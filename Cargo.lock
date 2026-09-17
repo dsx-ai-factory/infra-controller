@@ -1618,6 +1618,7 @@ dependencies = [
  "logfmt",
  "mac_address",
  "metrics-endpoint",
+ "mockito",
  "moka",
  "opentelemetry 0.32.0",
  "opentelemetry-otlp",

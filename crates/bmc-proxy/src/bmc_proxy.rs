@@ -54,11 +54,12 @@ use tokio_util::sync::CancellationToken;
 use tower_http::add_extension::AddExtensionLayer;
 use trace_propagation::{is_propagated_header, set_span_parent_from_headers};
 use tracing::Instrument;
+use url::Url;
 
 use crate::config::{AuthConfig, TlsConfig};
 use crate::metrics::{
     AuthContextMissing, MethodLabel, PrincipalAllowListDenied, RequestAclDenied,
-    UpstreamAuthRetried, UpstreamRequestCompleted, UpstreamStatus,
+    RequestPathRejected, UpstreamAuthRetried, UpstreamRequestCompleted, UpstreamStatus,
 };
 use crate::span_isolation::SpanIsolationMiddleware;
 
@@ -656,6 +657,54 @@ async fn proxy_request(
     result
 }
 
+/// Refuse a request whose path contains unsafe characters the ACLs cannot handle.
+/// `Some` contains the reason to include in the response, otherwise - let it through.
+fn refuse_rewritten_path<B>(request: &Request<B>) -> Option<Response<Body>> {
+    let path = request.uri().path();
+    let reason = path_the_acls_cannot_speak_for(path)?;
+    emit(RequestPathRejected::new(
+        request.method(),
+        path.to_string(),
+        reason,
+    ));
+    Some(error_response(
+        (
+            StatusCode::BAD_REQUEST,
+            "request URL path contains illegal character(s)",
+        )
+            .into(),
+    ))
+}
+
+/// To help evaluate a URL path against unsafe characters.
+/// (unresolvable FQDN per RFC 2606, never used for actual request forwarding)
+const PATH_PROBE_BASE: &str = "https://bmc-proxy.invalid";
+
+/// Dots and escapes are not interpreted by the ACL matcher, so a BMC may receive a different
+/// path if we are not careful. If the decoded path differs from the original, flag it for denial.
+fn path_the_acls_cannot_speak_for(path: &str) -> Option<String> {
+    // Fail closed: a path the probe cannot parse is refused, not handed to ACLs
+    // matching a spelling the BMC may read differently. No path `http::Uri`
+    // accepts is known to reach this (the url crate encodes rather than errors).
+    let parsed = match Url::parse(&format!("{PATH_PROBE_BASE}{path}")) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Some(format!(
+                "ACL enforcement: request path {path} could not be parsed: {error}"
+            ));
+        }
+    };
+    if parsed.path() != path {
+        return Some(format!(
+            "ACL enforcement: request path {path} != upstream {}",
+            parsed.path()
+        ));
+    }
+    // %-escapes are dangerous - can decode to unintended destinations
+    path.contains('%')
+        .then(|| format!("ACL enforcement: request path {path} contains escapes"))
+}
+
 fn bmc_proxy_request_span<B>(request: &Request<B>) -> tracing::Span {
     let request_span = tracing::info_span!(
         parent: None,
@@ -687,6 +736,10 @@ async fn proxy_request_inner(
     state: BmcProxyState,
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
+    // Validate request path for safety before passing to ACL matcher
+    if let Some(reason) = refuse_rewritten_path(&request) {
+        return Ok(reason);
+    }
     if !state.allows(&request) {
         return Ok(error_response((StatusCode::FORBIDDEN, "Forbidden").into()));
     }
@@ -782,6 +835,8 @@ async fn proxy_request_inner(
     } = upstream_response;
     let status = response.status();
     let headers = response.headers().clone();
+    // capture resolved upstream URL for inclusion in the response body
+    let upstream_url = response.url().clone();
     let body = prepare_response_body(
         status,
         &headers,
@@ -794,7 +849,7 @@ async fn proxy_request_inner(
         evict_cached_credentials(target_ip, &state.credential_cache).await;
     }
 
-    Ok(build_response(status, &headers, body))
+    Ok(build_response(status, &headers, body, &upstream_url))
 }
 
 /// The caller's request body, in a form the proxy can attach to an upstream
@@ -1120,6 +1175,7 @@ fn build_response(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
     body: PreparedResponseBody,
+    upstream: &Url,
 ) -> Response<Body> {
     let body_was_rewritten = !matches!(&body, PreparedResponseBody::Unchanged(_));
     let body_was_replaced = matches!(&body, PreparedResponseBody::Replaced(_));
@@ -1141,12 +1197,35 @@ fn build_response(
         {
             continue;
         }
+        if name == reqwest::header::LOCATION
+            && let Some(relative) = make_redirect_relative(value, upstream)
+        {
+            response = response.header(name, relative);
+            continue;
+        }
         response = response.header(name, value);
     }
     if body_was_replaced {
         response = response.header(reqwest::header::CONTENT_TYPE, "application/json");
     }
     response.body(body).unwrap()
+}
+
+/// Makes redirects relative if `Location` points back at the same BMC,
+/// since we disable following redirects, we want clients to keep using this proxy
+fn make_redirect_relative(value: &http::HeaderValue, upstream: &Url) -> Option<http::HeaderValue> {
+    let location = Url::parse(value.to_str().ok()?).ok()?;
+    (location.host_str() == upstream.host_str()
+        && location.port_or_known_default() == upstream.port_or_known_default())
+    .then(|| {
+        let mut relative = location.path().to_string();
+        if let Some(query) = location.query() {
+            relative.push('?');
+            relative.push_str(query);
+        }
+        http::HeaderValue::from_str(&relative).ok()
+    })
+    .flatten()
 }
 
 fn copy_request_headers(source: &HeaderMap, dest: &mut HeaderMap) {
@@ -1460,7 +1539,9 @@ fn build_http_client() -> Result<reqwest_middleware::ClientWithMiddleware, BmcPr
         .no_deflate()
         .no_zstd()
         .danger_accept_invalid_certs(true)
-        .redirect(reqwest::redirect::Policy::limited(5))
+        // Not followed: each hop needs its own target and ACL decision.
+        // Sending 3xx redirects instead to enforce client's authorization/ACLs checks.
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(5)) // Limit connections to 5 seconds
         .timeout(UPSTREAM_REQUEST_TIMEOUT) // Limit the overall request; uploads override per request
         .pool_max_idle_per_host(4)
@@ -1510,6 +1591,7 @@ mod tests {
     use rpc::forge_api_client::ForgeApiClient;
     use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
     use tokio_stream::iter;
+    use url::Url;
 
     use super::{
         BmcCredentials, BmcProxyState, CREDENTIAL_CACHE_IDLE_TTL, ConnectionFailReason,
@@ -1518,9 +1600,10 @@ mod tests {
         PreparedResponseBody, TcpAcceptFailed, TlsCertificateReloadFailed, TlsConnectionFailed,
         UpstreamBody, authorize_principal_allow_list, bmc_proxy_request_span, bounded_cache,
         build_authority, build_http_client, build_response, copy_request_headers, create_client,
-        evict_cached_credentials, forwarded_header_value, idle_bounded_cache,
-        ip_for_forwarded_target, is_hop_by_hop_header, method_supports_body,
-        parse_forwarded_host_value, prepare_response_body, request_principal_ids, span_status,
+        error_response, evict_cached_credentials, forwarded_header_value, idle_bounded_cache,
+        ip_for_forwarded_target, is_hop_by_hop_header, make_redirect_relative,
+        method_supports_body, parse_forwarded_host_value, path_the_acls_cannot_speak_for,
+        prepare_response_body, refuse_rewritten_path, request_principal_ids, span_status,
     };
 
     const TEST_CONFIG: &str = r#"
@@ -1915,6 +1998,197 @@ mod tests {
             credentials: summarize_credentials(client.credentials),
         })
         .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn paths_the_acls_cannot_speak_for_are_named() {
+        value_scenarios!(
+            run = |path: &str| path_the_acls_cannot_speak_for(path).is_some();
+
+            // to satisfy different BMC flavors (maps to one resource)
+            "the service root is left alone, with or without the slash" {
+                "/redfish/v1" => false,
+                "/redfish/v1/" => false,
+            }
+
+            "an ordinary resource path is left alone" {
+                "/redfish/v1/Systems/1" => false,
+            }
+
+            "an empty component is left to the ACL" {
+                "/redfish/v1//Systems" => false,
+            }
+
+            "dot segments resolve to another path" {
+                "/redfish/v1/../../cgi-bin/x" => true,
+                "/redfish/v1/./x" => true,
+            }
+
+            "an encoded dot segment is the same segment" {
+                "/redfish/v1/%2e%2e/%2e%2e/cgi-bin/x" => true,
+                "/redfish/v1/%2E%2E/x" => true,
+                "/redfish/v1/.%2e/x" => true,
+            }
+
+            "an escape the BMC decodes and the matcher does not" {
+                "/redfish/v1/%53ystems/1" => true,
+                "/redfish/v1/Systems%2Ffoo" => true,
+                "/redfish/v1/a%20b" => true,
+                "/redfish/v1/%252e%252e/x" => true,
+            }
+
+            // IPv6: brackets are not in the path encode set, so these must survive.
+            "a path embedding an address is left alone" {
+                "/redfish/v1/Managers/BMC/Hosts/[2001:db8::1]" => false,
+                "/redfish/v1/Managers/BMC/Hosts/2001:db8::1" => false,
+            }
+
+            // corner case for ipv6 but doesn't apply to us, percent escapes enforcement stays.
+            "a zone id is an escape like any other" {
+                "/redfish/v1/Sessions/fe80::1%25eth0" => true,
+            }
+
+            // Not an escape: the encoding rewrites the braces.
+            "a character outside the path set is rewritten too" {
+                "/redfish/v1/Systems/{id}" => true,
+            }
+        );
+    }
+
+    /// The reason is the log line's only pointer to what was refused, so it has
+    /// to name the path — on both branches, since a literal `{path}` in one of
+    /// them is exactly the regression `is_some()` above cannot see.
+    #[test]
+    fn a_refusal_reason_names_the_path() {
+        for path in ["/redfish/v1/../x", "/redfish/v1/a%20b"] {
+            let reason = path_the_acls_cannot_speak_for(path).expect("refused");
+            assert!(reason.contains(path), "{reason:?} does not name {path:?}");
+        }
+    }
+
+    /// A `GET` at `path`, for the two refusal checks below.
+    fn probe_request(path: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("https://proxy.example{path}"))
+            .body(Body::empty())
+            .expect("request builds")
+    }
+
+    const REQUEST_PATH_LABELS: [(&str, &str); 2] =
+        [("authorization_layer", "request_path"), ("method", "get")];
+
+    // Two tests rather than one table: `MetricsCapture::start` holds a
+    // process-wide lock for its guard's life.
+    #[test]
+    fn a_rewritten_path_is_refused_and_recorded() {
+        let metrics = MetricsCapture::start();
+        let mut refusal = None;
+        let logs =
+            capture_logs(|| refusal = refuse_rewritten_path(&probe_request("/redfish/v1/../x")));
+
+        assert_eq!(
+            refusal.map(|response| response.status()),
+            Some(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            authorization_event_names(&logs),
+            vec!["bmc_proxy_request_path_rejected".to_string()]
+        );
+        assert_eq!(
+            metrics.counter_delta(AUTHORIZATION_DENIED_METRIC, &REQUEST_PATH_LABELS),
+            1.0
+        );
+    }
+
+    #[test]
+    fn a_path_the_upstream_receives_as_written_passes_through() {
+        let metrics = MetricsCapture::start();
+        let mut refusal = Some(error_response((StatusCode::OK, "placeholder").into()));
+        let logs = capture_logs(|| {
+            refusal = refuse_rewritten_path(&probe_request("/redfish/v1/Systems"));
+        });
+
+        assert!(refusal.is_none(), "the request should reach the ACLs");
+        assert!(authorization_event_names(&logs).is_empty());
+        assert_eq!(
+            metrics.counter_delta(AUTHORIZATION_DENIED_METRIC, &REQUEST_PATH_LABELS),
+            0.0
+        );
+    }
+
+    #[test]
+    fn a_location_naming_the_same_bmc_is_reduced_to_a_path() {
+        value_scenarios!(
+            run = |(upstream, location): (&str, &str)| {
+                let upstream = Url::parse(upstream).expect("upstream url");
+                make_redirect_relative(&HeaderValue::from_str(location).unwrap(), &upstream)
+                    .map(|value| value.to_str().expect("ascii").to_string())
+            };
+
+            "the same BMC becomes a relative reference" {
+                ("https://192.0.2.5/redfish", "https://192.0.2.5/redfish/v1/")
+                    => Some("/redfish/v1/".to_string()),
+                ("https://192.0.2.5/redfish", "https://192.0.2.5/redfish/v1?$select=Id")
+                    => Some("/redfish/v1?$select=Id".to_string()),
+            }
+
+            "an explicit default port is still the same BMC" {
+                ("https://192.0.2.5/redfish", "https://192.0.2.5:443/redfish/v1/")
+                    => Some("/redfish/v1/".to_string()),
+            }
+
+            "an IPv6 BMC is compared like any other" {
+                ("https://[2001:db8::1]/redfish", "https://[2001:db8::1]/redfish/v1/")
+                    => Some("/redfish/v1/".to_string()),
+                ("https://[2001:db8::1]/redfish", "https://[2001:db8::2]/redfish/v1/") => None,
+            }
+
+            // redirect to another host/port would be weird, but we don't handle this by design.
+            "another host is left as it arrived" {
+                ("https://192.0.2.5/redfish", "https://192.0.2.9/redfish/v1/") => None,
+                ("https://192.0.2.5/redfish", "https://192.0.2.5:8443/redfish/v1/") => None,
+                ("https://192.0.2.5/redfish", "http://169.254.169.254/latest/meta-data/") => None,
+            }
+
+            // Parsing fails and the header passes on — the same outcome.
+            "a relative location needs no rewriting" {
+                ("https://192.0.2.5/redfish", "/redfish/v1/") => None,
+            }
+        );
+    }
+
+    /// The upstream client hands a 3xx back rather than chasing it.
+    ///
+    /// Asserting the second location is never requested is what makes removing
+    /// `Policy::none()` fail a test rather than only change a line.
+    #[tokio::test]
+    async fn the_upstream_client_does_not_follow_a_redirect() {
+        let mut server = mockito::Server::new_async().await;
+        let redirect = server
+            .mock("GET", "/redfish/v1")
+            .with_status(302)
+            .with_header("location", "/redfish/v1/Systems")
+            .expect(1)
+            .create_async()
+            .await;
+        let destination = server
+            .mock("GET", "/redfish/v1/Systems")
+            .with_status(200)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let response = build_http_client()
+            .expect("client builds")
+            .get(format!("{}/redfish/v1", server.url()))
+            .send()
+            .await
+            .expect("request reaches the mock server");
+
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        redirect.assert_async().await;
+        destination.assert_async().await;
     }
 
     #[test]
@@ -2826,10 +3100,12 @@ mod tests {
             Result::<Bytes, Infallible>::Ok(Bytes::from_static(br#""ok"}"#)),
         ]));
 
+        let upstream = Url::parse("https://192.0.2.5/redfish/v1").expect("upstream url");
         let response = build_response(
             reqwest::StatusCode::OK,
             &headers,
             PreparedResponseBody::Unchanged(body),
+            &upstream,
         );
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -2885,7 +3161,13 @@ mod tests {
         .await;
         assert!(matches!(&body, PreparedResponseBody::Redacted(_)));
 
-        let response = build_response(reqwest::StatusCode::INTERNAL_SERVER_ERROR, &headers, body);
+        let upstream = Url::parse("https://192.0.2.5/redfish/v1").expect("upstream url");
+        let response = build_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &headers,
+            body,
+            &upstream,
+        );
 
         // Rewritten responses omit stale entity metadata and every secret form.
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -2987,10 +3269,12 @@ mod tests {
         )
         .await;
         assert!(matches!(&prepared, PreparedResponseBody::Replaced(_)));
+        let upstream = Url::parse("https://192.0.2.5/redfish/v1").expect("upstream url");
         let response = build_response(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             &reqwest::header::HeaderMap::new(),
             prepared,
+            &upstream,
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(
@@ -3020,10 +3304,12 @@ mod tests {
         .await;
         assert!(matches!(&prepared, PreparedResponseBody::Replaced(_)));
 
+        let upstream = Url::parse("https://192.0.2.5/redfish/v1").expect("upstream url");
         let response = build_response(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             &headers,
             prepared,
+            &upstream,
         );
         assert!(
             !response
@@ -3053,7 +3339,8 @@ mod tests {
         .await;
         assert!(matches!(&prepared, PreparedResponseBody::Unchanged(_)));
 
-        let response = build_response(reqwest::StatusCode::OK, &headers, prepared);
+        let upstream = Url::parse("https://192.0.2.5/redfish/v1").expect("upstream url");
+        let response = build_response(reqwest::StatusCode::OK, &headers, prepared, &upstream);
         assert_eq!(
             response.headers().get(reqwest::header::CONTENT_ENCODING),
             Some(&HeaderValue::from_static("gzip"))
