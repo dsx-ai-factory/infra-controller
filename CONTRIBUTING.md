@@ -6,6 +6,9 @@ We welcome contributions of all sizes — from fixing a typo in the docs to
 adding a new API endpoint. Whether you're a first-time contributor or a
 seasoned open-source developer, there's a place for you here.
 
+All project participants are expected to follow the
+[code of conduct](CODE_OF_CONDUCT.md).
+
 > The software is provided "as is" without warranties of any kind. Features,
 > APIs, and configurations may change in future releases. For production
 > deployments, please test thoroughly in non-critical environments first.
