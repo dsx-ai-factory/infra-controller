@@ -88,7 +88,8 @@ See [helm-prereqs/README.md](helm-prereqs/README.md) for the full reference: PKI
 ## Contributing
 
 See the [contribution guide](CONTRIBUTING.md) for instructions on setting
-up a development environment and submitting changes.
+up a development environment and submitting changes, and the
+[code of conduct](CODE_OF_CONDUCT.md) for contributor expectations.
 
 ## Release Notice
 
