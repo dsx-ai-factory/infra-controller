@@ -115,8 +115,20 @@ struct CoverageView {
     hardware_class: Option<String>,
     /// Absent for the `any` row, which is never recorded on an endpoint.
     explored_endpoints: Option<i32>,
+    /// The attester sets recorded for this class. The table shows how many
+    /// there are; the per-set endpoint counts here are what tell an outlier of
+    /// one endpoint from an even split. Absent for the `any` row.
+    attester_sets: Option<Vec<AttesterSetView>>,
     own_profile: &'static str,
     would_use: String,
+}
+
+/// One recorded set of attesters, and how many of the class's endpoints last
+/// reported it.
+#[derive(Serialize)]
+struct AttesterSetView {
+    digest: String,
+    endpoints: i32,
 }
 
 /// Every class the site has, then `any`. The `any` row is listed even when no
@@ -135,6 +147,16 @@ fn coverage_views(coverage: &GetAttestationCoverageResponse) -> Vec<CoverageView
                     .map_or("n/a", |_| own_profile(entry.coverage)),
                 would_use: would_use(entry.coverage, entry.mode),
                 explored_endpoints: Some(entry.endpoints),
+                attester_sets: Some(
+                    entry
+                        .attester_sets
+                        .iter()
+                        .map(|set| AttesterSetView {
+                            digest: set.digest.clone(),
+                            endpoints: set.endpoints,
+                        })
+                        .collect(),
+                ),
                 hardware_class,
             }
         })
@@ -147,6 +169,7 @@ fn coverage_views(coverage: &GetAttestationCoverageResponse) -> Vec<CoverageView
     views.push(CoverageView {
         hardware_class: Some(ANY_HARDWARE_CLASS.to_string()),
         explored_endpoints: None,
+        attester_sets: None,
         own_profile,
         would_use,
     });
@@ -163,6 +186,7 @@ async fn write_coverage(
     table.set_titles(row![
         "HARDWARE CLASS",
         "EXPLORED ENDPOINTS",
+        "ATTESTER SETS",
         "OWN PROFILE",
         "WOULD USE"
     ]);
@@ -171,6 +195,10 @@ async fn write_coverage(
             view.hardware_class.as_deref().unwrap_or(NO_CLASS_RECORDED),
             view.explored_endpoints
                 .map(|count| count.to_string())
+                .unwrap_or(NOT_APPLICABLE.to_string()),
+            view.attester_sets
+                .as_ref()
+                .map(|sets| sets.len().to_string())
                 .unwrap_or(NOT_APPLICABLE.to_string()),
             view.own_profile,
             view.would_use,

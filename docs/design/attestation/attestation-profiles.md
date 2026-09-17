@@ -501,7 +501,7 @@ message GetAttestationCoverageResponse {
 
 ### 6.2 Validation rules
 
-- `hardware_class` must be `any`, or three non-empty `_`-separated fields each
+- `hardware_class` must be `any`, or two non-empty `_`-separated fields each
 matching `[a-z0-9-]+` — the shape §4.1 derives. `any` carries no extra
 restriction on its `mode`.
 - **Create** additionally requires a class some endpoint has recorded; the error

@@ -14,6 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::collections::HashMap;
+
 use ::rpc::forge as rpc;
 use carbide_authn::middleware::Principal;
 use carbide_instrument::{Event, LabelValue, emit};
@@ -245,6 +247,7 @@ pub(crate) async fn coverage(
         .map_err(|error| db::DatabaseError::new("attestation coverage", error))?;
 
     let counts = db::explored_endpoints::hardware_class_counts(&mut *conn).await?;
+    let mut attester_sets = attester_sets_by_class(&mut conn).await?;
 
     let mut entries = Vec::with_capacity(counts.len());
     for count in counts {
@@ -253,9 +256,11 @@ pub(crate) async fn coverage(
         let resolution =
             db::attestation_profile::resolve(&mut *conn, count.hardware_class.as_deref()).await?;
         let (coverage, mode) = reported_coverage(&resolution);
+        let hardware_class = count.hardware_class.unwrap_or_default();
 
         entries.push(rpc::AttestationCoverageEntry {
-            hardware_class: count.hardware_class.unwrap_or_default(),
+            attester_sets: attester_sets.remove(&hardware_class).unwrap_or_default(),
+            hardware_class,
             endpoints: count.endpoints as i32,
             coverage: coverage.into(),
             mode: mode.map(Into::into),
@@ -272,6 +277,27 @@ pub(crate) async fn coverage(
             rpc::AttesterSelectionMode::from(profile.policy_document.selection.mode).into()
         }),
     }))
+}
+
+/// The recorded attester sets, gathered per class so each entry can take its
+/// own without a query apiece.
+///
+/// A class with no sets recorded is absent rather than present and empty,
+/// which the caller reads as the empty list it reports.
+async fn attester_sets_by_class(
+    conn: &mut sqlx::PgConnection,
+) -> Result<HashMap<String, Vec<rpc::AttesterSet>>, CarbideError> {
+    let mut by_class: HashMap<String, Vec<rpc::AttesterSet>> = HashMap::new();
+    for set in db::hardware_class_attesters::counts_by_class(conn).await? {
+        by_class
+            .entry(set.hardware_class)
+            .or_default()
+            .push(rpc::AttesterSet {
+                digest: set.attester_digest,
+                endpoints: set.endpoints as i32,
+            });
+    }
+    Ok(by_class)
 }
 
 /// Maps one resolution onto what the view reports: which profile would supply

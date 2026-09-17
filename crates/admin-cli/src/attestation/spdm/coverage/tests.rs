@@ -16,7 +16,7 @@
  */
 
 use clap::Parser;
-use rpc::forge::{AttestationCoverageEntry, AttesterSelectionMode};
+use rpc::forge::{AttestationCoverageEntry, AttesterSelectionMode, AttesterSet};
 
 use super::*;
 use crate::async_write::CapturedOutput;
@@ -86,12 +86,29 @@ fn entry(
         endpoints,
         coverage: coverage.into(),
         mode: mode.map(Into::into),
+        attester_sets: Vec::new(),
     }
 }
 
-const HEADERS: [&str; 4] = [
+/// The two sets the profiled class spans: seventy-one trays reporting one and
+/// a single tray reporting another, which is the drift the column exists for.
+fn attester_sets() -> Vec<AttesterSet> {
+    vec![
+        AttesterSet {
+            digest: "1e05c4".to_string(),
+            endpoints: 71,
+        },
+        AttesterSet {
+            digest: "9a7fb2".to_string(),
+            endpoints: 1,
+        },
+    ]
+}
+
+const HEADERS: [&str; 5] = [
     "HARDWARE CLASS",
     "EXPLORED ENDPOINTS",
+    "ATTESTER SETS",
     "OWN PROFILE",
     "WOULD USE",
 ];
@@ -103,15 +120,19 @@ const HEADERS: [&str; 4] = [
 /// fallback.
 #[tokio::test]
 async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
+    let profiled = AttestationCoverageEntry {
+        attester_sets: attester_sets(),
+        ..entry(
+            PROFILED_CLASS,
+            72,
+            AttestationCoverage::OwnProfile,
+            Some(AttesterSelectionMode::Allowlist),
+        )
+    };
     let without_fallback = GetAttestationCoverageResponse {
         entries: vec![
             entry(UNPROFILED_CLASS, 2, AttestationCoverage::NoProfile, None),
-            entry(
-                PROFILED_CLASS,
-                72,
-                AttestationCoverage::OwnProfile,
-                Some(AttesterSelectionMode::Allowlist),
-            ),
+            profiled,
             entry("", 1, AttestationCoverage::ClassNotRecorded, None),
         ],
         any_profile_mode: None,
@@ -126,18 +147,27 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
             vec![
                 UNPROFILED_CLASS,
                 "2",
+                "0",
                 "no",
                 "nothing: no profile for this class and no any fallback"
             ],
-            vec![PROFILED_CLASS, "72", "yes", "its own profile (allowlist)"],
+            vec![
+                PROFILED_CLASS,
+                "72",
+                "2",
+                "yes",
+                "its own profile (allowlist)"
+            ],
             vec![
                 NO_CLASS_RECORDED,
                 "1",
+                "0",
                 "n/a",
                 "nothing: no class recorded and no any profile"
             ],
             vec![
                 ANY_HARDWARE_CLASS,
+                NOT_APPLICABLE,
                 NOT_APPLICABLE,
                 "no",
                 "nothing: no any fallback is stored"
@@ -173,11 +203,18 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
         rows(&output),
         [
             HEADERS.to_vec(),
-            vec![UNPROFILED_CLASS, "2", "no", "any (all)"],
-            vec![PROFILED_CLASS, "72", "yes", "its own profile (allowlist)"],
-            vec![NO_CLASS_RECORDED, "1", "n/a", "any (all)"],
+            vec![UNPROFILED_CLASS, "2", "0", "no", "any (all)"],
+            vec![
+                PROFILED_CLASS,
+                "72",
+                "2",
+                "yes",
+                "its own profile (allowlist)"
+            ],
+            vec![NO_CLASS_RECORDED, "1", "0", "n/a", "any (all)"],
             vec![
                 ANY_HARDWARE_CLASS,
+                NOT_APPLICABLE,
                 NOT_APPLICABLE,
                 "yes",
                 "its own profile (all)"
@@ -187,15 +224,24 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
 
     // Serialized, the class of the endpoints carrying none is absent rather
     // than the label the table substitutes, and so is the count of a row that
-    // is not keyed to hardware.
+    // is not keyed to hardware. The per-set endpoint counts are here rather
+    // than in the table, where 71 against 1 is what names the outlier.
     let (result, output) = execute(with_fallback, OutputFormat::Json).await;
     result.unwrap();
     let reported: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        reported[1]["attester_sets"],
+        serde_json::json!([
+            {"digest": "1e05c4", "endpoints": 71},
+            {"digest": "9a7fb2", "endpoints": 1},
+        ])
+    );
     assert_eq!(
         reported[2],
         serde_json::json!({
             "hardware_class": null,
             "explored_endpoints": 1,
+            "attester_sets": [],
             "own_profile": "n/a",
             "would_use": "any (all)",
         })
@@ -205,6 +251,7 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
         serde_json::json!({
             "hardware_class": ANY_HARDWARE_CLASS,
             "explored_endpoints": null,
+            "attester_sets": null,
             "own_profile": "yes",
             "would_use": "its own profile (all)",
         })
