@@ -1188,6 +1188,24 @@ mod rbac_rule_tests {
         }
     }
 
+    /// The probe's service identity can call exactly its two read RPCs, and a
+    /// write RPC stays denied — so dropping SiteHealthProbe from the read
+    /// vectors or pasting it onto a write RPC fails here.
+    #[test]
+    fn site_health_probe_reads_machines_and_nothing_else() {
+        let probe = Principal::SpiffeServiceIdentifier("nico-site-health-probe".to_string());
+        for method in ["FindMachineIds", "FindMachinesByIds"] {
+            assert!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&probe)),
+                "{method}"
+            );
+        }
+        assert!(!InternalRBACRules::allowed_from_static(
+            "SetMaintenance",
+            std::slice::from_ref(&probe),
+        ));
+    }
+
     #[test]
     fn admin_cli_can_create_network_segments() {
         assert!(InternalRBACRules::allowed_from_static(

@@ -8,6 +8,13 @@ otherwise the pod would wait forever on a TLS secret no issuer will mint.
 {{- if .Values.probes.grpcMachines.enabled }}
 {{- $name := include "nico-site-health-probe.name" . }}
 {{- $namespace := include "nico-site-health-probe.namespace" . }}
+{{/* Guarded so `helm lint`/`helm template` of the bare subchart directory
+     (no parent-provided globals) render instead of nil-pointering. */}}
+{{- $global := .Values.global | default dict }}
+{{- $cert := $global.certificate | default dict }}
+{{- $key := $cert.privateKey | default dict }}
+{{- $issuer := $cert.issuerRef | default dict }}
+{{- $spiffe := $global.spiffe | default dict }}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -17,21 +24,22 @@ metadata:
     {{- include "nico-site-health-probe.labels" . | nindent 4 }}
 spec:
   secretName: {{ $name }}-tls
-  duration: {{ .Values.global.certificate.duration }}
-  renewBefore: {{ .Values.global.certificate.renewBefore }}
+  duration: {{ $cert.duration }}
+  renewBefore: {{ $cert.renewBefore }}
   commonName: {{ printf "%s.%s.svc.cluster.local" $name $namespace }}
   dnsNames:
     - {{ printf "%s.%s.svc.cluster.local" $name $namespace }}
   uris:
-    # The identity nico-api's internal RBAC grants read access to. The
-    # namespace segment is pinned to the accepted /nico-system/sa/ base, not
-    # the deploy namespace (same convention as the parent machine-a-tron cert).
-    - {{ printf "spiffe://%s/%s/sa/%s" .Values.global.spiffe.trustDomain .Values.certificate.identityNamespace .Values.certificate.spiffeServiceName }}
+    # The identity nico-api's internal RBAC grants read access to. nico-api
+    # accepts SPIFFE paths under its own namespace (plus /default/sa/), so the
+    # namespace segment follows the release namespace unless a site whose
+    # nico-api lives elsewhere overrides identityNamespace.
+    - {{ printf "spiffe://%s/%s/sa/%s" $spiffe.trustDomain (.Values.certificate.identityNamespace | default $namespace) .Values.certificate.spiffeServiceName }}
   privateKey:
-    algorithm: {{ .Values.global.certificate.privateKey.algorithm }}
-    size: {{ .Values.global.certificate.privateKey.size }}
+    algorithm: {{ $key.algorithm }}
+    size: {{ $key.size }}
   issuerRef:
-    kind: {{ .Values.global.certificate.issuerRef.kind }}
-    name: {{ .Values.global.certificate.issuerRef.name }}
-    group: {{ .Values.global.certificate.issuerRef.group }}
+    kind: {{ $issuer.kind }}
+    name: {{ $issuer.name }}
+    group: {{ $issuer.group }}
 {{- end }}

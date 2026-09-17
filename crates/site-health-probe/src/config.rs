@@ -261,15 +261,29 @@ fn is_https_url(raw: &str) -> bool {
 /// also fails: after prepending, the original scheme ends up in the host,
 /// port, or path position and trips those constraints.
 fn is_host_port(raw: &str) -> bool {
-    Url::parse(&format!("https://{raw}")).is_ok_and(|u| {
-        u.host_str().is_some()
-            && u.port().is_some()
-            && u.username().is_empty()
-            && u.password().is_none()
-            && u.path() == "/"
-            && u.query().is_none()
-            && u.fragment().is_none()
-    })
+    // The explicit port is checked on the raw string because `Url::port()`
+    // strips a port equal to the scheme default: with the https:// prefix,
+    // an explicit `:443` would otherwise read back as "no port" and reject
+    // the documented external gRPC port.
+    let explicit_port = raw.rsplit_once(':').is_some_and(|(host, port)| {
+        !port.is_empty()
+            && port.chars().all(|c| c.is_ascii_digit())
+            // Port 0 can never reach a listener, and the u16 parse also
+            // bounds oversized ports without leaning on the URL parse below.
+            && port.parse::<u16>().is_ok_and(|port| port != 0)
+            // For a bracketed IPv6 host the port separator must follow `]`;
+            // a colon inside the brackets is part of the address.
+            && (!host.contains(':') || host.ends_with(']'))
+    });
+    explicit_port
+        && Url::parse(&format!("https://{raw}")).is_ok_and(|u| {
+            u.host_str().is_some()
+                && u.username().is_empty()
+                && u.password().is_none()
+                && u.path() == "/"
+                && u.query().is_none()
+                && u.fragment().is_none()
+        })
 }
 
 #[cfg(test)]
@@ -423,6 +437,79 @@ probes:
             cfg.listen_addr().expect("defaults").to_string(),
             "0.0.0.0:9009",
             "listen address defaults"
+        );
+    }
+
+    /// The gRPC target accepts exactly a bare authority with an explicit
+    /// numeric port — including `:443`, which `Url::port()` alone would strip
+    /// as the https default (the regression this table pins), and bracketed
+    /// IPv6 hosts.
+    #[test]
+    fn host_port_accepts_only_bare_authorities() {
+        check_values(
+            [
+                Check {
+                    scenario: "documented external port 443",
+                    input: "nico-api.example.com:443",
+                    expect: true,
+                },
+                Check {
+                    scenario: "cluster-internal port",
+                    input: "nico-api.nico-system.svc.cluster.local:1079",
+                    expect: true,
+                },
+                Check {
+                    scenario: "bracketed ipv6 with port",
+                    input: "[2001:db8::1]:443",
+                    expect: true,
+                },
+                Check {
+                    scenario: "missing port",
+                    input: "nico-api.example.com",
+                    expect: false,
+                },
+                Check {
+                    scenario: "non-numeric port",
+                    input: "nico-api:abc",
+                    expect: false,
+                },
+                Check {
+                    scenario: "scheme",
+                    input: "https://nico-api:1079",
+                    expect: false,
+                },
+                Check {
+                    scenario: "userinfo",
+                    input: "user@nico-api:1079",
+                    expect: false,
+                },
+                Check {
+                    scenario: "path",
+                    input: "nico-api:1079/v1",
+                    expect: false,
+                },
+                Check {
+                    scenario: "unbracketed ipv6",
+                    input: "2001:db8::1",
+                    expect: false,
+                },
+                Check {
+                    scenario: "port above 65535",
+                    input: "nico-api:99999",
+                    expect: false,
+                },
+                Check {
+                    scenario: "port zero",
+                    input: "nico-api:0",
+                    expect: false,
+                },
+                Check {
+                    scenario: "bracketed ipv6 with port zero",
+                    input: "[2001:db8::1]:0",
+                    expect: false,
+                },
+            ],
+            is_host_port,
         );
     }
 

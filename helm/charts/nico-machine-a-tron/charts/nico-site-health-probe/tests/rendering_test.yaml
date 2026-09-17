@@ -43,12 +43,49 @@ tests:
           path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
           value: false
 
-  - it: pins the SPIFFE identity nico-api RBAC grants
+  - it: derives the SPIFFE identity namespace from the release namespace
     template: templates/certificate.yaml
     asserts:
       - contains:
           path: spec.uris
-          content: spiffe://nico.local/nico-system/sa/nico-site-health-probe
+          content: spiffe://nico.local/NAMESPACE/sa/nico-site-health-probe
+
+  - it: honors an explicit identityNamespace for sites where nico-api lives elsewhere
+    template: templates/certificate.yaml
+    set:
+      certificate:
+        identityNamespace: forge-system
+    asserts:
+      - contains:
+          path: spec.uris
+          content: spiffe://nico.local/forge-system/sa/nico-site-health-probe
+
+  - it: renders the certificate without parent-provided globals
+    template: templates/certificate.yaml
+    set:
+      global: null
+    asserts:
+      - isKind:
+          of: Certificate
+
+  - it: requires the keycloak secret key when a REST probe is enabled
+    # The failure surfaces through deployment.yaml, whose config-checksum
+    # annotation renders the configmap first.
+    template: templates/deployment.yaml
+    set:
+      probes:
+        restMachines:
+          enabled: true
+          target: https://t
+          org: o
+          auth:
+            tokenUrl: https://k
+            existingSecret:
+              name: some-secret
+              key: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: 'probes.restMachines.auth.existingSecret.key is required when the probe is enabled'
 
   - it: renders the grpc probe config with SPIFFE cert paths
     template: templates/configmap.yaml

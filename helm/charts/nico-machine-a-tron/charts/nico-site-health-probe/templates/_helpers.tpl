@@ -34,10 +34,3 @@ app.kubernetes.io/component: monitoring
 {{- define "nico-site-health-probe.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "nico-site-health-probe.name" . }}
 {{- end }}
-
-{{/* Whether any REST probe is enabled (drives the keycloak secret mount). */}}
-{{- define "nico-site-health-probe.restEnabled" -}}
-{{- if or .Values.probes.restMachines.enabled .Values.probes.restInstances.enabled -}}
-true
-{{- end -}}
-{{- end }}

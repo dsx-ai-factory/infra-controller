@@ -46,14 +46,14 @@ metrics:
 serviceMonitor:
   enabled: false
 
-## SPIFFE client certificate for nico-api mTLS. The identity namespace is
-## pinned to nico-system because nico-api accepts SPIFFE URIs under the
-## /nico-system/sa/ base regardless of the pod's actual namespace (the parent
-## machine-a-tron chart relies on the same behavior). The service name must
-## stay "nico-site-health-probe" — nico-api's internal RBAC grants exactly
-## this identity read access to FindMachineIds/FindMachinesByIds.
+## SPIFFE client certificate for nico-api mTLS. nico-api accepts SPIFFE URIs
+## under its own deploy/auth namespace (plus /default/sa/), so the identity
+## namespace defaults to the release namespace; set identityNamespace only
+## when nico-api runs in a different namespace than this probe. The service
+## name must stay "nico-site-health-probe" — nico-api's internal RBAC grants
+## exactly this identity read access to FindMachineIds/FindMachinesByIds.
 certificate:
-  identityNamespace: nico-system
+  identityNamespace: ""
   spiffeServiceName: nico-site-health-probe
 
 ## CA bundle for verifying nico-rest-api's TLS (its certs come from the REST

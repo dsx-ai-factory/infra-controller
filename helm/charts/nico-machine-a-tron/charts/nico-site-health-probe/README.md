@@ -47,9 +47,11 @@ on every run, the REST CA bundle is loaded once at startup: after rotating
 then).
 
 The gRPC probe authenticates as
-`spiffe://<trustDomain>/nico-system/sa/nico-site-health-probe`; nico-api's
-internal RBAC grants exactly this identity read-only access to
-`FindMachineIds`/`FindMachinesByIds`.
+`spiffe://<trustDomain>/<namespace>/sa/nico-site-health-probe`, where the
+namespace segment defaults to the release namespace (nico-api accepts SPIFFE
+identities under its own namespace; set `certificate.identityNamespace` when
+nico-api runs elsewhere). nico-api's internal RBAC grants exactly this
+service identity read-only access to `FindMachineIds`/`FindMachinesByIds`.
 
 ## Metrics
 
@@ -61,7 +63,7 @@ which this standalone binary is not part of.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `carbide_site_health_probe_request_duration_milliseconds` | histogram | `api`, `probe`, `operation` | Duration of synthetic probe requests against NICo APIs, by API surface, probe, and operation. Buckets 5 ms – 10 s. |
+| `carbide_site_health_probe_request_duration_milliseconds` | histogram | `api`, `probe`, `operation` | Duration of synthetic probe requests against NICo APIs, by API surface, probe, and operation. SDK default buckets (0 ms – 10 s). |
 | `carbide_site_health_probe_requests_total` | counter | `api`, `probe`, `outcome` | Probe runs by outcome (`success`, `failure`, `timeout`). Timeout is separate from failure: a slow-but-alive API and a down API are different incidents. |
 | `carbide_site_health_probe_up` | gauge | `api`, `probe` | 1 if the probe's most recent run succeeded, 0 on failure, timeout, or panic — the gauge operators alert on. |
 | `carbide_site_health_probe_last_run_timestamp_seconds` | gauge | `api`, `probe` | Unix time of the most recent completed run; a stale value means the probe is wedged or stopped. |

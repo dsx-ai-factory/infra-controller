@@ -488,8 +488,9 @@ metric set is documented in the
   `FindMachinesByIds` against nico-api — the `machine show` read path,
   including the PostgreSQL round-trip. Authenticates with a SPIFFE mTLS cert
   issued by the site's ClusterIssuer under the identity
-  `spiffe://<trustDomain>/nico-system/sa/nico-site-health-probe`, which
-  nico-api's internal RBAC grants read-only access.
+  `spiffe://<trustDomain>/<namespace>/sa/nico-site-health-probe` (namespace
+  defaults to the release namespace), which nico-api's internal RBAC grants
+  read-only access.
 - **REST probes** (off by default): `GET /v2/org/<org>/nico/machine` and
   `/instance` against nico-rest-api via a Keycloak service-account client.
   Enabling them requires site inputs — the org, the token URL, a client

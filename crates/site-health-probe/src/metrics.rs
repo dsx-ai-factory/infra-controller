@@ -51,12 +51,10 @@ impl Metrics {
                     "Duration of synthetic probe requests against NICo APIs, by API surface, \
                      probe, and operation.",
                 )
-                // Millisecond buckets matching the repo's metrics-endpoint
-                // defaults (5ms..10s), so probe latencies read alongside
-                // service latencies.
-                .with_boundaries(vec![
-                    5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
-                ])
+                // No explicit boundaries: metrics-endpoint applies no latency
+                // view, so this falls back to the SDK default bucket set —
+                // the same fallback other histograms without a custom view
+                // get, rather than a probe-specific `le` layout.
                 .build(),
             requests: meter
                 .u64_counter("carbide_site_health_probe_requests")
@@ -249,10 +247,12 @@ mod tests {
             ),
             Some(1.0),
         );
-        // The explicit boundaries survive the exporter (they are advisory in
-        // the OTel API): every configured `le` bucket appears.
+        // The histogram uses the SDK default bucket set — the same `le`
+        // labels as every other carbide_* histogram in the workspace — so
+        // cross-histogram quantiles line up. This pins that contract.
         for le in [
-            "5", "10", "25", "50", "100", "250", "500", "1000", "2500", "5000", "10000",
+            "0", "5", "10", "25", "50", "75", "100", "250", "500", "750", "1000", "2500", "5000",
+            "7500", "10000",
         ] {
             assert!(
                 series_value(
