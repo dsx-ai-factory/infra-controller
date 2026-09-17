@@ -10,8 +10,8 @@ NVLink switches
 ## SYNOPSIS
 
 **nico-admin-cli component-manager get-firmware-versions switch**
-\<**--switch-id**\> \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+\[**--switch-id**\] \[**--mac-address**\] \[**--extended**\]
+\[**--sort-by**\] \[**-h**\|**--help**\]
 
 ## DESCRIPTION
 
@@ -21,6 +21,10 @@ Target NVLink switches
 
 **--switch-id** *\<SWITCH_IDS\>...*  
 Switch IDs to target
+
+**--mac-address** *\<MAC_ADDRESSES\>...*  
+Device MAC addresses to target (BMC MAC for compute/switch, PMC MAC for
+power shelf)
 
 **--extended**  
 Extended result output.

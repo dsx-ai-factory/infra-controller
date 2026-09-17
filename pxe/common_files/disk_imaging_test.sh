@@ -17,6 +17,9 @@
 #
 set -u
 
+# Requires GNU bash 4.3 or newer: the script under test uses `local -n`
+# namerefs, which Apple's default /bin/bash 3.2 does not support.
+
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 script_under_test="$script_dir/disk_imaging.sh"
 temp_dir=$(mktemp -d)
@@ -28,6 +31,8 @@ log_output="$temp_dir/disk-imaging.log"
 mock_blkid_status=0
 mock_blkid_stdout=
 mock_blkid_stderr=
+mock_lsblk_scan=
+mock_lsblk_esp_disk=
 
 fail() {
 	echo "FAIL: $1" >&2
@@ -59,6 +64,10 @@ set_blkid_result() {
 	: >"$log_output"
 }
 
+set_lsblk_esp_disk() {
+	mock_lsblk_esp_disk=$1
+}
+
 blkid() {
 	printf '%s' "$mock_blkid_stdout"
 	printf '%s' "$mock_blkid_stderr" >&2
@@ -66,7 +75,17 @@ blkid() {
 }
 
 lsblk() {
-	case "$2:$3" in
+	case "$2:${3-}" in
+		NAME,SIZE,TYPE:)
+			printf '%s\n' "$mock_lsblk_scan"
+			;;
+		PARTTYPE:*)
+			if [ "${3-}" == "$mock_lsblk_esp_disk" ]; then
+				printf '%s\n' "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+			else
+				printf '%s\n' "0fc63daf-8483-4772-8e79-3d69d8477de4"
+			fi
+			;;
 		MAJ:MIN:/dev/target)
 			printf '%s\n' "259:0"
 			;;
@@ -214,5 +233,38 @@ if parse_kernel_cmdline_argument \
 fi
 assert_eq "unknown argument leaves image_url unchanged" "unchanged-url" "$image_url"
 assert_eq "unknown argument leaves image_disk unchanged" "unchanged-disk" "$image_disk"
+
+echo "bootdisk selection"
+mock_lsblk_scan=$'/dev/vda 10737418240 disk'
+mock_lsblk_esp_disk=
+image_disk=
+find_bootdisk
+assert_eq "blank sole virtio disk is selected" "/dev/vda" "$image_disk"
+
+mock_lsblk_scan=$'/dev/sda 21474836480 disk\n/dev/nvme0n1 10737418240 disk'
+mock_lsblk_esp_disk=/dev/sda
+image_disk=
+find_bootdisk
+assert_eq "EFI disk wins over the deterministic order" "/dev/sda" "$image_disk"
+
+mock_lsblk_scan=$'/dev/sda 10737418240 disk\n/dev/nvme0n1 21474836480 disk'
+mock_lsblk_esp_disk=
+image_disk=
+find_bootdisk
+assert_eq "version-sorted name order is preserved without EFI" "/dev/nvme0n1" "$image_disk"
+
+mock_lsblk_scan=$'/dev/vda 10737418240 disk'
+mock_lsblk_esp_disk=
+image_disk=smallest
+find_bootdisk
+assert_eq "smallest selector picks the sole disk" "/dev/vda" "$image_disk"
+
+mock_lsblk_scan=
+mock_lsblk_esp_disk=
+image_disk=
+if ( find_bootdisk ) >/dev/null 2>&1; then
+	fail "bootdisk selection accepted an empty disk inventory"
+fi
+assert_log_contains "Boot drive not detected or specified"
 
 echo "disk imaging identifier tests passed"
