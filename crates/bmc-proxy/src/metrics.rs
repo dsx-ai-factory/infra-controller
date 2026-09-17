@@ -92,11 +92,14 @@ impl From<&Method> for MethodLabel {
 
 /// The authorization boundary that rejected a request or could not evaluate
 /// it. The outer allow-list decides which principals may use the proxy at all;
-/// the request ACL then decides which Redfish method and path they may use.
+/// the request ACL then decides which Redfish method and path they may use;
+/// `RequestPath` is the check that the path those ACLs match is the resource
+/// the BMC will act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 enum AuthorizationLayer {
     PrincipalAllowList,
     RequestAcl,
+    RequestPath,
 }
 
 /// The one metric the Events below record.
@@ -111,6 +114,41 @@ pub(crate) struct BmcProxyAuthorizationDenied {
     authorization_layer: AuthorizationLayer,
     #[label(name = "method")]
     method_label: MethodLabel,
+}
+
+/// The ACLs could not be evaluated against the resource the BMC would act on,
+/// so the request was refused before they ran. `reason` says which reading
+/// differs; `bmc_proxy::path_the_acls_cannot_speak_for` explains both.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_request_path_rejected",
+    metric_family = BmcProxyAuthorizationDenied,
+    log = info,
+    message = "Request refused: the ACLs cannot be evaluated against this path"
+)]
+pub(crate) struct RequestPathRejected {
+    #[label]
+    authorization_layer: AuthorizationLayer,
+    #[label]
+    method_label: MethodLabel,
+    #[context]
+    path: String,
+    #[context]
+    reason: String,
+    #[context]
+    method: String,
+}
+
+impl RequestPathRejected {
+    pub(crate) fn new(method: &Method, path: String, reason: String) -> Self {
+        Self {
+            authorization_layer: AuthorizationLayer::RequestPath,
+            method_label: method.into(),
+            path,
+            reason,
+            method: method.as_str().to_string(),
+        }
+    }
 }
 
 /// The request reached the per-principal ACL, but no configured rule allowed

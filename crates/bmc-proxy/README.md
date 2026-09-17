@@ -104,6 +104,14 @@ Path matching syntax:
   Invalid: `/redfish/v1/Systems/sys*tem/SecureBoot`
 - At most one `**` is allowed in an ACL path.
 
+The matcher resolves neither dot segments (`.` and `..`, in any spelling) nor percent-escapes
+in path segments, so a request path that carries either is refused with `400` before the ACLs
+are evaluated: the BMC would read it as a path other than the one the ACLs matched.
+
+Redirects are **not followed**; the `3xx` is returned instead, with server part of the URL
+stripped (relative redirect) if Location's host is the same target. This is done to enforce
+access authorization for redirects to follow the same policy as for the original requests.
+
 Examples:
 
 - `"/**"`

@@ -74,5 +74,11 @@ Path wildcards:
 - `foo*bar` is not valid.
 - Only one `**` is allowed per path pattern.
 
+A *request* path the BMC would read differently is refused with `400` before
+the ACLs run: `.`/`..` in any spelling, percent-escapes of any kind, and
+characters the path encoding rewrites, braces included. Redirects are not followed — the
+`3xx` is returned, so the next hop is authorised like any other request. See
+the crate README.
+
 When converting Redfish-style documented endpoints to ACLs, replace templated path components
 like `{id}` or `{session_id}` with `*`.
