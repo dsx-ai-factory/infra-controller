@@ -82,7 +82,7 @@ pub(crate) async fn add(
 
     let machine = parse_expected_machine_for_insert(request.into_inner(), None)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(CarbideError::from)?;
     // Convert through CarbideError so a duplicate BMC MAC becomes AlreadyExists; the direct
     // DatabaseError to Status conversion reports it as FailedPrecondition.
     db::expected_machine::create(&mut txn, machine)

@@ -316,7 +316,7 @@ pub(crate) async fn patch_expected_switch(
     )?;
     log_request_data_redacted(format!("expected_switch_id: {expected_switch_id}"));
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(CarbideError::from)?;
     let mut switch = db_expected_switch::find_for_update(
         &mut txn,
         &ExpectedSwitchRequest {
@@ -324,14 +324,15 @@ pub(crate) async fn patch_expected_switch(
             bmc_mac_address: None,
         },
     )
-    .await?
+    .await
+    .map_err(CarbideError::from)?
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "expected_switch",
         id: expected_switch_id.to_string(),
     })?;
     validate_bmc_mac(&patch.bmc_mac_address, switch.bmc_mac_address)?;
     if fields.is_empty() {
-        txn.commit().await?;
+        txn.commit().await.map_err(CarbideError::from)?;
         return Ok(Response::new(()));
     }
     if fields.contains(UpdateField::BmcUsername) {
@@ -382,7 +383,7 @@ pub(crate) async fn patch_expected_switch(
         api.runtime_config.retained_boot_interface_window,
     )
     .await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(CarbideError::from)?;
     for preallocation in preallocations {
         emit(StaticAddressPreallocationCompleted::from(preallocation));
     }

@@ -154,17 +154,18 @@ pub(crate) async fn patch_expected_power_shelf(
         "expected_power_shelf_id: {expected_power_shelf_id}"
     ));
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(CarbideError::from)?;
     let mut power_shelf =
         db_expected_power_shelf::find_by_id_for_update(&mut txn, expected_power_shelf_id)
-            .await?
+            .await
+            .map_err(CarbideError::from)?
             .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "expected_power_shelf",
                 id: expected_power_shelf_id.to_string(),
             })?;
     validate_bmc_mac(&patch.bmc_mac_address, power_shelf.bmc_mac_address)?;
     if fields.is_empty() {
-        txn.commit().await?;
+        txn.commit().await.map_err(CarbideError::from)?;
         return Ok(Response::new(()));
     }
     if fields.contains(UpdateField::BmcUsername) {
@@ -193,7 +194,7 @@ pub(crate) async fn patch_expected_power_shelf(
         api.runtime_config.retained_boot_interface_window,
     )
     .await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(CarbideError::from)?;
     if let Some(preallocation) = preallocation {
         emit(StaticAddressPreallocationCompleted::from(preallocation));
     }

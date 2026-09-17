@@ -182,7 +182,7 @@ pub(crate) async fn update(
             .into());
         }
     };
-    txn.commit().await?;
+    txn.commit().await.map_err(CarbideError::from)?;
 
     Ok(Response::new(rpc::IbPartition::try_from(resp)?))
 }
