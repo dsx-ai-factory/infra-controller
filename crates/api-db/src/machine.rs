@@ -1042,43 +1042,52 @@ pub async fn update_metadata(
     }
 }
 
-/// Only does the update if the passed observation is newer than any existing one
+/// `MachineObservationNotCurrent` means the machine is missing or its stored
+/// observation no longer satisfies the timestamp condition. The write does not
+/// distinguish those cases. Converting this reason to [`DatabaseError`] wraps
+/// `sqlx::Error::RowNotFound` for callers that require the observation to apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineObservationNotCurrent;
+
+impl From<MachineObservationNotCurrent> for DatabaseError {
+    #[track_caller]
+    fn from(_: MachineObservationNotCurrent) -> Self {
+        Self::new(
+            "update machine status observation",
+            sqlx::Error::RowNotFound,
+        )
+    }
+}
+
+/// Stores a network observation when its timestamp passes the database freshness
+/// check, or no timestamp is stored. Returns `NotApplied` for a missing machine
+/// or rejected timestamp. The JSON and SQLx timestamp conversions can differ
+/// below microsecond precision, so equal instants are not always accepted.
 pub async fn update_network_status_observation(
     txn: &mut PgConnection,
     machine_id: &DpuMachineId,
     observation: &MachineNetworkStatusObservation,
-) -> Result<(), DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
     let query = "UPDATE machines SET network_status_observation = $1::json WHERE id = $2 AND
                 (
                     (network_status_observation->>'observed_at' IS NULL)
                     OR ((network_status_observation->>'observed_at')::timestamp <= $3::timestamp)
                 ) RETURNING id";
-    let _id: (MachineId,) = match sqlx::query_as(query)
+    let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
         .bind(machine_id)
         .bind(observation.observed_at)
-        .fetch_one(&mut *txn)
+        .fetch_optional(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
-    {
-        Ok(result) => result,
-        Err(e) if e.is_not_found() => {
-            // This function is intended to be able to capture why the update sometimes fails in unit-test
-            // even though all prerequisite data is present.
-            // It compiles to a no-op in production environments.
-            debug_failed_machine_status_update(
-                txn,
-                machine_id,
-                "network_status_observation",
-                observation,
-            )
-            .await;
-            return Err(e);
-        }
-        Err(e) => return Err(e),
-    };
+        .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    if updated.is_some() {
+        return Ok(ConditionalWrite::Applied(()));
+    }
+
+    debug_failed_machine_status_update(txn, machine_id, "network_status_observation", observation)
+        .await;
+    Ok(ConditionalWrite::NotApplied(MachineObservationNotCurrent))
 }
 
 /// `ExtensionServiceObservationNotCurrent` means the conditional observation
@@ -1162,44 +1171,57 @@ pub async fn update_extension_service_status_observation(
     })
 }
 
-/// Only does the update if the passed observation is newer than any existing one
+/// Stores an InfiniBand observation when none is stored or its timestamp is at
+/// least as recent, comparing both JSON timestamps at PostgreSQL's microsecond
+/// precision. A missing machine or an unmet condition returns `NotApplied`.
 pub async fn update_infiniband_status_observation(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     observation: &MachineInfinibandStatusObservation,
-) -> Result<(), DatabaseError> {
-    let query =
-            "UPDATE machines SET infiniband_status_observation = $1::json WHERE id = $2 AND
+) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
+    let query = "UPDATE machines SET infiniband_status_observation = $1::json WHERE id = $2 AND
              (infiniband_status_observation IS NULL
-                OR (infiniband_status_observation ? 'observed_at' AND infiniband_status_observation->>'observed_at' <= $3)
+                OR (infiniband_status_observation ? 'observed_at'
+                    AND (infiniband_status_observation->>'observed_at')::timestamptz
+                        <= ($1::json->>'observed_at')::timestamptz)
             ) RETURNING id";
-    let _id: (MachineId,) = sqlx::query_as(query)
+    let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
         .bind(machine_id)
-        .bind(observation.observed_at.to_rfc3339())
-        .fetch_one(txn)
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    Ok(match updated {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(MachineObservationNotCurrent),
+    })
 }
 
+/// Stores an NVLink observation when no timestamp is stored or its timestamp is
+/// at least as recent, comparing both JSON timestamps at PostgreSQL's
+/// microsecond precision. A missing machine or an unmet condition returns
+/// `NotApplied`.
 pub async fn update_nvlink_status_observation(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     observation: &MachineNvLinkStatusObservation,
-) -> Result<(), DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
     let query = "UPDATE machines SET nvlink_status_observation = $1::json WHERE id = $2 AND
-                (nvlink_status_observation->>'observed_at' IS NULL OR nvlink_status_observation->>'observed_at' <= $3) RETURNING id";
-    let _id: (MachineId,) = sqlx::query_as(query)
+                (nvlink_status_observation->>'observed_at' IS NULL
+                    OR (nvlink_status_observation->>'observed_at')::timestamptz
+                        <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
+    let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
         .bind(machine_id)
-        .bind(observation.observed_at.to_rfc3339())
-        .fetch_one(txn)
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    Ok(match updated {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(MachineObservationNotCurrent),
+    })
 }
 
 /// Clears `machines.nvlink_status_observation` for the given machine IDs.
@@ -1224,26 +1246,34 @@ pub async fn clear_nvlink_status_observations(
     Ok(())
 }
 
+/// Stores a Spectrum-X observation when no timestamp is stored or its timestamp
+/// is at least as recent, comparing both JSON timestamps at PostgreSQL's
+/// microsecond precision. A missing machine or an unmet condition returns
+/// `NotApplied`.
 pub async fn update_spx_status_observation(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     observation: &MachineSpxStatusObservation,
-) -> Result<(), DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
     tracing::debug!(
         observation = ?observation,
         "updating SPX status observation",
     );
     let query = "UPDATE machines SET spx_status_observation = $1::json WHERE id = $2 AND
-                (spx_status_observation->>'observed_at' IS NULL OR spx_status_observation->>'observed_at' <= $3) RETURNING id";
-    let _id: (MachineId,) = sqlx::query_as(query)
+                (spx_status_observation->>'observed_at' IS NULL
+                    OR (spx_status_observation->>'observed_at')::timestamptz
+                        <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
+    let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
         .bind(machine_id)
-        .bind(observation.observed_at.to_rfc3339())
-        .fetch_one(txn)
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    Ok(match updated {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(MachineObservationNotCurrent),
+    })
 }
 
 #[cfg(test)]
@@ -3657,6 +3687,158 @@ mod test {
     use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
     use model::resource_pool::{ResourcePool, ValueType};
     use tokio::sync::oneshot;
+
+    #[crate::sqlx_test]
+    async fn machine_observations_compare_timestamps_chronologically(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine::infiniband::MachineInfinibandStatusObservation;
+        use model::machine::nvlink::MachineNvLinkStatusObservation;
+        use model::machine::spx::MachineSpxStatusObservation;
+
+        use super::{
+            MachineObservationNotCurrent, update_infiniband_status_observation,
+            update_nvlink_status_observation, update_spx_status_observation,
+        };
+        use crate::ConditionalWrite::{Applied, NotApplied};
+
+        struct Case {
+            scenario: &'static str,
+            stored_at: Option<&'static str>,
+            observed_at: &'static str,
+            applies: bool,
+        }
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+
+        // Each column has its own SQL predicate. Check persisted JSON, not only
+        // the result, so a rejected observation cannot replace newer data.
+        // Only the literal column names below are interpolated into SQL.
+        for column in [
+            "infiniband_status_observation",
+            "nvlink_status_observation",
+            "spx_status_observation",
+        ] {
+            for Case {
+                scenario,
+                stored_at,
+                observed_at,
+                applies,
+            } in [
+                Case {
+                    scenario: "first observation",
+                    stored_at: None,
+                    observed_at: "2026-09-16T16:00:00.123Z",
+                    applies: true,
+                },
+                Case {
+                    scenario: "newer with more fractional digits",
+                    stored_at: Some("2026-09-16T16:00:00.123Z"),
+                    observed_at: "2026-09-16T16:00:00.123001+00:00",
+                    applies: true,
+                },
+                Case {
+                    scenario: "equal nanosecond timestamp",
+                    stored_at: Some("2026-09-16T16:00:00.123456789Z"),
+                    observed_at: "2026-09-16T16:00:00.123456789+00:00",
+                    applies: true,
+                },
+                Case {
+                    scenario: "older timestamp with a different offset",
+                    stored_at: Some("2026-09-16T15:00:00.123001-01:00"),
+                    observed_at: "2026-09-16T16:00:00.123Z",
+                    applies: false,
+                },
+            ] {
+                let stored =
+                    stored_at.map(|timestamp| serde_json::json!({"observed_at": timestamp}));
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "UPDATE machines SET {column} = $1 WHERE id = $2"
+                )))
+                .bind(stored.as_ref().map(sqlx::types::Json))
+                .bind(machine_id)
+                .execute(txn.as_mut())
+                .await?;
+                let observed_at = observed_at.parse()?;
+                let (result, incoming) = match column {
+                    "infiniband_status_observation" => {
+                        let observation = MachineInfinibandStatusObservation {
+                            observed_at,
+                            ib_interfaces: Vec::new(),
+                        };
+                        (
+                            update_infiniband_status_observation(
+                                txn.as_mut(),
+                                &machine_id,
+                                &observation,
+                            )
+                            .await?,
+                            serde_json::to_value(observation)?,
+                        )
+                    }
+                    "nvlink_status_observation" => {
+                        let observation = MachineNvLinkStatusObservation {
+                            observed_at,
+                            nvlink_gpus: Vec::new(),
+                        };
+                        (
+                            update_nvlink_status_observation(
+                                txn.as_mut(),
+                                &machine_id,
+                                &observation,
+                            )
+                            .await?,
+                            serde_json::to_value(observation)?,
+                        )
+                    }
+                    "spx_status_observation" => {
+                        let observation = MachineSpxStatusObservation {
+                            observed_at,
+                            spx_attachments: Vec::new(),
+                        };
+                        (
+                            update_spx_status_observation(txn.as_mut(), &machine_id, &observation)
+                                .await?,
+                            serde_json::to_value(observation)?,
+                        )
+                    }
+                    _ => unreachable!("the table contains only observation columns"),
+                };
+                assert_eq!(
+                    result,
+                    if applies {
+                        Applied(())
+                    } else {
+                        NotApplied(MachineObservationNotCurrent)
+                    },
+                    "{column}: {scenario}"
+                );
+                let persisted: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(
+                    format!("SELECT {column} FROM machines WHERE id = $1"),
+                ))
+                .bind(machine_id)
+                .fetch_one(txn.as_mut())
+                .await?;
+                assert_eq!(
+                    persisted,
+                    if applies { incoming } else { stored.unwrap() },
+                    "{column}: {scenario}"
+                );
+            }
+        }
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn extension_service_observations_preserve_per_service_timestamp_order(

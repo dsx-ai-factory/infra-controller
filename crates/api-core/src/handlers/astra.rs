@@ -363,12 +363,15 @@ pub(super) async fn process_astra_config_status(
         observed_at: chrono::Utc::now(),
     };
 
-    db::machine::update_spx_status_observation(
+    if let db::ConditionalWrite::NotApplied(reason) = db::machine::update_spx_status_observation(
         &mut txn,
         &snapshot.host_snapshot.id,
         &machine_observation,
     )
-    .await?;
+    .await?
+    {
+        return Err(db::DatabaseError::from(reason).into());
+    }
 
     txn.commit().await.map_err(|e| CarbideError::Internal {
         message: format!("Failed to commit transaction: {e}"),

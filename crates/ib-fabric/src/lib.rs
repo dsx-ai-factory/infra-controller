@@ -1593,7 +1593,11 @@ async fn record_machine_infiniband_status_observation(
             .acquire()
             .await
             .map_err(|e| DatabaseError::new("acquire connection", e))?;
-        db::machine::update_infiniband_status_observation(&mut conn, machine_id, &cur).await?;
+        if let db::ConditionalWrite::NotApplied(reason) =
+            db::machine::update_infiniband_status_observation(&mut conn, machine_id, &cur).await?
+        {
+            return Err(DatabaseError::from(reason).into());
+        }
         metrics.num_machine_ib_status_updates += 1;
         mh_snapshot
             .host_snapshot

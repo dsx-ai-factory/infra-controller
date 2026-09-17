@@ -1041,7 +1041,12 @@ pub(crate) async fn record_dpu_network_status(
     };
 
     // Instance network observation is the part of network observation now.
-    db::machine::update_network_status_observation(&mut txn, &dpu_machine_id, &machine_obs).await?;
+    if let ConditionalWrite::NotApplied(reason) =
+        db::machine::update_network_status_observation(&mut txn, &dpu_machine_id, &machine_obs)
+            .await?
+    {
+        return Err(db::DatabaseError::from(reason).into());
+    }
     if dpu_machine.network_config.value.use_admin_network_changed == Some(true)
         && machine_obs.network_config_version.as_ref() == Some(&dpu_machine.network_config.version)
     {
