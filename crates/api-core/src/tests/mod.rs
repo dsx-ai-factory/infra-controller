@@ -81,6 +81,7 @@ mod site_prefix;
 mod sku;
 mod spdm;
 mod switch;
+mod tenant_identity_config;
 mod tenant_prefix_startup;
 mod tenants;
 mod tpm_ca;
