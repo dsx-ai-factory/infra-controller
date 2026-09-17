@@ -17,9 +17,9 @@
 /helm/ @dsx-ai-factory/dsx-sw-helm
 /helm-prereqs/ @dsx-ai-factory/dsx-sw-helm
 
-# Documentation (To be re-enabled once as have a doc reviewer)
-/docs/ @polarweasel
-/fern/ @polarweasel
+# Documentation
+/docs/ @polarweasel @CoCo-Ben
+/fern/ @polarweasel @CoCo-Ben
 
 # The metrics catalogue is generated (`test_integration` regenerates it from the
 # `/metrics` scrape; `cargo xtask check-metric-docs --fix` adds the rest), not

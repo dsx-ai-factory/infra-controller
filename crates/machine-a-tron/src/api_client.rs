@@ -366,13 +366,14 @@ impl ApiClient {
     /// real environments set it through the admin CLI / API when DHCP discovery is not used.
     /// `dpu_policy` is the per-host policy -- pass `Some(Ignore)` for zero-DPU
     /// mock hosts or `Some(Nic)` for DPU-in-NIC-mode mock hosts; `None` for
-    /// normal DPU hosts.
+    /// normal DPU hosts. `dpf_enabled` marks the host as DPF-managed in NICo.
     pub async fn add_expected_machine(
         &self,
         bmc_mac_address: String,
         chassis_serial_number: String,
         rack_id: Option<RackId>,
         dpu_policy: Option<HostDpuPolicy>,
+        dpf_enabled: bool,
         interfaces: Vec<ExpectedInterface>,
     ) -> ClientApiResult<()> {
         self.0
@@ -390,8 +391,8 @@ impl ApiClient {
                 rack_id,
                 default_pause_ingestion_and_poweron: None,
                 #[allow(deprecated)]
-                dpf_enabled: true,
-                is_dpf_enabled: Some(true),
+                dpf_enabled,
+                is_dpf_enabled: Some(dpf_enabled),
                 bmc_ip_address: None,
                 bmc_retain_credentials: None,
                 dpu_mode: dpu_policy.map(|policy| rpc::forge::DpuMode::from(policy) as i32),

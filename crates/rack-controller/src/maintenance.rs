@@ -1347,10 +1347,7 @@ async fn start_configure_nmx_cluster(
         .await;
     }
 
-    let services = switch_mtls_services_as_i32(&[
-        SwitchMtlsService::NvueApi,
-        SwitchMtlsService::ScaleUpFabricManager,
-    ]);
+    let services = switch_mtls_services_as_i32(&[SwitchMtlsService::NvueApi]);
 
     let job_id = match component_manager
         .batch_configure_switch_certificate(&endpoints, None, Some(&services))

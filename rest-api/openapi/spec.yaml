@@ -248,9 +248,6 @@ tags:
     x-displayName: DPU Reprovision
     description: |-
       DPU Reprovision allows re-provisioning Machine's DPUs
-  - name: Health Report
-    description: |-
-      Machine Health Report contains information about the health of a Machine including user enforced overrides
   - name: Machine Capability
     description: |-
       Machine Capability defines the hardware capabilities of a Machine. Machine Capabilities can be used to group Machines into Instance Types.
@@ -11073,7 +11070,7 @@ paths:
     get:
       summary: Retrieve all Machine health reports
       tags:
-        - Health Report
+        - Machine
       responses:
         '200':
           description: OK
@@ -11099,7 +11096,7 @@ paths:
     put:
       summary: Create or update Machine health report
       tags:
-        - Health Report
+        - Machine
       requestBody:
         required: true
         content:
@@ -11151,7 +11148,7 @@ paths:
     delete:
       summary: Delete Machine health report
       tags:
-        - Health Report
+        - Machine
       responses:
         '204':
           description: Machine health report was successfully removed
@@ -27024,7 +27021,7 @@ components:
       type: object
       description: Describes BMC information of a Machine
       examples:
-        - ip: 10.217.133.5
+        - ip: '2001:db8::5'
           mac: 'C8:4B:D6:7A:C9:8A'
           version: '1'
           firmwareRevision: '6.00'
@@ -27033,8 +27030,7 @@ components:
           type:
             - string
             - 'null'
-          description: 'IP address of the Machine BMC'
-          format: ipv4
+          description: 'IPv4 or IPv6 address of the Machine BMC'
         mac:
           type:
             - string
@@ -27584,6 +27580,8 @@ components:
           type: boolean
           description: |-
             When true, this host is eligible for DPF-based provisioning.
+            Returns the effective setting: true when no value is configured.
+            An explicitly configured false value is returned as false.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines
@@ -27716,6 +27714,8 @@ components:
             - 'null'
           description: |-
             When true, this host is eligible for DPF-based provisioning.
+            Optional. Omission or null uses an effective default of true.
+            Set false explicitly to disable DPF-based provisioning.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines
@@ -27854,6 +27854,8 @@ components:
             - 'null'
           description: |-
             When true, this host is eligible for DPF-based provisioning.
+            Optional. Omission or null leaves the existing setting unchanged.
+            An explicit true or false value updates the setting.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines

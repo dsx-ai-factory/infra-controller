@@ -2581,6 +2581,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-mat-protocol-gateway"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "carbide-test-support",
+ "carbide-ufm-mock",
+ "carbide-utils",
+ "clap",
+ "duration-str",
+ "eyre",
+ "figment",
+ "metrics-endpoint",
+ "rcgen",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "carbide-measured-boot"
 version = "0.0.0"
 dependencies = [
@@ -2959,9 +2986,11 @@ name = "carbide-rms-mock"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "carbide-test-support",
  "librms",
  "mac_address",
  "serde",
+ "serde_json",
  "tokio",
  "tonic",
  "tracing",
@@ -3464,6 +3493,7 @@ dependencies = [
  "metrics-endpoint",
  "opentelemetry 0.32.0",
  "reqwest 0.13.4",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

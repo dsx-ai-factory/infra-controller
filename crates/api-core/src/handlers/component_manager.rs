@@ -36,7 +36,9 @@ use component_manager::compute_tray_manager::{
 use component_manager::core_compute_manager::CoreComputeTrayManager;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{NvSwitchManager, SwitchEndpoint};
-use component_manager::power_shelf_manager::{PowerShelfEndpoint, PowerShelfVendor};
+use component_manager::power_shelf_manager::{
+    PowerShelfEndpoint, PowerShelfManager, PowerShelfVendor,
+};
 use component_manager::types::FirmwareUpdateOptions;
 use db::{self, WithTransaction};
 use futures_util::FutureExt;
@@ -2132,6 +2134,108 @@ async fn resolve_switch_macs(
     })
 }
 
+/// Power shelf PMC MAC resolution. Ingested MACs reuse the power-shelf id path;
+/// `uningested` MACs are reachable before ingestion via the expected inventory.
+type PowerShelfMacResolution = MacResolution<PowerShelfId>;
+
+/// Resolve each caller-supplied power shelf PMC MAC to an ingested
+/// `power_shelf_id` or classify it as having no row yet. Parse failures are
+/// collected as per-MAC error results rather than failing the whole request.
+async fn resolve_power_shelf_macs(
+    api: &Api,
+    mac_addresses: &[String],
+) -> Result<PowerShelfMacResolution, Status> {
+    let mut ingested = HashMap::new();
+    let mut uningested = Vec::new();
+    let mut errors = Vec::new();
+
+    let mut parsed = Vec::new();
+    for raw_mac in mac_addresses {
+        match raw_mac.parse::<MacAddress>() {
+            Ok(mac) => parsed.push(mac),
+            Err(_) => errors.push(invalid_mac_result(raw_mac)),
+        }
+    }
+
+    if !parsed.is_empty() {
+        let rows = db::power_shelf::find_ids_by_bmc_macs(&mut api.db_reader(), &parsed)
+            .await
+            .map_err(|e| Status::internal(format!("db error: {e}")))?;
+        let mac_to_id: HashMap<MacAddress, PowerShelfId> = rows
+            .into_iter()
+            .map(|r| (r.bmc_mac_address, r.id))
+            .collect();
+        for mac in parsed {
+            match mac_to_id.get(&mac) {
+                Some(id) => {
+                    ingested.insert(*id, mac);
+                }
+                None => uningested.push(mac),
+            }
+        }
+    }
+
+    Ok(PowerShelfMacResolution {
+        ingested,
+        uningested,
+        errors,
+    })
+}
+
+/// Build direct power shelf endpoints for pre-ingestion power shelves from the
+/// expected inventory (PMC IP) and stored credentials, keyed by PMC MAC.
+///
+/// Returns the resolvable endpoints plus per-MAC error results for MACs missing
+/// from the expected inventory or missing credentials. Power shelf vendor is a
+/// hardcoded default (no vendor lookup), mirroring the ingested id path.
+async fn build_pre_ingestion_power_shelf_endpoints(
+    api: &Api,
+    macs: &[MacAddress],
+) -> Result<(Vec<PowerShelfEndpoint>, Vec<rpc::ComponentResult>), Status> {
+    let rows = db::power_shelf::find_power_shelf_endpoints_by_bmc_macs(&mut api.db_reader(), macs)
+        .await
+        .map_err(|e| Status::internal(format!("db error resolving power shelf endpoints: {e}")))?;
+
+    let mut by_mac: HashMap<MacAddress, _> = rows.into_iter().map(|r| (r.pmc_mac, r)).collect();
+
+    let mut endpoints = Vec::new();
+    let mut errors = Vec::new();
+
+    for &mac in macs {
+        let Some(row) = by_mac.remove(&mac) else {
+            errors.push(mac_result(
+                &mac,
+                rpc::ComponentManagerStatusCode::NotFound,
+                Some("power shelf PMC MAC not found in expected inventory".to_owned()),
+            ));
+            continue;
+        };
+
+        let pmc_credentials =
+            match fetch_powershelf_pmc_credentials(api.credential_manager.as_ref(), mac).await {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push(mac_result(
+                        &mac,
+                        rpc::ComponentManagerStatusCode::NotFound,
+                        Some(format!("PMC credentials unavailable: {e}")),
+                    ));
+                    continue;
+                }
+            };
+
+        endpoints.push(PowerShelfEndpoint {
+            pmc_ip: row.pmc_ip,
+            pmc_mac: mac,
+            // TODO: retrieve vendor from DB instead of using a hardcoded default
+            pmc_vendor: PowerShelfVendor::DEFAULT,
+            pmc_credentials,
+        });
+    }
+
+    Ok((endpoints, errors))
+}
+
 /// Build direct switch endpoints for pre-ingestion switches from the expected
 /// inventory (BMC + NVOS IP/MAC) and stored credentials, keyed by BMC MAC.
 ///
@@ -2838,6 +2942,97 @@ async fn power_control_switch_ids(
     }
 }
 
+/// Power control for a set of ingested power-shelf ids, honoring the state
+/// controller unless bypassed. Returns per-id results plus the PMC IPs dispatched
+/// to (for site re-exploration; empty on the state-controller path).
+async fn power_control_power_shelf_ids(
+    api: &Api,
+    cm: &ComponentManager,
+    power_shelf_ids: &[PowerShelfId],
+    action: PowerAction,
+    bypass_state_controller: bool,
+) -> Result<(Vec<rpc::ComponentResult>, Vec<IpAddr>), Status> {
+    if cm.power_shelf_use_state_controller && !bypass_state_controller {
+        let results =
+            queue_power_shelf_power_control_via_state_controller(api, power_shelf_ids, action)
+                .await?;
+        Ok((results, Vec::new()))
+    } else {
+        let endpoints = resolve_power_shelf_endpoints(api, power_shelf_ids).await?;
+
+        let mut results: Vec<_> = endpoints
+            .unresolved
+            .iter()
+            .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
+            .collect();
+
+        tracing::info!(
+            backend = cm.power_shelf.name(),
+            power_shelf_count = endpoints.resolved.endpoints.len(),
+            ?action,
+            "power control for power shelves"
+        );
+        let backend_results = cm
+            .power_shelf
+            .power_control(&endpoints.resolved.endpoints, action)
+            .await
+            .map_err(component_manager_error_to_status)?;
+        results.extend(backend_results.into_iter().map(|r| {
+            let id = ps_mac_to_id_str(&r.pmc_mac, &endpoints.resolved.mac_to_id);
+            if r.success {
+                success_result(&id)
+            } else {
+                error_result(&id, r.error.unwrap_or_default())
+            }
+        }));
+
+        let ips: Vec<IpAddr> = endpoints
+            .resolved
+            .endpoints
+            .iter()
+            .map(|ep| ep.pmc_ip)
+            .collect();
+
+        Ok((results, ips))
+    }
+}
+
+/// Dispatch power control to the PMCs of pre-ingestion power shelves through the
+/// configured `backend`, returning per-MAC results and the PMC IPs dispatched
+/// to (for site re-exploration). The backend echoes each endpoint's PMC MAC, so
+/// results correlate on it directly.
+async fn dispatch_pre_ingestion_power_shelf_power_control(
+    api: &Api,
+    backend: &dyn PowerShelfManager,
+    macs: &[MacAddress],
+    action: PowerAction,
+) -> Result<(Vec<rpc::ComponentResult>, Vec<IpAddr>), Status> {
+    let (endpoints, mut results) = build_pre_ingestion_power_shelf_endpoints(api, macs).await?;
+
+    if endpoints.is_empty() {
+        return Ok((results, Vec::new()));
+    }
+
+    let ips: Vec<IpAddr> = endpoints.iter().map(|ep| ep.pmc_ip).collect();
+    let backend_results = backend
+        .power_control(&endpoints, action)
+        .await
+        .map_err(component_manager_error_to_status)?;
+    results.extend(backend_results.into_iter().map(|r| {
+        mac_result(
+            &r.pmc_mac,
+            if r.success {
+                rpc::ComponentManagerStatusCode::Success
+            } else {
+                rpc::ComponentManagerStatusCode::InternalError
+            },
+            r.error,
+        )
+    }));
+
+    Ok((results, ips))
+}
+
 pub(crate) async fn component_power_control(
     api: &Api,
     request: Request<rpc::ComponentPowerControlRequest>,
@@ -2923,49 +3118,70 @@ pub(crate) async fn component_power_control(
             (results, ips)
         }
         rpc::component_power_control_request::Target::PowerShelfIds(list) => {
-            if cm.power_shelf_use_state_controller && !bypass_state_controller {
-                let results =
-                    queue_power_shelf_power_control_via_state_controller(api, &list.ids, action)
-                        .await?;
-                (results, Vec::new())
-            } else {
-                let endpoints = resolve_power_shelf_endpoints(api, &list.ids).await?;
+            power_control_power_shelf_ids(api, cm, &list.ids, action, bypass_state_controller)
+                .await?
+        }
+        rpc::component_power_control_request::Target::PowerShelfPmcMacs(list) => {
+            let resolution = resolve_power_shelf_macs(api, &list.mac_addresses).await?;
+            let mut results = resolution.errors.clone();
+            let mut ips: Vec<IpAddr> = Vec::new();
 
-                let mut results: Vec<_> = endpoints
-                    .unresolved
-                    .iter()
-                    .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
-                    .collect();
-
-                tracing::info!(
-                    backend = cm.power_shelf.name(),
-                    power_shelf_count = endpoints.resolved.endpoints.len(),
-                    ?action,
-                    "power control for power shelves"
-                );
-                let backend_results = cm
-                    .power_shelf
-                    .power_control(&endpoints.resolved.endpoints, action)
-                    .await
-                    .map_err(component_manager_error_to_status)?;
-                results.extend(backend_results.into_iter().map(|r| {
-                    let id = ps_mac_to_id_str(&r.pmc_mac, &endpoints.resolved.mac_to_id);
-                    if r.success {
-                        success_result(&id)
-                    } else {
-                        error_result(&id, r.error.unwrap_or_default())
+            // Uningested power shelf MACs (no power_shelves row) always dispatch
+            // directly through the configured backend: a row-less device has no
+            // persisted state for the state controller to reconcile, so
+            // --bypass-state-controller only governs ingested targets. Report a
+            // dispatch failure per-MAC rather than discarding parse-error results
+            // or blocking the ingested subset below.
+            if !resolution.uningested.is_empty() {
+                match dispatch_pre_ingestion_power_shelf_power_control(
+                    api,
+                    cm.power_shelf.as_ref(),
+                    &resolution.uningested,
+                    action,
+                )
+                .await
+                {
+                    Ok((pre_results, pre_ips)) => {
+                        results.extend(pre_results);
+                        ips.extend(pre_ips);
                     }
-                }));
-
-                let ips: Vec<IpAddr> = endpoints
-                    .resolved
-                    .endpoints
-                    .iter()
-                    .map(|ep| ep.pmc_ip)
-                    .collect();
-
-                (results, ips)
+                    Err(status) => results.extend(
+                        resolution
+                            .uningested
+                            .iter()
+                            .map(|mac| mac_status_result(mac, &status)),
+                    ),
+                }
             }
+
+            // Ingested MACs: reuse the power-shelf-id path verbatim, then echo the
+            // caller's MAC onto each result. The pre-ingestion dispatch above has
+            // already committed power actions, so a failure resolving the ingested
+            // subset must not discard those results; report it per-MAC instead.
+            if !resolution.ingested.is_empty() {
+                match power_control_power_shelf_ids(
+                    api,
+                    cm,
+                    &resolution.ingested_ids(),
+                    action,
+                    bypass_state_controller,
+                )
+                .await
+                {
+                    Ok((ingested_results, ingested_ips)) => {
+                        results.extend(resolution.echo_mac_by_component_id(ingested_results));
+                        ips.extend(ingested_ips);
+                    }
+                    Err(status) => results.extend(
+                        resolution
+                            .ingested
+                            .values()
+                            .map(|mac| mac_status_result(mac, &status)),
+                    ),
+                }
+            }
+
+            (results, ips)
         }
         rpc::component_power_control_request::Target::MachineIds(list) => {
             power_control_ingested_machine_ids(
@@ -3479,6 +3695,9 @@ pub(crate) async fn get_component_inventory(
         rpc::get_component_inventory_request::Target::SwitchBmcMacs(list) => {
             inventory_by_bmc_macs(api, &list.mac_addresses).await?
         }
+        rpc::get_component_inventory_request::Target::PowerShelfPmcMacs(list) => {
+            inventory_by_bmc_macs(api, &list.mac_addresses).await?
+        }
     };
 
     Ok(Response::new(rpc::GetComponentInventoryResponse {
@@ -3696,6 +3915,221 @@ async fn update_switch_firmware_by_mac(
     Ok(results)
 }
 
+/// Update firmware for a set of ingested power-shelf ids.
+///
+/// Mirrors [`update_switch_firmware_by_ids`]: the state-controller path submits
+/// a rack-maintenance firmware activity; the direct path dispatches to the
+/// configured backend by resolved endpoint. Returns per-id results.
+async fn update_power_shelf_firmware_by_ids(
+    api: &Api,
+    power_shelf_ids: &[PowerShelfId],
+    components: &[i32],
+    target_version: &str,
+    access_token: &Option<String>,
+    force_update: bool,
+    bypass_state_controller: bool,
+) -> Result<Vec<rpc::ComponentResult>, Status> {
+    let cm = require_component_manager(api)?;
+    let route_through_state_controller =
+        cm.power_shelf_use_state_controller && !bypass_state_controller;
+    if route_through_state_controller {
+        let token = require_firmware_object_json_for_rack_maintenance(
+            "power shelf",
+            access_token,
+            target_version,
+        )?;
+        let components = map_power_shelf_components(components)?;
+        let component_names = components
+            .iter()
+            .map(|component| match component {
+                PowerShelfComponent::Pmc => "pmc".to_string(),
+                PowerShelfComponent::Psu => "psu".to_string(),
+            })
+            .collect();
+        let maintenance_activities = vec![firmware_upgrade_activity(
+            target_version.to_string(),
+            component_names,
+            Some(token),
+            force_update,
+        )];
+        let rack_maintenance_targets = group_power_shelf_ids_by_rack(api, power_shelf_ids).await?;
+        submit_rack_firmware_maintenance_requests(
+            api,
+            rack_maintenance_targets,
+            maintenance_activities,
+        )
+        .await
+    } else {
+        let options = if cm.power_shelf.supports_firmware_object_json() {
+            require_firmware_object_json_for_direct_rms(
+                "power shelf",
+                access_token,
+                target_version,
+                force_update,
+            )?
+        } else {
+            reject_power_shelf_firmware_object_json(access_token)?;
+            FirmwareUpdateOptions {
+                force_update,
+                ..FirmwareUpdateOptions::default()
+            }
+        };
+        let components = map_power_shelf_components(components)?;
+        let endpoints = resolve_power_shelf_endpoints(api, power_shelf_ids).await?;
+
+        let mut results: Vec<_> = endpoints
+            .unresolved
+            .iter()
+            .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
+            .collect();
+
+        let backend_results = cm
+            .power_shelf
+            .update_firmware(
+                &endpoints.resolved.endpoints,
+                target_version,
+                &components,
+                &options,
+            )
+            .await
+            .map_err(component_manager_error_to_status)?;
+        results.extend(backend_results.into_iter().map(|r| {
+            let id = ps_mac_to_id_str(&r.pmc_mac, &endpoints.resolved.mac_to_id);
+            if r.success {
+                success_result(&id)
+            } else {
+                error_result(&id, r.error.unwrap_or_default())
+            }
+        }));
+        Ok(results)
+    }
+}
+
+/// Direct-dispatch a firmware update to pre-ingestion power shelves through the
+/// configured backend, correlated by PMC MAC. A row-less power shelf has no
+/// persisted state for the state controller to reconcile, so it is always
+/// dispatched directly regardless of `--bypass-state-controller`.
+async fn dispatch_pre_ingestion_power_shelf_firmware(
+    api: &Api,
+    macs: &[MacAddress],
+    components: &[i32],
+    target_version: &str,
+    access_token: &Option<String>,
+    force_update: bool,
+) -> Result<Vec<rpc::ComponentResult>, Status> {
+    let cm = require_component_manager(api)?;
+    let options = if cm.power_shelf.supports_firmware_object_json() {
+        require_firmware_object_json_for_direct_rms(
+            "power shelf",
+            access_token,
+            target_version,
+            force_update,
+        )?
+    } else {
+        reject_power_shelf_firmware_object_json(access_token)?;
+        FirmwareUpdateOptions {
+            force_update,
+            ..FirmwareUpdateOptions::default()
+        }
+    };
+    let components = map_power_shelf_components(components)?;
+
+    let (endpoints, mut results) = build_pre_ingestion_power_shelf_endpoints(api, macs).await?;
+    if endpoints.is_empty() {
+        return Ok(results);
+    }
+
+    let backend_results = cm
+        .power_shelf
+        .update_firmware(&endpoints, target_version, &components, &options)
+        .await
+        .map_err(component_manager_error_to_status)?;
+    results.extend(backend_results.into_iter().map(|r| {
+        mac_result(
+            &r.pmc_mac,
+            if r.success {
+                rpc::ComponentManagerStatusCode::Success
+            } else {
+                rpc::ComponentManagerStatusCode::InternalError
+            },
+            r.error,
+        )
+    }));
+
+    Ok(results)
+}
+
+/// Update firmware for a set of power-shelf PMC MAC targets.
+///
+/// Ingested MACs reuse the power-shelf-id path verbatim, then echo the caller's
+/// MAC onto each result. Uningested MACs always direct-dispatch through the
+/// configured backend.
+async fn update_power_shelf_firmware_by_mac(
+    api: &Api,
+    mac_addresses: &[String],
+    components: &[i32],
+    target_version: &str,
+    access_token: &Option<String>,
+    force_update: bool,
+    bypass_state_controller: bool,
+) -> Result<Vec<rpc::ComponentResult>, Status> {
+    let resolution = resolve_power_shelf_macs(api, mac_addresses).await?;
+    let mut results = resolution.errors.clone();
+
+    if !resolution.uningested.is_empty() {
+        // Dispatching the uningested subset must not discard parse-error results
+        // already collected above, nor block the independent ingested subset
+        // below. Report a dispatch failure per-MAC against the uningested
+        // targets instead of aborting the whole batch.
+        match dispatch_pre_ingestion_power_shelf_firmware(
+            api,
+            &resolution.uningested,
+            components,
+            target_version,
+            access_token,
+            force_update,
+        )
+        .await
+        {
+            Ok(dispatched) => results.extend(dispatched),
+            Err(status) => results.extend(
+                resolution
+                    .uningested
+                    .iter()
+                    .map(|mac| mac_status_result(mac, &status)),
+            ),
+        }
+    }
+
+    if !resolution.ingested.is_empty() {
+        // The pre-ingestion dispatch above has already queued backend jobs, so a
+        // failure resolving the ingested subset (e.g. an ingested power shelf
+        // with no rack) must not discard those results. Report it per-MAC against
+        // the ingested targets instead of aborting after submission.
+        match update_power_shelf_firmware_by_ids(
+            api,
+            &resolution.ingested_ids(),
+            components,
+            target_version,
+            access_token,
+            force_update,
+            bypass_state_controller,
+        )
+        .await
+        {
+            Ok(ingested) => results.extend(resolution.echo_mac_by_component_id(ingested)),
+            Err(status) => results.extend(
+                resolution
+                    .ingested
+                    .values()
+                    .map(|mac| mac_status_result(mac, &status)),
+            ),
+        }
+    }
+
+    Ok(results)
+}
+
 pub(crate) async fn update_component_firmware(
     api: &Api,
     request: Request<rpc::UpdateComponentFirmwareRequest>,
@@ -3710,12 +4144,10 @@ pub(crate) async fn update_component_firmware(
 
     let force_update = req.force_update;
     let bypass_state_controller = req.bypass_state_controller;
-    let mut rack_maintenance_targets: Vec<RackFirmwareMaintenanceTarget> = Vec::new();
-    let mut power_shelf_results: Option<Vec<rpc::ComponentResult>> = None;
-    let mut rack_results: Option<Vec<rpc::ComponentResult>> = None;
-    let mut maintenance_activities: Vec<rpc::MaintenanceActivityConfig> = Vec::new();
 
-    match target {
+    // Only the power-shelf arm yields a result set that falls through to the
+    // shared response below; every other arm returns its response directly.
+    let results = match target {
         rpc::update_component_firmware_request::Target::Switches(t) => {
             require_component_manager(api)?;
             let components = t.components;
@@ -3824,82 +4256,54 @@ pub(crate) async fn update_component_firmware(
             }
         }
         rpc::update_component_firmware_request::Target::PowerShelves(t) => {
-            let list = t
-                .power_shelf_ids
-                .ok_or_else(|| Status::invalid_argument("power_shelf_ids is required"))?;
-            if list.ids.is_empty() {
-                return Err(Status::invalid_argument(
-                    "power_shelf_ids must not be empty",
-                ));
-            }
-
-            let cm = require_component_manager(api)?;
-            let route_through_state_controller =
-                cm.power_shelf_use_state_controller && !bypass_state_controller;
-            if route_through_state_controller {
-                let token = require_firmware_object_json_for_rack_maintenance(
-                    "power shelf",
-                    &access_token,
-                    &req.target_version,
-                )?;
-                let components = map_power_shelf_components(&t.components)?;
-                let component_names = components
-                    .iter()
-                    .map(|component| match component {
-                        PowerShelfComponent::Pmc => "pmc".to_string(),
-                        PowerShelfComponent::Psu => "psu".to_string(),
-                    })
-                    .collect();
-                maintenance_activities = vec![firmware_upgrade_activity(
-                    req.target_version.clone(),
-                    component_names,
-                    Some(token),
-                    force_update,
-                )];
-                rack_maintenance_targets = group_power_shelf_ids_by_rack(api, &list.ids).await?;
-            } else {
-                let options = if cm.power_shelf.supports_firmware_object_json() {
-                    require_firmware_object_json_for_direct_rms(
-                        "power shelf",
-                        &access_token,
-                        &req.target_version,
-                        force_update,
-                    )?
-                } else {
-                    reject_power_shelf_firmware_object_json(&access_token)?;
-                    FirmwareUpdateOptions {
-                        force_update,
-                        ..FirmwareUpdateOptions::default()
+            require_component_manager(api)?;
+            let components = t.components;
+            // power_shelf_ids and pmc_macs are plain fields (not a proto oneof,
+            // to keep field 1 wire-compatible), so the server enforces exactly
+            // one.
+            match (t.power_shelf_ids, t.pmc_macs) {
+                (Some(_), Some(_)) => {
+                    return Err(Status::invalid_argument(
+                        "power shelf target must set exactly one of power_shelf_ids or pmc_macs, not both",
+                    ));
+                }
+                (None, None) => {
+                    return Err(Status::invalid_argument(
+                        "power shelf target (power_shelf_ids or pmc_macs) is required",
+                    ));
+                }
+                (Some(list), None) => {
+                    if list.ids.is_empty() {
+                        return Err(Status::invalid_argument(
+                            "power_shelf_ids must not be empty",
+                        ));
                     }
-                };
-                let components = map_power_shelf_components(&t.components)?;
-                let endpoints = resolve_power_shelf_endpoints(api, &list.ids).await?;
-
-                let mut results: Vec<_> = endpoints
-                    .unresolved
-                    .iter()
-                    .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
-                    .collect();
-
-                let backend_results = cm
-                    .power_shelf
-                    .update_firmware(
-                        &endpoints.resolved.endpoints,
-                        &req.target_version,
+                    update_power_shelf_firmware_by_ids(
+                        api,
+                        &list.ids,
                         &components,
-                        &options,
+                        &req.target_version,
+                        &access_token,
+                        force_update,
+                        bypass_state_controller,
                     )
-                    .await
-                    .map_err(component_manager_error_to_status)?;
-                results.extend(backend_results.into_iter().map(|r| {
-                    let id = ps_mac_to_id_str(&r.pmc_mac, &endpoints.resolved.mac_to_id);
-                    if r.success {
-                        success_result(&id)
-                    } else {
-                        error_result(&id, r.error.unwrap_or_default())
+                    .await?
+                }
+                (None, Some(macs)) => {
+                    if macs.mac_addresses.is_empty() {
+                        return Err(Status::invalid_argument("pmc_macs must not be empty"));
                     }
-                }));
-                power_shelf_results = Some(results);
+                    update_power_shelf_firmware_by_mac(
+                        api,
+                        &macs.mac_addresses,
+                        &components,
+                        &req.target_version,
+                        &access_token,
+                        force_update,
+                        bypass_state_controller,
+                    )
+                    .await?
+                }
             }
         }
         rpc::update_component_firmware_request::Target::Racks(t) => {
@@ -3951,28 +4355,11 @@ pub(crate) async fn update_component_firmware(
                     Err(status) => results.push(status_result(&rack_id_string, status)),
                 }
             }
-            rack_results = Some(results);
+            return Ok(Response::new(rpc::UpdateComponentFirmwareResponse {
+                results,
+            }));
         }
-    }
-
-    if let Some(results) = power_shelf_results {
-        return Ok(Response::new(rpc::UpdateComponentFirmwareResponse {
-            results,
-        }));
-    }
-
-    if let Some(results) = rack_results {
-        return Ok(Response::new(rpc::UpdateComponentFirmwareResponse {
-            results,
-        }));
-    }
-
-    let results = submit_rack_firmware_maintenance_requests(
-        api,
-        rack_maintenance_targets,
-        maintenance_activities,
-    )
-    .await?;
+    };
 
     Ok(Response::new(rpc::UpdateComponentFirmwareResponse {
         results,
@@ -4537,6 +4924,57 @@ async fn rack_firmware_statuses(
         .collect())
 }
 
+/// Firmware status for pre-ingestion power shelves, dispatched to the configured
+/// backend via direct endpoints and correlated by PMC MAC. Endpoints that cannot
+/// be resolved (missing credentials or expected inventory) are reported per-MAC.
+async fn pre_ingestion_power_shelf_firmware_statuses(
+    api: &Api,
+    cm: &ComponentManager,
+    macs: &[MacAddress],
+) -> Result<Vec<rpc::FirmwareUpdateStatus>, Status> {
+    let (endpoints, errors) = build_pre_ingestion_power_shelf_endpoints(api, macs).await?;
+
+    let mut statuses: Vec<rpc::FirmwareUpdateStatus> = errors
+        .into_iter()
+        .map(|result| rpc::FirmwareUpdateStatus {
+            result: Some(result),
+            state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
+            target_version: String::new(),
+            updated_at: None,
+        })
+        .collect();
+
+    if endpoints.is_empty() {
+        return Ok(statuses);
+    }
+
+    let backend_statuses = cm
+        .power_shelf
+        .get_firmware_status(&endpoints)
+        .await
+        .map_err(component_manager_error_to_status)?;
+    statuses.extend(
+        backend_statuses
+            .into_iter()
+            .map(|s| rpc::FirmwareUpdateStatus {
+                result: Some(if s.error.is_none() {
+                    mac_result(&s.pmc_mac, rpc::ComponentManagerStatusCode::Success, None)
+                } else {
+                    mac_result(
+                        &s.pmc_mac,
+                        rpc::ComponentManagerStatusCode::InternalError,
+                        s.error,
+                    )
+                }),
+                state: map_fw_state(s.state),
+                target_version: s.target_version,
+                updated_at: None,
+            }),
+    );
+
+    Ok(statuses)
+}
+
 pub(crate) async fn get_component_firmware_status(
     api: &Api,
     request: Request<rpc::GetComponentFirmwareStatusRequest>,
@@ -4593,6 +5031,46 @@ pub(crate) async fn get_component_firmware_status(
         }
         rpc::get_component_firmware_status_request::Target::PowerShelfIds(list) => {
             power_shelf_firmware_statuses(api, &list.ids).await?
+        }
+        rpc::get_component_firmware_status_request::Target::PowerShelfPmcMacs(list) => {
+            let cm = require_component_manager(api)?;
+            let resolution = resolve_power_shelf_macs(api, &list.mac_addresses).await?;
+            let mut statuses: Vec<rpc::FirmwareUpdateStatus> = resolution
+                .errors
+                .iter()
+                .map(|result| rpc::FirmwareUpdateStatus {
+                    result: Some(result.clone()),
+                    state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
+                    target_version: String::new(),
+                    updated_at: None,
+                })
+                .collect();
+
+            // Uningested power shelves: query the backend directly via
+            // pre-ingestion endpoints, correlated by MAC.
+            if !resolution.uningested.is_empty() {
+                statuses.extend(
+                    pre_ingestion_power_shelf_firmware_statuses(api, cm, &resolution.uningested)
+                        .await?,
+                );
+            }
+
+            // Ingested MACs: reuse the power-shelf-id path, then echo the MAC.
+            if !resolution.ingested.is_empty() {
+                let ingested =
+                    power_shelf_firmware_statuses(api, &resolution.ingested_ids()).await?;
+                statuses.extend(ingested.into_iter().map(|mut status| {
+                    if let Some(result) = status.result.as_mut()
+                        && let Some(mac) =
+                            resolution.mac_for_component_id(result.component_id.as_deref())
+                    {
+                        result.mac_address = Some(mac.to_string());
+                    }
+                    status
+                }));
+            }
+
+            statuses
         }
         rpc::get_component_firmware_status_request::Target::MachineIds(list) => {
             routed_machine_firmware_statuses(api, &list.machine_ids).await?
@@ -4789,6 +5267,100 @@ async fn firmware_versions_switch_ids(
     Ok(devices)
 }
 
+/// Firmware versions for a set of ingested power-shelf ids, listed from the
+/// configured backend by resolved endpoint and correlated by PMC MAC.
+async fn firmware_versions_power_shelf_ids(
+    api: &Api,
+    cm: &ComponentManager,
+    power_shelf_ids: &[PowerShelfId],
+) -> Result<Vec<rpc::DeviceFirmwareVersions>, Status> {
+    let endpoints = resolve_power_shelf_endpoints(api, power_shelf_ids).await?;
+
+    let mut devices: Vec<rpc::DeviceFirmwareVersions> = endpoints
+        .unresolved
+        .iter()
+        .map(|u| rpc::DeviceFirmwareVersions {
+            result: Some(error_result(&u.id.to_string(), u.reason.clone())),
+            ..Default::default()
+        })
+        .collect();
+
+    let fw_results = cm
+        .power_shelf
+        .list_firmware(&endpoints.resolved.endpoints)
+        .await
+        .map_err(component_manager_error_to_status)?;
+
+    for fv in fw_results {
+        let id = endpoints
+            .resolved
+            .mac_to_id
+            .get(&fv.pmc_mac)
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        let result = if let Some(err) = fv.error {
+            error_result(&id, err)
+        } else {
+            success_result(&id)
+        };
+        devices.push(rpc::DeviceFirmwareVersions {
+            result: Some(result),
+            versions: fv.versions,
+            ..Default::default()
+        });
+    }
+
+    Ok(devices)
+}
+
+/// Firmware versions for pre-ingestion power shelves, listed from the configured
+/// backend via direct endpoints and correlated by PMC MAC. Endpoints that cannot
+/// be resolved (missing credentials or expected inventory) are reported per-MAC.
+async fn pre_ingestion_power_shelf_firmware_versions(
+    api: &Api,
+    cm: &ComponentManager,
+    macs: &[MacAddress],
+) -> Result<Vec<rpc::DeviceFirmwareVersions>, Status> {
+    let (endpoints, errors) = build_pre_ingestion_power_shelf_endpoints(api, macs).await?;
+
+    let mut devices: Vec<rpc::DeviceFirmwareVersions> = errors
+        .into_iter()
+        .map(|result| rpc::DeviceFirmwareVersions {
+            result: Some(result),
+            ..Default::default()
+        })
+        .collect();
+
+    if endpoints.is_empty() {
+        return Ok(devices);
+    }
+
+    let fw_results = cm
+        .power_shelf
+        .list_firmware(&endpoints)
+        .await
+        .map_err(component_manager_error_to_status)?;
+
+    devices.extend(fw_results.into_iter().map(|fv| {
+        let result = if let Some(err) = fv.error {
+            mac_result(
+                &fv.pmc_mac,
+                rpc::ComponentManagerStatusCode::InternalError,
+                Some(err),
+            )
+        } else {
+            mac_result(&fv.pmc_mac, rpc::ComponentManagerStatusCode::Success, None)
+        };
+        rpc::DeviceFirmwareVersions {
+            result: Some(result),
+            versions: fv.versions,
+            ..Default::default()
+        }
+    }));
+
+    Ok(devices)
+}
+
 pub(crate) async fn list_component_firmware_versions(
     api: &Api,
     request: Request<rpc::ListComponentFirmwareVersionsRequest>,
@@ -4875,40 +5447,45 @@ pub(crate) async fn list_component_firmware_versions(
         }
         rpc::list_component_firmware_versions_request::Target::PowerShelfIds(list) => {
             let cm = require_component_manager(api)?;
-            let endpoints = resolve_power_shelf_endpoints(api, &list.ids).await?;
-
-            let mut devices: Vec<rpc::DeviceFirmwareVersions> = endpoints
-                .unresolved
+            let devices = firmware_versions_power_shelf_ids(api, cm, &list.ids).await?;
+            Ok(Response::new(rpc::ListComponentFirmwareVersionsResponse {
+                devices,
+            }))
+        }
+        rpc::list_component_firmware_versions_request::Target::PowerShelfPmcMacs(list) => {
+            let cm = require_component_manager(api)?;
+            let resolution = resolve_power_shelf_macs(api, &list.mac_addresses).await?;
+            let mut devices: Vec<rpc::DeviceFirmwareVersions> = resolution
+                .errors
                 .iter()
-                .map(|u| rpc::DeviceFirmwareVersions {
-                    result: Some(error_result(&u.id.to_string(), u.reason.clone())),
+                .map(|result| rpc::DeviceFirmwareVersions {
+                    result: Some(result.clone()),
                     ..Default::default()
                 })
                 .collect();
 
-            let fw_results = cm
-                .power_shelf
-                .list_firmware(&endpoints.resolved.endpoints)
-                .await
-                .map_err(component_manager_error_to_status)?;
+            // Uningested power shelves: list from the backend directly via
+            // pre-ingestion endpoints, correlated by MAC.
+            if !resolution.uningested.is_empty() {
+                devices.extend(
+                    pre_ingestion_power_shelf_firmware_versions(api, cm, &resolution.uningested)
+                        .await?,
+                );
+            }
 
-            for fv in fw_results {
-                let id = endpoints
-                    .resolved
-                    .mac_to_id
-                    .get(&fv.pmc_mac)
-                    .map(|id| id.to_string())
-                    .unwrap_or_default();
-                let result = if let Some(err) = fv.error {
-                    error_result(&id, err)
-                } else {
-                    success_result(&id)
-                };
-                devices.push(rpc::DeviceFirmwareVersions {
-                    result: Some(result),
-                    versions: fv.versions,
-                    ..Default::default()
-                });
+            // Ingested MACs: reuse the power-shelf-id path, then echo the MAC.
+            if !resolution.ingested.is_empty() {
+                let ingested =
+                    firmware_versions_power_shelf_ids(api, cm, &resolution.ingested_ids()).await?;
+                devices.extend(ingested.into_iter().map(|mut device| {
+                    if let Some(result) = device.result.as_mut()
+                        && let Some(mac) =
+                            resolution.mac_for_component_id(result.component_id.as_deref())
+                    {
+                        result.mac_address = Some(mac.to_string());
+                    }
+                    device
+                }));
             }
 
             Ok(Response::new(rpc::ListComponentFirmwareVersionsResponse {

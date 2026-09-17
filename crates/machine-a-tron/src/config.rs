@@ -26,6 +26,7 @@ use bmc_mock::{
     DpuMachineInfo, DpuSettings, HardwareType, HostFirmwareVersions, RackInfo, RackPlacement,
     RackType,
 };
+use carbide_utils::HostPortPair;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use clap::Parser;
@@ -149,6 +150,11 @@ pub struct MachineConfig {
     #[serde(default)]
     pub dpus_in_nic_mode: bool,
 
+    /// Whether hosts in this section are registered as DPF-enabled expected machines;
+    /// DPUs of a DPF-enabled host start with the DPU agent installed. Defaults to true.
+    #[serde(default = "default_true")]
+    pub dpf_enabled: bool,
+
     /// What firmware versions to report for DPUs in this host
     #[serde(default)]
     pub dpu_firmware_versions: Option<DpuFirmwareVersions>,
@@ -259,6 +265,7 @@ impl WiwynnGb200RackConfig {
             run_interval_idle: self.run_interval_idle,
             network_status_run_interval: self.network_status_run_interval,
             dpus_in_nic_mode: self.dpus_in_nic_mode,
+            dpf_enabled: true,
             dpu_firmware_versions: self.dpu_firmware_versions.clone(),
             host_firmware_versions: None,
             dpu_agent_version: self.dpu_agent_version.clone(),
@@ -353,6 +360,7 @@ impl LenovoGb300RackConfig {
             run_interval_idle: self.run_interval_idle,
             network_status_run_interval: self.network_status_run_interval,
             dpus_in_nic_mode: self.dpus_in_nic_mode,
+            dpf_enabled: true,
             dpu_firmware_versions: self.dpu_firmware_versions.clone(),
             host_firmware_versions: None,
             dpu_agent_version: self.dpu_agent_version.clone(),
@@ -592,6 +600,12 @@ pub struct MachineATronConfig {
 }
 
 impl MachineATronConfig {
+    pub(crate) fn bmc_proxy_address(&self) -> Option<String> {
+        self.configure_carbide_bmc_proxy_host
+            .as_ref()
+            .map(|host| HostPortPair::HostAndPort(host.clone(), self.bmc_mock_port).to_string())
+    }
+
     pub fn validate(&self) -> eyre::Result<()> {
         if let Some(ufm_mock) = self.ufm_mock.as_ref() {
             ufm_mock.validate()?;
@@ -1011,8 +1025,9 @@ pub struct MachineATronContext {
     pub bmc_registry: BmcMockRegistry,
     pub api_throttler: ApiThrottler,
     /// These are the firmware versions the server wants us to be on. If not configured for other
-    /// firmware, DPU's can mock that they already have this installed.
-    pub desired_firmware_versions: Vec<DesiredFirmwareVersionEntry>,
+    /// firmware, DPU's can mock that they already have this installed. Refreshed in the
+    /// background by `spawn_desired_firmware_refresher`.
+    pub desired_firmware_versions: std::sync::RwLock<Vec<DesiredFirmwareVersionEntry>>,
     pub forge_api_client: ForgeApiClient,
     pub dhcp_client: crate::dhcp_wrapper::DhcpClient,
     pub mac_address_pool: Arc<Mutex<MacAddressPool>>,
@@ -1098,6 +1113,11 @@ scout_run_interval = "5s"
     "#,
         )
         .expect("Could not parse config")
+    }
+
+    #[test]
+    fn machine_config_dpf_enabled_defaults_to_true() {
+        assert!(rack_config().machines["config"].dpf_enabled);
     }
 
     fn wiwynn_gb200_rack_from_machine(machine: &MachineConfig) -> WiwynnGb200RackConfig {
@@ -1385,6 +1405,44 @@ scout_run_interval = "5s"
     #[test]
     fn dhcp_uses_api_by_default() {
         assert_eq!(rack_config().dhcp, DhcpType::Api {});
+    }
+
+    #[test]
+    fn bmc_proxy_address_uses_configured_host_and_port() {
+        check_values(
+            [
+                Check {
+                    scenario: "bare IPv6 with default port",
+                    input: r#"configure_carbide_bmc_proxy_host = "2001:db8::1""#,
+                    expect: Some("[2001:db8::1]:2000".to_string()),
+                },
+                Check {
+                    scenario: "bracketed IPv6 with configured port",
+                    input: r#"configure_carbide_bmc_proxy_host = "[2001:db8::1]"
+bmc_mock_port = 8443"#,
+                    expect: Some("[2001:db8::1]:8443".to_string()),
+                },
+                Check {
+                    scenario: "IPv4",
+                    input: r#"configure_carbide_bmc_proxy_host = "192.0.2.1""#,
+                    expect: Some("192.0.2.1:2000".to_string()),
+                },
+                Check {
+                    scenario: "proxy host omitted",
+                    input: "",
+                    expect: None,
+                },
+            ],
+            |serialized| {
+                let config: MachineATronConfig = toml::from_str(&format!(
+                    r#"carbide_api_url = "https://carbide-api.forge:443"
+machines = {{}}
+{serialized}"#
+                ))
+                .expect("could not parse config");
+                config.bmc_proxy_address()
+            },
+        );
     }
 
     #[test]

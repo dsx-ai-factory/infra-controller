@@ -119,6 +119,8 @@ navigation:
           path: provisioning/ingesting-hosts.md
         - page: Ingesting Hosts (REST API)
           path: provisioning/ingesting-hosts-rest-api.md
+        - page: Discovery OS cloud-init (Scout)
+          path: provisioning/discovery-os-cloud-init.md
         - page: Configure Expected Machine Interfaces
           path: provisioning/expected-machine-interfaces.md
         - page: Site Setup API Parity

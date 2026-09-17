@@ -48,6 +48,95 @@ use crate::{DatabaseError, db_init};
 
 type VpcVniPoolState = Vec<(String, String, sqlx::types::Json<ResourcePoolEntryState>)>;
 
+#[crate::sqlx_test]
+async fn vpc_updates_without_versions_use_latest_locked_state(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    enum Update {
+        Metadata,
+        Virtualization,
+    }
+
+    let env = create_test_env(pool).await;
+    assert!(!env.config.tenant_prefix_overlap_enabled);
+    for (scenario, operation) in [
+        ("metadata update", Update::Metadata),
+        ("virtualization update", Update::Virtualization),
+    ] {
+        let (vpc_id, created) = create_fixture_vpc(&env, scenario.to_string(), None, None).await;
+        let version: ConfigVersion = created.version.parse()?;
+        let mut writer = env.pool.begin().await?;
+        let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(writer.as_mut())
+            .await?;
+        sqlx::query(
+            "UPDATE vpcs SET version = $1, power_resource_group = 'concurrent-group' WHERE id = $2",
+        )
+        .bind(version.increment())
+        .bind(vpc_id)
+        .execute(writer.as_mut())
+        .await?;
+
+        let update = async {
+            match operation {
+                Update::Metadata => env
+                    .api
+                    .update_vpc(tonic::Request::new(rpc::forge::VpcUpdateRequest {
+                        id: Some(vpc_id),
+                        metadata: Some(rpc::forge::Metadata {
+                            name: "requested name".to_string(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }))
+                    .await
+                    .map(drop),
+                Update::Virtualization => env
+                    .api
+                    .update_vpc_virtualization(tonic::Request::new(
+                        rpc::forge::VpcUpdateVirtualizationRequest {
+                            id: Some(vpc_id),
+                            network_virtualization_type: Some(
+                                rpc::forge::VpcVirtualizationType::Flat as i32,
+                            ),
+                            if_version_match: None,
+                        },
+                    ))
+                    .await
+                    .map(drop),
+            }
+        };
+        let release = async {
+            wait_for_blocked_query(&env.pool, writer_pid, "vpcs").await;
+            writer.commit().await
+        };
+        let (updated, released) = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(update, release)
+        })
+        .await?;
+        released?;
+        updated.unwrap_or_else(|error| panic!("{scenario}: {error}"));
+
+        let current = find_test_vpc(&env, vpc_id).await?;
+        let current_version: ConfigVersion = current.version.parse()?;
+        assert_eq!(current_version.version_nr(), version.version_nr() + 2);
+        assert_eq!(
+            forge_vpc_config(&current).power_resource_group.as_deref(),
+            Some("concurrent-group")
+        );
+        match operation {
+            Update::Metadata => {
+                assert_eq!(current.metadata.unwrap().name, "requested name");
+            }
+            Update::Virtualization => assert_eq!(
+                forge_vpc_config(&current).network_virtualization_type,
+                Some(rpc::forge::VpcVirtualizationType::Flat as i32)
+            ),
+        }
+    }
+    Ok(())
+}
+
 fn forge_vpc_config(vpc: &rpc::forge::Vpc) -> &rpc::forge::VpcConfig {
     vpc.config
         .as_ref()
@@ -138,6 +227,124 @@ async fn create_routing_profile_vpc(
         .create_vpc(request.tonic_request())
         .await?
         .into_inner())
+}
+
+#[crate::sqlx_test]
+async fn vpc_nsg_assignment_without_tenant_prefixes_rechecks_locked_policy(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let mut config = crate::test_support::default_config::get();
+    config.tenant_prefix_overlap_enabled = false;
+    config.network_security_group.stateful_acls_enabled = true;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(Vec::new()),
+            create_network_segments: Some(false),
+            ..TestEnvOverrides::with_config(config).with_fnn_config(None)
+        },
+    )
+    .await;
+    let tenant = "assignment-without-tenant-prefixes";
+    let created = create_routing_profile_vpc(&env, tenant, None).await?;
+    let vpc_id = created.id.unwrap();
+    let nsg_id = uuid::Uuid::new_v4().to_string();
+    env.api
+        .create_network_security_group(tonic::Request::new(
+            rpc::forge::CreateNetworkSecurityGroupRequest {
+                id: Some(nsg_id.clone()),
+                tenant_organization_id: tenant.to_string(),
+                metadata: Some(rpc::Metadata {
+                    name: "concurrent assignment policy".to_string(),
+                    ..Default::default()
+                }),
+                network_security_group_attributes: Some(Default::default()),
+            },
+        ))
+        .await?;
+    let id = nsg_id.parse()?;
+    let mut writer = env.pool.begin().await?;
+    let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(writer.as_mut())
+        .await?;
+    let old =
+        db::network_security_group::find_by_ids(&mut writer, std::slice::from_ref(&id), None, true)
+            .await?
+            .pop()
+            .unwrap();
+    let expanded = db::network_security_group::update(
+        &mut writer,
+        &id,
+        &old.tenant_organization_id,
+        &old.metadata,
+        true,
+        &[],
+        old.version,
+        None,
+    )
+    .await?;
+    let mut overlap_blocker = env.pool.begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut overlap_blocker).await?;
+    let overlap_blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(overlap_blocker.as_mut())
+        .await?;
+    let assignment = env
+        .api
+        .update_vpc(tonic::Request::new(rpc::forge::VpcUpdateRequest {
+            id: Some(vpc_id),
+            metadata: created.metadata.clone(),
+            network_security_group_id: Some(nsg_id.clone()),
+            ..Default::default()
+        }));
+    let release = async {
+        wait_for_blocked_query(&env.pool, writer_pid, "network_security_groups").await;
+        writer.commit().await?;
+        wait_for_blocked_query(
+            &env.pool,
+            overlap_blocker_pid,
+            "tenant_prefix_overlap:checks",
+        )
+        .await;
+        let available = tokio::time::timeout(
+            Duration::from_secs(10),
+            db::network_security_group::find_by_ids(
+                &mut overlap_blocker,
+                std::slice::from_ref(&id),
+                None,
+                true,
+            ),
+        )
+        .await??;
+        assert_eq!(available, vec![expanded.clone()]);
+        overlap_blocker.commit().await?;
+        Ok::<(), eyre::Report>(())
+    };
+    let (result, released) = tokio::time::timeout(Duration::from_secs(70), async {
+        tokio::join!(assignment, release)
+    })
+    .await?;
+    released?;
+    let updated = result?.into_inner().vpc.unwrap();
+    assert_eq!(
+        forge_vpc_config(&updated)
+            .network_security_group_id
+            .as_deref(),
+        Some(nsg_id.as_str())
+    );
+    let created_version: ConfigVersion = created.version.parse()?;
+    let updated_version: ConfigVersion = updated.version.parse()?;
+    assert_eq!(
+        updated_version.version_nr(),
+        created_version.version_nr() + 1
+    );
+    assert_eq!(find_test_vpc(&env, vpc_id).await?, updated);
+    let mut txn = env.pool.begin().await?;
+    assert_eq!(
+        db::network_security_group::find_by_ids(&mut txn, &[id], None, false).await?,
+        vec![expanded]
+    );
+    txn.commit().await?;
+    Ok(())
 }
 
 #[crate::sqlx_test]
@@ -3718,7 +3925,7 @@ async fn vpc_deletion_is_idempotent(pool: sqlx::PgPool) -> Result<(), eyre::Repo
 async fn create_admin_vpc(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let env = create_test_env(pool).await;
     let vni = 10000;
-    db_init::create_admin_vpc(&env.pool, Some(vni)).await?;
+    db_init::create_admin_vpc(&env.api, Some(vni)).await?;
 
     let mut txn = env.pool.begin().await?;
     let mut admin_vpc = db::vpc::find_by_vni(&mut txn, vni as i32).await?;
@@ -3748,7 +3955,7 @@ async fn create_admin_vpc_updates_existing_admin_vpc_vni(
     let updated_vni = 10001;
 
     // Create the initial admin VPC and verify the admin segments attach to it.
-    db_init::create_admin_vpc(&env.pool, Some(initial_vni)).await?;
+    db_init::create_admin_vpc(&env.api, Some(initial_vni)).await?;
     let mut txn = env.pool.begin().await?;
     let mut initial_admin_vpcs = db::vpc::find_by_vni(&mut txn, initial_vni as i32).await?;
     assert_eq!(initial_admin_vpcs.len(), 1);
@@ -3759,7 +3966,7 @@ async fn create_admin_vpc_updates_existing_admin_vpc_vni(
     txn.commit().await?;
 
     // Change the configured VNI and run startup reconciliation again.
-    db_init::create_admin_vpc(&env.pool, Some(updated_vni)).await?;
+    db_init::create_admin_vpc(&env.api, Some(updated_vni)).await?;
 
     // Fetch from the DB to verify the existing admin VPC was updated in place.
     let mut txn = env.pool.begin().await?;
@@ -3817,7 +4024,7 @@ async fn create_admin_vpc_rejects_existing_tenant_vpc_vni(
     txn.commit().await?;
 
     // Seeding the admin VPC must fail instead of adopting the tenant VPC.
-    let err = db_init::create_admin_vpc(&env.pool, Some(vni))
+    let err = db_init::create_admin_vpc(&env.api, Some(vni))
         .await
         .expect_err("admin VPC seeding should reject an already-used tenant VNI");
     assert!(

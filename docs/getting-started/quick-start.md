@@ -222,6 +222,103 @@ nico-rest-api:
 
 When `keycloak.enabled: false`, the Keycloak deployment is still created by `setup.sh`, but `nico-rest-api` will not use it for token validation.
 
+#### Optional: Expose NICo REST over TLS with Ingress
+
+By default, `setup.sh` exposes `nico-rest-api` through a NodePort in `helm-prereqs/values/nico-rest.yaml`. To expose it through a fully qualified domain name with TLS, enable the `nico-rest-api` ingress and configure its certificate settings in that file:
+
+```yaml filename="helm-prereqs/values/nico-rest.yaml"
+nico-rest-api:
+  nodePort:
+    enabled: false
+  ingress:
+    enabled: true
+    className: contour
+    hosts:
+      - host: rest-api.mysite.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    certificate:
+      enabled: true
+      secretName: rest-api-mysite-example-com-tls
+```
+
+With this managed-certificate setup, `ingress.hosts` is the only place the DNS name appears. The chart adds every host to the ingress `spec.tls` block and to the certificate `dnsNames`, and uses the first host as the certificate common name, so a host that is renamed here stays covered by TLS. Supplying your own `ingress.tls` or `certificate.dnsNames` replaces the corresponding derived list, and the name then has to appear there too. The chart rejects an override that leaves an `ingress.hosts` entry out, under the rule that applies to each list: `ingress.tls[].hosts` has to name the host exactly, because that is how an ingress controller keys the virtual host it terminates TLS on, while `certificate.dnsNames` accepts a wildcard covering one label, as X.509 SAN matching does.
+
+Two settings are defaults rather than something to configure. `ingress.annotations` carries `ingress.kubernetes.io/force-ssl-redirect: "true"`, because a `spec.tls` block alone leaves port 80 serving the API in cleartext. And the chart rejects `ingress.enabled` together with `nodePort.enabled`.
+
+The chart creates a cert-manager `Certificate` for the ingress TLS Secret when `ingress.certificate.enabled: true`. The certificate is issued by the REST stack's `nico-rest-ca-issuer`, so this is a quick self-signed/private-CA setup suitable for lab and site-local deployments. If your cluster already has a TLS Secret for the domain, set `ingress.certificate.enabled: false` and set `ingress.tls` to point at that existing Secret.
+
+The ingress routes to the chart-managed `nico-rest-api` Service on `service.port`; the API pod still serves plain HTTP internally and does not need TLS-specific configuration. If your cluster does not already have an ingress controller, run setup with the optional Contour/Envoy controller:
+
+```bash
+./setup.sh --install-contour
+# or
+export NICO_INSTALL_CONTOUR=true
+./setup.sh -y
+```
+
+##### Use an ingress controller the cluster already has
+
+Nothing in the rendered Ingress is Contour-specific, so skip `--install-contour` and point `ingress.className` at your own controller's class. The `contour` default only reflects the controller `setup.sh` can install for you. To serve a TLS Secret your own issuer populates, set `ingress.certificate.enabled: false` and list the Secret in `ingress.tls`:
+
+```yaml filename="helm-prereqs/values/nico-rest.yaml"
+nico-rest-api:
+  nodePort:
+    enabled: false
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    hosts:
+      - host: rest-api.mysite.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    certificate:
+      enabled: false
+    tls:
+      - secretName: mysite-wildcard-tls
+        hosts:
+          - rest-api.mysite.example.com
+```
+
+Note that `ingress.tls[].hosts` names the concrete host even though the Secret holds a wildcard certificate. Contour keys its secure virtual host by the literal string there and attaches a route only on an exact match, so a `*.mysite.example.com` entry would leave this route with no HTTPS virtual host at all. The chart rejects any `ingress.hosts` entry that `ingress.tls[].hosts` does not name exactly. The wildcard certificate itself still works, and `certificate.dnsNames` does accept wildcards, since X.509 SAN matching covers one label.
+
+Three things differ from the Contour path:
+
+- **The redirect annotation is controller-specific.** A `spec.tls` block does not redirect plaintext HTTP on its own. The chart defaults `ingress.annotations` to `ingress.kubernetes.io/force-ssl-redirect: "true"`, which Contour honours, and ingress-nginx wants `nginx.ingress.kubernetes.io/force-ssl-redirect` instead, as the example above sets. Overriding the map merges with the default, so add your controller's annotation rather than assuming the inherited one applies.
+- **Annotation values must be quoted strings.** Kubernetes annotations are `map[string]string`, so an unquoted `true` or a bare number is rejected at apply time with `cannot unmarshal bool into Go struct field ObjectMeta.metadata.annotations of type string`.
+- **The Secret must live in the `nico-rest` namespace.** `spec.tls[].secretName` resolves in the Ingress's own namespace, so copy or mirror a site-wide wildcard Secret into `nico-rest`. Contour additionally needs a `TLSCertificateDelegation` to read one from elsewhere.
+
+Keeping `ingress.certificate.enabled: true` also works with a foreign controller; the chart issues the Secret through cert-manager and your controller serves it. The DNS step below still applies, but read the external address from your controller's own Service instead of `contour-envoy`.
+
+##### Point DNS at the ingress and trust the CA
+
+The Ingress does not answer until the host resolves to the Envoy LoadBalancer address. MetalLB assigns that address from `vip-pool-external`, so populate the `addresses` field of that pool in `helm-prereqs/values/metallb-config.yaml` before installing Contour, then read the assigned address:
+
+```bash
+kubectl get service contour-envoy -n projectcontour \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+```
+
+Create an `A` record for `rest-api.mysite.example.com` pointing at it. `health-check.sh` prints the same address under its Contour/Envoy section.
+
+Because `nico-rest-ca-issuer` is a CA issuer backed by the site CA in `ca-signing-secret`, clients reject the certificate until they trust that CA. Export the bundle from the issued Secret and confirm the chain:
+
+```bash
+kubectl get secret rest-api-mysite-example-com-tls -n nico-rest \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > nico-rest-ca.crt
+openssl s_client -connect rest-api.mysite.example.com:443 \
+  -servername rest-api.mysite.example.com \
+  -CAfile nico-rest-ca.crt </dev/null 2>/dev/null | grep 'Verify return code'
+```
+
+`Verify return code: 0 (ok)` confirms Envoy is serving the issued certificate and that the CA bundle validates it. Pass the same file to API clients, for example `curl --cacert nico-rest-ca.crt`, and use `https://rest-api.mysite.example.com` as the base URL in place of the NodePort address.
+
+For a certificate issued by a public CA instead, set `ingress.certificate.enabled: false` and point `ingress.tls` at a Secret your own issuer populates.
+
 ### 3f. Review site-agent Config
 
 The defaults in `helm-prereqs/values/nico-site-agent.yaml` point at the Zalando-managed `nico-pg-cluster` (`DB_ADDR: nico-pg-cluster.postgres.svc.cluster.local`, `DB_DATABASE: nico_rest`), which is the same cluster used by `nico-rest-api`. No changes are needed for a standard deployment.
@@ -342,6 +439,7 @@ You can combine common options as needed:
 |--------|--------|
 | `--core-values <file>` | Use site-specific NICo Core values for Phase 6. |
 | `--debug` | Enable shell tracing. This may print secrets, so protect the logs. |
+| `--install-contour` | Install the optional Contour/Envoy ingress controller in Phase 1d, for clusters that do not already provide one. Envoy's Service is `LoadBalancer` and takes its external IP from MetalLB. Same as `NICO_INSTALL_CONTOUR=true`; defaults to `false`. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Phase 6. |
 | `--skip-core` | Skip the Phase 6 NICo Core Helm release. |
@@ -365,6 +463,7 @@ before continuing.
 | 1 | local-path-provisioner + StorageClasses |
 | 1b | postgres-operator (Zalando) |
 | 1c | MetalLB + site BGP/L2 config |
+| 1d | Optional Contour/Envoy ingress controller (`--install-contour`) |
 | 2 | cert-manager + Vault TLS bootstrap (PKI chain) |
 | 3 | HashiCorp Vault (3-node HA Raft) |
 | 4 | Vault init + unseal + SSH host key |
@@ -381,6 +480,7 @@ The following components are deployed:
 ```text
 local-path-provisioner     (raw manifest - StorageClasses for Vault + PostgreSQL PVCs)
 metallb                    (metallb/metallb 0.14.5 - LoadBalancer IPs via BGP or L2)
+contour + envoy            (optional - Ingress controller for REST API FQDN/TLS)
 postgres-operator          (zalando/postgres-operator 1.11.0 - manages nico-pg-cluster)
 cert-manager               (jetstack/cert-manager v1.17.1)
 vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS)

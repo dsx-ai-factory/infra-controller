@@ -88,8 +88,10 @@ replaces the default. Omission or an empty list uses all four values below.
 
 `[rack_state_controller].nmx_cluster_switch_mtls_services` is deprecated. The
 field remains accepted and ignored. Rack `ConfigureNmxCluster` maintenance
-uses fixed `nvue_api` and `scale_up_fabric_manager` bindings so the certificate
-batch updates both NVUE and NMX-C, and passes `domain_name = None`.
+uses a fixed `nvue_api` binding so the certificate batch updates NVUE material
+without changing NMX-C state on non-primary switches, and passes
+`domain_name = None`. The following RMS V2 workflow selects the primary switch
+and binds NMX-C to the refreshed NVUE material.
 
 The complete rack skip, retry, restart, polling, success, and error transition
 contract is defined under

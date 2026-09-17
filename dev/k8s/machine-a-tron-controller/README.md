@@ -40,6 +40,7 @@ kind load docker-image mat-k8s-controller:latest --name <cluster>
 | `--source-list-debounce` | `SOURCE_LIST_DEBOUNCE` | `5s` | Minimum age of a changed source set before a later discovery pass publishes it with a new `generation` (`0` publishes at once) |
 | `--health-addr` | `HEALTH_ADDR` | `:8091` | Listen address for the liveness endpoint `GET /healthz` on the pod network (empty disables it) |
 | `--health-stale-after` | `HEALTH_STALE_AFTER` | `10m` | How long the reconcile loop may go without completing a pass before `/healthz` reports a stall (`0` disables the check) |
+| `--enable-state-annotations` | `ENABLE_STATE_ANNOTATIONS` | `false` | Include machine state annotations (`mat-api-state`, `mat-power-state`) on Services; causes frequent updates in large deployments |
 
 An environment variable that is set is the flag's default, an empty value
 included: `SOURCE_LIST_ADDR=""` disables the source list endpoint just like
@@ -97,7 +98,7 @@ served for the lifetime of the controller and shuts down gracefully with it.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `generation` | uint64 | Increments only when the set of `(name, base_url)` pairs changes (add, remove or URL change). Starts at `0` before the first discovery. |
+| `generation` | uint64 | Increments only when the set of `(name, base_url)` pairs changes (add, remove or URL change). Starts at `0` before the first discovery and restarts from `0` with the controller process; see [Generation semantics](#generation-semantics). |
 | `ready` | bool | `true` once the first successful discovery completed. Stays `true` afterwards, including when the set becomes empty. |
 | `sources[].name` | string | Machine-a-tron identity: the discovered bmc-mock Service name. |
 | `sources[].base_url` | string | `https://<svc>.<ns>.svc.cluster.local:<port>`, the same URL the controller polls for `/machines/status`. |
@@ -127,9 +128,25 @@ the endpoint with the pass that confirms it, at most two intervals after it
 happened with the default debounce. A failed discovery pass leaves the last
 published set in place.
 
+The counter is held in memory. A controller restart publishes
+`generation = 0, ready = false` with an empty list until the first discovery
+completes and then republishes whatever it found as generation `1`, whether or
+not the set changed while the controller was down. The generation is therefore
+a change hint, not an identity of the set: consumers that must react to fleet
+changes compare the `(name, base_url)` set they started with against the
+current list and use the generation for logging only. That is what
+`mat-protocol-gateway` does (see `crates/mat-protocol-gateway/README.md`,
+"Epoch model"); it ignores `ready = false` responses, keeps running when the
+same set reappears under a new generation, and exits only when the set
+differs.
+
 The reference JSON shape is checked in as
-[`pkg/sourcelist/testdata/sources_v1.json`](pkg/sourcelist/testdata/sources_v1.json)
-and is intended to be shared with client-side tests.
+[`pkg/sourcelist/testdata/sources_v1.json`](pkg/sourcelist/testdata/sources_v1.json).
+It is the cross-language contract fixture: `TestHandler_SourcesGolden`
+asserts that the Go handler's response is JSON-equal to it, and the Rust
+gateway's contract tests (`crates/mat-protocol-gateway/tests/integration/source_list_contract.rs`)
+include the same file and check that the gateway types carry exactly its
+fields, so a change to the JSON shape fails on whichever side was not updated.
 
 ## Liveness endpoint
 
@@ -176,8 +193,8 @@ Created Services have:
 **Annotations:**
 
 - `nvidia-infra-controller/mat-bmc-ip`
-- `nvidia-infra-controller/mat-api-state`
-- `nvidia-infra-controller/mat-power-state`
+- `nvidia-infra-controller/mat-api-state` (when `--enable-state-annotations=true`)
+- `nvidia-infra-controller/mat-power-state` (when `--enable-state-annotations=true`)
 - `nvidia-infra-controller/mat-hardware-type`
 - `nvidia-infra-controller/mat-ipmi-listen-port` (when `bmc.ipmi` reported in status)
 - `nvidia-infra-controller/mat-ssh-listen-port` (when `bmc.ssh` reported in status)

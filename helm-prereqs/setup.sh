@@ -44,6 +44,7 @@
 #                          StorageClass. Default: true.
 #   NICO_STORAGE_CLASS     StorageClass for Postgres and Vault data and audit PVCs.
 #                          Default: local-path-persistent.
+#   NICO_INSTALL_CONTOUR   Install Contour/Envoy after MetalLB. Default: false.
 #   VAULT_NS               Vault namespace. Default: vault
 #   CERT_MANAGER_NS        cert-manager namespace. Default: cert-manager
 #   PREFLIGHT_CHECK_IMAGE  Image for preflight per-node checks.
@@ -137,6 +138,7 @@
 #   ./setup.sh --skip-core --skip-rest  # fully non-interactive infra-only run
 #   ./setup.sh --core-values /path/to/values.yaml      # use site-specific values for Phase 6
 #   ./setup.sh --metallb-config /path/to/metallb.yaml  # use site-specific MetalLB config (file or kustomize dir)
+#   ./setup.sh --install-contour      # install optional Contour/Envoy Ingress controller
 #   ./setup.sh --site-overlay /path/to/kustomize-dir   # kubectl apply -k after Phase 6 (NTP services, etc.)
 #   ./setup.sh --skip-dpf               # skip DPF DPU provisioning (installed by default otherwise)
 #   ./setup.sh --with-observability     # also install the local monitoring stack (Loki, Tempo,
@@ -171,6 +173,7 @@ INSTALL_DPF="${NICO_INSTALL_DPF:-true}"
 INSTALL_RMS="${NICO_INSTALL_RMS:-true}"
 [[ "${NICO_SKIP_RMS:-false}" == "true" ]] && INSTALL_RMS=false
 WITH_OBSERVABILITY="${WITH_OBSERVABILITY:-false}"
+INSTALL_CONTOUR="${NICO_INSTALL_CONTOUR:-false}"
 CORE_VALUES=""
 METALLB_CONFIG=""
 SITE_OVERLAY=""
@@ -185,6 +188,7 @@ while [[ $# -gt 0 ]]; do
         --install-rms)  INSTALL_RMS=true ;;   # explicit; RMS is the default
         --skip-rms)     INSTALL_RMS=false ;;
         --with-observability) WITH_OBSERVABILITY=true ;;
+        --install-contour) INSTALL_CONTOUR=true ;;
         --debug)        set -x         ;;
         --core-values)
             [[ -z "${2:-}" ]] && { echo "Error: --core-values requires a file path"; exit 1; }
@@ -201,7 +205,7 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-flow] [--skip-dpf] [--skip-rms] [--with-observability] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-flow] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
@@ -222,6 +226,10 @@ esac
 case "${INSTALL_RMS}" in
     true|false) ;;
     *) echo "Error: NICO_INSTALL_RMS must be true or false (got '${INSTALL_RMS}')"; exit 1 ;;
+esac
+case "${INSTALL_CONTOUR}" in
+    true|false) ;;
+    *) echo "Error: NICO_INSTALL_CONTOUR must be true or false (got '${INSTALL_CONTOUR}')"; exit 1 ;;
 esac
 
 # The predecessor Flow chart bundled PSM and NSM in the Flow Deployment. This
@@ -701,6 +709,42 @@ else
     kubectl apply -f "${SCRIPT_DIR}/values/metallb-config.yaml"
 fi
 echo "MetalLB ready"
+
+# ---------------------------------------------------------------------------
+# 1d. Contour/Envoy — optional Ingress controller.
+#     Install after MetalLB so the Envoy LoadBalancer Service can receive an
+#     external address. Skip this when the cluster already has an Ingress
+#     controller.
+# ---------------------------------------------------------------------------
+if [[ "${INSTALL_CONTOUR}" == "true" ]]; then
+    _SETUP_PHASE="[1d] Contour/Envoy"
+    echo "=== [1d] Contour/Envoy ==="
+    # helmfile sync runs `helm upgrade --install`, so a contour release already
+    # in projectcontour is upgraded rather than rejected. Left unchecked that
+    # reconfigures a site's own ingress controller with our values and stamps it
+    # with the ownership label clean.sh keys on, which would then delete it.
+    # Only a release using our own name reaches this: a foreign release under a
+    # different name makes the sync a fresh install, and Helm refuses that
+    # because the cluster-scoped IngressClass already belongs to another release.
+    if kubectl get deployment contour-contour -n projectcontour &>/dev/null; then
+        _CONTOUR_OWNER="$(kubectl get deployment contour-contour -n projectcontour \
+            -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null || true)"
+        if [[ "${_CONTOUR_OWNER}" != "nico" ]]; then
+            echo "ERROR: projectcontour already runs a Contour that NICo does not manage." >&2
+            echo "  Drop --install-contour and point nico-rest-api.ingress.className at it," >&2
+            echo "  or remove it first: helm uninstall contour -n projectcontour" >&2
+            exit 1
+        fi
+    fi
+    # No --include-needs. Phase 1c above already installed MetalLB, and pulling
+    # it in here would re-sync that release without the CRD apply/re-apply that
+    # phase 1c wraps around it. The release sets wait: true, so this returns
+    # only once Contour and the Envoy DaemonSet are ready.
+    helmfile sync -l name=contour
+    echo "Contour/Envoy ready"
+else
+    echo "Skipping Contour/Envoy (set NICO_INSTALL_CONTOUR=true or pass --install-contour to install it)"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. cert-manager + Prometheus CRDs + Vault TLS bootstrap
@@ -1392,6 +1436,7 @@ fi
 # ---------------------------------------------------------------------------
 # NICo Core
 # ---------------------------------------------------------------------------
+_CORE_INSTALLED_THIS_RUN=false
 if "${SKIP_CORE}"; then
     echo "=== [6/6] NICo Core ==="
     echo "Skipped (--skip-core flag set)."
@@ -1670,6 +1715,7 @@ else
             kubectl rollout status deployment/nico-api -n nico-system --timeout=300s
             echo "DPF enabled in carbide-api"
         fi
+        _CORE_INSTALLED_THIS_RUN=true
     elif "${INSTALL_DPF}"; then
         # The DPF path deploys from a mktemp values file that the EXIT trap
         # deletes, and enablement is a two-phase flow (deploy DPF-off, set the
@@ -1704,16 +1750,33 @@ fi
 #   helm-prereqs/observability/install-observability.sh
 # Docs: helm-prereqs/observability/README.md
 # ---------------------------------------------------------------------------
+_resolve_nico_servicemonitors_mode() {
+    local core_installed_this_run="$1"
+    local requested_mode="${NICO_SERVICEMONITORS:-}"
+
+    if [[ "${core_installed_this_run}" == "true" ]]; then
+        printf '%s\n' "${requested_mode:-true}"
+    elif [[ "${requested_mode}" == "false" ]]; then
+        printf 'false\n'
+    else
+        # Never upgrade an existing Core release from this checkout unless the
+        # same setup run successfully installed it. This also covers a declined
+        # Core prompt in addition to --skip-core.
+        printf 'hint\n'
+    fi
+}
+
 _OBSERVABILITY_INSTALLED=false
 if "${WITH_OBSERVABILITY}"; then
     echo ""
     _SETUP_PHASE="observability"
     echo "=== Observability (--with-observability) ==="
     # The stack is optional: a failure here must not abort the rest of the install.
-    # NICO_SERVICEMONITORS=true is safe in this integrated path — Core was just installed
-    # from this same tree, so the release upgrade the installer performs is a no-op apart
-    # from adding the monitor objects.
-    if NICO_SERVICEMONITORS="${NICO_SERVICEMONITORS:-true}" \
+    # Reconcile Core metrics only when this run installed Core from the same tree.
+    # Otherwise use the standalone-safe hint path and leave any existing release untouched.
+    _nico_servicemonitors_mode="$(_resolve_nico_servicemonitors_mode \
+        "${_CORE_INSTALLED_THIS_RUN}")"
+    if NICO_SERVICEMONITORS="${_nico_servicemonitors_mode}" \
         "${SCRIPT_DIR}/observability/install-observability.sh"; then
         _OBSERVABILITY_INSTALLED=true
     else

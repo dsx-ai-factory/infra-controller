@@ -271,11 +271,12 @@ async fn test_create_vpc_peering(pool: PgPool) -> Result<(), Box<dyn std::error:
 
 async fn create_peering_overlap_fixture(
     pool: PgPool,
+    gate_enabled: bool,
     existing_policy: Option<VpcPeeringPolicy>,
     source_type: VpcVirtualizationType,
 ) -> Result<(TestEnv, Vec<rpc::forge::Vpc>), Box<dyn std::error::Error>> {
     let mut config = crate::test_support::default_config::get();
-    config.tenant_prefix_overlap_enabled = true;
+    config.tenant_prefix_overlap_enabled = gate_enabled;
     config.vpc_peering_policy = Some(VpcPeeringPolicy::Mixed);
     config.vpc_peering_policy_on_existing = existing_policy;
     let mut overrides = TestEnvOverrides::with_config(config);
@@ -295,9 +296,7 @@ async fn create_peering_overlap_fixture(
     .enumerate()
     {
         let tenant_id = format!("tenant-{index}");
-        if virtualization_type == VpcVirtualizationType::Fnn {
-            create_fixture_tenant(&env, tenant_id.clone()).await?;
-        }
+        create_fixture_tenant(&env, tenant_id.clone()).await?;
         vpcs.push(
             env.api
                 .create_vpc(
@@ -333,10 +332,27 @@ async fn retain_peering_overlap_prefix(
     // prefix creation rejects it; no global exclusion is removed for the test.
     let retained_prefix_id = VpcPrefixId::new();
     let source_version: ConfigVersion = source.version.parse()?;
+    let root = db::site_prefix::create_tenant_managed(
+        model::site_prefix::NewTenantManagedSitePrefix {
+            id: carbide_uuid::site_prefix::SitePrefixId::new(),
+            tenant_organization_id: source
+                .config
+                .as_ref()
+                .unwrap()
+                .tenant_organization_id
+                .parse()?,
+            prefix: "10.120.0.0/16".parse()?,
+            metadata: Metadata::new_with_default_name(),
+        },
+        10,
+        txn,
+    )
+    .await?
+    .site_prefix;
     db::vpc_prefix::persist(
         NewVpcPrefix {
             id: retained_prefix_id,
-            site_prefix_id: None,
+            site_prefix_id: Some(root.id),
             vpc_id: source.id.unwrap(),
             config: VpcPrefixConfig {
                 prefix: "10.120.1.0/24".parse()?,
@@ -369,9 +385,13 @@ async fn retain_peering_overlap_prefix(
 async fn vpc_peering_rejects_direct_and_sibling_retained_prefixes(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (env, vpcs) =
-        create_peering_overlap_fixture(pool, None, VpcVirtualizationType::EthernetVirtualizer)
-            .await?;
+    let (env, vpcs) = create_peering_overlap_fixture(
+        pool,
+        true,
+        None,
+        VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await?;
     let receiver_id = vpcs[0].id.unwrap();
     let segment_source_id = vpcs[1].id.unwrap();
     let retained_source_id = vpcs[2].id.unwrap();
@@ -453,12 +473,79 @@ async fn vpc_peering_rejects_direct_and_sibling_retained_prefixes(
 }
 
 #[crate::sqlx_test]
-#[allow(deprecated)] // Preserve the existing ETV-to-NVUE update path.
-async fn vpc_peering_receiver_type_change_rejects_new_vni_imports(
+async fn vpc_peering_overlap_gate_off_freezes_new_duplicate_source(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (env, vpcs) = create_peering_overlap_fixture(
         pool,
+        false,
+        None,
+        VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await?;
+    let receiver_id = vpcs[0].id.unwrap();
+    let source_id = vpcs[1].id.unwrap();
+    let peering_id = VpcPeeringId::new();
+    let request = VpcPeeringCreationRequest {
+        id: Some(peering_id),
+        vpc_id: Some(receiver_id),
+        peer_vpc_id: Some(source_id),
+    };
+    env.api
+        .create_vpc_peering(Request::new(request.clone()))
+        .await?;
+    env.api
+        .delete_vpc_peering(Request::new(VpcPeeringDeletionRequest {
+            id: Some(peering_id),
+        }))
+        .await?;
+
+    let mut txn = env.pool.begin().await?;
+    retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
+    txn.commit().await?;
+    // The other copy is not a peer. Gate-off still prohibits gaining the
+    // source's duplicate address space, not just importing both copies.
+    let error = env
+        .api
+        .create_vpc_peering(Request::new(request))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
+    assert_eq!(
+        error.message(),
+        "the requested prefix overlaps address space that is not eligible for reuse",
+        "{error}"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vpc_peerings WHERE id = $1")
+        .bind(peering_id)
+        .fetch_one(&env.pool)
+        .await?;
+    assert_eq!(count, 0);
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn vpc_peering_receiver_type_change_rejects_new_vni_imports(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    check_receiver_type_change_rejects_new_vni_imports(pool, true).await
+}
+
+#[crate::sqlx_test]
+async fn vpc_peering_overlap_gate_off_receiver_type_change_rejects_new_vni_imports(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    check_receiver_type_change_rejects_new_vni_imports(pool, false).await
+}
+
+#[allow(deprecated)] // Preserve the existing ETV-to-NVUE update path.
+async fn check_receiver_type_change_rejects_new_vni_imports(
+    pool: PgPool,
+    gate_enabled: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (env, vpcs) = create_peering_overlap_fixture(
+        pool,
+        gate_enabled,
         Some(VpcPeeringPolicy::None),
         VpcVirtualizationType::Fnn,
     )

@@ -334,6 +334,21 @@ func TestIpamer_AcquireSpecificIP(t *testing.T) {
 		require.Nil(t, err)
 		require.Equal(t, prefix.availableips(), uint64(256))
 		require.Equal(t, prefix.acquiredips(), uint64(1))
+
+		t.Run("high IPv6 address", func(t *testing.T) {
+			prefix, err := ipam.NewPrefix(ctx, "2001:db8::/64")
+			require.NoError(t, err)
+			requestedIP := "2001:db8::8000:0:0:1"
+
+			ip, err := ipam.AcquireSpecificIP(ctx, prefix.Cidr, requestedIP)
+			require.NoError(t, err)
+			require.NotNil(t, ip)
+			require.Equal(t, requestedIP, ip.IP.String())
+
+			prefix = ipam.PrefixFrom(ctx, prefix.Cidr)
+			require.NotNil(t, prefix)
+			require.True(t, prefix.ips[requestedIP])
+		})
 	})
 }
 

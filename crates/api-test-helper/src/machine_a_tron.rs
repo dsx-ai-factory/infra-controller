@@ -89,7 +89,7 @@ pub async fn run_local(
         forge_client_config,
         bmc_mock_certs_dir: Some(repo_root.join("crates/bmc-mock")),
         api_throttler,
-        desired_firmware_versions: desired_firmware,
+        desired_firmware_versions: std::sync::RwLock::new(desired_firmware),
         forge_api_client,
         dhcp_client,
         mac_address_pool,

@@ -178,7 +178,11 @@ async fn validate_vpc_prefix_overlaps(
 /// A retained VNI may still carry routes from a previous profile. Overlap
 /// admission requires one owned allocation, not just a matching active VNI.
 /// The caller holds the VPC mutation lock until the prefix write completes.
-async fn validate_overlap_vni(api: &Api, txn: &mut PgConnection, vpc: &Vpc) -> CarbideResult<()> {
+pub(super) async fn validate_overlap_vni(
+    api: &Api,
+    txn: &mut PgConnection,
+    vpc: &Vpc,
+) -> CarbideResult<()> {
     let owner_id = vpc.id.to_string();
     let mut allocation = None;
     for pool in [

@@ -60,6 +60,9 @@ jobs:
       - name: Check REST command bundle contract
         run: make check-command-bundle
 
+      - name: Test local nico-api address configuration
+        run: python3 -B scripts/test_local_core_address.py
+
   lint-go:
     name: Lint Go
     runs-on: linux-amd64-cpu8
