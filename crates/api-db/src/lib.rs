@@ -46,6 +46,7 @@ pub mod expected_switch;
 pub mod explored_endpoints;
 pub mod explored_managed_host;
 pub mod extension_service;
+pub mod hardware_class_attesters;
 pub mod health_history;
 pub mod health_report;
 pub mod host_firmware_config;

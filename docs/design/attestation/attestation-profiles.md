@@ -857,6 +857,11 @@ CREATE TABLE hardware_class_attesters (
 `ComponentIntegrityType` is `SPDM`, sorted and newline-joined. No measurements,
 which move with every firmware update.
 
+A collection holding no SPDM member is a set like any other and gets its own
+digest, so a tray reporting none where its peers report eight shows up as a
+second set rather than as nothing observed. Only §7.1's `None` — no collection
+reported, or a fetch that failed — records neither a digest nor a row.
+
 **Scoped by type, not by enablement.** A `TPM` member is never attested, and
 `ComponentIntegrityEnabled` is read-write, so filtering on it would put
 configuration inside the identity: switching SPDM off on one GPU would read as

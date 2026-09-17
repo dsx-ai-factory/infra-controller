@@ -46,9 +46,10 @@ use model::machine::{
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::metadata::Metadata;
 use model::site_explorer::{
-    BlueFieldOperatingMode, Chassis, ComputerSystem, EndpointExplorationError,
-    EndpointExplorationReport, EndpointType, ExploredDpu, ExploredManagedHost,
-    InitialBmcResetPhase, Inventory, NetworkAdapter, PreingestionState, Service, UefiDevicePath,
+    BlueFieldOperatingMode, Chassis, ComponentIntegrityEntry, ComputerSystem,
+    EndpointExplorationError, EndpointExplorationReport, EndpointType, ExploredDpu,
+    ExploredManagedHost, InitialBmcResetPhase, Inventory, NetworkAdapter, PreingestionState,
+    Service, UefiDevicePath,
 };
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::GetSiteExplorationRequest;
@@ -147,6 +148,66 @@ fn suppression_test_config(explorations_per_run: u64) -> SiteExplorerConfig {
         create_power_shelves: Arc::new(false.into()),
         create_switches: Arc::new(false.into()),
         ..Default::default()
+    }
+}
+
+/// Exploration is the only writer of the attester inventory, so one pass has to
+/// leave the endpoint's digest and the class's set behind together. Nothing
+/// else fills either, which makes this wiring the only thing that can lose
+/// them.
+#[sqlx_test]
+async fn exploration_records_the_attester_set_its_class_carries(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let mut machine = env.new_machine("02:00:00:00:11:01", "Vendor1");
+    machine.discover_dhcp(env.api()).await?;
+    let address: IpAddr = machine.ip.parse()?;
+
+    let report = EndpointExplorationReport {
+        endpoint_type: EndpointType::Bmc,
+        hardware_class: Some("nvidia_dgx-gb300".to_string()),
+        component_integrities: Some(vec![
+            component_integrity("ERoT_BMC_0", "SPDM"),
+            component_integrity("TPM_0", "TPM"),
+        ]),
+        ..Default::default()
+    };
+    let expected = report.attester_set().expect("the report reported a set");
+
+    let explorer = env.test_site_explorer(suppression_test_config(1));
+    explorer.insert_endpoints(vec![(address, report)]);
+    explorer.run_single_iteration().await?;
+
+    let mut txn = env.pool.begin().await?;
+    let digest: Option<String> =
+        sqlx::query_scalar("SELECT attester_digest FROM explored_endpoints WHERE address = $1")
+            .bind(address)
+            .fetch_one(txn.as_mut())
+            .await?;
+    assert_eq!(digest.as_deref(), Some(expected.digest.as_str()));
+
+    let (class, ids): (String, serde_json::Value) =
+        sqlx::query_as("SELECT hardware_class, attester_ids FROM hardware_class_attesters")
+            .fetch_one(txn.as_mut())
+            .await?;
+    txn.commit().await?;
+
+    assert_eq!(class, "nvidia_dgx-gb300");
+    assert_eq!(
+        ids,
+        serde_json::json!(["ERoT_BMC_0"]),
+        "the set holds the attesters, so the TPM the BMC also listed is not in it"
+    );
+
+    Ok(())
+}
+
+fn component_integrity(id: &str, integrity_type: &str) -> ComponentIntegrityEntry {
+    ComponentIntegrityEntry {
+        id: id.to_string(),
+        component_integrity_type: integrity_type.to_string(),
+        component_integrity_enabled: true,
     }
 }
 
