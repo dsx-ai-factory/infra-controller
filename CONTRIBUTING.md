@@ -289,6 +289,32 @@ for the requested behavior.
 - Keep OpenAPI specs, protobufs, database migrations, Helm manifests, generated
   code, and documentation in sync with the behavior they describe.
 
+#### Local CI Verification
+
+Contributors can run the primary verification command locally for the core Rust
+CI workflow:
+
+```bash
+cargo make pre-commit-verify
+```
+
+This command combines the workspace verification checks with the release build
+and Core service test suite. It requires the developer setup described in the
+[development guide](docs/development.md#local-environment-prep), including a
+working PostgreSQL test environment.
+
+When the complete flow is not practical, run the lighter workspace verification
+flow if your environment supports it:
+
+```bash
+cargo make pre-commit-verify-workspace
+```
+
+This skips the release build and test suite, but still requires the lint,
+formatting, dependency-policy, and REST protobuf generation tools. Run the
+focused checks relevant to your change and document any verification limitations
+in the pull request.
+
 ## Pull Request Guidelines
 
 - Provide a clear description of the problem and solution.
