@@ -1303,6 +1303,17 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 
 	// ==================== Step 3: Database Transaction ====================
 
+	if len(apiRequest.SpectrumXAttachments) > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+		defer cancel()
+	}
+	spectrumXEligibleIDs, spectrumXErr := common.GetSpectrumXEligibleMachineIDs(ctx, bcih.dbSession, bcih.scp, site.ID, instancetype.ID, apiRequest.MachineLabelSelector, apiRequest.SpectrumXAttachments)
+	if spectrumXErr != nil {
+		logger.Warn().Err(spectrumXErr.Diagnosis()).Msg("SpectrumX preflight failed")
+		return c.JSON(spectrumXErr.Code, spectrumXErr)
+	}
+
 	// instanceData holds all the per-instance rows + workflow configs that
 	// get assembled inside the closure and reused for the HTTP response after
 	// the closure returns.
@@ -1421,7 +1432,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		// Allocate machines with topology optimization
-		machines, apiErr := allocateMachinesForBatch(ctx, tx, bcih.dbSession, instancetype, apiRequest.Count, topologyOptimized, apiRequest.MachineLabelSelector, logger)
+		machines, apiErr := allocateMachinesForBatch(ctx, tx, bcih.dbSession, instancetype, apiRequest.Count, topologyOptimized, apiRequest.MachineLabelSelector, spectrumXEligibleIDs, logger)
 		if apiErr != nil {
 			return apiErr
 		}
@@ -2029,6 +2040,7 @@ func allocateMachinesForBatch(
 	count int,
 	topologyOptimized bool,
 	machineLabelSelector map[string]string,
+	spectrumXEligibleIDs map[string]struct{},
 	logger zerolog.Logger,
 ) ([]cdbm.Machine, *cutil.APIError) {
 	if instancetype == nil || count <= 0 {
@@ -2054,6 +2066,18 @@ func allocateMachinesForBatch(
 		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve available machines", nil)
 	}
 
+	// Filter before counting capacity or choosing the NVLink domain. Choosing
+	// the largest unfiltered domain could hide compatible capacity elsewhere.
+	if spectrumXEligibleIDs != nil {
+		compatible := make([]cdbm.Machine, 0, len(machines))
+		for _, machine := range machines {
+			_, eligible := spectrumXEligibleIDs[machine.ID]
+			if eligible {
+				compatible = append(compatible, machine)
+			}
+		}
+		machines = compatible
+	}
 	if len(machines) < count {
 		logger.Warn().Int("available", len(machines)).Int("requested", count).
 			Msg("insufficient machines available")

@@ -301,7 +301,7 @@ func AcquireInstanceTypeQuotaLock(ctx context.Context, tx *cdb.Tx, tenantID uuid
 }
 
 // GetUnallocatedMachineForInstanceType provides unallocatd machine based on instancetype
-func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Logger, tx *cdb.Tx, dbSession *cdb.Session, instanceType *cdbm.InstanceType, apiRequest *cam.APIInstanceCreateRequest) (*cdbm.Machine, error) {
+func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Logger, tx *cdb.Tx, dbSession *cdb.Session, instanceType *cdbm.InstanceType, apiRequest *cam.APIInstanceCreateRequest, spectrumXEligibleIDs map[string]struct{}) (*cdbm.Machine, error) {
 	if instanceType == nil {
 		return nil, ErrInvalidFunctionParams
 	}
@@ -375,6 +375,14 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 
 	if len(machines) > 0 {
 		for _, mc := range machines {
+			// nil leaves non-SpectrumX placement unchanged. A non-nil empty
+			// set must not fall back to unvalidated machines.
+			if spectrumXEligibleIDs != nil {
+				_, eligible := spectrumXEligibleIDs[mc.ID]
+				if !eligible {
+					continue
+				}
+			}
 			// Acquire an advisory lock on the MachineID, other provider will be look for other is this is being locked
 			// this lock is released when the transaction commits or rollback
 			err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
