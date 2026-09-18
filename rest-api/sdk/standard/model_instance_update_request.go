@@ -58,7 +58,7 @@ type InstanceUpdateRequest struct {
 	AutoNetwork NullableBool `json:"autoNetwork,omitempty"`
 	// Update InfiniBand Interfaces of the Instance
 	InfinibandInterfaces []InfiniBandInterfaceCreateRequest `json:"infinibandInterfaces,omitempty"`
-	// Update SpectrumX Partition attachments of the Instance. Omitting this field leaves the Instance's SpectrumX attachments unchanged; an explicit (possibly empty) list replaces them entirely. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.
+	// Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without a live capability lookup. A nonempty list, including an unchanged list, requires live Site inventory validation against the Instance's Machine before any update is persisted. Invalid selectors return 400; a Machine no longer reported by the Site returns 409. Discovery failure rejects the update. Final Site validation remains authoritative if inventory changes. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.
 	SpectrumXAttachments []InstanceSpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments,omitempty"`
 	// Update NVLink Interfaces of the Instance. A subset of GPUs may be specified. Each item references a GPU index (`deviceInstance`) and an NVLink Logical Partition. Different interfaces may reference different NVLink Logical Partitions. Partial updates are not allowed; specified interfaces will delete or replace existing Interfaces. Updating is not allowed if the Instance's VPC has the `nvLinkLogicalPartitionId` attribute set.
 	NvLinkInterfaces []NVLinkInterfaceCreateOrUpdateRequest `json:"nvLinkInterfaces,omitempty"`
@@ -802,9 +802,9 @@ func (o *InstanceUpdateRequest) SetInfinibandInterfaces(v []InfiniBandInterfaceC
 	o.InfinibandInterfaces = v
 }
 
-// GetSpectrumXAttachments returns the SpectrumXAttachments field value if set, zero value otherwise.
+// GetSpectrumXAttachments returns the SpectrumXAttachments field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InstanceUpdateRequest) GetSpectrumXAttachments() []InstanceSpectrumXAttachmentCreateOrUpdateRequest {
-	if o == nil || IsNil(o.SpectrumXAttachments) {
+	if o == nil {
 		var ret []InstanceSpectrumXAttachmentCreateOrUpdateRequest
 		return ret
 	}
@@ -813,6 +813,7 @@ func (o *InstanceUpdateRequest) GetSpectrumXAttachments() []InstanceSpectrumXAtt
 
 // GetSpectrumXAttachmentsOk returns a tuple with the SpectrumXAttachments field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetSpectrumXAttachmentsOk() ([]InstanceSpectrumXAttachmentCreateOrUpdateRequest, bool) {
 	if o == nil || IsNil(o.SpectrumXAttachments) {
 		return nil, false
@@ -962,7 +963,7 @@ func (o InstanceUpdateRequest) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.InfinibandInterfaces) {
 		toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
 	}
-	if !IsNil(o.SpectrumXAttachments) {
+	if o.SpectrumXAttachments != nil {
 		toSerialize["spectrumXAttachments"] = o.SpectrumXAttachments
 	}
 	if !IsNil(o.NvLinkInterfaces) {
