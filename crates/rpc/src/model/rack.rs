@@ -65,6 +65,7 @@ impl From<rpc::forge::RackSearchFilter> for RackSearchFilter {
     fn from(filter: rpc::forge::RackSearchFilter) -> Self {
         RackSearchFilter {
             label: filter.label.map(model::metadata::LabelFilter::from),
+            deleted: model::DeletedFilter::from(filter.deleted),
         }
     }
 }
@@ -89,6 +90,7 @@ mod tests {
                         key: LABEL_LOCATION_DATACENTER.to_string(),
                         value: Some("az01".to_string()),
                     }),
+                    ..Default::default()
                 } => Some(LabelFilter {
                     key: LABEL_LOCATION_DATACENTER.to_string(),
                     value: Some("az01".to_string()),
@@ -101,6 +103,7 @@ mod tests {
                         key: LABEL_CHASSIS_MANUFACTURER.to_string(),
                         value: None,
                     }),
+                    ..Default::default()
                 } => Some(LabelFilter {
                     key: LABEL_CHASSIS_MANUFACTURER.to_string(),
                     value: None,
@@ -108,7 +111,27 @@ mod tests {
             }
 
             "no label" {
-                rpc::forge::RackSearchFilter { label: None } => None,
+                rpc::forge::RackSearchFilter::default() => None,
+            }
+        );
+    }
+
+    #[test]
+    fn rack_search_filter_maps_deleted_filter() {
+        value_scenarios!(
+            run = |deleted| RackSearchFilter::from(rpc::forge::RackSearchFilter {
+                deleted,
+                ..Default::default()
+            })
+            .deleted;
+            "exclude by default" {
+                rpc::forge::DeletedFilter::Exclude as i32 => model::DeletedFilter::Exclude,
+            }
+            "deleted only" {
+                rpc::forge::DeletedFilter::Only as i32 => model::DeletedFilter::Only,
+            }
+            "include deleted" {
+                rpc::forge::DeletedFilter::Include as i32 => model::DeletedFilter::Include,
             }
         );
     }
