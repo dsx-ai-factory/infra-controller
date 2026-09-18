@@ -5,6 +5,7 @@ package model
 
 import (
 	"errors"
+	"math"
 	"time"
 
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -38,7 +39,8 @@ func (sacr APISpectrumXAttachmentCreateOrUpdateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired)),
 		validation.Field(&sacr.DeviceInstance,
 			validation.NotNil.Error(validationErrorValueRequired),
-			validation.Min(0).Error("value must be equal or greater than 0")),
+			validation.Min(0).Error("value must be equal or greater than 0"),
+			validation.Max(int64(math.MaxUint32)).Error("value must not exceed 4294967295")),
 		validation.Field(&sacr.AttachmentType,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.In(cdbm.SpectrumXAttachmentTypePhysical, cdbm.SpectrumXAttachmentTypeVirtual, cdbm.SpectrumXAttachmentTypeOVS).Error("must be one of 'Physical', 'Virtual', or 'OVS'")),

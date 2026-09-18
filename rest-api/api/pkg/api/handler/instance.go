@@ -1179,6 +1179,42 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		}
 	}
 
+	var spectrumXEligibleIDs map[string]struct{}
+	if len(apiRequest.SpectrumXAttachments) > 0 {
+		// Discovery and allocation share a caller budget rather than each
+		// consuming a full workflow wait under the HTTP write deadline.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+		defer cancel()
+		var apiErr *cutil.APIError
+		if apiRequest.MachineID != nil {
+			// Scope the requested ID before sending it to the Site. Availability
+			// is still checked on the locked record inside the transaction.
+			selected, readErr := cdbm.NewMachineDAO(cih.dbSession).GetByID(ctx, nil, *apiRequest.MachineID, nil, false)
+			if readErr != nil {
+				if errors.Is(readErr, cdb.ErrDoesNotExist) {
+					return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find Machine with ID specified in request data", nil)
+				}
+				logger.Error().Err(readErr).Msg("failed to retrieve Machine for SpectrumX validation")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Machine", nil)
+			}
+			if selected.SiteID != site.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Machine specified in request does not belong to Site", nil)
+			}
+			apiErr = common.ValidateMachineSpectrumXAttachments(ctx, cih.scp, site.ID, selected.ID, apiRequest.SpectrumXAttachments)
+		} else {
+			id, parseErr := uuid.Parse(*apiRequest.InstanceTypeID)
+			if parseErr != nil {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Instance Type ID in request is not valid", nil)
+			}
+			spectrumXEligibleIDs, apiErr = common.GetSpectrumXEligibleMachineIDs(ctx, cih.dbSession, cih.scp, site.ID, id, apiRequest.MachineLabelSelector, apiRequest.SpectrumXAttachments)
+		}
+		if apiErr != nil {
+			logger.Warn().Err(apiErr.Diagnosis()).Msg("SpectrumX preflight failed")
+			return c.JSON(apiErr.Code, apiErr)
+		}
+	}
+
 	// timeoutResp lets the closure signal a post-rollback handler — the
 	// TerminateWorkflow call has to run after the closure returns so that
 	// the DB tx unwinds before we make the second remote call. nil means
@@ -1406,7 +1442,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			// Select unallocated Machine for the requested instance type
-			machine, err = common.GetUnallocatedMachineForInstanceType(ctx, logger, tx, cih.dbSession, instanceType, &apiRequest)
+			machine, err = common.GetUnallocatedMachineForInstanceType(ctx, logger, tx, cih.dbSession, instanceType, &apiRequest, spectrumXEligibleIDs)
 			if err != nil {
 				var ibSelErr *common.InfiniBandMachineSelectionError
 				if errors.As(err, &ibSelErr) {
@@ -3457,6 +3493,20 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		if err != nil {
 			logger.Error().Msgf("NVLink interfaces validation failed: %s", err)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate NVLink interfaces specified in request", err)
+		}
+	}
+
+	// Only an explicit nonempty replacement needs live validation. Omission
+	// preserves attachments, and an empty replacement must allow removal even
+	// after the corresponding device disappears from inventory.
+	if len(apiRequest.SpectrumXAttachments) > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+		defer cancel()
+		apiErr := common.ValidateMachineSpectrumXAttachments(ctx, uih.scp, site.ID, machine.ID, apiRequest.SpectrumXAttachments)
+		if apiErr != nil {
+			logger.Warn().Err(apiErr.Diagnosis()).Msg("SpectrumX preflight failed")
+			return c.JSON(apiErr.Code, apiErr)
 		}
 	}
 
