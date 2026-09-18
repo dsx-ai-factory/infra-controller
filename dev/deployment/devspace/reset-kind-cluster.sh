@@ -35,8 +35,9 @@ main() {
   require_bin kind
   require_bin kubectl
   require_bin base64
+  require_bin jq
 
-  local current_context cluster_name control_plane node_image
+  local current_context cluster_name control_plane node_image ip_family config_file
   current_context="$(kubectl config current-context 2>/dev/null || true)"
   case "${current_context}" in
     kind-*) cluster_name="${current_context#kind-}" ;;
@@ -55,11 +56,22 @@ main() {
     exit 1
   fi
 
+  # Preserve dual-stack networking when DevSpace purges a vfkit-hosted cluster.
+  ip_family="$(kubectl get node "${control_plane}" -o json | jq -r '
+    .spec.podCIDRs | if length == 2 then "dual"
+    elif .[0] | contains(":") then "ipv6" else "ipv4" end')"
+  config_file="$(mktemp)"
+  trap 'rm -f -- "${config_file}"' EXIT
+  printf 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnetworking:\n  ipFamily: %s\n' \
+    "${ip_family}" >"${config_file}"
+
   log "Deleting kind cluster ${cluster_name}"
   kind delete cluster --name "${cluster_name}"
 
   log "Recreating kind cluster ${cluster_name} with ${node_image}"
-  kind create cluster --name "${cluster_name}" --image "${node_image}"
+  kind create cluster --name "${cluster_name}" --image "${node_image}" --config "${config_file}"
+  rm -f -- "${config_file}"
+  trap - EXIT
 
   log "Installing clean local prerequisites"
   "${SCRIPT_DIR}/bootstrap-prereqs.sh"

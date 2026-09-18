@@ -4,23 +4,22 @@
 #
 # Prepare a fresh Ubuntu VM for the complete local NICo DevSpace stack.
 #
-# Docker and containerd data are placed under an existing /dockerroot directory,
-# or a symlink to one, by default.
+# Docker and containerd use their normal Linux storage locations. Storage mounts
+# are managed by the VM or host, not by this tooling/bootstrap script.
 
 set -euo pipefail
 
-DEVSPACE_VERSION="v6.3.21"
-KIND_VERSION="v0.32.0"
-KUBECTL_VERSION="v1.36.3"
-HELM_VERSION="v3.21.3"
-KIND_NODE_IMAGE="kindest/node:v1.36.1"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=versions.env
+source "${SCRIPT_DIR}/versions.env"
 
 DEV_USER=""
 REPO_DIR=""
 REPO_URL="https://github.com/NVIDIA/infra-controller.git"
 REPO_REF=""
 CLUSTER_NAME="nico-dev"
-DOCKER_ROOT="/dockerroot"
+IP_FAMILY="ipv4"
 SKIP_DEPLOY=0
 SCRIPT_START_SECONDS="${SECONDS}"
 
@@ -67,8 +66,8 @@ Options:
   --repo-url URL       Repository to clone if --repo-dir does not exist.
   --repo-ref REF       Branch, tag, or commit to check out after cloning.
   --cluster-name NAME  kind cluster name. Default: nico-dev.
-  --docker-root PATH   Existing Docker storage directory, or symlink to one.
-                       Default: /dockerroot.
+  --ip-family FAMILY   kind networking: ipv4 (default) or dual.
+                       An existing cluster must already use this family.
   --skip-deploy        Prepare the host and cluster but do not build/deploy.
   -h, --help           Show this help.
 
@@ -106,14 +105,14 @@ while (($#)); do
       CLUSTER_NAME="$2"
       shift 2
       ;;
-    --docker-root)
-      (($# >= 2)) || die "--docker-root requires a value"
-      DOCKER_ROOT="$2"
-      shift 2
-      ;;
     --skip-deploy)
       SKIP_DEPLOY=1
       shift
+      ;;
+    --ip-family)
+      (($# >= 2)) || die "--ip-family requires a value"
+      IP_FAMILY="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -125,6 +124,11 @@ while (($#)); do
   esac
 done
 
+case "${IP_FAMILY}" in
+  ipv4|dual) ;;
+  *) die "--ip-family must be ipv4 or dual" ;;
+esac
+
 if [[ "${EUID}" -ne 0 ]]; then
   if [[ -z "${DEV_USER}" ]]; then
     DEV_USER="${USER:-$(id -un)}"
@@ -134,7 +138,7 @@ if [[ "${EUID}" -ne 0 ]]; then
     --user "${DEV_USER}" \
     --repo-url "${REPO_URL}" \
     --cluster-name "${CLUSTER_NAME}" \
-    --docker-root "${DOCKER_ROOT}"
+    --ip-family "${IP_FAMILY}"
   )
   if [[ -n "${REPO_DIR}" ]]; then
     sudo_args+=(--repo-dir "${REPO_DIR}")
@@ -266,48 +270,8 @@ EOF
     docker-compose-plugin
 }
 
-require_docker_storage() {
-  [[ -d "${DOCKER_ROOT}" ]] || \
-    die "Docker storage directory or directory symlink does not exist: ${DOCKER_ROOT}"
-}
-
 configure_docker() {
-  log "Configuring Docker and containerd storage under ${DOCKER_ROOT}"
-  systemctl stop docker.service docker.socket containerd.service \
-    >/dev/null 2>&1 || true
-
-  mkdir -p /etc/docker /etc/containerd
-  mkdir -p "${DOCKER_ROOT}/containerd"
-
-  local daemon_tmp
-  daemon_tmp="$(mktemp)"
-  if [[ -s /etc/docker/daemon.json ]]; then
-    jq --arg root "${DOCKER_ROOT}" '. + {"data-root": $root}' \
-      /etc/docker/daemon.json >"${daemon_tmp}"
-  else
-    jq -n --arg root "${DOCKER_ROOT}" '{"data-root": $root}' >"${daemon_tmp}"
-  fi
-  install -m 0644 "${daemon_tmp}" /etc/docker/daemon.json
-  rm -f "${daemon_tmp}"
-
-  if [[ ! -s /etc/containerd/config.toml ]]; then
-    containerd config default >/etc/containerd/config.toml
-  fi
-  local containerd_tmp
-  containerd_tmp="$(mktemp)"
-  if grep -Eq '^root[[:space:]]*=' \
-    /etc/containerd/config.toml; then
-    sed -E \
-      "s|^root[[:space:]]*=.*$|root = \"${DOCKER_ROOT}/containerd\"|" \
-      /etc/containerd/config.toml >"${containerd_tmp}"
-  else
-    {
-      printf 'root = "%s/containerd"\n\n' "${DOCKER_ROOT}"
-      cat /etc/containerd/config.toml
-    } >"${containerd_tmp}"
-  fi
-  install -m 0644 "${containerd_tmp}" /etc/containerd/config.toml
-  rm -f "${containerd_tmp}"
+  log "Configuring Docker access and registry TLS compatibility"
 
   install -m 0755 -d \
     /etc/systemd/system/docker.service.d \
@@ -324,6 +288,7 @@ EOF
   usermod -aG docker "${DEV_USER}"
   systemctl daemon-reload
   systemctl enable --now containerd.service docker.service
+  systemctl restart containerd.service docker.service
 
   local _attempt
   for _attempt in {1..30}; do
@@ -470,17 +435,29 @@ configure_kind_node_tls() {
 }
 
 prepare_cluster() {
-  local clusters
+  local clusters actual_family config_file
   clusters="$(run_as_user kind get clusters)"
   if grep -Fxq "${CLUSTER_NAME}" <<<"${clusters}"; then
     log "Reusing kind cluster ${CLUSTER_NAME}"
     run_as_user kind export kubeconfig --name "${CLUSTER_NAME}"
+    actual_family="$(run_as_user kubectl --context "kind-${CLUSTER_NAME}" get node \
+      "${CLUSTER_NAME}-control-plane" -o json | jq -r '
+        .spec.podCIDRs | if length == 2 then "dual"
+        elif .[0] | contains(":") then "ipv6" else "ipv4" end')"
+    [[ "${actual_family}" == "${IP_FAMILY}" ]] || \
+      die "existing cluster uses ${actual_family}, requested ${IP_FAMILY}; use a different cluster name or explicitly delete the cluster"
   else
     log "Creating kind cluster ${CLUSTER_NAME} with ${KIND_NODE_IMAGE}"
     run_as_user docker pull "${KIND_NODE_IMAGE}"
+    config_file="$(mktemp)"
+    printf 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnetworking:\n  ipFamily: %s\n' \
+      "${IP_FAMILY}" >"${config_file}"
+    chown "${DEV_USER}:${USER_GROUP}" "${config_file}"
     run_as_user kind create cluster \
       --name "${CLUSTER_NAME}" \
-      --image "${KIND_NODE_IMAGE}"
+      --image "${KIND_NODE_IMAGE}" \
+      --config "${config_file}"
+    rm -f "${config_file}"
   fi
 
   configure_kind_node_tls
@@ -499,8 +476,8 @@ kind_node_has_image() {
 
 preload_postgres_image() {
   local node="${CLUSTER_NAME}-control-plane"
-  local host_image="postgres:14.5-alpine"
-  local node_image="docker.io/library/postgres:14.5-alpine"
+  local host_image="${CORE_POSTGRES_IMAGE}"
+  local node_image="docker.io/library/${CORE_POSTGRES_IMAGE}"
 
   if kind_node_has_image "${node}" "${node_image}"; then
     log "Reusing ${node_image} inside ${node}"
@@ -532,8 +509,8 @@ preload_postgres_image() {
 
 cache_postgres_wait_image() {
   local node="${CLUSTER_NAME}-control-plane"
-  local source_image="docker.io/library/postgres:14.5-alpine"
-  local wait_image="docker.io/library/postgres:14.4-alpine"
+  local source_image="docker.io/library/${CORE_POSTGRES_IMAGE}"
+  local wait_image="docker.io/library/${REST_POSTGRES_IMAGE}"
 
   if kind_node_has_image "${node}" "${wait_image}"; then
     return
@@ -627,7 +604,7 @@ show_summary() {
   log "Setup complete"
   run_as_user kubectl get deployments,statefulsets -A
   run_as_user docker system df
-  df -h / "${DOCKER_ROOT}"
+  df -h / /home /var/lib/docker /var/lib/containerd
   cat <<EOF
 
 Access the services from another machine with:
@@ -643,7 +620,6 @@ EOF
 }
 
 main() {
-  require_docker_storage
   install_host_packages
   configure_docker
   prepare_user_tool_directories
