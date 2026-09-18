@@ -216,3 +216,5 @@ API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverr
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+API POST /v2/org/{org}/nico/dpu-extension-service removed the enum value `DpfHelmChart` of the request property `serviceType`
+API DELETE /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} removed the success response with the status `202`
