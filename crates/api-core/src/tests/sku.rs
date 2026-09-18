@@ -153,7 +153,7 @@ pub(in crate::tests) mod tests {
               "count": 1,
               "min_size_mb": 1800000,
               "max_size_mb": 2000000,
-              "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/nvme/nvme0/nvme0n1"]
+              "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/nvme"]
             }
           ],
           "tpm":
@@ -216,7 +216,7 @@ pub(in crate::tests) mod tests {
         "count": 1,
         "min_size_mb": 1831420,
         "max_size_mb": 1831420,
-        "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme/nvme0/nvme0n1"]
+        "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme"]
       }
     ],
     "memory": [
