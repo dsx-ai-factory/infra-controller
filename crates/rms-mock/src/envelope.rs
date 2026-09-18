@@ -21,6 +21,7 @@
 //! the host refuses, is a per-node failure: its result says why, it counts
 //! towards `failed_nodes`, and the batch fails.
 
+use crate::jobs::{JobState, JobStatus};
 use crate::resolve::NodeRef;
 use crate::rms;
 
@@ -109,4 +110,56 @@ pub(crate) fn node_batch(results: &[NodeResult<'_>], job_id: &str) -> rms::NodeB
         job_id: job_id.to_owned(),
         stats: Some(outcome.stats),
     }
+}
+
+/// The `job_states` of a `GetJobStatus` response: the polled job first, then
+/// its children when asked for.
+pub(crate) fn job_states(status: &JobStatus, include_children: bool) -> Vec<rms::JobStatus> {
+    let mut states = vec![job_status(status)];
+    if include_children {
+        states.extend(status.children.iter().map(job_status));
+    }
+    states
+}
+
+/// One job as `GetJobStatus` reports it. `execution_state` is never the
+/// proto3 default, and a parent is tied to no node.
+fn job_status(status: &JobStatus) -> rms::JobStatus {
+    let error_code = match status.state {
+        JobState::Failed => rms::JobError::Other,
+        JobState::Running | JobState::Completed => rms::JobError::Unspecified,
+    };
+    rms::JobStatus {
+        job_id: status.job_id.clone(),
+        parent_job_id: status.parent_job_id.clone(),
+        child_job_ids: status.children.iter().map(|c| c.job_id.clone()).collect(),
+        execution_state: status.state.as_execution_state(),
+        error_message: status.error_message.clone(),
+        error_code: error_code as i32,
+        result_json: String::new(),
+        state_description: status.state.as_wire_str().to_owned(),
+        rack_id: non_empty(&status.rack_id),
+        node_id: non_empty(&status.node_id),
+        created_at: None,
+        updated_at: None,
+    }
+}
+
+/// Reject a status poll that names no job, which would otherwise read as a
+/// completed one.
+pub(crate) fn require_job_id(job_id: &str) -> Result<(), tonic::Status> {
+    if job_id.trim().is_empty() {
+        return Err(tonic::Status::invalid_argument("job_id is required"));
+    }
+    Ok(())
+}
+
+/// The `error_message` of a status RPC answering `RETURN_CODE_FAILURE` for a
+/// job this process never issued.
+pub(crate) fn job_not_found(job_id: &str) -> String {
+    format!("job {job_id} not found")
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    (!s.is_empty()).then(|| s.to_owned())
 }

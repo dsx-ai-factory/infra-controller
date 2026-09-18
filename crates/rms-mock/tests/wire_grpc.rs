@@ -23,24 +23,15 @@
 //! paths the services are mounted on. A test that called the impl directly
 //! would pass even if nothing were reachable.
 
-use std::net::IpAddr;
-use std::sync::Arc;
+mod common;
 
+use common::{
+    a_switch, a_tray, failing_nodes, node_info, node_info_in_rack, serve_with, serve_with_config,
+};
 use librms::protos::rack_manager::rack_manager_client::RackManagerClient;
 use librms::protos::rack_manager_v2::rack_manager_v2_client::RackManagerV2Client;
 use mac_address::MacAddress;
-use rms_mock::{RmsMock, RmsMockConfig, SimNode, SimNodeKind, StaticInventory};
-
-/// An NVLink switch tray in rack unit 30 of rack-001.
-fn a_switch() -> SimNode {
-    SimNode {
-        kind: Some(SimNodeKind::Switch),
-        bmc_mac: Some(MacAddress::new([0x02, 0x00, 0x11, 0x11, 0x22, 0x22])),
-        rack_id: Some("rack-001".to_string()),
-        slot_number: Some(30),
-        ..SimNode::default()
-    }
-}
+use rms_mock::SimNode;
 
 /// A second switch tray in the same rack as [`a_switch`], lower in it.
 fn a_second_switch() -> SimNode {
@@ -51,38 +42,9 @@ fn a_second_switch() -> SimNode {
     }
 }
 
-/// A compute tray in slot 12 of rack-001, the third tray in its rack.
-fn a_tray() -> SimNode {
-    SimNode {
-        kind: Some(SimNodeKind::Compute),
-        bmc_mac: Some(MacAddress::new([0x02, 0x00, 0xab, 0xcd, 0x12, 0x34])),
-        bmc_ip: Some(IpAddr::from([10, 233, 16, 20])),
-        rack_id: Some("rack-001".to_string()),
-        slot_number: Some(12),
-        tray_index: Some(2),
-        ..SimNode::default()
-    }
-}
-
-/// Serve the mock on an ephemeral port and return its base URL.
+/// Serve the mock with no devices and return its base URL.
 async fn serve() -> String {
     serve_with(Vec::new()).await
-}
-
-async fn serve_with(nodes: Vec<SimNode>) -> String {
-    let mock = Arc::new(RmsMock::new(
-        Arc::new(StaticInventory::new(nodes.into())),
-        RmsMockConfig::default(),
-    ));
-    let router = rms_mock::router(mock);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-
-    format!("http://{addr}")
 }
 
 #[tokio::test]
@@ -158,36 +120,6 @@ fn fabric_config() -> librms::protos::rack_manager_v2::ScaleUpFabricConfig {
     librms::protos::rack_manager_v2::ScaleUpFabricConfig {
         topology_type: "nvl72".to_string(),
         extra_static_configs: Vec::new(),
-    }
-}
-
-/// Build a request for one node, identified the way carbide identifies nodes:
-/// an opaque `node_id` plus a BMC MAC.
-fn node_info(node_id: &str, mac: &str) -> librms::protos::rack_manager::NodeInfo {
-    node_info_in_rack("rack-001", node_id, mac)
-}
-
-fn node_info_in_rack(
-    rack_id: &str,
-    node_id: &str,
-    mac: &str,
-) -> librms::protos::rack_manager::NodeInfo {
-    librms::protos::rack_manager::NodeInfo {
-        node_id: node_id.to_string(),
-        rack_id: rack_id.to_string(),
-        // Left unset: the mock matches on address, not on declared type.
-        r#type: None,
-        bmc_endpoint: Some(librms::protos::rack_manager::Endpoint {
-            interface: Some(librms::protos::rack_manager::NetworkInterface {
-                ip_address: String::new(),
-                mac_address: mac.to_string(),
-                host_name: None,
-            }),
-            port: 443,
-            credentials: None,
-        }),
-        host_endpoint: None,
-        node_descriptor: None,
     }
 }
 
@@ -391,17 +323,21 @@ async fn certificate_jobs_progress_to_completed() {
     }
 }
 
-/// A poll for a job this process never issued reports it completed on both
-/// job-status RPCs.
+/// A poll for a job this process never issued, as NICo does after a restart
+/// of the mock. The certificate and generic status RPCs report it completed,
+/// with one completed child so a reader that needs children is satisfied;
+/// the firmware and switch system image RPCs answer `RETURN_CODE_FAILURE`
+/// with a reason, as their proto specifies and NICo's readers expect.
 #[tokio::test]
-async fn an_unknown_job_is_reported_completed() {
+async fn an_unknown_job_is_completed_or_not_found_as_each_rpc_specifies() {
+    use librms::protos::rack_manager as v1;
     let url = serve_with(vec![a_switch()]).await;
     let mut client = RackManagerClient::connect(url).await.unwrap();
-    let job_id = "rms-mock-from-a-past-life".to_string();
+    let job_id = "rms-mock-0-from-a-past-life".to_string();
 
     let certificate = client
         .get_configure_switch_certificate_job_status(
-            librms::protos::rack_manager::GetConfigureSwitchCertificateJobStatusRequest {
+            v1::GetConfigureSwitchCertificateJobStatusRequest {
                 job_id: job_id.clone(),
             },
         )
@@ -409,24 +345,55 @@ async fn an_unknown_job_is_reported_completed() {
         .unwrap()
         .into_inner();
     assert_eq!(certificate.job_id, job_id);
-    assert_eq!(
-        certificate.status,
-        librms::protos::rack_manager::ReturnCode::Success as i32
-    );
+    assert_eq!(certificate.status, v1::ReturnCode::Success as i32);
     assert_eq!(certificate.state, "completed");
 
-    let fabric = client
-        .get_job_status(librms::protos::rack_manager::GetJobStatusRequest {
+    let generic = client
+        .get_job_status(v1::GetJobStatusRequest {
             job_id: job_id.clone(),
-            include_child_job_states: false,
+            include_child_job_states: true,
         })
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(fabric.job_states[0].job_id, job_id);
+    assert_eq!(generic.job_states.len(), 2, "the job and one child");
+    assert_eq!(generic.job_states[0].job_id, job_id);
+    for job in &generic.job_states {
+        assert_eq!(job.execution_state, v1::JobExecutionState::Completed as i32);
+    }
     assert_eq!(
-        fabric.job_states[0].execution_state,
-        librms::protos::rack_manager::JobExecutionState::Completed as i32
+        generic.job_states[1].parent_job_id.as_deref(),
+        Some(job_id.as_str())
+    );
+
+    let firmware = client
+        .get_firmware_job_status(v1::GetFirmwareJobStatusRequest {
+            job_id: job_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(firmware.status, v1::ReturnCode::Failure as i32);
+    assert_eq!(firmware.job_id, job_id);
+    assert!(
+        firmware.error_message.contains(&job_id),
+        "{:?}",
+        firmware.error_message
+    );
+
+    let image = client
+        .get_switch_system_image_job_status(v1::GetSwitchSystemImageJobStatusRequest {
+            job_id: job_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(image.status, v1::ReturnCode::Failure as i32);
+    assert_eq!(image.job_id, job_id);
+    assert!(
+        image.error_message.contains(&job_id),
+        "{:?}",
+        image.error_message
     );
 }
 
@@ -464,14 +431,18 @@ async fn a_fabric_request_naming_no_switches_is_an_invalid_argument() {
         assert_eq!(status.code(), tonic::Code::InvalidArgument, "{what}");
     }
 
-    // Nothing was issued: the first accepted request gets the first id.
+    // Nothing was issued: the first accepted request gets the first id of
+    // this run.
     let job_id = v2
         .configure_scale_up_fabric_manager(request(Some(switches())))
         .await
         .unwrap()
         .into_inner()
         .job_id;
-    assert_eq!(job_id, "rms-mock-1");
+    assert!(
+        job_id.starts_with("rms-mock-") && job_id.ends_with("-1"),
+        "expected the first id of the run, got {job_id}"
+    );
     let status = v1
         .get_job_status(librms::protos::rack_manager::GetJobStatusRequest {
             job_id: job_id.clone(),
@@ -1151,5 +1122,376 @@ async fn fabric_election_is_independent_per_rack() {
             vec![expected.to_string()],
             "the requested primary is honoured in one rack and the lowest node id elected in the other"
         );
+    }
+}
+
+fn certificate_request(
+    nodes: Vec<librms::protos::rack_manager::NodeInfo>,
+) -> librms::protos::rack_manager::ConfigureSwitchCertificateRequest {
+    librms::protos::rack_manager::ConfigureSwitchCertificateRequest {
+        nodes: Some(librms::protos::rack_manager::NodeSet { nodes }),
+        services: Vec::new(),
+        test_hello: false,
+        domain: None,
+    }
+}
+
+/// Poll a certificate job until it is terminal, returning every state seen
+/// and the final response.
+async fn poll_certificate_job(
+    client: &mut RackManagerClient<tonic::transport::Channel>,
+    job_id: &str,
+) -> (
+    Vec<String>,
+    librms::protos::rack_manager::GetConfigureSwitchCertificateJobStatusResponse,
+) {
+    let mut seen = Vec::new();
+    for _ in 0..5 {
+        let status = client
+            .get_configure_switch_certificate_job_status(
+                librms::protos::rack_manager::GetConfigureSwitchCertificateJobStatusRequest {
+                    job_id: job_id.to_string(),
+                },
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(status.job_id, job_id);
+        seen.push(status.state.clone());
+        if matches!(status.state.as_str(), "completed" | "failed") {
+            return (seen, status);
+        }
+    }
+    panic!("job {job_id} never reached a terminal state; polled states were {seen:?}");
+}
+
+/// Poll a parent through `GetJobStatus` with its children until it is
+/// terminal, returning the final response with the parent first.
+async fn poll_parent(
+    client: &mut RackManagerClient<tonic::transport::Channel>,
+    parent: &str,
+) -> librms::protos::rack_manager::GetJobStatusResponse {
+    for _ in 0..5 {
+        let response = client
+            .get_job_status(librms::protos::rack_manager::GetJobStatusRequest {
+                job_id: parent.to_string(),
+                include_child_job_states: true,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            response.job_states[0].job_id, parent,
+            "the parent comes first"
+        );
+        if matches!(
+            librms::protos::rack_manager::JobExecutionState::try_from(
+                response.job_states[0].execution_state
+            ),
+            Ok(librms::protos::rack_manager::JobExecutionState::Completed
+                | librms::protos::rack_manager::JobExecutionState::Failed)
+        ) {
+            return response;
+        }
+    }
+    panic!("job {parent} never reached a terminal state");
+}
+
+/// A status poll that names no job is a caller bug, rejected the same way by
+/// every status RPC rather than answered as a completed job.
+#[tokio::test]
+async fn polling_without_a_job_id_is_an_invalid_argument() {
+    use librms::protos::rack_manager as v1;
+    let url = serve().await;
+    let mut client = RackManagerClient::connect(url).await.unwrap();
+
+    let codes = [
+        (
+            "GetJobStatus",
+            client
+                .get_job_status(v1::GetJobStatusRequest {
+                    job_id: String::new(),
+                    include_child_job_states: true,
+                })
+                .await
+                .map(drop),
+        ),
+        (
+            "GetConfigureSwitchCertificateJobStatus",
+            client
+                .get_configure_switch_certificate_job_status(
+                    v1::GetConfigureSwitchCertificateJobStatusRequest {
+                        job_id: "  ".to_string(),
+                    },
+                )
+                .await
+                .map(drop),
+        ),
+        (
+            "GetFirmwareJobStatus",
+            client
+                .get_firmware_job_status(v1::GetFirmwareJobStatusRequest {
+                    job_id: String::new(),
+                })
+                .await
+                .map(drop),
+        ),
+        (
+            "GetSwitchSystemImageJobStatus",
+            client
+                .get_switch_system_image_job_status(v1::GetSwitchSystemImageJobStatusRequest {
+                    job_id: String::new(),
+                })
+                .await
+                .map(drop),
+        ),
+    ];
+    for (rpc, outcome) in codes {
+        let status = outcome.expect_err(rpc);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{rpc}");
+    }
+}
+
+/// A certificate batch is a parent job with one child per switch: the batch's
+/// `job_id` is the parent, each entry in `jobs` a child, and both are
+/// pollable through the certificate job-status RPC.
+#[tokio::test]
+async fn certificate_batches_issue_a_parent_and_per_switch_children() {
+    let url = serve_with(vec![a_switch(), a_second_switch()]).await;
+    let mut client = RackManagerClient::connect(url).await.unwrap();
+
+    let started = client
+        .configure_switch_certificate(certificate_request(vec![
+            node_info("switch-7", "02:00:11:11:22:22"),
+            node_info("switch-8", "02:00:11:11:33:33"),
+        ]))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let parent = started.response.unwrap().job_id;
+    let children: Vec<&str> = started.jobs.iter().map(|j| j.job_id.as_str()).collect();
+    assert!(!parent.is_empty());
+    assert_eq!(children.len(), 2);
+    assert!(
+        !children.contains(&parent.as_str()),
+        "the parent is a job of its own, not the first child"
+    );
+    assert_ne!(children[0], children[1]);
+    assert_eq!(started.jobs[0].node_id, "switch-7");
+    assert_eq!(started.jobs[1].node_id, "switch-8");
+
+    // A child reports its own node; the parent reports none.
+    let (_, child) = poll_certificate_job(&mut client, children[0]).await;
+    assert_eq!(
+        (child.node_id.as_str(), child.rack_id.as_str()),
+        ("switch-7", "rack-001")
+    );
+
+    let (_, parent_status) = poll_certificate_job(&mut client, &parent).await;
+    assert_eq!(parent_status.state, "completed");
+    assert_eq!(
+        (
+            parent_status.node_id.as_str(),
+            parent_status.rack_id.as_str()
+        ),
+        ("", "rack-001")
+    );
+}
+
+/// `GetJobStatus` on a parent lists the parent first and, when asked, each
+/// child with its own state; callers correlate children by `parent_job_id`
+/// and `child_job_ids`, prefer a failed child's message, and read a failed
+/// child as a failed batch.
+#[tokio::test]
+async fn get_job_status_reports_children_and_a_failed_child_fails_the_parent() {
+    let url = serve_with_config(
+        vec![a_switch(), a_second_switch()],
+        failing_nodes(&["switch-8"]),
+    )
+    .await;
+    let mut client = RackManagerClient::connect(url).await.unwrap();
+
+    let started = client
+        .configure_switch_certificate(certificate_request(vec![
+            node_info("switch-7", "02:00:11:11:22:22"),
+            node_info("switch-8", "02:00:11:11:33:33"),
+        ]))
+        .await
+        .unwrap()
+        .into_inner();
+    // Submission succeeds: the failure is the job's outcome.
+    let batch = started.response.unwrap();
+    assert_eq!(
+        batch.status,
+        librms::protos::rack_manager::ReturnCode::Success as i32
+    );
+    let parent_id = batch.job_id;
+    let child_ids: Vec<String> = started.jobs.iter().map(|j| j.job_id.clone()).collect();
+
+    // Without children: one entry, which still names them.
+    let alone = client
+        .get_job_status(librms::protos::rack_manager::GetJobStatusRequest {
+            job_id: parent_id.clone(),
+            include_child_job_states: false,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(alone.job_states.len(), 1);
+    assert_eq!(alone.job_states[0].child_job_ids, child_ids);
+    assert_eq!(alone.job_states[0].parent_job_id, None);
+
+    let response = poll_parent(&mut client, &parent_id).await;
+    assert_eq!(response.job_states.len(), 3, "parent plus two children");
+    let parent = &response.job_states[0];
+    assert_eq!(
+        parent.execution_state,
+        librms::protos::rack_manager::JobExecutionState::Failed as i32,
+        "one failed child fails the batch"
+    );
+    assert!(
+        parent.error_message.contains("switch-8"),
+        "the parent's message names the failed node: {:?}",
+        parent.error_message
+    );
+    assert_eq!(parent.node_id, None, "a parent is not tied to one node");
+    assert_eq!(parent.rack_id.as_deref(), Some("rack-001"));
+
+    let children = &response.job_states[1..];
+    for child in children {
+        assert_eq!(child.parent_job_id.as_deref(), Some(parent_id.as_str()));
+        assert!(parent.child_job_ids.contains(&child.job_id));
+    }
+    let by_node = |node: &str| {
+        children
+            .iter()
+            .find(|c| c.node_id.as_deref() == Some(node))
+            .unwrap_or_else(|| panic!("no child for {node}"))
+    };
+    assert_eq!(
+        by_node("switch-7").execution_state,
+        librms::protos::rack_manager::JobExecutionState::Completed as i32
+    );
+    let failed = by_node("switch-8");
+    assert_eq!(
+        failed.execution_state,
+        librms::protos::rack_manager::JobExecutionState::Failed as i32
+    );
+    assert!(
+        failed.error_message.contains("simulated failure"),
+        "{:?}",
+        failed.error_message
+    );
+    assert_ne!(
+        failed.error_code,
+        librms::protos::rack_manager::JobError::Unspecified as i32,
+        "the caller renders the error code by name"
+    );
+
+    // The certificate status RPC reports the same child in its own vocabulary.
+    let (seen, last) = poll_certificate_job(&mut client, &failed.job_id).await;
+    assert_eq!(seen, ["failed"], "already terminal");
+    assert!(last.error_message.contains("switch-8"));
+}
+
+/// The one-job fabric configuration takes the same failure path, selected by
+/// the elected primary's node id, and reports it as an execution state the
+/// caller maps to a failed rack.
+#[tokio::test]
+async fn a_faulted_fabric_job_runs_and_then_fails_with_a_message() {
+    let url = serve_with_config(vec![a_switch()], failing_nodes(&["switch-7"])).await;
+    let mut v2 = RackManagerV2Client::connect(url.clone()).await.unwrap();
+    let mut v1 = RackManagerClient::connect(url).await.unwrap();
+
+    let job_id = v2
+        .configure_scale_up_fabric_manager(
+            librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+                nodes: Some(librms::protos::rack_manager::NodeSet {
+                    nodes: vec![node_info("switch-7", "02:00:11:11:22:22")],
+                }),
+                primary_switch_node_id: Some("switch-7".to_string()),
+                domain: None,
+                config: Some(fabric_config()),
+            },
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .job_id;
+
+    let mut polls = Vec::new();
+    for _ in 0..2 {
+        let response = v1
+            .get_job_status(librms::protos::rack_manager::GetJobStatusRequest {
+                job_id: job_id.clone(),
+                include_child_job_states: false,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let job = &response.job_states[0];
+        polls.push((job.execution_state, job.error_message.clone()));
+    }
+    assert_eq!(
+        polls.iter().map(|(state, _)| *state).collect::<Vec<_>>(),
+        [
+            librms::protos::rack_manager::JobExecutionState::Running as i32,
+            librms::protos::rack_manager::JobExecutionState::Failed as i32,
+        ]
+    );
+    assert!(polls[1].1.contains("switch-7"), "{:?}", polls[1].1);
+}
+
+/// Two racks driven at the same time get jobs of their own, each answering
+/// for the rack it was issued for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn racks_get_independent_jobs() {
+    let other_rack_switch = SimNode {
+        bmc_mac: Some(MacAddress::new([0x02, 0x00, 0x22, 0x22, 0x44, 0x44])),
+        rack_id: Some("rack-002".to_string()),
+        ..a_switch()
+    };
+    let url = serve_with(vec![a_switch(), other_rack_switch]).await;
+
+    let configure =
+        |url: String, rack_id: &'static str, node_id: &'static str, mac: &'static str| {
+            tokio::spawn(async move {
+                RackManagerClient::connect(url)
+                    .await
+                    .unwrap()
+                    .configure_switch_certificate(certificate_request(vec![node_info_in_rack(
+                        rack_id, node_id, mac,
+                    )]))
+                    .await
+                    .unwrap()
+                    .into_inner()
+            })
+        };
+    let (rack_1, rack_2) = tokio::join!(
+        configure(url.clone(), "rack-001", "switch-7", "02:00:11:11:22:22"),
+        configure(url.clone(), "rack-002", "switch-9", "02:00:22:22:44:44"),
+    );
+    let (rack_1, rack_2) = (rack_1.unwrap(), rack_2.unwrap());
+
+    let ids = [
+        rack_1.response.as_ref().unwrap().job_id.clone(),
+        rack_1.jobs[0].job_id.clone(),
+        rack_2.response.as_ref().unwrap().job_id.clone(),
+        rack_2.jobs[0].job_id.clone(),
+    ];
+    let distinct: std::collections::HashSet<&String> = ids.iter().collect();
+    assert_eq!(distinct.len(), 4, "every job id is unique: {ids:?}");
+
+    let mut client = RackManagerClient::connect(url).await.unwrap();
+    for (parent, rack, node) in [
+        (&ids[0], "rack-001", "switch-7"),
+        (&ids[2], "rack-002", "switch-9"),
+    ] {
+        let response = poll_parent(&mut client, parent).await;
+        assert_eq!(response.job_states.len(), 2, "one child per rack");
+        assert_eq!(response.job_states[0].rack_id.as_deref(), Some(rack));
+        assert_eq!(response.job_states[1].rack_id.as_deref(), Some(rack));
+        assert_eq!(response.job_states[1].node_id.as_deref(), Some(node));
     }
 }
