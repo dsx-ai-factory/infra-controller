@@ -120,7 +120,7 @@ config it edits.
    automatically) with mTLS issued from `vault-nico-issuer`, and provisions the
    `rms` database on `nico-pg-cluster`.
 
-   Airgapped sites clone nv-rms out-of-band and set
+   Air-gapped sites clone nv-rms out-of-band and set
    `NICO_RMS_CHART=<clone>/helm` instead. Refer to *Building the RMS image*
    below.
 
@@ -181,7 +181,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_SKIP_DPF` | No | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Same as `--skip-dpf`. Defaults to `false`. |
 | `NICO_SKIP_RMS` | No | Skip the Rack Management Service (rack-manager chart, phase 5c), which installs **by default**. Same as `--skip-rms`. Defaults to `false`. |
 | `NICO_RMS_IMAGE_TAG` | Unless RMS is skipped (`--skip-rms` / `NICO_SKIP_RMS=true`) | RMS API server image tag (git-describe style, e.g. `v0.10.0-rc2`). No default - the chart fails at render without one. See `setup.sh` header for the full `NICO_RMS_*` family (chart override, image repo, NGC key). The namespace is fixed to `rack-manager` - NICo Core dials the service by that name. |
-| `NICO_DPF_SRC` | No | Local `NVIDIA/doca-platform` checkout to install the DPF operator chart from (airgapped or self-managed sites). Defaults to unset - the chart comes from the pinned `v26.4.0` commit: the `helm-prereqs/doca-platform` git submodule in a git checkout, or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged chart. |
+| `NICO_DPF_SRC` | No | Local `NVIDIA/doca-platform` checkout to install the DPF operator chart from (air-gapped or self-managed sites). Defaults to unset - the chart comes from the pinned `v26.4.0` commit: the `helm-prereqs/doca-platform` git submodule in a git checkout, or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged chart. |
 | `NICO_DPF_NGC_API_KEY` | No | NGC API key for `dpf-pull-secret` and the Argo CD helm repository secrets. Defaults to `REGISTRY_PULL_SECRET`. |
 | `NICO_DPF_NICO_NGC_API_KEY` | No | NGC API key with access to the NICo DPUService images (`nico-pull-secret`). Defaults to `NICO_DPF_NGC_API_KEY`. |
 | `NICO_DPF_K8S_API_VIP` / `NICO_DPF_K8S_API_PORT` | No | Host-cluster API server address/port that DPUs must reach. Defaults are derived from the `kubernetes` Endpoints — override when the derived address is not routable from the DPUs. |
@@ -535,7 +535,7 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
    git checkout of this repository, the `helm-prereqs/doca-platform` git
    submodule (initialized automatically); from the packaged `nico-prereqs`
    chart, a shallow clone of the commit recorded in
-   `helm-prereqs/doca-platform.pin`. On airgapped or self-managed sites,
+   `helm-prereqs/doca-platform.pin`. On air-gapped or self-managed sites,
    `NICO_DPF_SRC=<clone>` overrides both with an operator-managed checkout.
    Keep it at the pinned commit: `setup.sh` installs whatever that checkout
    contains and only warns when its HEAD differs from the pin.
