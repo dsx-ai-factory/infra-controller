@@ -531,13 +531,14 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
    `hbn-user-password`, and the Argo CD helm repository secrets.
 3. **DPF operator** - installed from `deploy/charts/dpf-operator` in a
    `NVIDIA/doca-platform` checkout at the reviewed commit this repository
-   pins (currently `v26.4.0`). The source is resolved one of three ways, all
-   installing the same pinned commit: in a git checkout of this repository,
-   the `helm-prereqs/doca-platform` git submodule (initialized
-   automatically); from the packaged `nico-prereqs` chart, a shallow clone of
-   the commit recorded in `helm-prereqs/doca-platform.pin`; or, on airgapped
-   or self-managed sites, the checkout `NICO_DPF_SRC=<clone>` points at,
-   cloned at the pinned commit out-of-band.
+   pins (currently `v26.4.0`). Two source paths enforce that commit: in a
+   git checkout of this repository, the `helm-prereqs/doca-platform` git
+   submodule (initialized automatically); from the packaged `nico-prereqs`
+   chart, a shallow clone of the commit recorded in
+   `helm-prereqs/doca-platform.pin`. On airgapped or self-managed sites,
+   `NICO_DPF_SRC=<clone>` overrides both with an operator-managed checkout.
+   Keep it at the pinned commit: `setup.sh` installs whatever that checkout
+   contains and only warns when its HEAD differs from the pin.
    The image (`NICO_DPF_IMAGE_REPO`, default `nvcr.io/nvidia/doca/dpf-system`)
    is set explicitly and pulls anonymously (the GA `nvidia/doca` images are
    public); set `NICO_DPF_IMAGE_PULL_SECRET` only for a private registry.
@@ -772,7 +773,9 @@ DPUService charts live).
 > the packaged chart - it selects the doca-platform chart/CRDs to install, and
 > `NICO_DPF_IMAGE_TAG` defaults to the same release. Version bumps are commits
 > in this repo that move the submodule and the pin file together, not an
-> environment variable. Keep your
+> environment variable. When `NICO_DPF_SRC` is set, the installed chart/CRDs
+> come from that checkout instead; `setup.sh` warns, but does not stop, when
+> its HEAD differs from the pin. Keep your
 > mirrored/self-built artifacts on the same version, or set `NICO_DPF_IMAGE_TAG`
 > explicitly when they diverge.
 
