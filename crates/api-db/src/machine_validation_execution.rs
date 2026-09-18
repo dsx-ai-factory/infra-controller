@@ -240,6 +240,15 @@ pub async fn record_result(
     Ok(first_terminal)
 }
 
+/// `HeartbeatNotAccepted` means the run is missing or inactive, the target does
+/// not belong to the run, or the targeted item or attempt is missing or inactive.
+/// These cases share one rejection; it does not diagnose which condition failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeartbeatNotAccepted;
+
+/// `record_heartbeat` records progress for an active run and, when provided,
+/// its active item and attempt. A rejected heartbeat can follow earlier writes
+/// in this transaction, so the caller must roll back on `NotApplied`.
 pub async fn record_heartbeat(
     txn: &mut PgConnection,
     validation_id: &MachineValidationId,
@@ -247,28 +256,32 @@ pub async fn record_heartbeat(
     attempt_id: Option<&MachineValidationAttemptId>,
     test_id: Option<&str>,
     observed_at: DateTime<Utc>,
-) -> DatabaseResult<bool> {
+) -> DatabaseResult<ConditionalWrite<(), HeartbeatNotAccepted>> {
     let targets_run_item = run_item_id.is_some() || attempt_id.is_some() || test_id.is_some();
-    let Some(run_item_id) =
+    let run_item_id =
         resolve_run_item_for_heartbeat(txn, validation_id, run_item_id, attempt_id, test_id)
-            .await?
-    else {
-        return if targets_run_item {
-            Ok(false)
-        } else {
-            update_run_heartbeat(txn, validation_id, observed_at).await
-        };
-    };
+            .await?;
+    if targets_run_item && run_item_id.is_none() {
+        return Ok(ConditionalWrite::NotApplied(HeartbeatNotAccepted));
+    }
 
     if !update_run_heartbeat(txn, validation_id, observed_at).await? {
-        return Ok(false);
+        return Ok(ConditionalWrite::NotApplied(HeartbeatNotAccepted));
     }
+
+    let Some(run_item_id) = run_item_id else {
+        return Ok(ConditionalWrite::Applied(()));
+    };
 
     if !update_run_item_heartbeat(txn, validation_id, &run_item_id, observed_at).await? {
-        return Ok(false);
+        return Ok(ConditionalWrite::NotApplied(HeartbeatNotAccepted));
     }
 
-    update_attempt_heartbeat(txn, &run_item_id, attempt_id, observed_at).await
+    if !update_attempt_heartbeat(txn, &run_item_id, attempt_id, observed_at).await? {
+        return Ok(ConditionalWrite::NotApplied(HeartbeatNotAccepted));
+    }
+
+    Ok(ConditionalWrite::Applied(()))
 }
 
 pub async fn find_stale_active_attempts(
@@ -1020,6 +1033,56 @@ mod tests {
             .map_err(|e| DatabaseError::query(ATTEMPT_QUERY, e))?;
 
         Ok(attempt_id)
+    }
+
+    #[crate::sqlx_test]
+    async fn run_only_heartbeat_applies_until_completion(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine_validation::{MachineValidationState, MachineValidationStatus};
+
+        let observed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut txn = pool.begin().await?;
+        let id = insert_active_validation(txn.as_mut(), observed_at).await?;
+        assert_eq!(
+            record_heartbeat(txn.as_mut(), &id, None, None, None, observed_at).await?,
+            ConditionalWrite::Applied(())
+        );
+        txn.commit().await?;
+        let run = crate::machine_validation::find_by_id(&pool, &id).await?;
+        assert_eq!(run.last_heartbeat_at, Some(observed_at));
+
+        let mut txn = pool.begin().await?;
+        let ConditionalWrite::Applied(_) = crate::machine_validation::update_end_time_if_active(
+            txn.as_mut(),
+            &id,
+            &MachineValidationStatus {
+                state: MachineValidationState::Success,
+                ..MachineValidationStatus::default()
+            },
+        )
+        .await?
+        else {
+            panic!("active validation should complete");
+        };
+        assert_eq!(
+            record_heartbeat(
+                txn.as_mut(),
+                &id,
+                None,
+                None,
+                None,
+                observed_at + chrono::Duration::seconds(1),
+            )
+            .await?,
+            ConditionalWrite::NotApplied(HeartbeatNotAccepted)
+        );
+        // Commit the rejected call so the reload catches any unintended heartbeat write.
+        txn.commit().await?;
+        let run = crate::machine_validation::find_by_id(&pool, &id).await?;
+        assert_eq!(run.last_heartbeat_at, Some(observed_at));
+
+        Ok(())
     }
 
     #[crate::sqlx_test]

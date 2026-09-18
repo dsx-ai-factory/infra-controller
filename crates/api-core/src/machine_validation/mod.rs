@@ -24,7 +24,7 @@ use std::sync::Arc;
 use carbide_machine_controller::config::machine_validation::MachineValidationConfig;
 use carbide_utils::managed_loop::{self, LoopManager};
 use carbide_utils::periodic_timer::PeriodicTimer;
-use db::machine_validation::StateColumn;
+use db::machine_validation::{StateColumn, ValidationNotActive};
 use db::{ConditionalWrite, ObjectColumnFilter};
 use model::machine::{FailureCause, FailureDetails, FailureSource};
 use model::machine_validation::{
@@ -404,7 +404,10 @@ async fn reconcile_terminal_run_items(
         status,
     )
     .await?;
-    Ok(completed.then(|| MachineValidationCompleted {
+    if let ConditionalWrite::NotApplied(ValidationNotActive) = completed {
+        return Ok(None);
+    }
+    Ok(Some(MachineValidationCompleted {
         outcome: MachineValidationOutcome::Passed,
         cause: MachineValidationFailureCause::None,
         machine_id: validation.machine_id,
@@ -493,7 +496,7 @@ async fn complete_active_validation_as_failed(
     )
     .await?;
 
-    if !completed {
+    if let ConditionalWrite::NotApplied(ValidationNotActive) = completed {
         return Ok(None);
     }
 
@@ -707,7 +710,7 @@ mod tests {
         // The API can commit a heartbeat after selection but before the
         // monitor acquires the parent run lock. Reuse that snapshot below.
         let mut heartbeat_txn = pool.begin().await?;
-        assert!(
+        assert_eq!(
             db::machine_validation_execution::record_heartbeat(
                 heartbeat_txn.as_mut(),
                 &validation_id,
@@ -716,7 +719,8 @@ mod tests {
                 None,
                 now,
             )
-            .await?
+            .await?,
+            ConditionalWrite::Applied(())
         );
         heartbeat_txn.commit().await?;
 
