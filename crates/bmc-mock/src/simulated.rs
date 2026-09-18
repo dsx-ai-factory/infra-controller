@@ -20,7 +20,8 @@ use std::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::{
-    Callbacks, MockPowerState, POWER_CYCLE_DELAY, SetSystemPowerError, SystemPowerControl,
+    BootConfigPatch, CallbackError, Callbacks, InMemorySystemState, MockPowerState,
+    POWER_CYCLE_DELAY, SetSystemPowerError, SystemPowerControl, SystemStateData, VirtualMediaState,
 };
 
 /// Stateful callbacks for a generated BMC that is not connected to a real or
@@ -28,6 +29,7 @@ use crate::{
 /// devices such as a DPU BMC.
 #[derive(Debug, Default)]
 pub struct SimulatedCallbacks {
+    system_state: InMemorySystemState,
     power_state: Mutex<MockPowerState>,
 }
 
@@ -38,6 +40,30 @@ impl SimulatedCallbacks {
 }
 
 impl Callbacks for SimulatedCallbacks {
+    fn initialize_system(&self, system_id: &str, initial: SystemStateData) {
+        self.system_state.initialize_system(system_id, initial);
+    }
+
+    async fn get_system_state(&self, system_id: &str) -> Result<SystemStateData, CallbackError> {
+        self.system_state.get_system_state(system_id)
+    }
+
+    async fn set_boot_config(
+        &self,
+        system_id: &str,
+        patch: BootConfigPatch,
+    ) -> Result<(), CallbackError> {
+        self.system_state.set_boot_config(system_id, patch)
+    }
+
+    async fn set_virtual_media(
+        &self,
+        system_id: &str,
+        desired: VirtualMediaState,
+    ) -> Result<(), CallbackError> {
+        self.system_state.set_virtual_media(system_id, desired)
+    }
+
     fn get_power_state(&self) -> MockPowerState {
         let mut state = self.power_state.lock().unwrap();
         if matches!(

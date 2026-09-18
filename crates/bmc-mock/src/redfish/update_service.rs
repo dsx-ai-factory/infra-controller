@@ -1063,7 +1063,7 @@ mod tests {
         };
         machine_router(
             &info,
-            StdArc::new(NoopCallbacks),
+            StdArc::new(NoopCallbacks::default()),
             "test".into(),
             false,
             MachineRouterOptions::default(),

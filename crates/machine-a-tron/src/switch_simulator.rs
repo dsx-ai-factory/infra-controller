@@ -24,8 +24,9 @@ use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId}
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
-    POWER_CYCLE_DELAY, SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
+    BmcCommand, BootConfigPatch, CallbackError, Callbacks, HostMachineInfo, HostnameQuerying,
+    InMemorySystemState, MachineInfo, MockPowerState, POWER_CYCLE_DELAY, SetSystemPowerError,
+    SetSystemPowerResult, SystemPowerControl, SystemStateData, VirtualMediaState,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -88,11 +89,36 @@ impl SwitchLiveState {
 
 #[derive(Debug, Clone)]
 struct SwitchCallbacks {
+    system_state: InMemorySystemState,
     state: Arc<RwLock<SwitchLiveState>>,
     mailbox: ActorMailbox<SwitchMessage>,
 }
 
 impl Callbacks for SwitchCallbacks {
+    fn initialize_system(&self, system_id: &str, initial: SystemStateData) {
+        self.system_state.initialize_system(system_id, initial);
+    }
+
+    async fn get_system_state(&self, system_id: &str) -> Result<SystemStateData, CallbackError> {
+        self.system_state.get_system_state(system_id)
+    }
+
+    async fn set_boot_config(
+        &self,
+        system_id: &str,
+        patch: BootConfigPatch,
+    ) -> Result<(), CallbackError> {
+        self.system_state.set_boot_config(system_id, patch)
+    }
+
+    async fn set_virtual_media(
+        &self,
+        system_id: &str,
+        desired: VirtualMediaState,
+    ) -> Result<(), CallbackError> {
+        self.system_state.set_virtual_media(system_id, desired)
+    }
+
     fn get_power_state(&self) -> MockPowerState {
         self.state.read().unwrap().power_state
     }
@@ -414,6 +440,7 @@ impl SwitchActor {
             &machine_info,
             self.app_context.clone(),
             Arc::new(SwitchCallbacks {
+                system_state: InMemorySystemState::default(),
                 state: self.live_state.clone(),
                 mailbox: mailbox.clone(),
             }),
@@ -583,6 +610,7 @@ impl SwitchHandle {
         request: SystemPowerControl,
     ) -> Result<(), SetSystemPowerError> {
         SwitchCallbacks {
+            system_state: InMemorySystemState::default(),
             state: self.0.live_state.clone(),
             mailbox: self.0.mailbox.clone(),
         }

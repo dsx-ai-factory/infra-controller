@@ -24,9 +24,10 @@ use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId}
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, Callbacks, HardwareType, HostMachineInfo, HostnameQuerying, MachineInfo,
-    MockPowerState, POWER_CYCLE_DELAY, SetSystemPowerError, SetSystemPowerResult,
-    SystemPowerControl,
+    BmcCommand, BootConfigPatch, CallbackError, Callbacks, HardwareType, HostMachineInfo,
+    HostnameQuerying, InMemorySystemState, MachineInfo, MockPowerState, POWER_CYCLE_DELAY,
+    SetSystemPowerError, SetSystemPowerResult, SystemPowerControl, SystemStateData,
+    VirtualMediaState,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -64,11 +65,36 @@ impl PowerShelfLiveState {
 
 #[derive(Debug, Clone)]
 struct PowerShelfCallbacks {
+    system_state: InMemorySystemState,
     state: Arc<RwLock<PowerShelfLiveState>>,
     mailbox: ActorMailbox<PowerShelfMessage>,
 }
 
 impl Callbacks for PowerShelfCallbacks {
+    fn initialize_system(&self, system_id: &str, initial: SystemStateData) {
+        self.system_state.initialize_system(system_id, initial);
+    }
+
+    async fn get_system_state(&self, system_id: &str) -> Result<SystemStateData, CallbackError> {
+        self.system_state.get_system_state(system_id)
+    }
+
+    async fn set_boot_config(
+        &self,
+        system_id: &str,
+        patch: BootConfigPatch,
+    ) -> Result<(), CallbackError> {
+        self.system_state.set_boot_config(system_id, patch)
+    }
+
+    async fn set_virtual_media(
+        &self,
+        system_id: &str,
+        desired: VirtualMediaState,
+    ) -> Result<(), CallbackError> {
+        self.system_state.set_virtual_media(system_id, desired)
+    }
+
     fn get_power_state(&self) -> MockPowerState {
         self.state.read().unwrap().power_state
     }
@@ -349,6 +375,7 @@ impl PowerShelfActor {
             &machine_info,
             self.app_context.clone(),
             Arc::new(PowerShelfCallbacks {
+                system_state: InMemorySystemState::default(),
                 state: self.live_state.clone(),
                 mailbox: mailbox.clone(),
             }),
@@ -504,6 +531,7 @@ impl PowerShelfHandle {
         request: SystemPowerControl,
     ) -> Result<(), SetSystemPowerError> {
         PowerShelfCallbacks {
+            system_state: InMemorySystemState::default(),
             state: self.0.live_state.clone(),
             mailbox: self.0.mailbox.clone(),
         }

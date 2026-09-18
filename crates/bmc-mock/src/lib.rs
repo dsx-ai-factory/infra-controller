@@ -75,6 +75,7 @@ pub mod simulated;
 mod auth_router;
 pub mod availability;
 mod bmc_state;
+mod boot;
 mod combined_server;
 mod event_controls;
 mod http;
@@ -88,11 +89,14 @@ mod mock_machine_router;
 mod rack_info;
 mod redfish;
 mod sse;
+mod system_state;
 mod tar_router;
 pub mod test_support;
 pub mod tls;
+mod virtual_media;
 
 pub use bmc_state::{BmcEvent, BmcState};
+pub use boot::{BootConfigPatch, BootSourceOverride, BootSourceOverridePatch, BootState};
 pub use carbide_axum_utils::authority_router::authority_router as combined_router;
 pub use carbide_axum_utils::injection;
 pub use combined_server::{CombinedServer, ListenerOrAddress};
@@ -115,6 +119,8 @@ pub use redfish::event_service::{
 };
 pub use redfish::virtual_media::DeviceConfig as VirtualMediaDeviceConfig;
 pub use sse::StreamStep;
+pub use system_state::{CallbackError, InMemorySystemState, SystemStateData};
+pub use virtual_media::VirtualMediaState;
 
 pub const DUMMY_FACTORY_USERNAME: &str = "root";
 pub const DUMMY_FACTORY_PASSWORD: &str = "factory_password";
@@ -281,6 +287,30 @@ pub trait Callbacks: std::fmt::Debug + Send + Sync + 'static {
         }?;
         self.send_power_command(reset_type)
     }
+
+    /// Initializes a system's boot/media state during BMC construction.
+    fn initialize_system(&self, system_id: &str, initial: SystemStateData);
+
+    /// Returns a consistent snapshot; fails if the system or its owner is unavailable.
+    fn get_system_state(
+        &self,
+        system_id: &str,
+    ) -> impl Future<Output = Result<SystemStateData, CallbackError>> + Send;
+
+    /// Applies a partial boot configuration to the owner's current state.
+    /// Fails if the system or its owner is unavailable.
+    fn set_boot_config(
+        &self,
+        system_id: &str,
+        patch: BootConfigPatch,
+    ) -> impl Future<Output = Result<(), CallbackError>> + Send;
+
+    /// Replaces media contents; fails if the owner or configured device is unavailable.
+    fn set_virtual_media(
+        &self,
+        system_id: &str,
+        desired: VirtualMediaState,
+    ) -> impl Future<Output = Result<(), CallbackError>> + Send;
 
     fn state_refresh_indication(&self);
 }

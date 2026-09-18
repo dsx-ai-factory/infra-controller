@@ -773,7 +773,7 @@ pub(crate) mod fixtures {
     pub(crate) fn router(auth: bool) -> (Router, BmcState<NoopCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(NoopCallbacks::default()),
             "sse-test".into(),
             auth,
             MachineRouterOptions {
@@ -866,7 +866,7 @@ mod tests {
     fn poisoned_state_does_not_panic_in_destructors() {
         let (router, bmc) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(NoopCallbacks::default()),
             "poison".into(),
             false,
             MachineRouterOptions::default(),
@@ -998,7 +998,7 @@ mod tests {
     fn router_with(limits: EventServiceConfig) -> (Router, BmcState<NoopCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(NoopCallbacks::default()),
             "sse-limits-test".into(),
             false,
             MachineRouterOptions {
@@ -1131,7 +1131,7 @@ mod tests {
                 };
                 let (router, state) = machine_router(
                     &info,
-                    Arc::new(NoopCallbacks),
+                    Arc::new(NoopCallbacks::default()),
                     "hardware-event-service".into(),
                     false,
                     MachineRouterOptions {
@@ -1302,7 +1302,7 @@ mod tests {
     async fn ipmi_cold_reset_closes_stream_and_invalidates_replay() {
         let (router, bmc) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(NoopCallbacks::default()),
             "ipmi-reset".into(),
             false,
             MachineRouterOptions {
@@ -1883,7 +1883,7 @@ mod tests {
     async fn manager_reset_without_outage_still_closes_sse() {
         let (router, bmc) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(NoopCallbacks::default()),
             "reset-test".into(),
             false,
             MachineRouterOptions::default(),
@@ -1975,7 +1975,7 @@ mod tests {
         // A profile without a log service still publishes, pointing at the system.
         let (bare, bare_bmc) = machine_router(
             &host_info(HardwareType::GenericAmi),
-            Arc::new(NoopCallbacks),
+            Arc::new(NoopCallbacks::default()),
             "bare-log".into(),
             false,
             MachineRouterOptions::default(),

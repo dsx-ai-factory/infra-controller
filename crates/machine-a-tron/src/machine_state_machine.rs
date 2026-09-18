@@ -23,8 +23,9 @@ use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::{
-    BmcCommand, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
-    SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
+    BmcCommand, BmcEvent, BmcState, BootConfigPatch, CallbackError, Callbacks, HostnameQuerying,
+    InMemorySystemState, MachineInfo, MockPowerState, SetSystemPowerError, SetSystemPowerResult,
+    SystemPowerControl, SystemStateData, VirtualMediaState,
 };
 use carbide_network::virtualization::build_dual_stack_list;
 use carbide_uuid::machine::{DpuMachineId, InvalidMachineType, MachineId, MachineInterfaceId};
@@ -136,6 +137,7 @@ pub(super) struct MachineStateMachine {
     fsm: MachineFsm,
     bmc_mock: Option<Arc<BmcMockWrapperHandle>>,
     bmc_state: Option<BmcState<LiveStateCallbacks>>,
+    system_state: InMemorySystemState,
     bmc_injection: Arc<InjectionStore>,
     power_cycle_deadline: Option<Instant>,
     machine_on_deadline: Option<Instant>,
@@ -159,6 +161,7 @@ pub(super) struct MachineStateMachine {
 
 #[derive(Debug, Clone)]
 pub(super) struct LiveStateCallbacks {
+    system_state: InMemorySystemState,
     state: Arc<RwLock<LiveState>>,
     command_channel: mpsc::UnboundedSender<BmcCommand>,
 }
@@ -167,8 +170,10 @@ impl LiveStateCallbacks {
     pub(super) fn new(
         state: Arc<RwLock<LiveState>>,
         command_channel: mpsc::UnboundedSender<BmcCommand>,
+        system_state: InMemorySystemState,
     ) -> Self {
         Self {
+            system_state,
             state,
             command_channel,
         }
@@ -176,6 +181,30 @@ impl LiveStateCallbacks {
 }
 
 impl Callbacks for LiveStateCallbacks {
+    fn initialize_system(&self, system_id: &str, initial: SystemStateData) {
+        self.system_state.initialize_system(system_id, initial);
+    }
+
+    async fn get_system_state(&self, system_id: &str) -> Result<SystemStateData, CallbackError> {
+        self.system_state.get_system_state(system_id)
+    }
+
+    async fn set_boot_config(
+        &self,
+        system_id: &str,
+        patch: BootConfigPatch,
+    ) -> Result<(), CallbackError> {
+        self.system_state.set_boot_config(system_id, patch)
+    }
+
+    async fn set_virtual_media(
+        &self,
+        system_id: &str,
+        desired: VirtualMediaState,
+    ) -> Result<(), CallbackError> {
+        self.system_state.set_virtual_media(system_id, desired)
+    }
+
     fn get_power_state(&self) -> MockPowerState {
         self.state.read().unwrap().power_state
     }
@@ -388,6 +417,7 @@ impl MachineStateMachine {
             actions: actions.into_iter().collect(),
             bmc_mock: None,
             bmc_state: None,
+            system_state: InMemorySystemState::default(),
             bmc_injection: Arc::new(InjectionStore::new()),
             power_cycle_deadline: None,
             machine_on_deadline: None,
@@ -438,6 +468,7 @@ impl MachineStateMachine {
             bmc_dhcp_info: None,
             bmc_mock: None,
             bmc_state: None,
+            system_state: InMemorySystemState::default(),
             bmc_injection: Arc::new(InjectionStore::new()),
             machine_dhcp_info: None,
             machine_interface_id: None,
@@ -621,6 +652,9 @@ impl MachineStateMachine {
                     Err(_) => return Some(self.config.run_interval_working),
                 },
                 FsmAction::BmcEvent(event) => {
+                    if matches!(event, BmcEvent::BootCompleted) {
+                        self.system_state.on_boot_completed();
+                    }
                     if let Some(bmc_state) = &self.bmc_state {
                         bmc_state.on_event(event)
                     }
@@ -1350,6 +1384,7 @@ impl MachineStateMachine {
             Arc::new(LiveStateCallbacks::new(
                 self.live_state.clone(),
                 self.bmc_command_channel.clone(),
+                self.system_state.clone(),
             )),
             Arc::new(LiveStateHostnameQuery(self.live_state.clone())),
             self.mat_host_id,

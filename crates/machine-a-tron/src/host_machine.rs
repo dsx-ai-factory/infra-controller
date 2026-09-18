@@ -592,8 +592,12 @@ impl MachineHandle {
         &self,
         request: SystemPowerControl,
     ) -> Result<(), SetSystemPowerError> {
-        LiveStateCallbacks::new(self.0.live_state.clone(), self.0.bmc_control_tx.clone())
-            .set_power_state(request)
+        LiveStateCallbacks::new(
+            self.0.live_state.clone(),
+            self.0.bmc_control_tx.clone(),
+            Default::default(),
+        )
+        .set_power_state(request)
     }
 
     pub(crate) fn power_state(&self) -> MockPowerState {

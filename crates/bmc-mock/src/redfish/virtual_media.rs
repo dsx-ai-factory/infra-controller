@@ -16,17 +16,17 @@
  */
 
 use std::borrow::Cow;
-use std::sync::Mutex;
 
 use axum::Router;
 use axum::extract::{Json, Path, State};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
-use crate::{Callbacks, http, redfish};
+use crate::{CallbackError, Callbacks, VirtualMediaState as Media, http, redfish};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceConfig {
@@ -35,16 +35,8 @@ pub struct DeviceConfig {
     pub media_types: Vec<Cow<'static, str>>,
 }
 
-#[derive(Default)]
-struct Media {
-    image: Option<String>,
-    inserted: bool,
-    write_protected: bool,
-}
-
 struct DeviceState {
     config: DeviceConfig,
-    media: Mutex<Media>,
 }
 
 pub(crate) struct VirtualMediaState {
@@ -56,13 +48,7 @@ impl VirtualMediaState {
         Self {
             devices: devices
                 .into_iter()
-                .map(|config| DeviceState {
-                    config,
-                    media: Mutex::new(Media {
-                        write_protected: true,
-                        ..Default::default()
-                    }),
-                })
+                .map(|config| DeviceState { config })
                 .collect(),
         }
     }
@@ -73,8 +59,8 @@ impl VirtualMediaState {
             .find(|device| device.config.id == device_id)
     }
 
-    pub(crate) fn desired_state(&self) -> Vec<serde_json::Value> {
-        self.devices.iter().map(DeviceState::state_json).collect()
+    pub(crate) fn device_ids(&self) -> impl Iterator<Item = &str> {
+        self.devices.iter().map(|device| device.config.id.as_ref())
     }
 }
 
@@ -156,15 +142,31 @@ async fn get_device<C: Callbacks>(
     State(state): State<BmcState<C>>,
     Path((system_id, device_id)): Path<(String, String)>,
 ) -> Response {
-    let Some(device) = state
-        .system_state
-        .find(&system_id)
-        .and_then(|system| system.virtual_media())
-        .and_then(|virtual_media| virtual_media.find_device(&device_id))
+    let Some(system) = state.system_state.find(&system_id) else {
+        return http::not_found();
+    };
+    let Some(device) = system
+        .virtual_media()
+        .and_then(|media| media.find_device(&device_id))
     else {
         return http::not_found();
     };
-    device.to_json(&system_id).into_ok_response()
+    match system
+        .callbacks
+        .get_system_state(system.id())
+        .await
+        .and_then(|data| {
+            data.virtual_media
+                .get(&device_id)
+                .map(|media| device.to_json(&system_id, media))
+                .ok_or_else(|| CallbackError::VirtualMediaNotConfigured(device_id.clone()))
+        }) {
+        Ok(json) => json.into_ok_response(),
+        Err(error) => {
+            tracing::error!(%error, "could not read virtual media state");
+            http::redfish_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+        }
+    }
 }
 
 async fn insert_media<C: Callbacks>(
@@ -172,10 +174,11 @@ async fn insert_media<C: Callbacks>(
     Path((system_id, device_id)): Path<(String, String)>,
     Json(request): Json<serde_json::Value>,
 ) -> Response {
-    let Some(device) = state
-        .system_state
-        .find(&system_id)
-        .and_then(|system| system.virtual_media())
+    let Some(system) = state.system_state.find(&system_id) else {
+        return http::not_found();
+    };
+    let Some(_device) = system
+        .virtual_media()
         .and_then(|virtual_media| virtual_media.find_device(&device_id))
     else {
         return http::not_found();
@@ -198,47 +201,58 @@ async fn insert_media<C: Callbacks>(
         None => true,
         Some(_) => return http::bad_request("WriteProtected must be a boolean"),
     };
-    *device.media.lock().expect("mutex poisoned") = Media {
-        image: Some(image.to_string()),
-        inserted: true,
-        write_protected,
-    };
-    http::ok_no_content()
+    update_media(
+        system,
+        Media {
+            device_id,
+            image: Some(image.to_string()),
+            write_protected,
+        },
+    )
+    .await
 }
 
 async fn eject_media<C: Callbacks>(
     State(state): State<BmcState<C>>,
     Path((system_id, device_id)): Path<(String, String)>,
 ) -> Response {
-    let Some(device) = state
-        .system_state
-        .find(&system_id)
-        .and_then(|system| system.virtual_media())
+    let Some(system) = state.system_state.find(&system_id) else {
+        return http::not_found();
+    };
+    let Some(_device) = system
+        .virtual_media()
         .and_then(|virtual_media| virtual_media.find_device(&device_id))
     else {
         return http::not_found();
     };
-    *device.media.lock().expect("mutex poisoned") = Media {
-        write_protected: true,
-        ..Default::default()
-    };
-    http::ok_no_content()
+    update_media(
+        system,
+        Media {
+            device_id,
+            image: None,
+            write_protected: true,
+        },
+    )
+    .await
+}
+
+async fn update_media<C: Callbacks>(
+    system: &redfish::computer_system::SingleSystemState<C>,
+    media: Media,
+) -> Response {
+    match system.callbacks.set_virtual_media(system.id(), media).await {
+        Ok(()) => http::ok_no_content(),
+        Err(error) => {
+            tracing::error!(%error, "could not update virtual media state");
+            http::callback_error(error)
+        }
+    }
 }
 
 impl DeviceState {
-    fn state_json(&self) -> serde_json::Value {
-        let media = self.media.lock().expect("mutex poisoned");
-        json!({
-            "Id": self.config.id,
-            "Image": media.image,
-            "Inserted": media.inserted,
-            "WriteProtected": media.write_protected,
-        })
-    }
-
-    fn to_json(&self, system_id: &str) -> serde_json::Value {
+    fn to_json(&self, system_id: &str, media: &Media) -> serde_json::Value {
         let resource = resource(system_id, &self.config.id);
-        resource.json_patch().patch(self.state_json()).patch(json!({
+        resource.json_patch().patch(media.to_json()).patch(json!({
             "Name": self.config.name,
             "MediaTypes": self.config.media_types,
             "ConnectedVia": "URI",
@@ -262,21 +276,51 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
     use http_body_util::BodyExt;
+    use nv_redfish::schema::computer_system::BootSourceOverrideEnabled;
     use tower::ServiceExt;
 
     use super::*;
     use crate::test_support::host_info;
     use crate::{
-        Callbacks, HardwareType, MachineRouterOptions, MockPowerState, SetSystemPowerError,
-        SystemPowerControl, machine_router,
+        BootConfigPatch, Callbacks, HardwareType, InMemorySystemState, MachineRouterOptions,
+        MockPowerState, SetSystemPowerError, SystemPowerControl, SystemStateData,
+        VirtualMediaState, machine_router,
     };
 
     #[derive(Debug, Default)]
     struct RecordingCallbacks {
+        system_state: InMemorySystemState,
         refresh_count: AtomicUsize,
     }
 
     impl Callbacks for RecordingCallbacks {
+        fn initialize_system(&self, system_id: &str, initial: SystemStateData) {
+            self.system_state.initialize_system(system_id, initial);
+        }
+
+        async fn get_system_state(
+            &self,
+            system_id: &str,
+        ) -> Result<SystemStateData, CallbackError> {
+            self.system_state.get_system_state(system_id)
+        }
+
+        async fn set_boot_config(
+            &self,
+            system_id: &str,
+            patch: BootConfigPatch,
+        ) -> Result<(), CallbackError> {
+            self.system_state.set_boot_config(system_id, patch)
+        }
+
+        async fn set_virtual_media(
+            &self,
+            system_id: &str,
+            desired: VirtualMediaState,
+        ) -> Result<(), CallbackError> {
+            self.system_state.set_virtual_media(system_id, desired)
+        }
+
         fn get_power_state(&self) -> MockPowerState {
             MockPowerState::Off
         }
@@ -468,31 +512,27 @@ mod tests {
         assert_eq!(body["Boot"]["BootSourceOverrideMode"], "UEFI");
         assert_eq!(body["Boot"]["BootSourceOverrideEnabled"], "Once");
         assert_eq!(body["Boot"]["BootSourceOverrideTarget"], "Cd");
-    }
 
-    #[tokio::test]
-    async fn preserves_unrecognized_boot_override_values() {
-        let (router, callbacks) = test_router();
-        let system = "/redfish/v1/Systems/System.Embedded.1";
+        let snapshot = callbacks
+            .get_system_state("System.Embedded.1")
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.boot.source.enabled,
+            Some(BootSourceOverrideEnabled::Once)
+        );
+        assert_eq!(snapshot.virtual_media["Cd"].image, None);
+        assert_eq!(snapshot.virtual_media["ConfigCd"].image, None);
 
-        let (status, _) = request(
-            &router,
-            Method::PATCH,
-            system,
-            Some(json!({
-                "Boot": {
-                    "BootSourceOverrideTarget": "VendorSpecific",
-                }
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(callbacks.refresh_count.load(Ordering::Relaxed), 1);
-
+        callbacks.system_state.on_boot_completed();
         let (_, body) = request(&router, Method::GET, system, None).await;
         assert_eq!(
-            body.unwrap()["Boot"]["BootSourceOverrideTarget"],
-            "VendorSpecific"
+            body.unwrap()["Boot"]["BootSourceOverrideEnabled"],
+            "Disabled"
+        );
+        assert_eq!(
+            snapshot.boot.source.enabled,
+            Some(BootSourceOverrideEnabled::Once)
         );
     }
 }

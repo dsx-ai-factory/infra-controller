@@ -277,7 +277,7 @@ mod tests {
                 &mut mac_pool,
                 ranges_config,
             )),
-            Arc::new(NoopCallbacks),
+            Arc::new(NoopCallbacks::default()),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions::default(),

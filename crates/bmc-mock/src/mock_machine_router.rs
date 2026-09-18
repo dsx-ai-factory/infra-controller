@@ -180,6 +180,7 @@ fn machine_router_inner<C: Callbacks>(
     let system_state = Arc::new(crate::redfish::computer_system::SystemState::from_config(
         system_config,
         &options,
+        &callbacks,
     ));
     let chassis_state = Arc::new(crate::redfish::chassis::ChassisState::from_config(
         chassis_config,
@@ -293,7 +294,7 @@ mod tests {
         for (scenario, profile, event_service) in disabled {
             let (router, state) = machine_router_inner(
                 &host_info(crate::HardwareType::DellPowerEdgeR750),
-                Arc::new(NoopCallbacks),
+                Arc::new(NoopCallbacks::default()),
                 "disabled-event-service".into(),
                 false,
                 Arc::new(InjectionStore::new()),

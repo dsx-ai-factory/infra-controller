@@ -599,10 +599,14 @@ mod tests {
         IPMI_SIM_EXECUTABLE, IpmiSimConfig, MockConsole, stable_guid, start, validate_credential,
         validate_executable_in_path,
     };
-    use crate::{Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl};
+    use crate::{
+        BootConfigPatch, CallbackError, Callbacks, InMemorySystemState, MockPowerState,
+        SetSystemPowerError, SystemPowerControl, SystemStateData, VirtualMediaState,
+    };
 
     #[derive(Debug, Default)]
     struct RecordingCallbacks {
+        system_state: InMemorySystemState,
         commands: Mutex<Vec<SystemPowerControl>>,
         command_received: Notify,
     }
@@ -624,6 +628,33 @@ mod tests {
     }
 
     impl Callbacks for RecordingCallbacks {
+        fn initialize_system(&self, system_id: &str, initial: SystemStateData) {
+            self.system_state.initialize_system(system_id, initial);
+        }
+
+        async fn get_system_state(
+            &self,
+            system_id: &str,
+        ) -> Result<SystemStateData, CallbackError> {
+            self.system_state.get_system_state(system_id)
+        }
+
+        async fn set_boot_config(
+            &self,
+            system_id: &str,
+            patch: BootConfigPatch,
+        ) -> Result<(), CallbackError> {
+            self.system_state.set_boot_config(system_id, patch)
+        }
+
+        async fn set_virtual_media(
+            &self,
+            system_id: &str,
+            desired: VirtualMediaState,
+        ) -> Result<(), CallbackError> {
+            self.system_state.set_virtual_media(system_id, desired)
+        }
+
         fn get_power_state(&self) -> MockPowerState {
             MockPowerState::On
         }

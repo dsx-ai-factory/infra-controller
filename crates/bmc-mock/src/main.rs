@@ -31,9 +31,10 @@ use bmc_mock::mac_address_pool::{
     RangesConfig as MacAddressRangesConfig,
 };
 use bmc_mock::{
-    BmcCommand, BmcState, Callbacks, DpuFirmwareVersions, DpuMachineInfo, DpuSettings,
-    HardwareType, HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions,
-    MockPowerState, SetSystemPowerError, SystemPowerControl, VirtualMediaDeviceConfig,
+    BmcCommand, BmcState, BootConfigPatch, CallbackError, Callbacks, DpuFirmwareVersions,
+    DpuMachineInfo, DpuSettings, HardwareType, HostMachineInfo, InMemorySystemState,
+    ListenerOrAddress, MachineInfo, MachineRouterOptions, MockPowerState, SetSystemPowerError,
+    SystemPowerControl, SystemStateData, VirtualMediaDeviceConfig, VirtualMediaState,
     redfish_error_envelope,
 };
 use command_line::{MachineRole, StateBackend};
@@ -481,16 +482,44 @@ fn generated_machine_info(config: &GeneratedMockConfig) -> MachineInfo {
 
 #[derive(Debug)]
 struct ChannelCallbacks {
+    system_state: InMemorySystemState,
     command_channel: mpsc::UnboundedSender<BmcCommand>,
 }
 
 impl ChannelCallbacks {
     fn new(command_channel: mpsc::UnboundedSender<BmcCommand>) -> Self {
-        Self { command_channel }
+        Self {
+            command_channel,
+            system_state: InMemorySystemState::default(),
+        }
     }
 }
 
 impl Callbacks for ChannelCallbacks {
+    fn initialize_system(&self, system_id: &str, initial: SystemStateData) {
+        self.system_state.initialize_system(system_id, initial);
+    }
+
+    async fn get_system_state(&self, system_id: &str) -> Result<SystemStateData, CallbackError> {
+        self.system_state.get_system_state(system_id)
+    }
+
+    async fn set_boot_config(
+        &self,
+        system_id: &str,
+        patch: BootConfigPatch,
+    ) -> Result<(), CallbackError> {
+        self.system_state.set_boot_config(system_id, patch)
+    }
+
+    async fn set_virtual_media(
+        &self,
+        system_id: &str,
+        desired: VirtualMediaState,
+    ) -> Result<(), CallbackError> {
+        self.system_state.set_virtual_media(system_id, desired)
+    }
+
     fn get_power_state(&self) -> MockPowerState {
         MockPowerState::On
     }

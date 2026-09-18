@@ -19,9 +19,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use nv_redfish::schema::computer_system::{BootSource, BootSourceOverrideEnabled};
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
 use tokio::io::AsyncReadExt;
@@ -33,9 +34,10 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use url::Url;
 
 use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult};
-use crate::redfish::computer_system::{SingleSystemState, SystemState};
+use crate::boot::{BootSourceOverride, BootState};
 use crate::{
-    BmcState, BootOptionKind, Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl,
+    BmcState, BootConfigPatch, BootOptionKind, CallbackError, Callbacks, MockPowerState,
+    SetSystemPowerError, SystemPowerControl, SystemStateData, VirtualMediaState,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +49,24 @@ enum VirtualMediaError {
 }
 
 type VirtualMediaResult = Result<(), VirtualMediaError>;
+
+impl From<VirtualMediaError> for CallbackError {
+    fn from(error: VirtualMediaError) -> Self {
+        match error {
+            VirtualMediaError::BadRequest(message) => Self::BadRequest(message),
+            error => Self::InternalError(error.into()),
+        }
+    }
+}
+
+impl From<SetSystemPowerError> for CallbackError {
+    fn from(error: SetSystemPowerError) -> Self {
+        match error {
+            SetSystemPowerError::BadRequest(message) => Self::BadRequest(message),
+            error => Self::InternalError(error.into()),
+        }
+    }
+}
 
 /// Maximum duration of one virsh attempt, including output collection.
 const VIRSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -68,6 +88,9 @@ pub struct Config {
 /// Power reads return the last observation, initially Off, updated at actor startup
 /// and after power commands, binding, and refresh notifications. Power commands
 /// return once enqueued; execution failures are logged by the actor.
+/// Boot and media requests read or update actor-owned desired state. A write reply
+/// acknowledges the state change, not virsh I/O. Refresh reconciles that state
+/// and logs execution failures.
 /// Dropping the handle cancels the actor. Once binding starts, it finishes even if
 /// its caller stops awaiting the reply, to avoid interrupting XML updates.
 #[derive(Debug)]
@@ -81,12 +104,30 @@ pub struct LibvirtCallbacks {
 #[derive(Debug)]
 enum LibvirtMessage {
     Run,
+    InitializeState {
+        system_id: String,
+        state: SystemStateData,
+    },
     Bind {
-        state: Weak<SystemState<LibvirtCallbacks>>,
-        reply: oneshot::Sender<Result<(), String>>,
+        system_id: String,
+        reply: oneshot::Sender<Result<(), CallbackError>>,
     },
     SendPowerCommand {
         reset_type: SystemPowerControl,
+    },
+    SetBootConfig {
+        system_id: String,
+        patch: BootConfigPatch,
+        reply: oneshot::Sender<Result<(), CallbackError>>,
+    },
+    SetVirtualMedia {
+        system_id: String,
+        state: VirtualMediaState,
+        reply: oneshot::Sender<Result<(), CallbackError>>,
+    },
+    GetSystemState {
+        system_id: String,
+        reply: oneshot::Sender<Result<SystemStateData, CallbackError>>,
     },
     Refresh,
 }
@@ -94,7 +135,8 @@ enum LibvirtMessage {
 struct LibvirtBackend {
     config: Config,
     restore_boot_after_power_on: bool,
-    system_state: Option<Weak<SystemState<LibvirtCallbacks>>>,
+    system_states: BTreeMap<String, SystemStateData>,
+    controlled_system: Option<String>,
     applied_state: AppliedState,
     refresh_pending: Arc<AtomicBool>,
     power_state: Arc<RwLock<MockPowerState>>,
@@ -103,8 +145,8 @@ struct LibvirtBackend {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct AppliedState {
     persistent_boot_selection: Option<BootOptionKind>,
-    boot_source_override: serde_json::Value,
-    virtual_media: BTreeMap<String, serde_json::Value>,
+    boot_source_override: BootSourceOverride,
+    virtual_media: BTreeMap<String, VirtualMediaState>,
 }
 
 impl LibvirtCallbacks {
@@ -117,7 +159,8 @@ impl LibvirtCallbacks {
             LibvirtBackend {
                 config,
                 restore_boot_after_power_on: false,
-                system_state: None,
+                system_states: BTreeMap::new(),
+                controlled_system: None,
                 applied_state: AppliedState::default(),
                 refresh_pending: refresh_pending.clone(),
                 power_state: power_state.clone(),
@@ -147,37 +190,41 @@ impl LibvirtCallbacks {
     ///
     /// Returns an error when the BMC has no controlled `ComputerSystem`, this
     /// backend is already bound, or libvirt cannot apply the initial selection.
-    pub async fn bind_state(&self, state: &BmcState<Self>) -> Result<(), String> {
+    pub async fn bind_state(&self, state: &BmcState<Self>) -> Result<(), CallbackError> {
+        let system = state
+            .system_state
+            .controlled_system()
+            .ok_or_else(|| eyre::eyre!("libvirt backend has no controlled ComputerSystem"))?;
         let (reply, response) = oneshot::channel();
         self.mailbox
             .send(LibvirtMessage::Bind {
-                state: Arc::downgrade(&state.system_state),
+                system_id: system.id().to_string(),
                 reply,
             })
-            .map_err(|error| error.to_string())?;
-        response.await.map_err(|error| error.to_string())?
+            .map_err(eyre::Error::from)?;
+        response.await.map_err(eyre::Error::from)?
     }
 }
 
 impl LibvirtBackend {
-    async fn bind_state(
-        &mut self,
-        state: Weak<SystemState<LibvirtCallbacks>>,
-    ) -> Result<(), String> {
-        let system_state = state
-            .upgrade()
-            .ok_or_else(|| "BMC mock state was dropped before binding".to_string())?;
-        let controlled_system = system_state
-            .controlled_system()
-            .ok_or_else(|| "libvirt backend has no controlled ComputerSystem".to_string())?;
-        if self.system_state.is_some() {
-            return Err("libvirt backend state is already bound".to_string());
+    fn controlled_state(&self) -> Option<&SystemStateData> {
+        self.controlled_system
+            .as_ref()
+            .and_then(|id| self.system_states.get(id))
+    }
+
+    async fn bind_state(&mut self, system_id: String) -> Result<(), CallbackError> {
+        if self.controlled_system.is_some() {
+            return Err(eyre::eyre!("libvirt backend state is already bound").into());
         }
-        let applied = AppliedState::from(controlled_system);
+        let state = self
+            .system_states
+            .get(&system_id)
+            .ok_or_else(|| CallbackError::SystemNotInitialized(system_id.clone()))?;
+        let applied = AppliedState::from(state);
         self.set_persistent_boot_selection(applied.persistent_boot_selection)
-            .await
-            .map_err(|error| error.to_string())?;
-        self.system_state = Some(state);
+            .await?;
+        self.controlled_system = Some(system_id);
         self.applied_state = applied;
         Ok(())
     }
@@ -259,8 +306,8 @@ impl LibvirtBackend {
         self.domain_command("start").await?;
         let restore_boot = std::mem::take(&mut self.restore_boot_after_power_on);
         if restore_boot {
-            if let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) {
-                system_state.on_boot_completed();
+            for state in self.system_states.values_mut() {
+                state.boot.on_boot_completed();
             }
             self.restore_persistent_boot_order().await?;
         }
@@ -269,35 +316,22 @@ impl LibvirtBackend {
 
     async fn restore_persistent_boot_order(&self) -> Result<(), SetSystemPowerError> {
         let selection = self
-            .system_state
-            .as_ref()
-            .and_then(Weak::upgrade)
-            .and_then(|state| {
-                state
-                    .controlled_system()
-                    .and_then(SingleSystemState::resolve_persistent_boot_selection)
-            });
+            .controlled_state()
+            .and_then(|state| state.boot.persistent_selection());
         self.set_persistent_boot_selection(selection).await
     }
 
     async fn reapply_effective_boot_order(&mut self) -> Result<(), SetSystemPowerError> {
-        let Some(state) = self.system_state.as_ref().and_then(Weak::upgrade) else {
-            return Err(SetSystemPowerError::CommandSendError(
-                "libvirt backend is not bound to BMC mock state".to_string(),
-            ));
-        };
-        let Some(system) = state.controlled_system() else {
-            return Err(SetSystemPowerError::CommandSendError(
-                "BMC mock state has no controlled ComputerSystem".to_string(),
-            ));
-        };
-        let boot_source_override = system.boot_source_override();
-        if boot_source_override_is_active(&boot_source_override) {
-            self.set_boot_source_override(&boot_source_override).await
-        } else {
-            self.set_persistent_boot_selection(system.resolve_persistent_boot_selection())
-                .await
-        }
+        let boot = self
+            .controlled_state()
+            .ok_or_else(|| {
+                SetSystemPowerError::CommandSendError(
+                    "libvirt backend is not bound to BMC mock state".to_string(),
+                )
+            })?
+            .boot
+            .clone();
+        self.apply_boot_config(&boot).await
     }
 
     async fn set_persistent_boot_selection(
@@ -380,28 +414,26 @@ impl LibvirtBackend {
 
     async fn set_boot_source_override(
         &mut self,
-        boot_source_override: &serde_json::Value,
+        boot_source_override: &BootSourceOverride,
     ) -> Result<(), SetSystemPowerError> {
-        let enabled = boot_source_override
-            .get("BootSourceOverrideEnabled")
-            .and_then(serde_json::Value::as_str);
-        let target = boot_source_override
-            .get("BootSourceOverrideTarget")
-            .and_then(serde_json::Value::as_str);
+        let enabled = boot_source_override.enabled;
+        let target = boot_source_override.target;
         let devices = match (enabled, target) {
-            (Some("Disabled"), _) | (_, Some("None")) => &["hd"][..],
-            (_, Some("Cd")) => &["cdrom", "hd"][..],
-            (_, Some("Hdd")) => &["hd"][..],
-            (_, Some("Pxe" | "UefiHttp")) => &["network", "hd"][..],
+            (Some(BootSourceOverrideEnabled::Disabled), _) | (_, Some(BootSource::None)) => {
+                &["hd"][..]
+            }
+            (_, Some(BootSource::Cd)) => &["cdrom", "hd"][..],
+            (_, Some(BootSource::Hdd)) => &["hd"][..],
+            (_, Some(BootSource::Pxe | BootSource::UefiHttp)) => &["network", "hd"][..],
             (_, Some(target)) => {
                 return Err(SetSystemPowerError::BadRequest(format!(
-                    "unsupported boot source override target: {target}"
+                    "unsupported boot source override target: {target:?}"
                 )));
             }
             (_, None) => return Ok(()),
         };
         self.set_boot_devices(devices).await?;
-        self.restore_boot_after_power_on = enabled == Some("Once");
+        self.restore_boot_after_power_on = enabled == Some(BootSourceOverrideEnabled::Once);
         Ok(())
     }
 
@@ -438,33 +470,11 @@ impl LibvirtBackend {
         self.detach_target(target).await
     }
 
-    async fn apply_virtual_media(&self, state: &serde_json::Value) -> VirtualMediaResult {
-        let device_id = state
-            .get("Id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                VirtualMediaError::BadRequest("virtual media state has no Id".to_string())
-            })?;
-        let inserted = state
-            .get("Inserted")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        if !inserted {
-            return self.eject_virtual_media(device_id).await;
-        }
-        let image = state
-            .get("Image")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                VirtualMediaError::BadRequest(format!(
-                    "inserted virtual media device {device_id} has no Image"
-                ))
-            })?;
-        let write_protected = state
-            .get("WriteProtected")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        self.insert_virtual_media(device_id, image, write_protected)
+    async fn apply_virtual_media(&self, state: &VirtualMediaState) -> VirtualMediaResult {
+        let Some(image) = state.image.as_deref() else {
+            return self.eject_virtual_media(&state.device_id).await;
+        };
+        self.insert_virtual_media(&state.device_id, image, state.write_protected)
             .await
     }
 
@@ -500,38 +510,32 @@ impl LibvirtBackend {
         }
         Ok(())
     }
-}
 
-impl<C: Callbacks> From<&SingleSystemState<C>> for AppliedState {
-    fn from(system: &SingleSystemState<C>) -> Self {
-        let virtual_media = system
-            .virtual_media()
-            .into_iter()
-            .flat_map(|virtual_media| virtual_media.desired_state())
-            .filter_map(|state| {
-                let device_id = state
-                    .get("Id")
-                    .and_then(serde_json::Value::as_str)?
-                    .to_string();
-                Some((device_id, state))
-            })
-            .collect();
-        Self {
-            persistent_boot_selection: system.resolve_persistent_boot_selection(),
-            boot_source_override: system.boot_source_override(),
-            virtual_media,
+    async fn apply_boot_config(&mut self, boot: &BootState) -> Result<(), SetSystemPowerError> {
+        if boot_source_override_is_active(&boot.source) {
+            self.set_boot_source_override(&boot.source).await
+        } else {
+            self.set_persistent_boot_selection(boot.persistent_selection())
+                .await
         }
     }
 }
 
-fn boot_source_override_is_active(boot_source_override: &serde_json::Value) -> bool {
-    let enabled = boot_source_override
-        .get("BootSourceOverrideEnabled")
-        .and_then(serde_json::Value::as_str);
-    let target = boot_source_override
-        .get("BootSourceOverrideTarget")
-        .and_then(serde_json::Value::as_str);
-    enabled != Some("Disabled") && !matches!(target, None | Some("None"))
+impl From<&SystemStateData> for AppliedState {
+    fn from(state: &SystemStateData) -> Self {
+        Self {
+            persistent_boot_selection: state.boot.persistent_selection(),
+            boot_source_override: state.boot.source.clone(),
+            virtual_media: state.virtual_media.clone(),
+        }
+    }
+}
+
+fn boot_source_override_is_active(boot_source_override: &BootSourceOverride) -> bool {
+    let enabled = boot_source_override.enabled;
+    let target = boot_source_override.target;
+    enabled != Some(BootSourceOverrideEnabled::Disabled)
+        && !matches!(target, None | Some(BootSource::None))
 }
 
 impl LibvirtBackend {
@@ -589,24 +593,14 @@ impl LibvirtBackend {
     }
 
     async fn refresh(&mut self) {
-        let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) else {
+        let Some(state) = self.controlled_state() else {
             tracing::error!(
                 domain = %self.config.domain,
                 "libvirt backend is not bound to BMC mock state",
             );
             return;
         };
-        let Some(controlled_system) = system_state.controlled_system() else {
-            tracing::error!(
-                domain = %self.config.domain,
-                "BMC mock state has no controlled ComputerSystem",
-            );
-            return;
-        };
-        if let Err(error) = self
-            .reconcile_state(AppliedState::from(controlled_system))
-            .await
-        {
+        if let Err(error) = self.reconcile_state(AppliedState::from(state)).await {
             tracing::error!(
                 domain = %self.config.domain,
                 error = %error,
@@ -624,9 +618,19 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
     ) -> ActorResult {
         match message {
             LibvirtMessage::Run => self.refresh_power_state().await,
-            LibvirtMessage::Bind { state, reply } => {
+            LibvirtMessage::InitializeState { system_id, state } => {
+                match self.system_states.entry(system_id) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(state);
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry) => {
+                        tracing::error!(domain = %self.config.domain, system_id = %entry.key(), "libvirt system state is already initialized");
+                    }
+                }
+            }
+            LibvirtMessage::Bind { system_id, reply } => {
                 if !reply.is_closed() {
-                    let result = self.bind_state(state).await;
+                    let result = self.bind_state(system_id).await;
                     self.refresh_power_state().await;
                     // The caller can stop waiting while the operation completes.
                     reply.send(result).ok();
@@ -644,8 +648,44 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                 }
                 self.refresh_power_state().await;
             }
+            LibvirtMessage::SetBootConfig {
+                system_id,
+                patch,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let result = self
+                        .system_states
+                        .get_mut(&system_id)
+                        .ok_or(CallbackError::SystemNotInitialized(system_id))
+                        .map(|state| state.boot.apply(patch));
+                    reply.send(result).ok();
+                }
+            }
+            LibvirtMessage::SetVirtualMedia {
+                system_id,
+                state: desired,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let result = self
+                        .system_states
+                        .get_mut(&system_id)
+                        .ok_or(CallbackError::SystemNotInitialized(system_id))
+                        .and_then(|state| state.set_media(desired));
+                    reply.send(result).ok();
+                }
+            }
+            LibvirtMessage::GetSystemState { system_id, reply } => {
+                let result = self
+                    .system_states
+                    .get(&system_id)
+                    .cloned()
+                    .ok_or(CallbackError::SystemNotInitialized(system_id));
+                reply.send(result).ok();
+            }
             LibvirtMessage::Refresh => {
-                // Clear before reading state so changes during reconciliation queue another refresh.
+                // Coalesce notifications until this refresh begins.
                 self.refresh_pending.store(false, Ordering::SeqCst);
                 self.refresh().await;
                 self.refresh_power_state().await;
@@ -656,6 +696,49 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
 }
 
 impl Callbacks for LibvirtCallbacks {
+    async fn get_system_state(&self, system_id: &str) -> Result<SystemStateData, CallbackError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::GetSystemState {
+                system_id: system_id.to_string(),
+                reply,
+            })
+            .map_err(eyre::Error::from)?;
+        response.await.map_err(eyre::Error::from)?
+    }
+
+    async fn set_boot_config(
+        &self,
+        system_id: &str,
+        patch: BootConfigPatch,
+    ) -> Result<(), CallbackError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::SetBootConfig {
+                system_id: system_id.to_string(),
+                patch,
+                reply,
+            })
+            .map_err(eyre::Error::from)?;
+        response.await.map_err(eyre::Error::from)?
+    }
+
+    async fn set_virtual_media(
+        &self,
+        system_id: &str,
+        state: VirtualMediaState,
+    ) -> Result<(), CallbackError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::SetVirtualMedia {
+                system_id: system_id.to_string(),
+                state,
+                reply,
+            })
+            .map_err(eyre::Error::from)?;
+        response.await.map_err(eyre::Error::from)?
+    }
+
     fn get_power_state(&self) -> MockPowerState {
         *self.power_state.read().expect("power state lock poisoned")
     }
@@ -667,6 +750,15 @@ impl Callbacks for LibvirtCallbacks {
         self.mailbox
             .send(LibvirtMessage::SendPowerCommand { reset_type })
             .map_err(|error| SetSystemPowerError::CommandSendError(error.to_string()))
+    }
+
+    fn initialize_system(&self, system_id: &str, initial: SystemStateData) {
+        if let Err(error) = self.mailbox.send(LibvirtMessage::InitializeState {
+            system_id: system_id.to_string(),
+            state: initial,
+        }) {
+            tracing::error!(%error, "could not initialize libvirt system state");
+        }
     }
 
     fn state_refresh_indication(&self) {

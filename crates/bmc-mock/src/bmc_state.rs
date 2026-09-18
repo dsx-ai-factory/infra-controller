@@ -164,7 +164,6 @@ impl<C: Callbacks> BmcState<C> {
                 }
             }
             BmcEvent::BootCompleted => {
-                self.system_state.on_boot_completed();
                 if let Some(system) = system {
                     self.record_event(LogEntryDraft::boot_completed(&system));
                 }

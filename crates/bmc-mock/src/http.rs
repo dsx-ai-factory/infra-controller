@@ -20,7 +20,15 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
+use crate::CallbackError;
 use crate::json::JsonExt;
+
+pub(crate) fn callback_error(error: CallbackError) -> Response {
+    match error {
+        CallbackError::BadRequest(message) => bad_request(&message),
+        _ => redfish_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
+    }
+}
 
 pub(crate) fn not_found() -> Response {
     redfish_error(StatusCode::NOT_FOUND, "resource not found")

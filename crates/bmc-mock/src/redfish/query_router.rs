@@ -400,7 +400,7 @@ mod tests {
     fn dell_router() -> (Router, BmcState<NoopCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(NoopCallbacks::default()),
             String::new(),
             false,
             MachineRouterOptions::default(),
