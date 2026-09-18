@@ -279,7 +279,6 @@ It supports these common deployment modes:
 | `-y` | Non-interactive mode; accept setup prompts automatically. |
 | `--skip-core` | Install prerequisites and REST, but skip the NICo Core Helm release. |
 | `--skip-rest` | Install prerequisites and Core, but skip all REST phases and REST repo checks. |
-| `--skip-flow` | Skip NICo Flow in Phase 7h. You can also set `flow.enabled=false` in `values.yaml` to omit Flow prerequisites. |
 | `--skip-core --skip-rest` | Infrastructure-only run; image tags, image registry, and REST repo are not required. |
 | `--core-values <file>` | Use site-specific Core values instead of `helm-prereqs/values/nico-core.yaml`. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
@@ -312,7 +311,7 @@ unreachable registry host skips the image checks entirely
 The Flow chart no longer deploys PSM or NSM, and `setup.sh` does not support an
 automatic upgrade from a Flow Deployment that still contains either manager
 container. This check runs before preflight or any cluster mutation, including
-when `--skip-flow` or `--skip-rest` is set.
+when `--skip-rest` is set.
 
 To preserve the bundled managers, leave the existing Flow release unchanged
 and stop the upgrade. `setup.sh` cannot upgrade the other components while that
@@ -343,7 +342,7 @@ change is otherwise rejected with `conflict occurred while applying object
 `--force` and do not patch the Deployment or upgrade `nico-prereqs` first.
 
 ```bash
-helm upgrade flow ./helm/charts/nico-flow \
+helm upgrade flow ./helm/nico-flow \
   --namespace flow \
   --reset-then-reuse-values \
   --set global.image.repository="${NICO_IMAGE_REGISTRY}" \
@@ -357,7 +356,7 @@ kubectl rollout status deployment/flow -n flow --timeout=300s
 On Helm 4, run the upgrade with the conflict flag instead:
 
 ```bash
-helm upgrade flow ./helm/charts/nico-flow \
+helm upgrade flow ./helm/nico-flow \
   --namespace flow \
   --reset-then-reuse-values \
   --force-conflicts \
@@ -383,7 +382,7 @@ environment, values files, site overlay, DPF choice, and other options. Setup
 verifies the Deployment rollout and active Pods again before mutation. After
 preflight and the Core phase completes or is skipped, it removes any remaining
 legacy Vault tokens, policies, Secrets, and cluster-wide RBAC even when
-`--skip-rest` or `--skip-flow` is set.
+`--skip-rest` is set.
 
 Upgrading `nico-prereqs` removes the retired ExternalSecret resources and may
 garbage-collect their generated PSM/NSM database credential Secrets. The
@@ -424,7 +423,7 @@ NICo REST                  (../helm/rest/nico-rest)
   ├── keycloak              (dev OIDC IdP, nico-dev realm)
   ├── temporal              (temporal-helm/temporal, mTLS)
   └── nico-rest             (API, cert-manager, workflow, site-manager - DB on nico-pg-cluster)
-NICo Flow                  (../helm/charts/nico-flow - Flow, PSM, and NSM)
+NICo Flow                  (../helm/nico-flow - task, policy, and automation service)
 NICo REST site-agent       (../helm/rest/nico-rest-site-agent - StatefulSet, bootstrap via site-manager)
 Observability (opt-in)     (observability/ - only with --with-observability; also standalone)
   ├── kube-prometheus-stack (prometheus-community 59.1.0 - Prometheus + Grafana, release `obs`)
