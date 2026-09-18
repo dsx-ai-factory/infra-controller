@@ -377,13 +377,23 @@ pub(crate) async fn start_runtime(
         db::site_prefix::reconcile_configured(&mut txn, &carbide_config.site_fabric_prefixes)
             .await?;
 
-        if !carbide_config.site_fabric_prefixes.is_empty() {
+        // Persisted roots can be retiring after the final configured root is
+        // removed, so current configuration alone cannot decide whether
+        // legacy VpcPrefix lineage must be repaired and validated.
+        if db::site_prefix::operator_managed_prefixes_exist(&mut txn).await? {
             let lineage =
                 db::site_prefix::backfill_vpc_prefix_site_prefix_lineage(&mut txn).await?;
+            let require_parent_for_every_vpc_prefix =
+                !carbide_config.site_fabric_prefixes.is_empty();
+            let blocking_missing_vpc_prefix_ids = if require_parent_for_every_vpc_prefix {
+                lineage.missing_vpc_prefix_ids.as_slice()
+            } else {
+                &[]
+            };
             eyre::ensure!(
-                lineage.unresolved_vpc_prefix_count() == 0,
+                lineage.is_safe_for_startup(require_parent_for_every_vpc_prefix),
                 "VpcPrefix SitePrefix lineage preflight failed: missing VpcPrefix IDs: {:?}; ambiguous VpcPrefixes: {:?}",
-                lineage.missing_vpc_prefix_ids,
+                blocking_missing_vpc_prefix_ids,
                 lineage.ambiguous,
             );
         }
@@ -402,11 +412,17 @@ pub(crate) async fn start_runtime(
     };
 
     // A listen-only replica trusts another instance to reconcile configuration,
-    // but it still must not serve a configured-root site with unresolved
-    // VpcPrefix lineage.
-    if carbide_config.listen_only && !carbide_config.site_fabric_prefixes.is_empty() {
-        let unassigned =
-            db::site_prefix::find_unassigned_vpc_prefix_site_prefix_ids(&db_pool).await?;
+    // but it must reject every unassigned row that the corresponding
+    // authoritative startup would require to be repaired.
+    if carbide_config.listen_only {
+        let unassigned = if carbide_config.site_fabric_prefixes.is_empty() {
+            db::site_prefix::find_unassigned_vpc_prefix_ids_with_operator_parent_candidates(
+                &db_pool,
+            )
+            .await?
+        } else {
+            db::site_prefix::find_unassigned_vpc_prefix_site_prefix_ids(&db_pool).await?
+        };
         eyre::ensure!(
             unassigned.is_empty(),
             "VpcPrefix SitePrefix lineage preflight failed: unassigned VpcPrefix IDs: {:?}",

@@ -305,6 +305,8 @@ The isolated configuration is only applied when the site controller is unaware o
 
 ### DPU Configuration Example
 
+The following example uses EthernetVirtualizer (ETV), represented by `network_virtualization_type = 2`, with no FNN null-route list.
+
 ```json
 {
   "asn": 4294967000,
@@ -386,6 +388,8 @@ The isolated configuration is only applied when the site controller is unaware o
     "192.168.98.0/24",
     "172.16.205.0/24"
   ],
+  "site_fabric_null_routes": null,
+  "vpc_peer_vnis_authoritative": true,
   "vpc_isolation_behavior": 2,
   "stateful_acls_enabled": false,
   "enable_dhcp": true,
@@ -396,3 +400,24 @@ The isolated configuration is only applied when the site controller is unaware o
   "internet_l3_vni": null
 }
 ```
+
+The following partial response shows the corresponding FNN fields, with `network_virtualization_type = 5`:
+
+```json
+{
+  "network_virtualization_type": 5,
+  "site_fabric_null_routes": {
+    "items": [
+      "172.16.205.0/24",
+      "192.168.4.128/26",
+      "192.168.98.0/24"
+    ]
+  }
+}
+```
+
+The response field `site_fabric_null_routes` is present for FNN and contains the final route list resolved by Core. A present empty list disables FNN null routes, and each distinct prefix boundary is authoritative. A new agent that receives a response from an older Core, where this field is absent, reduces `site_fabric_prefixes` to its minimal exact union before rendering fallback blackhole routes.
+
+The response field `site_fabric_prefixes` always contains the original configured site prefixes. It is not replaced with explicit null routes, so older agents retain their pre-upgrade ACL behavior until the rolling agent update finishes.
+
+`vpc_peer_vnis_authoritative` confirms that Core applied its stored-peering activation policy to every peer-VNI list in the response. Agents ignore peer VNIs when this marker is absent or false, so configuration from a Core version that predates the marker fails closed during a rolling upgrade or rollback.

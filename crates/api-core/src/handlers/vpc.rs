@@ -193,11 +193,8 @@ pub(crate) async fn update(
         kind: "Vpc",
         id: vpc_update.id.to_string(),
     })?;
-    let mut candidate_nsg =
-        find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, false).await?;
-    let observed_nsg_version = candidate_nsg.as_ref().map(|nsg| nsg.version);
-    let observed_policy =
-        VpcPolicyUpdate::from_request(api, &observed_vpc, &vpc_update, candidate_nsg.as_ref())?;
+    let candidate_nsg = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, false).await?;
+    let observed_policy = VpcPolicyUpdate::from_request(api, &observed_vpc, &vpc_update)?;
     let overlap_locked = observed_policy.needs_overlap_check();
     if overlap_locked {
         db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
@@ -207,17 +204,7 @@ pub(crate) async fn update(
     // lock before the VPC lock, matching NSG deletion and policy updates.
     let nsg_locked = observed_policy.nsg_changed && candidate_nsg.is_some();
     if nsg_locked {
-        candidate_nsg = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, true).await?;
-        if api.runtime_config.tenant_prefix_overlap_enabled
-            && let Some(observed_version) = observed_nsg_version
-            && candidate_nsg.as_ref().map(|nsg| nsg.version) != Some(observed_version)
-        {
-            return Err(CarbideError::ConcurrentModificationError(
-                "NetworkSecurityGroup",
-                observed_version.to_string(),
-            )
-            .into());
-        }
+        let _ = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, true).await?;
     }
     let mut current_vpc = db::vpc::find_by_with_lock(
         &mut txn,
@@ -247,8 +234,7 @@ pub(crate) async fn update(
         Ok(())
     };
     check_version(&current_vpc)?;
-    let mut policy =
-        VpcPolicyUpdate::from_request(api, &current_vpc, &vpc_update, candidate_nsg.as_ref())?;
+    let mut policy = VpcPolicyUpdate::from_request(api, &current_vpc, &vpc_update)?;
 
     // Another writer can turn an unchanged policy into an expansion or
     // change the NSG attachment while this request waits. Release resource
@@ -259,8 +245,12 @@ pub(crate) async fn update(
     {
         txn.rollback().await?;
         txn = api.txn_begin().await?;
-        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
-        candidate_nsg = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, true).await?;
+        // Preserve routing lock order without making an NSG-only retry
+        // participate in overlap admission.
+        if vpc_update.routing_profile_overrides.is_some() {
+            db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        }
+        let _ = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, true).await?;
         current_vpc = db::vpc::find_by_with_lock(
             &mut txn,
             ObjectColumnFilter::One(vpc::IdColumn, &vpc_update.id),
@@ -273,19 +263,11 @@ pub(crate) async fn update(
             id: vpc_update.id.to_string(),
         })?;
         check_version(&current_vpc)?;
-        policy =
-            VpcPolicyUpdate::from_request(api, &current_vpc, &vpc_update, candidate_nsg.as_ref())?;
+        policy = VpcPolicyUpdate::from_request(api, &current_vpc, &vpc_update)?;
     }
     if policy.needs_overlap_check() && tenant_prefix_overlap::checks_required(api, &mut txn).await?
     {
-        tenant_prefix_overlap::validate_vpc_policy(
-            api,
-            &mut txn,
-            &policy.candidate,
-            policy.profile_requires_check,
-            policy.nsg_requires_check,
-        )
-        .await?;
+        tenant_prefix_overlap::validate_vpc_policy(api, &mut txn, &policy.candidate).await?;
     }
     vpc_update.if_version_match = Some(current_vpc.version);
     let vpc = db::vpc::update(&vpc_update, &mut txn).await?;
@@ -335,7 +317,6 @@ struct VpcPolicyUpdate {
     candidate: model::vpc::Vpc,
     nsg_changed: bool,
     profile_requires_check: bool,
-    nsg_requires_check: bool,
 }
 
 impl VpcPolicyUpdate {
@@ -343,7 +324,6 @@ impl VpcPolicyUpdate {
         api: &Api,
         vpc: &model::vpc::Vpc,
         update: &UpdateVpc,
-        nsg: Option<&model::network_security_group::NetworkSecurityGroup>,
     ) -> Result<Self, CarbideError> {
         let mut candidate = vpc.clone();
         candidate.config.network_security_group_id = update.network_security_group_id.clone();
@@ -370,27 +350,16 @@ impl VpcPolicyUpdate {
                 fnn.resolve_vpc_routing_profile(&candidate.config)?.as_ref(),
             );
         }
-        let nsg_requires_check = nsg_changed
-            && nsg.is_some_and(|nsg| {
-                !tenant_prefix_overlap::nsg_policy_is_safe(
-                    &nsg.rules,
-                    nsg.stateful_egress,
-                    api.runtime_config
-                        .network_security_group
-                        .stateful_acls_enabled,
-                )
-            });
         Ok(Self {
             candidate,
             nsg_changed,
             profile_requires_check,
-            nsg_requires_check,
         })
     }
 
     fn needs_overlap_check(&self) -> bool {
         self.candidate.config.network_virtualization_type == VpcVirtualizationType::Fnn
-            && (self.profile_requires_check || self.nsg_requires_check)
+            && self.profile_requires_check
     }
 }
 
@@ -509,7 +478,7 @@ pub(crate) async fn change_routing_profile(
         && let Some(candidate) = candidate.as_ref()
         && tenant_prefix_overlap::checks_required(api, &mut txn).await?
     {
-        tenant_prefix_overlap::validate_vpc_policy(api, &mut txn, candidate, true, false).await?;
+        tenant_prefix_overlap::validate_vpc_policy(api, &mut txn, candidate).await?;
     }
 
     let allocations = find_vpc_vni_allocations(api, &mut txn, &vpc).await?;

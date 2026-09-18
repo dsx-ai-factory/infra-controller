@@ -47,7 +47,8 @@ behavior.
 | `route_servers` | `Vec<String>` | `[]` | `networking` | Route server IPs for L2VPN Ethernet Virtual network support. |
 | `enable_route_servers` | `bool` | `false` | `networking` | Enables route server injection into DPU FRR configs for L2VPN. |
 | `deny_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 CIDR prefixes that tenant instances are blocked from reaching. FNN generates family-specific NVUE ACL policies; all non-FNN virtualizers apply the IPv4 prefixes only. |
-| `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IP prefixes (v4/v6) assigned for tenant use within this site. |
+| `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 prefixes assigned for tenant use within this site. With `mutual_isolation`, ETV enforces the IPv4 prefixes with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL. With `open`, that ACL is not installed. On upgrade, authoritative Core scans persisted Ready and Deleting operator-managed SitePrefixes even when this list is empty. It assigns an unparented legacy VpcPrefix when exactly one operator root contains it; ambiguous parentage blocks startup. With a nonempty list, missing parentage also blocks startup. Listen-only replicas require an authoritative Core to assign unresolved lineage first. |
+| `site_fabric_null_routes` | `Option<Vec<IpNetwork>>` | `site_fabric_prefixes` | `networking` | IPv4 and IPv6 prefixes installed by FNN as blackhole routes under `mutual_isolation`. Omission inherits `site_fabric_prefixes`, retains removed operator-managed roots while they contain a VpcPrefix or VPC-attached direct NetworkPrefix, and reduces those inherited roots to their minimal exact union. Soft-deleted children retain coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative: each CIDR is canonicalized to its network boundary and exact duplicates are removed, but parent, child, and adjacent entries are not aggregated. An empty list (`[]`) installs no null routes. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. An effective `/0` null route and `leak_default_route_from_underlay = true` for the same address family are unsupported because the imported default wins the equal-prefix distance comparison. With `open`, the routes are not installed. Tenant prefix reuse follows the [overlap checks](#tenant-prefix-overlap-checks). |
 | `tenant_prefix_overlap_enabled` | `bool` | `false` | `networking` | Site opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). The existing `VpcPrefix` exclusion continues to prevent overlapping `VpcPrefix` persistence until the cutover tracked by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892). |
 | `max_site_prefixes_per_tenant` | `u32` | `8` | `networking` | Maximum tenant-managed SitePrefixes retained for one tenant at this site. Prefixes awaiting removal still count against this limit and keep their CIDR reserved. |
 | `anycast_site_prefixes` | `Vec<Ipv4Network>` | `[]` | `networking` | Aggregate IPv4 prefixes containing tenant-announced prefixes (e.g., BYOIP). **Deprecated.** Use [`routing_profiles.allowed_anycast_prefixes`](#fnnroutingprofileconfig) instead. |
@@ -72,8 +73,8 @@ behavior.
 | `machine_update_run_interval` | `Option<u64>` | — | `machines` | Interval (seconds) at which the machine update manager checks for updates. |
 | `retained_boot_interface_window` | `Option<Duration>` | — | `machines` | How long a retained boot interface pair (`retained_boot_interfaces` table) stays applicable after its `machine_interfaces` row was deleted. Unset retains forever; set a window (e.g. `30d`) so a MAC reappearing on different hardware doesn't inherit an obsolete Redfish interface id. |
 | `site_explorer` | `SiteExplorerConfig` | *(see below)* | `hardware` | SiteExplorer hardware discovery settings (see [SiteExplorerConfig](#siteexplorerconfig)). |
-| `vpc_peering_policy` | `Option<VpcPeeringPolicy>` | — | `networking` | Policy for VPC peering based on network virtualization type at creation time. |
-| `vpc_peering_policy_on_existing` | `Option<VpcPeeringPolicy>` | — | `networking` | Policy for whether existing VPC peerings should be active. |
+| `vpc_peering_policy` | `Option<VpcPeeringPolicy>` | — | `networking` | VPC peering creation policy. `exclusive` admits capability-compatible pairs, while `none` or omission disables creation. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. ETV/FNN requests always return `InvalidArgument`. |
+| `vpc_peering_policy_on_existing` | `Option<VpcPeeringPolicy>` | — | `networking` | Activation policy for stored VPC peerings. Omission falls back to `vpc_peering_policy`. `exclusive` enables the virtualization-specific mechanism only for compatible pairs: ETV emits peer-prefix ACL permits, while FNN imports peer-VNI route targets. `none` disables both mechanisms. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. |
 | `attestation_enabled` | `bool` | `false` | `security` | Enables TPM-based machine attestation (adds `Measuring` state before `Ready`). |
 | `bmc_rotation_enabled` | `bool` | `false` | `security` | Site-wide kill-switch for passive BMC credential rotation. When `false` (default), a Ready host never auto-enters `RotatingBmc`; the force-converge escape hatch bypasses it. |
 | `uefi_rotation_enabled` | `bool` | `false` | `security` | Site-wide kill-switch for passive UEFI credential rotation (host and DPU). When `false` (default), a Ready host never auto-enters `RotatingHostUefi` nor drives its DPUs into `RotatingDpuUefi`; the per-machine force-converge escape hatch bypasses it. |
@@ -815,7 +816,7 @@ client-certificate authentication is not used.
 | `route_targets_on_exports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets added to routes exported by the DPU. |
 | `internal` | `Option<bool>` | — (effective `false`) | Whether the profile uses internal VNI allocation. This property cannot be overridden on a VPC. |
 | `tenant_prefix_overlap_eligible` | `bool` | `false` | Base routing profile opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). This setting cannot be overridden on a VPC. |
-| `leak_default_route_from_underlay` | `Option<bool>` | — (effective `false`) | Leak the default route from the underlay/default VRF into tenant VRFs. |
+| `leak_default_route_from_underlay` | `Option<bool>` | — (effective `false`) | Leak the default route from the underlay/default VRF into tenant VRFs. Do not enable this for an address family whose effective `site_fabric_null_routes` contains `/0`; the imported default has a better administrative distance than the equal-prefix blackhole. |
 | `leak_tenant_host_routes_to_underlay` | `Option<bool>` | — (effective `false`) | Leak tenant host routes into the underlay/default VRF. |
 | `tenant_leak_communities_accepted` | `Option<bool>` | — (effective `false`) | Honor route-leak communities sent by the tenant host OS. |
 | `accepted_leaks_from_underlay` | `Option<Vec<PrefixFilterPolicyEntry>>` | — (effective `[]`) | Specific underlay/default VRF prefixes allowed to leak into tenant VRFs. Routing only; does not affect ACLs. |
@@ -885,49 +886,15 @@ imports; there are no transitive peer imports. Prefixes awaiting removal still
 count. These writers also check the combined networks of each affected Instance,
 including Instances waiting for their network segments and pending replacements.
 
-VPC routing-profile changes, VPC NSG assignments, and NSG rule changes check
-the affected tenant-serving FNN interfaces. An Instance's explicit NSG replaces
-its VPC's NSG. Discovery boot suppresses NSGs but still uses the routing profile.
-Allocated Instances remain relevant even before their controllers leave Admin
-networking, including while waiting for network segments. Pending networks and
-deleting Instances not yet in the controller's return-to-Admin state also count.
-Core rejects unsafe policy changes on these paths with `FailedPrecondition`,
-even before duplicate CIDRs exist. Unused definitions remain editable.
-Metadata updates, unchanged stored policy,
-and proven restrictions do not take the overlap transaction lock unless a
-concurrent update changes the policy they replace. With overlap enabled,
-`UpdateVpc` and `UpdateNetworkSecurityGroup` can return `FailedPrecondition` if
-a VPC or NSG changes while the request waits for its row lock. With overlap
-disabled, requests without `if_version_match` instead use the latest locked
-record and repeat any needed policy checks. Explicit version conditions still
-apply in either mode.
+VPC routing-profile changes check the affected tenant-serving FNN interfaces. Allocated Instances remain relevant even before their controllers leave Admin networking, including while waiting for network segments. Pending networks and deleting Instances not yet in the controller's return-to-Admin state also count. Core rejects unsafe routing-profile changes on these paths with `FailedPrecondition`, even before duplicate CIDRs exist. Unused definitions remain editable. Metadata updates, unchanged stored routing policy, and proven restrictions do not take the overlap transaction lock unless a concurrent update changes the policy they replace. With overlap enabled, `UpdateVpc` can return `FailedPrecondition` if the VPC changes while the request waits for its row lock. With overlap disabled, requests without `if_version_match` instead use the latest locked record and repeat any needed routing-policy checks. Explicit version conditions still apply in either mode.
 
-Instance allocation and network expansion check all VPCs used by the requested,
-current, and pending networks together, including their direct peer imports.
-An Instance must not connect to overlapping address space from different VPCs,
-even when those VPCs are otherwise isolated. Core returns `InvalidArgument`
-for that conflict. With overlap enabled, allocation, network expansion, and
-NSG changes also check the effective FNN policy before duplicate CIDRs exist.
-Effective NSG rules must be deny-only, and `stateful_egress` must be disabled
-when `stateful_acls_enabled` is enabled; unsafe policy returns
-`FailedPrecondition`. Network expansion also requires an eligible resolved
-routing profile and safe site-wide policy.
+Instance allocation and network expansion check all VPCs used by the requested, current, and pending networks together, including their direct peer imports. An Instance must not connect to overlapping address space from different VPCs, even when those VPCs are otherwise isolated. Core returns `InvalidArgument` for that conflict. With overlap enabled, allocation and network expansion also check the effective FNN routing policy before duplicate CIDRs exist. Network expansion requires an eligible resolved routing profile and safe site-wide policy. NSG permits and stateful egress do not participate in overlap admission: FNN isolation is enforced by routing blackholes, which ACL policy cannot bypass.
 
-When `tenant_prefix_overlap_enabled = false` but another VPC still uses the
-same addresses, Instance allocation and network expansion return
-`InvalidArgument`; unsafe NSG changes return `FailedPrecondition`. Prefixes
-being deleted still count. Metadata edits, removal of unchanged interfaces,
-and safe NSG replacements remain available. A request cannot replace a pending
-network update. Requests that need admission take the overlap transaction lock
-before resource locks, including when the gate is off. A waiting Instance
-update reloads its dependencies but keeps its original configuration version;
-if that version changed, the request returns `FailedPrecondition`.
+New prefix reuse requires coverage from the current `site_fabric_null_routes` configuration, or current `site_fabric_prefixes` when the override is omitted. Retained-state validation also uses retiring operator roots when the override is omitted, matching the routes sent to FNN. Retiring roots do not authorize new reuse. An explicit empty list disables tenant prefix reuse.
 
-With the gate off, peering and VPC virtualization changes also reject new
-imports of overlapping address space involving a tenant-managed `VpcPrefix`.
-Existing imports and nonexpanding changes remain available. Unsafe VPC and NSG
-policy changes are rejected where an affected Instance can reach that duplicate
-address space.
+When `tenant_prefix_overlap_enabled = false` but another VPC still uses the same addresses, Instance allocation and network expansion return `InvalidArgument`. Prefixes being deleted still count. Metadata edits and removal of unchanged interfaces remain available. A request cannot replace a pending network update. Requests that need admission take the overlap transaction lock before resource locks, including when the gate is off. A waiting Instance update reloads its dependencies but keeps its original configuration version. If that version changed, the request returns `FailedPrecondition`.
+
+With the gate off, peering and VPC virtualization changes also reject new imports of overlapping address space involving a tenant-managed `VpcPrefix`. Existing imports and nonexpanding changes remain available. Unsafe routing-profile changes are rejected where an affected Instance can reach that duplicate address space.
 
 Core checks retained prefixes, peer imports, Instance networks, and effective
 FNN policy before starting controllers or the API listener, including with

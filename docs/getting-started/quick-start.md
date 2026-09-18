@@ -164,7 +164,8 @@ Open `helm-prereqs/values/nico-core.yaml` and update the following values:
   | `initial_domain_name` | Base DNS domain for the site (e.g. `mysite.example.com`) |
   | `dhcp_servers` | List of DHCP server IPs reachable from bare-metal hosts, or `[]` |
   | `ntp_servers` | List of enterprise NTP server IPs for BMC time setup and DHCP option 42, or `[]` to use the legacy DHCP/DNS fallback |
-  | `site_fabric_prefixes` | CIDRs that are part of the site fabric (instance-to-instance traffic) |
+  | `site_fabric_prefixes` | CIDRs that are part of the site fabric. Under mutual isolation, ETV uses these CIDRs for its isolation ACL and omitted `site_fabric_null_routes` inherits them for FNN blackholes |
+  | `site_fabric_null_routes` | Optional FNN isolation CIDRs. Omit to inherit, retain, and collapse operator roots. An explicit list canonicalizes and deduplicates equivalent CIDRs without aggregating parent, child, or adjacent entries. Set `[]` to install no null routes |
   | `deny_prefixes` | CIDRs instances must not reach (OOB, control plane, management) |
   | `[pools.lo-ip]` ranges | Loopback IP range allocated to bare-metal hosts |
   | `[pools.vlan-id]` ranges | VLAN ID allocation range |
@@ -182,7 +183,9 @@ gateway. Do not use empty strings for address fields. The `[pools.lo-ip]`,
 `[pools.vlan-id]`, and `[pools.vni]` ranges must be non-empty.
 
 <Tip>
-The following fields are safe to leave as empty arrays: `dhcp_servers`, `ntp_servers`, and `site_fabric_prefixes`. Keep required fields in the TOML block; optional network fields follow the initial network configuration requirements above.
+The following fields are safe to leave as empty arrays: `dhcp_servers` and `ntp_servers`. Do not leave `site_fabric_prefixes` empty when ETV mutual isolation depends on its site-prefix ACL. For FNN, omit `site_fabric_null_routes` to inherit `site_fabric_prefixes` and retain retiring operator roots while they contain a VpcPrefix or VPC-attached direct NetworkPrefix. Soft-deleted children retain coverage until their VpcPrefix or segment is hard-deleted. Configure a nonempty override when FNN isolation uses different CIDRs. Setting `site_fabric_null_routes = []` explicitly disables FNN null routes. Keep required fields in the TOML block. Optional network fields follow the initial network configuration requirements above.
+
+Before upgrading a site with persisted operator-managed SitePrefixes, start an authoritative Core before listen-only replicas. Core automatically assigns legacy VpcPrefixes with one containing historical root, but startup rejects ambiguous lineage even when `site_fabric_prefixes` is now empty. If the error lists multiple candidate SitePrefix IDs, stop the rollout and contact NVIDIA support to plan an offline database repair while Core is stopped. Core fails before opening its API listener, and neither gRPC nor `nico-admin-cli` can assign `site_prefix_id`. Removing roots from the current file does not remove their historical lineage immediately.
 </Tip>
 
 ### 3d. NICo REST source tree

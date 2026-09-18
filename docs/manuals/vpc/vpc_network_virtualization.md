@@ -50,9 +50,10 @@ for every VPC hosted on its managed host. Routes flow between VRFs and the fabri
 │    (vpc-dpu-lo pool)                                                    │
 │                                                                         │
 │  VPC VRF  ◄─── VPC VNI (vpc-vni or external-vpc-vni pool)               │
-│    native RT import: <datacenter_asn>:<vpc_vni>                         │
+│    native + peered VPC RT imports: <datacenter_asn>:<imported_vni>      │
 │    additional RT imports: from routing profile + fnn config             │
 │    export tags: native RT + route_targets_on_exports                    │
+│    site_fabric_null_routes: distance-250 blackholes in mutual isolation │
 │                                                                         │
 │  deny_prefixes ACL ──► blocks listed prefixes from tenant traffic       │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -73,11 +74,16 @@ for every VPC hosted on its managed host. Routes flow between VRFs and the fabri
 | Routing profile | `fnn.routing_profiles` in the API server config | Defines `route_target_imports`, `route_targets_on_exports`, and leak behavior for a VPC's VRF |
 | Additional RT imports | `fnn.additional_route_target_imports` | Extra route-targets imported into every VPC VRF site-wide |
 | Deny-prefix ACL | `deny_prefixes` in the API server config | Prefixes tenant instances are not permitted to reach |
-| Site fabric prefixes | `site_fabric_prefixes` in the API server config | IP prefixes assigned for tenant use within this site; used for VPC isolation enforcement |
+| Site fabric prefixes | `site_fabric_prefixes` in the API server config | IP prefixes assigned for tenant use within this site. Under mutual isolation, ETV installs an IPv4 isolation ACL only when the rendered DPU configuration has no NSG, while open isolation does not install that ACL |
+| Site fabric null routes | `site_fabric_null_routes` in the API server config | FNN blackhole prefixes under mutual isolation. Omission inherits `site_fabric_prefixes`, retains removed operator-managed roots while they contain a VpcPrefix or VPC-attached direct NetworkPrefix, and reduces the inherited roots to their minimal exact union. Soft-deleted children retain coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative: each CIDR is canonicalized and exact duplicates are removed without aggregating parent, child, or adjacent entries. An empty list installs none. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. Do not combine an effective `/0` null route with `leak_default_route_from_underlay = true` for the same address family because the imported default overrides the equal-prefix blackhole. Open isolation does not install the routes |
 
 Pool definitions (ranges, prefix sizes) are configured in the API server `pools` section; see
 [VNI Resource Pools](vni_resource_pools.md) and
 [IP Resource Pools](../networking/ip_resource_pools.md).
+
+### VPC Peering Compatibility
+
+ETV and FNN VPCs cannot peer. `CreateVpcPeering` returns `InvalidArgument` for that pair regardless of `vpc_peering_policy`. The deprecated `mixed` value for `vpc_peering_policy` and `vpc_peering_policy_on_existing` logs a startup warning and behaves as `exclusive`. Existing ETV/FNN rows remain visible for deletion but contribute neither ETV peer-prefix ACL permits nor FNN peer-VNI route-target imports. Flat VPCs remain compatible with both ETV and FNN under the capability-based `exclusive` policy, but compatibility does not synthesize a route to a Flat prefix. Follow the [FNN-to-Flat routing preparation and verification steps](vpc_peering_management.md#fnn-to-flat-routing-prerequisite) when creating or activating an FNN-to-Flat peering, or upgrading an agent that already serves one. Setting `vpc_peering_policy_on_existing` to `none` disables ETV peer-prefix ACL permits and FNN peer-VNI route-target imports for every stored peering. FNN agents import received peer VNIs only when Core marks them as policy-filtered. An absent or false marker fails closed across Core/agent version skew.
 
 ### Why `datacenter_asn` and `asn` are separate
 
@@ -118,7 +124,7 @@ The handler proceeds as follows:
    - BGP ASN (per-DPU from `fnn-asn` pool)
    - DPU loopback IP from the `lo-ip` pool
    - DHCP server addresses and route server addresses
-   - `deny_prefixes` and `site_fabric_prefixes` ACL data
+   - `deny_prefixes` ACL data and the effective site-isolation prefixes (`site_fabric_null_routes` for FNN, `site_fabric_prefixes` otherwise)
    - `datacenter_asn`
    - The resolved `routing_profile` (imports, exports, leak flags)
    - `additional_route_target_imports`

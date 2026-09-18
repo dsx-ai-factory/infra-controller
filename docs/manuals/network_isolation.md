@@ -8,7 +8,7 @@ configuration guides linked below.
 
 | Fabric | Operator-facing primitive | Isolation enforced by |
 |---|---|---|
-| Ethernet | VPC + VpcPrefix (+ optional Network Security Group) | DPU VRF per VPC (HBN / NVUE) over a pure type-5 EVPN overlay |
+| Ethernet | VPC + VpcPrefix (+ optional Network Security Group) | FNN per-VPC VRFs plus site-fabric blackholes, ETV isolation or NSG ACLs, and operator-managed policy for Flat VPCs |
 | InfiniBand | InfiniBand partition | UFM P_Key partition membership; `IbFabricMonitor` reconciler |
 | NVLink | NVLink logical partition | NMX-C partition lifecycle; `NvlPartitionMonitor` reconciler |
 
@@ -72,10 +72,7 @@ the fabric.
 
 Ethernet isolation has three independent layers:
 
-- **Routing isolation (VPC / VRF).** VRFs are isolated by default. A route
-  advertised in one VPC does not appear in another VPC's VRF. Cross-VPC
-  reachability is opt-in via VPC peering or controlled route leaking on the
-  VPC's routing profile.
+- **Routing isolation (VPC / VRF).** FNN creates a local VRF per VPC, but a VRF alone does not prevent a shared upstream VRF from hairpinning traffic between tenants. Under `mutual_isolation`, FNN installs the effective `site_fabric_null_routes` as floating blackholes in every tenant VRF. An authorized import from compatible VPC peering or routing policy takes precedence only when it is at least as specific as the applicable blackhole. Explicit CIDRs are canonicalized and exactly deduplicated without aggregating distinct prefix boundaries. ETV instead uses a site-prefix isolation ACL when no Network Security Group replaces it. The `open` mode installs neither the FNN blackholes nor the ETV isolation ACL, and Flat VPC isolation remains the operator-managed fabric's responsibility.
 - **Default isolation (admin overlay).** A managed host never carries tenant
   traffic unless a tenant configuration places it in a VPC. Between tenants,
   during provisioning / termination, or when its configuration is unknown,
