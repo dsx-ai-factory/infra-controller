@@ -1159,8 +1159,15 @@ impl ApiClient {
                     .id
             }
         };
-        // Legacy records can be selected by MAC even when they have no ID.
-        if let Some(resolved_id) = resolved_id {
+        // Legacy records can be selected by MAC even when they have no ID. The
+        // native PATCH RPC has no update-mask path for DPU loopback reservations,
+        // so a request that sets them must skip the fast path entirely and use
+        // the legacy read-modify-write, which applies every field including the
+        // reservations. Otherwise a successful native patch would return early
+        // and silently drop them.
+        if dpu_loopback_reservations.is_none()
+            && let Some(resolved_id) = resolved_id
+        {
             let metadata = (meta_name.is_some() || meta_description.is_some() || labels.is_some())
                 .then(|| rpc::Metadata {
                     name: meta_name.clone().unwrap_or_default(),
@@ -1223,6 +1230,7 @@ impl ApiClient {
             bmc_ip_allocation,
             host_lifecycle_profile,
             interfaces,
+            dpu_loopback_reservations,
         )
         .await
     }
@@ -1250,6 +1258,7 @@ impl ApiClient {
         bmc_ip_allocation: Option<::rpc::forge::BmcIpAllocationType>,
         host_lifecycle_profile: Option<::rpc::forge::HostLifecycleProfile>,
         interfaces: Option<String>,
+        dpu_loopback_reservations: Option<String>,
     ) -> Result<(), CarbideCliError> {
         let get_req = match (bmc_mac_address, id) {
             (Some(_), Some(_)) => {
