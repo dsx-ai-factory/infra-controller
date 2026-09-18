@@ -49,7 +49,7 @@ use crate::machine_utils::{
     PxeBootTarget, PxeError, PxeResponse, forge_agent_control, get_validation_id,
     send_pxe_boot_request,
 };
-use crate::{Guid, InfinibandPortState, PersistedDevice, PersistedDpuMachine};
+use crate::{Guid, InfinibandPortState, PersistedDevice, PersistedDpuMachine, scout_stream};
 
 type DpuDhcpRelayHandle = oneshot::Sender<()>;
 
@@ -154,6 +154,7 @@ pub(super) struct MachineStateMachine {
     app_context: Arc<MachineATronContext>,
     dpu_dhcp_relay: Option<DpuDhcpRelay>,
     dpu_dhcp_relay_handle: Option<DpuDhcpRelayHandle>,
+    scout_stream: Option<scout_stream::Handle>,
 }
 
 #[derive(Debug, Clone)]
@@ -405,6 +406,7 @@ impl MachineStateMachine {
             app_context,
             dpu_dhcp_relay,
             dpu_dhcp_relay_handle: None,
+            scout_stream: None,
             mat_host_id,
         }
     }
@@ -452,6 +454,7 @@ impl MachineStateMachine {
             app_context,
             dpu_dhcp_relay,
             dpu_dhcp_relay_handle: None,
+            scout_stream: None,
             mat_host_id,
         }
     }
@@ -665,11 +668,25 @@ impl MachineStateMachine {
                 FsmAction::AgentControlRequest(os_image) => {
                     match self.agent_control_request(*os_image).await {
                         Ok(_) => {
+                            if *os_image == OsImage::Scout && self.scout_stream.is_none() {
+                                let machine_id = self
+                                    .machine_discovery_result
+                                    .as_ref()
+                                    .and_then(|result| result.machine_id)
+                                    .expect("successful Scout control requires a machine ID");
+                                self.scout_stream = Some(scout_stream::Handle::start(
+                                    machine_id,
+                                    self.app_context.app_config.carbide_api_url.clone(),
+                                    self.app_context.forge_client_config.clone(),
+                                    self.app_context.app_config.scout_stream_reconnect_interval,
+                                ));
+                            }
                             self.actions.pop_front();
                             self.fsm_event(Event::AgentControlCompleted)
                         }
                         Err(MachineStateError::MachineNotFound(machine_id)) => {
                             tracing::warn!(%machine_id, "Machine not found during agent control, likely force deleted");
+                            self.scout_stream = None;
                             self.actions.pop_front();
                             self.fsm_event(Event::MachineNotFound)
                         }
@@ -698,6 +715,7 @@ impl MachineStateMachine {
                     self.machine_interface_id = None;
                     self.machine_discovery_result = None;
                     self.dpu_dhcp_relay_handle = None;
+                    self.scout_stream = None;
                 }
             }
         }

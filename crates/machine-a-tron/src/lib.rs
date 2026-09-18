@@ -41,6 +41,7 @@ mod mock_ssh_server;
 mod power_shelf_fsm;
 mod power_shelf_simulator;
 mod rack;
+mod scout_stream;
 mod simulator_registry;
 mod status;
 mod switch_fsm;
