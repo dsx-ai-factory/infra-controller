@@ -175,7 +175,7 @@ export NICO_CORE_IMAGE_TAG=v2.1.0                      # new Core tag
 export NICO_REST_IMAGE_TAG=v2.1.0                      # new REST tag
 ```
 
-If you are upgrading DPF as part of this release, the DPF version is the `helm-prereqs/doca-platform` submodule pin in the checkout you run `setup.sh` from; there is no version variable to set. Airgapped sites update the checkout `NICO_DPF_SRC` points at to the same commit (`git submodule status helm-prereqs/doca-platform`). Remove `NICO_DPF_VERSION` and `NICO_DPF_SRC_DIR` from your environment files: `setup.sh` now rejects them when installing DPF. A leftover `helm-prereqs/.dpf-src/` clone from earlier releases is no longer used and can be deleted.
+If you are upgrading DPF as part of this release, the DPF version is the pinned `helm-prereqs/doca-platform` commit of the `setup.sh` you run: the submodule gitlink in a git checkout, or `helm-prereqs/doca-platform.pin` in the packaged `nico-prereqs` chart, which `setup.sh` clones at that commit. There is no version variable to set, and both paths install the same commit. Airgapped sites update the checkout `NICO_DPF_SRC` points at to the same commit (`git submodule status helm-prereqs/doca-platform`, or the sha in `doca-platform.pin`). Remove `NICO_DPF_VERSION` and `NICO_DPF_SRC_DIR` from your environment files: `setup.sh` now rejects them when installing DPF. A leftover `helm-prereqs/.dpf-src/` clone from earlier releases is no longer used and can be deleted.
 
 DPF is enabled by default, and on DPF sites two more variables are **required** — preflight raises hard errors when they are unset:
 

@@ -55,11 +55,12 @@
 #                          Same as --skip-dpf. (NICO_INSTALL_DPF=false honored too.)
 #   NICO_DPF_SRC           Local doca-platform checkout to install the DPF
 #                          operator chart from. Default: unset - the source is
-#                          the helm-prereqs/doca-platform git submodule, pinned
-#                          by this repo (initialized automatically when git and
-#                          network are available; on airgapped hosts, clone
-#                          doca-platform at the pinned commit yourself and set
-#                          this variable).
+#                          the pinned helm-prereqs/doca-platform commit: the git
+#                          submodule in a git checkout of this repo, or a clone
+#                          of the commit in helm-prereqs/doca-platform.pin when
+#                          running from the packaged chart (both need git and
+#                          network; on airgapped hosts, clone doca-platform at
+#                          the pinned commit yourself and set this variable).
 #   NICO_DPF_IMAGE_REPO    DPF operator image repository. Default the public NGC
 #                          image nvcr.io/nvidia/doca/dpf-system. Point at your own
 #                          registry (mirror or self-built) to match Core/REST.
@@ -404,9 +405,11 @@ VAULT_NS="${VAULT_NS:-vault}"
 CERT_MANAGER_NS="${CERT_MANAGER_NS:-cert-manager}"
 NICO_MANAGE_DEFAULT_STORAGE_CLASS="${NICO_MANAGE_DEFAULT_STORAGE_CLASS:-true}"
 NICO_STORAGE_CLASS="${NICO_STORAGE_CLASS:-local-path-persistent}"
-# The DPF operator chart comes from the helm-prereqs/doca-platform git
-# submodule, pinned to a reviewed commit (bump the pin to move versions).
-# NICO_DPF_SRC points at a local checkout instead (airgapped or self-managed).
+# The DPF operator chart comes from the pinned helm-prereqs/doca-platform
+# commit: the git submodule in a git checkout, or a clone of the commit in
+# doca-platform.pin from the packaged chart (bump both together to move
+# versions). NICO_DPF_SRC points at a local checkout instead (airgapped or
+# self-managed).
 NICO_DPF_SRC="${NICO_DPF_SRC:-}"
 NICO_DPF_NGC_API_KEY="${NICO_DPF_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}"
 NICO_DPF_NICO_NGC_API_KEY="${NICO_DPF_NICO_NGC_API_KEY:-${NICO_DPF_NGC_API_KEY}}"
@@ -1131,22 +1134,29 @@ until ROLE_ID_B64="$(kubectl get secret nico-vault-approle-tokens \
 done
 echo "Vault AppRole credentials ready"
 
-# Align a pinned helm-prereqs/<name> submodule to the gitlink this repo records.
-# The submodule is the supply-chain boundary: the commit is pinned and reviewed
-# here and git verifies the hash on init, so setup.sh never clones a mutable
-# ref. A dirty submodule is refused so the pin stays meaningful.
+# The commit helm-prereqs/<name> is pinned to: the gitlink in a git checkout of
+# this repo, else the helm-prereqs/<name>.pin file that ships with the packaged
+# chart (tests keep the two equal). Prints nothing when neither exists.
+#   $1 submodule name under helm-prereqs/
+_pinned_submodule_commit() {
+    local _name="$1" _pin
+    _pin="$(git -C "${SCRIPT_DIR}/.." rev-parse ":helm-prereqs/${_name}" 2>/dev/null || true)"
+    [[ -n "${_pin}" ]] || \
+        _pin="$(grep -E -m1 '^[0-9a-f]{40}$' "${SCRIPT_DIR}/${_name}.pin" 2>/dev/null || true)"
+    printf '%s' "${_pin}"
+}
+
+# Align a pinned helm-prereqs/<name> submodule to the commit this repo records.
+# The pin is the supply-chain boundary: the commit is pinned and reviewed here
+# and git verifies the hash on checkout, so setup.sh never clones a mutable
+# ref. In a git checkout the submodule is initialized; from the packaged chart
+# (no .git, no gitlink) the commit in <name>.pin is cloned shallowly instead.
+# A dirty checkout is refused so the pin stays meaningful.
 #   $1 submodule name under helm-prereqs/   $2 upstream URL (airgap hint)
 #   $3 override to set on an airgapped host, e.g. NICO_RMS_CHART=<clone>/helm
 _sync_pinned_submodule() {
-    local _name="$1" _url="$2" _override="$3"
+    local _name="$1" _url="$2" _override="$3" _pin
     local _dir="${SCRIPT_DIR}/${_name}"
-    if ! git -C "${SCRIPT_DIR}/.." rev-parse --git-dir &>/dev/null; then
-        echo "Error: ${SCRIPT_DIR}/.. is not a git checkout, so the ${_name} submodule cannot be synced."
-        echo "  → A source tarball or the packaged chart is not enough: run setup.sh from a"
-        echo "    git clone of this repository, or clone ${_url} at the pinned"
-        echo "    commit and set ${_override}."
-        return 1
-    fi
     if [[ -e "${_dir}/.git" ]] && \
        [[ -n "$(git -C "${_dir}" status --porcelain 2>/dev/null)" ]]; then
         echo "Error: helm-prereqs/${_name} has local modifications."
@@ -1154,19 +1164,54 @@ _sync_pinned_submodule() {
         echo "    ${_override%%=*} at your modified checkout explicitly."
         return 1
     fi
-    echo "Syncing the ${_name} submodule to the pinned commit..."
-    if ! git -C "${SCRIPT_DIR}/.." submodule update --init --checkout --depth 1 -- "helm-prereqs/${_name}"; then
-        echo "Error: could not sync the ${_name} submodule to the pinned commit."
-        echo "  → On an airgapped host, clone ${_url} at the pinned commit"
-        echo "    (git -C ${SCRIPT_DIR}/.. submodule status) and set ${_override}."
+    if git -C "${SCRIPT_DIR}/.." rev-parse --git-dir &>/dev/null; then
+        echo "Syncing the ${_name} submodule to the pinned commit..."
+        if ! git -C "${SCRIPT_DIR}/.." submodule update --init --checkout --depth 1 -- "helm-prereqs/${_name}"; then
+            echo "Error: could not sync the ${_name} submodule to the pinned commit."
+            echo "  → On an airgapped host, clone ${_url} at the pinned commit"
+            echo "    (git -C ${SCRIPT_DIR}/.. submodule status) and set ${_override}."
+            return 1
+        fi
+        echo "helm-prereqs/${_name}: $(git -C "${_dir}" rev-parse --short HEAD 2>/dev/null || echo pinned)"
+        return 0
+    fi
+    _pin="$(_pinned_submodule_commit "${_name}")"
+    if [[ -z "${_pin}" ]]; then
+        echo "Error: ${SCRIPT_DIR}/.. is not a git checkout and ${SCRIPT_DIR}/${_name}.pin is missing, so the ${_name} source cannot be synced."
+        echo "  → Run setup.sh from a git clone of this repository or the packaged"
+        echo "    nico-prereqs chart, or clone ${_url} at the pinned commit and set ${_override}."
         return 1
     fi
-    echo "helm-prereqs/${_name}: $(git -C "${_dir}" rev-parse --short HEAD 2>/dev/null || echo pinned)"
+    if [[ -e "${_dir}/.git" && "$(git -C "${_dir}" rev-parse HEAD 2>/dev/null)" == "${_pin}" ]]; then
+        echo "helm-prereqs/${_name}: ${_pin:0:9} (already at the pinned commit)"
+        return 0
+    fi
+    echo "Cloning ${_name} at the pinned commit ${_pin:0:9} (${_name}.pin)..."
+    if [[ ! -e "${_dir}/.git" ]]; then
+        git init -q "${_dir}" && git -C "${_dir}" remote add origin "${_url}"
+    fi
+    # Fetch the commit by sha (GitHub allows it); a server that refuses a
+    # shallow fetch by sha gets a full fetch and a checkout of the sha.
+    if git -C "${_dir}" fetch -q --depth 1 origin "${_pin}" 2>/dev/null; then
+        git -C "${_dir}" checkout -q --detach FETCH_HEAD
+    else
+        echo "  shallow fetch by commit refused; fetching the full history..."
+        git -C "${_dir}" fetch -q origin && git -C "${_dir}" checkout -q --detach "${_pin}"
+    fi || {
+        echo "Error: could not clone ${_url} at the pinned commit ${_pin:0:9}."
+        echo "  → On an airgapped host, clone it at that commit and set ${_override}."
+        return 1
+    }
+    if [[ "$(git -C "${_dir}" rev-parse HEAD 2>/dev/null)" != "${_pin}" ]]; then
+        echo "Error: helm-prereqs/${_name} HEAD is not the pinned commit ${_pin:0:9} after the clone."
+        return 1
+    fi
+    echo "helm-prereqs/${_name}: ${_pin:0:9}"
 }
 
 # Warn (never fail) when the doca-platform source in use is not at the pinned
-# helm-prereqs/doca-platform gitlink. Local git reads only, no network: a shallow
-# submodule sync carries no tags, so the release tag is not compared.
+# helm-prereqs/doca-platform commit. Local git reads only, no network: a shallow
+# sync carries no tags, so the release tag is not compared.
 #   $1 doca-platform source dir
 _warn_dpf_source_mismatch() {
     local _src="$1" _head _pin _top
@@ -1176,7 +1221,7 @@ _warn_dpf_source_mismatch() {
         return 0
     fi
     _head="$(git -C "${_src}" rev-parse HEAD 2>/dev/null || true)"
-    _pin="$(git -C "${SCRIPT_DIR}/.." rev-parse :helm-prereqs/doca-platform 2>/dev/null || true)"
+    _pin="$(_pinned_submodule_commit doca-platform)"
     if [[ -z "${_head}" || -z "${_pin}" ]]; then
         echo "WARNING: could not read ${_src} HEAD or the pinned helm-prereqs/doca-platform commit to compare them."
     elif [[ "${_head}" != "${_pin}" ]]; then
@@ -1345,8 +1390,9 @@ if "${INSTALL_DPF}"; then
     fi
 
     # 5b.4 Resolve the doca-platform source: an explicit NICO_DPF_SRC override,
-    #      or the pinned helm-prereqs/doca-platform submodule (same contract as
-    #      the nv-rms submodule in 5c).
+    #      or the pinned helm-prereqs/doca-platform commit (the submodule in a
+    #      git checkout, a clone of doca-platform.pin from the packaged chart;
+    #      same contract as the nv-rms submodule in 5c).
     if [[ -n "${NICO_DPF_SRC}" ]]; then
         _DPF_SRC="${NICO_DPF_SRC}"
         echo "Using local doca-platform source: ${_DPF_SRC}"

@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETUP_SH="${SCRIPT_DIR}/../setup.sh"
 PREFLIGHT_SH="${SCRIPT_DIR}/../preflight.sh"
 
-for fn in _sync_pinned_submodule _reject_retired_dpf_vars; do
+for fn in _pinned_submodule_commit _sync_pinned_submodule _reject_retired_dpf_vars; do
     definition="$(sed -n "/^${fn}()/,/^}/p" "${SETUP_SH}")"
     if [[ -z "${definition}" ]]; then
         echo "could not extract ${fn} from setup.sh" >&2
@@ -69,31 +69,61 @@ if [[ "${rc}" -ne 1 || "${out}" != *"has local modifications"* ]]; then
     exit 1
 fi
 
-# A source tarball is not a git checkout; the hint must say so instead of
-# pointing at git submodule status.
+# A source tarball is neither a git checkout nor a packaged chart with a pin
+# file; the hint must say so instead of pointing at git submodule status.
 mkdir -p "${WORK}/tarball/helm-prereqs"
 SCRIPT_DIR="${WORK}/tarball/helm-prereqs"
 rc=0
 out="$(_sync_pinned_submodule fake "${UPSTREAM_URL}" 'NICO_FAKE_SRC=<clone>' 2>&1)" || rc=$?
-if [[ "${rc}" -ne 1 || "${out}" != *"is not a git checkout"* ]]; then
-    echo "non-git checkout must be refused with rc 1 (got rc ${rc}: ${out})" >&2
+if [[ "${rc}" -ne 1 || "${out}" != *"is not a git checkout and "*"fake.pin is missing"* ]]; then
+    echo "non-git checkout without a pin file must be refused with rc 1 (got rc ${rc}: ${out})" >&2
     exit 1
 fi
 
-# preflight.sh must refuse the same tarball before any phase runs, and accept
-# a checkout that records the gitlink.
+# The packaged chart has no .git or gitlink but ships <name>.pin; the sync must
+# clone the pinned commit (not the upstream tip) shallowly, and a re-run at the
+# pin must not touch the network.
+mkdir -p "${WORK}/chart/helm-prereqs"
+printf '# pinned\n%s\n' "${PINNED}" > "${WORK}/chart/helm-prereqs/fake.pin"
+SCRIPT_DIR="${WORK}/chart/helm-prereqs"
+if [[ "$(_pinned_submodule_commit fake)" != "${PINNED}" ]]; then
+    echo "pin file must resolve to the pinned commit outside a git checkout" >&2
+    exit 1
+fi
+if ! _sync_pinned_submodule fake "${UPSTREAM_URL}" 'NICO_FAKE_SRC=<clone>' >/dev/null; then
+    echo "sync from a packaged chart with a pin file must succeed" >&2
+    exit 1
+fi
+if [[ "$(git -C "${WORK}/chart/helm-prereqs/fake" rev-parse HEAD)" != "${PINNED}" ]]; then
+    echo "packaged-chart clone must sit at the pinned commit, not the upstream tip" >&2
+    exit 1
+fi
+if ! git -C "${WORK}/chart/helm-prereqs/fake" rev-parse --is-shallow-repository | grep -qx true; then
+    echo "packaged-chart clone must be a shallow checkout" >&2
+    exit 1
+fi
+out="$(_sync_pinned_submodule fake "file://${WORK}/does-not-exist.git" 'NICO_FAKE_SRC=<clone>' 2>&1)"
+if [[ "${out}" != *"already at the pinned commit"* ]]; then
+    echo "re-run at the pinned commit must skip the clone (got: ${out})" >&2
+    exit 1
+fi
+
+# preflight.sh must refuse the tarball before any phase runs, and accept both
+# a checkout that records the gitlink and a packaged chart with the pin file.
 ERRORS=()
 SCRIPT_DIR="${WORK}/tarball/helm-prereqs" _check_pinned_submodule Fake fake 'NICO_FAKE_SRC=<clone>' --skip-fake
-if [[ "${#ERRORS[@]}" -ne 1 || "${ERRORS[0]}" != *"a source tarball or the packaged chart is not enough"* ]]; then
-    echo "preflight must reject a non-git checkout (got: ${ERRORS[*]:-none})" >&2
+if [[ "${#ERRORS[@]}" -ne 1 || "${ERRORS[0]}" != *"a source tarball has neither"* ]]; then
+    echo "preflight must reject a non-git checkout without a pin file (got: ${ERRORS[*]:-none})" >&2
     exit 1
 fi
-ERRORS=()
-SCRIPT_DIR="${WORK}/clone/helm-prereqs" _check_pinned_submodule Fake fake 'NICO_FAKE_SRC=<clone>' --skip-fake
-if [[ "${#ERRORS[@]}" -ne 0 ]]; then
-    echo "preflight must accept a checkout with the recorded gitlink (got: ${ERRORS[*]})" >&2
-    exit 1
-fi
+for dir in clone chart; do
+    ERRORS=()
+    SCRIPT_DIR="${WORK}/${dir}/helm-prereqs" _check_pinned_submodule Fake fake 'NICO_FAKE_SRC=<clone>' --skip-fake
+    if [[ "${#ERRORS[@]}" -ne 0 ]]; then
+        echo "preflight must accept ${dir} (got: ${ERRORS[*]})" >&2
+        exit 1
+    fi
+done
 
 # Retired DPF variables abort only when DPF installs; --skip-dpf runs ignore them.
 for var in NICO_DPF_VERSION NICO_DPF_SRC_DIR; do

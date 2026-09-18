@@ -476,16 +476,19 @@ if [[ -n "${KUBECONFIG:-}" && ! -f "${KUBECONFIG}" ]]; then
 fi
 
 # A phase that installs from a pinned helm-prereqs/<name> submodule needs git
-# and a git checkout of this repository that records the gitlink. A source
-# tarball or the packaged chart has neither, so fail here rather than in
-# setup.sh after earlier phases have already changed the cluster.
+# and a record of the pinned commit: the gitlink in a git checkout of this
+# repository, or the helm-prereqs/<name>.pin file shipped with the packaged
+# chart (setup.sh clones that commit). A source tarball has neither, so fail
+# here rather than in setup.sh after earlier phases have already changed the
+# cluster.
 #   $1 phase label   $2 submodule name   $3 local-source override   $4 skip flag
 _check_pinned_submodule() {
     local _phase="$1" _name="$2" _override="$3" _skip="$4"
     if ! command -v git &>/dev/null; then
-        ERRORS+=("${_phase} requires 'git' to initialize the ${_name} submodule - install it, set ${_override}, or pass ${_skip}")
-    elif ! git -C "${SCRIPT_DIR}/.." ls-files -s -- "helm-prereqs/${_name}" 2>/dev/null | grep -q '^160000 '; then
-        ERRORS+=("${_phase} requires a git checkout of this repository with the helm-prereqs/${_name} submodule recorded (a source tarball or the packaged chart is not enough) - run from a git clone, set ${_override}, or pass ${_skip}")
+        ERRORS+=("${_phase} requires 'git' to fetch the pinned ${_name} source - install it, set ${_override}, or pass ${_skip}")
+    elif ! git -C "${SCRIPT_DIR}/.." ls-files -s -- "helm-prereqs/${_name}" 2>/dev/null | grep -q '^160000 ' && \
+         ! grep -qE '^[0-9a-f]{40}$' "${SCRIPT_DIR}/${_name}.pin" 2>/dev/null; then
+        ERRORS+=("${_phase} requires the pinned helm-prereqs/${_name} commit: a git checkout of this repository recording the submodule, or the helm-prereqs/${_name}.pin file from the packaged chart (a source tarball has neither) - run from a git clone or the packaged chart, set ${_override}, or pass ${_skip}")
     fi
 }
 
