@@ -15,7 +15,9 @@
  * limitations under the License.
  */
 
-use model::instance::config::spx::{InstanceSpxAttachment, InstanceSpxConfig, SpxAttachmentType};
+use model::instance::config::spx::{
+    InstanceSpxAttachment, InstanceSpxConfig, SpxAttachmentOvs, SpxAttachmentType, SpxAttachmentVf,
+};
 
 use crate::errors::RpcDataConversionError;
 use crate::forge as rpc;
@@ -44,7 +46,13 @@ impl TryFrom<rpc::InstanceSpxConfig> for InstanceSpxConfig {
                 device_instance: attachment.device_instance,
                 spx_partition_id,
                 attachment_type,
-                virtual_function_id: attachment.virtual_function_id,
+                attachment_vf: attachment.attachment_vf.map(|vf| SpxAttachmentVf {
+                    vf_index: vf.vf_index,
+                }),
+                attachment_ovs: attachment.attachment_ovs.map(|ovs| SpxAttachmentOvs {
+                    bridge_name: ovs.bridge_name,
+                    ovn_network_name: ovs.ovn_network_name,
+                }),
                 mac_address: None,
             });
         }
@@ -63,7 +71,13 @@ impl TryFrom<InstanceSpxConfig> for rpc::InstanceSpxConfig {
                 device_instance: attachment.device_instance,
                 spx_partition_id: Some(attachment.spx_partition_id),
                 attachment_type: attachment.attachment_type as i32,
-                virtual_function_id: attachment.virtual_function_id,
+                attachment_vf: attachment.attachment_vf.map(|vf| rpc::SpxAttchmentVf {
+                    vf_index: vf.vf_index,
+                }),
+                attachment_ovs: attachment.attachment_ovs.map(|ovs| rpc::SpxAttchmentOvs {
+                    bridge_name: ovs.bridge_name,
+                    ovn_network_name: ovs.ovn_network_name,
+                }),
             });
         }
         Ok(rpc::InstanceSpxConfig { spx_attachments })

@@ -3382,7 +3382,22 @@ message InstanceSpxConfig {
 enum SpxAttachmentType {
   Physical = 0;
   Virtual = 1;
-  Ovn = 2; // This is WIP. Specification for this not yet finalized in Astra Spec
+  reserved 2; // was: Ovn = 2
+  reserved "Ovn";
+  OVS = 3;
+}
+
+message SpxAttchmentVf {
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  uint32 vf_index = 1;
+}
+
+message SpxAttchmentOvs {
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  string bridge_name = 1;
+  optional string ovn_network_name = 2;
 }
 
 message InstanceSpxAttachment {
@@ -3392,7 +3407,10 @@ message InstanceSpxAttachment {
   uint32 device_instance = 2;
   common.SpxPartitionId spx_partition_id = 3;
   SpxAttachmentType attachment_type = 4;
-  optional uint32 virtual_function_id = 5; // Needed only if AttachmentType is Virtual
+  reserved 5;
+  reserved "virtual_function_id";
+  optional SpxAttchmentVf attachment_vf = 6;  // If attachment type is Virtual, this is required
+  optional SpxAttchmentOvs attachment_ovs = 7;  // If attachment type is OVS, this is required
 }
 
 // New configuration for the instances network interfaces
@@ -8788,8 +8806,9 @@ message AstraAttachment {
   int32 subnet_mask = 4;
   optional SpxAttachmentType attachment_type = 5;
   optional int32 virtual_function_id = 6;
-  optional string network_name = 7; // Set if attachment_type is OVN
+  optional string network_name = 7; // Set if attachment_type is OVS
   string revision = 8; // This is either spx_config_version from instance of network_config_version from dpa_interface
+  optional string bridge_name = 9; // Set if attachment_type is OVS
 }
 
 message AstraConfigStatus {
