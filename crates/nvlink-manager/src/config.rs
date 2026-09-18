@@ -19,6 +19,21 @@ use carbide_utils::config::as_std_duration;
 use duration_str::deserialize_duration;
 use serde::{Deserialize, Serialize};
 
+/// Deserializes a duration and rejects zero.
+fn deserialize_positive_duration<'de, D>(deserializer: D) -> Result<std::time::Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let duration: std::time::Duration = deserialize_duration(deserializer)?;
+    if duration.is_zero() {
+        return Err(serde::de::Error::custom(
+            "duration must be greater than zero",
+        ));
+    }
+
+    Ok(duration)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NvLinkConfig {
@@ -34,9 +49,10 @@ pub struct NvLinkConfig {
     pub domain_discovery_enabled: bool,
 
     /// Maximum duration for one read-only domain-discovery database or NMX-C operation.
+    /// Must be greater than zero.
     #[serde(
         default = "NvLinkConfig::default_domain_discovery_operation_timeout",
-        deserialize_with = "deserialize_duration",
+        deserialize_with = "deserialize_positive_duration",
         serialize_with = "as_std_duration"
     )]
     pub domain_discovery_operation_timeout: std::time::Duration,
@@ -259,6 +275,23 @@ mod test {
             Some("nmxc.example.internal")
         );
         assert_eq!(config.nmx_c_endpoint_port, Some(9370));
+    }
+
+    #[test]
+    fn deserialize_zero_domain_discovery_operation_timeout_is_rejected() {
+        let err = serde_json::from_str::<NvLinkConfig>(
+            r#"{
+                "domain_discovery_operation_timeout": "0s",
+                "allow_insecure": false
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("duration must be greater than zero"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

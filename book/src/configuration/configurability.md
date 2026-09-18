@@ -1120,7 +1120,7 @@ domain returned by each rack's NMX-C endpoint without reconciling partitions.
 NICo inventory supplies the switch NVOS address; discovery combines it with
 `nmx_c_endpoint_port`. The read-only mode reuses `monitor_run_interval`, applies
 `domain_discovery_operation_timeout` to database and NMX-C operations, and uses
-the configured NMX-C TLS settings.
+the configured NMX-C TLS settings. The operation timeout must be greater than zero.
 
 ---
 

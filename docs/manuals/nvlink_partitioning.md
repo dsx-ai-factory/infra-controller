@@ -210,7 +210,7 @@ allow_insecure = false
 | ----- | ------- |
 | `enabled` | Enables automated NVLink partition reconciliation. Defaults to `false` |
 | `domain_discovery_enabled` | When partition reconciliation is disabled, periodically performs read-only NMX-C `Hello` calls and records the observed domain on rack components. Defaults to `false`; `enabled = true` already performs this discovery |
-| `domain_discovery_operation_timeout` | Maximum duration for each discovery database operation and each per-rack NMX-C observation, including metadata persistence. Defaults to `30s` |
+| `domain_discovery_operation_timeout` | Maximum duration for each discovery database operation and each per-rack NMX-C observation, including metadata persistence. Defaults to `30s` and must be greater than zero |
 | `monitor_run_interval` | Interval used by the enabled partition monitor or read-only domain discovery. Defaults to `60s` |
 | `nmx_c_tls_ca_cert_path` | Optional PEM containing additional CAs for normal NMX-C connectivity. The certificate monitor requires this file and does not use the system trust store |
 | `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C |
