@@ -31,9 +31,8 @@ pub(crate) struct Metrics {
 }
 
 pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::Result<Metrics> {
-    // This sets the global meter provider
-    // Note: This configures metrics bucket between 5.0 and 10000.0, which are best suited
-    // for tracking milliseconds
+    // Histograms without a matching view use OpenTelemetry's default boundaries.
+    // Unit-specific and count-oriented histograms register explicit views below.
     // See https://github.com/open-telemetry/opentelemetry-rust/blob/495330f63576cfaec2d48946928f3dc3332ba058/opentelemetry-sdk/src/metrics/reader.rs#L155-L158
     use opentelemetry::KeyValue;
 
