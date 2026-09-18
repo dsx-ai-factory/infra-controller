@@ -164,6 +164,7 @@ pub(super) async fn get_astra_config(
                 virtual_function_id: None, // TODO: Add virtual function id if supported
                 network_name: None,        // TODO: Add network name when VMAAS support is added
                 revision: instance.spx_config_version.to_string(),
+                bridge_name: None,
             };
 
             astra_attachments.push(astra_attachment);
@@ -177,6 +178,7 @@ pub(super) async fn get_astra_config(
                 virtual_function_id: None,
                 network_name: None,
                 revision: dpa_interface.network_config.version.to_string(),
+                bridge_name: None,
             };
 
             astra_attachments.push(astra_attachment);

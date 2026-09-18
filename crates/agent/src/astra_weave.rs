@@ -119,7 +119,7 @@ fn weave_ew_virtual_network_attachment_spec_from_astra_attachment(
                 vf_index,
             });
         }
-        SpxAttachmentType::Ovn => {
+        SpxAttachmentType::Ovs => {
             let Some(network_name) = astra_attachment_status
                 .network_name
                 .as_ref()
@@ -1735,6 +1735,7 @@ mod tests {
             virtual_function_id: Some(7),
             network_name: Some("test-network".to_string()),
             revision: revision.to_string(),
+            bridge_name: None,
         }
     }
 
@@ -1751,6 +1752,7 @@ mod tests {
             virtual_function_id: None,
             network_name: None,
             revision: revision.to_string(),
+            bridge_name: None,
         }
     }
 
