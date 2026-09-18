@@ -27,7 +27,10 @@ use db::{
 use model::DeletedFilter;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::power_shelf::PowerShelfSearchFilter;
-use model::rack::{FirmwareUpgradeState, Rack, RackConfig, RackMaintenanceState, RackState};
+use model::rack::{
+    FirmwareUpgradeState, Rack, RackConfig, RackErrorRecoveryPolicy, RackMaintenanceState,
+    RackState,
+};
 use model::switch::SwitchSearchFilter;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -116,7 +119,11 @@ pub async fn handle_ready(
             "Rack transitioning from Ready to Error",
         );
         let txn = ctx.services.db_pool.begin().await?;
-        return Ok(StateHandlerOutcome::transition(RackState::Error { cause }).with_txn(txn));
+        return Ok(StateHandlerOutcome::transition(RackState::Error {
+            cause,
+            recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+        })
+        .with_txn(txn));
     }
 
     Ok(StateHandlerOutcome::wait(

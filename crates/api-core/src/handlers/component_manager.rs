@@ -270,7 +270,7 @@ fn rack_firmware_failure_summary(rack: &model::rack::Rack, job: &FirmwareUpgrade
         // job can therefore outlive its own error and sit next to an unrelated one, so
         // quote the rack error as context instead of claiming it caused this upgrade
         // to fail.
-        if let model::rack::RackState::Error { cause } = &rack.controller_state.value {
+        if let model::rack::RackState::Error { cause, .. } = &rack.controller_state.value {
             let cause = cause.trim();
             if !cause.is_empty() {
                 return format!("firmware upgrade failed; rack is in error state: {cause}");
@@ -5611,7 +5611,7 @@ mod tests {
     use config_version::{ConfigVersion, Versioned};
     use model::component_manager::FirmwareState;
     use model::metadata::Metadata;
-    use model::rack::{Rack, RackConfig, RackState};
+    use model::rack::{Rack, RackConfig, RackErrorRecoveryPolicy, RackState};
     use tonic::Code;
 
     use super::*;
@@ -6251,6 +6251,7 @@ mod tests {
         rack.controller_state = Versioned::new(
             RackState::Error {
                 cause: cause.to_string(),
+                recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
             },
             ConfigVersion::initial(),
         );
@@ -6284,6 +6285,7 @@ mod tests {
         rack.controller_state = Versioned::new(
             RackState::Error {
                 cause: unrelated.to_string(),
+                recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
             },
             ConfigVersion::initial(),
         );

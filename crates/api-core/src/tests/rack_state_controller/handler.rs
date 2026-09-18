@@ -43,8 +43,9 @@ use model::rack::{
     ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
     FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
     NvosPasswordUpdateState, NvosUpdateJob, NvosUpdateState, NvosUpdateSwitchStatus, Rack,
-    RackConfig, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState,
-    RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
+    RackConfig, RackErrorRecoveryPolicy, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus,
+    RackMaintenanceState, RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState,
+    SwitchNvosUpdateStatus,
 };
 use model::rack_type::{
     RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -1230,6 +1231,7 @@ async fn test_error_state_does_nothing(
 
     let error_state = RackState::Error {
         cause: "test error".to_string(),
+        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     };
     let outcome = handler
         .handle_object_state(&rack_id, &mut rack, &error_state, &mut ctx)
@@ -1749,7 +1751,7 @@ async fn test_firmware_upgrade_start_rejects_desired_off_machine_before_rms_subm
     }
 
     let StateHandlerOutcome::Transition {
-        next_state: RackState::Error { cause },
+        next_state: RackState::Error { cause, .. },
         ..
     } = outcome
     else {
@@ -2127,7 +2129,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
         .await?;
 
     let StateHandlerOutcome::Transition {
-        next_state: RackState::Error { cause },
+        next_state: RackState::Error { cause, .. },
         ..
     } = &outcome
     else {
@@ -2327,7 +2329,7 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state(
         .handle_object_state(&rack_id, &mut rack, &maintenance_state, &mut ctx)
         .await?;
     let StateHandlerOutcome::Transition {
-        next_state: RackState::Error { cause },
+        next_state: RackState::Error { cause, .. },
         ..
     } = &outcome
     else {
@@ -3645,7 +3647,7 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
 
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
-    let RackState::Error { cause } = rack.controller_state.value else {
+    let RackState::Error { cause, .. } = rack.controller_state.value else {
         panic!("missing profile SOT should fail an enrolled NVOS phase");
     };
 
@@ -3943,7 +3945,7 @@ async fn test_nvos_update_recovery_moves_to_error_when_profile_is_missing(
 
     assert!(rack.config.maintenance_requested.is_none());
 
-    let RackState::Error { cause } = &rack.controller_state.value else {
+    let RackState::Error { cause, .. } = &rack.controller_state.value else {
         panic!("missing profile should fail NVOS password recovery");
     };
 
@@ -4340,7 +4342,7 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
 
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
-    let RackState::Error { cause } = rack.controller_state.value else {
+    let RackState::Error { cause, .. } = rack.controller_state.value else {
         panic!("failed NVOS password recovery should transition the rack to Error");
     };
 
@@ -4764,6 +4766,109 @@ async fn test_configure_nmx_cluster_v1_config_rotates_certificates_through_v2_wo
 }
 
 #[crate::sqlx_test]
+async fn test_configure_nmx_cluster_failed_v2_job_requires_new_maintenance_request(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (env, rack_id, _) =
+        create_configure_nmx_cluster_test_rack(&pool, TestEnvOverrides::default()).await?;
+
+    env.rms_sim
+        .queue_configure_switch_certificate_response(Ok(rms::ConfigureSwitchCertificateResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "configure-switch-certificate-job".to_string(),
+                ..Default::default()
+            }),
+            jobs: Vec::new(),
+        }))
+        .await;
+
+    env.rms_sim
+        .queue_get_configure_switch_certificate_job_status_response(Ok(
+            rms::GetConfigureSwitchCertificateJobStatusResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "configure-switch-certificate-job".to_string(),
+                state: "completed".to_string(),
+                ..Default::default()
+            },
+        ))
+        .await;
+
+    env.rms_sim
+        .queue_configure_scale_up_fabric_manager_v2_response(Ok(
+            rms_v2::ConfigureScaleUpFabricManagerResponse {
+                job_id: "failed-fabric-job".to_string(),
+            },
+        ))
+        .await;
+
+    env.rms_sim
+        .queue_get_job_status_response(Ok(rms::GetJobStatusResponse {
+            job_states: vec![rms::JobStatus {
+                job_id: "failed-fabric-job".to_string(),
+                execution_state: rms::JobExecutionState::Failed as i32,
+                error_message: "nmx-controller failed to start".to_string(),
+                ..Default::default()
+            }],
+        }))
+        .await;
+
+    env.run_rack_controller_iteration().await;
+    env.run_rack_controller_iteration().await;
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(rack.config.maintenance_requested.is_none());
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Error {
+            ref cause,
+            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+        } if cause == "ConfigureScaleUpFabricManager job failed-fabric-job failed: nmx-controller failed to start"
+    ));
+
+    assert_eq!(
+        env.rms_sim
+            .submitted_configure_switch_certificate_requests()
+            .await
+            .len(),
+        1
+    );
+
+    assert_eq!(
+        env.rms_sim
+            .submitted_configure_scale_up_fabric_manager_v2_requests()
+            .await
+            .len(),
+        1
+    );
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Error {
+            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+            ..
+        }
+    ));
+
+    assert_eq!(
+        env.rms_sim
+            .submitted_configure_scale_up_fabric_manager_v2_requests()
+            .await
+            .len(),
+        1
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_configure_nmx_cluster_partial_certificate_submission_does_not_retry_or_start_v2(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -4788,12 +4893,25 @@ async fn test_configure_nmx_cluster_partial_certificate_submission_does_not_retr
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause }
+        RackState::Error {
+            ref cause,
+            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+        }
             if cause.contains("certificate batch rejected")
                 && cause.contains("partial-certificate-job")
     ));
 
     env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Error {
+            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+            ..
+        }
+    ));
 
     assert_eq!(
         env.rms_sim
@@ -4939,7 +5057,7 @@ async fn test_configure_nmx_cluster_stops_when_certificate_job_is_missing(
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause }
+        RackState::Error { ref cause, .. }
             if cause.contains("configure-switch-certificate-job")
                 && cause.contains("job not found")
     ));
@@ -5019,7 +5137,7 @@ async fn test_configure_nmx_cluster_waits_for_certificate_job_and_stops_on_failu
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause } if cause.contains("certificate install failed")
+        RackState::Error { ref cause, .. } if cause.contains("certificate install failed")
     ));
 
     assert!(
@@ -5080,7 +5198,7 @@ async fn test_configure_nmx_cluster_requires_nvos_credentials_before_rotation(
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause } if cause.contains("missing NVOS credentials")
+        RackState::Error { ref cause, .. } if cause.contains("missing NVOS credentials")
     ));
 
     assert!(
@@ -5146,7 +5264,7 @@ async fn test_configure_nmx_cluster_rejects_ambiguous_nvos_endpoints_before_rota
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause }
+        RackState::Error { ref cause, .. }
             if cause.contains("multiple usable NVOS endpoints")
     ));
 
@@ -5310,7 +5428,7 @@ async fn test_configure_nmx_cluster_unknown_profile_stops_before_certificate_sub
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause } if cause.contains("rack profile is missing or unknown")
+        RackState::Error { ref cause, .. } if cause.contains("rack profile is missing or unknown")
     ));
 
     assert!(
@@ -5385,7 +5503,7 @@ async fn test_configure_nmx_cluster_retired_sub_state_transitions_to_error(
         panic!("expected a transition out of a retired sub-state");
     };
 
-    let RackState::Error { cause } = &next_state else {
+    let RackState::Error { cause, .. } = &next_state else {
         panic!("expected Error, got {next_state:?}");
     };
 
@@ -5716,7 +5834,10 @@ async fn test_ready_with_failed_switch_transitions_to_error(
 
     match outcome {
         StateHandlerOutcome::Transition { next_state, .. } => match next_state {
-            RackState::Error { cause } => {
+            RackState::Error {
+                cause,
+                recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+            } => {
                 assert!(
                     cause.contains("switch"),
                     "Error cause should mention failing switch, got: {}",
@@ -5792,7 +5913,10 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
 
     match outcome {
         StateHandlerOutcome::Transition { next_state, .. } => match next_state {
-            RackState::Error { cause } => {
+            RackState::Error {
+                cause,
+                recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+            } => {
                 assert!(
                     cause.contains("power shelf"),
                     "Error cause should mention failing power shelf, got: {}",
@@ -5872,6 +5996,7 @@ async fn test_error_recovers_to_ready_when_all_components_ready(
         &rack_id,
         RackState::Error {
             cause: "synthetic prior failure".to_string(),
+            recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         },
     )
     .await?;
@@ -5931,6 +6056,7 @@ async fn test_error_stays_in_error_when_components_not_all_ready(
         &rack_id,
         RackState::Error {
             cause: "synthetic prior failure".to_string(),
+            recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         },
     )
     .await?;

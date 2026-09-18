@@ -35,7 +35,7 @@ use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
 use db::{rack as db_rack, switch as db_switch};
 use model::component_manager::ConfigureSwitchCertificateState;
 use model::controller_outcome::PersistentStateHandlerOutcome;
-use model::rack::{RackConfig, RackState};
+use model::rack::{RackConfig, RackErrorRecoveryPolicy, RackState};
 use model::switch::{
     ConfigureCertificateState, ConfiguringState, SwitchControllerState, SwitchDecommissioningState,
 };
@@ -1098,6 +1098,7 @@ async fn test_rack_error_unwinds_switch_waiting_for_nvos(
             rack.controller_state.version.increment(),
             &RackState::Error {
                 cause: "profile SOT unavailable".to_string(),
+                recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
             },
         )
         .await?,
