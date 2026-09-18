@@ -1819,6 +1819,13 @@ paths:
           required: true
           description: ID of the Site
         - schema:
+            type: string
+            minLength: 1
+          name: machineId
+          in: query
+          required: false
+          description: Only return endpoints whose exploration report has this Machine ID. Omit to return all endpoints in the Site.
+        - schema:
             $ref: '#/components/schemas/PageNumber'
           name: pageNumber
           in: query
@@ -1872,6 +1879,8 @@ paths:
       operationId: get-all-site-explorer-endpoint
       description: |-
         Retrieve explored endpoints discovered by Site Explorer for a Site. Use `ID_ASC` or `ID_DESC` to order by endpoint ID; the default is `ID_ASC`.
+
+        Optional `machineId` filtering is applied before pagination and the total count. It requires a site-agent and nico-api version that supports the filter; older versions may ignore it and return unfiltered results and pagination totals. An empty or malformed Machine ID returns HTTP 400 when the filter is supported.
 
         The response is paged over Core `FindExploredEndpointIds` followed by
         `FindExploredEndpointsByIds`. Pagination metadata is returned in the

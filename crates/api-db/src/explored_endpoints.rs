@@ -121,15 +121,20 @@ impl From<DbExploredEndpoint> for ExploredEndpoint {
     }
 }
 
+/// Returns endpoint IPs whose exploration reports match `filter`.
 pub async fn find_ips(
     txn: impl DbReader<'_>,
-    // filter is currently is empty, so it is a placeholder for the future
-    _filter: model::site_explorer::ExploredEndpointSearchFilter,
+    filter: model::site_explorer::ExploredEndpointSearchFilter,
 ) -> Result<Vec<IpAddr>, DatabaseError> {
     #[derive(Debug, Clone, Copy, FromRow)]
     struct ExploredEndpointIp(IpAddr);
     // grab list of IPs
     let mut builder = sqlx::QueryBuilder::new("SELECT address FROM explored_endpoints");
+    if let Some(machine_id) = filter.machine_id {
+        builder
+            .push(" WHERE exploration_report->>'MachineId' = ")
+            .push_bind(machine_id);
+    }
     let query = builder.build_query_as();
     let ids: Vec<ExploredEndpointIp> = query
         .fetch_all(txn)

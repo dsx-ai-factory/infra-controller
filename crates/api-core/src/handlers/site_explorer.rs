@@ -36,7 +36,8 @@ pub(crate) async fn find_explored_endpoint_ids(
 ) -> Result<Response<::rpc::site_explorer::ExploredEndpointIdList>, Status> {
     log_request_data(&request);
 
-    let filter: model::site_explorer::ExploredEndpointSearchFilter = request.into_inner().into();
+    let filter: model::site_explorer::ExploredEndpointSearchFilter =
+        request.into_inner().try_into()?;
 
     let endpoint_ips = db::explored_endpoints::find_ips(&api.database_connection, filter).await?;
 

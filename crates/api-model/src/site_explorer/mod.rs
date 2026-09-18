@@ -48,8 +48,12 @@ use crate::pci::{UefiPciOrderingKey, UefiPciOrderingKeyParseError, normalize_uef
 use crate::power_shelf::power_shelf_id;
 use crate::switch::switch_id;
 
+/// Filters explored endpoints by values in their exploration reports.
 #[derive(Clone, Debug, Default)]
-pub struct ExploredEndpointSearchFilter {}
+pub struct ExploredEndpointSearchFilter {
+    /// Match this machine ID; `None` includes reports with any or no machine ID.
+    pub machine_id: Option<MachineId>,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ExploredManagedHostSearchFilter {}

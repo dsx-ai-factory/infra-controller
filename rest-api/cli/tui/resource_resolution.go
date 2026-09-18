@@ -6,10 +6,14 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+
+	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
 )
 
 // GeneratedResourceDescriptor describes how an OpenAPI parameter can be
@@ -341,7 +345,14 @@ func (s *Session) fetchMachineChassis(machineID string) ([]NamedItem, error) {
 	if siteID == "" {
 		return nil, fmt.Errorf("machine %s has no siteId", machineID)
 	}
-	endpoints, err := s.fetchAll(apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID})
+	endpoints, err := s.fetchAll(apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID, "machineId": machineID})
+	// REST versions without `machineId` reject the query before listing.
+	// The report check below still selects the machine on those servers.
+	var apiErr *appcli.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
+		apiErr.Message == "Unknown query parameter specified in request: machineId" {
+		endpoints, err = s.fetchAll(apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID})
+	}
 	if err != nil {
 		return nil, err
 	}

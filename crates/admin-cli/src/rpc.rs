@@ -925,7 +925,13 @@ impl ApiClient {
     ) -> CarbideCliResult<::rpc::site_explorer::SiteExplorationReport> {
         let last_run = self.get_site_explorer_last_run().await?;
         // grab endpoints
-        let endpoint_ids = match self.0.find_explored_endpoint_ids().await {
+        let endpoint_ids = match self
+            .0
+            .find_explored_endpoint_ids(
+                ::rpc::site_explorer::ExploredEndpointSearchFilter::default(),
+            )
+            .await
+        {
             Ok(endpoint_ids) => endpoint_ids,
             Err(status) => {
                 return if maybe_unimplemented(&status) {
