@@ -129,7 +129,7 @@ func (rs *FlowServerImpl) CreateExpectedRack(
 	return &pb.CreateExpectedRackResponse{Id: protobuf.UUIDTo(id)}, err
 }
 
-// GetRackInfoByID retrieves rack information by its unique identifier.
+// GetRackInfoByID retrieves rack information by external rack ID.
 // Optionally includes component information if requested.
 //
 // Parameters:
@@ -143,11 +143,12 @@ func (rs *FlowServerImpl) GetRackInfoByID(
 	ctx context.Context,
 	req *pb.GetRackInfoByIDRequest,
 ) (*pb.GetRackInfoResponse, error) {
-	r, err := rs.inventoryManager.GetRackByID(
-		ctx,
-		protobuf.UUIDFrom(req.GetId()),
-		req.GetWithComponents(),
-	)
+	rawID := req.GetId().GetId()
+	if rawID == "" {
+		return nil, status.Error(codes.InvalidArgument, "rack identifier is required")
+	}
+
+	r, err := rs.inventoryManager.GetRackByIdentifier(ctx, externalRackIdentifier(rawID), req.GetWithComponents())
 	if err != nil {
 		return nil, err
 	}
@@ -157,6 +158,10 @@ func (rs *FlowServerImpl) GetRackInfoByID(
 		return nil, err
 	}
 	return &pb.GetRackInfoResponse{Rack: result}, nil
+}
+
+func externalRackIdentifier(rawID string) identifier.Identifier {
+	return identifier.Identifier{ExternalID: rawID}
 }
 
 // GetRackInfoBySerial retrieves rack information by its manufacturer and serial number.
@@ -396,7 +401,8 @@ func (rs *FlowServerImpl) PatchComponent(
 	}, nil
 }
 
-// GetComponentInfoByID retrieves component information by its unique identifier.
+// GetComponentInfoByID retrieves component information by external component ID
+// or BMC MAC address.
 // Optionally includes the parent rack information if requested. This method
 // performs a two-step lookup: first retrieving the component and its rack ID,
 // then fetching rack details if requested.
@@ -412,13 +418,12 @@ func (rs *FlowServerImpl) GetComponentInfoByID(
 	ctx context.Context,
 	req *pb.GetComponentInfoByIDRequest,
 ) (*pb.GetComponentInfoResponse, error) {
-	c, err := rs.inventoryManager.GetComponentByID(
-		ctx,
-		protobuf.UUIDFrom(req.GetId()),
-	)
-
+	c, err := rs.resolveComponentIdentifier(ctx, req.GetId().GetId())
 	if err != nil {
 		return nil, err
+	}
+	if c.ComponentID == "" {
+		return nil, status.Errorf(codes.FailedPrecondition, "component %q has no external ID", req.GetId().GetId())
 	}
 
 	var r *rack.Rack
@@ -440,6 +445,20 @@ func (rs *FlowServerImpl) GetComponentInfoByID(
 		Component: result,
 		Rack:      protobuf.RackTo(r),
 	}, nil
+}
+
+// resolveComponentIdentifier resolves an external component ID or BMC MAC
+// address. The identifier must select exactly one component.
+func (rs *FlowServerImpl) resolveComponentIdentifier(
+	ctx context.Context,
+	componentIdentifier string,
+) (*component.Component, error) {
+	return inventoryresolver.ResolveComponentIdentifier(
+		ctx,
+		rs.inventoryManager,
+		componentIdentifier,
+		devicetypes.ComponentTypeUnknown,
+	)
 }
 
 // GetComponentInfoBySerial retrieves component information by its manufacturer and serial number.
@@ -979,10 +998,26 @@ func (rs *FlowServerImpl) ListTasks(
 	ctx context.Context,
 	req *pb.ListTasksRequest,
 ) (*pb.ListTasksResponse, error) {
+	var rackID uuid.UUID
+	if rawID := req.GetRackId().GetId(); rawID != "" {
+		resolved, err := rs.inventoryManager.GetRackByIdentifier(ctx, externalRackIdentifier(rawID), false)
+		if err != nil {
+			return nil, err
+		}
+		rackID = resolved.Info.ID
+	}
+	var componentID uuid.UUID
+	if rawID := req.GetComponentId().GetId(); rawID != "" {
+		resolved, err := rs.resolveComponentIdentifier(ctx, rawID)
+		if err != nil {
+			return nil, err
+		}
+		componentID = resolved.Info.ID
+	}
 	options := &taskcommon.TaskListOptions{
 		TaskType:    taskcommon.TaskTypeUnknown,
-		RackID:      protobuf.UUIDFrom(req.GetRackId()),
-		ComponentID: protobuf.UUIDFrom(req.GetComponentId()),
+		RackID:      rackID,
+		ComponentID: componentID,
 		ActiveOnly:  req.GetActiveOnly(),
 	}
 
@@ -1720,10 +1755,20 @@ func (rs *FlowServerImpl) ValidateComponents(
 			})
 			unexpectedCount++
 		case "missing_in_actual":
+			if sd.ComponentID == nil {
+				return nil, status.Error(codes.FailedPrecondition, "missing component has no inventory reference")
+			}
+			expected, lookupErr := rs.inventoryManager.GetComponentByID(ctx, *sd.ComponentID)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			macAddress := componentBMCMAC(expected)
+			if macAddress == "" {
+				return nil, status.Error(codes.FailedPrecondition, "missing component has no BMC MAC address")
+			}
 			diffs = append(diffs, &pb.ComponentDiff{
-				Type:        pb.DiffType_DIFF_TYPE_MISSING,
-				Id:          compUUID,
-				ComponentId: componentID,
+				Type:                pb.DiffType_DIFF_TYPE_MISSING,
+				ComponentMacAddress: macAddress,
 			})
 			missingCount++
 		case "mismatch":
@@ -1773,6 +1818,25 @@ func (rs *FlowServerImpl) ValidateComponents(
 		MismatchCount:   mismatchCount,
 		MatchCount:      matchCount,
 	}, nil
+}
+
+func componentBMCMAC(comp *component.Component) string {
+	if comp == nil {
+		return ""
+	}
+	macAddresses := make([]string, 0)
+	for _, bmcType := range devicetypes.BMCTypes() {
+		for _, controller := range comp.BmcsByType[bmcType] {
+			if macAddress := controller.MAC.String(); macAddress != "" {
+				macAddresses = append(macAddresses, macAddress)
+			}
+		}
+	}
+	if len(macAddresses) == 0 {
+		return ""
+	}
+	sort.Strings(macAddresses)
+	return macAddresses[0]
 }
 
 // applyComponentFilters applies filters to a list of components in memory.
@@ -2043,14 +2107,7 @@ func (rs *FlowServerImpl) resolveRackTarget(
 	ctx context.Context,
 	rt operation.RackTarget,
 ) ([]*component.Component, error) {
-	var r *rack.Rack
-	var err error
-
-	if rt.Identifier.ID != uuid.Nil {
-		r, err = rs.inventoryManager.GetRackByID(ctx, rt.Identifier.ID, true)
-	} else {
-		r, err = rs.inventoryManager.GetRackByIdentifier(ctx, rt.Identifier, true)
-	}
+	r, err := rs.inventoryManager.GetRackByIdentifier(ctx, rt.Identifier, true)
 	if err != nil {
 		return nil, err
 	}
@@ -2059,8 +2116,7 @@ func (rs *FlowServerImpl) resolveRackTarget(
 }
 
 // fetchComponentTarget fetches a single component from inventory by its
-// internal UUID or by external ID + type. The type in ct.External is
-// guaranteed non-unknown by protobuf.ComponentTargetFrom.
+// internal UUID, external ID, or BMC MAC address, with an optional type filter.
 func (rs *FlowServerImpl) fetchComponentTarget(
 	ctx context.Context,
 	ct operation.ComponentTarget,
@@ -2073,19 +2129,14 @@ func (rs *FlowServerImpl) fetchComponentTarget(
 		return []*component.Component{comp}, nil
 	}
 
-	// External ref: ID and Type are both validated non-empty by ComponentTargetFrom.
-	comps, err := rs.inventoryManager.GetComponentsByExternalIDs(ctx, []string{ct.External.ID})
+	resolved, err := inventoryresolver.ResolveComponentIdentifier(
+		ctx,
+		rs.inventoryManager,
+		ct.External.ID,
+		ct.External.Type,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get component by external id %s: %w", ct.External.ID, err)
+		return nil, err
 	}
-	if len(comps) == 0 {
-		return nil, fmt.Errorf("component with external id %s not found", ct.External.ID)
-	}
-	for _, comp := range comps {
-		if comp.Type == ct.External.Type {
-			return []*component.Component{comp}, nil
-		}
-	}
-	return nil, fmt.Errorf("component with external id %s and type %s not found",
-		ct.External.ID, devicetypes.ComponentTypeToString(ct.External.Type))
+	return []*component.Component{resolved}, nil
 }

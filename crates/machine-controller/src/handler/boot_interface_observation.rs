@@ -24,7 +24,8 @@
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use chrono::{DateTime, Duration, Utc};
 use config_version::Versioned;
-use model::machine::{Machine, ManagedHostState, ManagedHostStateSnapshot};
+use db::ConditionalWrite;
+use model::machine::{DpuMachine, HostMachine, ManagedHostState, ManagedHostStateSnapshot};
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -37,7 +38,7 @@ use crate::context::MachineStateHandlerContextObjects;
 
 /// Returns the verified desired target after its observation interval elapses.
 fn periodic_observation_target(
-    host: &Machine,
+    host: &HostMachine,
     now: DateTime<Utc>,
     observation_interval: Duration,
 ) -> Option<&Versioned<MachineBootInterfaceTarget>> {
@@ -54,7 +55,7 @@ fn periodic_observation_target(
 /// host's Redfish boot view and after the host entered its current state.
 fn dpu_observation_is_current(
     managed_host_snapshot: &ManagedHostStateSnapshot,
-    dpu_snapshot: &Machine,
+    dpu_snapshot: &DpuMachine,
     now: DateTime<Utc>,
     dpu_up_threshold: Duration,
 ) -> bool {
@@ -155,25 +156,27 @@ pub(super) async fn observe_verified_boot_interface(
     let mut observation_txn = ctx.services.db_pool.begin().await?;
     match boot_config_decision {
         HostBootConfigDecision::Complete => {
-            let observation_recorded = db::machine_desired_boot_interface::mark_verified(
+            let observation_write = db::machine_desired_boot_interface::mark_verified(
                 observation_txn.as_mut(),
-                &host.id.try_into()?,
+                &host.id,
                 desired_boot_interface.version,
                 Utc::now(),
             )
             .await?;
-            if observation_recorded {
-                tracing::debug!(
+            match observation_write {
+                ConditionalWrite::Applied(()) => tracing::debug!(
                     machine_id = %host.id,
                     desired_version = %desired_boot_interface.version,
                     "Verified periodic host boot configuration observation",
-                );
-            } else {
-                tracing::debug!(
-                    machine_id = %host.id,
-                    desired_version = %desired_boot_interface.version,
-                    "Discarded stale host boot configuration observation",
-                );
+                ),
+                ConditionalWrite::NotApplied(reason) => {
+                    tracing::debug!(
+                        machine_id = %host.id,
+                        desired_version = %desired_boot_interface.version,
+                        ?reason,
+                        "Discarded stale host boot configuration observation",
+                    )
+                }
             }
         }
         required_action @ (HostBootConfigDecision::ConfigureBios
@@ -184,12 +187,12 @@ pub(super) async fn observe_verified_boot_interface(
             let pending_boot_interface =
                 db::machine_desired_boot_interface::try_reopen_after_observed_drift(
                     observation_txn.as_mut(),
-                    &host.id.try_into()?,
+                    &host.id,
                     desired_boot_interface,
                 )
                 .await?;
-            if let Some(pending_boot_interface) = pending_boot_interface {
-                tracing::warn!(
+            match pending_boot_interface {
+                ConditionalWrite::Applied(pending_boot_interface) => tracing::warn!(
                     machine_id = %host.id,
                     desired_version = %pending_boot_interface.version,
                     ?required_action,
@@ -198,13 +201,15 @@ pub(super) async fn observe_verified_boot_interface(
                         ManagedHostState::Assigned { .. }
                     ),
                     "Host boot configuration drift detected",
-                );
-            } else {
-                tracing::debug!(
-                    machine_id = %host.id,
-                    desired_version = %desired_boot_interface.version,
-                    "Discarded stale host boot configuration drift observation",
-                );
+                ),
+                ConditionalWrite::NotApplied(reason) => {
+                    tracing::debug!(
+                        machine_id = %host.id,
+                        desired_version = %desired_boot_interface.version,
+                        ?reason,
+                        "Discarded stale host boot configuration drift observation",
+                    )
+                }
             }
         }
     }
@@ -255,7 +260,7 @@ mod tests {
                         }
                     });
 
-                periodic_observation_target(&host, now, observation_interval).is_some()
+                periodic_observation_target(&host.into(), now, observation_interval).is_some()
             };
             "eligible after the interval" {
                 PeriodicObservationInput {

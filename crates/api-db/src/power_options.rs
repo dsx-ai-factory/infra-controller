@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use config_version::ConfigVersion;
 use model::power_manager::{PowerOptions, PowerState};
 use sqlx::PgConnection;
@@ -38,7 +38,7 @@ pub async fn create(
 }
 
 pub async fn update_desired_state(
-    host_id: &MachineId,
+    host_id: &HostMachineId,
     power_state: PowerState,
     current_version: &ConfigVersion,
     txn: &mut PgConnection,
@@ -70,7 +70,7 @@ pub async fn get_all(txn: &mut PgConnection) -> Result<Vec<PowerOptions>, Databa
 }
 
 pub async fn get_by_ids(
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
     txn: &mut PgConnection,
 ) -> Result<Vec<PowerOptions>, DatabaseError> {
     let query = "SELECT * FROM power_options WHERE host_id = ANY($1)";

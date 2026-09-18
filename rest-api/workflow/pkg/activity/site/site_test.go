@@ -159,6 +159,29 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 
 	// Site 2 where the Machine components will be purged
 	site2 := util.TestBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusPending, nil, ipu)
+	ipBlockDAO := cdbm.NewIPBlockDAO(dbSession)
+	sitePrefixInput := cdbm.IPBlockCreateInput{
+		Name:                     "target-tenant-site-prefix",
+		SiteID:                   site.ID,
+		InfrastructureProviderID: ip.ID,
+		TenantID:                 &tenant.ID,
+		SitePrefixID:             cutil.GetPtr(uuid.New()),
+		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
+		Prefix:                   "10.60.0.0",
+		PrefixLength:             24,
+		ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
+		Status:                   cdbm.IPBlockStatusReady,
+		CreatedBy:                &ipu.ID,
+	}
+	targetIPBlock, err := ipBlockDAO.Create(ctx, nil, sitePrefixInput)
+	require.NoError(t, err)
+	sitePrefixInput.Name = "retained-tenant-site-prefix"
+	sitePrefixInput.SiteID = site2.ID
+	sitePrefixInput.SitePrefixID = cutil.GetPtr(uuid.New())
+	sitePrefixInput.Prefix = "10.61.0.0"
+	retainedIPBlock, err := ipBlockDAO.Create(ctx, nil, sitePrefixInput)
+	require.NoError(t, err)
+
 	vpc2 := util.TestBuildVpc(t, dbSession, ip, site2, tenant, "test-vpc-2")
 	machine3 := util.TestBuildMachine(t, dbSession, ip.ID, site2.ID, cutil.GetPtr("mcTypeTest2"), cutil.GetPtr(true), cdbm.MachineStatusReady)
 	machine4 := util.TestBuildMachine(t, dbSession, ip.ID, site2.ID, cutil.GetPtr("mcTypeTest3"), cutil.GetPtr(true), cdbm.MachineStatusReady)
@@ -243,6 +266,7 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 		want           error
 		wantErr        bool
 		expectDeletion bool
+		checkIPBlocks  func(*testing.T)
 	}{
 		{
 			name: "test Site delete component activity successfully completed",
@@ -263,6 +287,15 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 			},
 			want:           nil,
 			expectDeletion: true,
+			checkIPBlocks: func(t *testing.T) {
+				var deleted cdbm.IPBlock
+				err := dbSession.DB.NewSelect().Model(&deleted).Where("ipb.id = ?", targetIPBlock.ID).WhereAllWithDeleted().Scan(ctx)
+				require.NoError(t, err)
+				require.NotNil(t, deleted.Deleted)
+				active, err := ipBlockDAO.GetByID(ctx, nil, retainedIPBlock.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, retainedIPBlock.ID, active.ID)
+			},
 		},
 		{
 			name: "test Site delete component activity successfully completed when site doesn't exits",
@@ -312,6 +345,10 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
+			}
+			require.NoError(t, err)
+			if tt.checkIPBlocks != nil {
+				tt.checkIPBlocks(t)
 			}
 
 			// Check if the VPC was deleted in the DB
@@ -1753,7 +1790,14 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_ReturnsErrorWhenFabricB
 	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
 
 	err := cdb.WithTx(ctx, resources.dbSession, func(tx *cdb.Tx) error {
-		require.NoError(t, tx.AcquireAdvisoryLock(ctx, getSiteFabricIPBlockLockID(resources.site), false))
+		require.NoError(t, tx.AcquireAdvisoryLock(
+			ctx,
+			cdbm.SiteFabricIPBlockLockID(
+				resources.site.InfrastructureProviderID,
+				resources.site.ID,
+			),
+			false,
+		))
 
 		derr := mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.0.0.0/16"})
 		assert.ErrorIs(t, derr, cdb.ErrXactAdvisoryLockFailed)

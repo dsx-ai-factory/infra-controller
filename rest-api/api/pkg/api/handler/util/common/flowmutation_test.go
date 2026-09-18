@@ -196,7 +196,7 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 			assert.Equal(t, tc.wantFullMethod, call.request.FullMethod)
 
 			t.Run("coalesces retries onto the mutation already in flight", func(t *testing.T) {
-				assert.Equal(t, FlowWorkflowID(workflowID), call.options.ID)
+				assert.Equal(t, workflowID, call.options.ID)
 				assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, call.options.WorkflowIDConflictPolicy)
 			})
 
@@ -236,7 +236,7 @@ func TestExecuteFirmwareUpdateWorkflowEncryptsAuthenticationData(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.True(t, strings.HasPrefix(call.options.ID, FlowWorkflowID(workflowID+"-")))
+	assert.True(t, strings.HasPrefix(call.options.ID, workflowID+"-"))
 	assert.NotContains(t, call.options.ID, token)
 	assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, call.options.WorkflowIDConflictPolicy)
 	assert.NotContains(t, string(call.request.RequestJSON), token)

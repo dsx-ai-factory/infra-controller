@@ -1830,6 +1830,68 @@ func TestSubnetSQLDAO_Clear(t *testing.T) {
 	}
 }
 
+func TestSubnetSQLDAO_ClearDeleted(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSubnetInitDB(t)
+	defer dbSession.Close()
+	testSubnetSetupSchema(t, dbSession)
+
+	ip := testSubnetBuildInfrastructureProvider(t, dbSession, "testIP")
+	site := testSubnetBuildSite(t, dbSession, ip, "testSite")
+	tenant := testSubnetBuildTenant(t, dbSession, "testTenant")
+	vpc := testSubnetBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
+	user := testSubnetBuildUser(t, dbSession, "testUser")
+	ipBlock := testSubnetBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipBlock", &user.ID)
+	subnetDAO := NewSubnetDAO(dbSession)
+	controllerSegmentID := uuid.New()
+
+	subnet, err := subnetDAO.Create(ctx, nil, SubnetCreateInput{
+		SubnetID:                   &controllerSegmentID,
+		Name:                       "test-clear-deleted",
+		Org:                        "test",
+		SiteID:                     site.ID,
+		VpcID:                      vpc.ID,
+		TenantID:                   tenant.ID,
+		ControllerNetworkSegmentID: &controllerSegmentID,
+		RoutingType:                &ipBlock.RoutingType,
+		IPv4Prefix:                 cutil.GetPtr("192.0.2.0"),
+		IPv4Gateway:                cutil.GetPtr("192.0.2.1"),
+		IPv4BlockID:                &ipBlock.ID,
+		PrefixLength:               24,
+		Status:                     SubnetStatusError,
+		CreatedBy:                  user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, subnetDAO.Delete(ctx, nil, subnet.ID))
+
+	t.Run("clears soft-delete marker", func(t *testing.T) {
+		cleared, clearErr := subnetDAO.Clear(ctx, nil, SubnetClearInput{
+			SubnetId: subnet.ID,
+			Deleted:  true,
+		})
+		require.NoError(t, clearErr)
+		require.NotNil(t, cleared)
+		assert.Nil(t, cleared.Deleted)
+
+		updated, updateErr := subnetDAO.Update(ctx, nil, SubnetUpdateInput{
+			SubnetId:        subnet.ID,
+			Status:          cutil.GetPtr(SubnetStatusReady),
+			IsMissingOnSite: cutil.GetPtr(false),
+		})
+		require.NoError(t, updateErr)
+		assert.Equal(t, SubnetStatusReady, updated.Status)
+		assert.False(t, updated.IsMissingOnSite)
+	})
+
+	t.Run("returns not found for unknown Subnet", func(t *testing.T) {
+		_, clearErr := subnetDAO.Clear(ctx, nil, SubnetClearInput{
+			SubnetId: uuid.New(),
+			Deleted:  true,
+		})
+		assert.ErrorIs(t, clearErr, db.ErrDoesNotExist)
+	})
+}
+
 func TestSubnetSQLDAO_Delete(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testSubnetInitDB(t)

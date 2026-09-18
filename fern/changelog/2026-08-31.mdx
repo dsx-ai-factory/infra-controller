@@ -14,6 +14,9 @@ NICo v2.1 adds Lenovo GB300 NVL72 support, runtime firmware management, site-sca
 - [Expected Machine interface declarations](../../docs/provisioning/expected-machine-interfaces.md) persist managed-host boot-interface selection as durable desired state and synchronize it across DPU, SuperNIC, integrated-NIC, and zero-DPU hosts.
 - Zero-DPU administration now includes CLI creation of flat VPCs and network segments, plus in-place updates to expected-machine host NICs.
 - The [managed-host decommission command](../../docs/manuals/nico-admin-cli/commands/managed-host/managed-host-decommission.md) can mark BMC MAC addresses as ignored so DHCP and Site Explorer do not immediately rediscover or reingest removed hardware during tenant-release and decommissioning workflows.
+- [DPU LLDP collection](../../docs/dpu-management/dpu_configuration.md#dpu-lldp-collection) now configures LLDP-MED for systemd-managed DPUs and uses a bounded, freshness-checked sidecar snapshot for DPF-managed DPUs, keeping physical uplink discovery available in both deployment modes.
+- [Scout boot NIC selection](../../docs/playbooks/stuck_objects/network_connectivity.md#scout-boot-nic-selection) now keeps discovery networking on the interface named by NICo's boot MAC and removes DHCP, router advertisements, global addresses, and routes from other default-managed Ethernet interfaces. The selection is MAC-based, fail-open, and does not depend on NIC vendor.
+- [Image-based operating systems](../../docs/configuration/image-based-operating-systems.md) can select `smallest`, an NVMe or SCSI whole-disk path, or a stable `/dev/disk/by-id/` target. Imaging rejects ambiguous filesystem identities on other disks, selects architecture-appropriate EFI shims deterministically, and exposes the disk selector through REST create/update and `nico-admin-cli os-image create`.
 
 ### Rack, power, and firmware operations
 
@@ -30,6 +33,7 @@ NICo v2.1 adds Lenovo GB300 NVL72 support, runtime firmware management, site-sca
 - Instances can use interfaces from multiple VPCs, and per-interface routing profiles can further restrict anycast advertisements within the VPC-level policy.
 - Managed-host state is periodically republished on the DSX exchange so consumers can reconcile state after missing an event.
 - `nico-admin-cli` adds a [BIOS factory reset command](../../docs/manuals/nico-admin-cli/commands/redfish/redfish-reset-bios.md) for use before ingestion and supports creating VPCs and network segments.
+- Integrated MDS and standalone FMDS now expose `/latest/meta-data/instance-name` from the instance metadata name. The endpoint returns HTTP 404 when no nonempty name is available without changing the existing hostname value.
 
 ### Observability and operator experience
 
@@ -64,7 +68,7 @@ machine-a-tron is intended for simulation-only clusters and must not run alongsi
 
 ### Known issues
 
-- The NVLink Manager certificate monitor cannot automatically rotate an NVLink switch certificate that has already expired because it cannot establish the TLS connection needed to inspect the certificate. It logs the connection error without starting rotation. Track the fix in [GitHub issue #4568](https://github.com/NVIDIA/infra-controller/issues/4568).
+- The NVLink Manager certificate monitor cannot automatically rotate an NVLink switch certificate that has already expired because it cannot establish the TLS connection needed to inspect the certificate. It logs the connection error without starting rotation. Track the fix in [GitHub issue #4568](https://github.com/dsx-ai-factory/infra-controller/issues/4568).
 
 <br /><br />
 

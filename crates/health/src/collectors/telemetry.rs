@@ -143,21 +143,24 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for TelemetryCollector<B> {
             });
         };
 
+        let mut fetch_failures = 0;
         if self.units.is_none() {
-            self.units = Some(self.load_units(&telemetry_service).await);
+            self.units = self.load_units(&telemetry_service).await;
+            if self.units.is_none() {
+                fetch_failures += 1;
+            }
         }
 
         let Some(report_links) = telemetry_service.metric_report_links().await? else {
             return Ok(IterationResult {
                 refresh_triggered: true,
                 entity_count: Some(0),
-                fetch_failures: 0,
+                fetch_failures,
             });
         };
 
         self.emit_event(CollectorEvent::MetricCollectionStart);
 
-        let mut fetch_failures = 0;
         let mut sample_count = 0;
         for link in report_links {
             match link.upgrade::<MetricReport<B>>().await {
@@ -206,34 +209,39 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
     /// A BMC that publishes no definitions is not an error; every
     /// reading then falls back to [`UNKNOWN_UNIT`]. Returning an empty
     /// map (rather than `None`) keeps that from being retried on every
-    /// iteration.
+    /// iteration. A failed fetch is different: the definitions may well
+    /// exist, so `None` leaves the map unloaded and the next iteration
+    /// tries again rather than pinning every reading to [`UNKNOWN_UNIT`]
+    /// until restart.
     async fn load_units(
         &self,
         telemetry_service: &nv_redfish::telemetry_service::TelemetryService<B>,
-    ) -> HashMap<String, String> {
+    ) -> Option<HashMap<String, String>> {
         let definitions = match telemetry_service.metric_definitions().await {
             Ok(Some(definitions)) => definitions,
             Ok(None) => Vec::new(),
             Err(error) => {
-                tracing::debug!(
+                tracing::warn!(
                     ?error,
                     bmc_address = ?self.endpoint.addr,
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
-                    "Telemetry service published no metric definitions; \
-                     readings will be recorded without units"
+                    "Failed to fetch metric definitions; readings are recorded \
+                     without units until the next iteration succeeds"
                 );
-                Vec::new()
+                return None;
             }
         };
 
-        definitions
-            .into_iter()
-            .filter_map(|definition| {
-                let raw = definition.raw();
-                let units = raw.units.clone().flatten()?;
-                Some((raw.base.id.clone(), sanitize_unit(&units)))
-            })
-            .collect()
+        Some(
+            definitions
+                .into_iter()
+                .filter_map(|definition| {
+                    let raw = definition.raw();
+                    let units = raw.units.clone().flatten()?;
+                    Some((raw.base.id.clone(), sanitize_unit(&units)))
+                })
+                .collect(),
+        )
     }
 
     /// Emit one sample per numeric reading in `report`, returning how
@@ -270,6 +278,20 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             let Ok(reading) = reading.trim().parse::<f64>() else {
                 continue;
             };
+            // `f64::from_str` also accepts "NaN" and "inf". Those are legal
+            // Prometheus tokens, but as hardware readings they carry no
+            // information and poison every aggregate they enter.
+            if !reading.is_finite() {
+                tracing::debug!(
+                    report_id,
+                    metric_id,
+                    reading,
+                    bmc_address = ?self.endpoint.addr,
+                    rack_id = self.event_context.rack_id().map(tracing::field::display),
+                    "Skipping non-finite metric reading"
+                );
+                continue;
+            }
 
             let unit = units
                 .and_then(|units| units.get(&metric_id))
@@ -479,8 +501,8 @@ mod tests {
 
         check_cases_async(
             [Case {
-                scenario: "numeric readings publish with definition units, \
-                           stale and non-numeric values are dropped",
+                scenario: "finite readings publish with definition units; \
+                           stale, non-numeric and non-finite values are dropped",
                 input: fixture.bmc(),
                 expect: Yields(ObservedIteration {
                     entity_count: Some(3),
@@ -527,5 +549,69 @@ mod tests {
             run,
         )
         .await;
+    }
+
+    /// One failed definitions fetch must not pin every later reading to
+    /// the unknown unit: the next iteration retries and picks up the
+    /// declared units.
+    #[tokio::test]
+    async fn units_load_retries_after_transient_definitions_failure() {
+        let fixture = ProjectionFixture::with_transient_metric_definitions_failure().await;
+        let capture = Arc::new(CapturingSink::default());
+        let mut collector = TelemetryCollector::new_runner(
+            fixture.bmc(),
+            Arc::new(test_endpoint(mac("00:11:22:33:44:55"))),
+            TelemetryCollectorConfig {
+                data_sink: Some(capture.clone() as Arc<dyn DataSink>),
+            },
+        )
+        .expect("telemetry collector should build");
+
+        let mut observed = Vec::new();
+        for _ in 0..2 {
+            let result = collector
+                .run_iteration()
+                .await
+                .expect("telemetry iteration should succeed");
+            let mut units: Vec<(String, String)> = capture
+                .metrics
+                .lock()
+                .unwrap()
+                .drain(..)
+                .map(|metric| (metric.metric_type, metric.unit))
+                .collect();
+            units.sort();
+            observed.push((result.fetch_failures, units));
+        }
+
+        let unit_pairs = |units: &[(&str, &str)]| -> Vec<(String, String)> {
+            units
+                .iter()
+                .map(|(metric_type, unit)| ((*metric_type).to_string(), (*unit).to_string()))
+                .collect()
+        };
+        assert_eq!(
+            observed,
+            vec![
+                // The 503 counts as a fetch failure and readings still
+                // publish, just without units.
+                (
+                    1,
+                    unit_pairs(&[
+                        ("fan_pwm", "unknown"),
+                        ("gpu0_temp", "unknown"),
+                        ("total_gpu_power_watts", "unknown"),
+                    ]),
+                ),
+                (
+                    0,
+                    unit_pairs(&[
+                        ("fan_pwm", "unknown"),
+                        ("gpu0_temp", "celsius"),
+                        ("total_gpu_power_watts", "watts"),
+                    ]),
+                ),
+            ]
+        );
     }
 }

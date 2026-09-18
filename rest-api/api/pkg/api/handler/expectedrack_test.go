@@ -365,7 +365,7 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 				}
 				if tt.requestBody.Labels != nil {
 					assert.NotNil(t, response.Labels, "Labels should not be nil in response")
-					assert.Equal(t, tt.requestBody.Labels, response.Labels, "Labels in response should match request")
+					assert.Equal(t, tt.requestBody.Labels, map[string]string(response.Labels), "Labels in response should match request")
 				}
 			}
 		})
@@ -772,7 +772,7 @@ func TestGetExpectedRackHandler_Handle(t *testing.T) {
 				assert.Equal(t, testER.Name, response.Name, "Name should match")
 				assert.NotNil(t, response.Labels, "Labels should not be nil in response")
 				// Verify labels round-trip
-				assert.Equal(t, rackLabels, response.Labels, "Labels should round-trip exactly")
+				assert.Equal(t, rackLabels, map[string]string(response.Labels), "Labels should round-trip exactly")
 				assert.Equal(t, "Acme", response.Labels[labels.RackLabelChassisManufacturer])
 				assert.Equal(t, "SN-99999", response.Labels[labels.RackLabelChassisSerialNumber])
 				assert.Equal(t, "us-east", response.Labels[labels.RackLabelLocationRegion])

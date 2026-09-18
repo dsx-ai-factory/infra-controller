@@ -72,6 +72,7 @@ fn host_bmc_report() -> EndpointExplorationReport {
             power_state: PowerState::On,
             sku: None,
             boot_order: None,
+            bios_version: None,
             serial_console_ssh_port: None,
         }],
         chassis: vec![Chassis {

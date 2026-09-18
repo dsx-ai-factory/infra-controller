@@ -13,9 +13,9 @@ This page describes how the NVIDIA Infra Controller (NICo) project is branched, 
 
 ## GitHub URLs
 
-- [**NICo releases**](https://github.com/NVIDIA/infra-controller/releases)
-- [**Issue tracker**](https://github.com/NVIDIA/infra-controller/issues)
-- [**Source code**](https://github.com/NVIDIA/infra-controller)
+- [**NICo releases**](https://github.com/dsx-ai-factory/infra-controller/releases)
+- [**Issue tracker**](https://github.com/dsx-ai-factory/infra-controller/issues)
+- [**Source code**](https://github.com/dsx-ai-factory/infra-controller)
 
 Every published minor and patch release is available on the GitHub releases page, tagged with its Semantic Versioning (SemVer) version (refer to [Tag Naming](#tag-naming) below).
 
@@ -175,7 +175,7 @@ When in doubt about whether a fix clears the Maintenance bar, default to "no" an
 In other words, you can skip the Maintenance tier when upgrading from EOL straight to Current, but you may not move backward to an older minor (or to an older patch within the same minor). If a Current release introduces a problem that blocks you, the supported recovery is a forward-fix in the next patch release, not a downgrade.
 
 <Info title="Downgrade support">
-Downgrade support is being tracked as a potential future capability in [issue 2019, *Graceful Rollbacks of NICo to the previous minor version*](https://github.com/NVIDIA/infra-controller/issues/2019); track that issue for the latest state.
+Downgrade support is being tracked as a potential future capability in [issue 2019, *Graceful Rollbacks of NICo to the previous minor version*](https://github.com/dsx-ai-factory/infra-controller/issues/2019); track that issue for the latest state.
 </Info>
 
 ## QA Workflow
@@ -248,7 +248,7 @@ stateDiagram-v2
 The two fields move semi-independently:
 
 - While dev is still working, `Status` is `In Progress` and `QA Test Status` is typically somewhere in the triage/test-design/signoff portion of its track.
-- When the PR merges, the linked issue's `Status` flips to `Verify | Item Completed` (through the automation in [PR #2584](https://github.com/NVIDIA/infra-controller/pull/2584)), signaling to QA that the fix is code-complete and ready to be exercised. `QA Test Status` is expected to be `Test Plan Approved` (or already in `QA Execution`) by this point.
+- When the PR merges, the linked issue's `Status` flips to `Verify | Item Completed` (through the automation in [PR #2584](https://github.com/dsx-ai-factory/infra-controller/pull/2584)), signaling to QA that the fix is code-complete and ready to be exercised. `QA Test Status` is expected to be `Test Plan Approved` (or already in `QA Execution`) by this point.
 - After `QA Test Status` becomes `QA Passed`, the issue's `Status` is moved to `Closed` with `Disposition: Item Completed`.
 - If `QA Test Status` becomes `QA Failed`, the issue typically moves back to `Status: In Progress` so engineering can address the failure.
 
@@ -290,7 +290,7 @@ The following are considered internal and can change without notice between rele
 - The **admin CLI** (also referred to as the *debug CLI*) — a lower-level tool intended for operators and developers, not end users.
 - The **admin UI** (also referred to as the *debug UI*) — same audience as the admin CLI.
 - The **Vault data model** — how secrets are laid out inside HashiCorp Vault.
-- The **PostgreSQL database schema** used by NICo services. Refer to [issue #2019](https://github.com/NVIDIA/infra-controller/issues/2019) for the current state of this guarantee (tracked alongside downgrade support, which depends on it).
+- The **PostgreSQL database schema** used by NICo services. Refer to [issue #2019](https://github.com/dsx-ai-factory/infra-controller/issues/2019) for the current state of this guarantee (tracked alongside downgrade support, which depends on it).
 - Any other internal API contract between NICo services, or persistent data formats used only by NICo itself.
 
 If you build automation that depends on any of the unguaranteed items above, expect to update it across NICo releases.

@@ -44,26 +44,26 @@ Trusted services that are part of NICo deployment communicate with the NICo Core
 
 The NICo deployment includes a number of core services:
 
-- **NICo Core gRPC API**: Allows other components and services to
+* **NICo Core gRPC API**: Allows other components and services to
   query the state of all objects and to request creation, configuration, and deletion of entities.
-- **DHCP**: Provides IPs to all
+* **DHCP**: Provides IPs to all
   devices on underlay networks, including Host BMCs, DPU BMCs, and DPU OOB addresses. It also
   provides IPs to Hosts on the overlay network.
-- **PXE**: Delivers images to
+* **PXE**: Delivers images to
   managed hosts at boot time. Currently, managed hosts are configured to always boot from PXE. If a local
   bootable device is found, the host will boot it. Hosts can also be configured to always boot from a
   particular image for stateless configurations.
-- **Hardware health**: Pulls
+* **Hardware health**: Pulls
   hardware health and configuration information emitted from a Prometheus `/metrics` endpoint on port 9009 and
   reports that state information back to NICo.
-- **SSH console**: Provides a virtual serial
+* **SSH console**: Provides a virtual serial
   console logging and access over `ssh`, allowing console access to remote machines deployed on site.
   The `ssh-console` also logs the serial console output of each host into the logging system, where
   it can be queried using tools such as Grafana and `logcli`.
-- **DNS**: Provides domain name service (DNS) functionality
+* **DNS**: Provides domain name service (DNS) functionality
   using two services:
-  - `nico-dns`: Handles DNS queries from the site controller and managed nodes.
-  - `unbound`: Provides recursive DNS services to managed machines and instances.
+  * `nico-dns`: Handles DNS queries from the site controller and managed nodes.
+  * `unbound`: Provides recursive DNS services to managed machines and instances.
 
 This set of services is also referred to as the **Site Controller**
 
@@ -76,18 +76,18 @@ controller nodes.
 
 NICo requires persistent, durable storage to maintain state for the following components:
 
-- [Hashicorp Vault](https://www.vaultproject.io/): Used by Kubernetes for certificate signing requests (CSRs), this vault
+* [Hashicorp Vault](https://www.vaultproject.io/): Used by Kubernetes for certificate signing requests (CSRs), this vault
   uses three each (one per K8s control node) of the `data-vault` and `audit-vault` 10GB PVs to protect and distribute
   the data in the absence of a shared storage solution.
-- [Postgres](https://www.postgresql.org/): This database is used to store state for any NICo or site controller
+* [Postgres](https://www.postgresql.org/): This database is used to store state for any NICo or site controller
   components that require it, including the main "nicodb". There are three 10GB `pgdata` PVs deployed to protect
   and distribute the data in the absence of a shared storage solution. The `nicodb` database is stored here.
-- Certificate Management Infrastructure: This is a set of components that manage the certificates for the site controller and managed hosts.
+* Certificate Management Infrastructure: This is a set of components that manage the certificates for the site controller and managed hosts.
 
 #### Site Management
 
-- **Site Agent**: Maintains a northbound Temporal connection to NICo REST (Cloud, centrally deployed, or on-site) to sync data with the REST layer DB cache and delegate gRPC requests to NICo Core.
-- **Admin CLI**: Provides an admin-level command-line interface into NICo Core using the gRPC API.
+* **Site Agent**: Maintains a northbound Temporal connection to NICo REST (Cloud, centrally deployed, or on-site) to sync data with the REST layer DB cache and delegate gRPC requests to NICo Core.
+* **Admin CLI**: Provides an admin-level command-line interface into NICo Core using the gRPC API.
 
 <Note> The REST API is the primary way to interact with NICo and should be used for all state-modifying operations (creating/modifying tenants, VPCs, instances, etc). The admin CLI is a convenience tool for administrative tasks and should not be relied upon for production workflows. </Note>
 
@@ -100,7 +100,7 @@ The REST layer can be deployed in the datacenter with Infra Controller Core, or 
 in Cloud with Site Agent connecting from the datacenter. Multiple Infra Controller Cores running
 in different datacenters can also connect to Infra Controller REST through respective Site Agents.
 
-For details on NICo REST, please refer to the [infra-controller GitHub repository](https://github.com/NVIDIA/infra-controller) and the [REST API Reference](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference).
+For details on NICo REST, please refer to the [infra-controller GitHub repository](https://github.com/dsx-ai-factory/infra-controller) and the [REST API Reference](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference).
 
 ### Managed Hosts
 

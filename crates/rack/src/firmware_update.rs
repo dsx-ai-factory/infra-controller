@@ -18,6 +18,7 @@
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use db::{machine as db_machine, machine_topology as db_machine_topology, switch as db_switch};
@@ -32,7 +33,7 @@ use crate::rms_node_type::RmsNodeIdentity;
 
 #[derive(Debug, Clone)]
 pub struct RackFirmwareInventory {
-    pub machine_ids: Vec<carbide_uuid::machine::MachineId>,
+    pub machine_ids: Vec<carbide_uuid::machine::HostMachineId>,
     pub machines: Vec<FirmwareUpgradeDeviceInfo>,
     pub switch_ids: Vec<SwitchId>,
     pub switches: Vec<FirmwareUpgradeDeviceInfo>,
@@ -59,7 +60,7 @@ pub async fn load_rack_firmware_inventory(
     let (machine_ids, machine_topologies, bmc_ips) = {
         let mut txn = db_pool.begin().await?;
 
-        let machine_ids = db_machine::find_machine_ids(
+        let machine_ids = db_machine::find_machine_ids::<HostMachineId>(
             txn.as_mut(),
             MachineSearchConfig {
                 rack_id: Some(rack_id.clone()),
@@ -67,6 +68,7 @@ pub async fn load_rack_firmware_inventory(
             },
         )
         .await?;
+
         let machine_topologies =
             db_machine_topology::find_latest_by_machine_ids(txn.as_mut(), &machine_ids).await?;
         // The BMC IP is live network state -- read it from machine_interfaces, not the

@@ -24,10 +24,6 @@ pub(in crate::tests) mod api_fixtures;
 #[cfg(test)]
 pub(in crate::tests) mod attestation;
 pub(in crate::tests) mod endpoint;
-// Only this crate's own `#[cfg(test)]` health-override tests drive these shared CRUD
-// helpers; gate them out of test-support-only builds to keep dead-code detection honest.
-#[cfg(test)]
-pub(in crate::tests) mod metadata;
 pub(in crate::tests) mod network_segment;
 pub(in crate::tests) mod overlay_address;
 pub(in crate::tests) mod postgres;

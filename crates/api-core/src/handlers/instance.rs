@@ -25,10 +25,13 @@ use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey};
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
-use db::{DatabaseError, ObjectColumnFilter, WithTransaction, network_security_group};
+use db::instance::InstanceExtensionServicesNotCurrent;
+use db::{
+    ConditionalWrite, DatabaseError, ObjectColumnFilter, WithTransaction, network_security_group,
+};
 use futures_util::FutureExt;
 use health_report::{
     HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode,
@@ -46,7 +49,7 @@ use model::instance::config::tenant_config::TenantConfig;
 use model::instance::snapshot::InstanceSnapshot;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
-    HostHealthConfig, InstanceState, LoadSnapshotOptions, ManagedHostState,
+    HostHealthConfig, HostMachine, InstanceState, LoadSnapshotOptions, ManagedHostState,
     ManagedHostStateSnapshot,
 };
 use model::metadata::Metadata;
@@ -57,11 +60,11 @@ use model::vpc::{FabricInterfaceType, VpcVirtualizationTypeCapabilities};
 use serde_json::json;
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
+use tracing::Instrument;
 
+use super::tenant_prefix_overlap;
 use crate::api::{Api, log_machine_id, log_request_data, log_tenant_organization_id};
-use crate::cfg::file::CarbideConfig;
 use crate::ethernet_virtualization::validate_instance_interface_routing_profiles;
-use crate::handlers::utils::convert_and_log_machine_id;
 use crate::instance::{
     InstanceAllocationRequest, allocate_ib_port_guid, allocate_instance, allocate_network,
     allocate_spx_port_mac, ib_memberships_from_config, load_extension_services,
@@ -75,7 +78,7 @@ use crate::{CarbideError, CarbideResult};
 /// Admin `force_delete_instance` is not subject to this check.
 async fn ensure_instance_release_not_blocked_by_prevent_instance_deletion(
     txn: &mut db::Transaction<'_>,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     host_health: HostHealthConfig,
 ) -> Result<(), CarbideError> {
     let Some(snapshot) = db::managed_host::load_snapshot(
@@ -292,7 +295,7 @@ pub(crate) async fn find_by_machine_id(
 ) -> Result<Response<rpc::InstanceList>, Status> {
     log_request_data(&request);
 
-    let machine_id = convert_and_log_machine_id::<MachineId>(Some(&request.into_inner()))?;
+    let machine_id = request.into_inner();
 
     let mut txn = api.txn_begin().await?;
 
@@ -482,9 +485,9 @@ fn log_delete_attribution(delete_attribution: Option<&rpc::DeleteAttribution>) {
 /// releases to prevent infinite loops where RepairSystem triggers itself repeatedly.
 async fn handle_instance_release_from_repair_tenant(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     issue: Option<&rpc::Issue>,
-    machine: &model::machine::Machine,
+    machine: &HostMachine,
     tenant_organization_id: &str,
 ) -> Result<(), CarbideError> {
     let has_request_repair = machine
@@ -639,7 +642,7 @@ async fn handle_instance_release_from_repair_tenant(
 /// on the machine before it can be allocated to new instances.
 async fn handle_instance_release_from_regular_tenant_and_report_issue(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     issue: &rpc::Issue,
     auto_repair_enabled: bool,
     tenant_organization_id: &str,
@@ -723,6 +726,108 @@ pub(crate) async fn release(
 ) -> Result<Response<rpc::InstanceReleaseResult>, Status> {
     log_request_data(&request);
     let delete_instance = request.into_inner();
+    release_one_instance(api, delete_instance).await?;
+    Ok(Response::new(rpc::InstanceReleaseResult {}))
+}
+
+/// Releases multiple instances in one call. Each instance is released in its
+/// own transaction via [`release_one_instance`] -- the exact same logic and
+/// failure modes as calling `ReleaseInstance` once per instance -- so the only
+/// thing this RPC saves versus a client-side loop is the client-server round
+/// trips, not any change in per-instance behavior or transaction semantics.
+///
+/// Deliberately best-effort, not all-or-nothing: one instance failing (already
+/// released, blocked by a health check, not found, etc.) does not roll back or
+/// block the rest of the batch. A live 4,500-instance scale test found that
+/// aborting an entire batch on the first per-instance failure stranded
+/// thousands of instances with no way to resume (see admin-cli's
+/// release_batch_with_retry, crates/admin-cli/src/instance/release/cmd.rs)
+/// -- an all-or-nothing RPC-level transaction would reintroduce that same
+/// failure mode one layer down, so each instance's outcome is independent and
+/// reported individually instead.
+pub(crate) async fn batch_release(
+    api: &Api,
+    request: Request<rpc::BatchInstanceReleaseRequest>,
+) -> Result<Response<rpc::BatchInstanceReleaseResponse>, Status> {
+    log_request_data(&request);
+    let batch = request.into_inner();
+
+    let mut results = Vec::with_capacity(batch.release_requests.len());
+
+    for release_request in batch.release_requests {
+        let Some(instance_id) = release_request.id else {
+            // No id means there is nothing to attempt and nothing to key a
+            // success on, but the caller still needs to see this entry
+            // accounted for -- report it as a failed result with no id
+            // rather than silently dropping it, so response counts always
+            // reconcile against the request count.
+            tracing::warn!("Batch release entry with no instance id reported as a failure");
+            results.push(rpc::InstanceReleaseOutcome {
+                id: None,
+                status: rpc::InstanceReleaseStatusCode::InvalidArgument as i32,
+                error: "release request is missing an instance id".to_string(),
+            });
+            continue;
+        };
+        // Per-instance span, not just a %instance_id log field: log_machine_id/
+        // log_tenant_organization_id record onto Span::current(), and without a
+        // dedicated span per iteration every call in this loop would record onto
+        // the same batch-wide ReleaseInstances span -- last-write-wins, so the
+        // completed span would only ever reflect the final instance's machine and
+        // tenant, losing per-instance audit attribution for a destructive
+        // fleet-scale operation. Field names must match what those helpers record.
+        let instance_span = tracing::info_span!(
+            "release_one_instance",
+            instance_id = %instance_id,
+            forge.machine_id = tracing::field::Empty,
+            tenant.organization_id = tracing::field::Empty,
+        );
+        let outcome = match release_one_instance(api, release_request)
+            .instrument(instance_span)
+            .await
+        {
+            Ok(()) => rpc::InstanceReleaseOutcome {
+                id: Some(instance_id),
+                status: rpc::InstanceReleaseStatusCode::Success as i32,
+                error: String::new(),
+            },
+            Err(status) => rpc::InstanceReleaseOutcome {
+                id: Some(instance_id),
+                status: instance_release_status_code_for(&status) as i32,
+                error: status.message().to_string(),
+            },
+        };
+        results.push(outcome);
+    }
+
+    Ok(Response::new(rpc::BatchInstanceReleaseResponse { results }))
+}
+
+/// Maps a per-instance release failure's gRPC status code onto the batch
+/// response's stable [`rpc::InstanceReleaseStatusCode`], so callers can
+/// distinguish retryable outcomes (e.g. `Unavailable`, `ResourceExhausted`)
+/// from terminal ones (e.g. `NotFound`) without string-matching `error`.
+fn instance_release_status_code_for(status: &Status) -> rpc::InstanceReleaseStatusCode {
+    use rpc::InstanceReleaseStatusCode as Code;
+    match status.code() {
+        tonic::Code::InvalidArgument => Code::InvalidArgument,
+        tonic::Code::NotFound => Code::NotFound,
+        tonic::Code::FailedPrecondition => Code::FailedPrecondition,
+        tonic::Code::ResourceExhausted => Code::ResourceExhausted,
+        tonic::Code::PermissionDenied => Code::PermissionDenied,
+        tonic::Code::Unavailable => Code::Unavailable,
+        _ => Code::InternalError,
+    }
+}
+
+/// Core single-instance release logic, shared by [`release`] and
+/// [`batch_release`]. Owns its own transaction (begin through commit) so each
+/// instance in a batch is fully independent -- a failure partway through one
+/// instance's release never poisons or rolls back another instance's work.
+async fn release_one_instance(
+    api: &Api,
+    delete_instance: rpc::InstanceReleaseRequest,
+) -> Result<(), Status> {
     let instance_id = delete_instance
         .id
         .ok_or(RpcDataConversionError::MissingArgument("id"))?;
@@ -816,7 +921,7 @@ pub(crate) async fn release(
             "Instance is already marked for deletion.",
         );
         txn.commit().await?;
-        return Ok(Response::new(rpc::InstanceReleaseResult {}));
+        return Ok(());
     }
 
     let pkeys = load_ib_partition_pkeys(txn.as_mut(), &[&instance.infiniband_config]).await?;
@@ -828,7 +933,7 @@ pub(crate) async fn release(
 
     txn.commit().await?;
 
-    Ok(Response::new(rpc::InstanceReleaseResult {}))
+    Ok(())
 }
 
 pub(crate) async fn update_phone_home_last_contact(
@@ -889,7 +994,7 @@ pub(crate) async fn update_phone_home_last_contact(
     // attached to that host. Phone-home calls originate from the DPU agent on the host.
     // Skipped when bypass_rbac is enabled (caller_machine_id is None).
     if let Some(ref caller_machine_id) = caller_machine_id {
-        let caller_is_host = *caller_machine_id == instance.machine_id;
+        let caller_is_host = *caller_machine_id == instance.machine_id.into();
         let caller_is_attached_dpu = if caller_is_host {
             false
         } else {
@@ -1255,7 +1360,7 @@ pub(crate) async fn update_instance_config(
     let mut txn = api.txn_begin().await?;
 
     let (machine_id, initial_config_version) = {
-        // Capture the Instance before any IB lock wait. If another request
+        // Capture the Instance before any overlap or IB lock wait. If another request
         // updates it while this request waits, this version remains the
         // implicit optimistic token rather than silently rebasing.
         let request_start_instance = db::instance::find_by_id(&mut txn, instance_id)
@@ -1280,10 +1385,9 @@ pub(crate) async fn update_instance_config(
         kind: "machine",
         id: machine_id.to_string(),
     })?;
-    // We assign `initial_instance` from this first snapshot as the baseline for
-    // request validation and resource updates. An IB change later locks the
-    // Instance and Machine, reloads the snapshot, and uses the refreshed
-    // `instance` below.
+    // This first snapshot establishes the request's comparison baseline.
+    // An overlap wait reloads it before resource validation; an IB change
+    // later rereads it after locking the Instance and Machine.
     let initial_instance = mh_snapshot
         .instance
         .as_ref()
@@ -1340,12 +1444,57 @@ pub(crate) async fn update_instance_config(
         .verify_update_allowed_to(&config)
         .map_err(CarbideError::from)?;
 
-    validate_os_definition_usable(&mut txn, &config.os).await?;
-
     let expected_version = match request.if_version_match {
         Some(version) => version.parse().map_err(CarbideError::from)?,
         None => initial_config_version,
     };
+    let network_expands = !tenant_prefix_overlap::instance_network_is_nonexpanding(
+        &initial_instance.config.network,
+        &config.network,
+    );
+    let needs_overlap_check = mh_snapshot.has_managed_dpus()
+        && (initial_instance.config.network_security_group_id != config.network_security_group_id
+            || network_expands);
+    if needs_overlap_check {
+        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        // No resource locks precede this wait. Reload the retained networks,
+        // but keep the request's original version rather than rebasing it.
+        mh_snapshot = db::managed_host::load_snapshot(
+            &mut txn,
+            &machine_id,
+            LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
+        )
+        .await?
+        .ok_or(CarbideError::NotFoundError {
+            kind: "machine",
+            id: machine_id.to_string(),
+        })?;
+    }
+    let initial_instance = mh_snapshot
+        .instance
+        .as_ref()
+        .filter(|instance| instance.id == instance_id)
+        .ok_or(CarbideError::NotFoundError {
+            kind: "instance",
+            id: instance_id.to_string(),
+        })?;
+    if needs_overlap_check {
+        if initial_instance.config_version != expected_version {
+            return Err(CarbideError::ConcurrentModificationError(
+                "instance",
+                expected_version.to_string(),
+            )
+            .into());
+        }
+        if initial_instance.deleted.is_some() {
+            return Err(CarbideError::InvalidArgument(
+                "configuration for a terminating instance can not be changed".to_string(),
+            )
+            .into());
+        }
+    }
+
+    validate_os_definition_usable(&mut txn, &config.os).await?;
 
     // If an NSG is applied, we need to do a little more validation.
     if let InstanceConfig {
@@ -1388,11 +1537,13 @@ pub(crate) async fn update_instance_config(
     .await?;
 
     update_instance_network_config(
-        &api.runtime_config,
+        api,
         initial_instance,
-        &mut config.network,
+        &mut config,
         &mh_snapshot,
         &mut txn,
+        needs_overlap_check,
+        network_expands,
     )
     .await?;
 
@@ -1498,23 +1649,23 @@ pub(crate) async fn update_instance_config(
     Ok(Response::new(instance))
 }
 
-/// This function checks if network config update is requested and update db to initiate the
-/// process.
-///
-/// If it is requested, validate if update is allowed or not. If update is allowed, copy existing
-/// resources to avoid re-allocation, allocate resources for new interfaces and update the db to
-/// indicate the state machine to start updating network on DPUs. This function also increments
-/// network_config_version.
+/// Validate a requested network change, reuse existing resources, and allocate
+/// resources for new interfaces before queuing the update. The Instance state
+/// machine promotes that configuration and advances `network_config_version`.
 async fn update_instance_network_config(
-    runtime_config: &CarbideConfig,
+    api: &Api,
     instance: &InstanceSnapshot,
-    network: &mut InstanceNetworkConfig,
+    config: &mut InstanceConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    needs_overlap_check: bool,
+    network_expands: bool,
 ) -> Result<(), CarbideError> {
     if instance.update_network_config_request.is_some() {
         return Err(ConfigValidationError::InstanceNetworkConfigUpdateAlreadyInProgress.into());
     }
+    let runtime_config = &api.runtime_config;
+    let network = &mut config.network;
 
     // Auto-ness can't change for an existing instance. If a tenant has created
     // an instance with auto, it must remain auto until it is released. Maybe
@@ -1581,6 +1732,19 @@ async fn update_instance_network_config(
         .network
         .is_network_config_update_requested(network)
     {
+        if needs_overlap_check {
+            config
+                .network
+                .copy_existing_resources(&instance.config.network);
+            tenant_prefix_overlap::validate_instance_network(
+                api,
+                txn,
+                config,
+                Some(instance),
+                network_expands,
+            )
+            .await?;
+        }
         return Ok(());
     }
 
@@ -1625,6 +1789,18 @@ async fn update_instance_network_config(
         .map_err(CarbideError::from)?;
     validate_instance_vfs_against_dpf_topology(network, runtime_config)?;
     validate_instance_interface_routing_profiles(txn, network, runtime_config.fnn.as_ref()).await?;
+
+    if needs_overlap_check {
+        tenant_prefix_overlap::validate_instance_network(
+            api,
+            txn,
+            config,
+            Some(instance),
+            network_expands,
+        )
+        .await?;
+    }
+    let network = &mut config.network;
 
     // Allocate IPs and add them to the network config
     let updated_network_config = db::instance_network_config::with_allocated_ips(
@@ -1880,7 +2056,7 @@ async fn update_instance_extension_services_config(
     // A service being detached remains durably represented with `removed:
     // true`, so the merged config references every service the instance is
     // attached to before and after this update.
-    let new_extension_services_config =
+    let mut new_extension_services_config =
         current.calculate_new_extension_services_config(extension_services);
     let service_ids = new_extension_services_config
         .service_configs
@@ -1891,6 +2067,11 @@ async fn update_instance_extension_services_config(
 
     // Resolve the services while holding the service and version row locks.
     let (services, versions) = load_extension_services(txn, &service_ids).await?;
+    for config in &mut new_extension_services_config.service_configs {
+        if let Some(service) = services.get(&config.service_id) {
+            config.dpu_target = service.dpu_target;
+        }
+    }
     let existing_active_service_ids = current
         .active_services()
         .into_iter()
@@ -1900,22 +2081,39 @@ async fn update_instance_extension_services_config(
     validate_instance_extension_services(
         mh_snapshot.host_snapshot.id,
         mh_snapshot.host_snapshot.config.dpf.used_for_ingestion,
+        mh_snapshot
+            .host_snapshot
+            .primary_attached_dpu_machine_id()
+            .is_some_and(|primary_dpu| {
+                mh_snapshot
+                    .dpu_snapshots
+                    .iter()
+                    .any(|dpu| dpu.id == primary_dpu)
+            }),
         &new_extension_services_config,
         &services,
         &versions,
         &existing_active_service_ids,
     )?;
 
-    db::instance::update_extension_services_config(
+    match db::instance::update_extension_services_config(
         txn,
         instance.id,
         instance.extension_services_config_version,
+        current,
         &new_extension_services_config,
         true,
     )
-    .await?;
-
-    Ok(())
+    .await?
+    {
+        ConditionalWrite::Applied(()) => Ok(()),
+        ConditionalWrite::NotApplied(InstanceExtensionServicesNotCurrent) => {
+            Err(CarbideError::FailedPrecondition(format!(
+                "extension-service attachments for instance {} changed or the instance no longer exists; read the instance again before updating",
+                instance.id,
+            )))
+        }
+    }
 }
 
 /// Extracts the RPC representation of Instances from a ManagedHost snapshot
@@ -2133,8 +2331,7 @@ async fn update_instance_spx_config(
         only_svpc: false,
         only_astra: false,
     };
-    let host_machine_id = carbide_uuid::machine::HostMachineId::try_from(mid)
-        .map_err(|error| CarbideError::internal(error.to_string()))?;
+    let host_machine_id = mid;
     let dpa_interfaces =
         db::dpa_interface::find_by_machine_id(txn.as_mut(), host_machine_id, dpa_search_config)
             .await?;

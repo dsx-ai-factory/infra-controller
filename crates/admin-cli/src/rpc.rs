@@ -16,6 +16,7 @@
  */
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use ::rpc::forge::instance_interface_config::NetworkDetails;
 use ::rpc::forge::{
@@ -36,7 +37,7 @@ use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::dpu_remediations::RemediationId;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId};
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::nvlink::{NvLinkLogicalPartitionId, NvLinkPartitionId};
@@ -46,10 +47,12 @@ use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::spx::SpxPartitionId;
 use carbide_uuid::switch::SwitchId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
+use eyre::WrapErr;
 use futures::{StreamExt, TryStreamExt, stream};
 use mac_address::MacAddress;
 
 use crate::IntoOnlyOne;
+use crate::admission_retry::retry_on_admission_exhaustion;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::expected_machines::common::{ExpectedMachineJson, HostDpuPolicy};
 use crate::instance::AllocateInstance;
@@ -61,16 +64,16 @@ use crate::machine::MachineAutoupdate;
 pub(crate) struct ApiClient(pub(crate) ForgeApiClient);
 
 /// Returns `True` when `status` *can* mean the server does not implement
-/// the requested RPC, telling the caller to retry through the deprecated alias.
+/// the requested RPC, telling the caller to retry through the legacy operation.
 ///
-/// API servers that predate a renamed RPC answer it in one of two ways:
+/// API servers that predate an RPC answer it in one of two ways:
 ///
 /// - `Unimplemented`, when the request reaches the gRPC router.
 /// - A bare HTTP 403 with no `grpc-status` trailer, when `carbide-api` RBAC
 ///   rules reject a method name missing from its permission table (which
 ///   happens before the gRPC router is even consulted). tonic maps that 403 to
 ///   `PermissionDenied` on the client.
-fn maybe_unimplemented(status: &tonic::Status) -> bool {
+pub(crate) fn maybe_unimplemented(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::Unimplemented | tonic::Code::PermissionDenied
@@ -90,7 +93,7 @@ fn cap_chunk_size(page_size: usize, cap: usize) -> usize {
 
 /// Legacy BMC fields sent with a full `ExpectedMachine` update.
 ///
-/// `patch_expected_machine` still fetches the current record so it can merge
+/// `patch_expected_machine_legacy` fetches the current record so it can merge
 /// ordinary patch fields. These two fields need their own rules because the API
 /// uses their presence to distinguish a legacy `--bmc-*` override from the
 /// canonical `HostBmc` entry in `interfaces`.
@@ -189,6 +192,14 @@ fn legacy_bmc_patch_fields(
 // Benchmarks showed 4 had better overall performance while still overlapping page fetch latency.
 const PAGED_LIST_FETCH_CONCURRENCY: usize = 4;
 
+/// Attempt cap for retrying a single `RESOURCE_EXHAUSTED`-rejected call inside
+/// [`ApiClient::get_all_instances`]'s paged fetch (the id listing and each id
+/// chunk fetch individually), mirroring the per-instance/preflight caps used
+/// elsewhere in this crate.
+const MAX_PAGED_FETCH_ATTEMPTS: usize = 8;
+/// Cumulative backoff cap for one such retried call.
+const MAX_PAGED_FETCH_BACKOFF: Duration = Duration::from_secs(120);
+
 // Note: You do *not* need to add every gRPC method to this wrapper. Callers can use `.0` to get
 // access to the underlying ForgeApiClient, if they want to simply call the gRPC methods themselves.
 // Add methods here if there's some value to it, like constructing rpc request objects from simpler
@@ -205,13 +216,17 @@ impl ApiClient {
     /// source `version` already exposes. A zero/unset cap means the server
     /// enforces no limit, so we fall back to `page_size` -- `chunks(0)` panics.
     pub(crate) async fn effective_chunk_size(&self, page_size: usize) -> CarbideCliResult<usize> {
-        let cap = self
-            .0
-            .version(true)
-            .await?
-            .runtime_config
-            .unwrap_or_default()
-            .max_find_by_ids as usize;
+        // Every `*_by_ids` paged fetch calls this first to size its chunks, so a
+        // `RESOURCE_EXHAUSTED` rejection here needs the same retry protection as the
+        // paged fetches themselves -- otherwise it's a single unretried call sitting
+        // in front of code that's supposed to be retry-safe end-to-end.
+        let version = retry_on_admission_exhaustion(
+            MAX_PAGED_FETCH_ATTEMPTS,
+            MAX_PAGED_FETCH_BACKOFF,
+            || async { self.0.version(true).await.map_err(CarbideCliError::from) },
+        )
+        .await?;
+        let cap = version.runtime_config.unwrap_or_default().max_find_by_ids as usize;
         Ok(cap_chunk_size(page_size, cap))
     }
 
@@ -368,6 +383,17 @@ impl ApiClient {
             ))
     }
 
+    /// Resolves the full instance list matching a filter, via one id-listing
+    /// RPC followed by concurrently-chunked `find_instances_by_ids` fetches.
+    ///
+    /// Each of those calls is retried individually on `RESOURCE_EXHAUSTED`
+    /// (see [`retry_on_admission_exhaustion`]), rather than the whole method
+    /// being wrapped by a caller-side retry. A rejection while fetching, say,
+    /// the last of 20 chunks would otherwise burn the whole outer retry
+    /// budget re-fetching all 20 chunks from scratch, discarding the 19 that
+    /// already succeeded -- found via PR review at large-batch (`--label-key`)
+    /// scale, where a late chunk landing in a saturated admission window was
+    /// common.
     pub(crate) async fn get_all_instances(
         &self,
         tenant_org_id: Option<String>,
@@ -395,7 +421,22 @@ impl ApiClient {
                 .instance_ids
                 .chunks(self.effective_chunk_size(page_size).await?),
         )
-        .map(|ids| self.0.find_instances_by_ids(ids.to_vec()))
+        .map(|ids| {
+            let ids = ids.to_vec();
+            retry_on_admission_exhaustion(
+                MAX_PAGED_FETCH_ATTEMPTS,
+                MAX_PAGED_FETCH_BACKOFF,
+                move || {
+                    let ids = ids.clone();
+                    async move {
+                        self.0
+                            .find_instances_by_ids(ids)
+                            .await
+                            .map_err(CarbideCliError::from)
+                    }
+                },
+            )
+        })
         .buffered(PAGED_LIST_FETCH_CONCURRENCY)
         .try_for_each(|list| {
             all_list.instances.extend(list.instances);
@@ -436,7 +477,16 @@ impl ApiClient {
                 })
             },
         };
-        Ok(self.0.find_instance_ids(request).await?)
+        retry_on_admission_exhaustion(MAX_PAGED_FETCH_ATTEMPTS, MAX_PAGED_FETCH_BACKOFF, || {
+            let request = request.clone();
+            async move {
+                self.0
+                    .find_instance_ids(request)
+                    .await
+                    .map_err(CarbideCliError::from)
+            }
+        })
+        .await
     }
 
     pub(crate) async fn get_all_racks(&self, page_size: usize) -> CarbideCliResult<rpc::RackList> {
@@ -786,12 +836,12 @@ impl ApiClient {
 
     pub(crate) async fn machine_insert_health_report_override(
         &self,
-        id: MachineId,
+        id: &MachineId,
         report: ::rpc::health::HealthReport,
         replace: bool,
     ) -> CarbideCliResult<()> {
         let request = ::rpc::forge::InsertMachineHealthReportRequest {
-            machine_id: Some(id),
+            machine_id: Some(*id),
             health_report_entry: Some(rpc::HealthReportEntry {
                 report: Some(report),
                 mode: if replace {
@@ -876,7 +926,13 @@ impl ApiClient {
     ) -> CarbideCliResult<::rpc::site_explorer::SiteExplorationReport> {
         let last_run = self.get_site_explorer_last_run().await?;
         // grab endpoints
-        let endpoint_ids = match self.0.find_explored_endpoint_ids().await {
+        let endpoint_ids = match self
+            .0
+            .find_explored_endpoint_ids(
+                ::rpc::site_explorer::ExploredEndpointSearchFilter::default(),
+            )
+            .await
+        {
             Ok(endpoint_ids) => endpoint_ids,
             Err(status) => {
                 return if maybe_unimplemented(&status) {
@@ -994,10 +1050,10 @@ impl ApiClient {
 
     pub(crate) async fn get_machines_by_ids(
         &self,
-        machine_ids: &[MachineId],
+        machine_ids: &[impl MachineIdSubtypeTrait],
     ) -> CarbideCliResult<rpc::MachineList> {
         let request = ::rpc::forge::MachinesByIdsRequest {
-            machine_ids: Vec::from(machine_ids),
+            machine_ids: machine_ids.iter().copied().map(Into::into).collect(),
             ..Default::default()
         };
         Ok(self.0.find_machines_by_ids(request).await?)
@@ -1017,11 +1073,164 @@ impl ApiClient {
         Ok(self.0.set_dynamic_config(request).await?)
     }
 
-    /// Partially updates an expected machine: merges CLI-provided fields with the current API
-    /// record, then calls `update_expected_machine`. When `bmc_ip_address` is supplied, the server
-    /// runs the same static-interface reconciliation as a full RPC update.
+    /// Sends only the supplied fields through `PatchExpectedMachine`.
+    /// MAC selection reads the current record only to resolve its immutable ID.
+    /// Older servers use the legacy read/merge/update path instead.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn patch_expected_machine(
+        &self,
+        bmc_mac_address: Option<MacAddress>,
+        id: Option<String>,
+        bmc_username: Option<String>,
+        bmc_password: Option<String>,
+        chassis_serial_number: Option<String>,
+        fallback_dpu_serial_numbers: Option<Vec<String>>,
+        meta_name: Option<String>,
+        meta_description: Option<String>,
+        labels: Option<Vec<String>>,
+        sku_id: Option<String>,
+        rack_id: Option<RackId>,
+        default_pause_ingestion_and_poweron: Option<bool>,
+        dpf_enabled: Option<bool>,
+        bmc_ip_address: Option<String>,
+        bmc_retain_credentials: Option<bool>,
+        dpu_policy: Option<HostDpuPolicy>,
+        bmc_ip_allocation: Option<::rpc::forge::BmcIpAllocationType>,
+        host_lifecycle_profile: Option<::rpc::forge::HostLifecycleProfile>,
+        interfaces: Option<String>,
+    ) -> Result<(), CarbideCliError> {
+        let parsed_interfaces = interfaces
+            .as_deref()
+            .map(serde_json::from_str::<Vec<rpc::ExpectedInterface>>)
+            .transpose()?;
+        let paths = [
+            (bmc_username.is_some(), "bmc_username"),
+            (bmc_password.is_some(), "bmc_password"),
+            (chassis_serial_number.is_some(), "chassis_serial_number"),
+            (
+                fallback_dpu_serial_numbers.is_some(),
+                "fallback_dpu_serial_numbers",
+            ),
+            (meta_name.is_some(), "metadata.name"),
+            (meta_description.is_some(), "metadata.description"),
+            (labels.is_some(), "metadata.labels"),
+            (sku_id.is_some(), "sku_id"),
+            (rack_id.is_some(), "rack_id"),
+            (
+                default_pause_ingestion_and_poweron.is_some(),
+                "default_pause_ingestion_and_poweron",
+            ),
+            (dpf_enabled.is_some(), "is_dpf_enabled"),
+            (bmc_ip_address.is_some(), "bmc_ip_address"),
+            (bmc_retain_credentials.is_some(), "bmc_retain_credentials"),
+            (dpu_policy.is_some(), "dpu_mode"),
+            (bmc_ip_allocation.is_some(), "bmc_ip_allocation"),
+            (
+                host_lifecycle_profile
+                    .as_ref()
+                    .and_then(|profile| profile.disable_lockdown)
+                    .is_some(),
+                "host_lifecycle_profile.disable_lockdown",
+            ),
+            (parsed_interfaces.is_some(), "host_nics"),
+        ]
+        .into_iter()
+        .filter(|(selected, _)| *selected)
+        .map(|(_, path)| path.to_string())
+        .collect();
+        let resolved_id = match (bmc_mac_address, id.as_ref()) {
+            (Some(_), Some(_)) => {
+                return Err(CarbideCliError::ChooseOneError("--bmc-mac-address", "--id"));
+            }
+            (None, None) => {
+                return Err(CarbideCliError::RequireOneError(
+                    "--bmc-mac-address",
+                    "--id",
+                ));
+            }
+            (_, Some(id)) => Some(::rpc::common::Uuid { value: id.clone() }),
+            (Some(mac), None) => {
+                self.0
+                    .get_expected_machine(rpc::ExpectedMachineRequest {
+                        bmc_mac_address: mac.to_string(),
+                        id: None,
+                    })
+                    .await
+                    .wrap_err("failed to resolve expected machine by BMC MAC address")?
+                    .id
+            }
+        };
+        // Legacy records can be selected by MAC even when they have no ID.
+        if let Some(resolved_id) = resolved_id {
+            let metadata = (meta_name.is_some() || meta_description.is_some() || labels.is_some())
+                .then(|| rpc::Metadata {
+                    name: meta_name.clone().unwrap_or_default(),
+                    description: meta_description.clone().unwrap_or_default(),
+                    labels: crate::metadata::parse_rpc_labels(labels.clone().unwrap_or_default()),
+                });
+            let mut request = rpc::PatchExpectedMachineRequest {
+                expected_machine: Some(rpc::ExpectedMachine {
+                    id: Some(resolved_id),
+                    bmc_username: bmc_username.clone().unwrap_or_default(),
+                    bmc_password: bmc_password.clone().unwrap_or_default(),
+                    chassis_serial_number: chassis_serial_number.clone().unwrap_or_default(),
+                    fallback_dpu_serial_numbers: fallback_dpu_serial_numbers
+                        .clone()
+                        .unwrap_or_default(),
+                    metadata,
+                    sku_id: sku_id.clone(),
+                    rack_id: rack_id.clone(),
+                    default_pause_ingestion_and_poweron,
+                    is_dpf_enabled: dpf_enabled,
+                    bmc_ip_address: bmc_ip_address.clone(),
+                    bmc_retain_credentials,
+                    dpu_mode: dpu_policy.map(|policy| rpc::DpuMode::from(policy) as i32),
+                    bmc_ip_allocation: bmc_ip_allocation.map(|allocation| allocation as i32),
+                    host_lifecycle_profile,
+                    host_nics: parsed_interfaces.unwrap_or_default(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            request.update_mask.get_or_insert_default().paths = paths;
+            match self.0.patch_expected_machine(request).await {
+                Ok(()) => return Ok(()),
+                Err(status) if maybe_unimplemented(&status) => {}
+                Err(status) => {
+                    return Err(eyre::Report::from(status)
+                        .wrap_err("failed to patch expected machine")
+                        .into());
+                }
+            }
+        }
+
+        self.patch_expected_machine_legacy(
+            bmc_mac_address,
+            id,
+            bmc_username,
+            bmc_password,
+            chassis_serial_number,
+            fallback_dpu_serial_numbers,
+            meta_name,
+            meta_description,
+            labels,
+            sku_id,
+            rack_id,
+            default_pause_ingestion_and_poweron,
+            dpf_enabled,
+            bmc_ip_address,
+            bmc_retain_credentials,
+            dpu_policy,
+            bmc_ip_allocation,
+            host_lifecycle_profile,
+            interfaces,
+        )
+        .await
+    }
+
+    /// Uses the original read/merge/update operation for compatibility.
+    #[allow(clippy::too_many_arguments)]
+    async fn patch_expected_machine_legacy(
         &self,
         bmc_mac_address: Option<MacAddress>,
         id: Option<String>,
@@ -1062,7 +1271,11 @@ impl ApiClient {
                 id: None,
             },
         };
-        let expected_machine = self.0.get_expected_machine(get_req).await?;
+        let expected_machine = self
+            .0
+            .get_expected_machine(get_req)
+            .await
+            .wrap_err("failed to get expected machine for legacy update")?;
         let mac_str = bmc_mac_address
             .map(|m| m.to_string())
             .unwrap_or(expected_machine.bmc_mac_address.clone());
@@ -1082,26 +1295,9 @@ impl ApiClient {
             if meta_name.is_some() || meta_description.is_some() || labels.is_some() {
                 let existing = expected_machine.metadata.unwrap_or_default();
 
-                // Convert labels to the proto format
-                let merged_labels = if let Some(label_list) = labels {
-                    let mut proto_labels = Vec::new();
-                    for label in label_list {
-                        let proto_label = match label.split_once(':') {
-                            Some((k, v)) => ::rpc::forge::Label {
-                                key: k.trim().to_string(),
-                                value: Some(v.trim().to_string()),
-                            },
-                            None => ::rpc::forge::Label {
-                                key: label.trim().to_string(),
-                                value: None,
-                            },
-                        };
-                        proto_labels.push(proto_label);
-                    }
-                    proto_labels
-                } else {
-                    existing.labels
-                };
+                let merged_labels = labels
+                    .map(crate::metadata::parse_rpc_labels)
+                    .unwrap_or(existing.labels);
 
                 Some(::rpc::forge::Metadata {
                     name: meta_name.unwrap_or(existing.name),
@@ -1142,7 +1338,11 @@ impl ApiClient {
                 .or(expected_machine.host_lifecycle_profile),
         };
 
-        Ok(self.0.update_expected_machine(request).await?)
+        self.0
+            .update_expected_machine(request)
+            .await
+            .wrap_err("failed to update expected machine through the legacy RPC")?;
+        Ok(())
     }
 
     /// Replaces the entire expected-machine table from JSON.
@@ -1933,7 +2133,6 @@ impl ApiClient {
             };
             tracing::debug!(vfs_per_pf, "VFs per PF",);
             let mut vf_chunk_iter = vf_vpc_prefix_ids.chunks(vfs_per_pf);
-            let mut ipv6_vf_chunk_iter = allocate_instance.ipv6_vf_prefix_id.chunks(vfs_per_pf);
             for (map_index, i) in discovery_info
                 .network_interfaces
                 .iter()
@@ -1984,8 +2183,9 @@ impl ApiClient {
                     interface_configs.push(new_interface);
 
                     if let Some(vf_prefix_chunks) = vf_chunk_iter.next() {
-                        let ipv6_vf_chunk = ipv6_vf_chunk_iter.next();
                         for (vf_idx, vf_vpc_prefix_id) in vf_prefix_chunks.iter().enumerate() {
+                            // VF prefix and address lists span all physical interfaces.
+                            let vf_list_index = map_index * vfs_per_pf + vf_idx;
                             let new_interface = rpc::InstanceInterfaceConfig {
                                 function_type: rpc::InterfaceFunctionType::Virtual as i32,
                                 network_segment_id: None,
@@ -1995,18 +2195,20 @@ impl ApiClient {
                                 device: Some(pci_properties.device.clone()),
                                 device_instance,
                                 virtual_function_id: Some(vf_function_id),
-                                ip_address: allocate_instance.vf_ip_address.get(vf_idx).cloned(),
-                                ipv6_interface_config: ipv6_vf_chunk
-                                    .and_then(|c| c.get(vf_idx))
+                                ip_address: allocate_instance
+                                    .vf_ip_address
+                                    .get(vf_list_index)
+                                    .cloned(),
+                                ipv6_interface_config: allocate_instance
+                                    .ipv6_vf_prefix_id
+                                    .get(vf_list_index)
                                     .copied()
                                     .map(|vpc_prefix_id| rpc::InstanceInterfaceIpv6Config {
                                         vpc_prefix_id: Some(vpc_prefix_id),
-                                        ip_address: ipv6_vf_chunk.and_then(|_| {
-                                            allocate_instance
-                                                .ipv6_vf_ip_address
-                                                .get(vf_idx)
-                                                .cloned()
-                                        }),
+                                        ip_address: allocate_instance
+                                            .ipv6_vf_ip_address
+                                            .get(vf_list_index)
+                                            .cloned(),
                                     }),
                                 routing_profile: None,
                             };
@@ -2102,7 +2304,11 @@ impl ApiClient {
 
         let instance_request = rpc::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: machine.id,
+            machine_id: machine
+                .id
+                .map(carbide_uuid::machine::StableHostMachineId::try_from)
+                .transpose()
+                .map_err(|error| CarbideCliError::GenericError(error.to_string()))?,
 
             instance_type_id: allocate_instance.instance_type_id.clone(),
             config: Some(instance_config),
@@ -2598,20 +2804,6 @@ impl ApiClient {
             .await?)
     }
 
-    pub(crate) async fn update_machine_nvlink_info(
-        &self,
-        machine_id: MachineId,
-        nvlink_info: rpc::MachineNvLinkInfo,
-    ) -> CarbideCliResult<()> {
-        Ok(self
-            .0
-            .update_machine_nv_link_info(rpc::UpdateMachineNvLinkInfoRequest {
-                machine_id: Some(machine_id),
-                nvlink_info: Some(nvlink_info),
-            })
-            .await?)
-    }
-
     pub(crate) async fn get_all_instance_types(
         &self,
         page_size: usize,
@@ -2638,7 +2830,7 @@ impl ApiClient {
 
     pub(crate) async fn get_power_options(
         &self,
-        machine_id: Vec<MachineId>,
+        machine_id: Vec<carbide_uuid::machine::HostMachineId>,
     ) -> CarbideCliResult<Vec<rpc::PowerOptions>> {
         let all_options = self
             .0
@@ -2897,7 +3089,7 @@ impl ApiClient {
 
     pub(crate) async fn modify_dpf_state(
         &self,
-        machine_id: MachineId,
+        machine_id: HostMachineId,
         state: bool,
     ) -> CarbideCliResult<()> {
         let request = ModifyDpfStateRequest {
@@ -2910,7 +3102,7 @@ impl ApiClient {
 
     pub(crate) async fn get_dpf_state(
         &self,
-        machine_ids: Vec<MachineId>,
+        machine_ids: Vec<HostMachineId>,
         page_size: usize,
     ) -> CarbideCliResult<Vec<rpc::dpf_state_response::DpfState>> {
         let mut all_dpf_states = Vec::with_capacity(machine_ids.len());
@@ -2928,7 +3120,7 @@ impl ApiClient {
 
     pub(crate) async fn get_dpf_host_snapshot(
         &self,
-        host_machine_id: MachineId,
+        host_machine_id: HostMachineId,
     ) -> CarbideCliResult<String> {
         let request = GetDpfHostSnapshotRequest {
             host_machine_id: Some(host_machine_id),
@@ -2969,7 +3161,7 @@ impl ApiClient {
     /// needs no paging.
     pub(crate) async fn list_dpu_service_sync_history(
         &self,
-        machine_id: MachineId,
+        machine_id: carbide_uuid::machine::HostMachineId,
     ) -> CarbideCliResult<Vec<PendingDpuServiceSync>> {
         let response = self
             .0
@@ -2998,11 +3190,161 @@ impl ApiClient {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use ::rpc::{DiscoveryInfo, NetworkInterface, PciDeviceProperties};
+    use carbide_test_support::{Case, Check, Outcome, check_cases_async, check_values};
+    use clap::Parser;
 
     use super::{
-        LegacyBmcPatchFields, cap_chunk_size, legacy_bmc_patch_fields, maybe_unimplemented, rpc,
+        AllocateInstance, ApiClient, ForgeApiClient, LegacyBmcPatchFields, Machine, NetworkDetails,
+        cap_chunk_size, legacy_bmc_patch_fields, maybe_unimplemented, rpc,
     };
+
+    #[tokio::test]
+    async fn vf_addresses_follow_prefix_order_across_physical_interfaces() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "each VF gets its requested addresses",
+                    input: true,
+                    expect: Outcome::Yields(vec![
+                        (
+                            Some("192.0.2.10".to_string()),
+                            Some("2001:db8:1::10".to_string()),
+                        ),
+                        (
+                            Some("192.0.2.11".to_string()),
+                            Some("2001:db8:1::11".to_string()),
+                        ),
+                        (
+                            Some("198.51.100.10".to_string()),
+                            Some("2001:db8:2::10".to_string()),
+                        ),
+                        (
+                            Some("198.51.100.11".to_string()),
+                            Some("2001:db8:2::11".to_string()),
+                        ),
+                    ]),
+                },
+                Case {
+                    scenario: "an omitted later address does not reuse an earlier address",
+                    input: false,
+                    expect: Outcome::Yields(vec![
+                        (
+                            Some("192.0.2.10".to_string()),
+                            Some("2001:db8:1::10".to_string()),
+                        ),
+                        (
+                            Some("192.0.2.11".to_string()),
+                            Some("2001:db8:1::11".to_string()),
+                        ),
+                        (
+                            Some("198.51.100.10".to_string()),
+                            Some("2001:db8:2::10".to_string()),
+                        ),
+                        (None, None),
+                    ]),
+                },
+            ],
+            |request_last_address| async move {
+                let mut command = vec![
+                    "allocate",
+                    "--prefix-name",
+                    "vf-test",
+                    "--tenant-org",
+                    "test-org",
+                    "--vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000001",
+                    "--vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000002",
+                    "--vf-vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000003",
+                    "--vf-vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000004",
+                    "--vf-vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000007",
+                    "--vf-vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000008",
+                    "--ipv6-vf-prefix-id",
+                    "00000000-0000-0000-0000-000000000005",
+                    "--ipv6-vf-prefix-id",
+                    "00000000-0000-0000-0000-000000000006",
+                    "--ipv6-vf-prefix-id",
+                    "00000000-0000-0000-0000-000000000009",
+                    "--ipv6-vf-prefix-id",
+                    "00000000-0000-0000-0000-00000000000a",
+                    "--vf-ip-address",
+                    "192.0.2.10",
+                    "--vf-ip-address",
+                    "192.0.2.11",
+                    "--vf-ip-address",
+                    "198.51.100.10",
+                    "--ipv6-vf-ip-address",
+                    "2001:db8:1::10",
+                    "--ipv6-vf-ip-address",
+                    "2001:db8:1::11",
+                    "--ipv6-vf-ip-address",
+                    "2001:db8:2::10",
+                ];
+                if request_last_address {
+                    command.extend([
+                        "--vf-ip-address",
+                        "198.51.100.11",
+                        "--ipv6-vf-ip-address",
+                        "2001:db8:2::11",
+                    ]);
+                }
+                let args = AllocateInstance::try_parse_from(command).unwrap();
+                // The allocation builder still reads the legacy discovery field.
+                #[allow(deprecated)]
+                let machine = Machine {
+                    discovery_info: Some(DiscoveryInfo {
+                        network_interfaces: ["00:11:22:33:44:55", "00:11:22:33:44:66"]
+                            .into_iter()
+                            .map(|mac_address| NetworkInterface {
+                                mac_address: mac_address.to_string(),
+                                pci_properties: Some(PciDeviceProperties {
+                                    vendor: "Mellanox".to_string(),
+                                    device: "BlueField-3".to_string(),
+                                    ..Default::default()
+                                }),
+                            })
+                            .collect(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let client = ApiClient(ForgeApiClient::new(&ApiConfig::new(
+                    "invalid-unconnected-url",
+                    &ForgeClientConfig::default(),
+                )));
+                let request = client
+                    .build_instance_request(machine, &args, "vf-test", None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let interfaces = request.config.unwrap().network.unwrap().interfaces;
+                let addresses = interfaces
+                    .into_iter()
+                    .filter(|interface| {
+                        interface.function_type == rpc::InterfaceFunctionType::Virtual as i32
+                    })
+                    .enumerate()
+                    .map(|(index, interface)| {
+                        assert_eq!(interface.device_instance, (index / 2) as u32);
+                        assert_eq!(
+                            interface.network_details,
+                            Some(NetworkDetails::VpcPrefixId(args.vf_vpc_prefix_id[index]))
+                        );
+                        let ipv6 = interface.ipv6_interface_config.unwrap();
+                        assert_eq!(ipv6.vpc_prefix_id, Some(args.ipv6_vf_prefix_id[index]));
+                        (interface.ip_address, ipv6.ip_address)
+                    })
+                    .collect::<Vec<_>>();
+                Ok::<_, String>(addresses)
+            },
+        )
+        .await;
+    }
 
     /// Inputs that differ across the `legacy_bmc_patch_fields` table.
     #[derive(Debug)]

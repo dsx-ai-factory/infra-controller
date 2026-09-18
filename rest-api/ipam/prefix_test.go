@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"reflect"
 	"strings"
@@ -333,6 +334,21 @@ func TestIpamer_AcquireSpecificIP(t *testing.T) {
 		require.Nil(t, err)
 		require.Equal(t, prefix.availableips(), uint64(256))
 		require.Equal(t, prefix.acquiredips(), uint64(1))
+
+		t.Run("high IPv6 address", func(t *testing.T) {
+			prefix, err := ipam.NewPrefix(ctx, "2001:db8::/64")
+			require.NoError(t, err)
+			requestedIP := "2001:db8::8000:0:0:1"
+
+			ip, err := ipam.AcquireSpecificIP(ctx, prefix.Cidr, requestedIP)
+			require.NoError(t, err)
+			require.NotNil(t, ip)
+			require.Equal(t, requestedIP, ip.IP.String())
+
+			prefix = ipam.PrefixFrom(ctx, prefix.Cidr)
+			require.NotNil(t, prefix)
+			require.True(t, prefix.ips[requestedIP])
+		})
 	})
 }
 
@@ -1005,6 +1021,21 @@ func TestPrefix_Availableips(t *testing.T) {
 			Cidr: "2001:0db8:85a3::/116",
 			want: 4096,
 		},
+		{
+			name: "IPv6 below reporting boundary",
+			Cidr: "2001:db8::/98",
+			want: 1073741824,
+		},
+		{
+			name: "IPv6 at reporting boundary",
+			Cidr: "2001:db8::/97",
+			want: 2147483647,
+		},
+		{
+			name: "IPv6 above reporting boundary",
+			Cidr: "2001:db8::/96",
+			want: 2147483647,
+		},
 	}
 	for _, tt := range tests {
 		test := tt
@@ -1447,6 +1478,7 @@ func TestPrefix_availablePrefixes(t *testing.T) {
 		cidr                   string
 		availableChildPrefixes map[string]bool
 		want                   uint64
+		wantPrefixes           []string
 	}{
 		{
 			name:                   "one child prefix",
@@ -1477,6 +1509,32 @@ func TestPrefix_availablePrefixes(t *testing.T) {
 			availableChildPrefixes: map[string]bool{"2001:0db8:85a3::/122": false},
 			want:                   32 + 16,
 		},
+		{
+			name:         "ipv6 count below cap",
+			cidr:         "2001:db8::/96",
+			want:         1 << 30,
+			wantPrefixes: []string{"2001:db8::/96"},
+		},
+		{
+			name:         "ipv6 count exceeds uint64",
+			cidr:         "2001:db8::/48",
+			want:         math.MaxInt32,
+			wantPrefixes: []string{"2001:db8::/48"},
+		},
+		{
+			name: "ipv6 fragments exceed cap and keep all prefixes",
+			cidr: "2001:db8::/94",
+			availableChildPrefixes: map[string]bool{
+				"2001:db8::1:0:0/96": false,
+				"2001:db8::3:0:0/97": false,
+			},
+			want: math.MaxInt32,
+			wantPrefixes: []string{
+				"2001:db8::/96",
+				"2001:db8::2:0:0/96",
+				"2001:db8::3:8000:0/97",
+			},
+		},
 	}
 	for _, tt := range tests {
 		test := tt
@@ -1486,12 +1544,9 @@ func TestPrefix_availablePrefixes(t *testing.T) {
 				availableChildPrefixes: test.availableChildPrefixes,
 			}
 			got, avpfxs := p.availablePrefixes()
-			for _, pfx := range avpfxs {
-				// Only logs if fails
-				ipprefix, err := netip.ParsePrefix(pfx)
-				require.NoError(t, err)
-				smallest := 1 << (ipprefix.Addr().BitLen() - 2 - ipprefix.Bits())
-				t.Logf("available prefix:%s smallest left:%d", pfx, smallest)
+			t.Logf("available prefixes: %v", avpfxs)
+			if test.wantPrefixes != nil {
+				require.Equal(t, test.wantPrefixes, avpfxs)
 			}
 
 			if test.want != got {

@@ -20,7 +20,9 @@ use carbide_machine_controller::config::machine_validation::{
 };
 use carbide_uuid::machine_validation::{MachineValidationAttemptId, MachineValidationRunItemId};
 use config_version::ConfigVersion;
-use db::{self, machine_validation_suites};
+use db::machine_validation::ValidationNotActive;
+use db::machine_validation_execution::HeartbeatNotAccepted;
+use db::{self, ConditionalWrite, machine_validation_suites};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, MachineValidationContext, MachineValidationFilter,
@@ -119,7 +121,7 @@ pub(crate) async fn mark_machine_validation_complete(
         },
     )
     .await?;
-    if !completed {
+    if let ConditionalWrite::NotApplied(ValidationNotActive) = completed {
         tracing::info!(
             %machine_id,
             machine_validation_id = %validation_id,
@@ -639,7 +641,7 @@ pub(crate) async fn heartbeat_machine_validation_run(
     }
 
     let mut txn = api.txn_begin().await?;
-    let accepted = db::machine_validation_execution::record_heartbeat(
+    let heartbeat = db::machine_validation_execution::record_heartbeat(
         &mut txn,
         validation_id,
         run_item_id.as_ref(),
@@ -648,11 +650,16 @@ pub(crate) async fn heartbeat_machine_validation_run(
         chrono::Utc::now(),
     )
     .await?;
-    if accepted {
-        txn.commit().await?;
-    } else {
-        txn.rollback().await?;
-    }
+    let accepted = match heartbeat {
+        ConditionalWrite::Applied(()) => {
+            txn.commit().await?;
+            true
+        }
+        ConditionalWrite::NotApplied(HeartbeatNotAccepted) => {
+            txn.rollback().await?;
+            false
+        }
+    };
 
     Ok(tonic::Response::new(
         rpc::MachineValidationHeartbeatResponse { accepted },
@@ -880,12 +887,16 @@ fn validate_machine_validation_plugin(
             "plugin entrypoint must contain a non-empty executable and arguments".into(),
         ));
     }
-    let parameters: serde_json::Value =
-        serde_json::from_str(&plugin.parameters_json).map_err(|error| {
-            CarbideError::InvalidArgument(format!(
-                "plugin parameters_json must be valid JSON: {error}"
-            ))
-        })?;
+    let parameters_json = if plugin.parameters_json.is_empty() {
+        "{}"
+    } else {
+        &plugin.parameters_json
+    };
+    let parameters: serde_json::Value = serde_json::from_str(parameters_json).map_err(|error| {
+        CarbideError::InvalidArgument(format!(
+            "plugin parameters_json must be valid JSON: {error}"
+        ))
+    })?;
     if !parameters.is_object() {
         return Err(CarbideError::InvalidArgument(
             "plugin parameters_json must be a JSON object".into(),
@@ -1644,6 +1655,17 @@ mod img_name_validation_tests {
             approved_plugin_registries: vec!["registry.example.com".to_owned()],
             allow_privileged_plugins: true,
             allow_full_host_plugins: true,
+            ..MachineValidationConfig::default()
+        };
+        assert!(validate_machine_validation_plugin(&plugin.into(), &config).is_ok());
+    }
+
+    #[test]
+    fn plugin_admission_accepts_omitted_parameters() {
+        let mut plugin = plugin(false);
+        plugin.parameters_json.clear();
+        let config = MachineValidationConfig {
+            approved_plugin_registries: vec!["registry.example.com".to_owned()],
             ..MachineValidationConfig::default()
         };
         assert!(validate_machine_validation_plugin(&plugin.into(), &config).is_ok());

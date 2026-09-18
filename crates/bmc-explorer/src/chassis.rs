@@ -131,12 +131,15 @@ impl<B: Bmc> ExploredChassisCollection<B> {
 
     /// Detects a Delta power shelf. Delta BMCs expose neither a `Vendor` in the
     /// service root nor a `/redfish/v1/Systems` collection, so classification
-    /// relies on a Delta manufacturer on the power-shelf chassis (id "chassis"
-    /// or "powershelf"). The manufacturer gate is what distinguishes Delta from
-    /// the Lite-On power shelf, which shares the generic "powershelf" chassis
-    /// id.
+    /// relies on a Delta manufacturer on the power-shelf chassis. The
+    /// manufacturer gate is what distinguishes Delta from the Lite-On power
+    /// shelf, which can share the generic "powershelf" chassis id.
     pub(crate) fn is_delta_powershelf(&self) -> bool {
-        self.members.iter().any(|m| {
+        self.delta_powershelf_chassis().is_some()
+    }
+
+    fn delta_powershelf_chassis(&self) -> Option<&ExploredChassis<B>> {
+        self.members.iter().find(|m| {
             is_delta_powershelf_chassis(
                 m.chassis.id().into_inner(),
                 m.chassis
@@ -178,12 +181,7 @@ impl<B: Bmc> ExploredChassisCollection<B> {
     /// power-shelf chassis member (mirrors the libredfish Delta path).
     pub(crate) fn synthesized_powershelf_system(&self) -> ModelComputerSystem {
         let member = self
-            .members
-            .iter()
-            .find(|m| {
-                let id = m.chassis.id().into_inner();
-                id == "chassis" || id == "powershelf"
-            })
+            .delta_powershelf_chassis()
             .or_else(|| self.members.first());
 
         let (id, manufacturer, model, serial_number) = member
@@ -503,14 +501,19 @@ fn delta_psu_power_on<B: Bmc>(ps: &NvPowerSupply<B>) -> Option<bool> {
     }
 }
 
-/// Delta power-shelf identity gate: a power-shelf chassis (id `chassis` or
-/// `powershelf`) whose manufacturer identifies as Delta. This is what
-/// distinguishes a Delta shelf from the Lite-On shelf, which shares the generic
-/// `powershelf` chassis id but reports a different manufacturer. Split out so
-/// the gate can be exercised in unit tests without a live BMC.
+/// Delta power-shelf identity gate: a `chassis` id or an id containing `power`
+/// before `shelf`, compared case-insensitively, whose manufacturer identifies
+/// as Delta. The manufacturer distinguishes Delta from Lite-On shelves that can
+/// share the generic `powershelf` chassis id. Split out so the gate can be
+/// exercised in unit tests without a live BMC.
 fn is_delta_powershelf_chassis(chassis_id: &str, manufacturer: Option<&str>) -> bool {
-    (chassis_id == "chassis" || chassis_id == "powershelf")
-        && manufacturer.is_some_and(|mfg| mfg.to_lowercase().contains("delta"))
+    let chassis_id = chassis_id.to_ascii_lowercase();
+    let is_powershelf_id = chassis_id == "chassis"
+        || chassis_id
+            .split_once("power")
+            .is_some_and(|(_, suffix)| suffix.contains("shelf"));
+
+    is_powershelf_id && manufacturer.is_some_and(|mfg| mfg.to_lowercase().contains("delta"))
 }
 
 fn is_mgx_c2_processor_module(
@@ -618,26 +621,31 @@ mod tests {
         }
     }
 
-    // is_delta_powershelf_chassis gates Delta detection: a power-shelf chassis
-    // id ("chassis"/"powershelf") AND a Delta manufacturer. The manufacturer
-    // check is case-insensitive and substring-based, and is what separates a
-    // Delta shelf from a Lite-On shelf sharing the "powershelf" chassis id.
+    // is_delta_powershelf_chassis gates Delta detection on both a recognized
+    // power-shelf chassis id and a Delta manufacturer.
     #[test]
     fn is_delta_powershelf_chassis_gates_on_id_and_manufacturer() {
-        let cases: [(&str, Option<&str>, bool); 9] = [
-            // Delta manufacturer on either accepted power-shelf chassis id.
+        let cases: [(&str, Option<&str>, bool); 15] = [
+            // Legacy and power-before-shelf ids are case-insensitive.
             ("chassis", Some("DELTA"), true),
+            ("CHASSIS", Some("DELTA"), true),
             ("powershelf", Some("Delta"), true),
+            ("PowerShelf_0", Some("DELTA"), true),
+            ("delta-power-module-shelf_0", Some("DELTA"), true),
             // Case-insensitive, substring match on the manufacturer.
             ("chassis", Some("delta electronics"), true),
             ("powershelf", Some("Delta Energy Systems"), true),
-            // Right manufacturer but a non-power-shelf chassis id is ignored.
+            // Both words are required, with "power" before "shelf".
+            ("ShelfPower_0", Some("DELTA"), false),
+            ("PowerUnit_0", Some("DELTA"), false),
+            ("Shelf_0", Some("DELTA"), false),
+            // Unrelated chassis ids are ignored.
             ("Card1", Some("DELTA"), false),
             ("Baseboard", Some("delta"), false),
             // Power-shelf chassis id but a different (or missing) manufacturer.
             ("powershelf", Some("Lite-On"), false),
-            ("chassis", Some("NVIDIA"), false),
-            ("chassis", None, false),
+            ("PowerShelf_0", Some("NVIDIA"), false),
+            ("PowerShelf_0", None, false),
         ];
         for (id, mfg, expected) in cases {
             assert_eq!(

@@ -2,6 +2,23 @@ use std::collections::BTreeMap;
 
 use serde_json::Value as JsonValue;
 
+/// The configuration difference returned by NVUE's config diff operation.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(transparent)]
+pub struct RevisionConfigDiff(
+    // We're intentionally typing this fairly loosely for code brevity, since the
+    // sole user of this is concerned only with whether the diff is empty.
+    serde_json::Map<String, serde_json::Value>,
+);
+
+impl RevisionConfigDiff {
+    /// Return `true` for an empty diff, which means a no-op change between the
+    /// revisions.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct RevisionData {
@@ -96,6 +113,74 @@ pub enum RevisionIssueSeverity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revision_config_diff_requires_object_root_and_reports_empty_root() {
+        struct Case {
+            name: &'static str,
+            json: &'static str,
+            expected: Option<(bool, JsonValue)>,
+        }
+
+        let cases = [
+            Case {
+                name: "empty root object means no difference",
+                json: r#"{}"#,
+                expected: Some((true, serde_json::json!({}))),
+            },
+            Case {
+                name: "nested null remains a significant removal",
+                json: r#"{"interface":{"swp1":{"link":{"state":null}}}}"#,
+                expected: Some((
+                    false,
+                    serde_json::json!({
+                        "interface": {
+                            "swp1": {
+                                "link": {
+                                    "state": null
+                                }
+                            }
+                        }
+                    }),
+                )),
+            },
+            Case {
+                name: "null root is invalid",
+                json: "null",
+                expected: None,
+            },
+            Case {
+                name: "array root is invalid",
+                json: "[]",
+                expected: None,
+            },
+            Case {
+                name: "scalar root is invalid",
+                json: r#""value""#,
+                expected: None,
+            },
+        ];
+
+        for case in cases {
+            match (
+                serde_json::from_str::<RevisionConfigDiff>(case.json),
+                case.expected,
+            ) {
+                (Ok(diff), Some((expected_empty, expected_value))) => {
+                    assert_eq!(diff.is_empty(), expected_empty, "{}", case.name);
+                    assert_eq!(JsonValue::Object(diff.0), expected_value, "{}", case.name);
+                }
+                (Err(_), None) => {}
+                (Ok(_), None) => panic!("{}: expected deserialization to fail", case.name),
+                (Err(error), Some(_)) => {
+                    panic!(
+                        "{}: expected deserialization to succeed: {error}",
+                        case.name
+                    )
+                }
+            }
+        }
+    }
 
     #[test]
     fn classifies_revision_apply_status() {

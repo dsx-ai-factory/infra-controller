@@ -147,7 +147,9 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode};
     use axum::routing::get;
-    use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{
+        ApproxHistogramSum, CapturedFieldKind, MetricsCapture, capture_logs,
+    };
     use carbide_test_support::{Check, check_values};
     use tower::ServiceExt;
 
@@ -161,20 +163,11 @@ mod tests {
         Response,
     }
 
-    #[derive(Debug)]
-    struct ApproxLatencySum(f64);
-
-    impl PartialEq for ApproxLatencySum {
-        fn eq(&self, other: &Self) -> bool {
-            (self.0 - other.0).abs() < 1e-9
-        }
-    }
-
     #[derive(Debug, PartialEq)]
     struct EventObservation {
         request_delta: f64,
         latency_count_delta: u64,
-        latency_sum_delta: ApproxLatencySum,
+        latency_sum_delta: ApproxHistogramSum,
         logs: Vec<LogObservation>,
     }
 
@@ -215,7 +208,7 @@ mod tests {
         EventObservation {
             request_delta: metrics.counter_delta(REQUEST_METRIC, &[]),
             latency_count_delta: metrics.histogram_count_delta(LATENCY_METRIC, &[]),
-            latency_sum_delta: ApproxLatencySum(metrics.histogram_sum_delta(LATENCY_METRIC, &[])),
+            latency_sum_delta: metrics.histogram_sum_delta(LATENCY_METRIC, &[]),
             logs,
         }
     }
@@ -230,7 +223,7 @@ mod tests {
                     expect: EventObservation {
                         request_delta: 1.0,
                         latency_count_delta: 0,
-                        latency_sum_delta: ApproxLatencySum(0.0),
+                        latency_sum_delta: ApproxHistogramSum(0.0),
                         logs: vec![LogObservation {
                             metadata_name: "fmds_http_request_started".to_string(),
                             level: tracing::Level::INFO,
@@ -256,7 +249,7 @@ mod tests {
                     expect: EventObservation {
                         request_delta: 0.0,
                         latency_count_delta: 1,
-                        latency_sum_delta: ApproxLatencySum(12.5),
+                        latency_sum_delta: ApproxHistogramSum(12.5),
                         logs: vec![LogObservation {
                             metadata_name: "fmds_http_response_generated".to_string(),
                             level: tracing::Level::INFO,
@@ -277,46 +270,6 @@ mod tests {
                 },
             ],
             observe_event,
-        );
-    }
-
-    #[test]
-    fn latency_sum_comparison_uses_absolute_tolerance() {
-        struct Comparison {
-            actual: f64,
-            expected: f64,
-        }
-
-        check_values(
-            [
-                Check {
-                    scenario: "accepts insignificant floating-point drift",
-                    input: Comparison {
-                        actual: 12.500000000000002,
-                        expected: 12.5,
-                    },
-                    expect: true,
-                },
-                Check {
-                    scenario: "rejects the strict tolerance boundary",
-                    input: Comparison {
-                        actual: 1e-9,
-                        expected: 0.0,
-                    },
-                    expect: false,
-                },
-                Check {
-                    scenario: "rejects a meaningful difference",
-                    input: Comparison {
-                        actual: 12.500001,
-                        expected: 12.5,
-                    },
-                    expect: false,
-                },
-            ],
-            |comparison| {
-                ApproxLatencySum(comparison.actual) == ApproxLatencySum(comparison.expected)
-            },
         );
     }
 

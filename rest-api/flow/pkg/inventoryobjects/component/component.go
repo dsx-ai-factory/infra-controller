@@ -25,6 +25,7 @@ type Component struct {
 	BmcsByType      map[devicetypes.BMCType][]bmc.BMC `json:"bmcs_by_type"`
 	ComponentID     string                            `json:"component_id,omitempty"`
 	RackID          uuid.UUID                         `json:"rack_id"`
+	RackExternalID  string                            `json:"rack_external_id,omitempty"`
 	NVLDomainID     uuid.UUID                         `json:"nvl_domain_id"`
 	PowerState      string                            `json:"power_state,omitempty"`
 	// Status is the Flow-derived view of operability. Nil when no status

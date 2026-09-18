@@ -187,6 +187,18 @@ pub struct CarbideConfig {
     )]
     pub database_pool_max_lifetime: std::time::Duration,
 
+    /// How long to keep retrying the initial database connection at
+    /// startup before giving up. A transient outage (failover, rolling
+    /// upgrade, brief DNS blip) shorter than this window no longer takes
+    /// the process down. Set to `0` to fail on the first attempt, matching
+    /// the old behavior. Default is 5m.
+    #[serde(
+        default = "default_database_startup_retry_timeout",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub database_startup_retry_timeout: std::time::Duration,
+
     /// Bounds the number of API requests that may execute or wait for
     /// execution. The limits are shared by gRPC and admin HTTP traffic.
     #[serde(default)]
@@ -330,6 +342,17 @@ pub struct CarbideConfig {
     /// session). Values below 1 are treated as 1.
     #[serde(default = "default_bmc_max_sessions_per_caller")]
     pub bmc_max_sessions_per_caller: usize,
+
+    /// Routing of this instance's own BMC Redfish traffic through
+    /// nico-bmc-proxy. When enabled, ordinary traffic -- machine lifecycle
+    /// and established-endpoint credentialed exploration -- targets the
+    /// proxy, which authenticates upstream itself. Credential-subject work
+    /// (credential setup with factory/expected credentials, BMC session
+    /// minting, password rotation), exploration's anonymous vendor probes,
+    /// and component-manager compute-tray power control (explicit
+    /// per-endpoint credentials) stay direct. Absent or `enabled = false`
+    /// keeps every call direct.
+    pub bmc_proxy: Option<BmcProxyConfig>,
 
     /// When `true`, `GetBmcCredentials` may return
     /// `UsernamePassword` credentials for BMCs whose Redfish ServiceRoot
@@ -718,39 +741,13 @@ pub struct CarbideConfig {
     )]
     pub mlxconfig_profiles: Option<HashMap<String, MlxConfigProfile>>,
 
-    /// The intent of this config option is to use the NICo site controller as a standalone
-    /// (disconnected / air-gapped) infrastructure manager for racks of GB200/GB300/VR144.
-    /// Only set this if using NICo site controller with Rack Manager to manage GB200/300/VR144.
-    /// It will change site controller behavior significantly in the following ways, etc.:
-    /// 1. skip DPU management and use DPUs as NICs (set the site-wide `[site_explorer] dpu_policy = "nic"`, or per-host `ExpectedMachine.dpu_policy`)
-    ///    a. no dpu bfb upgrade and host power cycle
-    ///    b. no firmware upgrade and host power cycle
-    ///    c. no hbn deployment (no ecmp, etc)
-    ///    d. no dpu agent deployment
-    ///    e. no restricted mode configuration
-    ///    f. no tenant overlay network via L2 vxlan/evpn or L3 vni (fnn)
-    /// 2. support any other nic interface on the compute nodes including the onboard 3p nic
-    /// 3. require expected machines table rows to have other/all mac addresses for each machine
-    /// 4. restrict dhcp service to only provide ip address to known mac addresses
-    ///    a. for additional mac addresses, use HostInband network segment when dpu is in nic mode
-    /// 5. disable compute host individual firmware upgrades
-    ///    a. only rack level firmware upgrades are allowed
-    /// 6. enable nvlink switch and power shelf discovery and ingestion
-    ///    a. site explorer changes to explore switch and power shelf bmc
-    ///    b. state machine for ingestion workflow
-    ///    c. nvlink switch nvos deployment/upgrade via onie
-    ///    d. nvlink switch default configuration and machine validation
-    /// 7. enable rack state machine and calls to rack manager
-    ///    a. depend on rack manager for firmware upgrades of the rack
-    ///    b. depend on rack manager for all power sequencing of the rack and components
-    ///    c. override/suspend component level state machine state transitions as needed
-    /// 8. enable nvlink control plane integration with nmx-c
-    ///    a. export nmx-c apis via site controller
-    ///    b. hardware health daemon polling of switch telemetry and collection into site controller
-    ///    prometheus instance
-    /// 9. enable domain power service integration
-    #[serde(default)]
-    pub rack_management_enabled: bool,
+    /// Deprecated compatibility key. This setting no longer affects runtime
+    /// behavior now that expected-machine DHCP lookup is unconditional. It
+    /// remains accepted so strict unknown-field validation does not block
+    /// upgrades from configurations that still contain the key.
+    #[doc(hidden)]
+    #[serde(default, rename = "rack_management_enabled", skip_serializing)]
+    pub deprecated_rack_management_enabled: Option<bool>,
 
     /// Rack Manager Service configuration for rack-level firmware upgrades,
     /// power sequencing, and mTLS connectivity.
@@ -1472,7 +1469,7 @@ pub struct SecretsConfig {
     /// them, longest prefix winning. A "/" catch-all entry is required.
     /// Reads never consult routing -- every stored row records the KEK
     /// that wrapped it -- so rotating a key means changing it here and
-    /// running `carbide-admin-cli secrets re-wrap`.
+    /// running `nico-admin-cli secrets re-wrap`.
     ///
     /// Example:
     /// ```toml
@@ -1734,8 +1731,16 @@ pub struct DpfConfig {
     #[serde(default)]
     pub enabled: bool,
     /// Opts the DPF namespace into deployment-scoped DPUServiceInterfaces.
-    /// Changing modes requires operators to remove old-mode NICo resources and
-    /// re-ingest DPUs; NICo neither detects nor deletes those resources.
+    /// BF3 sites (including BF3 GB200) and generic BF4 use the default
+    /// unscoped mode; BF4 Astra requires this to be enabled. When enabled, initialization
+    /// removes legacy unscoped ServiceInterfaces before creating
+    /// scoped replacements. If cleanup remains incomplete for ten minutes, NICo logs an error and
+    /// continues waiting. If an operator manually completes unscoped cleanup, NICo creates scoped
+    /// replacements. The setting is read only at startup. To return to unscoped interfaces, stop
+    /// NICo, delete scoped ServiceInterfaces and wait for their deletion, then restart with this
+    /// set to false.
+    /// DPF initialization rejects disabling this value while scoped
+    /// ServiceInterfaces exist.
     #[serde(default)]
     pub deployment_scoped_service_interfaces: bool,
     /// SF capacity reserved beyond configured NICo-managed service endpoints.
@@ -2355,18 +2360,15 @@ fn append_gb200_label_suffix(label_key: &str) -> String {
 /// the `provisioning.dpu.nvidia.com/v1alpha1` `BlueFieldSoftware` CR.
 ///
 /// The PLDM firmware bundle is PSID-specific, so `pldm_fw_bundle` maps each PSID
-/// to its bundle URL. One `BlueFieldSoftware` CR and one DPUDeployment are
-/// created per PSID (see
-/// [`DpfDeploymentConfig::per_psid_deployment_name`] and
-/// [`DpfDeploymentConfig::per_psid_node_label_key`]).
+/// to its bundle URL. A single `BlueFieldSoftware` CR carries the complete map
+/// so DPF can select the matching bundle for each DPU model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DpfBlueFieldSoftwareConfig {
     /// OS ISO URL used by the DPU OS installation flow (`spec.osIso`). Shared
     /// across all PSIDs.
     pub os_iso: String,
-    /// Map of PSID → PLDM firmware bundle URL (`spec.pldmFwBundle`). Each entry
-    /// fans out to its own `BlueFieldSoftware` CR and DPUDeployment.
+    /// Map of PSID → PLDM firmware bundle URL (`spec.pldmFwBundle`).
     #[serde(default)]
     pub pldm_fw_bundle: BTreeMap<String, String>,
 }
@@ -2531,14 +2533,9 @@ impl DpfDeploymentsConfig {
                 (None, None) => errors.push(format!(
                     "deployment {name:?} sets neither bfb_url nor bluefield_software; set exactly one"
                 )),
-                // Exactly one PSID entry is allowed for now. Multi-PSID support
-                // is pending a DPF change that lets one `BlueFieldSoftware` CR
-                // carry a PSID→PLDM map; until then a single BF4 deployment uses
-                // the one entry's PLDM bundle.
-                (None, Some(bfs)) if bfs.pldm_fw_bundle.len() != 1 => errors.push(format!(
-                    "deployment {name:?} bluefield_software.pldm_fw_bundle must have exactly one \
-                     PSID → PLDM bundle URL entry (found {}).",
-                    bfs.pldm_fw_bundle.len()
+                (None, Some(bfs)) if bfs.pldm_fw_bundle.is_empty() => errors.push(format!(
+                    "deployment {name:?} bluefield_software.pldm_fw_bundle must have at least one \
+                     PSID → PLDM bundle URL entry.",
                 )),
                 _ => {}
             }
@@ -2912,19 +2909,21 @@ impl FnnRoutingProfileConfig {
     ///
     /// Evaluate the profile returned by [`FnnConfig::resolve_vpc_routing_profile`],
     /// not the raw base profile, so VPC overrides participate in the decision.
-    /// The caller adds the site-wide conditions for these prefix writers.
-    /// Peering and VPC policy changes are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5114>, and retained
-    /// Instance paths are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5115>. Startup and
-    /// complete writer coverage are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5116>. All three must
-    /// land before the database cutover in
-    /// <https://github.com/NVIDIA/infra-controller/issues/3892>.
+    /// Admission callers add the site-wide conditions and retained-network
+    /// checks. See peering and policy admission in
+    /// <https://github.com/NVIDIA/infra-controller/issues/5114> and Instance
+    /// admission in <https://github.com/NVIDIA/infra-controller/issues/5115>.
     pub(crate) fn is_eligible_for_tenant_prefix_overlap(&self) -> bool {
+        self.tenant_prefix_overlap_eligible && self.is_isolated_for_tenant_prefixes()
+    }
+
+    /// `is_isolated_for_tenant_prefixes` checks routing safety independently
+    /// of the admission opt-in. Turning that opt-in off must still let safe
+    /// retained networks serve traffic while their prefixes drain.
+    pub(crate) fn is_isolated_for_tenant_prefixes(&self) -> bool {
         // Keep this exhaustive so new profile fields require an explicit eligibility decision.
         let Self {
-            tenant_prefix_overlap_eligible,
+            tenant_prefix_overlap_eligible: _,
             route_target_imports,
             route_targets_on_exports,
             // External profiles cannot participate in exact prefix reuse.
@@ -2938,8 +2937,7 @@ impl FnnRoutingProfileConfig {
             access_tier: _,
         } = self;
 
-        *tenant_prefix_overlap_eligible
-            && *internal == Some(true)
+        *internal == Some(true)
             && route_target_imports.as_ref().is_none_or(Vec::is_empty)
             && route_targets_on_exports.as_ref().is_none_or(Vec::is_empty)
             && !leak_default_route_from_underlay.unwrap_or_default()
@@ -3169,6 +3167,18 @@ impl CarbideConfig {
             }
             validate_tool_url(&tool.name, &tool.url)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn validate_service_vpc_slots(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            !self.tenant_prefix_overlap_enabled || self.dpu_config.service_vpc_slot_count == 0,
+            "dpu_config.service_vpc_slot_count must be zero when tenant_prefix_overlap_enabled is true"
+        );
+        eyre::ensure!(
+            self.dpu_config.service_vpc_slot_count == 0 || self.site_global_vpc_vni.is_none(),
+            "dpu_config.service_vpc_slot_count requires site_global_vpc_vni to be unset because service VPCs require distinct HBN VRFs"
+        );
         Ok(())
     }
 
@@ -3494,9 +3504,9 @@ pub struct RackStateControllerConfig {
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
 
-    /// Switch mTLS services for NMX cluster setup. Accepted and ignored: rack
-    /// maintenance does not configure switch certificates. Per-switch
-    /// certificate configuration uses
+    /// Deprecated. Accepted and ignored. Rack `ConfigureNmxCluster` uses a fixed
+    /// `nvue_api` binding before RMS V2 selects and configures the primary switch.
+    /// Per-switch certificate configuration uses
     /// `[switch_state_controller].switch_mtls_services`.
     #[serde(default)]
     pub nmx_cluster_switch_mtls_services: Vec<component_manager::config::SwitchMtlsService>,
@@ -3650,6 +3660,10 @@ pub const fn default_database_pool_max_lifetime() -> std::time::Duration {
     std::time::Duration::from_secs(30 * 60)
 }
 
+pub const fn default_database_startup_retry_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(5 * 60)
+}
+
 const fn default_api_admission_max_work_in_flight() -> usize {
     64
 }
@@ -3683,6 +3697,81 @@ pub const fn default_bmc_session_lockout_threshold() -> u32 {
 
 pub const fn default_bmc_max_sessions_per_caller() -> usize {
     4
+}
+
+/// Routing of core's own BMC Redfish traffic through nico-bmc-proxy.
+///
+/// The client certificate identifies this instance to the proxy's mTLS
+/// listener; the defaults are the SPIFFE workload paths every nico-api pod
+/// already mounts. `root_ca` is what verifies the proxy's own certificate --
+/// unlike direct BMC connections, the proxy presents a real, verifiable
+/// identity, so certificate checking stays on.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BmcProxyConfig {
+    /// Master switch; `false` keeps all BMC traffic direct even when the
+    /// rest of this section is filled in.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Proxy address as `host:port` or `host` (port defaults to the BMC
+    /// proxy's 1079). Required when `enabled` is true; the serde default
+    /// (empty) only lets a disabled section omit it.
+    #[serde(default)]
+    pub address: String,
+    /// PEM client certificate presented to the proxy.
+    #[serde(default = "default_bmc_proxy_client_cert")]
+    pub client_cert: String,
+    /// PEM private key for `client_cert`.
+    #[serde(default = "default_bmc_proxy_client_key")]
+    pub client_key: String,
+    /// PEM bundle that verifies the proxy's server certificate.
+    #[serde(default = "default_bmc_proxy_root_ca")]
+    pub root_ca: String,
+}
+
+/// The port nico-bmc-proxy listens on, applied when `bmc_proxy.address` names
+/// only a host.
+const BMC_PROXY_DEFAULT_PORT: u16 = 1079;
+
+impl BmcProxyConfig {
+    /// The proxy address as a host-and-port pair.
+    ///
+    /// A host-only `address` gets the BMC proxy's default port; an address
+    /// without a host (e.g. `":1079"`) is rejected here rather than producing
+    /// a client that silently dials the BMC itself.
+    pub(crate) fn proxy_target(&self) -> Result<carbide_utils::HostPortPair, String> {
+        if self.address.trim().is_empty() {
+            return Err("bmc_proxy.address is required when bmc_proxy.enabled is true".to_string());
+        }
+        let parsed: carbide_utils::HostPortPair = self
+            .address
+            .parse()
+            .map_err(|err| format!("bmc_proxy.address {:?}: {err}", self.address))?;
+        match parsed {
+            carbide_utils::HostPortPair::HostAndPort(host, port) => {
+                Ok(carbide_utils::HostPortPair::HostAndPort(host, port))
+            }
+            carbide_utils::HostPortPair::HostOnly(host) => Ok(
+                carbide_utils::HostPortPair::HostAndPort(host, BMC_PROXY_DEFAULT_PORT),
+            ),
+            carbide_utils::HostPortPair::PortOnly(_) => Err(format!(
+                "bmc_proxy.address {:?} names no host; expected \"host\" or \"host:port\"",
+                self.address
+            )),
+        }
+    }
+}
+
+fn default_bmc_proxy_client_cert() -> String {
+    "/var/run/secrets/spiffe.io/tls.crt".to_string()
+}
+
+fn default_bmc_proxy_client_key() -> String {
+    "/var/run/secrets/spiffe.io/tls.key".to_string()
+}
+
+fn default_bmc_proxy_root_ca() -> String {
+    "/var/run/secrets/spiffe.io/ca.crt".to_string()
 }
 
 /// DpuConfig related internal configuration
@@ -4004,10 +4093,10 @@ pub struct NetworkSecurityGroupConfig {
     /// (src port range * dst port range * src prefix list * dst prefix list)
     #[serde(default = "default_max_network_security_group_size")]
     pub max_network_security_group_size: u32,
-    /// Whether to allow stateful security groups.
-    /// This will initially only be passed through to the
-    /// DPU as a way to toggle default stateful options
-    /// in nvue config.
+    /// Whether NSGs may enable stateful egress and the DPU enables its supporting NVUE options.
+    ///
+    /// When disabled, stateful NSG creation and updates from stateless to stateful are rejected.
+    /// Existing stateful NSGs remain editable, but the DPU applies their rules statelessly.
     #[serde(default = "default_to_true")]
     pub stateful_acls_enabled: bool,
 
@@ -5565,6 +5654,36 @@ path = "credentials.yaml"
     }
 
     #[test]
+    fn validate_service_vpc_slots_rejects_site_global_vpc_vni() {
+        let mut config: CarbideConfig = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .extract()
+            .unwrap();
+
+        config.dpu_config.service_vpc_slot_count = 1;
+        assert!(config.validate_service_vpc_slots().is_ok());
+
+        config.tenant_prefix_overlap_enabled = true;
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("must be zero when tenant_prefix_overlap_enabled is true")
+        );
+        config.tenant_prefix_overlap_enabled = false;
+
+        config.site_global_vpc_vni = Some(6_000);
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("requires site_global_vpc_vni to be unset")
+        );
+    }
+
+    #[test]
     fn periodic_state_republish_defaults_enabled() {
         let config = PeriodicStateRepublishConfig::default();
 
@@ -5787,6 +5906,10 @@ path = "credentials.yaml"
             std::time::Duration::from_secs(30 * 60)
         );
         assert_eq!(
+            config.database_startup_retry_timeout,
+            std::time::Duration::from_secs(5 * 60)
+        );
+        assert_eq!(
             config.api_admission_control,
             ApiAdmissionControlConfig {
                 enabled: true,
@@ -5901,6 +6024,56 @@ path = "credentials.yaml"
         );
     }
 
+    // The address contract: host-only gets the BMC proxy's default port, a
+    // host-less address is rejected at parse time rather than producing a client
+    // that silently dials the BMC itself.
+    #[test]
+    fn bmc_proxy_target_requires_a_host_and_defaults_the_port() {
+        let target = |address: &str| {
+            BmcProxyConfig {
+                enabled: true,
+                address: address.to_string(),
+                client_cert: default_bmc_proxy_client_cert(),
+                client_key: default_bmc_proxy_client_key(),
+                root_ca: default_bmc_proxy_root_ca(),
+            }
+            .proxy_target()
+        };
+
+        assert_eq!(
+            target("bmc-proxy.example").unwrap(),
+            carbide_utils::HostPortPair::HostAndPort("bmc-proxy.example".to_string(), 1079),
+        );
+        assert_eq!(
+            target("bmc-proxy.example:2079").unwrap(),
+            carbide_utils::HostPortPair::HostAndPort("bmc-proxy.example".to_string(), 2079),
+        );
+        assert!(
+            target(":1079").unwrap_err().contains("names no host"),
+            "a port-only address must be rejected"
+        );
+        assert!(
+            target("").unwrap_err().contains("required"),
+            "an omitted address must be rejected on an enabled section, not \
+             parsed as a host"
+        );
+    }
+
+    // `address` carries a serde default so a disabled `[bmc_proxy]` section can
+    // omit it; the empty default is only rejected when the section is
+    // actually enabled (see the `proxy_target` case above).
+    #[test]
+    fn bmc_proxy_section_parses_without_address_when_disabled() {
+        let config: CarbideConfig = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .merge(Toml::string("[bmc_proxy]\nenabled = false"))
+            .extract()
+            .unwrap();
+        let bmc_proxy = config.bmc_proxy.expect("section should parse");
+        assert!(!bmc_proxy.enabled);
+        assert_eq!(bmc_proxy.address, "");
+    }
+
     fn rendered_helm_api_config() -> String {
         let mut config =
             include_str!("../../../../helm/charts/nico-api/files/carbide-api-config.toml")
@@ -5970,6 +6143,10 @@ path = "credentials.yaml"
                 r#""https://rms.example.test""#,
             ),
             ("{{ .Values.rms.enforceTls }}", "true"),
+            (
+                r#"{{ .Values.bmcProxy.address | default (printf "nico-bmc-proxy.%s.svc.cluster.local:1079" (include "nico-api.namespace" .)) }}"#,
+                "nico-bmc-proxy.nico-system.svc.cluster.local:1079",
+            ),
             ("{{ . | quote }}", r#""/tmp/test.pem""#),
         ] {
             config = config.replace(template, rendered);
@@ -7938,16 +8115,7 @@ helm_repo_url = "oci://registry.example.test/doca"
     }
 
     #[test]
-    fn validate_provisioning_sources_requires_exactly_one_psid() {
-        // Exactly one PSID entry is accepted.
-        let one = DpfDeploymentsConfig {
-            bf3: DpfDeploymentConfig::default(),
-            bf4_generic: Some(bf4_config(None, Some(bf4_with_psids(&["MT_0000000884"])))),
-            bf4_astra: None,
-        };
-        assert!(one.validate_provisioning_sources().is_ok());
-
-        // More than one PSID is rejected (multi-PSID support is pending a DPF change).
+    fn validate_provisioning_sources_accepts_multiple_psids() {
         let many = DpfDeploymentsConfig {
             bf3: DpfDeploymentConfig::default(),
             bf4_generic: Some(bf4_config(
@@ -7956,6 +8124,6 @@ helm_repo_url = "oci://registry.example.test/doca"
             )),
             bf4_astra: None,
         };
-        assert!(many.validate_provisioning_sources().is_err());
+        assert!(many.validate_provisioning_sources().is_ok());
     }
 }

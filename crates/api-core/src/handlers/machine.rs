@@ -23,12 +23,17 @@ use ::rpc::forge as rpc;
 use ::rpc::model::machine::ManagedHostStateSnapshotRpc;
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
-use carbide_uuid::machine::{HostOrDpuId, MachineId};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
+};
 use libredfish::SystemPowerControl;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::hardware_info::MachineNvLinkInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
-use model::machine::{LoadSnapshotOptions, Machine, ManagedHostState, ManagedHostStateSnapshot};
+use model::machine::{
+    DpuMachine, HostMachine, LoadSnapshotOptions, Machine, MachineStatus, ManagedHostState,
+    ManagedHostStateSnapshot,
+};
 use model::metadata::Metadata;
 use model::network_segment::NetworkSegmentType;
 use tonic::{Request, Response, Status};
@@ -143,6 +148,20 @@ pub(crate) async fn find_machines_by_ids(
     )
     .await?;
 
+    // SpectrumX attachment selectors are live DPA-interface inventory, not a
+    // signal that SpectrumX is enabled or fully ready at the site. Load all
+    // requested hosts' device-description groups in one narrow, aggregated query.
+    let host_machine_ids = snapshots
+        .keys()
+        .filter_map(|machine_id| match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Host(host_id) => Some(host_id),
+            HostOrDpuId::Dpu(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let spectrum_x_capabilities_by_machine =
+        db::dpa_interface::find_spectrum_x_capabilities_by_machine_ids(&mut txn, &host_machine_ids)
+            .await?;
+
     txn.commit().await?;
 
     let sla_config = model::machine::slas::MachineSlaConfig::new(
@@ -153,6 +172,7 @@ pub(crate) async fn find_machines_by_ids(
     Ok(Response::new(snapshot_map_to_rpc_machines(
         snapshots,
         &sla_config,
+        spectrum_x_capabilities_by_machine,
     )))
 }
 
@@ -228,7 +248,7 @@ pub(crate) async fn machine_set_auto_update(
 
     let mut txn = api.txn_begin().await?;
 
-    let machine_id = convert_and_log_machine_id(request.machine_id.as_ref())?;
+    let machine_id: MachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
     let Some(_machine) =
         db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default()).await?
     else {
@@ -257,7 +277,7 @@ pub(crate) async fn update_machine_metadata(
 ) -> std::result::Result<tonic::Response<()>, tonic::Status> {
     log_request_data(&request);
     let request = request.into_inner();
-    let machine_id = convert_and_log_machine_id(request.machine_id.as_ref())?;
+    let machine_id: MachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
     // Prepare the metadata
     let metadata = match request.metadata {
@@ -310,8 +330,8 @@ pub(crate) async fn update_machine_metadata(
 /// operation the caller performs after the transaction commits.
 async fn force_delete_cleanup_txn(
     api: &Api,
-    host_machine: Option<&Machine>,
-    dpu_machines: &[Machine],
+    host_machine: Option<&HostMachine>,
+    dpu_machines: &[DpuMachine],
     request: &rpc::AdminForceDeleteMachineRequest,
 ) -> Result<rpc::AdminForceDeleteMachineResponse, CarbideError> {
     let mut response = rpc::AdminForceDeleteMachineResponse::default();
@@ -332,21 +352,35 @@ async fn force_delete_cleanup_txn(
     // BMC-typed interfaces that `force_cleanup` still row-locks.
     db::machine_interface::lock_all_admin_segments(&mut txn).await?;
 
-    let machines = host_machine
+    // Borrow just part of the Host and DPU's to avoid expensive-ish cloning into AnyMachine
+    struct MachineView<'a> {
+        status: &'a MachineStatus,
+        id: &'a MachineId,
+    }
+
+    let machines: Vec<MachineView> = host_machine
         .iter()
-        .copied()
-        .chain(dpu_machines.iter())
-        .collect::<Vec<_>>();
+        .map(|machine| MachineView {
+            id: &machine.id,
+            status: &machine.status,
+        })
+        .chain(dpu_machines.iter().map(|machine| MachineView {
+            id: &machine.id,
+            status: &machine.status,
+        }))
+        .collect();
+
     let bmc_macs = machines
         .iter()
         .filter_map(|machine| machine.status.bmc_info.mac)
         .collect::<Vec<_>>();
+
     // Collect underlay MACs before interface rows are deleted so DHCP
     // suppression cleanup still sees them when `delete_bmc_suppressions` is set.
     let dhcp_suppression_macs = if request.delete_bmc_suppressions {
         let machine_ids = machines
             .iter()
-            .map(|machine| machine.id)
+            .map(|machine| *machine.id)
             .collect::<Vec<_>>();
         let oob_macs = db::machine_interface::find_by_machine_ids(&mut txn, &machine_ids)
             .await?
@@ -379,7 +413,6 @@ async fn force_delete_cleanup_txn(
 
     let mut machines_by_bmc_ip = machines
         .iter()
-        .copied()
         .filter_map(|machine| machine.status.bmc_info.ip.map(|address| (address, machine)))
         .collect::<Vec<_>>();
     // Any transaction touching multiple explored_endpoints needs to sort them the same way to avoid
@@ -396,7 +429,7 @@ async fn force_delete_cleanup_txn(
         // Site Explorer refreshes firmware in machine_topologies before it
         // updates this endpoint. Lock in the same order; force_cleanup later
         // deletes the already-locked topology row.
-        db::machine_topology::lock_by_machine_id(&mut txn, &machine.id).await?;
+        db::machine_topology::lock_by_machine_id(&mut txn, machine.id).await?;
         db::explored_endpoints::delete(&mut txn, addr).await?;
     }
 
@@ -442,9 +475,7 @@ async fn force_delete_cleanup_txn(
         // Free up all loopback IPs allocated for this DPU.
         db::vpc_dpu_loopback::delete_and_deallocate(
             &api.common_pools,
-            &dpu_machine.id.try_into().map_err(|error| {
-                CarbideError::internal(format!("invalid DPU machine ID: {error}"))
-            })?,
+            &dpu_machine.id,
             &mut txn,
             true,
         )
@@ -614,15 +645,15 @@ pub(crate) async fn admin_force_delete_machine(
                     "Found host machine",
                 );
                 // Get all DPUs attached to this host, in case there are more than one.
-                let host_machine_id = host.id.try_into().map_err(|error| {
-                    CarbideError::internal(format!("invalid host machine ID: {error}"))
-                })?;
+                let host_machine_id = host.id;
                 dpu_machines =
                     db::machine::find_dpus_by_host_machine_id(&mut txn, &host_machine_id).await?;
                 host_machine = Some(host);
             } else {
                 host_machine = None;
-                dpu_machines = vec![machine];
+                dpu_machines = vec![machine.try_into().map_err(|error| {
+                    CarbideError::internal(format!("invalid DPU machine: {error}"))
+                })?];
             }
         }
         HostOrDpuId::Host(host_machine_id) => {
@@ -632,7 +663,9 @@ pub(crate) async fn admin_force_delete_machine(
                 dpu_machine_ids = ?dpu_machines.iter().map(|m| &m.id).collect::<Vec<_>>(),
                 "Found DPU machines",
             );
-            host_machine = Some(machine);
+            host_machine = Some(machine.try_into().map_err(|error| {
+                CarbideError::internal(format!("invalid host machine: {error}"))
+            })?);
         }
     }
 
@@ -945,19 +978,43 @@ pub(crate) async fn get_dpu_info_list(
 fn snapshot_map_to_rpc_machines(
     snapshots: HashMap<MachineId, ManagedHostStateSnapshot>,
     sla_config: &model::machine::slas::MachineSlaConfig,
+    mut spectrum_x_capabilities_by_machine: HashMap<
+        HostMachineId,
+        Vec<db::dpa_interface::SpectrumXDeviceCapability>,
+    >,
 ) -> rpc::MachineList {
     let mut result = rpc::MachineList {
         machines: Vec::with_capacity(snapshots.len()),
     };
 
-    for (machine_id, snapshot) in snapshots.into_iter() {
-        if let Some(rpc_machine) = snapshot.into_rpc_machine_state(
-            match machine_id.machine_type().is_dpu() {
-                true => Some(&machine_id),
-                false => None,
-            },
-            sla_config,
-        ) {
+    for (machine_id, snapshot) in snapshots {
+        let dpu_machine_id = DpuMachineId::try_from(machine_id).ok();
+        let spectrum_x_capabilities = match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Host(host_id) => spectrum_x_capabilities_by_machine
+                .remove(&host_id)
+                .map(spectrum_x_capabilities),
+            HostOrDpuId::Dpu(_) => None,
+        };
+        if let Some(mut rpc_machine) =
+            snapshot.into_rpc_machine_state(dpu_machine_id.as_ref(), sla_config)
+        {
+            if let Some(spectrum_x_capabilities) = spectrum_x_capabilities
+                && !spectrum_x_capabilities.is_empty()
+            {
+                let capabilities = rpc_machine
+                    .status
+                    .get_or_insert_default()
+                    .capabilities
+                    .get_or_insert_default();
+                capabilities.network.extend(spectrum_x_capabilities);
+                capabilities.network.sort_unstable_by(|a, b| {
+                    a.name.cmp(&b.name).then(a.device_type.cmp(&b.device_type))
+                });
+                #[allow(deprecated)]
+                {
+                    rpc_machine.capabilities = Some(capabilities.clone());
+                }
+            }
             result.machines.push(rpc_machine);
         }
         // A log message for the None case is already emitted inside
@@ -967,7 +1024,24 @@ fn snapshot_map_to_rpc_machines(
     result
 }
 
-async fn clear_bmc_credentials(api: &Api, machine: &Machine) -> Result<(), CarbideError> {
+fn spectrum_x_capabilities(
+    devices: Vec<db::dpa_interface::SpectrumXDeviceCapability>,
+) -> Vec<rpc::MachineCapabilityAttributesNetwork> {
+    devices
+        .into_iter()
+        .map(|device| rpc::MachineCapabilityAttributesNetwork {
+            name: device.device,
+            count: device.count,
+            vendor: None,
+            device_type: Some(rpc::MachineCapabilityDeviceType::SpectrumX as i32),
+        })
+        .collect()
+}
+
+async fn clear_bmc_credentials<ID: MachineIdSubtypeTrait>(
+    api: &Api,
+    machine: &Machine<ID>,
+) -> Result<(), CarbideError> {
     if let Some(mac_address) = machine.status.bmc_info.mac {
         tracing::info!(
             bmc_mac_address = %mac_address,

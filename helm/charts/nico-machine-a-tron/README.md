@@ -117,7 +117,7 @@ dynamically creates/updates/deletes Kubernetes Services as machines come online.
 
 ### Setup
 
-All pods can share the same `oobDhcpRelayAddress` - NICo assigns unique IPs
+All pods can share the same `bmcDhcpRelayAddress` - NICo assigns unique IPs
 from the subnet.
 
 ```yaml
@@ -133,16 +133,16 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 5
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
+        underlayDhcpRelayAddress: "10.104.0.1"
   mat-1:
     machines:
       rack-machines:
         hwType: wiwynn_gb200_nvl
         hostCount: 5
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "10.96.64.1"
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.96.64.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
 
 macAddressPool:
   enabled: true
@@ -210,7 +210,7 @@ adds a dynamic target UDP port for IPMI access.
 
 ### Requirements
 
-- `oobDhcpRelayAddress` must be within Kubernetes ServiceCIDR
+- `bmcDhcpRelayAddress` must be within Kubernetes ServiceCIDR
 - NICo assigns unique BMC IPs from the configured network
 - Default ServiceCIDR ranges:
   - `10.96.0.0/12` - vanilla Kubernetes (kubeadm)
@@ -262,8 +262,8 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 10
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "10.96.64.1"
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.96.64.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
 ```
 
 ### IPMI/SOL Simulation
@@ -473,6 +473,44 @@ To use API mode (default), don't set `dhcpRelay.baseIP` (or set it to empty stri
 
 ---
 
+## Site Health Probe (synthetic monitoring)
+
+The chart ships a `nico-site-health-probe` subchart (disabled by default —
+it needs a site-provided image before it can run; set
+`nico-site-health-probe.enabled=true` alongside the image override): a
+single-replica Rust service that continuously runs read-only probes against
+the site's APIs and exposes latency/outcome metrics on `:9009/metrics`
+(`carbide_site_health_probe_*`). Source: `crates/site-health-probe`; the
+metric set is documented in the
+[subchart README](charts/nico-site-health-probe/README.md).
+
+- **gRPC probe** (on by default): `FindMachineIds` + a first-page
+  `FindMachinesByIds` against nico-api — the `machine show` read path,
+  including the PostgreSQL round-trip. Authenticates with a SPIFFE mTLS cert
+  issued by the site's ClusterIssuer under the identity
+  `spiffe://<trustDomain>/<namespace>/sa/nico-site-health-probe` (namespace
+  defaults to the release namespace), which nico-api's internal RBAC grants
+  read-only access.
+- **REST probes** (off by default): `GET /v2/org/<org>/nico/machine` and
+  `/instance` against nico-rest-api via a Keycloak service-account client.
+  Enabling them requires site inputs — the org, the token URL, a client
+  secret in an existing Secret, and the REST CA bundle (`restCa`) since
+  nico-rest serves TLS from its own issuer. See the subchart values.
+
+Disable with `nico-site-health-probe.enabled=false`. Override the image
+(`nico-site-health-probe.image.repository/tag`) — the default has no registry
+prefix and will not resolve in real clusters.
+
+> **Certificate note:** like the machine-a-tron pod certs, the probe's TLS
+> secret (`nico-site-health-probe-tls`; with `nameOverride` set it is
+> `<nameOverride>-tls`) survives chart uninstalls. After a reinstall that
+> rotated the site CA, delete the stale secret so cert-manager reissues it:
+> `kubectl delete secret nico-site-health-probe-tls -n <ns>` (substitute the
+> override-derived name if set).
+
+<!-- TODO(#5360-followup): active lifecycle probes (machine_count: 1=canary,
+     all=scale test) and progress p50/p95/p99 reporting. -->
+
 ## Troubleshooting
 
 ### ClusterIP already allocated
@@ -484,7 +522,7 @@ provided IP is already allocated
 
 The BMC IP conflicts with an existing Service. Either:
 
-- Use a different `oobDhcpRelayAddress` range
+- Use a different `bmcDhcpRelayAddress` range
 - Reserve a ServiceCIDR for machine-a-tron (K8s 1.29+)
 
 ### ClusterIP outside ServiceCIDR

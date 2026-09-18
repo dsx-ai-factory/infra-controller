@@ -116,16 +116,24 @@ func (vp *VpcPrefix) ToProto(vpc *Vpc) *corev1.VpcPrefix {
 	return proto
 }
 
-// GetIPv4CIDR returns the VPC prefix's IPv4 CIDR string, or nil when Prefix is unset.
-func (vp *VpcPrefix) GetIPv4CIDR() *string {
+// GetCIDR parses the stored VPC Prefix into a canonical netip.Prefix.
+// PrefixLength completes legacy rows that store an address without CIDR
+// notation. Valid prefixes are masked to their network address. An unset
+// prefix returns an invalid zero value, while malformed stored prefixes return
+// an error.
+func (vp *VpcPrefix) GetCIDR() (netip.Prefix, error) {
 	if vp.Prefix == "" {
-		return nil
+		return netip.Prefix{}, nil
 	}
-	if strings.Contains(vp.Prefix, "/") {
-		return &vp.Prefix
+	cidr := vp.Prefix
+	if !strings.Contains(cidr, "/") {
+		cidr = fmt.Sprintf("%s/%d", cidr, vp.PrefixLength)
 	}
-	cidr := fmt.Sprintf("%s/%d", vp.Prefix, vp.PrefixLength)
-	return &cidr
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("invalid stored VPC Prefix CIDR %q: %w", cidr, err)
+	}
+	return prefix.Masked(), nil
 }
 
 // FromProto populates this VpcPrefix from its workflow proto representation.
@@ -280,7 +288,7 @@ type VpcPrefixDAO interface {
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 	//
 	// GetPrefixUsage returns IPv4 interface usage per VPC prefix ID (in-memory IPAM simulation).
-	// VPC prefixes without a valid CIDR are omitted from the result map.
+	// Unset and IPv6 prefixes are omitted; malformed stored prefixes return an error.
 	GetPrefixUsage(ctx context.Context, tx *db.Tx, vpcPrefixes ...*VpcPrefix) (map[uuid.UUID]*cipam.Usage, error)
 }
 
@@ -688,11 +696,14 @@ func (vpsd VpcPrefixSQLDAO) GetPrefixUsage(ctx context.Context, tx *db.Tx, vpcPr
 		if vp == nil {
 			return nil, fmt.Errorf("Failed to calculate usage stats for VPC Prefix: nil argument")
 		}
-		cidr := vp.GetIPv4CIDR()
-		if cidr == nil {
+		prefix, err := vp.GetCIDR()
+		if err != nil {
+			return nil, fmt.Errorf("failed to calculate usage stats for VPC Prefix %s: %w", vp.ID, err)
+		}
+		if !prefix.Addr().Is4() {
 			continue
 		}
-		vpcPrefixCIDRs[vp.ID] = *cidr
+		vpcPrefixCIDRs[vp.ID] = prefix.String()
 		vpcPrefixIDs = append(vpcPrefixIDs, vp.ID)
 	}
 	if len(vpcPrefixIDs) == 0 {

@@ -16,7 +16,9 @@
  */
 pub(in crate::tests) mod tests {
 
+    use carbide_spdm_controller::io::SpdmStateControllerIO;
     use carbide_uuid::machine::MachineId;
+    use config_version::ConfigVersion;
     use model::attestation::spdm::{SpdmAttestationState, SpdmObjectId};
     use rpc::forge::forge_server::Forge;
     use rpc::forge::{
@@ -25,7 +27,7 @@ pub(in crate::tests) mod tests {
         spdm_list_attestation_machines_request,
     };
     use sqlx::PgConnection;
-    //use sqlx::PgConnection;
+    use state_controller::io::StateControllerIO;
     use tonic::Request;
 
     use crate::cfg::file::CarbideConfig;
@@ -46,6 +48,114 @@ pub(in crate::tests) mod tests {
         let mut config = get_config();
         config.spdm.enabled = true;
         config
+    }
+
+    #[crate::sqlx_test]
+    async fn test_spdm_controller_persistence_honors_supplied_versions(pool: sqlx::PgPool) {
+        let env = create_test_env(pool).await;
+        let machine_id = create_managed_host(&env).await.host().id.into();
+        let object_id = SpdmObjectId(machine_id, "HGX_IRoT_GPU_0".to_string());
+        let old_version = ConfigVersion::initial();
+
+        sqlx::query(
+            "INSERT INTO spdm_machine_devices_attestation \
+             (machine_id, device_id, nonce, state, state_version, started_at) \
+             VALUES ($1, $2, gen_random_uuid(), $3, $4, now())",
+        )
+        .bind(machine_id)
+        .bind(&object_id.1)
+        .bind(sqlx::types::Json(SpdmAttestationState::FetchMetadata))
+        .bind(old_version)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+        // Another iteration commits before the stale transition is persisted.
+        let current_version = old_version.increment();
+        let mut txn = env.db_txn().await;
+        assert_eq!(
+            db::attestation::spdm::persist_controller_state(
+                &mut txn,
+                &object_id,
+                old_version,
+                current_version,
+                &SpdmAttestationState::FetchCertificate,
+            )
+            .await
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
+        );
+        txn.commit().await.unwrap();
+
+        // The same-state case pins the persistence contract, not an SPDM
+        // handler path. Use a distinct replacement so IO cannot recompute it.
+        let replacement_version = current_version.increment().increment();
+        struct Case {
+            scenario: &'static str,
+            device_id: &'static str,
+            old_version: ConfigVersion,
+            state: SpdmAttestationState,
+            expected: db::ConditionalWrite<(), db::ControllerStateNotCurrent>,
+            stored_state: Option<(SpdmAttestationState, ConfigVersion)>,
+        }
+        let io = SpdmStateControllerIO::default();
+        for case in [
+            Case {
+                scenario: "stale iteration cannot replace the committed state",
+                device_id: "HGX_IRoT_GPU_0",
+                old_version,
+                state: SpdmAttestationState::Passed,
+                expected: db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
+                stored_state: Some((SpdmAttestationState::FetchCertificate, current_version)),
+            },
+            Case {
+                scenario: "persistence stores the supplied version for the same state",
+                device_id: "HGX_IRoT_GPU_0",
+                old_version: current_version,
+                state: SpdmAttestationState::FetchCertificate,
+                expected: db::ConditionalWrite::Applied(()),
+                stored_state: Some((SpdmAttestationState::FetchCertificate, replacement_version)),
+            },
+            Case {
+                scenario: "missing device rejects the transition",
+                device_id: "missing-device",
+                old_version: replacement_version,
+                state: SpdmAttestationState::Passed,
+                expected: db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
+                stored_state: None,
+            },
+        ] {
+            let mut txn = env.db_txn().await;
+            let write = io
+                .persist_controller_state(
+                    &mut txn,
+                    &SpdmObjectId(machine_id, case.device_id.to_string()),
+                    case.old_version,
+                    replacement_version,
+                    &case.state,
+                )
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            assert_eq!(write, case.expected, "{}", case.scenario);
+
+            let stored_state: Option<(sqlx::types::Json<SpdmAttestationState>, ConfigVersion)> =
+                sqlx::query_as(
+                    "SELECT state, state_version FROM spdm_machine_devices_attestation \
+                     WHERE machine_id = $1 AND device_id = $2",
+                )
+                .bind(machine_id)
+                .bind(case.device_id)
+                .fetch_optional(&env.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                stored_state.map(|(state, version)| (state.0, version)),
+                case.stored_state,
+                "{}",
+                case.scenario
+            );
+        }
     }
 
     /// With SPDM off no state controller is spawned, so anything this scheduled

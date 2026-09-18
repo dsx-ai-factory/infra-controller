@@ -20,17 +20,15 @@ import (
 // checks if the TrayFilter type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &TrayFilter{}
 
-// TrayFilter Filter criteria for selecting trays in batch operations. If omitted or empty, all trays in the site are targeted.  Constraints: `rackId` and `rackName` are mutually exclusive. `rackId`/`rackName` cannot be combined with `ids`/`componentIds`. `componentIds` requires `type`. `slotId` requires `rackId` or `rackName`, must be >= 0, and composes with the rest of the filter via AND.
+// TrayFilter Filter criteria for selecting trays in batch operations. If omitted or empty, all trays in the site are targeted.  Constraints: `rackId` and `rackName` are mutually exclusive. `rackId`/`rackName` cannot be combined with `ids`. `slotId` requires `rackId` or `rackName`, must be >= 0, and composes with the rest of the filter via AND.
 type TrayFilter struct {
 	// Filter by Rack ID
 	RackId *string `json:"rackId,omitempty"`
 	// Filter by Rack name
 	RackName *string `json:"rackName,omitempty"`
-	// Filter by tray type
+	// Filter by tray type. When `ids` is specified, the type disambiguates component IDs shared by different component types.
 	Type *string `json:"type,omitempty"`
-	// Filter by component ID. Requires 'type'.
-	ComponentIds []string `json:"componentIds,omitempty"`
-	// Filter by tray UUID
+	// Filter by component ID
 	Ids []string `json:"ids,omitempty"`
 	// Restrict to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter via AND.
 	SlotId *int32 `json:"slotId,omitempty"`
@@ -149,38 +147,6 @@ func (o *TrayFilter) SetType(v string) {
 	o.Type = &v
 }
 
-// GetComponentIds returns the ComponentIds field value if set, zero value otherwise.
-func (o *TrayFilter) GetComponentIds() []string {
-	if o == nil || IsNil(o.ComponentIds) {
-		var ret []string
-		return ret
-	}
-	return o.ComponentIds
-}
-
-// GetComponentIdsOk returns a tuple with the ComponentIds field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-func (o *TrayFilter) GetComponentIdsOk() ([]string, bool) {
-	if o == nil || IsNil(o.ComponentIds) {
-		return nil, false
-	}
-	return o.ComponentIds, true
-}
-
-// HasComponentIds returns a boolean if a field has been set.
-func (o *TrayFilter) HasComponentIds() bool {
-	if o != nil && !IsNil(o.ComponentIds) {
-		return true
-	}
-
-	return false
-}
-
-// SetComponentIds gets a reference to the given []string and assigns it to the ComponentIds field.
-func (o *TrayFilter) SetComponentIds(v []string) {
-	o.ComponentIds = v
-}
-
 // GetIds returns the Ids field value if set, zero value otherwise.
 func (o *TrayFilter) GetIds() []string {
 	if o == nil || IsNil(o.Ids) {
@@ -263,9 +229,6 @@ func (o TrayFilter) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.Type) {
 		toSerialize["type"] = o.Type
-	}
-	if !IsNil(o.ComponentIds) {
-		toSerialize["componentIds"] = o.ComponentIds
 	}
 	if !IsNil(o.Ids) {
 		toSerialize["ids"] = o.Ids

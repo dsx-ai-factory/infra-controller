@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 use config_version::{ConfigVersion, Versioned};
-use db::DatabaseError;
+use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use sqlx::PgConnection;
@@ -94,9 +94,11 @@ pub trait StateControllerIO: Send + Sync + std::fmt::Debug + 'static + Default {
     /// Both are computed by the processor so that implementations do not need
     /// to call `.increment()` themselves.
     ///
-    /// Returns `true` if the state was successfully persisted, `false` if
-    /// the update was skipped (e.g. optimistic lock version mismatch).
-    /// The processor uses this to decide whether to persist state history.
+    /// Returns `Applied(())` when the state is persisted in the caller's
+    /// transaction. A missing object, changed version, or unmet persistence
+    /// condition returns `NotApplied(ControllerStateNotCurrent)`; database
+    /// failures remain errors. The processor records history only after an
+    /// applied write and rolls back the iteration's writes on rejection.
     async fn persist_controller_state(
         &self,
         txn: &mut PgConnection,
@@ -104,12 +106,12 @@ pub trait StateControllerIO: Send + Sync + std::fmt::Debug + 'static + Default {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError>;
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError>;
 
     /// Persists a state history record for debugging and audit purposes.
     ///
     /// Called by the processor after each successful state transition
-    /// (i.e. when `persist_controller_state` returns `true`).
+    /// (i.e. when `persist_controller_state` returns `Applied(())`).
     /// `new_version` is the version that was just written by
     /// `persist_controller_state`.
     async fn persist_state_history(

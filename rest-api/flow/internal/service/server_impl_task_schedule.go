@@ -1131,61 +1131,16 @@ func (rs *FlowServerImpl) resolveComponentTarget(
 		return ct.UUID, comp.RackID, nil
 	}
 
-	// External targeting.
-	// A type is always required: the same external ID may be shared across
-	// component types, so resolving without one is ambiguous.
-	if ct.External.Type == devicetypes.ComponentTypeUnknown {
-		return uuid.Nil, uuid.Nil, fmt.Errorf(
-			"external ref for id %s has no component type; type is required to resolve unambiguously",
-			ct.External.ID,
-		)
-	}
-
-	comps, err := rs.inventoryManager.GetComponentsByExternalIDs(
+	resolved, err := inventoryresolver.ResolveComponentIdentifier(
 		ctx,
-		[]string{ct.External.ID},
+		rs.inventoryManager,
+		ct.External.ID,
+		ct.External.Type,
 	)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf(
-			"resolve external component %s: %w",
-			ct.External.ID, err,
-		)
+		return uuid.Nil, uuid.Nil, err
 	}
-
-	if len(comps) == 0 {
-		return uuid.Nil, uuid.Nil, fmt.Errorf(
-			"no component found with external id %s",
-			ct.External.ID,
-		)
-	}
-
-	// Filter by type to narrow to the component whose type matches the
-	// fully-qualified external reference. Exactly one match is required:
-	// zero means not found, more than one means the inventory is ambiguous.
-	var matchCount int
-	var matchID, matchRack uuid.UUID
-	for _, comp := range comps {
-		if comp.Type == ct.External.Type {
-			matchCount++
-			matchID = comp.Info.ID
-			matchRack = comp.RackID
-		}
-	}
-
-	switch matchCount {
-	case 0:
-		return uuid.Nil, uuid.Nil, fmt.Errorf(
-			"no component found with external id %s and type %s",
-			ct.External.ID, devicetypes.ComponentTypeToString(ct.External.Type),
-		)
-	case 1:
-		return matchID, matchRack, nil
-	default:
-		return uuid.Nil, uuid.Nil, fmt.Errorf(
-			"ambiguous external component: %d components share external id %s and type %s",
-			matchCount, ct.External.ID, devicetypes.ComponentTypeToString(ct.External.Type),
-		)
-	}
+	return resolved.Info.ID, resolved.RackID, nil
 }
 
 // resolveComponentScope resolves component-level targets to their racks, groups

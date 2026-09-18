@@ -221,6 +221,7 @@ impl FmdsGrpcClient {
 mod test {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 
+    use carbide_instrument::testing::MetricsCapture;
     use config_version::ConfigVersion;
     use rpc::fmds::UpdateConfigResponse;
     use rpc::fmds::fmds_config_service_server::{FmdsConfigService, FmdsConfigServiceServer};
@@ -329,6 +330,13 @@ mod test {
         )
     }
 
+    async fn update_with_metrics_capture(updater: &mut FmdsUpdater) {
+        let _metrics = MetricsCapture::start();
+        updater
+            .update(Some(Arc::new(test_instance_metadata())), None)
+            .await;
+    }
+
     /// The happy path through [`FmdsUpdater::update`]: it dials the external
     /// FMDS on every call and the update lands on the server.
     #[tokio::test]
@@ -339,9 +347,7 @@ mod test {
 
         let (mut updater, _) = test_external_updater(format!("http://{addr}"));
 
-        updater
-            .update(Some(Arc::new(test_instance_metadata())), None)
-            .await;
+        update_with_metrics_capture(&mut updater).await;
 
         let update = received.recv().await.expect("server received an update");
         assert_eq!(update.hostname, "test-host");
@@ -349,9 +355,7 @@ mod test {
         assert!(update.machine_identity.is_some());
 
         // A second iteration reconnects and pushes again.
-        updater
-            .update(Some(Arc::new(test_instance_metadata())), None)
-            .await;
+        update_with_metrics_capture(&mut updater).await;
 
         let update = received
             .recv()
@@ -369,9 +373,7 @@ mod test {
         wait_until_listening(addr).await;
 
         let (mut updater, last_connect_succeeded) = test_external_updater(format!("http://{addr}"));
-        updater
-            .update(Some(Arc::new(test_instance_metadata())), None)
-            .await;
+        update_with_metrics_capture(&mut updater).await;
 
         assert!(last_connect_succeeded.load(Ordering::Relaxed));
 
@@ -389,17 +391,13 @@ mod test {
 
         // Nothing is listening yet. The push fails and is dropped, but the
         // updater stays usable rather than latching onto a degraded mode.
-        updater
-            .update(Some(Arc::new(test_instance_metadata())), None)
-            .await;
+        update_with_metrics_capture(&mut updater).await;
         assert!(!last_connect_succeeded.load(Ordering::Relaxed));
 
         // FMDS shows up, and the next iteration reaches it.
         let (server, mut received) = serve_fmds(addr, false);
         wait_until_listening(addr).await;
-        updater
-            .update(Some(Arc::new(test_instance_metadata())), None)
-            .await;
+        update_with_metrics_capture(&mut updater).await;
         assert!(last_connect_succeeded.load(Ordering::Relaxed));
 
         let update = received.recv().await.expect("server received an update");

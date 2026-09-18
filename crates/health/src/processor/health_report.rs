@@ -23,8 +23,24 @@ use nv_redfish::resource::Health as BmcHealth;
 use super::{CollectorEvent, EventContext, EventProcessor};
 use crate::sink::{
     Classification, HealthReport, HealthReportAlert, HealthReportSuccess, MetricSample, Probe,
-    ReportSource, SensorThresholdContext,
+    ReportSource, SensorAttribution, SensorThresholdContext,
 };
+
+/// Sensor placement from the sample labels the sensor projection already set.
+fn sensor_attribution(metric: &MetricSample) -> Option<SensorAttribution> {
+    let label = |key: &str| {
+        metric
+            .labels
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+    };
+    let attribution = SensorAttribution {
+        powersupply_id: label("powersupply_id"),
+        physical_context: label("physical_context"),
+    };
+    (attribution != SensorAttribution::default()).then_some(attribution)
+}
 
 #[derive(Debug, Clone, Copy)]
 enum SensorHealth {
@@ -139,11 +155,13 @@ impl HealthReportProcessor {
         health: &SensorThresholdContext,
     ) -> SensorHealthResult {
         let classification = Self::classify(health, metric.value);
+        let attribution = sensor_attribution(metric);
 
         match classification {
             SensorHealth::Ok => SensorHealthResult::Success(HealthReportSuccess {
                 probe_id: Probe::Sensor,
                 target: Some(health.sensor_id.clone()),
+                attribution,
             }),
             state => {
                 if health.bmc_health == BmcHealth::Ok {
@@ -162,6 +180,7 @@ impl HealthReportProcessor {
                     return SensorHealthResult::Success(HealthReportSuccess {
                         probe_id: Probe::Sensor,
                         target: Some(health.sensor_id.clone()),
+                        attribution,
                     });
                 }
 
@@ -192,6 +211,7 @@ impl HealthReportProcessor {
                     target: Some(health.sensor_id.clone()),
                     message,
                     classifications: vec![state.to_classification()],
+                    attribution,
                 })
             }
         }
@@ -254,9 +274,11 @@ impl EventProcessor for HealthReportProcessor {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
 
+    use carbide_test_support::{Check, check_values};
     use mac_address::MacAddress;
     use nv_redfish::resource::Health as BmcHealth;
 
@@ -334,6 +356,74 @@ mod tests {
         assert_eq!(report.target, Some(HealthReportTarget::Machine));
         assert!(report.successes.is_empty());
         assert_eq!(report.alerts.len(), 1);
+    }
+
+    /// Runs one critical sensor sample through the processor and returns the
+    /// attribution of the alert it produces.
+    fn observe_alert_attribution(labels: Vec<(&str, &str)>) -> Option<SensorAttribution> {
+        let processor = HealthReportProcessor::new();
+        let context = test_context();
+        let _ = processor.process_event(&context, &CollectorEvent::MetricCollectionStart);
+        let _ = processor.process_event(
+            &context,
+            &CollectorEvent::Metric(
+                MetricSample {
+                    key: "sensor-1".to_string(),
+                    name: "hw_sensor".to_string(),
+                    metric_type: "power".to_string(),
+                    unit: "watts".to_string(),
+                    value: 5600.0,
+                    labels: labels
+                        .into_iter()
+                        .map(|(key, value)| (Cow::Owned(key.to_string()), value.to_string()))
+                        .collect(),
+                    context: Some(SensorThresholdContext {
+                        entity_type: "powersupply".to_string(),
+                        sensor_id: "PSU0_Power".to_string(),
+                        upper_fatal: None,
+                        lower_fatal: None,
+                        upper_critical: Some(5500.0),
+                        lower_critical: None,
+                        upper_caution: None,
+                        lower_caution: None,
+                        range_max: None,
+                        range_min: None,
+                        bmc_health: BmcHealth::Critical,
+                    }),
+                }
+                .into(),
+            ),
+        );
+        let emitted = processor.process_event(&context, &CollectorEvent::MetricCollectionEnd);
+        let Some(CollectorEvent::HealthReport(report)) = emitted.last() else {
+            panic!("expected health report event");
+        };
+        report.alerts[0].attribution.clone()
+    }
+
+    #[test]
+    fn sensor_alert_attribution_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "power supply sensor carries its PSU and context",
+                    input: vec![
+                        ("powersupply_id", "PSU0"),
+                        ("physical_context", "power_supply"),
+                    ],
+                    expect: Some(SensorAttribution {
+                        powersupply_id: Some("PSU0".to_string()),
+                        physical_context: Some("power_supply".to_string()),
+                    }),
+                },
+                Check {
+                    scenario: "sensor without placement labels carries none",
+                    input: vec![("sensor_name", "PSU0_Power")],
+                    expect: None,
+                },
+            ],
+            observe_alert_attribution,
+        );
     }
 
     #[test]

@@ -18,7 +18,8 @@
 # setup.sh — install the NICo prerequisite stack
 #
 # Tool requirements:
-#   helmfile, helm, kubectl, jq, ssh-keygen
+#   helmfile, helm, kubectl, jq, ssh-keygen, envsubst (gettext)
+#   Core VIP preflight also requires python3 with PyYAML (unless --skip-core).
 #
 # Required environment:
 #   KUBECONFIG            Optional only if the current kubectl context already
@@ -44,6 +45,7 @@
 #                          StorageClass. Default: true.
 #   NICO_STORAGE_CLASS     StorageClass for Postgres and Vault data and audit PVCs.
 #                          Default: local-path-persistent.
+#   NICO_INSTALL_CONTOUR   Install Contour/Envoy after MetalLB. Default: false.
 #   VAULT_NS               Vault namespace. Default: vault
 #   CERT_MANAGER_NS        cert-manager namespace. Default: cert-manager
 #   PREFLIGHT_CHECK_IMAGE  Image for preflight per-node checks.
@@ -137,6 +139,7 @@
 #   ./setup.sh --skip-core --skip-rest  # fully non-interactive infra-only run
 #   ./setup.sh --core-values /path/to/values.yaml      # use site-specific values for Phase 6
 #   ./setup.sh --metallb-config /path/to/metallb.yaml  # use site-specific MetalLB config (file or kustomize dir)
+#   ./setup.sh --install-contour      # install optional Contour/Envoy Ingress controller
 #   ./setup.sh --site-overlay /path/to/kustomize-dir   # kubectl apply -k after Phase 6 (NTP services, etc.)
 #   ./setup.sh --skip-dpf               # skip DPF DPU provisioning (installed by default otherwise)
 #   ./setup.sh --with-observability     # also install the local monitoring stack (Loki, Tempo,
@@ -171,6 +174,7 @@ INSTALL_DPF="${NICO_INSTALL_DPF:-true}"
 INSTALL_RMS="${NICO_INSTALL_RMS:-true}"
 [[ "${NICO_SKIP_RMS:-false}" == "true" ]] && INSTALL_RMS=false
 WITH_OBSERVABILITY="${WITH_OBSERVABILITY:-false}"
+INSTALL_CONTOUR="${NICO_INSTALL_CONTOUR:-false}"
 CORE_VALUES=""
 METALLB_CONFIG=""
 SITE_OVERLAY=""
@@ -185,6 +189,7 @@ while [[ $# -gt 0 ]]; do
         --install-rms)  INSTALL_RMS=true ;;   # explicit; RMS is the default
         --skip-rms)     INSTALL_RMS=false ;;
         --with-observability) WITH_OBSERVABILITY=true ;;
+        --install-contour) INSTALL_CONTOUR=true ;;
         --debug)        set -x         ;;
         --core-values)
             [[ -z "${2:-}" ]] && { echo "Error: --core-values requires a file path"; exit 1; }
@@ -201,7 +206,7 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-flow] [--skip-dpf] [--skip-rms] [--with-observability] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-flow] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
@@ -222,6 +227,10 @@ esac
 case "${INSTALL_RMS}" in
     true|false) ;;
     *) echo "Error: NICO_INSTALL_RMS must be true or false (got '${INSTALL_RMS}')"; exit 1 ;;
+esac
+case "${INSTALL_CONTOUR}" in
+    true|false) ;;
+    *) echo "Error: NICO_INSTALL_CONTOUR must be true or false (got '${INSTALL_CONTOUR}')"; exit 1 ;;
 esac
 
 # The predecessor Flow chart bundled PSM and NSM in the Flow Deployment. This
@@ -701,6 +710,42 @@ else
     kubectl apply -f "${SCRIPT_DIR}/values/metallb-config.yaml"
 fi
 echo "MetalLB ready"
+
+# ---------------------------------------------------------------------------
+# 1d. Contour/Envoy — optional Ingress controller.
+#     Install after MetalLB so the Envoy LoadBalancer Service can receive an
+#     external address. Skip this when the cluster already has an Ingress
+#     controller.
+# ---------------------------------------------------------------------------
+if [[ "${INSTALL_CONTOUR}" == "true" ]]; then
+    _SETUP_PHASE="[1d] Contour/Envoy"
+    echo "=== [1d] Contour/Envoy ==="
+    # helmfile sync runs `helm upgrade --install`, so a contour release already
+    # in projectcontour is upgraded rather than rejected. Left unchecked that
+    # reconfigures a site's own ingress controller with our values and stamps it
+    # with the ownership label clean.sh keys on, which would then delete it.
+    # Only a release using our own name reaches this: a foreign release under a
+    # different name makes the sync a fresh install, and Helm refuses that
+    # because the cluster-scoped IngressClass already belongs to another release.
+    if kubectl get deployment contour-contour -n projectcontour &>/dev/null; then
+        _CONTOUR_OWNER="$(kubectl get deployment contour-contour -n projectcontour \
+            -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null || true)"
+        if [[ "${_CONTOUR_OWNER}" != "nico" ]]; then
+            echo "ERROR: projectcontour already runs a Contour that NICo does not manage." >&2
+            echo "  Drop --install-contour and point nico-rest-api.ingress.className at it," >&2
+            echo "  or remove it first: helm uninstall contour -n projectcontour" >&2
+            exit 1
+        fi
+    fi
+    # No --include-needs. Phase 1c above already installed MetalLB, and pulling
+    # it in here would re-sync that release without the CRD apply/re-apply that
+    # phase 1c wraps around it. The release sets wait: true, so this returns
+    # only once Contour and the Envoy DaemonSet are ready.
+    helmfile sync -l name=contour
+    echo "Contour/Envoy ready"
+else
+    echo "Skipping Contour/Envoy (set NICO_INSTALL_CONTOUR=true or pass --install-contour to install it)"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. cert-manager + Prometheus CRDs + Vault TLS bootstrap
@@ -1392,6 +1437,7 @@ fi
 # ---------------------------------------------------------------------------
 # NICo Core
 # ---------------------------------------------------------------------------
+_CORE_INSTALLED_THIS_RUN=false
 if "${SKIP_CORE}"; then
     echo "=== [6/6] NICo Core ==="
     echo "Skipped (--skip-core flag set)."
@@ -1670,6 +1716,7 @@ else
             kubectl rollout status deployment/nico-api -n nico-system --timeout=300s
             echo "DPF enabled in carbide-api"
         fi
+        _CORE_INSTALLED_THIS_RUN=true
     elif "${INSTALL_DPF}"; then
         # The DPF path deploys from a mktemp values file that the EXIT trap
         # deletes, and enablement is a two-phase flow (deploy DPF-off, set the
@@ -1704,16 +1751,33 @@ fi
 #   helm-prereqs/observability/install-observability.sh
 # Docs: helm-prereqs/observability/README.md
 # ---------------------------------------------------------------------------
+_resolve_nico_servicemonitors_mode() {
+    local core_installed_this_run="$1"
+    local requested_mode="${NICO_SERVICEMONITORS:-}"
+
+    if [[ "${core_installed_this_run}" == "true" ]]; then
+        printf '%s\n' "${requested_mode:-true}"
+    elif [[ "${requested_mode}" == "false" ]]; then
+        printf 'false\n'
+    else
+        # Never upgrade an existing Core release from this checkout unless the
+        # same setup run successfully installed it. This also covers a declined
+        # Core prompt in addition to --skip-core.
+        printf 'hint\n'
+    fi
+}
+
 _OBSERVABILITY_INSTALLED=false
 if "${WITH_OBSERVABILITY}"; then
     echo ""
     _SETUP_PHASE="observability"
     echo "=== Observability (--with-observability) ==="
     # The stack is optional: a failure here must not abort the rest of the install.
-    # NICO_SERVICEMONITORS=true is safe in this integrated path — Core was just installed
-    # from this same tree, so the release upgrade the installer performs is a no-op apart
-    # from adding the monitor objects.
-    if NICO_SERVICEMONITORS="${NICO_SERVICEMONITORS:-true}" \
+    # Reconcile Core metrics only when this run installed Core from the same tree.
+    # Otherwise use the standalone-safe hint path and leave any existing release untouched.
+    _nico_servicemonitors_mode="$(_resolve_nico_servicemonitors_mode \
+        "${_CORE_INSTALLED_THIS_RUN}")"
+    if NICO_SERVICEMONITORS="${_nico_servicemonitors_mode}" \
         "${SCRIPT_DIR}/observability/install-observability.sh"; then
         _OBSERVABILITY_INSTALLED=true
     else
@@ -1791,10 +1855,10 @@ echo "=== [7b/7] NICo REST CA issuer ClusterIssuer ==="
 (cd "${NICO_REST_DIR}" && kubectl apply -k deploy/kustomize/base/cert-manager-io)
 
 # --- 7c. NICo REST postgres --------------------------------------------------------
-# Simple postgres StatefulSet with all NICo databases pre-initialised:
-# forge, temporal, temporal_visibility, keycloak.
-# Lives alongside nico-pg-cluster in the postgres namespace — different
-# service name ("postgres") so Temporal and NICo values work without changes.
+# Legacy standalone postgres StatefulSet with pre-initialised databases:
+# nico (orphaned — no live component targets it), temporal, temporal_visibility,
+# keycloak. Still the default target for both — see "Consolidating
+# Temporal/Keycloak onto nico-pg-cluster" in README.md for the opt-in path.
 _SETUP_PHASE="[7c/7] NICo REST postgres"
 echo "=== [7c/7] NICo REST postgres ==="
 (cd "${NICO_REST_DIR}" && kubectl apply -k deploy/kustomize/base/postgres)
@@ -1807,11 +1871,58 @@ echo "NICo REST postgres ready"
 # Dev OIDC IdP, pre-loaded with the configured NICo development realm + test users.
 # nico-rest-api talks to it at http://keycloak.nico-rest:8082
 _SETUP_PHASE="[7d/7] Keycloak"
-_KC_ENABLED="$(grep -A5 'keycloak:' "${SCRIPT_DIR}/values/nico-rest.yaml" \
-    | grep 'enabled:' | head -1 | awk '{print $2}' || echo "false")"
+_KC_ENABLED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values/nico-rest.yaml" keycloak enabled)"
+[[ "${_KC_ENABLED}" == "true" ]] || _KC_ENABLED="false"
 
 if [[ "${_KC_ENABLED}" == "true" ]]; then
     echo "=== [7d/7] Keycloak ==="
+
+    # helm-prereqs/values.yaml::keycloak.useHaPostgres — DB consolidation opt-in,
+    # distinct from nico-rest.yaml's keycloak.enabled (deployed at all) above.
+    _KC_DB_CONSOLIDATED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" keycloak useHaPostgres)"
+    [[ "${_KC_DB_CONSOLIDATED}" == "true" ]] || _KC_DB_CONSOLIDATED="false"
+    # keycloak.namespace — must match what eso-external-secrets.yaml's
+    # nico-keycloak-db-eso targets, so KEYCLOAK_NS (read by keycloak/setup.sh)
+    # agrees with it. An operator-supplied KEYCLOAK_NS env var still wins, same
+    # as every other script in this feature (keycloak/setup.sh, clean.sh,
+    # migrate-temporal-keycloak-db.sh) — don't clobber it with the values.yaml
+    # default.
+    if [[ -z "${KEYCLOAK_NS:-}" ]]; then
+        export KEYCLOAK_NS="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" keycloak namespace)"
+        export KEYCLOAK_NS="${KEYCLOAK_NS:-nico-rest}"
+    fi
+
+    if [[ "${_KC_DB_CONSOLIDATED}" == "true" ]]; then
+        echo "Waiting for Keycloak DB credentials to be synced by ESO (nico-keycloak-pg-creds in ${KEYCLOAK_NS})..."
+        for _kc_i in $(seq 1 24); do
+            if kubectl get secret nico-keycloak-pg-creds -n "${KEYCLOAK_NS}" &>/dev/null; then
+                break
+            fi
+            if [[ "${_kc_i}" -eq 24 ]]; then
+                echo "ERROR: nico-keycloak-pg-creds not synced after 120s." >&2
+                echo "  Check: kubectl describe clusterexternalsecret nico-keycloak-db-eso" >&2
+                echo "  Ensure keycloak.useHaPostgres=true in helm-prereqs/values.yaml." >&2
+                exit 1
+            fi
+            echo "  nico-keycloak-pg-creds not yet synced (${_kc_i}/24) — retrying in 5s..."
+            sleep 5
+        done
+        echo "Keycloak DB credentials ready — targeting nico-pg-cluster"
+        # Reference the ESO-synced Secret directly (secretKeyRef in
+        # deployment.yaml) rather than reading the password into this shell —
+        # it never needs to touch a plaintext env value or process argument.
+        export KEYCLOAK_DB_HOST="nico-pg-cluster.postgres.svc.cluster.local"
+        export KEYCLOAK_DB_NAME="keycloak"
+        export KEYCLOAK_DB_USER="keycloak.nico"
+        # nico-pg-cluster's pg_hba.conf requires TLS (see the tls.enabled note
+        # on the Temporal override below) — "require" encrypts the connection.
+        # It does not verify the server certificate/hostname; that needs a
+        # truststore wired to the operator's CA, not done here.
+        export KEYCLOAK_DB_SSLMODE="require"
+        export KEYCLOAK_DB_PASSWORD_SECRET_NAME="nico-keycloak-pg-creds"
+        export KEYCLOAK_DB_PASSWORD_SECRET_KEY="password"
+    fi
+
     "${SCRIPT_DIR}/keycloak/setup.sh"
     echo "Keycloak ready"
 else
@@ -1835,12 +1946,81 @@ kubectl wait --for=condition=Ready certificate/server-site-cert \
 echo "Temporal TLS certs ready"
 
 # --- 7f. Temporal ------------------------------------------------------------
+# helm-prereqs/values.yaml::temporal.useHaPostgres — see README's "Consolidating
+# Temporal/Keycloak onto nico-pg-cluster" for the transition story and
+# helm-prereqs/scripts/migrate-temporal-keycloak-db.sh for moving existing
+# workflow history over.
 _SETUP_PHASE="[7f/7] Temporal"
 echo "=== [7f/7] Temporal ==="
-helm upgrade --install temporal "${NICO_REST_DIR}/temporal-helm/temporal" \
-    --namespace temporal \
-    -f "${NICO_REST_DIR}/temporal-helm/temporal/values-kind.yaml" \
+
+_TEMPORAL_DB_CONSOLIDATED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" temporal useHaPostgres)"
+[[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]] || _TEMPORAL_DB_CONSOLIDATED="false"
+
+TEMPORAL_CMD=(
+    helm upgrade --install temporal "${NICO_REST_DIR}/temporal-helm/temporal"
+    --namespace temporal
+    -f "${NICO_REST_DIR}/temporal-helm/temporal/values-kind.yaml"
     --timeout 300s --wait
+)
+
+if [[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]]; then
+    echo "Waiting for Temporal DB credentials to be synced by ESO (nico-temporal-pg-creds in temporal)..."
+    for _tp_i in $(seq 1 24); do
+        if kubectl get secret nico-temporal-pg-creds -n temporal &>/dev/null; then
+            break
+        fi
+        if [[ "${_tp_i}" -eq 24 ]]; then
+            echo "ERROR: nico-temporal-pg-creds not synced after 120s." >&2
+            echo "  Check: kubectl describe clusterexternalsecret nico-temporal-db-eso" >&2
+            echo "  Ensure temporal.useHaPostgres=true in helm-prereqs/values.yaml." >&2
+            exit 1
+        fi
+        echo "  nico-temporal-pg-creds not yet synced (${_tp_i}/24) — retrying in 5s..."
+        sleep 5
+    done
+    echo "Temporal DB credentials ready — targeting nico-pg-cluster"
+
+    # Mirror the nico-rest-workflow worker fix (#3284): override the chart's
+    # postgres.postgres defaults at install time rather than editing
+    # values-kind.yaml in place, so the legacy target keeps working unchanged
+    # for sites that haven't opted in. nico-temporal-pg-creds (synced by ESO
+    # above) already carries a "password" key, matching the chart's
+    # persistence.secretKey default — no need to copy it into another Secret.
+    #
+    # tls.enabled: true is required — nico-pg-cluster's pg_hba.conf only
+    # accepts encrypted connections (Zalando operator default), and any
+    # unrecognized key under persistence.default/visibility.sql passes
+    # straight through into the rendered SQL persistence config
+    # (server-configmap.yaml), so this is the supported way to turn it on.
+    # Without it, temporal-schema-update crash-loops on every attempt with
+    # "pg_hba.conf rejects connection ... no encryption" (verified on dev6).
+    _TEMPORAL_CREDS_FILE="$(mktemp)"
+    cat > "${_TEMPORAL_CREDS_FILE}" <<EOF
+server:
+  config:
+    persistence:
+      secretName: "nico-temporal-pg-creds"
+      default:
+        sql:
+          host: "nico-pg-cluster.postgres.svc.cluster.local"
+          database: "temporal"
+          user: "temporal.nico"
+          existingSecret: "nico-temporal-pg-creds"
+          tls:
+            enabled: true
+      visibility:
+        sql:
+          host: "nico-pg-cluster.postgres.svc.cluster.local"
+          database: "temporal_visibility"
+          user: "temporal.nico"
+          existingSecret: "nico-temporal-pg-creds"
+          tls:
+            enabled: true
+EOF
+    TEMPORAL_CMD+=(-f "${_TEMPORAL_CREDS_FILE}")
+fi
+
+"${TEMPORAL_CMD[@]}"
 echo "Temporal ready"
 
 # Create the Temporal namespaces required by NICo REST workers (requires mTLS)

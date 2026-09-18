@@ -67,7 +67,7 @@ type Machine struct {
 	Labels map[string]string `json:"labels,omitempty"`
 	// Status represents the status of the machine
 	Status *MachineStatus `json:"status,omitempty"`
-	// Indicates whether the machine is usable by or currently in use by a tenant.
+	// Indicates whether the machine is usable by or currently in use by a tenant. It does not indicate that a Machine is available for Instance creation.
 	IsUsableByTenant *bool `json:"isUsableByTenant,omitempty"`
 	// Chronological status history for the Machine
 	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`

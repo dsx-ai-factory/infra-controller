@@ -25,11 +25,14 @@ use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
 use db::network_security_group;
 use model::metadata::Metadata;
-use model::network_security_group::{NetworkSecurityGroupRule, NetworkSecurityGroupRuleNet};
+use model::network_security_group::{
+    NetworkSecurityGroup, NetworkSecurityGroupRule, NetworkSecurityGroupRuleNet,
+};
 use model::tenant::{InvalidTenantOrg, TenantOrganizationId};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use super::tenant_prefix_overlap;
 use crate::CarbideError;
 use crate::api::{Api, log_request_data, log_tenant_organization_id};
 
@@ -76,6 +79,14 @@ pub(crate) async fn create(
                 .map_err(CarbideError::from)?,
         )
     };
+
+    validate_stateful_egress_enablement(
+        None,
+        stateful_egress,
+        api.runtime_config
+            .network_security_group
+            .stateful_acls_enabled,
+    )?;
 
     let max_nsg_size = api
         .runtime_config
@@ -309,17 +320,13 @@ pub(crate) async fn update(
     // Start a new transaction for a db write.
     let mut txn = api.txn_begin().await?;
 
-    // Look up the NetworkSecurityGroup.  We'll need to check the current
-    // version. We could probably do everything with a single query
-    // with a few subqueries, but we'd only be able to send back a
-    // NotFound, leaving the caller with no way to know if it was
-    // because their NetworkSecurityGroup wasn't found or because the version
-    // didn't match.
+    // Classify the policy before taking resource locks: an expanding change
+    // must acquire the overlap lock first. The row is rechecked below.
     let current_network_security_group = network_security_group::find_by_ids(
         &mut txn,
         std::slice::from_ref(&id),
         Some(&tenant_organization_id),
-        true,
+        false,
     )
     .await?;
 
@@ -353,7 +360,7 @@ pub(crate) async fn update(
     };
 
     // Prepare the version match if present.
-    if let Some(if_version_match) = req.if_version_match {
+    if let Some(if_version_match) = req.if_version_match.as_ref() {
         let target_version = if_version_match
             .parse::<ConfigVersion>()
             .map_err(CarbideError::from)?;
@@ -367,6 +374,75 @@ pub(crate) async fn update(
         }
     };
 
+    let policy_is_nonexpanding = |nsg: &NetworkSecurityGroup| {
+        tenant_prefix_overlap::nsg_policy_is_nonexpanding(
+            nsg,
+            &rules,
+            stateful_egress,
+            api.runtime_config
+                .network_security_group
+                .stateful_acls_enabled,
+        )
+    };
+    let overlap_locked = !policy_is_nonexpanding(current_network_security_group);
+    if overlap_locked {
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    }
+    let locked_nsg = network_security_group::find_by_ids(
+        &mut txn,
+        std::slice::from_ref(&id),
+        Some(&tenant_organization_id),
+        true,
+    )
+    .await?
+    .pop();
+    if (api.runtime_config.tenant_prefix_overlap_enabled || req.if_version_match.is_some())
+        && locked_nsg.as_ref().map(|nsg| nsg.version)
+            != Some(current_network_security_group.version)
+    {
+        return Err(CarbideError::ConcurrentModificationError(
+            "NetworkSecurityGroup",
+            current_network_security_group.version.to_string(),
+        )
+        .into());
+    }
+    let not_found = || CarbideError::NotFoundError {
+        kind: "NetworkSecurityGroup",
+        id: format!("{id} for tenant org `{tenant_organization_id}`"),
+    };
+    let mut locked_nsg = locked_nsg.ok_or_else(not_found)?;
+    // Without `if_version_match`, callers may replace the latest policy when
+    // overlap admission is disabled. A concurrent restriction can turn an
+    // unchanged request into an expansion, so check the locked row again.
+    if !overlap_locked && !policy_is_nonexpanding(&locked_nsg) {
+        // Release the NSG lock before taking the overlap lock. Then read under
+        // both locks; no further restart is needed, even if the policy changed.
+        txn.rollback().await?;
+        txn = api.txn_begin().await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        locked_nsg = network_security_group::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(&id),
+            Some(&tenant_organization_id),
+            true,
+        )
+        .await?
+        .pop()
+        .ok_or_else(not_found)?;
+    }
+    validate_stateful_egress_enablement(
+        Some(locked_nsg.stateful_egress),
+        stateful_egress,
+        api.runtime_config
+            .network_security_group
+            .stateful_acls_enabled,
+    )?;
+    if !policy_is_nonexpanding(&locked_nsg)
+        && tenant_prefix_overlap::checks_required(api, &mut txn).await?
+    {
+        tenant_prefix_overlap::validate_nsg_policy(api, &mut txn, &id).await?;
+    }
+
     // Update record in the DB and get back
     // our new NetworkSecurityGroup state.
     let network_security_group = network_security_group::update(
@@ -376,7 +452,7 @@ pub(crate) async fn update(
         &metadata,
         stateful_egress,
         &rules,
-        current_network_security_group.version,
+        locked_nsg.version,
         None,
     )
     .await?;
@@ -621,6 +697,24 @@ pub(crate) async fn get_attachments(
     Ok(Response::new(rpc_out))
 }
 
+/// Rejects newly enabled stateful egress when the site does not support stateful ACLs.
+fn validate_stateful_egress_enablement(
+    current_stateful_egress: Option<bool>,
+    requested_stateful_egress: bool,
+    stateful_acls_enabled: bool,
+) -> Result<(), CarbideError> {
+    // Existing stateful groups remain editable if the site flag is disabled after creation.
+    if !stateful_acls_enabled && requested_stateful_egress && current_stateful_egress != Some(true)
+    {
+        return Err(CarbideError::InvalidArgument(
+            "stateful_egress requires network_security_group.stateful_acls_enabled to be true"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_expanded_rule_set(
     rules: &[NetworkSecurityGroupRule],
     limit: usize,
@@ -674,4 +768,39 @@ fn validate_expanded_rule_set(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+
+    use super::*;
+
+    /// Verifies the validator rejects only new stateful intent while site support is disabled.
+    ///
+    /// Existing stateful groups must remain editable after an operator disables the site flag.
+    #[test]
+    fn stateful_egress_enablement_requires_site_support() {
+        scenarios!(
+            run = |(current, requested, site_enabled)| {
+                validate_stateful_egress_enablement(current, requested, site_enabled).map_err(drop)
+            };
+            "site support disabled" {
+                // Stateless NSGs remain supported when stateful ACLs are unavailable.
+                (None, false, false) => Yields(()),
+                // Creation must not persist stateful intent the site cannot provide.
+                (None, true, false) => Fails,
+                // A stateless NSG cannot become stateful while support is unavailable.
+                (Some(false), true, false) => Fails,
+                // Disabling the site flag must not prevent unrelated edits to existing stateful NSGs.
+                (Some(true), true, false) => Yields(()),
+            }
+
+            "site support enabled" {
+                // Stateful NSGs are valid when the site advertises the required capability.
+                (None, true, true) => Yields(()),
+            }
+        );
+    }
 }

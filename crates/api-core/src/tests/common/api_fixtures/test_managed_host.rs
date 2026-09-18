@@ -19,7 +19,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{DpuMachineId, HostMachineId};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, HostMachineIdSubtypeTrait, MachineId, PredictedHostMachineId,
+    StableHostMachineId,
+};
+use db::DatabaseError;
 // `PgPoolReader` and `LoadSnapshotOptions` are only used by the `#[cfg(test)]`
 // `TestManagedHostSnapshots` trait below, so gate them out of test-support-only builds.
 #[cfg(test)]
@@ -27,7 +31,7 @@ use db::db_read::PgPoolReader;
 #[cfg(test)]
 use model::machine::LoadSnapshotOptions;
 use model::machine::{
-    InstanceState, Machine, ManagedHostState, ManagedHostStateSnapshot, ReprovisionState,
+    DpuMachine, InstanceState, ManagedHostState, ManagedHostStateSnapshot, ReprovisionState,
 };
 use rpc::forge::forge_agent_control_response::LegacyAction;
 use rpc::forge::forge_server::Forge;
@@ -37,32 +41,39 @@ use tonic::Request;
 use crate::tests::common::api_fixtures::instance::TestInstanceBuilder;
 use crate::tests::common::api_fixtures::{Api, TestEnv, TestMachine};
 
-pub(in crate::tests) struct TestManagedHost {
-    pub(in crate::tests) id: HostMachineId,
+pub(in crate::tests) struct TestAnyManagedHost<ID: HostMachineIdSubtypeTrait> {
+    pub(in crate::tests) id: ID,
     pub(in crate::tests) dpu_ids: Vec<DpuMachineId>,
     pub(in crate::tests) api: Arc<Api>,
 }
 
-impl From<TestManagedHost> for (HostMachineId, DpuMachineId) {
-    fn from(mut v: TestManagedHost) -> Self {
+pub(in crate::tests) type TestManagedHost = TestAnyManagedHost<StableHostMachineId>;
+pub(in crate::tests) type TestPredictedManagedHost = TestAnyManagedHost<PredictedHostMachineId>;
+
+impl From<TestAnyManagedHost<StableHostMachineId>> for (StableHostMachineId, DpuMachineId) {
+    fn from(mut v: TestAnyManagedHost<StableHostMachineId>) -> Self {
         (v.id, v.dpu_ids.remove(0))
     }
 }
 
 type Txn<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 
-impl TestManagedHost {
+impl<ID> TestAnyManagedHost<ID>
+where
+    ID: HostMachineIdSubtypeTrait,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
     // from_rpc_machine() will first try to read from m.status.interfaces
     // and fall back to the deprecated m.interfaces only if status is absent
     // or if status.interfaces yields zero DPU ids
     #[allow(deprecated)]
     pub(in crate::tests) fn from_rpc_machine(m: &rpc::Machine, api: Arc<Api>) -> Self {
-        TestManagedHost {
+        TestAnyManagedHost {
             id: m
                 .id
                 .unwrap()
                 .try_into()
-                .expect("MachineId should be a HostMachineId"),
+                .expect("MachineId should be a StableHostMachineId"),
             dpu_ids: m
                 .status
                 .as_ref()
@@ -88,27 +99,31 @@ impl TestManagedHost {
     }
 
     pub(in crate::tests) fn dpu(&self) -> TestMachine<DpuMachineId> {
-        TestMachine::new(self.dpu_ids[0], self.api.clone())
+        TestMachine::<DpuMachineId>::new(self.dpu_ids[0], self.api.clone())
     }
 
     pub(in crate::tests) fn dpu_n(&self, n: usize) -> TestMachine<DpuMachineId> {
         assert!(n < self.dpu_ids.len());
-        TestMachine::new(self.dpu_ids[n], self.api.clone())
+        TestMachine::<DpuMachineId>::new(self.dpu_ids[n], self.api.clone())
     }
 
-    pub(in crate::tests) fn host(&self) -> TestMachine<HostMachineId> {
+    pub(in crate::tests) fn host(&self) -> TestMachine<ID> {
         TestMachine::new(self.id, self.api.clone())
     }
 
+    pub(in crate::tests) fn host_as_any(&self) -> TestMachine<HostMachineId> {
+        TestMachine::<HostMachineId>::new(self.id.into(), self.api.clone())
+    }
+
     pub(in crate::tests) async fn snapshot(&self, txn: &mut Txn<'_>) -> ManagedHostStateSnapshot {
-        db::managed_host::load_snapshot(txn.as_mut(), &self.id, Default::default())
+        db::managed_host::load_snapshot(txn.as_mut(), self.id.as_machine_id(), Default::default())
             .await
             .unwrap()
             .unwrap()
     }
 
-    pub(in crate::tests) async fn dpu_db_machines(&self, txn: &mut Txn<'_>) -> Vec<Machine> {
-        db::machine::find_dpus_by_host_machine_id(txn, &self.id)
+    pub(in crate::tests) async fn dpu_db_machines(&self, txn: &mut Txn<'_>) -> Vec<DpuMachine> {
+        db::machine::find_dpus_by_host_machine_id(txn, self.id.as_host_machine_id())
             .await
             .unwrap()
     }
@@ -182,7 +197,9 @@ impl TestManagedHost {
             .unwrap()
             .into_inner();
     }
+}
 
+impl TestManagedHost {
     pub(in crate::tests) fn instance_builer<'a, 'b>(
         &'b self,
         test_env: &'a TestEnv,
@@ -207,7 +224,11 @@ pub(in crate::tests) trait TestManagedHostSnapshots {
 }
 
 #[cfg(test)]
-impl TestManagedHostSnapshots for Vec<TestManagedHost> {
+impl<ID> TestManagedHostSnapshots for Vec<TestAnyManagedHost<ID>>
+where
+    ID: HostMachineIdSubtypeTrait,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
     async fn snapshots(
         &self,
         txn: &mut PgPoolReader,
@@ -217,5 +238,8 @@ impl TestManagedHostSnapshots for Vec<TestManagedHost> {
         db::managed_host::load_by_machine_ids(txn, &machine_ids, load_options)
             .await
             .unwrap()
+            .into_iter()
+            .map(|(id, snapshot)| (id.to_host_machine_id(), snapshot))
+            .collect()
     }
 }

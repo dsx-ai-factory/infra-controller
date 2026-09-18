@@ -4,6 +4,7 @@ package common;
 
 import "codegen/v1/derive.proto";
 import "codegen/v1/extern_path.proto";
+import "codegen/v1/rust_type.proto";
 
 message MachineId {
   option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::machine::MachineId";

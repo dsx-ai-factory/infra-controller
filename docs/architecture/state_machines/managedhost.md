@@ -122,7 +122,8 @@ stateDiagram-v2
     if_state_dpu_nodpu --> HostInit_HI_WaitingForPlatformConfiguration : No DPU
 
     DD_Configuring --> DD_EnableRshim
-    DD_EnableRshim --> if_bfb_supported
+    DD_EnableRshim --> DD_RebootAllDPUS : DPF selected during site exploration
+    DD_EnableRshim --> if_bfb_supported : DPF not selected during site exploration
 
     if_bfb_supported --> DD_SSB_E_CheckSecureBootStatus : BFB install supported
     if_bfb_supported --> DD_SSB_D_CheckSecureBootStatus : BFB install not supported
@@ -182,10 +183,12 @@ stateDiagram-v2
 
     state "WaitingForPlatformConfiguration" as DI_WaitingForPlatformConfiguration
     state "WaitingForNetworkConfig" as DI_WaitingForNetworkConfig
+    state "DpfStates/Provisioning" as DI_DpfStates_Provisioning
     state "HostInit/EnableIpmiOverLan" as HostInit_HI_EnableIpmiOverLan
 
     DpuDiscoveringState_DD_SSB_E_CheckSecureBootStatus --> DI_IDO_InstallingBFB : Security boot is enabled
-    DpuDiscoveringState_DD_RebootAllDPUS --> DI_Init
+    DpuDiscoveringState_DD_RebootAllDPUS --> DI_DpfStates_Provisioning : DPF selected during site exploration
+    DpuDiscoveringState_DD_RebootAllDPUS --> DI_Init : DPF not selected during site exploration
 
     DI_IDO_InstallingBFB --> DI_IDO_WaitForInstallComplete
     DI_IDO_WaitForInstallComplete --> DI_IDO_WaitForInstallComplete : Task Running/New/Starting (wait more)
@@ -802,7 +805,6 @@ stateDiagram-v2
 ```
 
 ## Failed State
-
 
 ```mermaid
 stateDiagram-v2

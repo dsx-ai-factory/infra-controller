@@ -239,7 +239,7 @@ fn get_bundle_state(
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
 
     use super::*;
@@ -272,7 +272,7 @@ mod tests {
             log_count: usize,
             log: Option<LogObservation>,
             histogram_count_delta: u64,
-            histogram_sum_delta: f64,
+            histogram_sum_delta: ApproxHistogramSum,
         }
 
         const METRIC_NAME: &str = "carbide_measured_boot_collector_iteration_latency_milliseconds";
@@ -291,7 +291,7 @@ mod tests {
                         log_count: 0,
                         log: None,
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 1500.0,
+                        histogram_sum_delta: ApproxHistogramSum(1500.0),
                     },
                 },
                 Check {
@@ -314,7 +314,7 @@ mod tests {
                             error: Some("database unavailable".to_string()),
                         }),
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 250.0,
+                        histogram_sum_delta: ApproxHistogramSum(250.0),
                     },
                 },
             ],

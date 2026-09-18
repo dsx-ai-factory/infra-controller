@@ -36,6 +36,7 @@ carbide-dhcp-common = { path = "../dhcp-common" }
 carbide-instrument = { path = "../instrument" }
 carbide-rpc = { path = "../rpc" }
 carbide-tls = { path = "../tls" }
+carbide-dhcpv6 = { path = "../dhcpv6" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 
 [features]

@@ -25,8 +25,8 @@ use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::Credentials;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
-use carbide_site_explorer::BmcEndpointExplorer;
 use carbide_site_explorer::config::SiteExplorerExploreMode;
+use carbide_site_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 use clap::Parser;
 use mac_address::MacAddress;
 use tracing_subscriber::fmt;
@@ -107,11 +107,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let rotate_switch_nvos_credentials = Default::default();
 
-    let explorer = BmcEndpointExplorer::new(
+    let bmc_client = Arc::new(AuthenticatedBmcClient::new(
         redfish_client_pool,
         Arc::new(NvRedfishClientPool::new(proxy_address)),
+        // Debug tool: no [bmc_proxy]; everything dials the BMC directly.
+        None,
         carbide_ipmi::test_support(),
         credential_provider.clone(),
+    ));
+    let explorer = BmcEndpointExplorer::new(
+        bmc_client,
         rotate_switch_nvos_credentials,
         mode,
         // Standalone debug tool: no database, so rotation bookkeeping is skipped.
@@ -129,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             explorer
                 .generate_exploration_report(
                     bmc_ip_address,
-                    fallback_credentials.clone(),
+                    carbide_site_explorer::BmcAccess::Direct(fallback_credentials.clone()),
                     boot_interface.as_ref(),
                     None,
                 )
@@ -144,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &explorer
                     .generate_exploration_report(
                         bmc_ip_address,
-                        fallback_credentials.clone(),
+                        carbide_site_explorer::BmcAccess::Direct(fallback_credentials.clone()),
                         boot_interface.as_ref(),
                         None,
                     )

@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -34,8 +35,12 @@ func (e *etcd) Name() string {
 }
 
 func newEtcd(ctx context.Context, ip, port string, cert, key []byte, insecureskip bool) (*etcd, error) {
+	// JoinHostPort adds IPv6 brackets; accept hosts that already include them.
+	if strings.HasPrefix(ip, "[") && strings.HasSuffix(ip, "]") {
+		ip = ip[1 : len(ip)-1]
+	}
 	etcdConfig := clientv3.Config{
-		Endpoints:   []string{fmt.Sprintf("%s:%s", ip, port)},
+		Endpoints:   []string{net.JoinHostPort(ip, port)},
 		DialTimeout: 5 * time.Second,
 		Context:     context.Background(),
 	}

@@ -23,12 +23,12 @@ edition = "2024"
 license = "Apache-2.0"
 license-file = "LICENSE"
 authors = ["NVIDIA Carbide Engineering <carbide-dev@exchange.nvidia.com>"]
-repository = "https://github.com/NVIDIA/infra-controller"
+repository = "https://github.com/dsx-ai-factory/infra-controller"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.47.4" }
-librms = { git = "https://github.com/dsx-ai-factory/nv-rms-client.git", tag = "v0.10.1" }
+libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.47.6" }
+librms = { git = "https://github.com/dsx-ai-factory/nv-rms-client.git", tag = "v0.10.1", features = ["server"] }
 ansi-to-html = "0.2.2"
 
 tokio = { version = "1", features = ["full", "tracing"] }
@@ -62,8 +62,8 @@ opentelemetry-semantic-conventions = "0.32.1"
 tracing-opentelemetry = "0.33.0"
 
 # NV-Redfish
-nv-redfish = { version = "0.15.0" }
-nv-redfish-dispatcher = { version = "0.15.0" }
+nv-redfish = { version = "0.16.0" }
+nv-redfish-dispatcher = { version = "0.16.0" }
 
 ########
 # MARK: - Pinned packages that we can't upgrade due to conflicts or just bugs
@@ -239,7 +239,7 @@ toml_edit = "0.25.11"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tonic-reflection = "0.14"
-tower = "0.5"
+tower = { version = "0.5", features = ["timeout"] }
 tower-http = "0.7"
 tower-layer = "0.3"
 tower-service = "0.3.2"

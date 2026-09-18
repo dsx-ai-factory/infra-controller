@@ -410,16 +410,25 @@ pub unsafe extern "C" fn hook_set_config_provisioning_server_ipv6(
     }
 }
 
-/// Set whether DHCPv6 rapid-commit rendering is enabled.
-///
-/// Rapid commit stays disabled by default for this milestone; the setter is
-/// present so the Kea parameter is validated and ready for the later gate.
+/// Set whether DHCPv6 rapid commit is enabled.
 #[unsafe(no_mangle)]
 pub extern "C" fn hook_set_config_rapid_commit_v6(enabled: bool) {
-    if enabled {
-        log::warn!("DHCPv6 rapid-commit is configured but remains disabled for this milestone");
+    match CONFIG.write() {
+        Ok(mut config) => config.rapid_commit_v6 = enabled,
+        Err(error) => log::error!("failed to set DHCPv6 rapid-commit configuration: {error}"),
     }
-    CONFIG.write().unwrap().rapid_commit_v6 = false;
+}
+
+/// Return whether DHCPv6 rapid commit is enabled.
+#[unsafe(no_mangle)]
+pub extern "C" fn hook_get_config_rapid_commit_v6() -> bool {
+    CONFIG
+        .read()
+        .map(|config| config.rapid_commit_v6)
+        .unwrap_or_else(|error| {
+            log::error!("failed to read DHCPv6 rapid-commit configuration: {error}");
+            false
+        })
 }
 
 /// Take the config parameter from Kea and configure it as our metrics endpoint.
@@ -464,7 +473,7 @@ pub unsafe extern "C" fn carbide_set_config_metrics_endpoint(endpoint: *const c_
     }
 }
 
-/// Increments counter for total number of requests
+/// Increments the legacy DHCPv4 request counter.
 ///
 /// # Safety
 ///
@@ -474,7 +483,18 @@ pub unsafe extern "C" fn carbide_increment_total_requests() {
     metrics::increment_total_requests();
 }
 
-/// Increments counter for number of dropped or refused requests. The reason
+/// Increments the DHCPv6 request counter, labelled by the request's message
+/// type. `message_type` is the raw DHCPv6 message-type code reported by Kea.
+///
+/// # Safety
+///
+/// None
+#[unsafe(no_mangle)]
+pub extern "C" fn carbide_increment_v6_requests(message_type: u8) {
+    metrics::increment_v6_requests(metrics::V6RequestMessageType::from(message_type));
+}
+
+/// Increments the legacy DHCPv4 dropped-or-refused request counter. The reason
 /// string is mapped onto the bounded [`metrics::DropReason`] taxonomy; a
 /// string outside the taxonomy (or a null / non-UTF-8 input) is bucketed as
 /// `Unknown` so the metric's label domain stays closed.
@@ -522,7 +542,7 @@ pub extern "C" fn carbide_increment_v6_reply_sent(message_type: u8) {
     metrics::increment_v6_reply_sent(metrics::V6ReplyMessageType::from(message_type));
 }
 
-/// Increments counter for number of dropped DHCPv6 requests.
+/// Increments the DHCPv6 dropped-or-refused request counter.
 ///
 /// # Safety
 ///

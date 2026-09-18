@@ -25,8 +25,9 @@
 //! ([`super::implementation`]), so the one decorator covers every consumer
 //! -- machine-controller, spdm-controller, site-explorer, preingestion, and
 //! the rest -- without touching their call sites. The `operation` label is
-//! the trait method's own name: a closed set fixed at compile time, never a
-//! URL or other wire data.
+//! the trait method's own name, or a fixed compile-time label for a direct
+//! operation that needs response metadata unavailable through the trait. It
+//! is never a URL or other wire data.
 //!
 //! This backend's `outcome` has a third value beyond the shared helper's
 //! ok/error: `unsupported`, for calls a vendor answers with a local

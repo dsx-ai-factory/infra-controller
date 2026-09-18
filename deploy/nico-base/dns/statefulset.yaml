@@ -46,6 +46,9 @@ spec:
               value: "full"
             - name: RUST_LIB_BACKTRACE # See https://doc.rust-lang.org/std/backtrace/index.html#environment-variables
               value: "0"
+            # Uncomment to export DNS traces; trace export is disabled when unset.
+            # - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+            #   value: "http://opentelemetry-collector.otel.svc.cluster.local:4317"
           imagePullPolicy: IfNotPresent
           securityContext:
             capabilities:

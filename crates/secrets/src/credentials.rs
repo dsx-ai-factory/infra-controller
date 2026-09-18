@@ -19,6 +19,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::Engine;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
 use mac_address::MacAddress;
@@ -544,6 +545,16 @@ pub enum CredentialKey {
     RackMaintenanceAccessToken {
         rack_id: RackId,
     },
+
+    /// Firmware artifact access token addressed by a non-secret, operator-defined name.
+    ///
+    /// [`CredentialKey::to_key_str`] encodes the name as one path segment, preserving
+    /// its UTF-8 bytes without giving separators or traversal segments path semantics.
+    FirmwareArtifactAccessToken {
+        /// Opaque lookup name supplied through the credential API.
+        name: String,
+    },
+
     ContainerRegistry {
         registry: String,
     },
@@ -589,6 +600,10 @@ pub enum CredentialPrefix {
     MqttAuth,
     MachineIdentityEncryptionKey,
     RackMaintenanceAccessToken,
+
+    /// Prefix used to list all named firmware artifact access tokens.
+    FirmwareArtifactAccessToken,
+
     ContainerRegistry,
 }
 
@@ -613,6 +628,7 @@ impl CredentialPrefix {
             Self::MqttAuth => "mqtt/",
             Self::MachineIdentityEncryptionKey => "machine_identity/",
             Self::RackMaintenanceAccessToken => "racks/",
+            Self::FirmwareArtifactAccessToken => "firmware_artifacts/",
             Self::ContainerRegistry => "container_registries/",
         }
     }
@@ -636,6 +652,7 @@ impl CredentialPrefix {
             Self::MqttAuth,
             Self::MachineIdentityEncryptionKey,
             Self::RackMaintenanceAccessToken,
+            Self::FirmwareArtifactAccessToken,
             Self::ContainerRegistry,
         ]
     }
@@ -714,6 +731,9 @@ impl CredentialKey {
                 CredentialPrefix::MachineIdentityEncryptionKey
             }
             Self::RackMaintenanceAccessToken { .. } => CredentialPrefix::RackMaintenanceAccessToken,
+            Self::FirmwareArtifactAccessToken { .. } => {
+                CredentialPrefix::FirmwareArtifactAccessToken
+            }
             Self::ContainerRegistry { .. } => CredentialPrefix::ContainerRegistry,
         }
     }
@@ -835,6 +855,12 @@ impl CredentialKey {
             CredentialKey::RackMaintenanceAccessToken { rack_id } => {
                 Cow::from(format!("racks/{rack_id}/maintenance/access-token"))
             }
+            CredentialKey::FirmwareArtifactAccessToken { name } => {
+                let encoded_name =
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(name.as_bytes());
+
+                Cow::from(format!("firmware_artifacts/{encoded_name}/access-token"))
+            }
             CredentialKey::ContainerRegistry { registry } => {
                 Cow::from(format!("container_registries/{registry}/auth"))
             }
@@ -874,6 +900,17 @@ mod tests {
         assert!(password.chars().any(|c| c.is_lowercase()));
         assert!(password.chars().any(|c| c.is_ascii_digit()));
         assert!(password.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn firmware_artifact_credential_name_is_encoded_in_store_path() {
+        assert_eq!(
+            CredentialKey::FirmwareArtifactAccessToken {
+                name: "../repo/name".to_string(),
+            }
+            .to_key_str(),
+            "firmware_artifacts/Li4vcmVwby9uYW1l/access-token"
+        );
     }
 
     #[test]
@@ -1439,6 +1476,16 @@ mod tests {
                     expect: PathChecks::all_hold(),
                 },
                 Check {
+                    scenario: "firmware artifact access token",
+                    input: Row {
+                        key: CredentialKey::FirmwareArtifactAccessToken {
+                            name: "repository-a".to_string(),
+                        },
+                        expected_prefix: "firmware_artifacts/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
                     scenario: "rack maintenance access token",
                     input: Row {
                         key: CredentialKey::RackMaintenanceAccessToken { rack_id },
@@ -1531,6 +1578,9 @@ mod tests {
                 key_id: "k".to_string(),
             },
             CredentialKey::RackMaintenanceAccessToken { rack_id },
+            CredentialKey::FirmwareArtifactAccessToken {
+                name: "repository-a".to_string(),
+            },
             CredentialKey::ContainerRegistry {
                 registry: "nvcr.io".to_string(),
             },
@@ -1553,6 +1603,7 @@ mod tests {
     #[test]
     fn prefix_all_is_complete() {
         let all = CredentialPrefix::all();
-        assert_eq!(all.len(), 17);
+
+        assert_eq!(all.len(), 18);
     }
 }

@@ -29,7 +29,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use carbide_dpf::repository::{DpuRepository, K8sConfigRepository};
 use carbide_dpf::{
     DpfError, DpfSdk, DpfSdkBuilder, DpuDeploymentType, DpuDeviceInfo, DpuNodeInfo,
-    InitDpfResourcesConfig, KubeRepository, NAMESPACE, ServiceDefinition, dpu_node_cr_name,
+    InitDpfResourcesConfigBuilder, KubeRepository, NAMESPACE, ServiceDefinition, dpu_node_cr_name,
 };
 use clap::{Parser, Subcommand};
 use libredfish::model::BootProgressTypes;
@@ -713,11 +713,10 @@ async fn run_provisioning_flow(
     tracing::info!(host_bmc_ip_address = %host_bmc_ip, dpu_count = dpus.len(), timeout_seconds = timeout_secs, "Starting provisioning");
 
     tracing::info!("[1/4] Initializing DPF resources...");
-    let init_config = InitDpfResourcesConfig {
-        bfb_url: bfb_url.to_string(),
-        services: services.to_vec(),
-        ..Default::default()
-    };
+    let init_config = InitDpfResourcesConfigBuilder::default()
+        .bfb_url(bfb_url)
+        .services(services.to_vec())
+        .build()?;
     sdk.create_initialization_objects(&init_config).await?;
     tracing::info!("BFB, DPUFlavor, and DPUDeployment created");
 

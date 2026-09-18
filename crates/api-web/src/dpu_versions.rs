@@ -141,7 +141,7 @@ pub(super) async fn list_html(
 
     let tmpl = DpuVersions {
         machines,
-        page: PageContext::new(info, "/admin/dpu-versions"),
+        page: PageContext::new(info, "/admin/dpu/versions"),
     };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }

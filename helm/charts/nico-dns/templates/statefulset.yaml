@@ -42,6 +42,10 @@ spec:
                 configMapKeyRef:
                   name: {{ include "nico-dns.name" . }}
                   key: NICO_API
+            {{- if .Values.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: {{ .Values.otlpEndpoint | quote }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

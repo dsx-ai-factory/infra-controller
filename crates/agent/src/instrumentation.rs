@@ -28,7 +28,7 @@ use tracing::Span;
 
 pub mod config;
 use carbide_instrument::{MetricFamily, Outcome};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 pub use config::{get_dpu_agent_meter, get_prometheus_registry};
 
 /// LLDP and OVS expose one enum per restart flow, while the private Event
@@ -514,10 +514,10 @@ pub struct NetworkMonitorMetricsState {
     network_reachable_map: NetworkReachableMap,
 }
 
-type NetworkReachableMap = Arc<Mutex<Option<HashMap<MachineId, bool>>>>;
+type NetworkReachableMap = Arc<Mutex<Option<HashMap<DpuMachineId, bool>>>>;
 
 impl NetworkMonitorMetricsState {
-    pub fn initialize(meter: Meter, machine_id: MachineId) -> Arc<Self> {
+    pub fn initialize(meter: Meter, machine_id: DpuMachineId) -> Arc<Self> {
         let network_reachable_map = NetworkReachableMap::default();
 
         {
@@ -581,8 +581,8 @@ impl NetworkMonitorMetricsState {
     pub fn record_network_latency(
         &self,
         latency: Duration,
-        source_dpu_id: MachineId,
-        dest_dpu_id: MachineId,
+        source_dpu_id: DpuMachineId,
+        dest_dpu_id: DpuMachineId,
     ) {
         let attributes = [
             KeyValue::new("source_dpu_id", source_dpu_id.to_string()),
@@ -601,8 +601,8 @@ impl NetworkMonitorMetricsState {
     pub fn record_network_loss_percent(
         &self,
         loss_percent: f64,
-        source_dpu_id: MachineId,
-        dest_dpu_id: MachineId,
+        source_dpu_id: DpuMachineId,
+        dest_dpu_id: DpuMachineId,
     ) {
         let attributes = [
             KeyValue::new("source_dpu_id", source_dpu_id.to_string()),
@@ -616,7 +616,7 @@ impl NetworkMonitorMetricsState {
     /// # Parameters
     /// - `new_reachable_map`: Records reachability between DPUs where the key is ID of destination DPU
     ///   and value is reachability as bool
-    pub fn update_network_reachable_map(&self, new_reachable_map: HashMap<MachineId, bool>) {
+    pub fn update_network_reachable_map(&self, new_reachable_map: HashMap<DpuMachineId, bool>) {
         *self.network_reachable_map.lock().unwrap() = Some(new_reachable_map);
     }
 
@@ -628,8 +628,8 @@ impl NetworkMonitorMetricsState {
     /// - `error_type`: A string describing the type of communication error.
     pub fn record_communication_error(
         &self,
-        source_dpu_id: MachineId,
-        dest_dpu_id: MachineId,
+        source_dpu_id: DpuMachineId,
+        dest_dpu_id: DpuMachineId,
         error_type: String,
     ) {
         let attributes = [
@@ -645,7 +645,7 @@ impl NetworkMonitorMetricsState {
     /// # Parameters
     /// - `machine_id`: The ID of this machine
     /// - `error_type`: A string describing the type of network monitor error.
-    pub fn record_monitor_error(&self, machine_id: MachineId, error_type: String) {
+    pub fn record_monitor_error(&self, machine_id: DpuMachineId, error_type: String) {
         let attributes = [
             KeyValue::new("dpu_id", machine_id.to_string()),
             KeyValue::new("error_type", error_type),
@@ -1068,7 +1068,9 @@ mod http_request_tests {
     use axum::http::{Request as HttpRequest, StatusCode};
     use axum::routing::get;
     use carbide_instrument::emit;
-    use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{
+        ApproxHistogramSum, CapturedFieldKind, MetricsCapture, capture_logs,
+    };
     use carbide_test_support::{Check, check_values};
     use tower::ServiceExt;
 
@@ -1086,7 +1088,7 @@ mod http_request_tests {
     struct EventObservation {
         request_delta: f64,
         latency_count_delta: u64,
-        latency_sum_delta: f64,
+        latency_sum_delta: ApproxHistogramSum,
         logs: Vec<LogObservation>,
     }
 
@@ -1142,7 +1144,7 @@ mod http_request_tests {
                     expect: EventObservation {
                         request_delta: 1.0,
                         latency_count_delta: 0,
-                        latency_sum_delta: 0.0,
+                        latency_sum_delta: ApproxHistogramSum(0.0),
                         logs: vec![LogObservation {
                             metadata_name: "dpu_agent_http_request_started".to_string(),
                             level: tracing::Level::INFO,
@@ -1168,7 +1170,7 @@ mod http_request_tests {
                     expect: EventObservation {
                         request_delta: 0.0,
                         latency_count_delta: 1,
-                        latency_sum_delta: 12.5,
+                        latency_sum_delta: ApproxHistogramSum(12.5),
                         logs: vec![LogObservation {
                             metadata_name: "dpu_agent_http_response_generated".to_string(),
                             level: tracing::Level::INFO,

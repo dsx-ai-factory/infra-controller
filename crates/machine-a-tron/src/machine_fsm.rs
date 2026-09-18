@@ -108,11 +108,13 @@ impl MachineState {
                 Self::BmcOnlyMachineUp | Self::BmcOnlyMachineDown => (self, vec![]),
                 // Clean up as the DPU parks: drop its relay handle and cached
                 // discovery state so the flipped NIC stops serving host DHCP.
-                _ => {
-                    let mut actions = self.abandon_dhcp_retry();
-                    actions.push(Action::CleanupOnPowerOff);
-                    (Self::BmcOnlyMachineUp, actions)
-                }
+                _ => (
+                    Self::BmcOnlyMachineUp,
+                    self.abandon_dhcp_retry()
+                        .into_iter()
+                        .chain([Action::ConsoleOutputStop, Action::CleanupOnPowerOff])
+                        .collect(),
+                ),
             };
         }
         match self {
@@ -224,7 +226,11 @@ impl MachineState {
                 };
                 let mut actions = map_retry_actions(retry_actions, DhcpType::Bmc);
                 actions.extend(if power_on && !bmc_only {
-                    vec![Action::SetupBmc, Action::SetTimer(Timer::MachineOn)]
+                    vec![
+                        Action::SetupBmc,
+                        Action::ConsoleOutputStart,
+                        Action::SetTimer(Timer::MachineOn),
+                    ]
                 } else {
                     vec![Action::SetupBmc]
                 });
@@ -236,10 +242,13 @@ impl MachineState {
                     power_on: true,
                     dhcp_retry,
                 },
-                if power_on {
+                if power_on || bmc_only {
                     vec![]
                 } else {
-                    vec![Action::SetTimer(Timer::MachineOn)]
+                    vec![
+                        Action::ConsoleOutputStart,
+                        Action::SetTimer(Timer::MachineOn),
+                    ]
                 },
             ),
             Event::PowerOff => (
@@ -248,7 +257,7 @@ impl MachineState {
                     power_on: false,
                     dhcp_retry,
                 },
-                vec![],
+                vec![Action::ConsoleOutputStop],
             ),
             Event::PowerCycle => (
                 Self::BmcInit {
@@ -256,7 +265,10 @@ impl MachineState {
                     power_on: false,
                     dhcp_retry,
                 },
-                vec![Action::SetTimer(Timer::PowerCycle)],
+                vec![
+                    Action::ConsoleOutputStop,
+                    Action::SetTimer(Timer::PowerCycle),
+                ],
             ),
             Event::TimerAlert(Timer::PowerCycle) => (
                 Self::BmcInit {
@@ -303,6 +315,7 @@ impl MachineState {
                 let (_, retry_actions) = dhcp_retry.event(RetryEvent::Abandon);
                 let mut actions = map_retry_actions(retry_actions, DhcpType::Machine);
                 actions.extend([
+                    Action::ConsoleOutputStop,
                     Action::CleanupOnPowerOff,
                     Action::SetTimer(Timer::PowerCycle),
                 ]);
@@ -310,9 +323,13 @@ impl MachineState {
             }
             Event::PowerOff => {
                 let (_, retry_actions) = dhcp_retry.event(RetryEvent::Abandon);
-                let mut actions = map_retry_actions(retry_actions, DhcpType::Machine);
-                actions.push(Action::CleanupOnPowerOff);
-                (Self::MachineDown, actions)
+                (
+                    Self::MachineDown,
+                    map_retry_actions(retry_actions, DhcpType::Machine)
+                        .into_iter()
+                        .chain([Action::ConsoleOutputStop, Action::CleanupOnPowerOff])
+                        .collect(),
+                )
             }
             _ => (self, vec![]),
         }
@@ -320,12 +337,21 @@ impl MachineState {
 
     fn fsm_machine_down(self, event: Event) -> (Self, Vec<Action>) {
         match event {
-            Event::PowerCycle => (self, vec![Action::SetTimer(Timer::PowerCycle)]),
+            Event::PowerCycle => (
+                self,
+                vec![
+                    Action::ConsoleOutputStop,
+                    Action::SetTimer(Timer::PowerCycle),
+                ],
+            ),
             Event::PowerOn | Event::TimerAlert(Timer::PowerCycle) => (
                 Self::Init {
                     dhcp_retry: DhcpRetryFsm::new(),
                 },
-                vec![Action::SetTimer(Timer::MachineOn)],
+                vec![
+                    Action::ConsoleOutputStart,
+                    Action::SetTimer(Timer::MachineOn),
+                ],
             ),
             _ => (self, vec![]),
         }
@@ -341,8 +367,13 @@ impl MachineState {
                     OsImage::DpuAgent => OsFsm::DpuAgent(DpuAgentFsm::Discovery),
                     OsImage::Scout => OsFsm::Scout(ScoutFsm::Discovery),
                 };
-                let mut actions = os_fsm.init_actions();
-                actions.push(Action::BmcEvent(BmcEvent::BootCompleted));
+                let actions = match os_fsm {
+                    OsFsm::None => vec![
+                        Action::ConsoleOutputStop,
+                        Action::BmcEvent(BmcEvent::BootCompleted),
+                    ],
+                    _ => os_fsm.init_actions(),
+                };
                 (Self::MachineUp { os_fsm }, actions)
             }
             _ => (self, vec![]),
@@ -369,10 +400,11 @@ impl MachineState {
 
     fn fsm_bmc_only_machine_up(self, event: Event) -> (Self, Vec<Action>) {
         match event {
-            Event::PowerOff => (Self::BmcOnlyMachineDown, vec![]),
+            Event::PowerOff => (Self::BmcOnlyMachineDown, vec![Action::ConsoleOutputStop]),
             Event::PowerCycle => (
                 Self::BmcOnlyMachineDown,
                 vec![
+                    Action::ConsoleOutputStop,
                     Action::CleanupOnPowerOff,
                     Action::SetTimer(Timer::PowerCycle),
                 ],
@@ -386,6 +418,7 @@ impl MachineState {
             Event::PowerCycle => (
                 Self::BmcOnlyMachineDown,
                 vec![
+                    Action::ConsoleOutputStop,
                     Action::CleanupOnPowerOff,
                     Action::SetTimer(Timer::PowerCycle),
                 ],
@@ -398,13 +431,17 @@ impl MachineState {
     }
 
     fn machine_down_on_power_off(self) -> (Self, Vec<Action>) {
-        (Self::MachineDown, vec![Action::CleanupOnPowerOff])
+        (
+            Self::MachineDown,
+            vec![Action::ConsoleOutputStop, Action::CleanupOnPowerOff],
+        )
     }
 
     fn machine_down_on_power_cycle(self) -> (Self, Vec<Action>) {
         (
             Self::MachineDown,
             vec![
+                Action::ConsoleOutputStop,
                 Action::CleanupOnPowerOff,
                 Action::SetTimer(Timer::PowerCycle),
             ],
@@ -464,6 +501,8 @@ impl Event {
 #[derive(Copy, Clone, Debug)]
 pub(super) enum Action {
     SetupBmc,
+    ConsoleOutputStart,
+    ConsoleOutputStop,
     SetTimer(Timer),
     Dhcp(DhcpType),
     ScheduleDhcpRetry { delay: Duration },
@@ -552,9 +591,19 @@ impl ScoutFsm {
         match event {
             Event::InitialDiscoveryCompleted => (
                 Self::PollingLoop,
-                vec![Action::AgentControlRequest(OsImage::Scout)],
+                vec![
+                    Action::ConsoleOutputStop,
+                    Action::BmcEvent(BmcEvent::BootCompleted),
+                    Action::AgentControlRequest(OsImage::Scout),
+                ],
             ),
-            Event::MachineNotFound => (Self::FailedAndWaitForReboot, vec![]),
+            Event::MachineNotFound => (
+                Self::FailedAndWaitForReboot,
+                vec![
+                    Action::ConsoleOutputStop,
+                    Action::BmcEvent(BmcEvent::BootCompleted),
+                ],
+            ),
             _ => (self, vec![]),
         }
     }
@@ -595,9 +644,19 @@ impl DpuAgentFsm {
         match event {
             Event::InitialDiscoveryCompleted => (
                 Self::AgentControl,
-                vec![Action::AgentControlRequest(OsImage::DpuAgent)],
+                vec![
+                    Action::ConsoleOutputStop,
+                    Action::BmcEvent(BmcEvent::BootCompleted),
+                    Action::AgentControlRequest(OsImage::DpuAgent),
+                ],
             ),
-            Event::MachineNotFound => (Self::FailedAndWaitForReboot, vec![]),
+            Event::MachineNotFound => (
+                Self::FailedAndWaitForReboot,
+                vec![
+                    Action::ConsoleOutputStop,
+                    Action::BmcEvent(BmcEvent::BootCompleted),
+                ],
+            ),
             _ => (self, vec![]),
         }
     }
@@ -667,7 +726,11 @@ mod tests {
                 if starts_boot {
                     matches!(
                         actions.as_slice(),
-                        [Action::SetupBmc, Action::SetTimer(Timer::MachineOn)]
+                        [
+                            Action::SetupBmc,
+                            Action::ConsoleOutputStart,
+                            Action::SetTimer(Timer::MachineOn)
+                        ]
                     )
                 } else {
                     matches!(actions.as_slice(), [Action::SetupBmc])
@@ -675,6 +738,26 @@ mod tests {
                 "unexpected actions for power_on={power_on}, bmc_only={bmc_only}"
             );
         }
+    }
+
+    #[test]
+    fn bmc_only_power_on_during_initialization_does_not_start_boot() {
+        let (fsm, _) = MachineFsm::init(false, true);
+        let (fsm, actions) = fsm.event(Event::PowerOn);
+
+        assert!(matches!(
+            fsm.state,
+            MachineState::BmcInit {
+                power_on: true,
+                bmc_only: true,
+                ..
+            }
+        ));
+        assert!(actions.is_empty());
+
+        let (fsm, actions) = fsm.event(Event::DhcpComplete);
+        assert!(matches!(fsm.state, MachineState::BmcOnlyMachineUp));
+        assert!(matches!(actions.as_slice(), [Action::SetupBmc]));
     }
 
     #[test]
@@ -687,7 +770,7 @@ mod tests {
         ));
 
         let (fsm, actions) = fsm.event(Event::PowerOff);
-        assert!(actions.is_empty());
+        assert!(matches!(actions.as_slice(), [Action::ConsoleOutputStop]));
         let (_, actions) = fsm.event(Event::DhcpRetryExpired);
         assert!(matches!(actions.as_slice(), [Action::Dhcp(DhcpType::Bmc)]));
     }
@@ -702,10 +785,74 @@ mod tests {
         assert!(matches!(fsm.state, MachineState::MachineDown));
         assert!(matches!(
             actions.as_slice(),
-            [Action::CancelDhcpRetry, Action::CleanupOnPowerOff]
+            [
+                Action::CancelDhcpRetry,
+                Action::ConsoleOutputStop,
+                Action::CleanupOnPowerOff
+            ]
         ));
 
         let (_, actions) = fsm.event(Event::DhcpRetryExpired);
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn output_stops_before_boot_completion_and_steady_agent_work() {
+        for os_image in [OsImage::Scout, OsImage::DpuAgent] {
+            let (fsm, _) = MachineFsm::init(true, false);
+            let (fsm, _) = fsm.event(Event::DhcpComplete);
+            let (fsm, _) = fsm.event(Event::DhcpComplete);
+            let (fsm, actions) = fsm.event(Event::PxeComplete(os_image));
+            assert!(matches!(
+                actions.as_slice(),
+                [Action::InitialDiscoveryRequest(discovery_os)] if *discovery_os == os_image
+            ));
+
+            let (_, actions) = fsm.event(Event::InitialDiscoveryCompleted);
+            assert!(matches!(
+                actions.as_slice(),
+                [
+                    Action::ConsoleOutputStop,
+                    Action::BmcEvent(BmcEvent::BootCompleted),
+                    Action::AgentControlRequest(agent_os),
+                ] if *agent_os == os_image
+            ));
+        }
+    }
+
+    #[test]
+    fn disk_boot_stops_output_before_boot_completion() {
+        let (fsm, _) = MachineFsm::init(true, false);
+        let (fsm, _) = fsm.event(Event::DhcpComplete);
+        let (fsm, _) = fsm.event(Event::DhcpComplete);
+        let (_, actions) = fsm.event(Event::PxeComplete(OsImage::None));
+
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                Action::ConsoleOutputStop,
+                Action::BmcEvent(BmcEvent::BootCompleted)
+            ]
+        ));
+    }
+
+    #[test]
+    fn initial_discovery_failure_stops_output_and_completes_boot() {
+        for os_fsm in [
+            OsFsm::Scout(ScoutFsm::Discovery),
+            OsFsm::DpuAgent(DpuAgentFsm::Discovery),
+        ] {
+            let (os_fsm, actions) = os_fsm.event(Event::MachineNotFound);
+            assert!(os_fsm.is_awaiting_reboot());
+            // The OS has booted even if discovery cannot find its machine; the BMC must
+            // still consume the one-time boot override and record boot completion.
+            assert!(matches!(
+                actions.as_slice(),
+                [
+                    Action::ConsoleOutputStop,
+                    Action::BmcEvent(BmcEvent::BootCompleted)
+                ]
+            ));
+        }
     }
 }

@@ -17,14 +17,24 @@ RUN apt-get update && \
 	protobuf-compiler \
 	libpq-dev \
 	libssl-dev \
+	clang \
 	pkg-config \
 	lld \
+	mold \
 	&& rm -rf /var/lib/apt/lists/*
+
+RUN printf '#!/bin/sh\nexec clang -fuse-ld=lld "$@"\n' \
+		>/usr/local/bin/clang-lld && \
+	printf '#!/bin/sh\nexec clang -fuse-ld=mold "$@"\n' \
+		>/usr/local/bin/clang-mold && \
+	chmod 0755 /usr/local/bin/clang-lld /usr/local/bin/clang-mold
 
 # sccache: reuse compiled artifacts across runs (mount SCCACHE_DIR from host in run)
 RUN cargo install sccache --locked && rm -rf /usr/local/cargo/registry/src
 ENV RUSTC_WRAPPER=sccache
 ENV SCCACHE_DIR=/sccache
-# Use lld for linking (uses less RAM than default ld; avoids OOM when linking carbide-api tests).
+# Use lld on x86_64 and mold on aarch64 to avoid memory-heavy GNU ld links.
 # Enable tokio_unstable so tokio::task::Builder is available (used by api-db, api, etc.).
-ENV RUSTFLAGS="-C link-arg=-fuse-ld=lld --cfg tokio_unstable"
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-lld
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold
+ENV RUSTFLAGS="--cfg tokio_unstable"

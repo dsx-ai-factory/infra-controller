@@ -20,11 +20,14 @@ use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr, TcpListener, UdpSocket};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
 use nix::sys::stat::Mode;
 use nix::unistd::mkfifo;
 use tempfile::TempDir;
@@ -44,9 +47,18 @@ const PASSWORD_UPDATE_TIMEOUT: Duration = Duration::from_secs(10);
 const IPMI_SIM_EXECUTABLE: &str = "ipmi_sim";
 const CHASSIS_CONTROL_FIFO: &str = "chassis-control.fifo";
 
+/// A byte stream supplied to the mock SOL transport for one console connection.
+pub type ConsoleOutputStream = Pin<Box<dyn Stream<Item = Bytes> + Send + 'static>>;
+
+/// Creates an independent byte stream for every accepted mock SOL connection.
+pub type ConsoleOutputStreamFactory = Box<dyn Fn() -> ConsoleOutputStream + Send + 'static>;
+
+/// Configures one `ipmi_sim` process and its mock serial-console transport.
 #[derive(Debug, Clone)]
 pub struct IpmiSimConfig {
+    /// Stable identity used to derive the simulator GUID.
     pub stable_id: String,
+    /// Prompt written after interactive input ends with a newline.
     pub console_prompt: String,
 }
 
@@ -151,7 +163,15 @@ impl Reservations {
     }
 }
 
-pub async fn start(state: &BmcState, config: IpmiSimConfig) -> Result<IpmiSimHandle, Error> {
+/// Starts an IPMI simulator with an optional output stream factory for SOL connections.
+///
+/// The factory is called once per accepted console connection; its bytes are forwarded unchanged.
+/// Without a factory, the console only echoes interactive input and writes the configured prompt.
+pub async fn start(
+    state: &BmcState,
+    config: IpmiSimConfig,
+    console_output: Option<ConsoleOutputStreamFactory>,
+) -> Result<IpmiSimHandle, Error> {
     let (username, password) = state
         .account_service_state
         .administrator_credentials()
@@ -163,7 +183,7 @@ pub async fn start(state: &BmcState, config: IpmiSimConfig) -> Result<IpmiSimHan
         .tempdir()?;
     std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o700))?;
 
-    let console = MockConsole::start(config.console_prompt.clone()).await?;
+    let console = MockConsole::start(config.console_prompt.clone(), console_output).await?;
     let callbacks = state
         .callbacks
         .clone()
@@ -504,14 +524,18 @@ impl Drop for MockConsole {
 }
 
 impl MockConsole {
-    async fn start(prompt: String) -> Result<Self, std::io::Error> {
+    async fn start(
+        prompt: String,
+        output_factory: Option<ConsoleOutputStreamFactory>,
+    ) -> Result<Self, std::io::Error> {
         let listener = TokioTcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
         let bmc_mock_console_port = listener.local_addr()?.port();
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let prompt = prompt.clone();
+                let output = output_factory.as_ref().map(|factory| factory());
                 tokio::spawn(async move {
-                    if let Err(error) = serve_console(stream, &prompt).await {
+                    if let Err(error) = serve_console(stream, &prompt, output).await {
                         tracing::debug!(%error, "mock SOL console connection closed with error");
                     }
                 });
@@ -524,19 +548,36 @@ impl MockConsole {
     }
 }
 
-async fn serve_console(mut stream: TcpStream, prompt: &str) -> Result<(), std::io::Error> {
+async fn serve_console(
+    mut stream: TcpStream,
+    prompt: &str,
+    mut output: Option<ConsoleOutputStream>,
+) -> Result<(), std::io::Error> {
     let mut input = Vec::new();
     let mut buffer = [0_u8; 32];
     loop {
-        let length = stream.read(&mut buffer).await?;
-        if length == 0 {
-            return Ok(());
-        }
-        input.extend_from_slice(&buffer[..length]);
-        stream.write_all(&buffer[..length]).await?;
-        if input.ends_with(b"\n") || input.ends_with(b"\r") {
-            input.clear();
-            stream.write_all(format!("\r\n{prompt}").as_bytes()).await?;
+        tokio::select! {
+            biased;
+            length = stream.read(&mut buffer) => {
+                let length = length?;
+                if length == 0 {
+                    return Ok(());
+                }
+                input.extend_from_slice(&buffer[..length]);
+                stream.write_all(&buffer[..length]).await?;
+                if input.ends_with(b"\n") || input.ends_with(b"\r") {
+                    input.clear();
+                    stream.write_all(format!("\r\n{prompt}").as_bytes()).await?;
+                }
+            }
+            next = async { output.as_mut().expect("branch guard requires output").next().await },
+                if output.is_some() =>
+            {
+                match next {
+                    Some(bytes) => stream.write_all(&bytes).await?,
+                    None => output = None,
+                }
+            }
         }
     }
 }
@@ -548,11 +589,15 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use bytes::Bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
     use tokio::sync::Notify;
 
     use super::{
-        ChassisControlEvent, Error, IPMI_SIM_EXECUTABLE, IpmiSimConfig, MockConsole, stable_guid,
-        start, validate_credential, validate_executable_in_path,
+        ChassisControlEvent, ConsoleOutputStream, ConsoleOutputStreamFactory, Error,
+        IPMI_SIM_EXECUTABLE, IpmiSimConfig, MockConsole, stable_guid, start, validate_credential,
+        validate_executable_in_path,
     };
     use crate::{Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl};
 
@@ -659,6 +704,7 @@ mod tests {
                 stable_id: "missing-callback".to_string(),
                 console_prompt: "root@bmc-mock # ".to_string(),
             },
+            None,
         )
         .await
         .unwrap_err();
@@ -681,6 +727,7 @@ mod tests {
                 stable_id: "chassis-reset".to_string(),
                 console_prompt: "root@bmc-mock # ".to_string(),
             },
+            None,
         )
         .await
         .unwrap();
@@ -748,7 +795,9 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_mock_console_releases_listener() {
-        let console = MockConsole::start("prompt".to_string()).await.unwrap();
+        let console = MockConsole::start("prompt".to_string(), None)
+            .await
+            .unwrap();
         let port = console.bmc_mock_console_port;
 
         drop(console);
@@ -766,5 +815,49 @@ mod tests {
         })
         .await
         .expect("mock console listener was not released");
+    }
+
+    #[tokio::test]
+    async fn mock_console_forwards_supplied_bytes_and_preserves_interaction() {
+        let output_factory: ConsoleOutputStreamFactory = Box::new(|| {
+            Box::pin(futures::stream::iter([Bytes::from_static(
+                b"machine-owned output\r\n",
+            )])) as ConsoleOutputStream
+        });
+        let console = MockConsole::start("prompt>".to_string(), Some(output_factory))
+            .await
+            .unwrap();
+        let mut connection =
+            TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, console.bmc_mock_console_port))
+                .await
+                .unwrap();
+        connection.write_all(b"probe\r").await.unwrap();
+
+        let output = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut output = Vec::new();
+            let mut buffer = [0; 128];
+            loop {
+                let length = connection.read(&mut buffer).await.unwrap();
+                assert_ne!(length, 0, "mock console disconnected early");
+                output.extend_from_slice(&buffer[..length]);
+                if output
+                    .windows(b"machine-owned output\r\n".len())
+                    .any(|window| window == b"machine-owned output\r\n")
+                    && output
+                        .windows(b"probe\r\r\nprompt>".len())
+                        .any(|window| window == b"probe\r\r\nprompt>")
+                {
+                    return output;
+                }
+            }
+        })
+        .await
+        .expect("mock console did not forward output and prompt");
+
+        assert!(
+            output
+                .windows(b"machine-owned output\r\n".len())
+                .any(|window| window == b"machine-owned output\r\n")
+        );
     }
 }

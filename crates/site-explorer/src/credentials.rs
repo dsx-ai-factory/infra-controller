@@ -36,6 +36,7 @@ fn get_bmc_nvos_admin_credential_key(bmc_mac_address: MacAddress) -> CredentialK
     CredentialKey::SwitchNvosAdmin { bmc_mac_address }
 }
 
+#[derive(Clone)]
 pub(super) struct CredentialClient {
     credential_manager: Arc<dyn CredentialManager>,
 }

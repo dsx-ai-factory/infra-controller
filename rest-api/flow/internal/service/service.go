@@ -12,6 +12,8 @@ import (
 	"strconv"
 
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
@@ -363,8 +365,12 @@ func (s *Service) Start(ctx context.Context) (retErr error) {
 	// same completion log as accepted calls. Recovery runs on both sides of
 	// authorization: the outer layer catches authorization panics, while the
 	// inner layer can enrich downstream panic logs with the resolved identity.
+	// The stats handler extracts the caller's traceparent before any
+	// interceptor runs, so access logs and authorization decisions are
+	// recorded under the caller's trace rather than a fresh root.
 	s.grpcServer = grpc.NewServer(
 		certOpt,
+		grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))),
 		grpc.ChainUnaryInterceptor(unaryServerInterceptors(authorizer)...),
 		grpc.ChainStreamInterceptor(streamServerInterceptors(authorizer)...),
 	)

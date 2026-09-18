@@ -158,13 +158,14 @@ type UserCreateInput struct {
 
 // UserUpdateInput input parameters for Update method
 type UserUpdateInput struct {
-	UserID      uuid.UUID
-	AuxiliaryID *string
-	StarfleetID *string
-	Email       *string
-	FirstName   *string
-	LastName    *string
-	OrgData     OrgData
+	UserID          uuid.UUID
+	AuxiliaryID     *string
+	StarfleetID     *string
+	Email           *string
+	FirstName       *string
+	LastName        *string
+	OrgData         OrgData
+	PreserveUpdated bool
 }
 
 // UserGetOrCreateInput input parameters for GetOrCreate method
@@ -431,7 +432,9 @@ func (usd UserSQLDAO) Update(ctx context.Context, tx *db.Tx, input UserUpdateInp
 	}
 
 	if len(updatedFields) > 0 {
-		updatedFields = append(updatedFields, "updated")
+		if !input.PreserveUpdated {
+			updatedFields = append(updatedFields, "updated")
+		}
 
 		_, err := db.GetIDB(tx, usd.dbSession).NewUpdate().Model(u).Column(updatedFields...).Where("id = ?", input.UserID).Exec(ctx)
 		if err != nil {

@@ -23,7 +23,6 @@ import (
 const (
 	validationErrorInfrastructureProviderIDExpectNil = "Specifying InfrastructureProviderID is currently not supported"
 	errMsgInvalidImageSHA                            = "not a valid SHA hash"
-	errMsgInvalidImageDiskPath                       = "not a valid disk path"
 	errMsgExactlyOneRootFsField                      = "exactly one of 'rootFsId' and 'rootFsLabel' must be specified"
 	errMsgOnlyOneRootFsField                         = "only one of 'rootFsId' and 'rootFsLabel' may be specified"
 	errMsgNotEmpty                                   = "cannot be empty"
@@ -379,7 +378,7 @@ func (oscr *APIOperatingSystemCreateRequest) Validate() error {
 			validation.Field(&oscr.ImageAuthToken,
 				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.ImageAuthToken)) && util.IsNilOrEmptyStrPtr(oscr.ImageAuthType), validation.Required.Error("imageAuthType must be specified when imageAuthToken is specified"))),
 			validation.Field(&oscr.ImageDisk,
-				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.ImageDisk)), validation.Match(util.DiskImagePathRegex).Error(errMsgInvalidImageDiskPath))),
+				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.ImageDisk)), validation.By(util.ValidateDiskImagePath))),
 			validation.Field(&oscr.RootFsID,
 				validation.When(util.IsNilOrEmptyStrPtr(oscr.RootFsLabel), validation.Required.Error(errMsgExactlyOneRootFsField)),
 				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.RootFsLabel)), validation.Empty.Error(errMsgExactlyOneRootFsField))),
@@ -726,7 +725,7 @@ func (osur *APIOperatingSystemUpdateRequest) Validate(existingOS *cdbm.Operating
 			validation.Field(&osur.ImageAuthToken,
 				validation.When(!(util.IsNilOrEmptyStrPtr(osur.ImageAuthToken)) && util.IsNilOrEmptyStrPtr(osur.ImageAuthType), validation.Required.Error("imageAuthType must be specified when imageAuthToken is specified"))),
 			validation.Field(&osur.ImageDisk,
-				validation.When(!(util.IsEmptyStrPtr(osur.ImageDisk)), validation.Match(util.DiskImagePathRegex).Error(errMsgInvalidImageDiskPath))),
+				validation.When(!(util.IsEmptyStrPtr(osur.ImageDisk)), validation.By(util.ValidateDiskImagePath))),
 			validation.Field(&osur.RootFsID,
 				validation.When(!(util.IsNilOrEmptyStrPtr(osur.RootFsLabel)), validation.Empty.Error(errMsgOnlyOneRootFsField))),
 			validation.Field(&osur.RootFsLabel,

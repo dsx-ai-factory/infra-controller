@@ -2,6 +2,10 @@
 
 Once you have NVIDIA Infra Controller (NICo) up and running, you can begin ingesting machines.
 
+Hosts boot the discovery OS (Scout) as part of this flow. To run site-specific
+cloud-init configuration during discovery boots, refer to [Discovery OS cloud-init
+(Scout)](discovery-os-cloud-init.md).
+
 The preferred operator workflow uses the REST API and `nicocli`. Follow [Ingesting Hosts (REST API)](ingesting-hosts-rest-api.md) for credential setup, Expected Machine registration, ingestion verification, and table maintenance. The direct Core workflow below remains available for operations that do not yet have REST parity; see [Site Setup API Parity](site-setup-api-parity.md) for the current status and tracked gaps.
 
 ## Prerequisites
@@ -319,7 +323,7 @@ Before pairing can occur, Site Explorer must successfully explore each BMC endpo
 | `ConnectionTimeout` | BMC unreachable on the OOB network; check cabling and DHCP routing |
 | `ConnectionRefused` | No Redfish API exposed at the target IP; the DPU admin IP is often mistakenly probed here |
 | `Unauthorized` / `AvoidLockout` | BMC credentials do not match the expected machines table or site vault; see [Adding New Machines: BMC Password Requirements](../playbooks/stuck_objects/adding_new_machines.md) |
-| `MissingCredentials` | Credentials not yet available in vault; check that site-wide BMC credentials are configured |
+| `MissingCredentials` | Credentials not yet available from any configured credential source; check that site-wide BMC credentials are configured |
 | `UnsupportedVendor` | BMC vendor is not supported by this version of NICo |
 | `RedfishError` | Unexpected Redfish response; check BMC firmware version and `nico-api` logs for the full response body |
 | `InvalidDpuRedfishBiosResponse` | DPU BIOS endpoint returned an unexpected response; the DPU may need a fresh OS install |

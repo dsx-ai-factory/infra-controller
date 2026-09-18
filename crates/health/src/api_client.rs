@@ -313,7 +313,7 @@ fn switch_endpoint_metadata(
             .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
         endpoint_role,
         is_primary: switch.is_primary,
-        nmxc_enabled: config.enable_nmxc,
+        nmxc_enabled: config.enable_nmxc || switch.is_primary,
         nmxt_enabled,
     }))
 }
@@ -374,8 +374,8 @@ impl ApiEndpointSource {
 
     pub async fn fetch_bmc_hosts(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
         let mut endpoints = self.fetch_machine_endpoints().await?;
-        endpoints.extend(self.fetch_power_shelf_endpoints().await);
         endpoints.extend(self.fetch_switch_endpoints().await);
+        endpoints.extend(self.fetch_power_shelf_endpoints().await);
 
         self.prune_bmc_client_cache(&endpoints);
 
@@ -417,7 +417,11 @@ impl ApiEndpointSource {
 
         let mut endpoints = Vec::new();
 
-        for ids_chunk in machine_ids.machine_ids.chunks(100) {
+        // Page by id count, but keep each reply well under tonic's 4 MiB receive
+        // limit: a page of 100 machines has exceeded it in the field at about
+        // 46 KB per machine.
+        const MACHINES_PAGE_SIZE: usize = 25;
+        for ids_chunk in machine_ids.machine_ids.chunks(MACHINES_PAGE_SIZE) {
             let request = ::rpc::forge::MachinesByIdsRequest {
                 machine_ids: Vec::from(ids_chunk),
                 ..Default::default()
@@ -628,19 +632,15 @@ impl ApiEndpointSource {
             ));
         };
         let addr = BmcAddr::try_from(bmc_info)?;
-        let serial = power_shelf
-            .config
-            .as_ref()
-            .map(|config| config.name.clone())
-            .ok_or(HealthError::GenericError(
-                "Power shelf endpoint does not have serial".to_string(),
-            ))?;
 
         self.endpoint_for(
             addr,
             Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: power_shelf.id,
-                serial,
+                serial: None,
+                nvlink_domain_uuid: power_shelf
+                    .nvlink_domain_uuid
+                    .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
             })),
             power_shelf.rack_id.clone(),
             ApiCredentialKind::Bmc,
@@ -969,9 +969,31 @@ mod tests {
     }
 
     #[test]
-    fn power_shelf_endpoint_preserves_api_rack_id()
-    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let api_url = Url::parse("https://127.0.0.1:1079")?;
+    fn switch_endpoint_metadata_enables_nmxc_for_primary_switch() {
+        let metadata = switch_endpoint_metadata(
+            &rpc::forge::Switch {
+                config: Some(rpc::forge::SwitchConfig {
+                    name: "switch-a".to_string(),
+                    ..Default::default()
+                }),
+                is_primary: true,
+                ..Default::default()
+            },
+            SwitchEndpointRole::Host,
+            false,
+        )
+        .expect("switch metadata");
+
+        let EndpointMetadata::Switch(switch) = metadata else {
+            panic!("expected switch metadata");
+        };
+
+        assert!(switch.nmxc_enabled);
+    }
+
+    #[test]
+    fn power_shelf_endpoint_uses_api_rack_id_and_non_nil_domain() {
+        let api_url = Url::parse("https://127.0.0.1:1079").expect("valid URL");
 
         let source = ApiEndpointSource::new(
             Arc::new(ApiClientWrapper::new(
@@ -987,25 +1009,54 @@ mod tests {
         );
 
         let rack_id = RackId::new("RACK_1");
+        let domain = NvLinkDomainId::new();
 
-        let endpoint = source.extract_power_shelf_endpoint(&rpc::forge::PowerShelf {
-            config: Some(rpc::forge::PowerShelfConfig {
-                name: "power-shelf-a".to_string(),
-                ..Default::default()
-            }),
-            bmc_info: Some(rpc::forge::BmcInfo {
-                ip: Some("10.0.0.1".to_string()),
-                mac: Some(test_mac().to_string()),
-                port: Some(443),
-                ..Default::default()
-            }),
-            rack_id: Some(rack_id.clone()),
-            ..Default::default()
-        })?;
+        check_values(
+            [
+                Check {
+                    scenario: "domain is missing",
+                    input: None,
+                    expect: None,
+                },
+                Check {
+                    scenario: "nil domain is absent",
+                    input: Some(NvLinkDomainId::nil()),
+                    expect: None,
+                },
+                Check {
+                    scenario: "non-nil API power shelf field",
+                    input: Some(domain),
+                    expect: Some(domain),
+                },
+            ],
+            |nvlink_domain_uuid| {
+                let endpoint = source
+                    .extract_power_shelf_endpoint(&rpc::forge::PowerShelf {
+                        config: Some(rpc::forge::PowerShelfConfig {
+                            name: "power-shelf-a".to_string(),
+                            ..Default::default()
+                        }),
+                        bmc_info: Some(rpc::forge::BmcInfo {
+                            ip: Some("10.0.0.1".to_string()),
+                            mac: Some(test_mac().to_string()),
+                            port: Some(443),
+                            ..Default::default()
+                        }),
+                        rack_id: Some(rack_id.clone()),
+                        nvlink_domain_uuid,
+                        ..Default::default()
+                    })
+                    .expect("power shelf endpoint");
 
-        assert_eq!(endpoint.rack_id.as_ref(), Some(&rack_id));
-
-        Ok(())
+                assert_eq!(endpoint.rack_id.as_ref(), Some(&rack_id));
+                let Some(EndpointMetadata::PowerShelf(power_shelf)) = endpoint.metadata.as_ref()
+                else {
+                    panic!("expected power shelf metadata");
+                };
+                assert_eq!(power_shelf.serial, None);
+                power_shelf.nvlink_domain_uuid
+            },
+        );
     }
 
     #[tokio::test]

@@ -23,6 +23,7 @@ metadata:
     app: nico-pxe
     app.kubernetes.io/metrics: nico-pxe
 spec:
+  ipFamilyPolicy: PreferDualStack
   ports:
     - port: 8080
       name: http

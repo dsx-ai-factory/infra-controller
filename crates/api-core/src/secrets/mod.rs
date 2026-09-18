@@ -39,7 +39,8 @@ use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     CredentialKey, CredentialManager, CredentialReader, CredentialWriter, Credentials,
 };
-use db::secrets::NewSecretEntry;
+use db::ConditionalWrite;
+use db::secrets::{NewSecretEntry, SecretAlreadyExists};
 use model::secrets::SecretRow;
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -438,11 +439,14 @@ impl CredentialWriter for PostgresCredentialManager {
             .begin()
             .await
             .map_err(|e| PgSecretsError::Database(db::DatabaseError::acquire(e)))?;
-        let inserted = db::secrets::insert_if_missing(&mut txn, &envelope.as_new_entry(&path))
+        match db::secrets::insert_if_missing(&mut txn, &envelope.as_new_entry(&path))
             .await
-            .map_err(PgSecretsError::from)?;
-        if !inserted {
-            return Err(PgSecretsError::AlreadyExists(path.to_string()).into());
+            .map_err(PgSecretsError::from)?
+        {
+            ConditionalWrite::Applied(()) => {}
+            ConditionalWrite::NotApplied(SecretAlreadyExists) => {
+                return Err(PgSecretsError::AlreadyExists(path.to_string()).into());
+            }
         }
         txn.commit()
             .await

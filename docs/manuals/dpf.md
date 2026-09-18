@@ -514,7 +514,7 @@ spec:
   dpuDetector:
     disable: true
   provisioningController:
-    osInstallTimeout: "60m"
+    osInstallTimeout: "90m"
     installInterface:
       installViaRedfish:
         skipDPUNodeDiscovery: true
@@ -538,7 +538,7 @@ Field-by-field:
 | Field | Meaning |
 | --- | --- |
 | `dpuDetector.disable: true` | DPF normally polls hosts to discover new DPUs. NICo disables auto-discovery because DPUs are fed in via `DPUSet` CRs from the orchestrator. |
-| `provisioningController.osInstallTimeout: "60m"` | Total budget for the OS install flow per DPU. |
+| `provisioningController.osInstallTimeout: "90m"` | Total budget for the OS install flow per DPU. |
 | `provisioningController.installViaRedfish` | Provision DPUs by talking Redfish to the host BMC (vs. PXE-based). |
 | `skipDPUNodeDiscovery: true` | Do not auto-detect DPUs as Kubernetes nodes — DPF is told about them explicitly by NICo. |
 | `overrides.kubernetesAPIServerVIP` | Replace `REPLACE_ME` with the host-cluster API-server VIP that DPUs should reach. |
@@ -738,6 +738,44 @@ The DPU agent's generated `dhcp_server.service_name`, `fmds.service_name`, and
 `hbn.nvue_https_address` are deployment-specific and take precedence over these
 template overlays.
 
+#### DPU LLDP sidecar
+
+The DPU agent chart also runs `nico-lldp-sidecar` from the resolved DPU agent
+image. The sidecar executes the DPU host's `lldpcli`, atomically publishes its
+LLDP-MED output at `/data/lldp`, and shares that directory with
+`nico-dpu-agent`. A successful snapshot is refreshed every 120 seconds and a
+failed collection is retried after 30 seconds. Snapshots are retained for ten
+minutes and the last successful file is kept after a failure, but the agent
+rejects snapshots older than five minutes.
+
+The defaults request 10 millicores of CPU and 64 MiB of memory and limit the
+container to 250 millicores and 128 MiB. Override them through the DPU agent
+chart overlay when required:
+
+```toml
+[dpf.services.dpu_agent.extra_helm_values.lldpSidecar.resources.requests]
+cpu = "20m"
+memory = "96Mi"
+
+[dpf.services.dpu_agent.extra_helm_values.lldpSidecar.resources.limits]
+cpu = "500m"
+memory = "192Mi"
+```
+
+The sidecar mounts the host `/run`, `/usr/sbin`, and `/lib` paths read-only and
+the host `/sys` path read-only at `/host-sys`. Its security context drops all
+Linux capabilities and adds only `DAC_OVERRIDE`; it permits privilege
+escalation. These mounts and permissions are part of the collection design. Do
+not broaden them as a workaround for a collection failure without first
+checking the sidecar logs and the host `lldpd` service.
+
+The OpenTelemetry configuration collects this container's pod logs with
+`systemd.unit=nico-lldp-sidecar`. Keep its image aligned with
+`nico-dpu-agent`, because the snapshot is an internal interface between those
+two containers. Refer to
+[DPU LLDP Collection](../dpu-management/dpu_configuration.md#dpu-lldp-collection)
+for the native-agent comparison and freshness behavior.
+
 #### Per-deployment configuration (`[dpf.deployments.*]`)
 
 Each DPU generation is provisioned by its own `DPUDeployment`, configured under
@@ -779,8 +817,7 @@ node_label_key  = "carbide.nvidia.com/controlled.node.bf4"
 # Shared across all PSIDs
 os_iso = "https://artifacts.example.com/bfb.3.3.x.iso"
  
-# PSID -> PLDM firmware bundle URL.
-# Currently exactly one PSID entry is supported.
+# PSID -> PLDM firmware bundle URLs. Include one entry for each DPU model.
 [dpf.deployments.bf4_generic.bluefield_software.pldm_fw_bundle]
 "MT_000000xxxx" = "https://artifacts.example.com/bf4/mt_000000xxxx.pldm"
 ```
@@ -791,7 +828,7 @@ Per-deployment field reference:
 | --- | :---: | --- | --- |
 | `bfb_url` | no | BF3 bf-bundle URL | BlueField firmware bundle (BFB) used to provision the DPU. Mutually exclusive with `bluefield_software`. |
 | `bluefield_software.os_iso` | BF4 only | — | OS ISO URL used by BF4 deployments in place of a BFB. Required when `bluefield_software` is set. |
-| `bluefield_software.pldm_fw_bundle` | BF4 only | — | Map of PSID → PLDM firmware bundle URL. Currently exactly one entry is supported. |
+| `bluefield_software.pldm_fw_bundle` | BF4 only | — | Non-empty map of PSID → PLDM firmware bundle URL. Include one entry for each DPU model served by the deployment. |
 | `flavor_name` | yes | `carbide-dpu-flavor` | Base name for the generated `DPUFlavor` (BF3/generic BF4) or `DPUFlavorTemplate` (Astra) CR. |
 | `deployment_name` | yes | `nico-deployment-v2` | `DPUDeployment` CR name. |
 | `node_label_key` | yes | `carbide.nvidia.com/controlled.node.v2` | Node-selector label key applied to this deployment's DPUNodes. |
@@ -1588,6 +1625,6 @@ The DTS (`doca-telemetry`) and `doca-hbn` services, and the DPF operator and
 operand images, are NVIDIA-published on NGC and **pull anonymously by default**
 — no build or registry needed. To mirror them into your own registry (air-gapped
 or one-registry setups), refer to
-[helm-prereqs → DPF images and registries](https://github.com/NVIDIA/infra-controller/blob/main/helm-prereqs/README.md#dpf-images-and-registries)
+[helm-prereqs → DPF images and registries](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf-images-and-registries)
 (`NICO_DPF_IMAGE_REPO`/`_TAG`/`_PULL_SECRET` for the operator image;
 `NICO_DPF_HELM_REPO_*` for the operand/service charts).

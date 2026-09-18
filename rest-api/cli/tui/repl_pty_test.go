@@ -125,18 +125,21 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.waitFor(t, "Scope set: site =")
 		terminal.send(t, "vpc-prefix create\r")
 		terminal.waitFor(t, "VPC:")
-		terminal.send(t, "\r")
+		terminal.send(t, "vpc-two\r")
 		terminal.waitFor(t, "VPC prefix name")
-		terminal.send(t, "tenant-prefix\r")
-		terminal.waitFor(t, "Prefix length (8-31)")
-		terminal.send(t, "24\r")
+		terminal.send(t, "tenant-ipv6-prefix\r")
 		terminal.waitFor(t, "IP block:")
 		prefixPickerTranscript := terminal.transcript()
-		assert.Contains(t, prefixPickerTranscript, "tenant-ready")
+		// The two spaces after the IPv4 block name keep this check distinct
+		// from the similarly named tenant-ready-v6 row.
+		assert.Contains(t, prefixPickerTranscript, "tenant-ready  ")
+		assert.Contains(t, prefixPickerTranscript, "tenant-ready-v6")
 		assert.NotContains(t, prefixPickerTranscript, "provider-ready")
 		assert.NotContains(t, prefixPickerTranscript, "tenant-pending")
-		terminal.send(t, "\r")
-		terminal.waitFor(t, "VPC prefix created: tenant-prefix")
+		terminal.send(t, "tenant-ready-v6\r")
+		terminal.waitFor(t, "IPv6 prefix length (8-63)")
+		terminal.send(t, "63\r")
+		terminal.waitFor(t, "VPC prefix created: tenant-ipv6-prefix")
 
 		// Subnet creation must carry the selected Ethernet virtualizer VPC,
 		// tenant IPv4 block, and prefix length through the real terminal flow.
@@ -480,7 +483,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		require.Len(t, prefixRequests, 1)
 		assert.JSONEq(
 			t,
-			`{"name":"tenant-prefix","vpcId":"vpc-1","ipBlockId":"tenant-ready-id","prefixLength":24}`,
+			`{"name":"tenant-ipv6-prefix","vpcId":"vpc-2","ipBlockId":"tenant-ready-v6-id","prefixLength":63}`,
 			prefixRequests[0].Body,
 		)
 
@@ -597,6 +600,72 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		}
 		assert.Contains(t, strings.Join(vpcQueries, "\n"), "siteId=site-1")
 		assert.Contains(t, strings.Join(vpcQueries, "\n"), "siteId=site-2")
+	})
+
+	t.Run("interactive Allocation creation uses the selected IPv6 family", func(t *testing.T) {
+		recorder := &cliRegressionRecorder{}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			recorder.append(cliRegressionRequest{Method: request.Method, Path: request.URL.Path, Query: request.URL.RawQuery, Body: string(body)})
+			w.Header().Set("Content-Type", "application/json")
+			switch request.Method + " " + request.URL.Path {
+			case "GET /v2/org/acme/nico/site":
+				_, _ = io.WriteString(w, `[{"id":"site-1","name":"site-one","status":"Ready"}]`)
+			case "GET /v2/org/acme/nico/infrastructure-provider/current":
+				_, _ = io.WriteString(w, `{"id":"provider-1"}`)
+			case "GET /v2/org/acme/nico/tenant/current":
+				_, _ = io.WriteString(w, `{"id":"tenant-1"}`)
+			case "GET /v2/org/acme/nico/tenant/account":
+				_, _ = io.WriteString(w, `[]`)
+			case "GET /v2/org/acme/nico/ipblock":
+				_, _ = io.WriteString(w, `[{"id":"ipv6-block","name":"provider-ipv6","siteId":"site-1","infrastructureProviderId":"provider-1","tenantId":null,"status":"Ready","prefix":"2001:db8::","prefixLength":48,"protocolVersion":"IPv6"}]`)
+			case "POST /v2/org/acme/nico/allocation":
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, `{"id":"allocation-1","name":"ipv6-allocation"}`)
+			default:
+				http.NotFound(w, request)
+			}
+		}))
+		defer server.Close()
+
+		configPath := writeRegressionConfig(t, server.URL)
+		command := exec.Command(binaryPath, "--config", configPath, "tui")
+		command.Env = regressionEnvironment(map[string]string{"NICO_TOKEN": ptyAuthToken, "TERM": "xterm-256color"})
+		terminal := startRegressionPTY(t, command)
+		defer terminal.close()
+
+		terminal.waitFor(t, "Type a command or")
+		terminal.send(t, "allocation create\r")
+		terminal.waitFor(t, "Allocation name")
+		terminal.send(t, "ipv6-allocation\r")
+		terminal.waitFor(t, "Description (optional)")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "Tenant:")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "Resource type:")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "Constraint type:")
+		terminal.send(t, "\r")
+		terminal.waitFor(t, "Constraint value (prefix length, e.g. 56)")
+		terminal.send(t, "64\r")
+		terminal.waitFor(t, "Allocation created: ipv6-allocation")
+		terminal.send(t, "exit\r")
+		terminal.waitForExit(t)
+
+		requests := recorder.matching(http.MethodPost, "/v2/org/acme/nico/allocation")
+		require.Len(t, requests, 1)
+		assert.JSONEq(t, `{"name":"ipv6-allocation","siteId":"site-1","tenantId":"tenant-1","allocationConstraints":[{"resourceType":"IPBlock","resourceTypeId":"ipv6-block","constraintType":"Reserved","constraintValue":64}]}`, requests[0].Body)
+		ipBlockRequests := recorder.matching(http.MethodGet, "/v2/org/acme/nico/ipblock")
+		require.Len(t, ipBlockRequests, 1)
+		assert.Contains(t, ipBlockRequests[0].Query, "siteId=site-1")
+		assert.Contains(t, ipBlockRequests[0].Query, "infrastructureProviderId=provider-1")
+		for _, request := range recorder.snapshot() {
+			assert.False(t, strings.HasPrefix(request.Path, "/v2/org/acme/nico/ipblock/"), "the picker already provides the protocol version")
+		}
 	})
 
 	t.Run("interactive Ctrl+D prints goodbye", func(t *testing.T) {
@@ -747,7 +816,7 @@ func newInteractiveRegressionHandler(recorder *cliRegressionRecorder) http.Handl
 			request.URL.Path == "/v2/org/acme/nico/vpc":
 			_, _ = io.WriteString(w, `[
 				{"id":"vpc-1","name":"vpc-one","siteId":"site-1","status":"Ready","networkVirtualizationType":"ETHERNET_VIRTUALIZER"},
-				{"id":"vpc-2","name":"vpc-two","siteId":"site-1","status":"Ready","networkVirtualizationType":"FNN"},
+				{"id":"vpc-2","name":"vpc-two","siteId":"site-1","status":"Ready","networkVirtualizationType":"FNN","slaacEnabled":true},
 				{"id":"vpc-flat","name":"flat-vpc","siteId":"site-1","status":"Ready","networkVirtualizationType":"FLAT"},
 				{"id":"vpc-allocated","name":"allocated-vpc","siteId":"site-2","status":"Ready","networkVirtualizationType":"ETHERNET_VIRTUALIZER"}
 			]`)
@@ -805,7 +874,8 @@ func newInteractiveRegressionHandler(recorder *cliRegressionRecorder) http.Handl
 			_, _ = io.WriteString(w, `[
 				{"id":"provider-ready-id","name":"provider-ready","siteId":"site-1","status":"Ready","tenantId":null,"protocolVersion":"IPv4"},
 				{"id":"tenant-pending-id","name":"tenant-pending","siteId":"site-1","status":"Pending","tenantId":"tenant-1","protocolVersion":"IPv4"},
-				{"id":"tenant-ready-id","name":"tenant-ready","siteId":"site-1","status":"Ready","tenantId":"tenant-1","protocolVersion":"IPv4"}
+				{"id":"tenant-ready-id","name":"tenant-ready","siteId":"site-1","status":"Ready","tenantId":"tenant-1","protocolVersion":"IPv4"},
+				{"id":"tenant-ready-v6-id","name":"tenant-ready-v6","siteId":"site-1","status":"Ready","tenantId":"tenant-1","protocolVersion":"IPv6"}
 			]`)
 		case request.Method == http.MethodPost &&
 			request.URL.Path == "/v2/org/acme/nico/subnet":
@@ -814,7 +884,7 @@ func newInteractiveRegressionHandler(recorder *cliRegressionRecorder) http.Handl
 		case request.Method == http.MethodPost &&
 			request.URL.Path == "/v2/org/acme/nico/vpc-prefix":
 			w.WriteHeader(http.StatusCreated)
-			_, _ = io.WriteString(w, `{"id":"prefix-1","name":"tenant-prefix","status":"Pending"}`)
+			_, _ = io.WriteString(w, `{"id":"prefix-1","name":"tenant-ipv6-prefix","status":"Pending"}`)
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/vpc-prefix":
 			if request.URL.Query().Get("status") == "Ready" {

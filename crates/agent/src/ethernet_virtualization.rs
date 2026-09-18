@@ -126,21 +126,21 @@ struct DhcpServerPaths {
     host_config: FPath,
 }
 
-/// Stores addresses of dependent services that the DHCP module announces.
-/// Note that these can apply to both IPv4 and IPv6; pxe_ips is actually
-/// UEFI HTTP boot in this case, and NTP is still NTP. We should be able
-/// to leverage this struct even in DHCPv6 land (whereas other things don't
-/// really carry through to DHCPv6).
+/// Stores dual-stack PXE/UEFI HTTP, NTP, and DNS service addresses.
+///
+/// These are remote dependent services advertised as DHCP options; none is a
+/// local listener address.
+// TODO(dhcpv6-server-address): Populate `carbide_dhcp_server_v6` only after a
+// non-gating consumer and authoritative server-address source are defined.
 pub(super) struct ServiceAddresses {
     pub(super) pxe_ips: Vec<IpAddr>,
     pub(super) ntpservers: Vec<IpAddr>,
     pub(super) nameservers: Vec<IpAddr>,
 }
 
-/// Split a dual-stack nameserver list into its IPv4 and IPv6 members, so the
-/// gRPC and file-write DHCP-config paths derive both families the same way.
-fn split_nameservers_by_family(nameservers: &[IpAddr]) -> (Vec<Ipv4Addr>, Vec<Ipv6Addr>) {
-    nameservers
+/// Split a dual-stack address list into its IPv4 and IPv6 members.
+fn split_addresses_by_family(addresses: &[IpAddr]) -> (Vec<Ipv4Addr>, Vec<Ipv6Addr>) {
+    addresses
         .iter()
         .copied()
         .fold((Vec::new(), Vec::new()), |(mut v4, mut v6), addr| {
@@ -152,50 +152,38 @@ fn split_nameservers_by_family(nameservers: &[IpAddr]) -> (Vec<Ipv4Addr>, Vec<Ip
         })
 }
 
+/// Resolve site-configured DHCPv4 NTP and DNS-discovered DHCPv6 NTP options.
 fn build_dhcp_ntp_servers(
     nc: &rpc::ManagedHostNetworkConfigResponse,
     service_addrs: &ServiceAddresses,
-) -> Vec<Ipv4Addr> {
+) -> (Vec<Ipv4Addr>, Vec<Ipv6Addr>) {
     // Start with the NTP servers from the service addresses, which is read from carbide-ntp.forge.
-    let mut ntp_servers = service_addrs
-        .ntpservers
-        .iter()
-        .filter_map(|x| match x {
-            IpAddr::V4(x) => Some(*x),
-            _ => None,
-        })
-        .collect::<Vec<Ipv4Addr>>();
+    let (mut ntpservers_v4, ntpservers_v6) = split_addresses_by_family(&service_addrs.ntpservers);
 
-    // If the site has configured NTP servers, use them instead.
+    // The site configuration contract is IPv4-only, so it replaces option 42
+    // without suppressing the DNS-derived DHCPv6 option 56 fallback.
     if !nc.ntp_servers.is_empty() {
-        let site_ntp_servers: Vec<Ipv4Addr> = nc.ntp_servers
-        .iter()
-        .filter_map(|s| match IpAddr::from_str(s) {
-            Ok(IpAddr::V4(ip)) => Some(ip),
-            Ok(IpAddr::V6(_)) => {
-                tracing::debug!(
-                    ntp_server = %s,
-                    "IPv6 NTP server from ManagedHostNetworkConfigResponse is ignored for DHCPv4 config"
-                );
-                None
-            }
-            Err(e) => {
-                tracing::debug!(
-                    ntp_server = %s,
-                    error = %e,
-                    "Invalid NTP server IP from ManagedHostNetworkConfigResponse, ignoring"
-                );
-                None
-            }
-        })
-        .collect();
-
-        if !site_ntp_servers.is_empty() {
-            ntp_servers = site_ntp_servers;
+        let site_v4 = nc
+            .ntp_servers
+            .iter()
+            .filter_map(|server| match Ipv4Addr::from_str(server) {
+                Ok(address) => Some(address),
+                Err(error) => {
+                    tracing::debug!(
+                        ntp_server = %server,
+                        error = %error,
+                        "Invalid IPv4 NTP server from ManagedHostNetworkConfigResponse, ignoring"
+                    );
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if !site_v4.is_empty() {
+            ntpservers_v4 = site_v4;
         }
     }
 
-    ntp_servers
+    (ntpservers_v4, ntpservers_v6)
 }
 
 /// How we tell HBN to notice the new file we wrote
@@ -231,9 +219,9 @@ impl NvueClientContext {
     }
 
     // Wrap the inner nvue_client's `push_config()` and try to avoid re-applying
-    // a configuration we're already using. Returns Ok(Some(revision_id)) on
-    // a change, Ok(None) if the config was unchanged, and otherwise passes
-    // through errors from the inner client.
+    // a configuration we're already using. Returns Ok(Some(revision_id)) when
+    // a revision was applied, Ok(None) if the config was unchanged, and
+    // otherwise passes through errors from the inner client.
     async fn update_config(
         &mut self,
         config: &NvueConfig,
@@ -245,13 +233,9 @@ impl NvueClientContext {
         {
             Ok(None)
         } else {
-            self.nvue_client
-                .push_config(config)
-                .await
-                .map(|revision_id| {
-                    self.last_applied_hash.replace(new_hash);
-                    Some(revision_id)
-                })
+            let revision_id = self.nvue_client.push_config(config).await?;
+            self.last_applied_hash.replace(new_hash);
+            Ok(revision_id)
         }
     }
 }
@@ -332,8 +316,10 @@ fn parse_managed_host_loopback_ips(
     Ok((loopback_ip, loopback_ip_v6))
 }
 
-/// Update the NVUE network config. Returns Ok(true) if the configuration changed, and
-/// Ok(false) if not.
+/// Update the NVUE network config, returning whether NVUE applied a change.
+/// With `StartupFile` and `skip_post`, only save the desired file and return
+/// whether that file was replaced. Errors from saving or applying the desired
+/// configuration are returned to the caller.
 // The fetcher projects `addresses` into these compatibility fields before rendering.
 #[allow(deprecated)]
 pub(super) async fn update_nvue(
@@ -724,7 +710,7 @@ pub(super) async fn update_nvue(
             // that exceeded MAX_EXPECTED_SIZE.  Because of the diff check failing, it
             // also prevented a successful termination because the NVUE config couldn't
             // be switched to the admin network.
-            if !write(
+            let file_changed = write(
                 next_contents,
                 &path,
                 "NVUE",
@@ -732,17 +718,15 @@ pub(super) async fn update_nvue(
                     && path.0.exists()
                     && path.0.metadata()?.len() > MAX_EXPECTED_SIZE,
             )
-            .wrap_err(format!("NVUE config at {path}"))?
-            {
-                // config didn't change OR we are switching to the admin network.
-                return Ok(false);
-            };
+            .wrap_err(format!("NVUE config at {path}"))?;
 
             if !skip_post {
-                // Apply only when NVUE reports semantic diff.
+                // The agent can restart after saving the file but before
+                // applying it. Check NVUE even when the file is unchanged;
+                // `apply` skips the live update when NVUE reports no semantic diff.
                 return nvue::apply(hbn_root, &path).await;
             }
-            Ok(true)
+            Ok(file_changed)
         }
         NvueUpdateFlavor::RestApi { nvue_context } => {
             let config = NvueConfigWithHeader::from_yaml(&next_contents)
@@ -973,9 +957,9 @@ async fn update_dhcp_via_grpc(
     };
     let loopback_ip: Ipv4Addr = mh_nc.loopback_ip.parse()?;
 
-    let (nameservers_v4, nameservers_v6) = split_nameservers_by_family(&service_addrs.nameservers);
+    let (nameservers_v4, nameservers_v6) = split_addresses_by_family(&service_addrs.nameservers);
 
-    let ntpservers_v4 = build_dhcp_ntp_servers(network_config, service_addrs);
+    let (ntpservers_v4, ntpservers_v6) = build_dhcp_ntp_servers(network_config, service_addrs);
 
     let pxe_ip_v4 = service_addrs
         .pxe_ips
@@ -991,13 +975,18 @@ async fn update_dhcp_via_grpc(
             )
         })?;
 
-    let dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig::from_forge_dhcp_config(
+    let mut dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig::from_forge_dhcp_config(
         pxe_ip_v4,
         ntpservers_v4,
         nameservers_v4,
         nameservers_v6,
         loopback_ip,
     )?;
+
+    // Keep the gRPC model byte-equivalent to the file-backed YAML builder.
+    dhcp_config.carbide_ntpservers_v6 = ntpservers_v6;
+    dhcp_config.dhcpv6_preferred_lifetime_secs = dhcp::DHCPV6_PREFERRED_LIFETIME_SECS;
+    dhcp_config.dhcpv6_valid_lifetime_secs = dhcp::DHCPV6_VALID_LIFETIME_SECS;
     let mut host_config = carbide_rpc_utils::dhcp::HostConfig::try_from(
         network_config.clone(),
         hbn_device_names.reps[0],
@@ -1384,12 +1373,11 @@ fn write_dhcp_v4_server_config(
 
     let loopback_ip = mh_nc.loopback_ip.parse()?;
 
-    // Split the dual-stack nameservers by family: the IPv4 set drives the
-    // DHCPv4 options written here, while the IPv6 set is held in the config for
-    // the eventual DHCPv6 / RA consumer (inert in this path for now).
-    let (nameservers_v4, nameservers_v6) = split_nameservers_by_family(&service_addrs.nameservers);
+    // Split the dual-stack nameservers by family for the sibling v4 and v6
+    // listeners that consume this shared server configuration.
+    let (nameservers_v4, nameservers_v6) = split_addresses_by_family(&service_addrs.nameservers);
 
-    let ntpservers_v4 = build_dhcp_ntp_servers(nc, service_addrs);
+    let (ntpservers_v4, ntpservers_v6) = build_dhcp_ntp_servers(nc, service_addrs);
 
     let pxe_ip_v4 = service_addrs
         .pxe_ips
@@ -1429,6 +1417,7 @@ fn write_dhcp_v4_server_config(
     let next_contents = dhcp::build_server_config(
         pxe_ip_v4,
         ntpservers_v4,
+        ntpservers_v6,
         nameservers_v4,
         nameservers_v6,
         loopback_ip,
@@ -1864,6 +1853,9 @@ mod tests {
         InterfaceState, ServiceAddresses, needed_interface_state,
     };
     use crate::{HBNDeviceNames, dhcp, nvue};
+    /// Verifies managed-host loopbacks preserve optional IPv6 and reject invalid families.
+    ///
+    /// This keeps family validation at the NVUE rendering boundary.
     #[test]
     fn test_parse_managed_host_loopback_ips() {
         use carbide_test_support::Outcome::*;
@@ -1916,51 +1908,48 @@ mod tests {
         );
     }
 
+    /// Verifies IPv4 site NTP overrides do not suppress DNS-derived DHCPv6 NTP.
     #[test]
     fn test_build_dhcp_ntp_servers() {
+        use carbide_test_support::value_scenarios;
+
         let service_addrs = ServiceAddresses {
             pxe_ips: vec![],
-            ntpservers: vec![IpAddr::from([192, 0, 2, 20])],
-            nameservers: vec![],
-        };
-        let nc = rpc::ManagedHostNetworkConfigResponse {
-            ntp_servers: vec!["198.51.100.1".to_string(), "198.51.100.2".to_string()],
-            ..Default::default()
-        };
-
-        let out = build_dhcp_ntp_servers(&nc, &service_addrs);
-        assert_eq!(
-            out,
-            vec![
-                Ipv4Addr::from([198, 51, 100, 1]),
-                Ipv4Addr::from([198, 51, 100, 2])
-            ]
-        );
-    }
-
-    #[test]
-    fn test_build_dhcp_ntp_servers_fallback() {
-        let service_addrs = ServiceAddresses {
-            pxe_ips: vec![],
-            ntpservers: vec![IpAddr::from([192, 0, 2, 20])],
+            ntpservers: vec![
+                IpAddr::from([192, 0, 2, 20]),
+                "2001:db8::20".parse().unwrap(),
+            ],
             nameservers: vec![],
         };
 
-        let empty_nc = rpc::ManagedHostNetworkConfigResponse::default();
-
-        assert_eq!(
-            build_dhcp_ntp_servers(&empty_nc, &service_addrs),
-            vec![Ipv4Addr::from([192, 0, 2, 20])]
-        );
-
-        let invalid_nc = rpc::ManagedHostNetworkConfigResponse {
-            ntp_servers: vec!["not-an-ip".to_string(), "2001:db8::1".to_string()],
-            ..Default::default()
-        };
-
-        assert_eq!(
-            build_dhcp_ntp_servers(&invalid_nc, &service_addrs),
-            vec![Ipv4Addr::from([192, 0, 2, 20])]
+        value_scenarios!(run = |ntp_servers: Vec<String>| {
+                let nc = rpc::ManagedHostNetworkConfigResponse {
+                    ntp_servers,
+                    ..Default::default()
+                };
+                build_dhcp_ntp_servers(&nc, &service_addrs)
+            };
+            "configured overrides" {
+                // The supported site IPv4 value replaces only its service fallback.
+                vec!["198.51.100.1".to_string()] => (
+                    vec![Ipv4Addr::from([198, 51, 100, 1])],
+                    vec!["2001:db8::20".parse::<Ipv6Addr>().unwrap()],
+                ),
+            }
+            "empty configuration fallback" {
+                // With no site values, both service-provided families survive.
+                vec![] => (
+                    vec![Ipv4Addr::from([192, 0, 2, 20])],
+                    vec!["2001:db8::20".parse::<Ipv6Addr>().unwrap()],
+                ),
+            }
+            "invalid-address fallback" {
+                // An invalid site IPv4 value retains both service-provided families.
+                vec!["not-an-ip".to_string()] => (
+                    vec![Ipv4Addr::from([192, 0, 2, 20])],
+                    vec!["2001:db8::20".parse::<Ipv6Addr>().unwrap()],
+                ),
+            }
         );
     }
 
@@ -1974,6 +1963,153 @@ mod tests {
             ),
             Err(_) => tracing::debug!("Env var $HOSTNAME missing, skipping test, not important"),
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_file_retries_after_interrupted_apply() -> eyre::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Separate processes model a restart while sharing the saved YAML and
+        // fake NVUE state. Only each child's PATH points at the fake `crictl`.
+        if let Some(root) = std::env::var_os("NVUE_STARTUP_TEST_ROOT") {
+            let root = PathBuf::from(root);
+            let stage = std::env::var("NVUE_STARTUP_TEST_STAGE")?;
+            let virtualization_type = VpcVirtualizationType::EthernetVirtualizer;
+            let network_config = netconf(virtualization_type, 32, 24, false, None, true, false);
+            let update = async |skip_post| {
+                super::update_nvue(
+                    virtualization_type,
+                    NvueUpdateFlavor::StartupFile {
+                        hbn_root: &root,
+                        skip_post,
+                    },
+                    &network_config,
+                    HBNDeviceNames::hbn_23(),
+                    None,
+                )
+                .await
+            };
+
+            match stage.as_str() {
+                "save" => {
+                    assert!(update(true).await?);
+                    assert!(!update(true).await?);
+                }
+                "failure" => {
+                    let error = update(false).await.expect_err("live apply should fail");
+                    assert!(format!("{error:#}").contains("injected apply failure"));
+                }
+                "retry" => assert!(update(false).await?),
+                "unchanged" => assert!(!update(false).await?),
+                _ => panic!("unexpected StartupFile test stage: {stage}"),
+            }
+            return Ok(());
+        }
+
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        fs::create_dir_all(root.join("var/support"))?;
+        fs::create_dir_all(root.join("etc/cumulus/acl/policy.d"))?;
+        fs::create_dir(root.join("bin"))?;
+        let crictl = root.join("bin/crictl");
+        fs::write(
+            &crictl,
+            r#"#!/bin/sh
+set -eu
+root="$NVUE_STARTUP_TEST_ROOT"
+if [ "$*" = 'ps --name=doca-hbn -o=json' ]; then
+    printf '%s\n' '{"containers":[{"id":"test-hbn"}]}'
+    exit 0
+fi
+[ "$1" = exec ] && [ "$2" = test-hbn ]
+shift 2
+printf '%s\n' "$*" >> "$root/commands"
+case "$*" in
+    'nv config replace /var/support/nvue_startup.yaml')
+        cp "$root/var/support/nvue_startup.yaml" "$root/pending.yaml" ;;
+    'nv config diff')
+        if ! cmp -s "$root/pending.yaml" "$root/applied.yaml"; then
+            printf '%s\n' 'configuration changed'
+        fi ;;
+    'nv config apply -y')
+        if [ "$NVUE_STARTUP_TEST_STAGE" = failure ]; then
+            printf '%s\n' 'injected apply failure' >&2
+            exit 1
+        fi
+        cp "$root/pending.yaml" "$root/applied.yaml" ;;
+    'nv config detach') rm "$root/pending.yaml" ;;
+    'supervisorctl restart nl2doca') ;;
+    *) printf 'unexpected command: %s\n' "$*" >&2; exit 1 ;;
+esac
+"#,
+        )?;
+        fs::set_permissions(&crictl, fs::Permissions::from_mode(0o755))?;
+
+        // Stop after saving the desired file, while NVUE still has the old
+        // configuration. This is the state left by an interrupted update.
+        fs::write(root.join("applied.yaml"), "previous configuration")?;
+        run_startup_file_attempt(root, "save").await?;
+        assert!(!root.join("commands").exists(), "skip_reload ran a command");
+        let desired = fs::read_to_string(root.join(nvue::PATH))?;
+
+        run_startup_file_attempt(root, "failure").await?;
+        assert_eq!(
+            fs::read_to_string(root.join("applied.yaml"))?,
+            "previous configuration"
+        );
+        assert_eq!(
+            fs::read_to_string(FPath(root.join(nvue::PATH)).with_ext("error"))?,
+            desired
+        );
+        let attempted_apply = "nv config replace /var/support/nvue_startup.yaml\nnv config diff\nnv config apply -y\n";
+        assert_eq!(fs::read_to_string(root.join("commands"))?, attempted_apply);
+
+        run_startup_file_attempt(root, "retry").await?;
+        assert_eq!(fs::read_to_string(root.join("applied.yaml"))?, desired);
+        let successful_retry =
+            format!("{attempted_apply}{attempted_apply}supervisorctl restart nl2doca\n");
+        assert_eq!(fs::read_to_string(root.join("commands"))?, successful_retry);
+
+        run_startup_file_attempt(root, "unchanged").await?;
+        assert_eq!(fs::read_to_string(root.join("applied.yaml"))?, desired);
+        assert_eq!(
+            fs::read_to_string(root.join("commands"))?,
+            format!(
+                "{successful_retry}nv config replace /var/support/nvue_startup.yaml\nnv config diff\nnv config detach\n"
+            )
+        );
+        assert!(!root.join("pending.yaml").exists());
+        Ok(())
+    }
+
+    async fn run_startup_file_attempt(root: &Path, stage: &str) -> eyre::Result<()> {
+        let inherited_path =
+            std::env::var_os("PATH").ok_or_else(|| eyre::eyre!("missing test PATH"))?;
+        let path = std::env::join_paths(
+            std::iter::once(root.join("bin")).chain(std::env::split_paths(&inherited_path)),
+        )?;
+        let mut command = TokioCommand::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                "ethernet_virtualization::tests::startup_file_retries_after_interrupted_apply",
+                "--nocapture",
+            ])
+            .env("NVUE_STARTUP_TEST_ROOT", root)
+            .env("NVUE_STARTUP_TEST_STAGE", stage)
+            .env("IGNORE_MGMT_VRF", "true")
+            .env("PATH", path)
+            .kill_on_drop(true);
+        // The fake commands only use local files; bound a stuck child to 30s.
+        let output = timeout(Duration::from_secs(30), command.output()).await??;
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "StartupFile stage {stage} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         Ok(())
     }
 
@@ -3193,15 +3329,17 @@ mod tests {
         Ok(())
     }
 
+    /// Verifies generic service-address partitioning preserves order within each family.
     #[test]
-    fn split_nameservers_by_family_partitions_by_family() {
+    fn split_addresses_by_family_partitions_by_family() {
         use carbide_test_support::value_scenarios;
 
         value_scenarios!(
             run = |input: Vec<IpAddr>| -> (Vec<Ipv4Addr>, Vec<Ipv6Addr>) {
-                split_nameservers_by_family(&input)
+                split_addresses_by_family(&input)
             };
             "splits nameservers by family" {
+                // Mixed input preserves the original order within each family.
                 vec![
                     IpAddr::from([10, 0, 0, 1]),
                     "2001:db8::1".parse::<IpAddr>().unwrap(),
@@ -3210,9 +3348,12 @@ mod tests {
                     vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
                     vec!["2001:db8::1".parse::<Ipv6Addr>().unwrap()],
                 ),
+                // IPv4-only input leaves the IPv6 result empty.
                 vec![IpAddr::from([10, 0, 0, 1])] => (vec![Ipv4Addr::new(10, 0, 0, 1)], vec![]),
+                // IPv6-only input leaves the IPv4 result empty.
                 vec!["2001:db8::1".parse::<IpAddr>().unwrap()]
                     => (vec![], vec!["2001:db8::1".parse::<Ipv6Addr>().unwrap()]),
+                // Empty input produces two empty family lists.
                 vec![] => (vec![], vec![]),
             }
         );
@@ -3230,6 +3371,26 @@ mod tests {
             expected.carbide_provisioning_server_ipv4
         );
         assert_eq!(received.carbide_dhcp_server, expected.carbide_dhcp_server);
+        assert_eq!(
+            received.carbide_nameservers_v6,
+            expected.carbide_nameservers_v6
+        );
+        assert_eq!(
+            received.carbide_ntpservers_v6,
+            expected.carbide_ntpservers_v6
+        );
+        assert_eq!(
+            received.carbide_dhcp_server_v6,
+            expected.carbide_dhcp_server_v6
+        );
+        assert_eq!(
+            received.dhcpv6_preferred_lifetime_secs,
+            expected.dhcpv6_preferred_lifetime_secs
+        );
+        assert_eq!(
+            received.dhcpv6_valid_lifetime_secs,
+            expected.dhcpv6_valid_lifetime_secs
+        );
     }
 
     fn validate_host_config(received: HostConfig, expected: HostConfig) {
@@ -3252,15 +3413,16 @@ mod tests {
             assert_eq!(ip_config_received.gateway, ip_config_expected.gateway);
             assert_eq!(ip_config_received.address, ip_config_expected.address);
             assert_eq!(ip_config_received.prefix, ip_config_expected.prefix);
+            assert_eq!(ip_config_received.ipv6, ip_config_expected.ipv6);
         }
     }
 
-    // Exercises the DHCP renderer's deprecated compatibility input.
+    /// Verifies the deprecated file-backed DHCP compatibility input renders
+    /// dual-stack options and host state.
     #[test]
     #[allow(deprecated)]
     fn test_with_tenant_dhcp_server() -> Result<(), Box<dyn std::error::Error>> {
-        // The config we received from API server
-        // Admin won't be used
+        // Model the API-provided admin interface with both address families.
         let admin_interface_prefix: IpNetwork = "10.217.5.123/32".parse().unwrap();
         let admin_interface = rpc::FlatInterfaceConfig {
             function_type: rpc::InterfaceFunctionType::Physical.into(),
@@ -3286,7 +3448,23 @@ mod tests {
             ipv6_interface_config: None,
             vpc_routing_profile: None,
             interface_routing_profile: None,
-            addresses: vec![],
+            addresses: vec![
+                rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V4.into(),
+                    gateway: Some("10.217.5.123".to_string()),
+                    ip: "10.217.5.123".to_string(),
+                    interface_prefix: admin_interface_prefix.to_string(),
+                    prefix: "10.217.5.123".to_string(),
+                    tenant_vrf_loopback_ip: Some("10.213.2.1".to_string()),
+                    ..Default::default()
+                },
+                rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8::123".to_string(),
+                    interface_prefix: "2001:db8::/64".to_string(),
+                    ..Default::default()
+                },
+            ],
         };
 
         let mut admin_interface_with_mtu = admin_interface.clone();
@@ -3376,12 +3554,16 @@ mod tests {
                 Ipv4Addr::from([127, 0, 0, 2]),
                 Ipv4Addr::from([127, 0, 0, 3]),
             ],
+            carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],
+            carbide_ntpservers_v6: vec!["2001:db8::123".parse().unwrap()],
             carbide_provisioning_server_ipv4: Ipv4Addr::from([10, 0, 0, 1]),
             lease_time_secs: 604800,
             renewal_time_secs: 3600,
             rebinding_time_secs: 432000,
             carbide_api_url: None,
             carbide_dhcp_server: Ipv4Addr::from([10, 217, 5, 39]),
+            dhcpv6_preferred_lifetime_secs: dhcp::DHCPV6_PREFERRED_LIFETIME_SECS,
+            dhcpv6_valid_lifetime_secs: dhcp::DHCPV6_VALID_LIFETIME_SECS,
             ..Default::default()
         };
 
@@ -3480,13 +3662,16 @@ mod tests {
                 IpAddr::from([127, 0, 0, 1]),
                 IpAddr::from([127, 0, 0, 2]),
                 IpAddr::from([127, 0, 0, 3]),
+                "2001:db8::123".parse().unwrap(),
             ],
-            nameservers: vec![IpAddr::from([10, 1, 1, 1])],
+            nameservers: vec![IpAddr::from([10, 1, 1, 1]), "2001:db8::53".parse().unwrap()],
         };
 
         let mut host_config_str =
             dhcp::build_server_host_config(network_config.clone(), &HBNDeviceNames::pre_23())?;
         assert!(!host_config_str.contains("mtu"));
+        assert!(host_config_str.contains("ipv6:"));
+        assert!(host_config_str.contains("2001:db8::123"));
 
         let mut network_config2 = network_config.clone();
         network_config2.admin_interface = Some(admin_interface_with_mtu);
@@ -3577,6 +3762,8 @@ mod tests {
             rebinding_time_secs: 432000,
             carbide_api_url: None,
             carbide_dhcp_server: Ipv4Addr::from([10, 217, 5, 39]),
+            dhcpv6_preferred_lifetime_secs: dhcp::DHCPV6_PREFERRED_LIFETIME_SECS,
+            dhcpv6_valid_lifetime_secs: dhcp::DHCPV6_VALID_LIFETIME_SECS,
             ..Default::default()
         };
         let dhcp_contents = super::read_limited(g.path())?;

@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+FROM carbide-pxe-builder
+
+# Existing ARM boot-artifact tasks build helper images and export the HBN image.
+# Reuse the host daemon so the native build container only needs the Docker CLI.
+RUN apt-get update && \
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io file pigz && \
+	rm -rf /var/lib/apt/lists/*

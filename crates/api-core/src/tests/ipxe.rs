@@ -453,7 +453,10 @@ async fn test_pxe_instance(pool: sqlx::PgPool) {
         .get_pxe_instructions(rpc::forge::MachineArchitecture::X86)
         .await;
 
-    assert_eq!(instructions.pxe_script, "SomeRandomiPxe".to_string());
+    assert_eq!(
+        instructions.pxe_script,
+        "set nico-retry-provisioning 1\nSomeRandomiPxe"
+    );
 }
 
 #[crate::sqlx_test]

@@ -47,6 +47,33 @@ sequenceDiagram
     end
 ```
 
+## DPU LLDP Collection
+
+NICo uses LLDP-MED data from each DPU to associate its physical uplinks with
+top-of-rack switch ports. The collection path depends on how `dpu-agent` is
+deployed:
+
+**A systemd-managed agent invokes `lldpcli` directly.** Provisioning renames   `/etc/lldpd.d/lldp-interfaces.conf` to `/etc/lldpd.d/lldp-interfaces.conf.disabled`, configures `DAEMON_ARGS="-M 1"`, and restarts `lldpd` so LLDP-MED inventory is available on all interfaces.
+
+**A DPF deployment runs `nico-lldp-sidecar`** from the same image as `dpu-agent`. The sidecar invokes the host's `lldpcli`, writes an atomic snapshot to the shared `/data/lldp` path, and the containerized agent reads that snapshot.
+
+The DPF sidecar refreshes a successful snapshot every 120 seconds and retries a
+failed collection after 30 seconds. It retains snapshots for ten minutes and
+keeps the last successful snapshot when a later collection fails, but
+`dpu-agent` rejects snapshots older than five minutes. This allows short
+collection failures without reporting stale topology indefinitely.
+
+The sidecar mounts the host `/run`, `/usr/sbin`, and `/lib` paths read-only and
+mounts the host `/sys` at `/host-sys`, also read-only. It is granted only
+`DAC_OVERRIDE`; all other Linux capabilities are dropped. Its default resource
+requests are 10 millicores and 64 MiB, with limits of 250 millicores and 128
+MiB. Keep the sidecar and agent image versions aligned because the shared
+snapshot format is an internal contract.
+
+For deployment settings and log collection, refer to
+[DPF Setup for NICo Integration](../manuals/dpf.md#dpu-lldp-sidecar). For
+operational checks, refer to [DPU Health Checks](../operations/monitoring-health.md#dpu-health-checks).
+
 ## DPU ToR Uplink Health
 
 The DPU agent expects two ordered HBN uplinks. The first uplink is the primary

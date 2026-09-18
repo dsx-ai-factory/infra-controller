@@ -26,7 +26,16 @@ goto nico_menu
 
 :nico
 ifconf -c dhcp
-time chain --autofree http://${next-server}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto error_handler
+imgfree nico-boot ||
+set nico-retry-provisioning 0
+time chain --name nico-boot http://${next-server}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto retry_nico_boot
+
+# Core sets this flag to 1 when the response consumes a one-time custom PXE request.
+:retry_nico_boot
+iseq ${nico-retry-provisioning} 1 || goto error_handler
+imgstat nico-boot || goto error_handler
+prompt --key p --timeout 30000 Hit the ${bold}p${boldoff} key to open NICo menu; retrying in 30 seconds... && goto nico_menu ||
+time imgexec nico-boot && exit 1 || goto retry_nico_boot
 
 :nico_menu
 menu NICo - ${hostname}

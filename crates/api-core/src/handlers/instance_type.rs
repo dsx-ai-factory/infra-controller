@@ -21,7 +21,7 @@ use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use ::rpc::forge::InstanceTypeAllocationStats;
 use carbide_uuid::instance_type::InstanceTypeId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineIdSubtypeParseError};
 use config_version::ConfigVersion;
 use db::{ObjectFilter, compute_allocation, instance, instance_type};
 use model::instance_type::InstanceTypeMachineCapabilityFilter;
@@ -489,27 +489,14 @@ pub(crate) async fn associate_machines(
         .into());
     }
 
-    let mut machine_ids = Vec::<MachineId>::new();
-
     // Convert the rpc machine ID strings into MachineId, but reject if any
     // DPU machine IDs are found.
-    for mac_id in req.machine_ids {
-        machine_ids.push(
-            match mac_id.parse::<MachineId>().map_err(|e| {
-                CarbideError::from(RpcDataConversionError::InvalidMachineId(e.to_string()))
-            }) {
-                Err(e) => return Err(e.into()),
-                Ok(m_id) => match m_id.machine_type().is_dpu() {
-                    false => m_id,
-                    true => {
-                        return Err(
-                            CarbideError::InvalidArgument(format!("{m_id} is a DPU")).into()
-                        );
-                    }
-                },
-            },
-        );
-    }
+    let machine_ids = req
+        .machine_ids
+        .into_iter()
+        .map(|id| id.parse::<HostMachineId>())
+        .collect::<Result<Vec<HostMachineId>, MachineIdSubtypeParseError>>()
+        .map_err(|e| CarbideError::from(RpcDataConversionError::InvalidMachineId(e.to_string())))?;
 
     let instance_type_id = req
         .instance_type_id
@@ -621,7 +608,7 @@ pub(crate) async fn remove_machine_association(
     let machine_id = request
         .into_inner()
         .machine_id
-        .parse::<MachineId>()
+        .parse::<HostMachineId>()
         .map_err(|e| CarbideError::from(RpcDataConversionError::InvalidMachineId(e.to_string())))?;
 
     // Prepare our txn to associate machines with the instance type

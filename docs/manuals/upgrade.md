@@ -19,6 +19,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 | **4 (SSH host key)** | `bootstrap_ssh_host_key.sh` detects an existing SSH host key Secret and skips re-generation. The cluster's SSH identity is preserved across upgrades. |
 | **5 — external-secrets + nico-prereqs** | `helmfile sync` upgrades both releases. Existing `ClusterSecretStore` and `ExternalSecret` objects are reconciled to their new definitions. The ESO controller re-syncs all secrets on the next poll cycle. |
 | **5b — DPF** | DPF components are upgraded via their Helm charts. The `DPFOperatorConfig`, `DPUCluster`, and `DPUService` objects are preserved. Refer to [DPF version update](#20--21-dpf-version-update). |
+| **5c - [RMS](https://docs.nvidia.com/rms/documentation/home/)** | Unless `--skip-rms` is passed: the rack-manager release is upgraded via `helm upgrade --install` from the pinned `helm-prereqs/nv-rms` submodule. The RMS database on `nico-pg-cluster`, the ESO-synced credentials, and the operator-edited state are preserved. Seeding is create-if-absent; re-runs never overwrite. RMS does not reload its TLS material - after a certificate renewal, restart with `kubectl rollout restart deployment/rms-api-server -n rack-manager`. |
 | **6 — NICo Core** | `helm upgrade --install nico` rolls out the new Core image tag. The PostgreSQL database schema is migrated by the pre-upgrade Job (uses the `imagepullsecret` Secret, which is upserted). NICo state (host records, machine state, firmware inventory) lives in PostgreSQL and is preserved. |
 | **6b — DPF enablement** | On DPF-enabled sites only: refreshes the BMC-root credential, then runs a **second** `helm upgrade` of Core with the `[dpf]` block enabled and restarts `nico-api`. Core therefore rolls out twice on a DPF site. |
 | **7a–7g — NICo REST** | REST components are upgraded via `helm upgrade --install`. The `nico_rest` PostgreSQL database is migrated in-place by the REST migration Job. Temporal workflow state is preserved. The Keycloak realm and client credentials are preserved. |
@@ -68,6 +69,26 @@ kubectl get secret vault-cluster-keys -n vault -o json > vault-cluster-keys-back
 
 <Warning>
 This file contains the plaintext Vault unseal keys **and the Vault root token**. Anyone holding it has full control of Vault. Store it in a secure, offline location and delete the local copy after storing.
+</Warning>
+
+### Back up the secrets KEK
+
+If the site keeps credentials in Postgres (as detailed in [Secrets Storage](../configuration/secrets-storage.md)), the database dump below holds only ciphertext, and every key encryption key (KEK) its rows reference is needed to read it back.
+
+With an Integrated provider, export every Secret that holds key material your `[secrets.kms]` providers reference, including keys that are no longer routed but are still needed for older rows or older dumps, and store them with the Vault unseal keys. Copy a key supplied from a file or an inline value from its source instead.
+
+The following command exports one Secret; repeat it for each:
+
+```bash
+tmp=$(mktemp nico-secrets-kek-backup.XXXXXX)   # created with mode 0600
+kubectl get secret nico-secrets-kek -n nico-system -o json > "$tmp" \
+  && mv "$tmp" nico-secrets-kek-backup.json   # keep the old backup if the export fails
+```
+
+With a Transit provider the KEK lives in the Transit engine's storage, which the unseal-key export above does not include; take a Vault storage snapshot as well, for example `vault operator raft snapshot save vault-storage.snap`.
+
+<Warning>
+This file contains the plaintext KEK. Anyone holding it together with a database dump can decrypt every stored credential. Store it where you store the unseal keys and delete the local copy.
 </Warning>
 
 ### Back up the databases
@@ -122,7 +143,7 @@ Both should show `Initialized true` and `Sealed false`.
 
 ### Pull the new release
 
-Update your local checkout to the target release branch or tag. The commands below assume an `upstream` remote pointing at the main repository; add it once with `git remote add upstream https://github.com/NVIDIA/infra-controller.git` (or substitute `origin` if you cloned the main repository directly):
+Update your local checkout to the target release branch or tag. The commands below assume an `upstream` remote pointing at the main repository; add it once with `git remote add upstream https://github.com/dsx-ai-factory/infra-controller.git` (or substitute `origin` if you cloned the main repository directly):
 
 ```bash
 git fetch upstream
@@ -173,7 +194,7 @@ cd helm-prereqs/
 source ./preflight.sh
 ```
 
-Fix all errors before proceeding. Warnings about `NICO_DPF_BMC_ROOT_PASSWORD` being unset are safe to ignore on an upgrade (the credential is already stored in Vault from the initial install).
+Fix all errors before proceeding. Warnings about `NICO_DPF_BMC_ROOT_PASSWORD` being unset are safe to ignore on an upgrade (the credential is already in the credential store from the initial install).
 
 <Warning>
 `setup.sh -y` does **not** stop on preflight errors — with `-y` set, hard errors are printed and the run continues ("Things may fail"). The preflight gate is only enforced interactively, so genuinely resolve every error here rather than relying on the script to stop you.
@@ -203,6 +224,7 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | `--skip-core` | Skip Phase 6 only. Prerequisites and the REST stack still upgrade; NICo Core is left on its current image. Useful when the Core image did not change. |
 | `--skip-rest` | Skip Phase 7 only. Prerequisites and NICo Core still upgrade; the REST stack is left untouched. |
 | `--skip-flow` | Skip the Flow upgrade (Phase 7h). It does not bypass the initial guard for bundled PSM/NSM containers or an incomplete Flow-only rollout. Follow the [preserve-or-overwrite guidance](../../helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm). |
+| `--skip-rms` | Skip the Rack Management Service upgrade (Phase 5c). RMS installs **by default** (like DPF); `NICO_RMS_IMAGE_TAG` is required unless this flag is passed. Skipping leaves an existing RMS release untouched. |
 | `--skip-dpf` | Use **only** if DPF is not enabled at this site. This is not a pure skip: it clears `INSTALL_DPF`, which drops phases 5b and 6b *and* redeploys NICo Core with the `[dpf]` block disabled — on a DPF-enabled site that is a config change, not a skip. |
 | `--core-values <file>` | Use a per-site NICo Core values file (same as initial install). |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest or kustomize dir (same as initial install). |
@@ -215,6 +237,7 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | Phases 2–4 (cert-manager, Vault, unseal) | 1–3 min (Vault is already initialized; only rolling update time) |
 | Phase 5 (ESO + nico-prereqs) | 1–3 min |
 | Phase 5b (DPF) | 3–10 min (depends on DPF version delta) |
+| Phase 5c (RMS - unless `--skip-rms`) | 1-3 min (certificate issuance + rollout) |
 | Phase 6 (NICo Core) | 3–8 min (includes DB migration Job) |
 | Phase 6b (DPF enablement — DPF sites only) | 2–5 min (second Core rollout + nico-api restart) |
 | Phases 7a–7i (NICo REST + site-agent) | 5–15 min (Temporal and DB migrations are the slowest steps) |
@@ -274,6 +297,15 @@ Then run the included health check, which covers the full stack (Vault, cert-man
 cd helm-prereqs/
 ./health-check.sh
 ```
+
+## Moving credentials to Postgres
+
+Migrating an existing site's credentials from Vault to Postgres is a configuration walk described in [Secrets Storage](../configuration/secrets-storage.md), and it can be folded into an upgrade window. Two points matter when you migrate:
+
+- Every step changes the `nico-api` config and, in the reference installation, needs `kubectl -n nico-system rollout restart deployment/nico-api`: the chart carries the Stakater Reloader annotation, so installations that run Reloader restart automatically, but the reference installation does not install it.
+- The default rolling update also keeps the old pod running until the new one is ready, so finish each step's rollout before starting the next. Keep `bmc_rotation_enabled` and `uefi_rotation_enabled` at their default `false` until the whole fleet runs one config.
+
+Once the writer is Postgres, the KEK backup above belongs in every pre-upgrade checklist.
 
 ## Version-specific upgrade notes
 

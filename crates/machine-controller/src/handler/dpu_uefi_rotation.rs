@@ -43,14 +43,15 @@
 use bmc_vendor::DpuModel;
 use carbide_redfish::libredfish::CredentialOpError;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialType, Credentials};
-use carbide_uuid::machine::{DpuMachineId, MachineId};
+use carbide_uuid::machine::DpuMachineId;
+use db::credential_rotation::NoStagedCredentialRotation;
 use eyre::eyre;
-use model::machine::{Machine, ManagedHostState, ManagedHostStateSnapshot};
+use model::machine::{DpuMachine, ManagedHostState, ManagedHostStateSnapshot};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
-use super::{current_site_uefi_target, handler_restart_dpu, resolve_site_uefi_credentials};
+use super::{current_site_uefi_target, handler_restart_dpu, read_site_uefi_credentials};
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
 
 /// `true` when this DPU's UEFI credential lags the staged site-wide `dpu_uefi`
@@ -58,7 +59,7 @@ use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServi
 /// rotation row (never set) yields `false`.
 async fn dpu_uefi_rotation_needed(
     services: &MachineStateHandlerServices,
-    dpu: &Machine,
+    dpu: &DpuMachine,
 ) -> Result<bool, StateHandlerError> {
     let Some(mac) = dpu.status.bmc_info.mac else {
         return Ok(false);
@@ -79,7 +80,7 @@ async fn dpu_uefi_rotation_needed(
 /// first so a disabled site never runs the gate query.
 async fn should_rotate_dpu_uefi(
     services: &MachineStateHandlerServices,
-    dpu: &Machine,
+    dpu: &DpuMachine,
 ) -> Result<bool, StateHandlerError> {
     if dpu.uefi_credential_rotation_requested {
         return Ok(true);
@@ -100,7 +101,7 @@ pub(crate) async fn select_dpu_for_uefi_rotation(
 ) -> Result<Option<DpuMachineId>, StateHandlerError> {
     for dpu in &mh.dpu_snapshots {
         if should_rotate_dpu_uefi(services, dpu).await? {
-            return Ok(Some(dpu.dpu_machine_id()?));
+            return Ok(Some(dpu.id));
         }
     }
     Ok(None)
@@ -196,7 +197,7 @@ async fn read_dpu_factory_default(
 pub(crate) async fn handle_rotating_dpu_uefi(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     state: &ManagedHostStateSnapshot,
-    dpu_machine_id: MachineId,
+    dpu_machine_id: DpuMachineId,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     use db::credential_rotation::CredentialRotationType::DpuUefi;
 
@@ -254,7 +255,7 @@ pub(crate) async fn handle_rotating_dpu_uefi(
         let Credentials::UsernamePassword {
             password: new_password,
             ..
-        } = resolve_site_uefi_credentials(&db_pool, reader, DpuUefi).await?;
+        } = read_site_uefi_credentials(reader, DpuUefi, target).await?;
         (candidates, new_password)
     };
 
@@ -296,19 +297,27 @@ pub(crate) async fn handle_rotating_dpu_uefi(
             .map_err(|e| {
                 StateHandlerError::GenericError(eyre!("promote dpu uefi rotating_to_version: {e}"))
             })?;
-            if !promoted {
-                db::credential_rotation::record_device_converged(&mut txn, dpu_bmc_mac, DpuUefi)
-                    .await
-                    .map_err(|e| {
-                        StateHandlerError::GenericError(eyre!("record dpu uefi convergence: {e}"))
-                    })?;
+            if let db::ConditionalWrite::NotApplied(NoStagedCredentialRotation) = promoted {
+                db::credential_rotation::record_device_enrolled(
+                    &mut txn,
+                    dpu_bmc_mac,
+                    DpuUefi,
+                    Some(target as i32),
+                )
+                .await
+                .map_err(|e| {
+                    StateHandlerError::GenericError(eyre!("record dpu uefi convergence: {e}"))
+                })?;
             }
             tracing::info!(mac = %dpu_bmc_mac, %dpu_machine_id, "DPU UEFI converged to site-wide rotation target");
             // A forced attempt genuinely fired, so clear the one-shot request on
             // the same transaction; a re-force is a fresh operator action.
             if forced {
-                db::machine::clear_uefi_credential_rotation_requested(&mut txn, dpu_machine_id)
-                    .await?;
+                db::machine::clear_uefi_credential_rotation_requested(
+                    &mut txn,
+                    dpu_machine_id.into(),
+                )
+                .await?;
             }
             Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
         }
@@ -346,8 +355,11 @@ pub(crate) async fn handle_rotating_dpu_uefi(
             // A forced attempt genuinely fired, so clear the one-shot request on
             // the same transaction; a re-force is a fresh operator action.
             if forced {
-                db::machine::clear_uefi_credential_rotation_requested(&mut txn, dpu_machine_id)
-                    .await?;
+                db::machine::clear_uefi_credential_rotation_requested(
+                    &mut txn,
+                    dpu_machine_id.into(),
+                )
+                .await?;
             }
             Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
         }

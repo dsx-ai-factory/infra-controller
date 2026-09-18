@@ -20,11 +20,13 @@ use std::cmp::{max, min};
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_uuid::vpc::VpcId;
 use carbide_uuid::vpc_peering::VpcPeeringId;
+use ipnetwork::IpNetwork;
 use model::vpc::VpcPeering;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 pub async fn create(
     txn: &mut PgConnection,
@@ -141,7 +143,7 @@ pub async fn get_vpc_peer_ids(
         "#;
 
     let vpc_id: Uuid = vpc_id.into();
-    let vpc_peer_ids = sqlx::query_as(query)
+    let vpc_peer_ids = sqlx::query_scalar(query)
         .bind(vpc_id)
         .fetch_all(txn)
         .await
@@ -204,4 +206,24 @@ pub async fn get_prefixes_by_vpcs(
         .map(|segment_prefix| segment_prefix.prefix.to_string());
 
     Ok(vpc_prefixes.chain(vpc_segment_prefixes).collect())
+}
+
+/// `get_retained_prefixes_by_vpcs` returns address space grouped by its source
+/// VPC for peering admission. It includes deleting VPC prefixes and segment
+/// prefixes until their rows are removed, since DPUs may still use their routes.
+/// Linked segment prefixes are represented by their enclosing VPC prefix.
+pub async fn get_retained_prefixes_by_vpcs(
+    txn: impl DbReader<'_>,
+    vpc_ids: &[VpcId],
+) -> Result<Vec<(VpcId, IpNetwork)>, DatabaseError> {
+    let query = "SELECT vpc_id, prefix FROM network_vpc_prefixes WHERE vpc_id = ANY($1)
+        UNION ALL
+        SELECT ns.vpc_id, np.prefix FROM network_prefixes np
+        JOIN network_segments ns ON ns.id = np.segment_id
+        WHERE np.vpc_prefix_id IS NULL AND ns.vpc_id = ANY($1)";
+    sqlx::query_as(query)
+        .bind(vpc_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
 }

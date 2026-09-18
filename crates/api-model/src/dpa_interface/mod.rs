@@ -316,6 +316,18 @@ impl DpaInterface {
         instance: &Option<InstanceSnapshot>,
         spx_status_observation: &Option<MachineSpxStatusObservation>,
     ) -> bool {
+        // If the instance has no SPX attachments and the interface has reached
+        // the Assigned state, there is nothing to sync.
+        // Astra DPAs move to Assigned right away, as they don't have to go through
+        // the Unlock/Lock sequence. SVPC DPAs go through that sequence and then
+        // reach Assigned state.
+        if let Some(instance) = instance
+            && instance.config.spxconfig.spx_attachments.is_empty()
+            && self.controller_state.value == DpaInterfaceControllerState::Assigned
+        {
+            return true;
+        }
+
         let mut dpa_expected_version = self.network_config.version;
 
         // If we haven't yet seen any observations, we are not synced
@@ -463,13 +475,30 @@ impl TryFrom<DpaInterfaceSnapshotPgJson> for DpaInterface {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::str::FromStr;
 
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases, scenarios, value_scenarios};
+    use carbide_uuid::instance::InstanceId;
     use carbide_uuid::machine::HostMachineId as MachineId;
+    use carbide_uuid::spx::SpxPartitionId;
 
     use super::*;
+    use crate::instance::config::InstanceConfig;
+    use crate::instance::config::extension_services::InstanceExtensionServicesConfig;
+    use crate::instance::config::infiniband::InstanceInfinibandConfig;
+    use crate::instance::config::network::InstanceNetworkConfig;
+    use crate::instance::config::nvlink::InstanceNvLinkConfig;
+    use crate::instance::config::spx::{
+        InstanceSpxAttachment, InstanceSpxConfig, SpxAttachmentType,
+    };
+    use crate::instance::config::tenant_config::TenantConfig;
+    use crate::instance::status::InstanceStatusObservations;
+    use crate::machine::spx::MachineSpxAttachmentStatusObservation;
+    use crate::metadata::Metadata;
+    use crate::os::{InlineIpxe, OperatingSystem, OperatingSystemVariant};
+    use crate::tenant::TenantOrganizationId;
 
     fn test_machine_id() -> MachineId {
         MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30").unwrap()
@@ -806,6 +835,193 @@ mod tests {
                 assert_eq!(round_tripped, ty);
                 Ok(serialized)
             },
+        );
+    }
+
+    const DPA_MAC: &str = "00:11:22:33:44:55";
+
+    /// A `DpaInterface` on `DPA_MAC` in controller state `state` whose
+    /// managed-host (fallback) network config version is `mh_version`.
+    /// `managed_host_network_config_version_synced` reads only the MAC, the
+    /// controller state, and this version off the interface; the remaining
+    /// fields are inert.
+    fn dpa_interface(
+        state: DpaInterfaceControllerState,
+        mh_version: ConfigVersion,
+    ) -> DpaInterface {
+        DpaInterface {
+            id: DpaInterfaceId::nil(),
+            machine_id: test_machine_id(),
+            mac_address: MacAddress::from_str(DPA_MAC).unwrap(),
+            pci_name: String::new(),
+            underlay_ip: None,
+            overlay_ip: None,
+            created: Utc::now(),
+            updated: Utc::now(),
+            deleted: None,
+            controller_state: Versioned::new(state, ConfigVersion::initial()),
+            last_hb_time: Utc::now(),
+            controller_state_outcome: None,
+            network_config: Versioned::new(DpaInterfaceNetworkConfig::default(), mh_version),
+            card_state: None,
+            device_info: None,
+            device_info_ts: None,
+            mlxconfig_profile: None,
+            history: Vec::new(),
+            device_description: None,
+            interface_type: DpaInterfaceType::Svpc,
+        }
+    }
+
+    /// An `InstanceSnapshot` carrying `spx_attachments` and `spx_config_version`.
+    /// The sync check reads only `config.spxconfig.spx_attachments` and
+    /// `spx_config_version`; everything else is filled with inert values.
+    fn instance_snapshot(
+        spx_attachments: Vec<InstanceSpxAttachment>,
+        spx_config_version: ConfigVersion,
+    ) -> InstanceSnapshot {
+        let config = InstanceConfig {
+            tenant: TenantConfig {
+                tenant_organization_id: TenantOrganizationId::try_from("TenantA".to_string())
+                    .unwrap(),
+                tenant_keyset_ids: Vec::new(),
+                hostname: None,
+            },
+            os: OperatingSystem {
+                user_data: None,
+                variant: OperatingSystemVariant::Ipxe(InlineIpxe {
+                    ipxe_script: "boot".to_string(),
+                }),
+                phone_home_enabled: false,
+                run_provisioning_instructions_on_every_boot: false,
+            },
+            network: InstanceNetworkConfig::default(),
+            infiniband: InstanceInfinibandConfig::default(),
+            network_security_group_id: None,
+            extension_services: InstanceExtensionServicesConfig::default(),
+            nvlink: InstanceNvLinkConfig::default(),
+            spxconfig: InstanceSpxConfig { spx_attachments },
+            power_profile: None,
+        };
+        InstanceSnapshot {
+            id: InstanceId::nil(),
+            machine_id: HostMachineId::from_str(
+                "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0",
+            )
+            .unwrap(),
+            instance_type_id: None,
+            metadata: Metadata::default(),
+            config,
+            config_version: ConfigVersion::initial(),
+            network_config_version: ConfigVersion::initial(),
+            ib_config_version: ConfigVersion::initial(),
+            nvlink_config_version: ConfigVersion::initial(),
+            spx_config_version,
+            storage_config_version: ConfigVersion::initial(),
+            extension_services_config_version: ConfigVersion::initial(),
+            observations: InstanceStatusObservations {
+                network: HashMap::default(),
+                extension_services: HashMap::default(),
+                phone_home_last_contact: None,
+            },
+            use_custom_pxe_on_boot: false,
+            custom_pxe_reboot_requested: false,
+            deleted: None,
+            update_network_config_request: None,
+        }
+    }
+
+    /// An instance SPX attachment bound to `DPA_MAC` with a non-null partition
+    /// id, so the sync check adopts the instance's SPX config version as the
+    /// expected version.
+    fn matching_instance_attachment() -> InstanceSpxAttachment {
+        InstanceSpxAttachment {
+            device: "eth0".to_string(),
+            device_instance: 0,
+            mac_address: Some(DPA_MAC.to_string()),
+            spx_partition_id: SpxPartitionId::new(),
+            attachment_type: SpxAttachmentType::Physical,
+            virtual_function_id: None,
+        }
+    }
+
+    /// An SPX status observation for `DPA_MAC` reporting `config_version`.
+    fn observation(config_version: ConfigVersion) -> MachineSpxStatusObservation {
+        MachineSpxStatusObservation {
+            spx_attachments: vec![MachineSpxAttachmentStatusObservation {
+                mac_address: MacAddress::from_str(DPA_MAC).unwrap(),
+                config_version: Some(config_version),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn managed_host_network_config_version_synced_scenarios() {
+        // Sync-ness depends only on: the interface's controller state and its
+        // fallback (managed-host) network config version `mh_version`; the
+        // instance's SPX attachments and its `instance_version`, which becomes
+        // the expected version when an attachment matches DPA_MAC with a non-null
+        // partition id; and the observed version for DPA_MAC. With no observation
+        // we are never synced, except when the instance has no SPX attachments to
+        // sync at all and the interface has reached the Assigned state.
+        let mh_version = ConfigVersion::new(1);
+        let instance_version = ConfigVersion::new(7);
+
+        value_scenarios!(
+            run = |(state, instance, observation): (
+                DpaInterfaceControllerState,
+                Option<InstanceSnapshot>,
+                Option<MachineSpxStatusObservation>,
+            )| {
+                let dpa = dpa_interface(state, mh_version);
+                dpa.managed_host_network_config_version_synced(&instance, &observation)
+            };
+
+            "no instance and no observation is not synced" {
+                (DpaInterfaceControllerState::Assigned, None, None) => false,
+            }
+
+            "instance without attachments in assigned state is synced despite no observation" {
+                (
+                    DpaInterfaceControllerState::Assigned,
+                    Some(instance_snapshot(Vec::new(), instance_version)),
+                    None,
+                ) => true,
+            }
+
+            "instance without attachments before assigned state is not synced" {
+                (
+                    DpaInterfaceControllerState::Ready,
+                    Some(instance_snapshot(Vec::new(), instance_version)),
+                    None,
+                ) => false,
+            }
+
+            "configured attachments without observation is not synced" {
+                (
+                    DpaInterfaceControllerState::Assigned,
+                    Some(instance_snapshot(vec![matching_instance_attachment()], instance_version)),
+                    None,
+                ) => false,
+            }
+
+            "configured attachments with matching observed version is synced" {
+                (
+                    DpaInterfaceControllerState::Assigned,
+                    Some(instance_snapshot(vec![matching_instance_attachment()], instance_version)),
+                    Some(observation(instance_version)),
+                ) => true,
+            }
+
+            "configured attachments with mismatched observed version is not synced" {
+                (
+                    DpaInterfaceControllerState::Assigned,
+                    Some(instance_snapshot(vec![matching_instance_attachment()], instance_version)),
+                    Some(observation(mh_version)),
+                ) => false,
+            }
         );
     }
 }

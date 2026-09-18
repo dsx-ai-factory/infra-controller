@@ -62,6 +62,8 @@ navigation:
               slug: dpf-setup
             - page: Day 0 Machine Identity
               path: getting-started/installation-options/day0-machine-identity.md
+            - page: Day 0 Credential Store
+              path: getting-started/installation-options/day0-credential-store.md
           slug: installation-options
 
     - section: Architecture
@@ -117,6 +119,8 @@ navigation:
           path: provisioning/ingesting-hosts.md
         - page: Ingesting Hosts (REST API)
           path: provisioning/ingesting-hosts-rest-api.md
+        - page: Discovery OS cloud-init (Scout)
+          path: provisioning/discovery-os-cloud-init.md
         - page: Configure Expected Machine Interfaces
           path: provisioning/expected-machine-interfaces.md
         - page: Site Setup API Parity
@@ -142,12 +146,18 @@ navigation:
               path: manuals/networking/infiniband_partitioning.md
         - page: Tenant Management
           path: configuration/tenant_management.md
+        - page: Tenant Management with Keycloak
+          path: configuration/tenant-management-keycloak.md
+        - page: Image-Based Operating Systems
+          path: configuration/image-based-operating-systems.md
         - page: Organization & Permissions
           path: configuration/org-permissions.md
         - page: Machine Identity
           path: configuration/machine_identity.md
         - page: Secrets Storage
           path: configuration/secrets-storage.md
+        - page: Credential Sources
+          path: configuration/credential-sources.md
         - page: Host Naming
           path: configuration/host-naming.md
         - page: DNS
@@ -206,6 +216,8 @@ navigation:
           path: manuals/machine_identity_signing_key_rotation.md
         - page: NVLink Partitioning
           path: manuals/nvlink_partitioning.md
+        - page: NMX-C Certificate Monitoring and Rotation
+          path: operations/nvlink-certificate-rotation.md
         - page: Rack-Level Administration
           path: manuals/rack_level_admin.md
         - page: Leak Detection & Handling
@@ -214,6 +226,8 @@ navigation:
           contents:
             - page: VPC Routing Profiles
               path: manuals/vpc/vpc_routing_profiles.md
+            - page: Changing a VPC Routing Profile
+              path: manuals/vpc/changing_vpc_routing_profiles.md
             - page: VPC Peering
               path: manuals/vpc/vpc_peering_management.md
             - page: VPC Network Virtualization

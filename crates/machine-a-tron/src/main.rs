@@ -17,6 +17,7 @@
 #![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 mod logging;
+mod rms_mock;
 mod ufm_mock;
 
 use std::error::Error;
@@ -47,6 +48,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::logging::init_logging;
+use crate::rms_mock::HostedRmsMock;
 use crate::ufm_mock::HostedUfmMock;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 32)]
@@ -139,6 +141,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let bmc_mock_certs_dir = app_config.bmc_mock_certs_dir.clone();
+    let rms_mock_config = app_config.rms_mock.clone();
 
     let app_context = Arc::new(MachineATronContext {
         app_config,
@@ -146,11 +149,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         bmc_mock_certs_dir,
         bmc_registry,
         api_throttler,
-        desired_firmware_versions,
+        desired_firmware_versions: std::sync::RwLock::new(desired_firmware_versions),
         forge_api_client,
         dhcp_client,
         mac_address_pool: Mutex::new(mac_address_pool).into(),
     });
+
+    machine_a_tron::spawn_desired_firmware_refresher(app_context.clone());
 
     let info = app_context.forge_api_client.version(false).await?;
     tracing::info!(
@@ -163,7 +168,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Machines are created paused here. While paused, their actors do not advance the FSM, so
     // BMC DHCP and shared-router registration cannot run before the combined BMC mock listener is
     // started below.
-    let simulators = mat.make_devices(true).await?;
+    let (simulators, expected_inventory) = mat.make_devices(true).await?;
 
     // Persist them once in case of unclean shutdown
     app_context.app_config.write_persisted_devices(
@@ -182,11 +187,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         simulators.clone(),
         DeviceStatusConfig::new(bmc_mock_port),
         inventory_id.into(),
-    );
+    )
+    .with_expected_inventory(expected_inventory);
     // Hosted mode mounts the shared UFM mock router on machine-a-tron's control server. Its
     // ControlState can be injected as an in-process inventory provider; the standalone binary
     // initializes the same mock without this provider and relies on configured HTTP sources.
     let hosted_ufm = HostedUfmMock::start(ufm_config, &control_state)?;
+    let hosted_rms = HostedRmsMock::start(rms_mock_config, &control_state);
     let ufm_router = hosted_ufm.as_ref().map(HostedUfmMock::router);
     let certs_dir = app_context
         .bmc_mock_certs_dir
@@ -205,6 +212,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             None => bmc_router,
         };
         let router = append_control_routes(Some(bmc_router), control_state.clone());
+        // Merged onto the outermost router, and deliberately after the control
+        // routes. Those add a `/{*all}` catch-all, but axum matches the RMS
+        // services' static first segment ahead of it. Merging any lower would
+        // put gRPC behind a handler that rebuilds the request and resets it to
+        // HTTP/1.1, which fails without an obvious cause.
+        let router = router.merge(hosted_rms.router());
         bmc_mock::CombinedServer::run_router(
             "bmc-mock",
             router,

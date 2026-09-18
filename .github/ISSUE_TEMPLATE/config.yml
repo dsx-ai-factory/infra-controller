@@ -22,5 +22,5 @@ blank_issues_enabled: true
 # link that below to have it show up in the 'Submit Issue' page
 contact_links:
   - name: Ask a Question
-    url: https://github.com/NVIDIA/infra-controller/discussions
+    url: https://github.com/dsx-ai-factory/infra-controller/discussions
     about: Please ask any questions here.

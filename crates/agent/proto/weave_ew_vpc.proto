@@ -10,10 +10,6 @@
    its affiliates is strictly prohibited.
 */
 
-/*
- * This vendored protocol describes the Network Isolation API served by DPF
- * Weave and consumed by this agent. Update it when the controller API changes.
- */
 syntax = "proto3";
 
 package nvidia.weave.controller.v1;
@@ -25,6 +21,8 @@ import "google/protobuf/timestamp.proto";
 service NetworkIsolationService {
   // CreateVirtualNetwork creates a new virtual network.
   rpc CreateVirtualNetwork(CreateVirtualNetworkRequest) returns (CreateVirtualNetworkResponse);
+  // UpdateVirtualNetwork updates a virtual network.
+  rpc UpdateVirtualNetwork(UpdateVirtualNetworkRequest) returns (UpdateVirtualNetworkResponse);
   // DeleteVirtualNetwork deletes a virtual network.
   rpc DeleteVirtualNetwork(DeleteVirtualNetworkRequest) returns (DeleteVirtualNetworkResponse);
   // GetVirtualNetwork retrieves a virtual network.
@@ -34,6 +32,8 @@ service NetworkIsolationService {
 
   // CreateVirtualNetworkAttachment creates a new virtual network attachment.
   rpc CreateVirtualNetworkAttachment(CreateVirtualNetworkAttachmentRequest) returns (CreateVirtualNetworkAttachmentResponse);
+  // UpdateVirtualNetworkAttachment updates a virtual network attachment.
+  rpc UpdateVirtualNetworkAttachment(UpdateVirtualNetworkAttachmentRequest) returns (UpdateVirtualNetworkAttachmentResponse);
   // DeleteVirtualNetworkAttachment deletes a virtual network attachment.
   rpc DeleteVirtualNetworkAttachment(DeleteVirtualNetworkAttachmentRequest) returns (DeleteVirtualNetworkAttachmentResponse);
   // GetVirtualNetworkAttachment retrieves a virtual network attachment.
@@ -46,7 +46,7 @@ service NetworkIsolationService {
 message ObjectMetadata {
   // id is the object unique identifier assigned. This can be any uniquely identifiable string.
   // If provided in Create* rpc calls, the server will use the specified id as the object identifier.
-  // If left unset, the server will generate a unique id for the object.
+  // On object creation, if left unset, the server will generate a unique id for the object.
   optional string id = 1 [(buf.validate.field).string = {
     min_len: 1
     max_len: 256
@@ -55,8 +55,12 @@ message ObjectMetadata {
   optional google.protobuf.Timestamp creation_timestamp = 2;
   // deletion_timestamp is the timestamp when the object was scheduled for deletion. Output only. Set by the server.
   optional google.protobuf.Timestamp deletion_timestamp = 3;
+  // resource_version identifies the current internal version of this object. Set by the server on every write.
+  // It is ignored in Create* rpc calls and acts as an update precondition in Update* rpc calls.
+  // It must be treated as an opaque value: callers must not parse it or assume any ordering.
+  optional string resource_version = 4 [(buf.validate.field).string.max_len = 256];
   // user_data is a set of arbitrary key-value pairs that can be used by the caller to store data.
-  map<string, string> user_data = 4 [(buf.validate.field).map = {
+  map<string, string> user_data = 5 [(buf.validate.field).map = {
     max_pairs: 64
     keys: {
       string: {
@@ -81,6 +85,28 @@ message CreateVirtualNetworkRequest {
 // CreateVirtualNetworkResponse is the response to create a virtual network.
 message CreateVirtualNetworkResponse {
   // virtual_network is the created virtual network
+  VirtualNetwork virtual_network = 1;
+}
+
+// UpdateVirtualNetworkRequest is the request to update a virtual network.
+message UpdateVirtualNetworkRequest {
+  // metadata contains the metadata for the virtual network.
+  // metadata.id is required and identifies the virtual network to update.
+  // metadata.resource_version may be set by the caller. if set, the update is performed only if it matches the
+  // resource version of the stored object, otherwise the call fails with ABORTED. if left unset, the server uses the
+  // resource version it reads while serving the request.
+  ObjectMetadata metadata = 1 [(buf.validate.field).required = true];
+
+  option (buf.validate.message).cel = {
+    id: "metadata_id_required"
+    message: "metadata.id is required"
+    expression: "has(this.metadata.id)"
+  };
+}
+
+// UpdateVirtualNetworkResponse is the response to update a virtual network.
+message UpdateVirtualNetworkResponse {
+  // virtual_network is the updated virtual network
   VirtualNetwork virtual_network = 1;
 }
 
@@ -141,17 +167,19 @@ message VirtualNetworkSpec {
 
   // subnet_ipv4 is the IPv4 subnet address of the virtual network.
   // either subnet_ipv4 or subnet_ipv6 must be set.
-  // currently only IPv4 is supported.
+  // Set this for an IPv4 virtual network.
   optional string subnet_ipv4 = 2 [(buf.validate.field).string.ipv4_prefix = true];
   // subnet_ipv6 is the IPv6 subnet address of the virtual network.
   // either subnet_ipv4 or subnet_ipv6 must be set.
+  // Set this for an IPv6 virtual network.
   optional string subnet_ipv6 = 3 [(buf.validate.field).string.ipv6_prefix = true];
 
-  // validation rule: only subnet_ipv4 is supported.
+  // validation rule: exactly one of subnet_ipv4 / subnet_ipv6 must be set
+  // (single-stack only, dual-stack is not supported).
   option (buf.validate.message).cel = {
-    id: "only_ipv4_supported"
-    message: "only subnet_ipv4 is supported"
-    expression: "has(this.subnet_ipv4) && !has(this.subnet_ipv6)"
+    id: "exactly_one_subnet_required"
+    message: "exactly one of subnet_ipv4 or subnet_ipv6 must be set"
+    expression: "has(this.subnet_ipv4) != has(this.subnet_ipv6)"
   };
 }
 
@@ -201,8 +229,8 @@ enum AttachmentType {
   ATTACHMENT_TYPE_PF = 1;
   // ATTACHMENT_TYPE_VF represent a virtual function (VF) attachment.
   ATTACHMENT_TYPE_VF = 2;
-  // ATTACHMENT_TYPE_OVN represents an OVN bridge attachment.
-  ATTACHMENT_TYPE_OVN = 3;
+  // ATTACHMENT_TYPE_OVS represents an OVS bridge attachment.
+  ATTACHMENT_TYPE_OVS = 3;
 }
 
 // AttachmentPF is the attachment to a virtual network of type PF (ATTACHMENT_TYPE_PF)
@@ -222,10 +250,19 @@ message AttachmentVF {
   }];
 }
 
-// AttachmentOVN is the attachment to a virtual network for OVN (ATTACHMENT_TYPE_OVN)
-message AttachmentOVN {
-  // OVN network name to build the OVN bridge mapping in OVS external IDs
-  string network_name = 1 [(buf.validate.field).string = {
+// AttachmentOvs is the attachment to a virtual network for OVS (ATTACHMENT_TYPE_OVS)
+message AttachmentOvs {
+  // bridge_name is the OVS bridge the attachment connects to via a patch port.
+  // The bridge is created if it does not exist. When attachment is removed, the bridge is deleted if it was created by the attachment.
+  // Note: The created OVS bridge is created with the following attributes: datapath_type=netdev, fail_mode=standalone, no internal port.
+  string bridge_name = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 32
+    pattern: "^[a-zA-Z0-9_.-]+$"
+  }];
+  // ovn_network_name is the name of the OVN network.
+  // When set, OVN bridge mappings will be set to allow OVN controller to attach to the specified bridge.
+  optional string ovn_network_name = 2 [(buf.validate.field).string = {
     min_len: 1
     max_len: 256
     pattern: "^[a-zA-Z0-9_-]+$"
@@ -243,7 +280,7 @@ message VirtualNetworkAttachmentSpec {
   // Can be either the NIC's Serial number or the MAC address of one of the NICs host facing PFs.
   // Only MAC address is supported for now.
   string nic_id = 2 [(buf.validate.field).string = {pattern: "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"}];
-  // attachment_type is the type of attachment. currently only ATTACHMENT_TYPE_PF and ATTACHMENT_TYPE_OVN are supported.
+  // attachment_type is the type of attachment. currently only ATTACHMENT_TYPE_PF and ATTACHMENT_TYPE_OVS are supported.
   AttachmentType attachment_type = 3 [(buf.validate.field).enum = {
     in: [
       1,
@@ -254,8 +291,8 @@ message VirtualNetworkAttachmentSpec {
   optional AttachmentPF attachment_pf = 4;
   // attachment_vf is the VF attachment. set when attachment_type is ATTACHMENT_TYPE_VF.
   optional AttachmentVF attachment_vf = 5;
-  // attachment_ovn is the OVN attachment. set when attachment_type is ATTACHMENT_TYPE_OVN.
-  optional AttachmentOVN attachment_ovn = 6;
+  // attachment_ovs is the OVS attachment. set when attachment_type is ATTACHMENT_TYPE_OVS.
+  optional AttachmentOvs attachment_ovs = 6;
 
   option (buf.validate.message).cel = {
     id: "attachment_pf_iff_pf"
@@ -268,14 +305,14 @@ message VirtualNetworkAttachmentSpec {
     expression: "(this.attachment_type == 2) == has(this.attachment_vf)"
   };
   option (buf.validate.message).cel = {
-    id: "attachment_ovn_iff_ovn"
-    message: "attachment_ovn must be set if and only if attachment_type is ATTACHMENT_TYPE_OVN"
-    expression: "(this.attachment_type == 3) == has(this.attachment_ovn)"
+    id: "attachment_ovs_iff_ovs"
+    message: "attachment_ovs must be set if and only if attachment_type is ATTACHMENT_TYPE_OVS"
+    expression: "(this.attachment_type == 3) == has(this.attachment_ovs)"
   };
 }
 
 // VirtualNetworkAttachmentStatus contains additional information about the attachment.
-// host_ipv6 is not supported for now.
+// Exactly one of host_ipv4 or host_ipv6 is set to match the parent virtual network's subnet family.
 message VirtualNetworkAttachmentStatus {
   // state contains the current state of the object.
   State state = 1;
@@ -306,6 +343,28 @@ message CreateVirtualNetworkAttachmentRequest {
 // CreateVirtualNetworkAttachmentResponse is the response to create a virtual network attachment.
 message CreateVirtualNetworkAttachmentResponse {
   // virtual_network_attachment is the created virtual network attachment
+  VirtualNetworkAttachment virtual_network_attachment = 1;
+}
+
+// UpdateVirtualNetworkAttachmentRequest is the request to update a virtual network attachment.
+message UpdateVirtualNetworkAttachmentRequest {
+  // metadata contains the metadata for the virtual network attachment.
+  // metadata.id is required and identifies the virtual network attachment to update.
+  // metadata.resource_version may be set by the caller. if set, the update is performed only if it matches the
+  // resource version of the stored object, otherwise the call fails with ABORTED. if left unset, the server uses the
+  // resource version it reads while serving the request.
+  ObjectMetadata metadata = 1 [(buf.validate.field).required = true];
+
+  option (buf.validate.message).cel = {
+    id: "metadata_id_required"
+    message: "metadata.id is required"
+    expression: "has(this.metadata.id)"
+  };
+}
+
+// UpdateVirtualNetworkAttachmentResponse is the response to update a virtual network attachment.
+message UpdateVirtualNetworkAttachmentResponse {
+  // virtual_network_attachment is the updated virtual network attachment
   VirtualNetworkAttachment virtual_network_attachment = 1;
 }
 

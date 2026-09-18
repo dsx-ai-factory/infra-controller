@@ -16,6 +16,7 @@
  */
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,12 +26,14 @@ use bmc_mock::{
     DpuMachineInfo, DpuSettings, HardwareType, HostFirmwareVersions, RackInfo, RackPlacement,
     RackType,
 };
+use carbide_utils::HostPortPair;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use clap::Parser;
 use duration_str::deserialize_duration;
 use eyre::Context;
 use mac_address::MacAddress;
+use rms_mock::RmsMockConfig;
 use rpc::forge::DesiredFirmwareVersionEntry;
 use rpc::forge_tls_client::ForgeClientConfig;
 use rpc::protos::forge_api_client::ForgeApiClient;
@@ -147,6 +150,11 @@ pub struct MachineConfig {
     #[serde(default)]
     pub dpus_in_nic_mode: bool,
 
+    /// Whether hosts in this section are registered as DPF-enabled expected machines;
+    /// DPUs of a DPF-enabled host start with the DPU agent installed. Defaults to true.
+    #[serde(default = "default_true")]
+    pub dpf_enabled: bool,
+
     /// What firmware versions to report for DPUs in this host
     #[serde(default)]
     pub dpu_firmware_versions: Option<DpuFirmwareVersions>,
@@ -257,6 +265,7 @@ impl WiwynnGb200RackConfig {
             run_interval_idle: self.run_interval_idle,
             network_status_run_interval: self.network_status_run_interval,
             dpus_in_nic_mode: self.dpus_in_nic_mode,
+            dpf_enabled: true,
             dpu_firmware_versions: self.dpu_firmware_versions.clone(),
             host_firmware_versions: None,
             dpu_agent_version: self.dpu_agent_version.clone(),
@@ -351,6 +360,7 @@ impl LenovoGb300RackConfig {
             run_interval_idle: self.run_interval_idle,
             network_status_run_interval: self.network_status_run_interval,
             dpus_in_nic_mode: self.dpus_in_nic_mode,
+            dpf_enabled: true,
             dpu_firmware_versions: self.dpu_firmware_versions.clone(),
             host_firmware_versions: None,
             dpu_agent_version: self.dpu_agent_version.clone(),
@@ -417,6 +427,15 @@ pub struct DpuFirmwareVersions {
     pub cec: Option<String>,
     pub uefi: Option<String>,
     pub nic: Option<String>,
+    /// Optional opaque DPU BSP firmware version.
+    ///
+    /// Any string is accepted verbatim, including an empty string. The default,
+    /// `None`, omits `DPU_BSP` from generated firmware inventory; `Some("")`
+    /// explicitly configures that inventory entry with an empty version. This is
+    /// supported for generated BlueField-3 and BlueField-4 DPU profiles; profiles
+    /// without a generated DPU do not expose the entry.
+    #[serde(default)]
+    pub bsp: Option<String>,
 }
 
 /// BMC-mock has its own version of this data structure to avoid cyclic dependencies
@@ -427,6 +446,7 @@ impl From<DpuFirmwareVersions> for bmc_mock::DpuFirmwareVersions {
             cec: value.cec,
             uefi: value.uefi,
             nic: value.nic,
+            bsp: value.bsp,
         }
     }
 }
@@ -436,7 +456,11 @@ impl DpuFirmwareVersions {
         self,
         desired_firmware: &[DesiredFirmwareVersionEntry],
     ) -> Self {
-        // We emulate bf3 DPU's, find those from the desired firmware.
+        // TODO: Pass the emulated DPU generation into this lookup and select the
+        // matching desired-firmware model. This currently always uses BlueField-3,
+        // so missing BF4 values can be filled from the BF3 entry; explicit overrides
+        // still take precedence. BF4 BMC version strings use the `BF4-` convention:
+        // https://github.com/NVIDIA/infra-controller/pull/3477
         let Some(bf3_firmware_map) = desired_firmware
             .iter()
             .find(|entry| {
@@ -457,6 +481,7 @@ impl DpuFirmwareVersions {
             cec: self.cec.or_else(|| bf3_firmware_map.get("cec").cloned()),
             uefi: self.uefi.or_else(|| bf3_firmware_map.get("uefi").cloned()),
             nic: self.nic.or_else(|| bf3_firmware_map.get("nic").cloned()),
+            bsp: self.bsp,
         }
     }
 }
@@ -524,6 +549,10 @@ pub struct MachineATronConfig {
 
     /// If set, host BMC mocks start with this password instead of the factory default
     /// (`DUMMY_FACTORY_PASSWORD`). Emulates a BMC that was already rotated by an operator.
+    ///
+    /// When persistence is enabled and a snapshot exists for a given machine, the
+    /// snapshot's saved credentials are restored *after* this override is applied
+    /// and take precedence over it (see `MachineStateMachine::run_bmc_mock`).
     #[serde(default)]
     pub host_bmc_password: Option<String>,
 
@@ -562,9 +591,21 @@ pub struct MachineATronConfig {
     /// when its explicit `enabled` flag is set.
     #[serde(default)]
     pub ufm_mock: Option<UfmMockConfig>,
+
+    /// The hosted RMS mock. Unlike the UFM mock this has no `enabled`
+    /// flag: the services are always mounted, and NICo reaches them only when
+    /// it is configured with an `rms.api_url` pointing here.
+    #[serde(default)]
+    pub rms_mock: RmsMockConfig,
 }
 
 impl MachineATronConfig {
+    pub(crate) fn bmc_proxy_address(&self) -> Option<String> {
+        self.configure_carbide_bmc_proxy_host
+            .as_ref()
+            .map(|host| HostPortPair::HostAndPort(host.clone(), self.bmc_mock_port).to_string())
+    }
+
     pub fn validate(&self) -> eyre::Result<()> {
         if let Some(ufm_mock) = self.ufm_mock.as_ref() {
             ufm_mock.validate()?;
@@ -754,10 +795,16 @@ impl MachineATronConfig {
         }
 
         for (config_section, persisted_devices) in persisted_devices_by_section {
-            std::fs::write(
-                devices_persist_dir.join(format!("{config_section}.json")),
-                serde_json::to_vec(&persisted_devices)?,
-            )?;
+            // Write-then-rename so a crash mid-write can never leave a
+            // truncated snapshot behind.
+            let final_path = devices_persist_dir.join(format!("{config_section}.json"));
+            let tmp_path = devices_persist_dir.join(format!("{config_section}.json.tmp"));
+            std::fs::write(&tmp_path, serde_json::to_vec(&persisted_devices)?)?;
+            // Snapshots hold plaintext BMC passwords (`bmc_accounts`), so lock
+            // them to owner-only rather than trusting the process umask
+            // (issue #5966, CWE-732). The mode carries across the rename.
+            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::rename(&tmp_path, &final_path)?;
         }
 
         Ok(())
@@ -829,6 +876,19 @@ pub struct PersistedDevice {
     /// the versions last observed, not the operator-configured starting point.
     #[serde(default)]
     pub active_host_firmware: Option<HostFirmwareVersions>,
+    /// Current BMC account passwords at the time this snapshot was taken.
+    /// Restored on restart so a rotated password survives a pod restart
+    /// instead of resetting to the factory default (issue #5966).
+    ///
+    /// `None` means the credentials are simply absent from this snapshot — e.g.
+    /// a legacy snapshot written before this field existed, or a device type
+    /// that never populates it. This is not an error: the configured or
+    /// factory-default credentials remain in effect rather than being cleared.
+    ///
+    /// Power shelves are intentionally excluded from credential restoration
+    /// entirely, so they never populate this field.
+    #[serde(default)]
+    pub bmc_accounts: Option<Vec<bmc_mock::BmcAccountCredential>>,
 }
 
 impl PersistedDevice {
@@ -852,6 +912,17 @@ pub struct PersistedDpuMachine {
     pub serial: String,
     pub installed_os: OsImage,
     pub dpu_index: u8,
+    /// Current BMC account passwords for this DPU at the time this snapshot was
+    /// taken. Restored on restart so a rotated password survives a pod restart
+    /// instead of resetting to the factory default (issue #5966).
+    ///
+    /// `None` means the credentials are simply absent from this snapshot — e.g.
+    /// a legacy snapshot written before this field existed, or a device type
+    /// that never populates it. This is not an error: the configured or
+    /// factory-default credentials remain in effect rather than being cleared.
+    /// See also [`PersistedDevice::bmc_accounts`].
+    #[serde(default)]
+    pub bmc_accounts: Option<Vec<bmc_mock::BmcAccountCredential>>,
     #[serde(flatten)]
     pub settings: DpuSettings,
 }
@@ -954,8 +1025,9 @@ pub struct MachineATronContext {
     pub bmc_registry: BmcMockRegistry,
     pub api_throttler: ApiThrottler,
     /// These are the firmware versions the server wants us to be on. If not configured for other
-    /// firmware, DPU's can mock that they already have this installed.
-    pub desired_firmware_versions: Vec<DesiredFirmwareVersionEntry>,
+    /// firmware, DPU's can mock that they already have this installed. Refreshed in the
+    /// background by `spawn_desired_firmware_refresher`.
+    pub desired_firmware_versions: std::sync::RwLock<Vec<DesiredFirmwareVersionEntry>>,
     pub forge_api_client: ForgeApiClient,
     pub dhcp_client: crate::dhcp_wrapper::DhcpClient,
     pub mac_address_pool: Arc<Mutex<MacAddressPool>>,
@@ -1041,6 +1113,11 @@ scout_run_interval = "5s"
     "#,
         )
         .expect("Could not parse config")
+    }
+
+    #[test]
+    fn machine_config_dpf_enabled_defaults_to_true() {
+        assert!(rack_config().machines["config"].dpf_enabled);
     }
 
     fn wiwynn_gb200_rack_from_machine(machine: &MachineConfig) -> WiwynnGb200RackConfig {
@@ -1328,6 +1405,44 @@ scout_run_interval = "5s"
     #[test]
     fn dhcp_uses_api_by_default() {
         assert_eq!(rack_config().dhcp, DhcpType::Api {});
+    }
+
+    #[test]
+    fn bmc_proxy_address_uses_configured_host_and_port() {
+        check_values(
+            [
+                Check {
+                    scenario: "bare IPv6 with default port",
+                    input: r#"configure_carbide_bmc_proxy_host = "2001:db8::1""#,
+                    expect: Some("[2001:db8::1]:2000".to_string()),
+                },
+                Check {
+                    scenario: "bracketed IPv6 with configured port",
+                    input: r#"configure_carbide_bmc_proxy_host = "[2001:db8::1]"
+bmc_mock_port = 8443"#,
+                    expect: Some("[2001:db8::1]:8443".to_string()),
+                },
+                Check {
+                    scenario: "IPv4",
+                    input: r#"configure_carbide_bmc_proxy_host = "192.0.2.1""#,
+                    expect: Some("192.0.2.1:2000".to_string()),
+                },
+                Check {
+                    scenario: "proxy host omitted",
+                    input: "",
+                    expect: None,
+                },
+            ],
+            |serialized| {
+                let config: MachineATronConfig = toml::from_str(&format!(
+                    r#"carbide_api_url = "https://carbide-api.forge:443"
+machines = {{}}
+{serialized}"#
+                ))
+                .expect("could not parse config");
+                config.bmc_proxy_address()
+            },
+        );
     }
 
     #[test]
@@ -1725,5 +1840,57 @@ server_address = "127.0.0.1:6767""#,
                 machine.missing_host_inband_relay_for_direct_host_dhcp()
             },
         );
+    }
+
+    fn persisted_device_fixture() -> PersistedDevice {
+        PersistedDevice {
+            mat_id: Uuid::new_v4(),
+            machine_config_section: "config".to_string(),
+            hw_type: HardwareType::GenericAmi,
+            bmc_mac_address: MacAddress::new([2, 0, 0, 0, 0, 1]),
+            serial: "SER123".to_string(),
+            dpus: Vec::new(),
+            non_dpu_mac_address: None,
+            nvos_mac_addresses: Vec::new(),
+            switch_serial_number: None,
+            observed_machine_id: None,
+            installed_os: OsImage::None,
+            tpm_ek_certificate: None,
+            hw_mac_addr_pool: None,
+            active_host_firmware: None,
+            bmc_accounts: None,
+        }
+    }
+
+    #[test]
+    fn persisted_device_bmc_accounts_round_trip() {
+        let mut device = persisted_device_fixture();
+        device.bmc_accounts = Some(vec![bmc_mock::BmcAccountCredential {
+            account_id: "1".to_string(),
+            username: "root".to_string(),
+            password: "rotated-password".to_string(),
+        }]);
+
+        let json = serde_json::to_string(&device).unwrap();
+        let restored: PersistedDevice = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.bmc_accounts, device.bmc_accounts);
+    }
+
+    #[test]
+    fn persisted_device_snapshot_without_bmc_accounts_still_loads() {
+        // Snapshots written by pre-#5966 machine-a-tron versions have no
+        // bmc_accounts field and must keep loading.
+        let device = persisted_device_fixture();
+        let mut json = serde_json::to_value(&device).unwrap();
+        assert!(
+            json.as_object_mut()
+                .unwrap()
+                .remove("bmc_accounts")
+                .is_some()
+        );
+
+        let restored: PersistedDevice = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.bmc_accounts, None);
+        assert_eq!(restored.serial, device.serial);
     }
 }

@@ -137,11 +137,13 @@ impl TestHarness {
             config,
             self.test_meter.meter(),
             endpoint_exploration_service,
+            endpoint_explorer.clone(),
             api.common_pools().clone(),
             api.work_lock_manager_handle(),
             api.runtime_config.rack_profiles.clone(),
             None,
             api.credential_manager().clone(),
+            false,
         );
         TestSiteExplorer::new(site_explorer, endpoint_explorer)
     }

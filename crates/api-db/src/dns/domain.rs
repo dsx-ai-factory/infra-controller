@@ -176,6 +176,30 @@ pub async fn find_all_by<'a, C: ColumnInfo<'a, TableType = Domain>>(
         .map_err(|e| DatabaseError::query(query.sql(), e))
 }
 
+/// Finds the live domain whose name is the longest entry in `candidates`.
+///
+/// `candidates` are the label suffixes of a queried name, lowercase and
+/// without a trailing dot (see `Fqdn::suffixes`). Names compare after
+/// `lower(rtrim(name, '.'))`, so a stored dotted or mixed-case spelling still
+/// matches. One query, bounded by the number of labels in the question, in
+/// place of loading every row.
+pub async fn find_longest_live_zone(
+    txn: impl DbReader<'_>,
+    candidates: &[String],
+) -> Result<Option<Domain>, DatabaseError> {
+    let query = "SELECT * FROM domains
+                 WHERE deleted IS NULL
+                   AND lower(rtrim(name, '.')) = ANY($1)
+                 ORDER BY length(rtrim(name, '.')) DESC, name
+                 LIMIT 1";
+    sqlx::query_as::<_, DbDomain>(query)
+        .bind(candidates)
+        .fetch_optional(txn)
+        .await
+        .map(|domain| domain.map(Domain::from))
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Finds live domains named `name`.
 ///
 /// Reverse-zone names compare case-insensitively without a trailing dot
@@ -311,6 +335,53 @@ fn test_generate_domain_serial_format() {
     let serial = dns_record::SoaRecord::generate_new_serial();
 
     assert_eq!(serial, expected_serial);
+}
+
+#[cfg(test)]
+mod test_find_longest_live_zone {
+    use model::dns::NewDomain;
+
+    use crate as db;
+
+    #[crate::sqlx_test]
+    async fn picks_the_longest_live_suffix(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin");
+        for name in ["example.com", "mysite.example.com."] {
+            db::dns::domain::persist(NewDomain::new(name), &mut txn)
+                .await
+                .expect("persist domain");
+        }
+        let deleted = db::dns::domain::persist(NewDomain::new("gpu.mysite.example.com"), &mut txn)
+            .await
+            .expect("persist domain");
+        db::dns::domain::delete(deleted, &mut txn)
+            .await
+            .expect("delete domain");
+
+        let suffixes = |name: &str| {
+            model::dns::Fqdn::parse(name)
+                .expect("fixture name")
+                .suffixes()
+        };
+
+        let held = db::dns::domain::find_longest_live_zone(
+            txn.as_mut(),
+            &suffixes("gpu.mysite.example.com."),
+        )
+        .await
+        .expect("query")
+        .expect("a live zone encloses the name");
+        assert_eq!(
+            held.name, "mysite.example.com.",
+            "the longest live match wins over its parent and its deleted child, in stored spelling"
+        );
+
+        let none =
+            db::dns::domain::find_longest_live_zone(txn.as_mut(), &suffixes("www.example.org."))
+                .await
+                .expect("query");
+        assert!(none.is_none(), "no zone encloses example.org");
+    }
 }
 
 #[cfg(test)]

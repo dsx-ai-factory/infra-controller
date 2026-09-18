@@ -223,8 +223,7 @@ async fn test_tenant(pool: sqlx::PgPool) {
             .contains("RoutingProfile not found: ADMIN")
     );
 
-    // Create a VPC for the tenant
-    // No network_virtualization_type, should default.
+    // Create an active FNN VPC whose inherited routing policy makes profile changes unsafe.
     let new_vpc = env
         .api
         .create_vpc(
@@ -234,6 +233,7 @@ async fn test_tenant(pool: sqlx::PgPool) {
                     description: "".to_string(),
                     labels: Vec::new(),
                 })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
                 .tonic_request(),
         )
         .await
@@ -256,7 +256,7 @@ async fn test_tenant(pool: sqlx::PgPool) {
             .await
             .unwrap_err()
             .message()
-            .contains("cannot update tenant routing profile type")
+            .contains("cannot update tenant routing profile type for tenant with active FNN VPCs")
     );
 
     //
@@ -404,6 +404,74 @@ async fn test_tenant(pool: sqlx::PgPool) {
     );
 }
 
+/// Verifies an FNN tenant update without a routing profile rejects the whole write so metadata,
+/// version, and inherited policy cannot diverge.
+#[crate::sqlx_test]
+async fn update_tenant_requires_routing_profile_with_fnn(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+
+    // Create through the public API so the tenant receives the site's default FNN profile.
+    let tenant = env
+        .api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "fnn-update-profile".to_string(),
+            routing_profile_type: None,
+            metadata: Some(rpc::forge::Metadata {
+                name: "FNN update profile".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await?
+        .into_inner()
+        .tenant
+        .expect("created tenant");
+
+    // Capture the original state so the rejected write can be checked for partial persistence.
+    let original_metadata = tenant.metadata.clone();
+    let original_version = tenant.version.clone();
+
+    // Omitting the replacement profile must fail even before the tenant owns any VPCs.
+    let error = env
+        .api
+        .update_tenant(tonic::Request::new(rpc::forge::UpdateTenantRequest {
+            organization_id: tenant.organization_id.clone(),
+            routing_profile_type: None,
+            metadata: Some(rpc::forge::Metadata {
+                name: "Rejected FNN metadata update".to_string(),
+                ..Default::default()
+            }),
+            if_version_match: Some(original_version.clone()),
+        }))
+        .await
+        .expect_err("an FNN tenant update without a routing profile must fail");
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert!(
+        error
+            .message()
+            .contains("`routing_profile_type` is required")
+    );
+
+    // Reload through the public API to prove no part of the rejected write was persisted.
+    let persisted = env
+        .api
+        .find_tenant(tonic::Request::new(rpc::forge::FindTenantRequest {
+            tenant_organization_id: tenant.organization_id,
+        }))
+        .await?
+        .into_inner()
+        .tenant
+        .expect("persisted tenant");
+    assert_eq!(persisted.metadata, original_metadata);
+    assert_eq!(persisted.version, original_version);
+    assert_eq!(persisted.routing_profile_type.as_deref(), Some("EXTERNAL"));
+
+    Ok(())
+}
+
 #[crate::sqlx_test]
 async fn test_find_tenant_ids(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
@@ -518,6 +586,34 @@ async fn test_tenant_create_without_fnn(pool: sqlx::PgPool) {
     assert_eq!(tenant.organization_id, "PreFnnOrg");
     assert_eq!(tenant.routing_profile_type, None);
 
+    // Omitting the replacement profile remains valid without FNN and leaves it unset.
+    let tenant_update = env
+        .api
+        .update_tenant(tonic::Request::new(rpc::forge::UpdateTenantRequest {
+            organization_id: tenant.organization_id.clone(),
+            routing_profile_type: None,
+            metadata: tenant.metadata.clone(),
+            if_version_match: Some(tenant.version),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let updated_tenant = tenant_update.tenant.expect("updated tenant");
+    assert_eq!(updated_tenant.routing_profile_type, None);
+
+    // Reload through the public API to prove the successful update persisted no profile.
+    let persisted_tenant = env
+        .api
+        .find_tenant(tonic::Request::new(rpc::forge::FindTenantRequest {
+            tenant_organization_id: updated_tenant.organization_id,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .tenant
+        .expect("persisted tenant");
+    assert_eq!(persisted_tenant.routing_profile_type, None);
+
     // Updating a tenant with a routing profile while FNN is disabled should fail.
     let update_tenant = env
         .api
@@ -529,7 +625,7 @@ async fn test_tenant_create_without_fnn(pool: sqlx::PgPool) {
                 description: "".to_string(),
                 labels: vec![],
             }),
-            if_version_match: Some(tenant.version.clone()),
+            if_version_match: Some(persisted_tenant.version),
         }))
         .await
         .unwrap_err();

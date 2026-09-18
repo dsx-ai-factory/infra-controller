@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::extract::{OriginalUri, State};
 use axum::http::{StatusCode, header};
@@ -31,12 +32,18 @@ use nv_redfish::computer_system::{ComputerSystem, Drive, Memory, Processor, Stor
 use serde_json::{Value, json};
 use url::Url;
 
-use super::inventory::DiscoveredEntity;
+use super::inventory::{DiscoveredEntity, ShelfPower};
 
 #[derive(Clone)]
 enum MockResponse {
     Json(Value),
     Malformed,
+    /// Answers `503 Service Unavailable` while `failures` is above zero,
+    /// decrementing it per request, then serves `then`.
+    Transient {
+        failures: Arc<AtomicUsize>,
+        then: Value,
+    },
 }
 
 async fn resource_response(
@@ -51,6 +58,18 @@ async fn resource_response(
             "not valid JSON",
         )
             .into_response(),
+        Some(MockResponse::Transient { failures, then }) => {
+            let failing = failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
+            if failing {
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            } else {
+                Json(then.clone()).into_response()
+            }
+        }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -85,6 +104,20 @@ fn insert(resources: &mut HashMap<String, MockResponse>, path: &str, value: Valu
     resources.insert(path.to_string(), MockResponse::Json(value));
 }
 
+/// Make the resource at `path` answer 503 to its first request only.
+fn fail_once(resources: &mut HashMap<String, MockResponse>, path: &str) {
+    let Some(MockResponse::Json(then)) = resources.remove(path) else {
+        panic!("{path} should be a JSON mock resource");
+    };
+    resources.insert(
+        path.to_string(),
+        MockResponse::Transient {
+            failures: Arc::new(AtomicUsize::new(1)),
+            then,
+        },
+    );
+}
+
 fn insert_resource(
     resources: &mut HashMap<String, MockResponse>,
     path: &str,
@@ -105,11 +138,12 @@ fn reference(path: &str) -> Value {
 }
 
 const TELEMETRY_SERVICE: &str = "/redfish/v1/TelemetryService";
+const METRIC_DEFINITIONS: &str = "/redfish/v1/TelemetryService/MetricDefinitions";
 
 /// A telemetry service publishing two reports: one healthy and one the
 /// NVIDIA OEM extension marks stale.
 fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
-    const DEFINITIONS: &str = "/redfish/v1/TelemetryService/MetricDefinitions";
+    const DEFINITIONS: &str = METRIC_DEFINITIONS;
     const REPORTS: &str = "/redfish/v1/TelemetryService/MetricReports";
 
     let definition = |id: &str| format!("{DEFINITIONS}/{id}");
@@ -192,6 +226,9 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
                 { "MetricId": "FanPWM", "MetricValue": "30" },
                 // Discrete state, so there is no gauge to publish.
                 { "MetricId": "PowerState", "MetricValue": "Enabled" },
+                // Parse as f64 but are not measurements.
+                { "MetricId": "NonFinite", "MetricValue": "NaN" },
+                { "MetricId": "Infinite", "MetricValue": "inf" },
                 // No id to name a series after.
                 { "MetricValue": "1" }
             ]
@@ -562,6 +599,9 @@ fn mock_resources() -> HashMap<String, MockResponse> {
         json!({
             "ChassisType": "RackMount",
             "Model": "HGX",
+            "MaxPowerWatts": 33000,
+            "PowerState": "On",
+            "Status": { "Health": "OK", "State": "StandbyOffline" },
             "PowerSubsystem": reference(POWER_SUBSYSTEM)
         }),
     );
@@ -579,7 +619,10 @@ fn mock_resources() -> HashMap<String, MockResponse> {
         "#PowerSubsystem.v1_1_0.PowerSubsystem",
         "PowerSubsystem",
         "Power subsystem",
-        json!({ "PowerSupplies": reference(POWER_SUPPLIES) }),
+        json!({
+            "Status": { "Health": "OK", "State": "Enabled" },
+            "PowerSupplies": reference(POWER_SUPPLIES)
+        }),
     );
 
     let power_supply_paths = [power_supply("PS0"), power_supply("PS-sparse")];
@@ -605,6 +648,7 @@ fn mock_resources() -> HashMap<String, MockResponse> {
         json!({
             "Model": "PSU-3KW",
             "PowerCapacityWatts": 3000.0,
+            "Status": { "Health": "Warning", "State": "Enabled" },
             "Metrics": reference(&psu_metrics)
         }),
     );
@@ -643,7 +687,14 @@ pub(in crate::collectors) enum TestEntity {
     SparseDrive,
     PowerSupply,
     SparsePowerSupply,
+    /// `PS0` with both the standard capacity and an OEM value; the standard
+    /// field wins.
+    PowerSupplyWithOemCapacity,
+    /// `PS-sparse`, which has no standard capacity, with an OEM value.
+    OemCapacityPowerSupply,
     Chassis,
+    /// `CH0` discovered on a power-shelf endpoint, with its power subsystem.
+    ShelfChassis,
     SparseChassis,
 }
 
@@ -660,7 +711,19 @@ pub(in crate::collectors) struct ProjectionFixture {
 
 impl ProjectionFixture {
     pub(in crate::collectors) async fn new() -> Self {
-        let resources = Arc::new(mock_resources());
+        Self::from_resources(mock_resources()).await
+    }
+
+    /// Like [`Self::new`], but the metric definitions collection answers
+    /// 503 to its first request and serves normally afterwards.
+    pub(in crate::collectors) async fn with_transient_metric_definitions_failure() -> Self {
+        let mut resources = mock_resources();
+        fail_once(&mut resources, METRIC_DEFINITIONS);
+        Self::from_resources(resources).await
+    }
+
+    async fn from_resources(resources: HashMap<String, MockResponse>) -> Self {
+        let resources = Arc::new(resources);
         let router = Router::new()
             .fallback(resource_response)
             .with_state(resources);
@@ -812,27 +875,32 @@ impl ProjectionFixture {
                     entity,
                     system: self.system.clone(),
                     sensors,
+                    gpu: None,
                 }
             }
             TestEntity::NvidiaGpuProcessor => DiscoveredEntity::Processor {
                 entity: self.processor("GPU0"),
                 system: self.system.clone(),
                 sensors: Vec::new(),
+                gpu: None,
             },
             TestEntity::SparseProcessor => DiscoveredEntity::Processor {
                 entity: self.processor("CPU-sparse"),
                 system: self.system.clone(),
                 sensors: Vec::new(),
+                gpu: None,
             },
             TestEntity::ProcessorWithEmptyMetrics => DiscoveredEntity::Processor {
                 entity: self.processor("CPU-empty"),
                 system: self.system.clone(),
                 sensors: Vec::new(),
+                gpu: None,
             },
             TestEntity::ProcessorWithMalformedMetrics => DiscoveredEntity::Processor {
                 entity: self.processor("CPU-malformed"),
                 system: self.system.clone(),
                 sensors: Vec::new(),
+                gpu: None,
             },
             TestEntity::Memory => DiscoveredEntity::Memory {
                 entity: self.memory("DIMM0"),
@@ -865,19 +933,56 @@ impl ProjectionFixture {
                 entity: self.power_supply("PS0"),
                 chassis: self.chassis("CH0"),
                 sensors: Vec::new(),
+                oem_capacity_watts: None,
             },
             TestEntity::SparsePowerSupply => DiscoveredEntity::PowerSupply {
                 entity: self.power_supply("PS-sparse"),
                 chassis: self.chassis("CH0"),
                 sensors: Vec::new(),
+                oem_capacity_watts: None,
+            },
+            TestEntity::PowerSupplyWithOemCapacity => DiscoveredEntity::PowerSupply {
+                entity: self.power_supply("PS0"),
+                chassis: self.chassis("CH0"),
+                sensors: Vec::new(),
+                oem_capacity_watts: Some(5500.0),
+            },
+            TestEntity::OemCapacityPowerSupply => DiscoveredEntity::PowerSupply {
+                entity: self.power_supply("PS-sparse"),
+                chassis: self.chassis("CH0"),
+                sensors: Vec::new(),
+                oem_capacity_watts: Some(5500.0),
             },
             TestEntity::Chassis => DiscoveredEntity::Chassis {
                 entity: self.chassis("CH0"),
                 sensors: Vec::new(),
+                shelf_power: None,
+                gpu: None,
             },
+            TestEntity::ShelfChassis => {
+                let entity = self.chassis("CH0");
+                let subsystem = entity
+                    .raw()
+                    .power_subsystem
+                    .as_ref()
+                    .expect("CH0 links a power subsystem")
+                    .get(self.bmc.as_ref())
+                    .await
+                    .expect("power subsystem should load");
+                DiscoveredEntity::Chassis {
+                    entity,
+                    sensors: Vec::new(),
+                    shelf_power: Some(ShelfPower {
+                        subsystem: Some(subsystem),
+                    }),
+                    gpu: None,
+                }
+            }
             TestEntity::SparseChassis => DiscoveredEntity::Chassis {
                 entity: self.chassis("CH-sparse"),
                 sensors: Vec::new(),
+                shelf_power: None,
+                gpu: None,
             },
         }
     }

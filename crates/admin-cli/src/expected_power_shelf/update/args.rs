@@ -132,6 +132,29 @@ pub(crate) struct Args {
     bmc_retain_credentials: Option<bool>,
 }
 
+impl Args {
+    pub(super) fn update_mask(&self) -> Vec<String> {
+        [
+            (self.bmc_username.is_some(), "bmc_username"),
+            (self.bmc_password.is_some(), "bmc_password"),
+            (self.shelf_serial_number.is_some(), "shelf_serial_number"),
+            (self.bmc_ip_address.is_some(), "bmc_ip_address"),
+            (
+                self.bmc_retain_credentials.is_some(),
+                "bmc_retain_credentials",
+            ),
+            (self.rack_id.is_some(), "rack_id"),
+            (self.meta_name.is_some(), "metadata.name"),
+            (self.meta_description.is_some(), "metadata.description"),
+            (self.labels.is_some(), "metadata.labels"),
+        ]
+        .into_iter()
+        .filter(|(provided, _)| *provided)
+        .map(|(_, path)| path.to_string())
+        .collect()
+    }
+}
+
 impl TryFrom<Args> for rpc::forge::ExpectedPowerShelf {
     type Error = CarbideCliError;
 

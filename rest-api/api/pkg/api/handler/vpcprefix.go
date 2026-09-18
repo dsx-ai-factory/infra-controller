@@ -30,6 +30,7 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -157,18 +158,31 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where the VPC prefix is being created must be in Registered state in order to proceed", nil)
 	}
 
-	// Validate IPBlocks in request
-	// NOTE: model validation ensures non-nil IPv4BlockID
-	ipBlockFilter := cdbm.IPBlockFilterInput{}
+	// Model validation ensures `IPBlockID` is not nil. Only a Ready tenant IP
+	// Block can provide addresses for a new VPC Prefix.
+	ipBlockFilter := cdbm.IPBlockFilterInput{Statuses: []string{cdbm.IPBlockStatusReady}}
 	ipBlockFilter.TenantAllocated(tenant.ID)
 	ipBlock, err := common.GetIPBlockFromIDString(ctx, nil, *apiRequest.IPBlockID, ipBlockFilter, csh.dbSession)
 	if err != nil {
-		logger.Warn().Err(err).Msg("error getting IPv4 IPBlock in request")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error retrieving ipv4 IPBlock from request", nil)
+		logger.Warn().Err(err).Msg("error getting IP Block in request")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find a Ready tenant IP Block specified by ipBlockId", nil)
 	}
 	if vpc.SiteID != ipBlock.SiteID {
-		logger.Warn().Msg("IPv4 Block specified in request and VPC do not belong to the same Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "IPv4 Block specified in request and VPC do not belong to the same Site", nil)
+		logger.Warn().Msg("IP Block specified in request and VPC do not belong to the same Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "IP Block specified in request and VPC do not belong to the same Site", nil)
+	}
+
+	family := vpcprefix.IPFamily(ipBlock.ProtocolVersion)
+	maxPrefixLength, knownFamily := family.MaximumPrefixLength(vpc.SlaacEnabled)
+	if !knownFamily {
+		logger.Error().Str("protocolVersion", ipBlock.ProtocolVersion).Msg("IP Block has unsupported protocol version")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Could not determine VPC Prefix length limit", nil)
+	}
+
+	verr = apiRequest.ValidatePrefixLength(maxPrefixLength)
+	if verr != nil {
+		logger.Warn().Err(verr).Msg("error validating VPC prefix length for IP Block and VPC")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating VPC prefix creation request data", verr)
 	}
 
 	// Check for name uniqueness for the tenant, ie, Tenant cannot have another VPC prefix with same name at the Site
@@ -697,8 +711,10 @@ func (gsh GetVpcPrefixHandler) Handle(c echo.Context) error {
 		}
 		var ok bool
 		vpusage, ok = prefixUsageMap[vpcPrefix.ID]
-		if !ok {
-			logger.Error().Str("vpcPrefixId", vpcPrefix.ID.String()).Msg("VPC prefix missing CIDR for usage stats")
+		// REST usage stats model IPv4 Interface allocations. IPv6 prefixes
+		// intentionally have no usage entry and remain valid responses.
+		if !ok && vpcPrefix.IPBlock.ProtocolVersion != cdbm.IPBlockProtocolVersionV6 {
+			logger.Error().Str("vpcPrefixId", vpcPrefix.ID.String()).Msg("IPv4 VPC prefix missing usage stats")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Usage Stats for VPC prefix", nil)
 		}
 	}

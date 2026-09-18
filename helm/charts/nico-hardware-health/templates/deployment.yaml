@@ -70,7 +70,13 @@ spec:
             - mountPath: "/var/run/secrets/spiffe.io"
               name: spiffe
               readOnly: true
+        {{- with .Values.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       volumes:
         - name: spiffe
           secret:
             secretName: {{ include "nico-hardware-health.name" . }}-certificate
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

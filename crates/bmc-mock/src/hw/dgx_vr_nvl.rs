@@ -37,6 +37,10 @@ impl DgxVrNvl<'_> {
     const BLUEFIELD_NIC_ID: &'static str = "BlueField_NIC_0";
     const BLUEFIELD_PCIE_DEVICE_ID: &'static str = "BlueField_0";
 
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "BMC_0";
         let bmc_eth_builder = |eth| {
@@ -115,6 +119,7 @@ impl DgxVrNvl<'_> {
                     log_services: None,
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("VR NVL".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: None,
                     serial_console: None,
@@ -135,6 +140,7 @@ impl DgxVrNvl<'_> {
                     log_services: None,
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("VR NVL72".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: Some(callbacks),
                     serial_console: Some(hw::openbmc::enabled_serial_console()),

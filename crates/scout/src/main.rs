@@ -545,7 +545,7 @@ async fn report_firmware_upgrade_status(
 ) -> Result<(), CarbideClientError> {
     let mut client = client::create_forge_client(config).await?;
     let request = tonic::Request::new(rpc_forge::ScoutFirmwareUpgradeStatusRequest {
-        machine_id: Some(*machine_id),
+        machine_id: Some(machine_id.try_into()?),
         success: result.success,
         exit_code: result.exit_code,
         stdout: truncate(&result.stdout, MAX_FIRMWARE_UPGRADE_STATUS_FIELD_SIZE),

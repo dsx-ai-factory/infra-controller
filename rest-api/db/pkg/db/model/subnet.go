@@ -16,6 +16,7 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
 
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
@@ -321,6 +322,7 @@ func splitNetworkPrefix(s string) (string, int, bool) {
 
 // SubnetCreateInput parameters for Create method
 type SubnetCreateInput struct {
+	SubnetID                   *uuid.UUID
 	Name                       string
 	Description                *string
 	Org                        string
@@ -378,6 +380,8 @@ type SubnetClearInput struct {
 	IPv6Gateway                bool
 	IPv6BlockID                bool
 	Mtu                        bool
+	// Deleted clears the soft-delete timestamp (undelete).
+	Deleted bool
 }
 
 // SubnetFilterInput input parameters for GetAll method
@@ -392,6 +396,8 @@ type SubnetFilterInput struct {
 	IPv6BlockIDs []uuid.UUID
 	Statuses     []string
 	SearchQuery  *string
+	// IncludeDeleted returns soft-deleted rows in addition to active ones.
+	IncludeDeleted bool
 }
 
 var _ bun.BeforeAppendModelHook = (*Subnet)(nil)
@@ -462,8 +468,13 @@ func (ssd SubnetSQLDAO) Create(ctx context.Context, tx *db.Tx, input SubnetCreat
 		ssd.tracerSpan.SetAttribute(sbDAOSpan, "name", input.Name)
 	}
 
+	id := input.SubnetID
+	if id == nil {
+		id = cutil.GetPtr(uuid.New())
+	}
+
 	s := &Subnet{
-		ID:                         uuid.New(),
+		ID:                         *id,
 		Name:                       input.Name,
 		Description:                input.Description,
 		Org:                        input.Org,
@@ -591,6 +602,10 @@ func (ssd SubnetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SubnetFilt
 	ss := []Subnet{}
 
 	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(&ss)
+	// Soft-deleted rows are excluded by default.
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 	if filter.SubnetIDs != nil {
 		query = query.Where("su.id IN (?)", bun.In(filter.SubnetIDs))
 		ssd.tracerSpan.SetAttribute(sbDAOSpan, "subnet_ids", filter.SubnetIDs)
@@ -848,11 +863,20 @@ func (ssd SubnetSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SubnetClearI
 		s.MTU = nil
 		updatedFields = append(updatedFields, "mtu")
 	}
+	if input.Deleted {
+		s.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(s).Column(updatedFields...).Where("id = ?", input.SubnetId).Exec(ctx)
+		query := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(s).Column(updatedFields...).Where("id = ?", input.SubnetId)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}

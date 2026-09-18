@@ -48,8 +48,8 @@ use crate::cfg::file::{
     SwitchStateControllerConfig, TracingConfig, VmaasConfig, VpcPeeringPolicy,
     VpcPrefixStateControllerConfig, default_bmc_session_lockout_threshold,
     default_database_pool_acquire_timeout, default_database_pool_idle_timeout,
-    default_database_pool_max_lifetime, default_max_find_by_ids,
-    default_max_site_prefixes_per_tenant, default_pxe_public_base_url,
+    default_database_pool_max_lifetime, default_database_startup_retry_timeout,
+    default_max_find_by_ids, default_max_site_prefixes_per_tenant, default_pxe_public_base_url,
 };
 #[cfg(test)]
 use crate::cfg::file::{
@@ -171,6 +171,7 @@ pub fn get() -> CarbideConfig {
         database_pool_acquire_timeout: default_database_pool_acquire_timeout(),
         database_pool_idle_timeout: default_database_pool_idle_timeout(),
         database_pool_max_lifetime: default_database_pool_max_lifetime(),
+        database_startup_retry_timeout: default_database_startup_retry_timeout(),
         api_admission_control: Default::default(),
         compute_allocation_enforcement: Default::default(),
         asn: 0,
@@ -200,6 +201,7 @@ pub fn get() -> CarbideConfig {
         dpu_ipmi_reboot_attempts: Some(0),
         bmc_session_lockout_threshold: default_bmc_session_lockout_threshold(),
         bmc_max_sessions_per_caller: crate::cfg::file::default_bmc_max_sessions_per_caller(),
+        bmc_proxy: None,
         allow_bmc_basic_auth_fallback: false,
         allow_insecure_discovery: true,
         scout_boot_interface_correction_enabled: false,
@@ -338,7 +340,7 @@ pub fn get() -> CarbideConfig {
             bridging: None,
         }),
         mlxconfig_profiles: None,
-        rack_management_enabled: false,
+        deprecated_rack_management_enabled: None,
         rms: RmsConfig::default(),
         rack_profiles: Default::default(),
         spdm_state_controller: SpdmStateControllerConfig {

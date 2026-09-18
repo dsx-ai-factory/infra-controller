@@ -20,7 +20,7 @@ use std::future::Future;
 use carbide_api_core::test_support::Api;
 use carbide_uuid::machine::MachineId;
 use model::hardware_info::HardwareInfo;
-use model::machine::Machine;
+use model::machine::AnyMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use tonic::IntoRequest;
 
@@ -54,7 +54,7 @@ pub trait TestMachine {
     fn db_machine<'a, 'txn>(
         &'a self,
         txn: &'a mut sqlx::PgTransaction<'txn>,
-    ) -> impl Future<Output = Machine> + 'a {
+    ) -> impl Future<Output = AnyMachine> + 'a {
         async move {
             db::machine::find_one(txn.as_mut(), &self.id(), MachineSearchConfig::default())
                 .await
@@ -63,7 +63,7 @@ pub trait TestMachine {
         }
     }
 
-    fn machine(&self) -> impl Future<Output = Machine> + '_ {
+    fn machine(&self) -> impl Future<Output = AnyMachine> + '_ {
         async move {
             let mut txn = self
                 .api()
