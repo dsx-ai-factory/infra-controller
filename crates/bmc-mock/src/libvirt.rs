@@ -52,7 +52,7 @@ pub struct Config {
 pub struct LibvirtCallbacks {
     config: Config,
     restore_boot_after_power_on: Mutex<bool>,
-    system_state: OnceLock<Weak<SystemState>>,
+    system_state: OnceLock<Weak<SystemState<Self>>>,
     applied_state: Mutex<AppliedState>,
 }
 
@@ -83,7 +83,7 @@ impl LibvirtCallbacks {
     ///
     /// Returns an error when the BMC has no controlled `ComputerSystem`, this
     /// backend is already bound, or libvirt cannot apply the initial selection.
-    pub fn bind_state(&self, state: &BmcState) -> Result<(), String> {
+    pub fn bind_state(&self, state: &BmcState<Self>) -> Result<(), String> {
         let controlled_system = state
             .system_state
             .controlled_system()
@@ -367,8 +367,8 @@ impl LibvirtCallbacks {
     }
 }
 
-impl From<&SingleSystemState> for AppliedState {
-    fn from(system: &SingleSystemState) -> Self {
+impl<C: Callbacks> From<&SingleSystemState<C>> for AppliedState {
+    fn from(system: &SingleSystemState<C>) -> Self {
         let virtual_media = system
             .virtual_media()
             .into_iter()

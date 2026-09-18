@@ -33,10 +33,10 @@ use crate::mock_ssh_server::{MockSshServerHandle, PromptBehavior};
 /// BmcMockWrapper launches a single instance of bmc-mock, configured to mock a single BMC for
 /// either a DPU or a Host. It will rewrite certain responses to customize them for the machines
 /// machine-a-tron is mocking.
-pub(super) struct BmcMockWrapper {
+pub(super) struct BmcMockWrapper<C: Callbacks> {
     app_context: Arc<MachineATronContext>,
     bmc_mock_router: Router,
-    bmc_mock_state: BmcState,
+    bmc_mock_state: BmcState<C>,
     hostname: Arc<dyn HostnameQuerying>,
     needs_ipmi_console: bool,
     requires_ssh_console: bool,
@@ -44,11 +44,11 @@ pub(super) struct BmcMockWrapper {
     ssh_prompt_behavior: PromptBehavior,
 }
 
-impl BmcMockWrapper {
+impl<C: Callbacks> BmcMockWrapper<C> {
     pub(super) fn new(
         machine_info: &MachineInfo,
         app_context: Arc<MachineATronContext>,
-        callbacks: Arc<dyn Callbacks>,
+        callbacks: Arc<C>,
         hostname: Arc<dyn HostnameQuerying>,
         host_id: Uuid,
         injection: Arc<InjectionStore>,
@@ -158,7 +158,7 @@ impl BmcMockWrapper {
         &self.bmc_mock_router
     }
 
-    pub(super) fn state(&self) -> &BmcState {
+    pub(super) fn state(&self) -> &BmcState<C> {
         &self.bmc_mock_state
     }
 

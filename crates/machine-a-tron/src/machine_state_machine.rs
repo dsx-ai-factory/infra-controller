@@ -135,7 +135,7 @@ pub(super) struct MachineStateMachine {
 
     fsm: MachineFsm,
     bmc_mock: Option<Arc<BmcMockWrapperHandle>>,
-    bmc_state: Option<BmcState>,
+    bmc_state: Option<BmcState<LiveStateCallbacks>>,
     bmc_injection: Arc<InjectionStore>,
     power_cycle_deadline: Option<Instant>,
     machine_on_deadline: Option<Instant>,
@@ -728,7 +728,13 @@ impl MachineStateMachine {
 
     async fn setup_bmc(
         &self,
-    ) -> Result<(Option<Arc<BmcMockWrapperHandle>>, BmcState), MachineStateError> {
+    ) -> Result<
+        (
+            Option<Arc<BmcMockWrapperHandle>>,
+            BmcState<LiveStateCallbacks>,
+        ),
+        MachineStateError,
+    > {
         let Some(dhcp_info) = &self.bmc_dhcp_info else {
             return Err(MachineStateError::NoBmcDhcpInfo);
         };
@@ -1313,7 +1319,13 @@ impl MachineStateMachine {
     async fn run_bmc_mock(
         &self,
         ip_address: Ipv4Addr,
-    ) -> Result<(Option<Arc<BmcMockWrapperHandle>>, BmcState), MachineStateError> {
+    ) -> Result<
+        (
+            Option<Arc<BmcMockWrapperHandle>>,
+            BmcState<LiveStateCallbacks>,
+        ),
+        MachineStateError,
+    > {
         let bmc_mock = BmcMockWrapper::new(
             &self.machine_info,
             self.app_context.clone(),

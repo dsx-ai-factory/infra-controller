@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listen_addr = args.port.map(|p| SocketAddr::from(([0, 0, 0, 0], p)));
     info!(cert_path = ?args.cert_path, "Using BMC mock certificate path");
-    let (router, generated_state) = if let Some(tar_path) = args.targz {
+    let (router, _ipmi_sim_handle) = if let Some(tar_path) = args.targz {
         info!(archive_path = %tar_path.to_string_lossy(), "Using default BMC mock archive");
         (
             tar_router::tar_router(TarGzOption::Disk(&tar_path), Some(&mut tar_router_entries))
@@ -126,27 +126,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             backend = ?generated_config.state_backend,
             "Using generated BMC mock",
         );
-        let (router, state) = generated_mock(generated_config);
-        (router, Some(state))
-    };
-
-    let _ipmi_sim_handle = if args.enable_ipmi_simulation {
-        let state = generated_state
-            .as_ref()
-            .expect("archive-backed routers were rejected above");
-        Some(
-            bmc_mock::ipmi_sim::start(
-                state,
-                bmc_mock::ipmi_sim::IpmiSimConfig {
-                    stable_id: "standalone-bmc-mock".to_string(),
-                    console_prompt: "root@bmc-mock # ".to_string(),
-                },
-                None,
-            )
-            .await?,
-        )
-    } else {
-        None
+        if generated_config.use_channel_callbacks {
+            let command_channel = spawn_qemu_reboot_handler();
+            let callbacks = Arc::new(ChannelCallbacks::new(command_channel));
+            let (router, state) = generated_mock(generated_config, callbacks);
+            let ipmi = start_ipmi_simulation(&state, args.enable_ipmi_simulation).await?;
+            (router, ipmi)
+        } else if let Some(libvirt_config) = generated_config.libvirt_config.clone() {
+            let callbacks = Arc::new(bmc_mock::libvirt::LibvirtCallbacks::new(libvirt_config));
+            let (router, state) = generated_mock(generated_config, callbacks.clone());
+            callbacks
+                .bind_state(&state)
+                .expect("libvirt backend must bind to generated BMC state");
+            let ipmi = start_ipmi_simulation(&state, args.enable_ipmi_simulation).await?;
+            (router, ipmi)
+        } else {
+            let callbacks = Arc::new(bmc_mock::simulated::SimulatedCallbacks::new());
+            let (router, state) = generated_mock(generated_config, callbacks);
+            let ipmi = start_ipmi_simulation(&state, args.enable_ipmi_simulation).await?;
+            (router, ipmi)
+        }
     };
 
     routers_by_ip.insert("".to_owned(), router);
@@ -354,23 +353,33 @@ fn bmc_reset_duration(args: &command_line::Args) -> Option<std::time::Duration> 
         .map(std::time::Duration::from_secs)
 }
 
-fn generated_mock(config: GeneratedMockConfig) -> (Router, BmcState) {
-    let machine_info = generated_machine_info(&config);
-    let libvirt_callbacks = config
-        .libvirt_config
-        .map(bmc_mock::libvirt::LibvirtCallbacks::new)
-        .map(Arc::new);
-    let callbacks: Arc<dyn Callbacks> = if config.use_channel_callbacks {
-        let command_channel = spawn_qemu_reboot_handler();
-        Arc::new(ChannelCallbacks::new(command_channel))
-    } else if let Some(callbacks) = &libvirt_callbacks {
-        callbacks.clone()
+async fn start_ipmi_simulation<C: Callbacks>(
+    state: &BmcState<C>,
+    enable_ipmi: bool,
+) -> Result<Option<bmc_mock::ipmi_sim::IpmiSimHandle>, Box<dyn std::error::Error>> {
+    if enable_ipmi {
+        Ok(Some(
+            bmc_mock::ipmi_sim::start(
+                state,
+                bmc_mock::ipmi_sim::IpmiSimConfig {
+                    stable_id: "standalone-bmc-mock".to_string(),
+                    console_prompt: "root@bmc-mock # ".to_string(),
+                },
+                None,
+            )
+            .await?,
+        ))
     } else {
-        Arc::new(bmc_mock::simulated::SimulatedCallbacks::new())
-    };
-    let result = if config.machine_role == MachineRole::Host
-        && config.state_backend == StateBackend::Libvirt
-    {
+        Ok(None)
+    }
+}
+
+fn generated_mock<C: Callbacks>(
+    config: GeneratedMockConfig,
+    callbacks: Arc<C>,
+) -> (Router, BmcState<C>) {
+    let machine_info = generated_machine_info(&config);
+    if config.machine_role == MachineRole::Host && config.state_backend == StateBackend::Libvirt {
         bmc_mock::machine_router(
             &machine_info,
             callbacks,
@@ -404,13 +413,7 @@ fn generated_mock(config: GeneratedMockConfig) -> (Router, BmcState) {
                 ..MachineRouterOptions::default()
             },
         )
-    };
-    if let Some(callbacks) = libvirt_callbacks {
-        callbacks
-            .bind_state(&result.1)
-            .expect("libvirt backend must bind to generated BMC state");
     }
-    result
 }
 
 fn generated_machine_info(config: &GeneratedMockConfig) -> MachineInfo {
@@ -515,7 +518,10 @@ mod tests {
             if enabled {
                 arguments.push("--redfish-auth");
             }
-            let (router, _) = generated_mock(config(&arguments).unwrap());
+            let (router, _) = generated_mock(
+                config(&arguments).unwrap(),
+                Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
+            );
             let response = router
                 .oneshot(
                     Request::builder()
@@ -562,7 +568,10 @@ mod tests {
             "dell_poweredge_r750",
         ])
         .unwrap();
-        let (_router, state) = generated_mock(config);
+        let (_router, state) = generated_mock(
+            config,
+            Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
+        );
         assert!(state.event_service.is_some());
         assert!(state.availability.is_none());
     }
@@ -585,7 +594,10 @@ mod tests {
             windowed.bmc_reset_duration,
             Some(std::time::Duration::from_secs(5))
         );
-        let (_router, state) = generated_mock(windowed);
+        let (_router, state) = generated_mock(
+            windowed,
+            Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
+        );
         assert!(state.availability.is_some());
 
         let instantaneous = config(&["bmc-mock", "--bmc-reset-duration", "0"]).unwrap();
@@ -729,7 +741,10 @@ mod tests {
             "nic-version",
         ])
         .unwrap();
-        let (_, state) = generated_mock(config);
+        let (_, state) = generated_mock(
+            config,
+            Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
+        );
 
         for (id, expected) in [
             ("BMC_Firmware", "bmc-version"),
@@ -777,7 +792,10 @@ mod tests {
                 "nic-version",
             ])
             .unwrap();
-            let (_, state) = generated_mock(config);
+            let (_, state) = generated_mock(
+                config,
+                Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
+            );
 
             for (id, expected) in [
                 ("BlueField_FW_BMC_0", "bmc-version"),

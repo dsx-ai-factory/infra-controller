@@ -38,8 +38,9 @@ use crate::{
 
 pub mod axum_http_client;
 
-#[derive(Debug)]
-pub(super) struct NoopCallbacks;
+/// Test backend with no external effects.
+#[derive(Clone, Debug)]
+pub struct NoopCallbacks;
 
 impl Callbacks for NoopCallbacks {
     fn get_power_state(&self) -> MockPowerState {
@@ -67,15 +68,15 @@ lazy_static::lazy_static! {
 }
 
 #[derive(Clone)]
-pub struct TestBmcHandle {
+pub struct TestBmcHandle<C: Callbacks = NoopCallbacks> {
     pub service_root: Arc<nv_redfish::ServiceRoot<TestBmc>>,
     /// The client behind `service_root`, for collectors that take the BMC
     /// directly rather than a service root.
     pub bmc: Arc<TestBmc>,
-    pub state: BmcState,
+    pub state: BmcState<C>,
 }
 
-async fn test_bmc((router, state): (axum::Router, BmcState)) -> TestBmcHandle {
+async fn test_bmc<C: Callbacks>((router, state): (axum::Router, BmcState<C>)) -> TestBmcHandle<C> {
     let client = AxumRouterHttpClient::new(router);
     let endpoint = Url::parse("https://bmc-mock.local").expect("valid URL");
     let credentials = BmcCredentials::new("root".to_string(), "password".to_string());
@@ -210,10 +211,18 @@ pub async fn supermicro_gb300_bmc() -> TestBmcHandle {
     .await
 }
 
+/// Creates a generic Supermicro test BMC with no-op callbacks.
 pub async fn generic_supermicro_bmc() -> TestBmcHandle {
+    generic_supermicro_bmc_with_callbacks(Arc::new(NoopCallbacks)).await
+}
+
+/// Creates a generic Supermicro test BMC with the supplied backend callbacks.
+pub async fn generic_supermicro_bmc_with_callbacks<C: Callbacks>(
+    callbacks: Arc<C>,
+) -> TestBmcHandle<C> {
     test_bmc(machine_router(
         &host_info(HardwareType::GenericSupermicro),
-        Arc::new(NoopCallbacks),
+        callbacks,
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -493,7 +502,7 @@ const TEST_DISABLED_INTERFACE: &str = "/redfish/v1/Systems/Self/EthernetInterfac
 /// Builds a generic host router with supplemental network adapter ports.
 pub fn generic_ami_router_with_network_adapter_ports(
     ports: Vec<serde_json::Value>,
-) -> (axum::Router, BmcState) {
+) -> (axum::Router, BmcState<NoopCallbacks>) {
     let (router, state) = machine_router(
         &host_info(HardwareType::GenericAmi),
         Arc::new(NoopCallbacks),
@@ -577,7 +586,7 @@ pub fn generic_ami_router_with_network_adapter_ports(
 /// Builds a generic host router with one supplemental network adapter port.
 pub fn generic_ami_router_with_network_adapter_port(
     port: serde_json::Value,
-) -> (axum::Router, BmcState) {
+) -> (axum::Router, BmcState<NoopCallbacks>) {
     generic_ami_router_with_network_adapter_ports(vec![port])
 }
 
@@ -585,7 +594,7 @@ pub fn generic_ami_router_with_network_adapter_port(
 /// adapter-port test router.
 pub fn generic_ami_router_with_network_adapter_port_and_disabled_system_mac(
     port: serde_json::Value,
-) -> (axum::Router, BmcState) {
+) -> (axum::Router, BmcState<NoopCallbacks>) {
     let (router, state) = generic_ami_router_with_network_adapter_port(port);
     state.injection.upsert(Rule {
         id: RuleId::from("disabled-system-interface"),

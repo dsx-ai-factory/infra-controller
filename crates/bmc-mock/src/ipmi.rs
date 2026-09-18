@@ -24,9 +24,9 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::SystemPowerControl;
 use crate::bmc_state::BmcState;
 use crate::redfish::log_service::LogEntryDraft;
+use crate::{Callbacks, SystemPowerControl};
 
 /// Request body for IPMI mock endpoint.
 #[derive(Debug, Deserialize)]
@@ -59,12 +59,12 @@ impl IpmiResponse {
 }
 
 /// Add IPMI routes to the router.
-pub(super) fn add_routes(router: Router<BmcState>) -> Router<BmcState> {
-    router.route("/ipmi", post(handle_ipmi))
+pub(super) fn add_routes<C: Callbacks>(router: Router<BmcState<C>>) -> Router<BmcState<C>> {
+    router.route("/ipmi", post(handle_ipmi::<C>))
 }
 
-async fn handle_ipmi(
-    axum::extract::State(state): axum::extract::State<BmcState>,
+async fn handle_ipmi<C: Callbacks>(
+    axum::extract::State(state): axum::extract::State<BmcState<C>>,
     Json(req): Json<IpmiRequest>,
 ) -> Json<IpmiResponse> {
     tracing::debug!(action = %req.action, "IPMI mock request");

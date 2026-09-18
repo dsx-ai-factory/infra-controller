@@ -79,10 +79,10 @@ struct HpeBootSettingsPatch {
     persistent_boot_config_order: Vec<String>,
 }
 
-pub(crate) fn add_routes(
-    r: Router<BmcState>,
+pub(crate) fn add_routes<C: Callbacks + 'static>(
+    r: Router<BmcState<C>>,
     bmc_vendor: redfish::oem::BmcVendor,
-) -> Router<BmcState> {
+) -> Router<BmcState<C>> {
     const SYSTEM_ID: &str = "{system_id}";
     const ETH_ID: &str = "{eth_id}";
     const BOOT_OPTION_ID: &str = "{boot_option_id}";
@@ -92,57 +92,60 @@ pub(crate) fn add_routes(
     const MEMORY_ID: &str = "{memory_id}";
     let bios = redfish::bios::resource(SYSTEM_ID);
     let routes = r
-        .route(&collection().odata_id, get(get_system_collection))
+        .route(&collection().odata_id, get(get_system_collection::<C>))
         .route(
             &resource(SYSTEM_ID).odata_id,
-            get(get_system).patch(patch_system),
+            get(get_system::<C>).patch(patch_system::<C>),
         )
-        .route(&reset_target(SYSTEM_ID), post(post_reset_system))
+        .route(&reset_target(SYSTEM_ID), post(post_reset_system::<C>))
         .route(
             &bmc_vendor.make_settings_odata_id(&resource(SYSTEM_ID)),
-            patch(patch_settings),
+            patch(patch_settings::<C>),
         )
         .route(
             &redfish::ethernet_interface::system_resource(SYSTEM_ID, ETH_ID).odata_id,
-            get(get_ethernet_interface),
+            get(get_ethernet_interface::<C>),
         )
         .route(
             &redfish::ethernet_interface::system_collection(SYSTEM_ID).odata_id,
-            get(get_ethernet_interface_collection),
+            get(get_ethernet_interface_collection::<C>),
         )
         .route(
             &redfish::secure_boot::resource(SYSTEM_ID).odata_id,
-            get(get_secure_boot).patch(patch_secure_boot),
+            get(get_secure_boot::<C>).patch(patch_secure_boot::<C>),
         )
         .route(
             &redfish::boot_option::collection(SYSTEM_ID).odata_id,
-            get(get_boot_options_collection),
+            get(get_boot_options_collection::<C>),
         )
         .route(
             &redfish::boot_option::resource(SYSTEM_ID, BOOT_OPTION_ID).odata_id,
-            get(get_boot_option),
+            get(get_boot_option::<C>),
         )
         .route(
             &bmc_vendor
                 .make_settings_odata_id(&redfish::boot_option::resource(SYSTEM_ID, BOOT_OPTION_ID)),
-            patch(patch_boot_option_settings),
+            patch(patch_boot_option_settings::<C>),
         )
-        .route(&bios.odata_id, get(get_bios).patch(patch_bios_settings))
+        .route(
+            &bios.odata_id,
+            get(get_bios::<C>).patch(patch_bios_settings::<C>),
+        )
         .route(
             &redfish::log_service::system_collection(SYSTEM_ID).odata_id,
-            get(get_log_services_collection),
+            get(get_log_services_collection::<C>),
         )
         .route(
             &redfish::log_service::system_resource(SYSTEM_ID, LOG_SERVICE_ID).odata_id,
-            get(get_log_service),
+            get(get_log_service::<C>),
         )
         .route(
             &redfish::log_service::system_clear_log_target(SYSTEM_ID, LOG_SERVICE_ID),
-            post(post_clear_log),
+            post(post_clear_log::<C>),
         )
         .route(
             &redfish::log_service::system_entries_collection(SYSTEM_ID, LOG_SERVICE_ID).odata_id,
-            get(get_log_service_entries),
+            get(get_log_service_entries::<C>),
         )
         .route(
             &format!(
@@ -150,39 +153,39 @@ pub(crate) fn add_routes(
                 redfish::log_service::system_entries_collection(SYSTEM_ID, LOG_SERVICE_ID).odata_id,
                 LOG_ENTRY_ID
             ),
-            get(get_log_service_entry),
+            get(get_log_service_entry::<C>),
         )
         .route(
             &redfish::storage::system_collection(SYSTEM_ID).odata_id,
-            get(get_storage_collection),
+            get(get_storage_collection::<C>),
         )
         .route(
             &redfish::processor::system_collection(SYSTEM_ID).odata_id,
-            get(get_processors_collection),
+            get(get_processors_collection::<C>),
         )
         .route(
             &redfish::processor::system_resource(SYSTEM_ID, PROCESSOR_ID).odata_id,
-            get(get_processor),
+            get(get_processor::<C>),
         )
         .route(
             &redfish::processor::metrics_resource(SYSTEM_ID, PROCESSOR_ID).odata_id,
-            get(get_processor_metrics),
+            get(get_processor_metrics::<C>),
         )
         .route(
             &redfish::memory::system_collection(SYSTEM_ID).odata_id,
-            get(get_memory_collection),
+            get(get_memory_collection::<C>),
         )
         .route(
             &redfish::memory::system_resource(SYSTEM_ID, MEMORY_ID).odata_id,
-            get(get_memory),
+            get(get_memory::<C>),
         )
         .route(
             &redfish::memory::metrics_resource(SYSTEM_ID, MEMORY_ID).odata_id,
-            get(get_memory_metrics),
+            get(get_memory_metrics::<C>),
         )
         .route(
             &bmc_vendor.make_settings_odata_id(&bios),
-            patch(patch_bios_settings),
+            patch(patch_bios_settings::<C>),
         )
         .route(
             &redfish::bios::change_password_target(&bios),
@@ -194,16 +197,16 @@ pub(crate) fn add_routes(
         // routing them, while the Redfish resource still advertises canonical
         // trailing-slash OData identifiers.
         let hpe_boot_path = hpe_boot.odata_id.trim_end_matches('/');
-        routes.route(hpe_boot_path, get(get_hpe_boot)).route(
+        routes.route(hpe_boot_path, get(get_hpe_boot::<C>)).route(
             &format!("{hpe_boot_path}/settings"),
-            patch(patch_hpe_boot_settings),
+            patch(patch_hpe_boot_settings::<C>),
         )
     } else {
         routes
     }
 }
 
-pub(crate) struct SingleSystemConfig {
+pub(crate) struct SingleSystemConfig<C: Callbacks> {
     pub(crate) id: Cow<'static, str>,
     pub(crate) eth_interfaces: Option<Vec<redfish::ethernet_interface::EthernetInterface>>,
     pub(crate) serial_number: Option<Cow<'static, str>>,
@@ -211,7 +214,7 @@ pub(crate) struct SingleSystemConfig {
     pub(crate) model: Option<Cow<'static, str>>,
     pub(crate) bios_version: Option<Cow<'static, str>>,
     pub(crate) boot_order_mode: BootOrderMode,
-    pub(crate) callbacks: Option<Arc<dyn Callbacks>>,
+    pub(crate) callbacks: Option<Arc<C>>,
     pub(crate) chassis: Vec<Cow<'static, str>>,
     pub(crate) boot_options: Option<Vec<redfish::boot_option::BootOption>>,
     pub(crate) bios_mode: BiosMode,
@@ -225,12 +228,12 @@ pub(crate) struct SingleSystemConfig {
     pub(crate) oem: Oem,
 }
 
-pub(crate) struct Config {
-    pub(crate) systems: Vec<SingleSystemConfig>,
+pub(crate) struct Config<C: Callbacks> {
+    pub(crate) systems: Vec<SingleSystemConfig<C>>,
 }
 
-pub struct SystemState {
-    systems: Vec<SingleSystemState>,
+pub struct SystemState<C: Callbacks> {
+    systems: Vec<SingleSystemState<C>>,
 }
 
 #[derive(Default)]
@@ -240,8 +243,8 @@ struct BootSourceOverride {
     target: Option<String>,
 }
 
-pub(crate) struct SingleSystemState {
-    config: SingleSystemConfig,
+pub(crate) struct SingleSystemState<C: Callbacks> {
+    config: SingleSystemConfig<C>,
     serial_console_ssh_port_override: Mutex<Option<u16>>,
     virtual_media: Option<redfish::virtual_media::VirtualMediaState>,
     boot_order_override: Mutex<Option<Vec<String>>>,
@@ -273,16 +276,16 @@ pub(crate) enum Oem {
     Generic,
 }
 
-impl SystemState {
-    pub(crate) fn from_config(config: Config, options: &MachineRouterOptions) -> Self {
+impl<C: Callbacks> SystemState<C> {
+    pub(crate) fn from_config(config: Config<C>, options: &MachineRouterOptions) -> Self {
         Self::from_configs(config.systems, options.virtual_media_devices.clone())
     }
 
-    pub(crate) fn systems(&self) -> &[SingleSystemState] {
+    pub(crate) fn systems(&self) -> &[SingleSystemState<C>] {
         &self.systems
     }
 
-    pub(crate) fn find(&self, system_id: &str) -> Option<&SingleSystemState> {
+    pub(crate) fn find(&self, system_id: &str) -> Option<&SingleSystemState<C>> {
         self.systems
             .iter()
             .find(|system| system.config.id.as_ref() == system_id)
@@ -315,7 +318,7 @@ impl SystemState {
     }
 
     fn from_configs(
-        configs: Vec<SingleSystemConfig>,
+        configs: Vec<SingleSystemConfig<C>>,
         virtual_media_devices: Option<Vec<redfish::virtual_media::DeviceConfig>>,
     ) -> Self {
         let mut virtual_media =
@@ -334,7 +337,7 @@ impl SystemState {
         Self { systems }
     }
 
-    pub(crate) fn controlled_system(&self) -> Option<&SingleSystemState> {
+    pub(crate) fn controlled_system(&self) -> Option<&SingleSystemState<C>> {
         self.systems
             .iter()
             .find(|system| system.config.callbacks.is_some())
@@ -395,9 +398,9 @@ impl SystemState {
     }
 }
 
-impl SingleSystemState {
+impl<C: Callbacks> SingleSystemState<C> {
     fn new(
-        config: SingleSystemConfig,
+        config: SingleSystemConfig<C>,
         virtual_media: Option<redfish::virtual_media::VirtualMediaState>,
     ) -> Self {
         Self {
@@ -634,7 +637,7 @@ impl SingleSystemState {
     }
 }
 
-async fn get_system_collection(State(state): State<BmcState>) -> Response {
+async fn get_system_collection<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     // Delta power shelves serve no `Systems` collection at all (the endpoint
     // 404s), which is the condition site-explorer's Delta path handles.
     if !state.exposes_computer_systems {
@@ -649,7 +652,10 @@ async fn get_system_collection(State(state): State<BmcState>) -> Response {
     collection().with_members(&members).into_ok_response()
 }
 
-async fn get_system(State(state): State<BmcState>, Path(system_id): Path<String>) -> Response {
+async fn get_system<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(system_id): Path<String>,
+) -> Response {
     let Some(system_state) = state.system_state.find(&system_id) else {
         return http::not_found();
     };
@@ -658,12 +664,12 @@ async fn get_system(State(state): State<BmcState>, Path(system_id): Path<String>
 
     let config = &system_state.config;
 
-    if let Some(state) = config
+    if let Some(power_state) = config
         .callbacks
         .as_ref()
         .map(|callbacks| callbacks.get_power_state())
     {
-        b = b.power_state(state).reset_action(&system_id)
+        b = b.power_state(power_state).reset_action(&system_id)
     }
 
     if config.boot_options.is_some() {
@@ -777,8 +783,8 @@ async fn get_system(State(state): State<BmcState>, Path(system_id): Path<String>
         .into_ok_response()
 }
 
-async fn get_ethernet_interface(
-    State(state): State<BmcState>,
+async fn get_ethernet_interface<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, interface_id)): Path<(String, String)>,
 ) -> Response {
     let Some(system_state) = state.system_state.find(&system_id) else {
@@ -794,8 +800,8 @@ async fn get_ethernet_interface(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_ethernet_interface_collection(
-    State(state): State<BmcState>,
+async fn get_ethernet_interface_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
 ) -> Response {
     let Some(system_state) = state.system_state.find(&system_id) else {
@@ -813,8 +819,8 @@ async fn get_ethernet_interface_collection(
         .into_ok_response()
 }
 
-async fn patch_settings(
-    State(state): State<BmcState>,
+async fn patch_settings<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
     Json(patch_settings): Json<serde_json::Value>,
 ) -> Response {
@@ -847,8 +853,8 @@ async fn patch_settings(
     json!({}).into_ok_response()
 }
 
-async fn patch_system(
-    State(state): State<BmcState>,
+async fn patch_system<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
     Json(patch_system): Json<serde_json::Value>,
 ) -> Response {
@@ -890,8 +896,8 @@ async fn patch_system(
     response
 }
 
-async fn post_reset_system(
-    State(state): State<BmcState>,
+async fn post_reset_system<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
     Json(mut power_request): Json<serde_json::Value>,
 ) -> Response {
@@ -931,7 +937,10 @@ async fn post_reset_system(
     }
 }
 
-async fn get_secure_boot(State(state): State<BmcState>, Path(system_id): Path<String>) -> Response {
+async fn get_secure_boot<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(system_id): Path<String>,
+) -> Response {
     let Some(system_state) = state.system_state.find(&system_id) else {
         return http::not_found();
     };
@@ -943,8 +952,8 @@ async fn get_secure_boot(State(state): State<BmcState>, Path(system_id): Path<St
         .into_ok_response()
 }
 
-async fn patch_secure_boot(
-    State(state): State<BmcState>,
+async fn patch_secure_boot<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
     Json(secure_boot_request): Json<serde_json::Value>,
 ) -> Response {
@@ -960,8 +969,8 @@ async fn patch_secure_boot(
     json!({}).into_ok_response()
 }
 
-async fn get_boot_options_collection(
-    State(state): State<BmcState>,
+async fn get_boot_options_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
 ) -> Response {
     let Some(system_state) = state.system_state.find(&system_id) else {
@@ -1000,8 +1009,8 @@ async fn get_boot_options_collection(
         .into_ok_response()
 }
 
-async fn get_boot_option(
-    State(state): State<BmcState>,
+async fn get_boot_option<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, boot_option_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -1012,8 +1021,8 @@ async fn get_boot_option(
         .unwrap_or_else(http::not_found)
 }
 
-async fn patch_boot_option_settings(
-    State(state): State<BmcState>,
+async fn patch_boot_option_settings<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, boot_option_id)): Path<(String, String)>,
     Json(patch_request): Json<serde_json::Value>,
 ) -> Response {
@@ -1027,7 +1036,10 @@ async fn patch_boot_option_settings(
 }
 
 /// Return the HPE iLO persistent boot-order resource.
-async fn get_hpe_boot(State(state): State<BmcState>, Path(system_id): Path<String>) -> Response {
+async fn get_hpe_boot<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(system_id): Path<String>,
+) -> Response {
     let Some(system_state) = state.system_state.find(&system_id) else {
         return http::not_found();
     };
@@ -1043,8 +1055,8 @@ async fn get_hpe_boot(State(state): State<BmcState>, Path(system_id): Path<Strin
 }
 
 /// Apply the HPE iLO persistent boot order staged through its settings resource.
-async fn patch_hpe_boot_settings(
-    State(state): State<BmcState>,
+async fn patch_hpe_boot_settings<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
     Json(request): Json<HpeBootSettingsPatch>,
 ) -> Response {
@@ -1055,8 +1067,8 @@ async fn patch_hpe_boot_settings(
     json!({}).into_ok_response()
 }
 
-async fn get_log_services_collection(
-    State(state): State<BmcState>,
+async fn get_log_services_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
 ) -> Response {
     state
@@ -1078,8 +1090,8 @@ async fn get_log_services_collection(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_log_service(
-    State(state): State<BmcState>,
+async fn get_log_service<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, log_service_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -1106,8 +1118,8 @@ async fn get_log_service(
         .unwrap_or_else(http::not_found)
 }
 
-async fn post_clear_log(
-    State(state): State<BmcState>,
+async fn post_clear_log<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, log_service_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -1122,8 +1134,8 @@ async fn post_clear_log(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_log_service_entries(
-    State(state): State<BmcState>,
+async fn get_log_service_entries<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, log_service_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -1150,8 +1162,8 @@ async fn get_log_service_entries(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_log_service_entry(
-    State(state): State<BmcState>,
+async fn get_log_service_entry<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, log_service_id, entry_id)): Path<(String, String, String)>,
 ) -> Response {
     state
@@ -1168,8 +1180,8 @@ async fn get_log_service_entry(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_storage_collection(
-    State(state): State<BmcState>,
+async fn get_storage_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
 ) -> Response {
     state
@@ -1190,8 +1202,8 @@ async fn get_storage_collection(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_processors_collection(
-    State(state): State<BmcState>,
+async fn get_processors_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
 ) -> Response {
     state
@@ -1212,8 +1224,8 @@ async fn get_processors_collection(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_processor(
-    State(state): State<BmcState>,
+async fn get_processor<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, processor_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -1224,8 +1236,8 @@ async fn get_processor(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_processor_metrics(
-    State(state): State<BmcState>,
+async fn get_processor_metrics<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, processor_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -1236,8 +1248,8 @@ async fn get_processor_metrics(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_memory_collection(
-    State(state): State<BmcState>,
+async fn get_memory_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
 ) -> Response {
     state
@@ -1256,8 +1268,8 @@ async fn get_memory_collection(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_memory(
-    State(state): State<BmcState>,
+async fn get_memory<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, memory_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -1268,8 +1280,8 @@ async fn get_memory(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_memory_metrics(
-    State(state): State<BmcState>,
+async fn get_memory_metrics<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, memory_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -1280,7 +1292,10 @@ async fn get_memory_metrics(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_bios(State(state): State<BmcState>, Path(system_id): Path<String>) -> Response {
+async fn get_bios<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(system_id): Path<String>,
+) -> Response {
     state
         .system_state
         .find(&system_id)
@@ -1299,8 +1314,8 @@ async fn get_bios(State(state): State<BmcState>, Path(system_id): Path<String>) 
         .unwrap_or_else(http::not_found)
 }
 
-async fn patch_bios_settings(
-    State(state): State<BmcState>,
+async fn patch_bios_settings<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
     Json(patch_bios_request): Json<serde_json::Value>,
 ) -> Response {
@@ -1544,7 +1559,7 @@ mod tests {
             .status()
     }
 
-    fn dell_router() -> (Router, BmcState) {
+    fn dell_router() -> (Router, BmcState<NoopCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
             Arc::new(NoopCallbacks),

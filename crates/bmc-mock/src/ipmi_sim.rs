@@ -167,8 +167,8 @@ impl Reservations {
 ///
 /// The factory is called once per accepted console connection; its bytes are forwarded unchanged.
 /// Without a factory, the console only echoes interactive input and writes the configured prompt.
-pub async fn start(
-    state: &BmcState,
+pub async fn start<C: Callbacks>(
+    state: &BmcState<C>,
     config: IpmiSimConfig,
     console_output: Option<ConsoleOutputStreamFactory>,
 ) -> Result<IpmiSimHandle, Error> {
@@ -291,7 +291,7 @@ impl Drop for ChassisControl {
 }
 
 impl ChassisControl {
-    fn start(base: &Path, callbacks: Arc<dyn Callbacks>) -> Result<Self, std::io::Error> {
+    fn start<C: Callbacks>(base: &Path, callbacks: Arc<C>) -> Result<Self, std::io::Error> {
         let fifo_path = base.join(CHASSIS_CONTROL_FIFO);
         mkfifo(&fifo_path, Mode::S_IRUSR | Mode::S_IWUSR).map_err(std::io::Error::from)?;
         let receiver = pipe::OpenOptions::new().open_receiver(&fifo_path)?;
@@ -714,13 +714,13 @@ mod tests {
 
     #[tokio::test]
     async fn real_ipmitool_resets_chassis() {
-        let bmc = crate::test_support::generic_supermicro_bmc().await;
-        let mut state = bmc.state;
+        let callbacks = Arc::new(RecordingCallbacks::default());
+        let bmc =
+            crate::test_support::generic_supermicro_bmc_with_callbacks(callbacks.clone()).await;
+        let state = bmc.state;
         state
             .account_service_state
             .change_factory_default_password("password");
-        let callbacks = Arc::new(RecordingCallbacks::default());
-        state.callbacks = Some(callbacks.clone());
         let simulator = start(
             &state,
             IpmiSimConfig {
