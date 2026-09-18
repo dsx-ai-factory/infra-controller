@@ -1463,14 +1463,18 @@ func promptTemplatedIPXEOperatingSystem(
 }
 
 func promptIPXETemplateRequirements(template *NamedItem, body map[string]interface{}) error {
-	parameters, err := promptIPXETemplateParameters(template)
+	requiredParameters, requiredArtifacts, err := ipxeTemplateRequirements(template)
+	if err != nil {
+		return err
+	}
+	parameters, err := promptIPXETemplateParameters(requiredParameters)
 	if err != nil {
 		return err
 	}
 	if len(parameters) > 0 {
 		body["ipxeTemplateParameters"] = parameters
 	}
-	artifacts, err := promptIPXETemplateArtifacts(template)
+	artifacts, err := promptIPXETemplateArtifacts(requiredArtifacts)
 	if err != nil {
 		return err
 	}
@@ -1480,11 +1484,19 @@ func promptIPXETemplateRequirements(template *NamedItem, body map[string]interfa
 	return nil
 }
 
-func promptIPXETemplateParameters(template *NamedItem) ([]map[string]interface{}, error) {
+func ipxeTemplateRequirements(template *NamedItem) ([]string, []string, error) {
 	requiredParameters, err := namedItemStringList(template, "requiredParams")
 	if err != nil {
-		return nil, fmt.Errorf("reading required iPXE template parameters: %w", err)
+		return nil, nil, fmt.Errorf("reading required iPXE template parameters: %w", err)
 	}
+	requiredArtifacts, err := namedItemStringList(template, "requiredArtifacts")
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading required iPXE template artifacts: %w", err)
+	}
+	return requiredParameters, requiredArtifacts, nil
+}
+
+func promptIPXETemplateParameters(requiredParameters []string) ([]map[string]interface{}, error) {
 	parameters := make([]map[string]interface{}, 0, len(requiredParameters))
 	for _, parameterName := range requiredParameters {
 		value, promptErr := PromptText(fmt.Sprintf("Value for parameter %s", parameterName), true)
@@ -1499,11 +1511,7 @@ func promptIPXETemplateParameters(template *NamedItem) ([]map[string]interface{}
 	return parameters, nil
 }
 
-func promptIPXETemplateArtifacts(template *NamedItem) ([]map[string]interface{}, error) {
-	requiredArtifacts, err := namedItemStringList(template, "requiredArtifacts")
-	if err != nil {
-		return nil, fmt.Errorf("reading required iPXE template artifacts: %w", err)
-	}
+func promptIPXETemplateArtifacts(requiredArtifacts []string) ([]map[string]interface{}, error) {
 	artifacts := make([]map[string]interface{}, 0, len(requiredArtifacts))
 	for _, artifactName := range requiredArtifacts {
 		artifact, promptErr := promptIPXETemplateArtifact(artifactName)
@@ -1934,64 +1942,64 @@ func promptTemplatedIPXEOperatingSystemUpdate(
 	item *NamedItem,
 	body map[string]interface{},
 ) error {
-	updateParameters, err := PromptConfirm("Update iPXE template parameters?")
+	template, err := operatingSystemIPXETemplate(s, item)
 	if err != nil {
 		return err
 	}
-	var template *NamedItem
-	loadTemplate := func() error {
-		if template != nil {
-			return nil
+	requiredParameters, requiredArtifacts, err := ipxeTemplateRequirements(template)
+	if err != nil {
+		return err
+	}
+
+	if len(requiredParameters) > 0 {
+		updateParameters, promptErr := PromptConfirm("Update iPXE template parameters?")
+		if promptErr != nil {
+			return promptErr
 		}
-		raw, loadErr := operatingSystemRaw(item)
-		if loadErr != nil {
-			return loadErr
-		}
-		templateID := strings.TrimSpace(str(raw, "ipxeTemplateId"))
-		if templateID == "" {
-			return fmt.Errorf("templated iPXE operating system %q has no ipxeTemplateId", item.Name)
-		}
-		templates, loadErr := s.fetchIPXETemplatesForSite("")
-		if loadErr != nil {
-			return fmt.Errorf("fetching ipxe-template: %w", loadErr)
-		}
-		for index := range templates {
-			if templates[index].ID == templateID {
-				template = &templates[index]
-				return nil
+		if updateParameters {
+			parameters, parametersErr := promptIPXETemplateParameters(requiredParameters)
+			if parametersErr != nil {
+				return parametersErr
 			}
+			body["ipxeTemplateParameters"] = parameters
 		}
-		return fmt.Errorf("iPXE template %q used by operating system %q is unavailable", templateID, item.Name)
 	}
 
-	if updateParameters {
-		err = loadTemplate()
-		if err != nil {
-			return err
-		}
-		parameters, promptErr := promptIPXETemplateParameters(template)
+	if len(requiredArtifacts) > 0 {
+		updateArtifacts, promptErr := PromptConfirm("Update iPXE template artifacts?")
 		if promptErr != nil {
 			return promptErr
 		}
-		body["ipxeTemplateParameters"] = parameters
-	}
-
-	updateArtifacts, err := PromptConfirm("Update iPXE template artifacts?")
-	if err != nil {
-		return err
-	}
-	if updateArtifacts {
-		err = loadTemplate()
-		if err != nil {
-			return err
+		if updateArtifacts {
+			artifacts, artifactsErr := promptIPXETemplateArtifacts(requiredArtifacts)
+			if artifactsErr != nil {
+				return artifactsErr
+			}
+			body["ipxeTemplateArtifacts"] = artifacts
 		}
-		artifacts, promptErr := promptIPXETemplateArtifacts(template)
-		if promptErr != nil {
-			return promptErr
-		}
-		body["ipxeTemplateArtifacts"] = artifacts
 	}
 	return nil
+}
+
+func operatingSystemIPXETemplate(s *Session, item *NamedItem) (*NamedItem, error) {
+	raw, err := operatingSystemRaw(item)
+	if err != nil {
+		return nil, err
+	}
+	templateID := strings.TrimSpace(str(raw, "ipxeTemplateId"))
+	if templateID == "" {
+		return nil, fmt.Errorf("templated iPXE operating system %q has no ipxeTemplateId", item.Name)
+	}
+	templates, err := s.fetchIPXETemplatesForSite("")
+	if err != nil {
+		return nil, fmt.Errorf("fetching ipxe-template: %w", err)
+	}
+	for index := range templates {
+		if templates[index].ID == templateID {
+			return &templates[index], nil
+		}
+	}
+	return nil, fmt.Errorf("iPXE template %q used by operating system %q is unavailable", templateID, item.Name)
 }
 
 func cmdOSDelete(s *Session, args []string) error {

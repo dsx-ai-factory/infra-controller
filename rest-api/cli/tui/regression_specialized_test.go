@@ -854,6 +854,8 @@ func TestCmdOSUpdatePromptsForTypeSpecificFields(t *testing.T) {
 		expectedTemplateCalls int32
 		expectedOutput        []string
 		unexpectedOutput      []string
+		noRequiredParameters  bool
+		noRequiredArtifacts   bool
 	}{
 		{
 			name:   "raw iPXE offers script update only",
@@ -1059,13 +1061,13 @@ func TestCmdOSUpdatePromptsForTypeSpecificFields(t *testing.T) {
 			},
 		},
 		{
-			name:       "templated iPXE skips template lookup when updates are declined",
-			osType:     operatingSystemAPITypeTemplatedIPXE,
-			templateID: templateID,
+			name:                 "templated iPXE omits parameter confirmation when none are required",
+			osType:               operatingSystemAPITypeTemplatedIPXE,
+			templateID:           templateID,
+			noRequiredParameters: true,
 			input: strings.Join([]string{
-				"renamed-template-os",
+				"renamed-no-parameter-os",
 				"",
-				"n",
 				"n",
 				"",
 				"",
@@ -1073,13 +1075,41 @@ func TestCmdOSUpdatePromptsForTypeSpecificFields(t *testing.T) {
 				"",
 			}, "\n") + "\n",
 			expectedBody: `{
-				"name":"renamed-template-os"
+				"name":"renamed-no-parameter-os"
 			}`,
+			expectedTemplateCalls: 1,
 			expectedOutput: []string{
-				"Update iPXE template parameters?",
 				"Update iPXE template artifacts?",
 			},
 			unexpectedOutput: []string{
+				"Update iPXE template parameters?",
+				"Value for parameter kernel_url",
+				"URL for artifact initrd",
+			},
+		},
+		{
+			name:                "templated iPXE omits artifact confirmation when none are required",
+			osType:              operatingSystemAPITypeTemplatedIPXE,
+			templateID:          templateID,
+			noRequiredArtifacts: true,
+			input: strings.Join([]string{
+				"renamed-no-artifact-os",
+				"",
+				"n",
+				"",
+				"",
+				"",
+				"",
+			}, "\n") + "\n",
+			expectedBody: `{
+				"name":"renamed-no-artifact-os"
+			}`,
+			expectedTemplateCalls: 1,
+			expectedOutput: []string{
+				"Update iPXE template parameters?",
+			},
+			unexpectedOutput: []string{
+				"Update iPXE template artifacts?",
 				"Value for parameter kernel_url",
 				"URL for artifact initrd",
 			},
@@ -1109,12 +1139,20 @@ func TestCmdOSUpdatePromptsForTypeSpecificFields(t *testing.T) {
 				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/ipxe-template":
 					templateCalls.Add(1)
 					assert.Empty(t, r.URL.Query().Get("siteId"))
+					requiredParameters := []string{"kernel_url"}
+					if test.noRequiredParameters {
+						requiredParameters = []string{}
+					}
+					requiredArtifacts := []string{"initrd"}
+					if test.noRequiredArtifacts {
+						requiredArtifacts = []string{}
+					}
 					response := map[string]interface{}{
 						"id":                templateID,
 						"name":              "Ubuntu Template",
 						"visibility":        "Public",
-						"requiredParams":    []string{"kernel_url"},
-						"requiredArtifacts": []string{"initrd"},
+						"requiredParams":    requiredParameters,
+						"requiredArtifacts": requiredArtifacts,
 					}
 					encodeErr := json.NewEncoder(w).Encode([]map[string]interface{}{response})
 					require.NoError(t, encodeErr)
