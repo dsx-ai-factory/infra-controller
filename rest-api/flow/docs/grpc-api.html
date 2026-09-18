@@ -1752,7 +1752,7 @@ not returned as a conflict against the proposed replacement operation. </p></td>
 
 
         <h3 id="v1.ComponentOperationStatus">ComponentOperationStatus</h3>
-        <p>ComponentOperationStatus is Flow's view of a component's operability.</p>
+        <p>ComponentOperationStatus is Flow's view of a component's operability. The</p><p>inventory loop computes it on every sync from core's controller_state.</p>
 
 
           <table class="field-table">
@@ -1772,7 +1772,7 @@ not returned as a conflict against the proposed replacement operation. </p></td>
                   <td>reason</td>
                   <td><a href="#string">string</a></td>
                   <td></td>
-                  <td><p>Human-readable source status detail. </p></td>
+                  <td><p>Human-readable detail (typically the raw core state string). </p></td>
                 </tr>
 
                 <tr>
@@ -6125,6 +6125,15 @@ set together with an explicit operation target_spec. </p></td>
                   <td><p>Update BMCs (matched by MAC address; create if new) </p></td>
                 </tr>
 
+                <tr>
+                  <td>update_mask</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.FieldMask</a></td>
+                  <td></td>
+                  <td><p>Optional for backward compatibility. When omitted, position replaces all
+three coordinates. When set, supported paths are position.slot_id,
+position.tray_idx, and position.host_id; only those coordinates change. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -6714,7 +6723,11 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td>operation_status</td>
                   <td><a href="#v1.Phase">Phase</a></td>
                   <td></td>
-                  <td><p>Operability phase aggregated from component phases. </p></td>
+                  <td><p>Flow-derived operability summary across active Compute, NVSwitch, and PowerShelf
+components in this rack. Unknown or missing component status wins, followed by
+Error, Initializing, Deleting, InUse, and Ready. A rack with no supported active
+components is Unknown. This is independent of component expansion and is not the
+Core rack lifecycle/controller state. </p></td>
                 </tr>
 
             </tbody>
@@ -8756,7 +8769,7 @@ exists, this includes every materialized phase.</p></td>
         </table>
 
         <h3 id="v1.Phase">Phase</h3>
-        <p>Phase is Flow's coarse operability bucket.</p>
+        <p>Phase is Flow's coarse operability bucket. Component phases are derived from</p><p>Core's type-specific state machines; Rack.operation_status aggregates those</p><p>component phases.</p>
         <table class="enum-table">
           <thead>
             <tr><td>Name</td><td>Number</td><td>Description</td></tr>

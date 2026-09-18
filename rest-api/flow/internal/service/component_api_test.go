@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	inventorymanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/manager"
 	inventorystore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/store"
@@ -502,6 +503,100 @@ func TestPatchComponent_Success(t *testing.T) {
 	assert.Equal(t, 3, updated.Position.SlotID)
 	assert.Equal(t, 2, updated.Position.TrayIndex)
 	assert.Equal(t, 5, updated.Position.HostID)
+}
+
+func TestPatchComponent_PositionPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		want component.InRackPosition
+	}{
+		{
+			name: "slot only",
+			path: "position.slot_id",
+			want: component.InRackPosition{SlotID: 0, TrayIndex: 2, HostID: 3},
+		},
+		{
+			name: "tray only",
+			path: "position.tray_idx",
+			want: component.InRackPosition{SlotID: 1, TrayIndex: 0, HostID: 3},
+		},
+		{
+			name: "host only",
+			path: "position.host_id",
+			want: component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 0},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := newMockManager()
+			compID := uuid.New()
+			mgr.components[compID] = &component.Component{
+				Info: deviceinfo.DeviceInfo{ID: compID},
+				Position: component.InRackPosition{
+					SlotID:    1,
+					TrayIndex: 2,
+					HostID:    3,
+				},
+			}
+
+			server := &FlowServerImpl{inventoryManager: mgr}
+			_, err := server.PatchComponent(context.Background(), &pb.PatchComponentRequest{
+				Id:       &pb.UUID{Id: compID.String()},
+				Position: &pb.RackPosition{},
+				UpdateMask: &fieldmaskpb.FieldMask{
+					Paths: []string{tc.path},
+				},
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, mgr.components[compID].Position)
+		})
+	}
+}
+
+func TestPatchComponent_InvalidPositionMask(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		position   *pb.RackPosition
+		updateMask *fieldmaskpb.FieldMask
+	}{
+		{
+			name:       "empty mask",
+			position:   &pb.RackPosition{},
+			updateMask: &fieldmaskpb.FieldMask{},
+		},
+		{
+			name:       "unsupported path",
+			position:   &pb.RackPosition{},
+			updateMask: &fieldmaskpb.FieldMask{Paths: []string{"position.unknown"}},
+		},
+		{
+			name:       "missing position",
+			updateMask: &fieldmaskpb.FieldMask{Paths: []string{"position.slot_id"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := newMockManager()
+			compID := uuid.New()
+			mgr.components[compID] = &component.Component{
+				Info:            deviceinfo.DeviceInfo{ID: compID},
+				FirmwareVersion: "original",
+				Position:        component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 3},
+			}
+
+			firmware := "must-not-be-applied"
+			server := &FlowServerImpl{inventoryManager: mgr}
+			_, err := server.PatchComponent(context.Background(), &pb.PatchComponentRequest{
+				Id:              &pb.UUID{Id: compID.String()},
+				FirmwareVersion: &firmware,
+				Position:        tc.position,
+				UpdateMask:      tc.updateMask,
+			})
+
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			assert.Equal(t, "original", mgr.components[compID].FirmwareVersion)
+			assert.Equal(t, component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 3}, mgr.components[compID].Position)
+		})
+	}
 }
 
 func TestPatchComponent_MissingID(t *testing.T) {
