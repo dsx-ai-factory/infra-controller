@@ -4769,7 +4769,10 @@ paths:
                   labels:
                     environment: staging
                     rack: B2
-        description: Expected Machine update request
+        description: |-
+          Expected Machine update request.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -4920,7 +4923,10 @@ paths:
                     labels:
                       environment: staging
                       rack: B3
-        description: Array of Expected Machine update requests
+        description: |-
+          Array of Expected Machine update requests.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Every item must use the same field set except bmcIpAddress; values may differ between items.
         required: true
       responses:
         '200':
@@ -5138,7 +5144,10 @@ paths:
                   labels:
                     environment: staging
                     rack: B2
-        description: Expected Power Shelf update request
+        description: |-
+          Expected Power Shelf update request.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -5723,7 +5732,10 @@ paths:
                   labels:
                     environment: staging
                     rack: B2
-        description: Expected Switch update request
+        description: |-
+          Expected Switch update request.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings. To change NVOS credentials, provide both nvOsUsername and nvOsPassword as non-empty strings. Each pair can be updated independently in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -27734,7 +27746,7 @@ components:
       description: |-
         Request data to update an existing Expected Machine.
 
-        Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
+        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
 
         For single updates (PATCH /expected-machine/{id}), the id field is optional in body and will be ignored if provided (the ID from the URL path is used).
 
@@ -27774,14 +27786,17 @@ components:
           type:
             - string
             - 'null'
+          minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Machine's BMC
+          description: Username for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
         defaultBmcPassword:
           type:
             - string
             - 'null'
+          minLength: 1
+          writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Machine's BMC
+          description: Password for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
         chassisSerialNumber:
           type:
             - string
@@ -28069,7 +28084,7 @@ components:
       description: |-
         Request data to update an existing Expected Power Shelf.
 
-        Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
+        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -28102,14 +28117,17 @@ components:
           type:
             - string
             - 'null'
+          minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Power Shelf's BMC
+          description: Username for accessing the Expected Power Shelf's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
         defaultBmcPassword:
           type:
             - string
             - 'null'
+          minLength: 1
+          writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Power Shelf's BMC
+          description: Password for accessing the Expected Power Shelf's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
         shelfSerialNumber:
           type:
             - string
@@ -28630,7 +28648,7 @@ components:
       description: |-
         Request data to update an existing Expected Switch.
 
-        Note: BMC and NvOS credentials (username/password) are only accepted during creation and updates but are not returned in responses.
+        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings. To change NVOS credentials, provide both nvOsUsername and nvOsPassword as non-empty strings. Each pair can be updated independently in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -28667,14 +28685,17 @@ components:
           type:
             - string
             - 'null'
+          minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Switch's BMC
+          description: Username for accessing the Expected Switch's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
         defaultBmcPassword:
           type:
             - string
             - 'null'
+          minLength: 1
+          writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Switch's BMC
+          description: Password for accessing the Expected Switch's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
         switchSerialNumber:
           type:
             - string
@@ -28686,12 +28707,15 @@ components:
           type:
             - string
             - 'null'
-          description: NvOS username for the Expected Switch
+          minLength: 1
+          description: NvOS username for the Expected Switch. Omission or null preserves the value; a non-empty value requires nvOsPassword in the same request.
         nvOsPassword:
           type:
             - string
             - 'null'
-          description: NvOS password for the Expected Switch
+          minLength: 1
+          writeOnly: true
+          description: NvOS password for the Expected Switch. Omission or null preserves the value; a non-empty value requires nvOsUsername in the same request.
         nvosMacAddresses:
           type: array
           uniqueItems: true

@@ -14,6 +14,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
@@ -193,6 +194,11 @@ type APIExpectedMachineUpdateRequest struct {
 
 // Validate ensure the values passed in request are acceptable
 func (emur *APIExpectedMachineUpdateRequest) Validate() error {
+	credentialErr := util.ValidateExpectedComponentCredentialPair(emur.DefaultBmcUsername, emur.DefaultBmcPassword, "defaultBmcUsername", "defaultBmcPassword")
+	if credentialErr != nil {
+		return credentialErr
+	}
+
 	if emur.ID != nil {
 		if *emur.ID == "" {
 			return validation.Errors{
@@ -252,6 +258,43 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 	}
 
 	return nil
+}
+
+// ToProto builds the Core patch from the updated cloud row and the fields
+// selected by this request. Call Validate before conversion and pass the
+// updated cloud row so derived metadata labels include its retained values.
+// Explicit zero and empty values remain updates.
+func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachine) *corev1.PatchExpectedMachineRequest {
+	resource := entity.ToProto(cdbm.ExpectedMachineCredentials{
+		Username: emur.DefaultBmcUsername,
+		Password: emur.DefaultBmcPassword,
+	})
+
+	// The DB row may still hold an address this PATCH omitted. Core needs
+	// the request value so nil preserves its reservation and "" clears it.
+	resource.BmcIpAddress = emur.BmcIpAddress
+	setBmcIP := emur.BmcIpAddress != nil && *emur.BmcIpAddress != ""
+	if setBmcIP {
+		resource.BmcIpAllocation = corev1.BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_AUTO.Enum()
+	}
+	return &corev1.PatchExpectedMachineRequest{
+		ExpectedMachine: resource,
+		UpdateMask: util.ExpectedComponentUpdateMask(
+			util.ExpectedComponentUpdateField{Path: "bmc_username", Present: emur.DefaultBmcUsername != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_password", Present: emur.DefaultBmcPassword != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_ip_address", Present: emur.BmcIpAddress != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_ip_allocation", Present: setBmcIP},
+			util.ExpectedComponentUpdateField{Path: "rack_id", Present: emur.RackID != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.name", Present: emur.Name != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.description", Present: emur.Description != nil},
+			util.ExpectedComponentUpdateField{Path: "metadata.labels", Present: emur.Labels != nil || emur.Manufacturer != nil || emur.Model != nil || emur.SlotID != nil || emur.TrayIdx != nil || emur.HostID != nil},
+			util.ExpectedComponentUpdateField{Path: "chassis_serial_number", Present: emur.ChassisSerialNumber != nil},
+			util.ExpectedComponentUpdateField{Path: "fallback_dpu_serial_numbers", Present: emur.FallbackDPUSerialNumbers != nil},
+			util.ExpectedComponentUpdateField{Path: "sku_id", Present: emur.SkuID != nil},
+			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
+			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
+		),
+	}
 }
 
 // APIExpectedMachine is the data structure to capture API representation of an ExpectedMachine
