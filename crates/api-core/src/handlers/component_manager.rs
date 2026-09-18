@@ -1158,12 +1158,16 @@ async fn group_machine_ids_by_rack(
 }
 
 /// Returns whether the machine is a rack-scale MNNVL server (GB200, GB300, etc.).
+///
+/// A machine is treated as rack-scale when it is associated with a rack, or when
+/// its hardware advertises MNNVL capability.
 fn is_rack_scale_server(machine: &HostMachine) -> bool {
-    machine
-        .status
-        .hardware_info
-        .as_ref()
-        .is_some_and(|hw| hw.is_mnnvl_capable())
+    machine.rack_id.is_some()
+        || machine
+            .status
+            .hardware_info
+            .as_ref()
+            .is_some_and(|hw| hw.is_mnnvl_capable())
 }
 
 /// Splits already-loaded compute machines into rack-scale and standalone lists.
@@ -7228,9 +7232,20 @@ mod tests {
         }))
     }
 
-    /// Standalone: no MNNVL-capable GPU.
+    /// Standalone: no rack association and no MNNVL-capable GPU.
     fn standalone_machine() -> HostMachine {
-        machine_with_hardware(Some(HardwareInfo::default()))
+        let mut machine = machine_with_hardware(Some(HardwareInfo::default()));
+        machine.rack_id = None;
+        machine
+    }
+
+    /// A rack tray stuck in DPU provisioning: it is associated with a rack, but
+    /// the host never booted far enough to report inventory, so its hardware
+    /// info is absent and `is_mnnvl_capable` alone cannot see it as rack-scale.
+    fn rack_member_without_inventory() -> HostMachine {
+        let mut machine = machine_with_hardware(None);
+        machine.rack_id = Some("rack-bench-01".parse().expect("valid rack id"));
+        machine
     }
 
     /// Mirror the MachineIds power path's classify → power-option gate → partition
@@ -7293,6 +7308,32 @@ mod tests {
         let err = machine_is_rack_scale(&HashMap::new(), id).unwrap_err();
         assert_eq!(err.code(), Code::NotFound);
         assert!(err.message().contains(&id.to_string()));
+    }
+
+    #[test]
+    fn rack_member_without_inventory_classifies_as_rack_scale() {
+        // Regression: trays stuck in DPUInitializing/Failed never boot far enough
+        // to report inventory, so they carry no GPUs or DMI product name and
+        // `is_mnnvl_capable` is false. Rack membership must still route them
+        // through the rack-scale maintenance flow.
+        let stuck_tray = rack_member_without_inventory();
+        assert!(
+            !stuck_tray
+                .status
+                .hardware_info
+                .as_ref()
+                .is_some_and(|hw| hw.is_mnnvl_capable()),
+            "the stuck tray reports no MNNVL-capable inventory"
+        );
+        assert!(
+            is_rack_scale_server(&stuck_tray),
+            "rack membership alone should classify a tray as rack-scale"
+        );
+
+        // Without a rack and without inventory there is no rack-scale signal.
+        let mut orphan = stuck_tray;
+        orphan.rack_id = None;
+        assert!(!is_rack_scale_server(&orphan));
     }
 
     #[test]
