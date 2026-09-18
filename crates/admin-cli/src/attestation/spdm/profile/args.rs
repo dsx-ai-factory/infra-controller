@@ -96,7 +96,7 @@ pub(crate) struct List {}
 EXAMPLES:
 
 Show the profile that applies to GB200 trays:
-    $ nico-admin-cli attestation spdm profile get Gb200
+    $ nico-admin-cli attestation spdm profile get nvidia_dgx-gb200
 
 Show the fallback that applies to hardware with no profile of its own:
     $ nico-admin-cli attestation spdm profile get any
@@ -112,11 +112,11 @@ pub(crate) struct Get {
 EXAMPLES:
 
 Attest the GPU integrity reports on GB200 trays:
-    $ nico-admin-cli attestation spdm profile create Gb200 \
+    $ nico-admin-cli attestation spdm profile create nvidia_dgx-gb200 \
     --mode allowlist --prefix HGX_IRoT_GPU_
 
 Mix pattern kinds in one selection:
-    $ nico-admin-cli attestation spdm profile create Gb200 \
+    $ nico-admin-cli attestation spdm profile create nvidia_dgx-gb200 \
     --mode allowlist --prefix HGX_IRoT_GPU_ --exact VERA_CPU_0
 
 Attest everything reported by hardware that has no profile of its own:
@@ -128,7 +128,13 @@ pub(crate) struct Create {
                 exploration records, or 'any' for the fallback. Run \
                 'attestation spdm coverage' to see the classes this site has")]
     pub(super) hardware_class: String,
-    #[clap(long, value_enum, help = "Which attesters the hardware requires")]
+    #[clap(
+        long,
+        value_enum,
+        help = "Which attesters the hardware requires. allowlist and denylist \
+                take at least one --exact or --prefix between them; all and \
+                none take neither"
+    )]
     pub(super) mode: Mode,
     #[clap(flatten)]
     pub(super) patterns: Patterns,
@@ -139,7 +145,7 @@ pub(crate) struct Create {
 EXAMPLES:
 
 Replace the selection, failing if someone else wrote first:
-    $ nico-admin-cli attestation spdm profile update Gb200 \
+    $ nico-admin-cli attestation spdm profile update nvidia_dgx-gb200 \
     --mode denylist --exact HGX_BMC_0 --if-version-match V7-T1789080000000000
 
 Switch the fallback off, which stops attesting every class without a profile
@@ -150,7 +156,13 @@ of its own:
 pub(crate) struct Update {
     #[clap(help = "Hardware class the profile is keyed to")]
     pub(super) hardware_class: String,
-    #[clap(long, value_enum, help = "Which attesters the hardware requires")]
+    #[clap(
+        long,
+        value_enum,
+        help = "Which attesters the hardware requires. allowlist and denylist \
+                take at least one --exact or --prefix between them; all and \
+                none take neither"
+    )]
     pub(super) mode: Mode,
     #[clap(flatten)]
     pub(super) patterns: Patterns,
@@ -173,7 +185,7 @@ pub(crate) struct Update {
 EXAMPLES:
 
 Remove a profile, failing if someone else wrote first:
-    $ nico-admin-cli attestation spdm profile delete Gb200 \
+    $ nico-admin-cli attestation spdm profile delete nvidia_dgx-gb200 \
     --if-version-match V7-T1789080000000000
 
 Remove the fallback, which leaves every class without a profile of its own
