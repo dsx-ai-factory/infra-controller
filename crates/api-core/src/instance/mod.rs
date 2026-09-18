@@ -1608,20 +1608,19 @@ pub(crate) fn validate_instance_extension_services(
             ))
         })?;
 
-        // A service type can only be attached to the host model able to
-        // reconcile it. DPF Helm services use DPUDevice labels and never reach
-        // the DPU agent; Kubernetes Pod services are agent-only. The host flag
-        // is authoritative here: the site-wide DPF switch is enforced when a
-        // service is created, and no host can be DPF-managed without it.
+        // v2.2 must not create a new DPF Helm attachment.
+        if service.service_type == ExtensionServiceType::DpfHelmChart {
+            return Err(CarbideError::FailedPrecondition(
+                "DPF helm chart extension services are not supported in v2.2".to_string(),
+            ));
+        }
+
+        // Kubernetes Pod services are agent-only and remain unsupported on a
+        // DPF-managed host.
         match (is_dpf_managed_host, &service.service_type) {
             (true, ExtensionServiceType::KubernetesPod) => {
                 return Err(CarbideError::FailedPrecondition(format!(
                     "DPU extension services are not supported on DPF-managed host {machine_id}"
-                )));
-            }
-            (false, ExtensionServiceType::DpfHelmChart) => {
-                return Err(CarbideError::FailedPrecondition(format!(
-                    "DPF helm chart extension services require a DPF-managed host {machine_id}"
                 )));
             }
             _ => {}

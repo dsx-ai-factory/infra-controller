@@ -25,9 +25,6 @@ use arc_swap::ArcSwap;
 use carbide_dpa::DpaInfo;
 use carbide_dpa_manager::DpaMonitor;
 use carbide_dpf::DpuDeploymentType;
-use carbide_extension_service_controller::context::ExtensionServiceStateHandlerServices;
-use carbide_extension_service_controller::handler::ExtensionServiceStateHandler;
-use carbide_extension_service_controller::io::ExtensionServiceStateControllerIO;
 use carbide_firmware::FirmwareDownloader;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ib_fabric::IbFabricMonitor;
@@ -1394,7 +1391,6 @@ async fn initialize_and_start_controllers<'a>(
         &carbide_config.power_shelf_state_controller.controller,
         &carbide_config.network_segment_state_controller.controller,
         &carbide_config.vpc_prefix_state_controller.controller,
-        &carbide_config.extension_service_state_controller.controller,
         &carbide_config.spdm_state_controller.controller,
         &carbide_config.ib_partition_state_controller.controller,
     ];
@@ -1627,23 +1623,6 @@ async fn initialize_and_start_controllers<'a>(
         )))
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build VpcPrefixStateController");
-
-    StateController::<ExtensionServiceStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
-        .meter("carbide_extension_services", meter.clone())
-        .processor_id(state_controller_id.clone())
-        .services(
-            ExtensionServiceStateHandlerServices {
-                db_pool: db_pool.clone(),
-                dpf_sdk: dpf_sdk.clone(),
-            }
-            .into(),
-        )
-        .per_object_state_metrics(per_object_state_recorder("extension_service"))
-        .iteration_config((&carbide_config.extension_service_state_controller.controller).into())
-        .state_handler(Arc::new(ExtensionServiceStateHandler))
-        .build_and_spawn(join_set, cancel_token.clone())
-        .expect("Unable to build ExtensionServiceStateController");
 
     if carbide_config.spdm.enabled {
         let Some(nras_config) = carbide_config.spdm.nras_config.clone() else {

@@ -488,7 +488,7 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub vpc_prefix_state_controller: VpcPrefixStateControllerConfig,
 
-    /// ExtensionServiceStateController related configuration parameter
+    /// ExtensionServiceStateController configuration not started in v2.2.
     #[serde(default)]
     pub extension_service_state_controller: ExtensionServiceStateControllerConfig,
 

@@ -138,7 +138,7 @@ pub(crate) async fn create(
     let initial_version = ConfigVersion::initial();
 
     // Validate service type is supported by the site
-    validate_extension_service_type_enabled(&service_type, api.runtime_config.dpf.enabled)?;
+    validate_extension_service_type_enabled(&service_type)?;
 
     // Validate the complete service definition before writing anything.
     // Kubernetes Pod data is stored exactly as provided; DPF Helm chart data
@@ -1010,15 +1010,17 @@ pub(crate) async fn find_instances_by_extension_service(
     ))
 }
 
-// Validate whether the reqested service type is supported at the site.
+/// Validates whether this release supports creating the requested service type.
+///
+/// DPF Helm chart services stay representable so databases created by earlier
+/// v2.2 release candidates remain readable, but creation is disabled because
+/// the supported v2.2 DPF version cannot reconcile them safely.
 fn validate_extension_service_type_enabled(
     service_type: &ExtensionServiceType,
-    dpf_enabled: bool,
 ) -> Result<(), CarbideError> {
-    // DPF Helm-chart services require DPF to be enabled for the site.
-    if matches!(service_type, ExtensionServiceType::DpfHelmChart) && !dpf_enabled {
+    if matches!(service_type, ExtensionServiceType::DpfHelmChart) {
         return Err(CarbideError::FailedPrecondition(
-            "DPF helm chart extension services require DPF to be enabled for this site".to_string(),
+            "DPF helm chart extension services are not supported in v2.2".to_string(),
         ));
     }
 

@@ -76,7 +76,7 @@ Use `site_explorer.dpu_policy` instead.
 | `machine_state_controller` | `MachineStateControllerConfig` | *(see below)* | `machines` | Machine state controller timing (see [MachineStateControllerConfig](#machinestatecontrollerconfig)). |
 | `network_segment_state_controller` | `NetworkSegmentStateControllerConfig` | *(see below)* | `networking` | Network segment state controller timing. |
 | `vpc_prefix_state_controller` | `VpcPrefixStateControllerConfig` | *(see below)* | `networking` | VPC prefix state controller timing. |
-| `extension_service_state_controller` | `ExtensionServiceStateControllerConfig` | *(see below)* | `machines` | DPU extension service state controller timing. |
+| `extension_service_state_controller` | `ExtensionServiceStateControllerConfig` | *(see below)* | `machines` | The DPF Helm extension-service controller is disabled in v2.2. |
 | `ib_partition_state_controller` | `IbPartitionStateControllerConfig` | *(see below)* | `hardware` | IB partition state controller timing. |
 | `dpa_interface_state_controller` | `DpaInterfaceStateControllerConfig` | *(see below)* | `networking` | DPA interface state controller timing. |
 | `rack_state_controller` | `RackStateControllerConfig` | *(see below)* | `hardware` | Rack state controller timing, optional ingestion firmware update, and primary-switch mTLS service selection. |
@@ -572,6 +572,10 @@ Extends `StateControllerConfig` with:
 ### `ExtensionServiceStateControllerConfig`
 
 TOML section: `[extension_service_state_controller]`.
+
+The section is accepted for configuration compatibility, but v2.2 does not
+start the DPF Helm extension-service controller. Its settings therefore have
+no runtime effect in this release.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
