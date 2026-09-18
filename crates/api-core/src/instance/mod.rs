@@ -1617,13 +1617,12 @@ pub(crate) fn validate_instance_extension_services(
 
         // Kubernetes Pod services are agent-only and remain unsupported on a
         // DPF-managed host.
-        match (is_dpf_managed_host, &service.service_type) {
-            (true, ExtensionServiceType::KubernetesPod) => {
-                return Err(CarbideError::FailedPrecondition(format!(
-                    "DPU extension services are not supported on DPF-managed host {machine_id}"
-                )));
-            }
-            _ => {}
+        if let (true, ExtensionServiceType::KubernetesPod) =
+            (is_dpf_managed_host, &service.service_type)
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DPU extension services are not supported on DPF-managed host {machine_id}"
+            )));
         }
 
         // A DPF Helm chart service is only reconcilable while its DPUService
