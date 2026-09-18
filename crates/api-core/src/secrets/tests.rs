@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use carbide_kms_provider::{EncryptedDek, IntegratedKmsProvider, KmsBackend, KmsError};
+use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     CredentialKey, CredentialReader, CredentialWriter, Credentials,
 };
@@ -186,10 +187,13 @@ async fn create_fails_when_credential_exists(pool: sqlx::PgPool) {
         .create_credentials(&key, &cred("admin", "usurper"))
         .await;
     let err = second.expect_err("second create must fail");
-    assert!(
-        err.to_string().contains("already exists"),
-        "unexpected error: {err}"
-    );
+    let SecretsError::GenericError(report) = &err else {
+        panic!("unexpected error: {err}");
+    };
+    let Some(PgSecretsError::AlreadyExists(path)) = report.downcast_ref::<PgSecretsError>() else {
+        panic!("unexpected error: {err}");
+    };
+    assert_eq!(path, key.to_key_str().as_ref());
 
     let current = mgr.get_credentials(&key).await.expect("get");
     assert_eq!(current, Some(cred("admin", "original")));
