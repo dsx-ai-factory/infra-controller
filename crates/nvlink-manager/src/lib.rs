@@ -2556,8 +2556,16 @@ impl NvlPartitionMonitor {
             ))
         })?;
         for (machine_id, observations) in observations {
-            db::machine::update_nvlink_status_observation(&mut obs_txn, &machine_id, &observations)
-                .await?;
+            if let db::ConditionalWrite::NotApplied(reason) =
+                db::machine::update_nvlink_status_observation(
+                    &mut obs_txn,
+                    &machine_id,
+                    &observations,
+                )
+                .await?
+            {
+                return Err(db::DatabaseError::from(reason).into());
+            }
         }
         obs_txn.commit().await.map_err(|e| {
             NvLinkManagerError::internal(format!(

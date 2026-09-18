@@ -92,13 +92,10 @@ impl NetworkSegmentStateHandler {
         ctx.metrics.seg_id = state.id.to_string();
         ctx.metrics.prefix = metric_prefix.prefix.to_string();
 
-        let total = metric_prefix.prefix.size();
-
-        let total_cnt: u32 = match total {
-            ipnetwork::NetworkSize::V4(nf) => nf,
-            ipnetwork::NetworkSize::V6(_n128) => 0,
+        ctx.metrics.total_ips = match metric_prefix.prefix.size() {
+            ipnetwork::NetworkSize::V4(count) => count as usize,
+            ipnetwork::NetworkSize::V6(count) => usize::try_from(count).unwrap_or(usize::MAX),
         };
-        ctx.metrics.total_ips = total_cnt as usize;
     }
 }
 

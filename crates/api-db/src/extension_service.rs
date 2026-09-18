@@ -48,6 +48,7 @@ pub async fn create(
     version: ConfigVersion,
     service_id: &ExtensionServiceId,
     service_type: &ExtensionServiceType,
+    dpu_target: Option<model::extension_service::DpuTarget>,
     service_name: &str,
     tenant_organization_id: &TenantOrganizationId,
     description: Option<&str>,
@@ -67,10 +68,10 @@ pub async fn create(
     // First create the extension service record
     let service_query = "INSERT INTO extension_services
             (id, type, name, description, tenant_organization_id, version_ctr,
-             controller_state, controller_state_version)
+             controller_state, controller_state_version, dpu_target)
             VALUES ($1, $2::varchar, $3::varchar, $4::varchar, $5::varchar, $6::integer,
-                    $7::jsonb, $8::varchar)
-            RETURNING id, type, name, description, tenant_organization_id, version_ctr,
+                    $7::jsonb, $8::varchar, $9)
+            RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr,
                       controller_state, controller_state_version, controller_state_outcome,
                       created, updated, deleted";
 
@@ -83,6 +84,7 @@ pub async fn create(
         .bind(initial_version_ctr)
         .bind(sqlx::types::Json(initial_controller_state))
         .bind(initial_controller_state_version)
+        .bind(dpu_target)
         .fetch_one(&mut *txn)
         .await
     {
@@ -192,7 +194,7 @@ pub async fn update(
         .push(" AND version_ctr = ")
         .push_bind(config_version_change.current.version_nr().cast_signed());
     builder.push(" AND deleted IS NULL");
-    builder.push(" RETURNING id, type, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, created, updated, deleted");
+    builder.push(" RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, created, updated, deleted");
 
     let updated_service = match builder
         .build_query_as::<ExtensionService>()
@@ -275,7 +277,7 @@ pub async fn update_metadata(
     builder.push(" WHERE id = ");
     builder.push_bind(service_id);
     builder.push(" AND deleted IS NULL");
-    builder.push(" RETURNING id, type, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, created, updated, deleted");
+    builder.push(" RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, created, updated, deleted");
 
     let updated_service = match builder
         .build_query_as::<ExtensionService>()
@@ -357,7 +359,7 @@ pub async fn update_dpf_helm_chart_in_place(
     builder.push(" AND controller_state = ");
     builder.push_bind(sqlx::types::Json(ExtensionServiceLifecycleState::Ready));
     builder.push(
-        " RETURNING id, type, name, description, tenant_organization_id, version_ctr, \
+        " RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr, \
           controller_state, controller_state_version, controller_state_outcome, created, updated, deleted",
     );
 
@@ -611,7 +613,7 @@ pub async fn find_by_ids(
     }
 
     let mut builder = sqlx::QueryBuilder::new(
-        "SELECT id, type, name, description, tenant_organization_id, version_ctr,
+        "SELECT id, type, dpu_target, name, description, tenant_organization_id, version_ctr,
          controller_state, controller_state_version, controller_state_outcome, created, updated, deleted FROM
          extension_services WHERE id = ANY(",
     );
@@ -657,6 +659,7 @@ pub async fn find_snapshots_by_ids(
         s.id AS service_id,
         s.name AS service_name,
         s.type AS service_type,
+        s.dpu_target,
         s.version_ctr AS version_ctr,
         s.description AS description,
         s.tenant_organization_id AS tenant_organization_id,
@@ -1089,7 +1092,9 @@ mod test_batched_lookups {
     use carbide_test_support::query_counter::count_queries;
     use config_version::ConfigVersion;
     use model::controller_outcome::PersistentStateHandlerOutcome;
-    use model::extension_service::{ExtensionServiceLifecycleState, ExtensionServiceType};
+    use model::extension_service::{
+        DpuTarget, ExtensionServiceLifecycleState, ExtensionServiceType,
+    };
     use model::metadata::Metadata;
     use model::tenant::TenantOrganizationId;
 
@@ -1129,6 +1134,7 @@ mod test_batched_lookups {
                 version,
                 &service_id,
                 &ExtensionServiceType::KubernetesPod,
+                None,
                 &format!("svc-{i}"),
                 &tenant,
                 Some("test service"),
@@ -1326,6 +1332,7 @@ mod test_batched_lookups {
             ConfigVersion::initial(),
             &service_id,
             &ExtensionServiceType::DpfHelmChart,
+            Some(DpuTarget::AllActive),
             "dpf-service",
             &tenant,
             Some("DPF Helm chart service"),

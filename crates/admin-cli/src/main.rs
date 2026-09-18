@@ -118,6 +118,8 @@ mod table_utils;
 mod tenant;
 mod tenant_keyset;
 #[cfg(test)]
+mod test_expected_component_patch;
+#[cfg(test)]
 mod test_support;
 mod tpm_ca;
 mod trim_table;

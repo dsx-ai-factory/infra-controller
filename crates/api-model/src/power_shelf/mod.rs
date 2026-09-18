@@ -269,6 +269,10 @@ pub enum PowerShelfControllerState {
 
     Maintenance {
         operation: PowerShelfMaintenanceOperation,
+        /// The request admitted before external work began. Older saved states
+        /// omit this, so their completion must leave pending requests alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<PowerShelfMaintenanceRequest>,
     },
 
     /// Rack-driven firmware wait in progress.
@@ -453,11 +457,13 @@ mod tests {
             "maintenance power-on" {
                 PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOn,
+                    request: None,
                 } => Yields((
                     r#"{"state":"maintenance","operation":{"operation":"poweron"}}"#
                         .to_string(),
                     PowerShelfControllerState::Maintenance {
                         operation: PowerShelfMaintenanceOperation::PowerOn,
+                        request: None,
                     },
                 )),
             }
@@ -465,11 +471,13 @@ mod tests {
             "maintenance power-off" {
                 PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOff,
+                    request: None,
                 } => Yields((
                     r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"#
                         .to_string(),
                     PowerShelfControllerState::Maintenance {
                         operation: PowerShelfMaintenanceOperation::PowerOff,
+                        request: None,
                     },
                 )),
             }
@@ -624,9 +632,11 @@ mod tests {
     fn maintenance_state_distinguishes_on_and_off() {
         let on = PowerShelfControllerState::Maintenance {
             operation: PowerShelfMaintenanceOperation::PowerOn,
+            request: None,
         };
         let off = PowerShelfControllerState::Maintenance {
             operation: PowerShelfMaintenanceOperation::PowerOff,
+            request: None,
         };
         assert_ne!(on, off);
     }
@@ -685,12 +695,14 @@ mod tests {
             "maintenance power-on" {
                 r#"{"state":"maintenance","operation":{"operation":"poweron"}}"# => Yields(PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOn,
+                    request: None,
                 }),
             }
 
             "maintenance power-off" {
                 r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"# => Yields(PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOff,
+                    request: None,
                 }),
             }
 
@@ -911,12 +923,14 @@ mod tests {
             "maintenance power-on has the maintenance SLA" {
                 PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOn,
+                    request: None,
                 } => (secs(slas::MAINTENANCE), true),
             }
 
             "maintenance power-off has the maintenance SLA" {
                 PowerShelfControllerState::Maintenance {
                     operation: PowerShelfMaintenanceOperation::PowerOff,
+                    request: None,
                 } => (secs(slas::MAINTENANCE), true),
             }
 

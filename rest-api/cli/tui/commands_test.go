@@ -1967,66 +1967,58 @@ func TestResolverResourceForAllocationResourceType(t *testing.T) {
 	}
 }
 
-func TestBuildAllocationConstraint_ValidInput(t *testing.T) {
-	got, err := buildAllocationConstraint("IPBlock", "block-1", "Reserved", "  28 ")
-	require.NoError(t, err)
-	assert.Equal(t, "IPBlock", got["resourceType"])
-	assert.Equal(t, "block-1", got["resourceTypeId"])
-	assert.Equal(t, "Reserved", got["constraintType"])
-	assert.Equal(t, 28, got["constraintValue"], "value must be an int, not a string")
-}
-
-func TestBuildAllocationConstraint_RejectsNonInteger(t *testing.T) {
-	_, err := buildAllocationConstraint("IPBlock", "block-1", "Reserved", "not-a-number")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "integer")
-}
-
-func TestBuildAllocationConstraint_RejectsOutOfRangeIPBlockPrefix(t *testing.T) {
-	_, err := buildAllocationConstraint("IPBlock", "block-1", "Reserved", "0")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "prefix length")
-
-	_, err = buildAllocationConstraint("IPBlock", "block-1", "Reserved", "33")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "prefix length")
-}
-
-func TestBuildAllocationConstraint_AcceptsBoundaryIPBlockPrefix(t *testing.T) {
-	_, err := buildAllocationConstraint("IPBlock", "block-1", "Reserved", "1")
-	require.NoError(t, err)
-	_, err = buildAllocationConstraint("IPBlock", "block-1", "Reserved", "32")
-	require.NoError(t, err)
-}
-
-func TestBuildAllocationConstraint_RejectsNonPositiveInstanceTypeCount(t *testing.T) {
-	_, err := buildAllocationConstraint("InstanceType", "type-1", "Reserved", "0")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "at least 1")
-
-	_, err = buildAllocationConstraint("InstanceType", "type-1", "Reserved", "-5")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "at least 1")
-}
-
-func TestBuildAllocationConstraint_MarshalShape(t *testing.T) {
-	c, err := buildAllocationConstraint("InstanceType", "type-1", "Reserved", "4")
-	require.NoError(t, err)
-	encoded, err := json.Marshal(c)
-	require.NoError(t, err)
-	var decoded map[string]interface{}
-	require.NoError(t, json.Unmarshal(encoded, &decoded))
-	assert.Equal(t, "InstanceType", decoded["resourceType"])
-	assert.Equal(t, "type-1", decoded["resourceTypeId"])
-	assert.Equal(t, "Reserved", decoded["constraintType"])
-	assert.InDelta(t, 4, decoded["constraintValue"], 0.0001,
-		"constraintValue must round-trip through JSON as a number, not a string")
+func TestBuildAllocationConstraint(t *testing.T) {
+	tests := []struct {
+		name            string
+		resourceType    string
+		protocolVersion string
+		valueText       string
+		wantValue       int
+		wantError       string
+	}{
+		{name: "IPv4 trims whitespace", resourceType: "IPBlock", protocolVersion: "IPv4", valueText: "  28 ", wantValue: 28},
+		{name: "IPv6 accepts 64", resourceType: "IPBlock", protocolVersion: "IPv6", valueText: "64", wantValue: 64},
+		{name: "IPv4 rejects 64", resourceType: "IPBlock", protocolVersion: "IPv4", valueText: "64", wantError: "prefix length must be between 1 and 32 for IPv4"},
+		{name: "IPv6 rejects 129", resourceType: "IPBlock", protocolVersion: "IPv6", valueText: "129", wantError: "prefix length must be between 1 and 128 for IPv6"},
+		{name: "IP Block requires protocol version", resourceType: "IPBlock", valueText: "28", wantError: "unsupported protocol version"},
+		{name: "noninteger rejected", resourceType: "IPBlock", protocolVersion: "IPv4", valueText: "not-a-number", wantError: "constraint value must be an integer"},
+		{name: "machine count needs no protocol version", resourceType: "InstanceType", valueText: "4", wantValue: 4},
+		{name: "machine count must be positive", resourceType: "InstanceType", valueText: "0", wantError: "must be at least 1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			constraint, err := buildAllocationConstraint(test.resourceType, "resource-1", test.protocolVersion, "Reserved", test.valueText)
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				assert.Nil(t, constraint)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.wantValue, constraint["constraintValue"])
+			encoded, err := json.Marshal(constraint)
+			require.NoError(t, err)
+			assert.JSONEq(t, fmt.Sprintf(`{"resourceType":%q,"resourceTypeId":"resource-1","constraintType":"Reserved","constraintValue":%d}`, test.resourceType, test.wantValue), string(encoded))
+		})
+	}
 }
 
 func TestAllocationConstraintValueHint(t *testing.T) {
-	assert.Contains(t, allocationConstraintValueHint("IPBlock"), "prefix")
-	assert.Contains(t, allocationConstraintValueHint("InstanceType"), "machine")
-	assert.NotEmpty(t, allocationConstraintValueHint("Unknown"), "unknown types still get a generic hint")
+	tests := []struct {
+		name            string
+		resourceType    string
+		protocolVersion string
+		want            string
+	}{
+		{name: "IPv4", resourceType: "IPBlock", protocolVersion: "IPv4", want: "prefix length, e.g. 28"},
+		{name: "IPv6", resourceType: "IPBlock", protocolVersion: "IPv6", want: "prefix length, e.g. 56"},
+		{name: "machine count", resourceType: "InstanceType", want: "machine count, e.g. 4"},
+		{name: "unknown resource", resourceType: "Unknown", want: "integer"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, allocationConstraintValueHint(test.resourceType, test.protocolVersion))
+		})
+	}
 }
 
 // --- VPC prefix create IP block picker tests (NVBug 6105076) ---

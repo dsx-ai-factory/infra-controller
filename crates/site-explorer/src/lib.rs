@@ -1420,6 +1420,12 @@ impl SiteExplorer {
         let explored_endpoints =
             db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
 
+        // Ingested BMC IPs are read once for the whole loop rather than per endpoint.
+        // The iteration work lock makes site-explorer the only writer that ingests
+        // machines, so nothing can become ingested while the loop below runs.
+        let already_ingested_bmc_ips =
+            db::machine_topology::find_all_ingested_bmc_ips(&mut txn).await?;
+
         txn.commit().await?;
 
         let mut explored_dpus = HashMap::new();
@@ -1451,10 +1457,13 @@ impl SiteExplorer {
             }
 
             if ep.report.is_dpu() {
-                if self.can_ingest_dpu_endpoint(metrics, &ep).await? {
+                if self.can_ingest_dpu_endpoint(metrics, &ep, &already_ingested_bmc_ips)? {
                     explored_dpus.insert(ep.address, ep);
                 }
-            } else if self.can_ingest_host_endpoint(metrics, &ep).await? {
+            } else if self
+                .can_ingest_host_endpoint(metrics, &ep, &already_ingested_bmc_ips)
+                .await?
+            {
                 explored_hosts.insert(ep.address, ep);
             }
         }
@@ -1720,11 +1729,9 @@ impl SiteExplorer {
                         if expected_managed_dpus_total > 0 {
                             tracing::warn!(
                                 bmc_ip_address = %ep.address,
-                                exploration_report = ?ep,
                                 discovered_dpu_count = dpus_explored_for_host.len(),
                                 expected_managed_dpu_count = expected_managed_dpus_total,
                                 all_dpus_configured_properly_in_host,
-                                discovered_dpu_details = ?dpus_explored_for_host,
                                 "cannot identify managed host because the site explorer has not discovered all attached DPUs"
                             );
                         }
@@ -2296,6 +2303,7 @@ impl SiteExplorer {
         for suppression in suppressions
             .iter()
             .filter(|suppression| suppression.acknowledged_at.is_none())
+            .unique_by(|suppression| suppression.bmc_mac_address)
         {
             let bmc_ips = db::machine_interface::lookup_bmc_ip_by_mac_address(
                 &self.database_connection,
@@ -3581,28 +3589,16 @@ impl SiteExplorer {
 
     /// can_ingest_dpu_endpoint returns a boolean indicating whether the site explorer should continue ingesting a DPU endpoint.
     /// it will always return true for a DPU that has already been ingested.
-    async fn can_ingest_dpu_endpoint(
+    ///
+    /// `already_ingested_bmc_ips` is the caller's snapshot of ingested BMC IPs, so
+    /// this decision costs no database round trip per endpoint.
+    fn can_ingest_dpu_endpoint(
         &self,
         metrics: &mut SiteExplorationMetrics,
         dpu_endpoint: &ExploredEndpoint,
+        already_ingested_bmc_ips: &HashSet<IpAddr>,
     ) -> SiteExplorerResult<bool> {
-        let is_managed_host_created_for_endpoint = match self
-            .is_managed_host_created_for_endpoint(dpu_endpoint.address)
-            .await
-        {
-            Ok(managed_host_exists) => managed_host_exists,
-            Err(e) => {
-                tracing::error!(
-                    %dpu_endpoint,
-                    error = %e,
-                    "Failed to determine whether managed host was created"
-                );
-                // return true by default
-                true
-            }
-        };
-
-        if is_managed_host_created_for_endpoint {
+        if already_ingested_bmc_ips.contains(&dpu_endpoint.address) {
             // this dpu has already been ingested
             return Ok(true);
         }
@@ -3751,28 +3747,16 @@ impl SiteExplorer {
     /// If the host has not been ingested, is a Lenovo,  and infinite boot is disabled, the function will try to enable
     /// infinite boot and return false.
     /// Otherwise, the function will return true.
+    ///
+    /// `already_ingested_bmc_ips` is the caller's snapshot of ingested BMC IPs, so
+    /// this decision costs no database round trip per endpoint.
     async fn can_ingest_host_endpoint(
         &self,
         metrics: &mut SiteExplorationMetrics,
         host_endpoint: &ExploredEndpoint,
+        already_ingested_bmc_ips: &HashSet<IpAddr>,
     ) -> SiteExplorerResult<bool> {
-        let is_managed_host_created_for_endpoint = match self
-            .is_managed_host_created_for_endpoint(host_endpoint.address)
-            .await
-        {
-            Ok(managed_host_exists) => managed_host_exists,
-            Err(e) => {
-                tracing::error!(
-                    %host_endpoint,
-                    error = %e,
-                    "Failed to determine whether managed host was created"
-                );
-                // return true by default
-                true
-            }
-        };
-
-        if is_managed_host_created_for_endpoint {
+        if already_ingested_bmc_ips.contains(&host_endpoint.address) {
             // this host has already been ingested
             return Ok(true);
         }

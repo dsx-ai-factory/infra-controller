@@ -53,6 +53,7 @@ pub async fn handle_error(
         return Ok(StateHandlerOutcome::transition(
             PowerShelfControllerState::Maintenance {
                 operation: req.operation,
+                request: Some(req.clone()),
             },
         ));
     }

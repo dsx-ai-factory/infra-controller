@@ -65,7 +65,10 @@ fn abandon_machine_actions_on_power_change(
     preserve_dhcp_retry: bool,
 ) {
     actions.retain(|action| match action {
-        FsmAction::SetupBmc | FsmAction::Dhcp(DhcpType::Bmc) | FsmAction::CleanupOnPowerOff => true,
+        FsmAction::SetupBmc
+        | FsmAction::ConsoleOutputStop
+        | FsmAction::Dhcp(DhcpType::Bmc)
+        | FsmAction::CleanupOnPowerOff => true,
         FsmAction::ScheduleDhcpRetry { .. } | FsmAction::CancelDhcpRetry => preserve_dhcp_retry,
         FsmAction::SetTimer(
             Timer::PowerCycle
@@ -78,6 +81,7 @@ fn abandon_machine_actions_on_power_change(
         | FsmAction::InitialDiscoveryRequest(_)
         | FsmAction::AgentControlRequest(_)
         | FsmAction::DpuAgentNetworkObservation
+        | FsmAction::ConsoleOutputStart
         | FsmAction::BmcEvent(BmcEvent::PowerOn | BmcEvent::BootCompleted) => false,
     });
 }
@@ -107,6 +111,16 @@ fn resolve_pxe_boot(
     match pxe_response.machine_interface_id {
         None if os_image != OsImage::None => Err(MachineStateError::MissingInterfaceId),
         machine_interface_id => Ok((os_image, machine_interface_id)),
+    }
+}
+
+/// Installed OS a machine starts with. A DPF-managed DPU without a recorded OS gets the
+/// DPU agent image: DPF writes the BFB before NICo first answers its PXE request with
+/// EXIT, so the simulated disk must already be bootable.
+fn initial_installed_os(is_dpu: bool, dpf_enabled: bool, recorded: OsImage) -> OsImage {
+    match recorded {
+        OsImage::None if is_dpu && dpf_enabled => OsImage::DpuAgent,
+        recorded => recorded,
     }
 }
 
@@ -143,13 +157,13 @@ pub(super) struct MachineStateMachine {
 }
 
 #[derive(Debug, Clone)]
-struct LiveStateCallbacks {
+pub(super) struct LiveStateCallbacks {
     state: Arc<RwLock<LiveState>>,
     command_channel: mpsc::UnboundedSender<BmcCommand>,
 }
 
 impl LiveStateCallbacks {
-    fn new(
+    pub(super) fn new(
         state: Arc<RwLock<LiveState>>,
         command_channel: mpsc::UnboundedSender<BmcCommand>,
     ) -> Self {
@@ -360,6 +374,11 @@ impl MachineStateMachine {
         };
         let (fsm, actions) = MachineFsm::init(true, Self::is_bmc_only(&machine_info, &config));
         let resolved_timings = Self::resolve_timings(&machine_info, &config);
+        let installed_os = initial_installed_os(
+            matches!(machine_info, MachineInfo::Dpu(_)),
+            config.dpf_enabled,
+            initial_os_image,
+        );
         let mut live_state =
             LiveState::for_machine(&machine_info, MockPowerState::On, tpm_ek_certificate);
         live_state.bmc_credentials = bmc_credentials;
@@ -377,7 +396,7 @@ impl MachineStateMachine {
             machine_interface_id: None,
             dhcp_retry_deadline: None,
             machine_discovery_result: None,
-            installed_os: initial_os_image,
+            installed_os,
             live_state: Arc::new(RwLock::new(live_state)),
             machine_info,
             bmc_command_channel,
@@ -401,6 +420,11 @@ impl MachineStateMachine {
     ) -> MachineStateMachine {
         let (fsm, actions) = MachineFsm::init(false, Self::is_bmc_only(&machine_info, &config));
         let resolved_timings = Self::resolve_timings(&machine_info, &config);
+        let installed_os = initial_installed_os(
+            matches!(machine_info, MachineInfo::Dpu(_)),
+            config.dpf_enabled,
+            OsImage::default(),
+        );
         MachineStateMachine {
             live_state: Arc::new(RwLock::new(LiveState::for_machine(
                 &machine_info,
@@ -420,7 +444,7 @@ impl MachineStateMachine {
             machine_on_deadline: None,
             agent_polling_deadline: None,
             power_cycle_deadline: None,
-            installed_os: OsImage::default(),
+            installed_os,
             machine_info,
             bmc_command_channel,
             config,
@@ -492,6 +516,18 @@ impl MachineStateMachine {
                     }
                     Err(_) => return Some(self.config.run_interval_working),
                 },
+                FsmAction::ConsoleOutputStart => {
+                    if let Some(bmc_mock) = &self.bmc_mock {
+                        bmc_mock.console_output_start();
+                    }
+                    self.actions.pop_front();
+                }
+                FsmAction::ConsoleOutputStop => {
+                    if let Some(bmc_mock) = &self.bmc_mock {
+                        bmc_mock.console_output_stop();
+                    }
+                    self.actions.pop_front();
+                }
                 FsmAction::SetTimer(Timer::PowerCycle) => {
                     tracing::info!(
                         duration = ?self.resolved_timings.power_off_force,
@@ -1563,6 +1599,40 @@ mod tests {
     }
 
     #[test]
+    fn dpf_managed_dpus_start_with_installed_dpu_agent() {
+        check_values(
+            [
+                Check {
+                    scenario: "new DPU of a DPF-enabled host",
+                    input: (true, true, OsImage::None),
+                    expect: OsImage::DpuAgent,
+                },
+                Check {
+                    scenario: "new DPU of a host without DPF",
+                    input: (true, false, OsImage::None),
+                    expect: OsImage::None,
+                },
+                Check {
+                    scenario: "new host under DPF",
+                    input: (false, true, OsImage::None),
+                    expect: OsImage::None,
+                },
+                Check {
+                    scenario: "restored DPF DPU keeps a recorded Scout",
+                    input: (true, true, OsImage::Scout),
+                    expect: OsImage::Scout,
+                },
+                Check {
+                    scenario: "restored host keeps a recorded Scout",
+                    input: (false, true, OsImage::Scout),
+                    expect: OsImage::Scout,
+                },
+            ],
+            |(is_dpu, dpf_enabled, recorded)| initial_installed_os(is_dpu, dpf_enabled, recorded),
+        );
+    }
+
+    #[test]
     fn power_change_abandons_queued_machine_actions() {
         let queued = |actions: &[FsmAction]| VecDeque::from(actions.to_vec());
 
@@ -1578,6 +1648,7 @@ mod tests {
                     input: (
                         queued(&[
                             FsmAction::SetupBmc,
+                            FsmAction::ConsoleOutputStart,
                             FsmAction::Dhcp(DhcpType::Machine),
                             FsmAction::SetTimer(Timer::PowerCycle),
                             FsmAction::SetTimer(Timer::MachineOn),
@@ -1589,12 +1660,14 @@ mod tests {
                             FsmAction::DpuAgentNetworkObservation,
                             FsmAction::BmcEvent(BmcEvent::PowerOn),
                             FsmAction::BmcEvent(BmcEvent::BootCompleted),
+                            FsmAction::ConsoleOutputStop,
                             FsmAction::CleanupOnPowerOff,
                         ]),
                         false,
                     ),
                     expect: vec![
                         format!("{:?}", FsmAction::SetupBmc),
+                        format!("{:?}", FsmAction::ConsoleOutputStop),
                         format!("{:?}", FsmAction::CleanupOnPowerOff),
                     ],
                 },

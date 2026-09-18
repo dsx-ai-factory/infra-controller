@@ -4,8 +4,10 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
@@ -16,6 +18,7 @@ import (
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	iActivity "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 )
 
@@ -227,6 +230,61 @@ func (s *CreateInstanceV2TestSuite) Test_CreateInstanceV2_Failure() {
 	s.env.ExecuteWorkflow(CreateInstanceV2, request)
 	s.True(s.env.IsWorkflowCompleted())
 	s.Error(s.env.GetWorkflowError())
+}
+
+// Test_CreateInstanceV2_ActivityDeadlineTracksLadder pins the budget that bounds
+// Core. CreateInstanceOnSite passes this context to AllocateInstance, so Core's own
+// deadline is whatever the activity carries. A budget outliving the REST caller's
+// wait would let Core commit an Instance the handler has already rolled back.
+func (s *CreateInstanceV2TestSuite) Test_CreateInstanceV2_ActivityDeadlineTracksLadder() {
+	var machineManager iActivity.ManageInstance
+
+	var deadline time.Time
+	var hasDeadline bool
+
+	s.env.RegisterActivity(machineManager.CreateInstanceOnSite)
+	s.env.OnActivity(machineManager.CreateInstanceOnSite, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			deadline, hasDeadline = args.Get(0).(context.Context).Deadline()
+		}).Return(nil)
+
+	s.env.ExecuteWorkflow(CreateInstanceV2, &corev1.InstanceAllocationRequest{
+		MachineId: &corev1.MachineId{Id: uuid.NewString()},
+	})
+
+	s.True(s.env.IsWorkflowCompleted())
+	s.NoError(s.env.GetWorkflowError())
+	s.True(hasDeadline)
+
+	// Assert against the constant, not a literal, so retuning the ladder does not
+	// require editing this test.
+	remaining := time.Until(deadline)
+	s.Greater(remaining, cloudutils.ActivityStartToCloseTimeout-time.Second)
+	s.LessOrEqual(remaining, cloudutils.ActivityStartToCloseTimeout)
+}
+
+// Test_CreateInstanceV2_DoesNotRetry pins the single attempt. Temporal anchors
+// StartToCloseTimeout at the moment an attempt starts, so a second attempt gets a
+// fresh budget that can outlive both the workflow and the caller, letting Core
+// commit an Instance the handler has already rolled back.
+func (s *CreateInstanceV2TestSuite) Test_CreateInstanceV2_DoesNotRetry() {
+	var machineManager iActivity.ManageInstance
+
+	attempts := 0
+
+	s.env.RegisterActivity(machineManager.CreateInstanceOnSite)
+	s.env.OnActivity(machineManager.CreateInstanceOnSite, mock.Anything, mock.Anything).
+		Run(func(mock.Arguments) {
+			attempts++
+		}).Return(errors.New("Site Controller communication error"))
+
+	s.env.ExecuteWorkflow(CreateInstanceV2, &corev1.InstanceAllocationRequest{
+		MachineId: &corev1.MachineId{Id: uuid.NewString()},
+	})
+
+	s.True(s.env.IsWorkflowCompleted())
+	s.Error(s.env.GetWorkflowError())
+	s.Equal(1, attempts)
 }
 
 func TestCreateInstanceV2TestSuite(t *testing.T) {

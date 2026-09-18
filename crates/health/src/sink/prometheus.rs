@@ -486,6 +486,7 @@ mod tests {
             metadata: Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: Some(power_shelf_id),
                 serial: Some("SN-PS-001".to_string()),
+                nvlink_domain_uuid: None,
             })),
             rack_id: Some(RackId::new("RACK_3")),
         };
@@ -508,6 +509,7 @@ mod tests {
             metadata: Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: None,
                 serial: Some("SN-PS-001".to_string()),
+                nvlink_domain_uuid: None,
             })),
             ..context
         };

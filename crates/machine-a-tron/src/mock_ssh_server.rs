@@ -17,20 +17,24 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::result::Result as StdResult;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bmc_mock::HostnameQuerying;
-use chrono::Utc;
+use bytes::Bytes;
 use eyre::Context;
+use futures::StreamExt;
 use rand::rand_core::UnwrapErr;
 use rand::rngs::SysRng;
 use russh::keys::PublicKeyBase64;
 use russh::server::{Auth, ChannelOpenHandle, Config, Msg, Server as _, Session, run_stream};
-use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty, server};
+use russh::{Channel, ChannelId, ChannelWriteHalf, MethodKind, MethodSet, Pty, server};
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
+
+use crate::console_output::ConsoleOutputController;
+
+const INTERACTIVE_OUTPUT_CAPACITY: usize = 32;
 
 #[derive(Debug)]
 pub struct MockSshServerHandle {
@@ -59,25 +63,28 @@ pub enum PromptBehavior {
     Hpe,
 }
 
+/// Starts a mock BMC SSH listener with optional machine-owned system-console output.
+///
+/// Generated output is visible only after the session enters system-console mode. Interactive
+/// echoes and prompts use a bounded per-session writer queue and are never shed.
 pub async fn spawn(
     port: Option<u16>,
     prompt_hostname: Arc<dyn HostnameQuerying>,
     require_credentials: Option<Credentials>,
     prompt_behavior: PromptBehavior,
-    generate_console_logs: bool,
+    console_output: Option<ConsoleOutputController>,
 ) -> eyre::Result<MockSshServerHandle> {
     let mut rng = SysRng;
     let host_key =
         russh::keys::PrivateKey::random(&mut UnwrapErr(&mut rng), russh::keys::Algorithm::Ed25519)?;
     let host_pubkey = host_key.public_key_base64();
     let cancel_token = CancellationToken::new();
-    let (log_messages_tx, _) = broadcast::channel(4096);
     let server = Server {
         prompt_hostname,
         prompt_behavior,
         require_credentials,
+        console_output,
         cancel_token: cancel_token.clone(),
-        log_messages_tx: log_messages_tx.downgrade(),
     };
     let listener = if let Some(port) = port {
         let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
@@ -100,36 +107,11 @@ pub async fn spawn(
         listener,
     ));
 
-    if generate_console_logs {
-        tokio::spawn(run_log_message_writer(
-            log_messages_tx,
-            cancel_token.clone(),
-        ));
-    }
-
     Ok(MockSshServerHandle {
         _drop_guard: cancel_token.drop_guard(),
         port,
         host_pubkey,
     })
-}
-
-// Spawns a loop which broadcasts log messages to all connected sessions, so that we can get some
-// mock output
-async fn run_log_message_writer(
-    log_messages_tx: broadcast::Sender<Vec<u8>>,
-    cancel_token: CancellationToken,
-) {
-    let mut idx: usize = 0;
-    while let Some(()) = cancel_token
-        .run_until_cancelled(tokio::time::sleep(Duration::from_secs(5)))
-        .await
-    {
-        log_messages_tx
-            .send(format!("[{}] log message {}\r\n", Utc::now().to_rfc3339(), idx).into_bytes())
-            .ok();
-        idx += 1;
-    }
 }
 
 #[derive(Clone)]
@@ -138,7 +120,7 @@ struct Server {
     prompt_behavior: PromptBehavior,
     require_credentials: Option<Credentials>,
     cancel_token: CancellationToken,
-    log_messages_tx: broadcast::WeakSender<Vec<u8>>,
+    console_output: Option<ConsoleOutputController>,
 }
 
 impl Server {
@@ -202,7 +184,7 @@ impl server::Server for Server {
             self.prompt_hostname.clone(),
             self.prompt_behavior,
             self.require_credentials.clone(),
-            self.log_messages_tx.upgrade().map(|s| s.subscribe()),
+            self.console_output.clone(),
         )
     }
 }
@@ -213,7 +195,10 @@ struct MockSshHandler {
     console_state: ConsoleState,
     buffer: Vec<u8>,
     require_credentials: Option<Credentials>,
-    log_message_rx: Option<broadcast::Receiver<Vec<u8>>>,
+    console_output: Option<ConsoleOutputController>,
+    console_state_tx: watch::Sender<ConsoleState>,
+    interactive_output: Option<mpsc::Sender<Bytes>>,
+    writer_task: Option<JoinHandle<()>>,
 }
 
 impl MockSshHandler {
@@ -221,34 +206,35 @@ impl MockSshHandler {
         prompt_hostname: Arc<dyn HostnameQuerying>,
         prompt_behavior: PromptBehavior,
         require_credentials: Option<Credentials>,
-        log_message_rx: Option<broadcast::Receiver<Vec<u8>>>,
+        console_output: Option<ConsoleOutputController>,
     ) -> Self {
+        let (console_state_tx, _) = watch::channel(ConsoleState::default());
         Self {
             prompt_hostname,
             prompt_behavior,
             console_state: ConsoleState::default(),
             buffer: Vec::default(),
             require_credentials,
-            log_message_rx,
+            console_output,
+            console_state_tx,
+            interactive_output: None,
+            writer_task: None,
         }
     }
 
-    fn print_prompt(
-        &self,
-        session: &mut Session,
-        channel: ChannelId,
-    ) -> StdResult<(), russh::Error> {
+    async fn print_prompt(&self) -> StdResult<(), russh::Error> {
         match self.console_state {
             ConsoleState::SystemConsole => {
-                session.data(
-                    channel,
-                    format!("\r\nroot@{} # ", self.prompt_hostname.get_hostname()),
-                )?;
+                self.send_interactive(format!(
+                    "\r\nroot@{} # ",
+                    self.prompt_hostname.get_hostname()
+                ))
+                .await?;
             }
             ConsoleState::Bmc => match self.prompt_behavior {
-                PromptBehavior::LenovoSr650 => session.data(channel, "\nsystem>")?,
-                PromptBehavior::Hpe => session.data(channel, "\n</>hpiLO->")?,
-                PromptBehavior::Dell => session.data(channel, "\nracadm>>")?,
+                PromptBehavior::LenovoSr650 => self.send_interactive("\nsystem>").await?,
+                PromptBehavior::Hpe => self.send_interactive("\n</>hpiLO->").await?,
+                PromptBehavior::Dell => self.send_interactive("\nracadm>>").await?,
                 PromptBehavior::Dpu | PromptBehavior::LenovoAmi => {}
             },
             ConsoleState::NoShell => {
@@ -257,14 +243,83 @@ impl MockSshHandler {
         }
         Ok(())
     }
+
+    fn set_console_state(&mut self, console_state: ConsoleState) {
+        self.console_state = console_state;
+        self.console_state_tx.send_replace(console_state);
+    }
+
+    async fn send_interactive(&self, data: impl Into<Bytes>) -> StdResult<(), russh::Error> {
+        let Some(output) = &self.interactive_output else {
+            return Err(russh::Error::Disconnect);
+        };
+        output
+            .send(data.into())
+            .await
+            .map_err(|_| russh::Error::Disconnect)
+    }
 }
 
-#[derive(Debug, Default, Copy, Clone)]
+impl Drop for MockSshHandler {
+    fn drop(&mut self) {
+        if let Some(task) = self.writer_task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 enum ConsoleState {
     #[default]
     NoShell,
     Bmc,
     SystemConsole,
+}
+
+async fn run_console_writer(
+    output: ChannelWriteHalf<Msg>,
+    mut interactive: mpsc::Receiver<Bytes>,
+    mut console_state: watch::Receiver<ConsoleState>,
+    console_output: Option<ConsoleOutputController>,
+) {
+    let mut console_output = console_output.map(|controller| controller.stream());
+    loop {
+        let write_result = tokio::select! {
+            biased;
+            interactive = interactive.recv() => match interactive {
+                Some(bytes) => output.data_bytes(bytes).await,
+                None => return,
+            },
+            changed = console_state.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                continue;
+            },
+            next = async {
+                console_output
+                    .as_mut()
+                    .expect("branch guard requires console output")
+                    .next()
+                    .await
+            }, if console_output.is_some()
+                && *console_state.borrow() == ConsoleState::SystemConsole =>
+            {
+                match next {
+                    Some(bytes) => output.data_bytes(bytes).await,
+                    None => {
+                        console_output = None;
+                        continue;
+                    }
+                }
+            }
+        };
+
+        if let Err(error) = write_result {
+            tracing::debug!(%error, "mock SSH console writer stopped");
+            return;
+        }
+    }
 }
 
 impl server::Handler for MockSshHandler {
@@ -278,21 +333,16 @@ impl server::Handler for MockSshHandler {
     ) -> StdResult<(), Self::Error> {
         tracing::debug!("channel_open_session");
 
-        if let Some(mut log_message_rx) = self.log_message_rx.take() {
-            tokio::spawn(async move {
-                loop {
-                    match log_message_rx.recv().await {
-                        Ok(msg) => {
-                            channel.data_bytes(msg).await.ok();
-                        }
-                        Err(RecvError::Lagged(_)) => {}
-                        Err(RecvError::Closed) => break,
-                    }
-                }
-            });
-        }
-
         reply.accept().await;
+        let (_, output) = channel.split();
+        let (interactive_output, interactive) = mpsc::channel(INTERACTIVE_OUTPUT_CAPACITY);
+        self.interactive_output = Some(interactive_output);
+        self.writer_task = Some(tokio::spawn(run_console_writer(
+            output,
+            interactive,
+            self.console_state_tx.subscribe(),
+            self.console_output.clone(),
+        )));
         Ok(())
     }
 
@@ -320,10 +370,10 @@ impl server::Handler for MockSshHandler {
         tracing::debug!("shell_request");
         match self.prompt_behavior {
             PromptBehavior::Dell | PromptBehavior::LenovoSr650 | PromptBehavior::Hpe => {
-                self.console_state = ConsoleState::Bmc;
+                self.set_console_state(ConsoleState::Bmc);
             }
             PromptBehavior::Dpu | PromptBehavior::LenovoAmi => {
-                self.console_state = ConsoleState::SystemConsole;
+                self.set_console_state(ConsoleState::SystemConsole);
             }
         }
         session.channel_success(channel)?;
@@ -363,9 +413,9 @@ impl server::Handler for MockSshHandler {
 
     async fn data(
         &mut self,
-        channel: ChannelId,
+        _channel: ChannelId,
         data: &[u8],
-        session: &mut Session,
+        _session: &mut Session,
     ) -> StdResult<(), Self::Error> {
         // Sending Ctrl+C ends the session and disconnects the client
         if data == [3] {
@@ -384,37 +434,38 @@ impl server::Handler for MockSshHandler {
                             tracing::info!(
                                 "Got `connect com2` in bmc prompt, simulating system console"
                             );
-                            self.console_state = ConsoleState::SystemConsole;
+                            self.set_console_state(ConsoleState::SystemConsole);
                         }
                         PromptBehavior::LenovoSr650 if command.starts_with(b"console kill 1") => {
                             tracing::info!(
                                 "Got unsupported Lenovo `console kill 1`, simulating BMC error"
                             );
-                            session.data(
-                                channel,
+                            self.send_interactive(
                                 "\r\nThe command line contains extraneous arguments\r\n",
-                            )?;
+                            )
+                            .await?;
                         }
                         PromptBehavior::LenovoSr650 if command.starts_with(b"console kill") => {
                             tracing::info!(
                                 "Got Lenovo `console kill`, simulating terminated SOL session"
                             );
-                            session.data(channel, "\r\nSession on channel 1 is terminated\r\n")?;
+                            self.send_interactive("\r\nSession on channel 1 is terminated\r\n")
+                                .await?;
                         }
                         PromptBehavior::LenovoSr650 if command.starts_with(b"console start") => {
                             tracing::info!("Got Lenovo `console start`, simulating system console");
-                            self.console_state = ConsoleState::SystemConsole;
+                            self.set_console_state(ConsoleState::SystemConsole);
                         }
                         PromptBehavior::Hpe if command.starts_with(b"vsp") => {
                             tracing::info!("Got HPE `vsp`, simulating system console");
-                            self.console_state = ConsoleState::SystemConsole;
+                            self.set_console_state(ConsoleState::SystemConsole);
                         }
                         _ => {}
                     }
-                    self.print_prompt(session, channel)?;
+                    self.print_prompt().await?;
                 } else {
                     self.buffer = [&self.buffer, data].concat();
-                    session.data(channel, data.to_owned())?;
+                    self.send_interactive(data.to_owned()).await?;
                 }
             }
             ConsoleState::SystemConsole => {
@@ -426,9 +477,9 @@ impl server::Handler for MockSshHandler {
                         tracing::info!(
                             "Got backdoor command to simulate escaping console, dropping to BMC prompt"
                         );
-                        self.console_state = ConsoleState::Bmc;
+                        self.set_console_state(ConsoleState::Bmc);
                     }
-                    self.print_prompt(session, channel)?;
+                    self.print_prompt().await?;
                 } else {
                     match (data, self.prompt_behavior) {
                         (b"\x1c", PromptBehavior::Dell) => {
@@ -438,11 +489,11 @@ impl server::Handler for MockSshHandler {
                                 "Got ctrl+\\ in system console, dropping to BMC prompt",
                             );
                             // ctrl+\
-                            self.console_state = ConsoleState::Bmc;
+                            self.set_console_state(ConsoleState::Bmc);
                         }
                         (data, _) => {
                             self.buffer = [&self.buffer, data].concat();
-                            session.data(channel, data.to_owned())?;
+                            self.send_interactive(data.to_owned()).await?;
                         }
                     }
                 }

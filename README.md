@@ -85,6 +85,12 @@ cd helm-prereqs
 
 See [helm-prereqs/README.md](helm-prereqs/README.md) for the full reference: PKI architecture, PostgreSQL setup, phase-by-phase description, secrets reference, and troubleshooting.
 
+## Contributing
+
+See the [contribution guide](CONTRIBUTING.md) for instructions on setting
+up a development environment and submitting changes, and the
+[code of conduct](CODE_OF_CONDUCT.md) for contributor expectations.
+
 ## Release Notice
 
 The software is provided "as is" without warranties of any kind. Features,

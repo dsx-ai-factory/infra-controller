@@ -3,9 +3,11 @@
 
 suite: Flow data encryption key mount
 templates:
+  - configmap.yaml
   - deployment.yaml
 tests:
   - it: mounts the key read-only in the Flow container only
+    template: deployment.yaml
     asserts:
       - lengthEqual:
           path: spec.template.spec.containers
@@ -32,6 +34,7 @@ tests:
                   path: encryption-key
 
   - it: mounts an externally managed Secret
+    template: deployment.yaml
     set:
       dataEncryption.key.existingSecret: externally-managed-flow-key
     asserts:

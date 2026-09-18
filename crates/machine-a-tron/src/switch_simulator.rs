@@ -576,6 +576,23 @@ impl SwitchHandle {
         self.0.mat_id
     }
 
+    /// Drive power through the guard the BMC mock uses, so an RMS power
+    /// request obeys the same rules as a Redfish one.
+    pub(crate) fn set_system_power(
+        &self,
+        request: SystemPowerControl,
+    ) -> Result<(), SetSystemPowerError> {
+        SwitchCallbacks {
+            state: self.0.live_state.clone(),
+            mailbox: self.0.mailbox.clone(),
+        }
+        .set_power_state(request)
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        self.0.live_state.read().unwrap().power_state
+    }
+
     pub(crate) fn pause(&self) -> eyre::Result<()> {
         self.0.mailbox.send(SwitchMessage::SetPaused(true))?;
         Ok(())

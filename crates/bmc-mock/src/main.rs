@@ -141,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     stable_id: "standalone-bmc-mock".to_string(),
                     console_prompt: "root@bmc-mock # ".to_string(),
                 },
+                None,
             )
             .await?,
         )

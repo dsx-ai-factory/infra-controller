@@ -18,7 +18,8 @@
 use std::net::IpAddr;
 
 use carbide_uuid::rack::RackId;
-use clap::{ArgGroup, Parser};
+use clap::error::ErrorKind;
+use clap::{ArgGroup, CommandFactory, Parser};
 use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -130,6 +131,41 @@ pub(crate) struct Args {
         help = "When true, site-explorer skips BMC password rotation and stores factory-default credentials in Vault as-is"
     )]
     bmc_retain_credentials: Option<bool>,
+}
+
+impl Args {
+    pub(super) fn validate(&self) -> Result<(), clap::Error> {
+        if self.host_name.is_some() {
+            return Err(Self::command()
+                .bin_name("nico-admin-cli expected-power-shelf update")
+                .error(
+                    ErrorKind::ValueValidation,
+                    "--host_name is not supported for expected power shelf updates; remove it from the command",
+                ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn update_mask(&self) -> Vec<String> {
+        [
+            (self.bmc_username.is_some(), "bmc_username"),
+            (self.bmc_password.is_some(), "bmc_password"),
+            (self.shelf_serial_number.is_some(), "shelf_serial_number"),
+            (self.bmc_ip_address.is_some(), "bmc_ip_address"),
+            (
+                self.bmc_retain_credentials.is_some(),
+                "bmc_retain_credentials",
+            ),
+            (self.rack_id.is_some(), "rack_id"),
+            (self.meta_name.is_some(), "metadata.name"),
+            (self.meta_description.is_some(), "metadata.description"),
+            (self.labels.is_some(), "metadata.labels"),
+        ]
+        .into_iter()
+        .filter(|(provided, _)| *provided)
+        .map(|(_, path)| path.to_string())
+        .collect()
+    }
 }
 
 impl TryFrom<Args> for rpc::forge::ExpectedPowerShelf {

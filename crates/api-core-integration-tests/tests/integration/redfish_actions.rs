@@ -190,10 +190,11 @@ async fn test_create_and_approve_action(_: PgPoolOptions, options: PgConnectOpti
 
     // Test whether the raw DB query allows double insertion of approver
     let mut txn = env.harness.db_txn().await;
-    assert!(
-        !db::redfish_actions::approve_request("user2".to_string(), request_id.into(), &mut txn)
+    assert_eq!(
+        db::redfish_actions::approve_request("user2".to_string(), request_id.into(), &mut txn)
             .await
-            .unwrap()
+            .unwrap(),
+        db::ConditionalWrite::NotApplied(db::redfish_actions::ApprovalNotRecorded)
     );
     txn.commit().await.unwrap();
 
@@ -218,6 +219,16 @@ async fn test_create_and_approve_action(_: PgPoolOptions, options: PgConnectOpti
     for result in results {
         assert_eq!(result.status, "OK")
     }
+
+    // Check the claim directly; a repeated API call stops at its pre-read.
+    let mut txn = env.harness.db_txn().await;
+    assert_eq!(
+        db::redfish_actions::set_applied("user2".to_string(), request_id.into(), &mut txn)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::NotApplied(db::redfish_actions::ActionNotClaimed)
+    );
+    txn.commit().await.unwrap();
 }
 
 #[sqlx_test]

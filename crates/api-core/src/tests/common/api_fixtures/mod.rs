@@ -1256,7 +1256,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
     // Seed the site-wide host and DPU UEFI site-default credentials (version 0).
     // These are written during site setup in production; tests don't run that.
     // UEFI setup resolves and reads the site-wide credential in the controller
-    // (`resolve_site_uefi_credentials`) through `redfish_client_pool`'s reader --
+    // (`read_site_uefi_credentials`) through `redfish_client_pool`'s reader --
     // which in tests is the `RedfishSim`'s own store -- before calling the
     // (mocked) `uefi_setup`, so a missing credential surfaces as a hard error.
     // Seed centrally so every machine-driving test has them regardless of fixture.

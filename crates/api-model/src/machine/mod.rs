@@ -1391,6 +1391,10 @@ pub enum ManagedHostState {
     /// Host is executing an operator-requested maintenance operation.
     Maintenance {
         operation: MachineMaintenanceOperation,
+        /// The request admitted before external work began. Older saved states
+        /// omit this, so their completion must leave pending requests alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<MachineMaintenanceRequest>,
     },
 
     /// Host is assigned to an Instance.
@@ -1764,9 +1768,13 @@ impl std::fmt::Display for ValidationState {
 pub const MAX_FIRMWARE_UPGRADE_RETRIES: u32 = 5;
 
 impl ManagedHostState {
-    /// Builds the controller state for a requested maintenance operation.
-    pub fn maintenance_for_operation(operation: MachineMaintenanceOperation) -> Self {
-        Self::Maintenance { operation }
+    /// Starts `Maintenance` with the requested operation and saves the full
+    /// request so completion can check whether it is still pending.
+    pub fn maintenance_for_request(request: MachineMaintenanceRequest) -> Self {
+        Self::Maintenance {
+            operation: request.operation.clone(),
+            request: Some(request),
+        }
     }
 
     /// Returns the DPU reprovision states embedded in either host allocation mode.
@@ -2328,6 +2336,11 @@ pub struct LockdownInfo {
 pub struct UefiSetupInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uefi_password_jid: Option<String>,
+    /// Site-wide version selected for an ingestion password job. Absent before
+    /// dispatch and in saved ingestion jobs created without version tracking.
+    /// Rotation jobs track their version in `device_credential_rotation` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_version: Option<u32>,
     pub uefi_setup_state: UefiSetupState,
 }
 
@@ -2927,7 +2940,7 @@ impl Display for ManagedHostState {
             } => {
                 write!(f, "BootConfiguring/{boot_config_state}")
             }
-            ManagedHostState::Maintenance { operation } => {
+            ManagedHostState::Maintenance { operation, .. } => {
                 write!(f, "Maintenance({operation:?})")
             }
             ManagedHostState::Assigned { instance_state, .. } => match instance_state {
@@ -3041,7 +3054,7 @@ impl ManagedHostState {
             } => {
                 format!("BootConfiguring/{boot_config_state}")
             }
-            ManagedHostState::Maintenance { operation } => {
+            ManagedHostState::Maintenance { operation, .. } => {
                 format!("Maintenance({operation:?})")
             }
             ManagedHostState::Assigned { instance_state } => match instance_state {
@@ -4963,6 +4976,7 @@ mod tests {
                     scenario: "maintenance uses the maintenance SLA",
                     input: stale(ManagedHostState::Maintenance {
                         operation: MachineMaintenanceOperation::PowerOn,
+                        request: None,
                     }),
                     expect: (seconds(300), true),
                 },

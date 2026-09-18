@@ -1943,11 +1943,12 @@ func promptSingleAllocationConstraint(s *Session, ctx context.Context) (map[stri
 	if err != nil {
 		return nil, err
 	}
-	valueText, err := PromptText(fmt.Sprintf("Constraint value (%s)", allocationConstraintValueHint(rt.ID)), true)
+	protocolVersion := rawFieldString(item.Raw, "protocolVersion")
+	valueText, err := PromptText(fmt.Sprintf("Constraint value (%s)", allocationConstraintValueHint(rt.ID, protocolVersion)), true)
 	if err != nil {
 		return nil, err
 	}
-	return buildAllocationConstraint(rt.ID, item.ID, ct.ID, valueText)
+	return buildAllocationConstraint(rt.ID, item.ID, protocolVersion, ct.ID, valueText)
 }
 
 // allocationConstraintResourceTypes lists the supported resource types for an
@@ -1990,10 +1991,13 @@ func resolverResourceForAllocationResourceType(resourceType string) (resolverKey
 }
 
 // allocationConstraintValueHint returns a short hint describing what the
-// constraint value represents for a given resource type.
-func allocationConstraintValueHint(resourceType string) string {
+// constraint value represents for a given resource type and protocol version.
+func allocationConstraintValueHint(resourceType, protocolVersion string) string {
 	switch resourceType {
 	case "IPBlock":
+		if protocolVersion == "IPv6" {
+			return "prefix length, e.g. 56"
+		}
 		return "prefix length, e.g. 28"
 	case "InstanceType":
 		return "machine count, e.g. 4"
@@ -2001,16 +2005,16 @@ func allocationConstraintValueHint(resourceType string) string {
 	return "integer"
 }
 
-// buildAllocationConstraint assembles an API-shaped constraint body from its
-// prompted fields. valueText is parsed as an integer and range-checked against
-// the resource type so the user gets immediate feedback rather than waiting
-// for a server-side rejection.
-func buildAllocationConstraint(resourceType, resourceTypeID, constraintType, valueText string) (map[string]interface{}, error) {
+// buildAllocationConstraint assembles the API request from the prompted fields.
+// valueText is parsed as an integer and range-checked against
+// the resource type and selected IP Block's protocol version so the user gets
+// immediate feedback rather than waiting for a server-side rejection.
+func buildAllocationConstraint(resourceType, resourceTypeID, protocolVersion, constraintType, valueText string) (map[string]interface{}, error) {
 	value, err := strconv.Atoi(strings.TrimSpace(valueText))
 	if err != nil {
 		return nil, fmt.Errorf("constraint value must be an integer: %w", err)
 	}
-	if err := validateAllocationConstraintValue(resourceType, value); err != nil {
+	if err := validateAllocationConstraintValue(resourceType, protocolVersion, value); err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
@@ -2025,12 +2029,10 @@ func buildAllocationConstraint(resourceType, resourceTypeID, constraintType, val
 // the REST API itself currently validates only loosely (ConstraintValue is
 // required but not range-checked, see the TODO in
 // api/pkg/api/model/allocationconstraint.go).
-func validateAllocationConstraintValue(resourceType string, value int) error {
+func validateAllocationConstraintValue(resourceType, protocolVersion string, value int) error {
 	switch resourceType {
 	case "IPBlock":
-		if value < 1 || value > 32 {
-			return fmt.Errorf("IPBlock constraint value must be an IPv4 prefix length between 1 and 32, got %d", value)
-		}
+		return validateIPBlockPrefixLength(protocolVersion, value)
 	case "InstanceType":
 		if value < 1 {
 			return fmt.Errorf("InstanceType constraint value (machine count) must be at least 1, got %d", value)

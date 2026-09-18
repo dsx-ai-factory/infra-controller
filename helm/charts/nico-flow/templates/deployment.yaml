@@ -19,6 +19,7 @@ spec:
         app: flow
       annotations:
         kubectl.kubernetes.io/default-container: flow
+        checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
       serviceAccountName: {{ .Values.serviceAccountName }}
@@ -86,11 +87,9 @@ spec:
             - name: spiffe
               mountPath: /var/run/secrets/spiffe.io
               readOnly: true
-            {{- if .Values.flowConfig }}
             - name: flow-config-files
               mountPath: /etc/flow
               readOnly: true
-            {{- end }}
             - name: temporal-client-certs
               mountPath: {{ .Values.temporal.certPath }}
               readOnly: true
@@ -101,11 +100,9 @@ spec:
         - name: spiffe
           secret:
             secretName: {{ .Values.certificate.name }}
-        {{- if .Values.flowConfig }}
         - name: flow-config-files
           configMap:
             name: flow-config-files
-        {{- end }}
         - name: temporal-client-certs
           secret:
             secretName: {{ .Values.temporalCert.secretName }}

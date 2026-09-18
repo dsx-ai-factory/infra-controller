@@ -35,6 +35,28 @@ resources: {}
 ## a positive integer (validated at render).
 fileDescriptorLimit: 65536
 
+## Additional containers appended verbatim to the pod spec after the
+## nico-hardware-health container, for example a telemetry collector sidecar.
+## The chart sets no pod-level securityContext, so each extra container runs
+## with only the securityContext it declares itself and is not covered by any
+## chart hardening. Set securityContext on every extra container.
+extraContainers: []
+# extraContainers:
+#   - name: collector
+#     image: <your-registry>/collector:<tag>
+#     args: ["--config=/etc/collector/config.yaml"]
+#     volumeMounts:
+#       - name: collector-config
+#         mountPath: /etc/collector
+#         readOnly: true
+
+## Additional volumes appended verbatim to the pod spec after the spiffe volume.
+extraVolumes: []
+# extraVolumes:
+#   - name: collector-config
+#     configMap:
+#       name: collector-config
+
 service:
   port: 9009
 

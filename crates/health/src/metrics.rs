@@ -34,7 +34,6 @@ use prometheus::{
     Encoder, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder, proto,
 };
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
 
 use crate::HealthError;
 
@@ -608,7 +607,7 @@ pub async fn run_metrics_server(
     metrics_endpoint: std::net::SocketAddr,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<(), BoxedErr> {
-    let listener = TcpListener::bind(metrics_endpoint)
+    let listener = metrics_endpoint::bind_tcp_listener(metrics_endpoint)
         .await
         .map_err(|e| Box::new(e) as BoxedErr)?;
 

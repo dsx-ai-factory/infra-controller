@@ -20,7 +20,9 @@ use carbide_machine_controller::config::machine_validation::{
 };
 use carbide_uuid::machine_validation::{MachineValidationAttemptId, MachineValidationRunItemId};
 use config_version::ConfigVersion;
-use db::{self, machine_validation_suites};
+use db::machine_validation::ValidationNotActive;
+use db::machine_validation_execution::HeartbeatNotAccepted;
+use db::{self, ConditionalWrite, machine_validation_suites};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, MachineValidationContext, MachineValidationFilter,
@@ -119,7 +121,7 @@ pub(crate) async fn mark_machine_validation_complete(
         },
     )
     .await?;
-    if !completed {
+    if let ConditionalWrite::NotApplied(ValidationNotActive) = completed {
         tracing::info!(
             %machine_id,
             machine_validation_id = %validation_id,
@@ -639,7 +641,7 @@ pub(crate) async fn heartbeat_machine_validation_run(
     }
 
     let mut txn = api.txn_begin().await?;
-    let accepted = db::machine_validation_execution::record_heartbeat(
+    let heartbeat = db::machine_validation_execution::record_heartbeat(
         &mut txn,
         validation_id,
         run_item_id.as_ref(),
@@ -648,11 +650,16 @@ pub(crate) async fn heartbeat_machine_validation_run(
         chrono::Utc::now(),
     )
     .await?;
-    if accepted {
-        txn.commit().await?;
-    } else {
-        txn.rollback().await?;
-    }
+    let accepted = match heartbeat {
+        ConditionalWrite::Applied(()) => {
+            txn.commit().await?;
+            true
+        }
+        ConditionalWrite::NotApplied(HeartbeatNotAccepted) => {
+            txn.rollback().await?;
+            false
+        }
+    };
 
     Ok(tonic::Response::new(
         rpc::MachineValidationHeartbeatResponse { accepted },

@@ -1052,20 +1052,24 @@ images when a machine in the model joins. See
 
 A rack profile can define a `firmware_object` block that references one
 firmware-object JSON document. NICo uses the document as the default input for
-rack firmware and switch NVOS image updates during rack maintenance. For a
-profile with switches, the document must include an NVOS image whose firmware
-type matches `rack_hardware_class`. NICo requests `prod` when
-`rack_hardware_class` is omitted. RMS records an asynchronous update failure
-when the document does not contain the required image.
+rack compute-tray pre-ingestion and for rack firmware and switch NVOS image
+updates during rack maintenance. For a profile with switches, the document must
+include an NVOS image whose firmware type matches `rack_hardware_class`. NICo
+requests `prod` when `rack_hardware_class` is omitted. RMS records an
+asynchronous update failure when the document does not contain the required
+image.
 
 The block contains a `url` and an optional `fetch_timeout`, which accepts
 duration strings such as `30s` and `60s` and defaults to `30s`. Use seconds for
 this request timeout, although the parser accepts other duration units such as
 milliseconds (`ms`), minutes (`m`), and hours (`h`). Without the block, NICo
-skips both automatic update phases. An explicit maintenance request can supply
-a firmware object instead. If no firmware object is available while a switch in
-the maintenance scope is already waiting for an NVOS update, the rack
-transitions to `Error` instead of skipping the NVOS phase.
+skips compute-tray pre-ingestion updates and both automatic rack maintenance
+update phases. An explicit maintenance request can supply a firmware object
+instead. If no firmware object is available while a switch in the maintenance
+scope is already waiting for an NVOS update, the rack transitions to `Error`
+instead of skipping the NVOS phase. The optional `access_token_credential`
+names a stored firmware artifact access token used by compute-tray
+pre-ingestion. When omitted, NICo sends the RMS no-auth sentinel.
 
 ---
 
@@ -1145,6 +1149,15 @@ override:
 | `envConfig.NICO_SEC_OPT` | `"2"` | Security mode: `0` insecure, `1` TLS, `2` mTLS. Production requires `2`. |
 | `CLUSTER_ID` | — (set by `setup.sh`) | Site UUID (`NICO_SITE_UUID`). |
 | `TEMPORAL_SUBSCRIBE_NAMESPACE` | — (set by `setup.sh`) | Temporal namespace; must match `CLUSTER_ID`. |
+
+### Flow runtime settings - `flowConfig`
+
+Flow reads `/etc/flow/flowconfig.yaml`, which the `nico-flow` chart renders
+from its `flowConfig` values (inventory sync interval, leak detection
+interval, and the two job toggles). Defaults equal Flow's built-in
+defaults, and changing a value rolls the Flow pod. See the
+[chart README](https://github.com/dsx-ai-factory/infra-controller/tree/main/helm/charts/nico-flow)
+for the value table and an override example.
 
 ### REST-side PostgreSQL
 

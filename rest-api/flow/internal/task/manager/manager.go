@@ -32,8 +32,10 @@ import (
 )
 
 const (
-	defaultMaxWaitingPerRack = 5
-	defaultQueueTimeout      = time.Hour
+	defaultMaxWaitingPerRack     = 5
+	defaultQueueTimeout          = time.Hour
+	schedulingCleanupTimeout     = 5 * time.Second
+	schedulingPersistenceFailure = "Task scheduling metadata could not be persisted"
 )
 
 // ErrRackConflict marks a rejected task submission caused by an active
@@ -552,6 +554,8 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 	targetRack *rack.Rack,
 ) (uuid.UUID, error) {
 	var task taskdef.Task
+	taskAlreadyPersisted := false
+	executionStarted := false
 	txErr := m.taskStore.RunInTransaction(
 		ctx,
 		func(txCtx context.Context) error {
@@ -568,6 +572,7 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 			}
 
 			if persistedTask != nil {
+				taskAlreadyPersisted = true
 				if err := validateIdempotentTaskRack(req, persistedTask); err != nil {
 					return err
 				}
@@ -604,12 +609,28 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 			// Keep the idempotency lock until the execution ID or deferred
 			// status is persisted so a concurrent retry cannot execute the
 			// same pending task.
-			return m.resolveAndExecuteTaskInTransaction(txCtx, &task, targetRack)
+			err = m.resolveAndExecuteTaskInTransaction(txCtx, &task, targetRack)
+			if err == nil {
+				executionStarted = true
+			}
+			return err
 		},
 	)
 
 	if txErr != nil {
-		return uuid.Nil, txErr
+		var persistErr *scheduledTaskPersistenceError
+		if executionStarted && !errors.As(txErr, &persistErr) {
+			txErr = &scheduledTaskPersistenceError{
+				taskID:      task.ID,
+				executionID: task.ExecutionID,
+				cause:       txErr,
+			}
+		}
+		return uuid.Nil, m.handleSchedulingPersistenceFailure(
+			ctx,
+			txErr,
+			taskAlreadyPersisted,
+		)
 	}
 	return task.ID, nil
 }
@@ -734,7 +755,8 @@ func (m *ManagerImpl) resolveAndExecuteTask(
 	task *taskdef.Task,
 	targetRack *rack.Rack,
 ) error {
-	return m.resolveAndExecuteTaskWithTransaction(ctx, task, targetRack, false)
+	err := m.resolveAndExecuteTaskWithTransaction(ctx, task, targetRack, false)
+	return m.handleSchedulingPersistenceFailure(ctx, err, true)
 }
 
 func (m *ManagerImpl) resolveAndExecuteTaskInTransaction(
@@ -769,6 +791,7 @@ func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
 			Str("rack_id", task.RackID.String()).
 			Msg("Resolved operation rule for task")
 	} else {
+		task.AppliedRuleID = nil
 		log.Info().
 			Str("rule_name", rule.Name).
 			Str("operation_type", string(task.Operation.Type)).
@@ -797,10 +820,81 @@ func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
 	task.ExecutionID = resp.ExecutionID
 	task.ExecutorType = m.executor.Type()
 	if err := m.taskStore.UpdateScheduledTask(ctx, task); err != nil {
-		log.Error().Err(err).
-			Msgf("failed to update scheduled task %s", task.ID)
+		return &scheduledTaskPersistenceError{
+			taskID:      task.ID,
+			executionID: resp.ExecutionID,
+			cause:       err,
+		}
 	}
 	return nil
+}
+
+type scheduledTaskPersistenceError struct {
+	taskID      uuid.UUID
+	executionID string
+	cause       error
+}
+
+func (e *scheduledTaskPersistenceError) Error() string {
+	return fmt.Sprintf("failed to persist scheduled task %s: %v", e.taskID, e.cause)
+}
+
+func (e *scheduledTaskPersistenceError) Unwrap() error {
+	return e.cause
+}
+
+// handleSchedulingPersistenceFailure compensates for an execution whose
+// scheduling metadata could not be made durable. Callers invoke it only after
+// any surrounding database transaction has unwound.
+func (m *ManagerImpl) handleSchedulingPersistenceFailure(
+	ctx context.Context,
+	executionErr error,
+	taskAlreadyPersisted bool,
+) error {
+	var persistErr *scheduledTaskPersistenceError
+	if !errors.As(executionErr, &persistErr) {
+		return executionErr
+	}
+
+	terminateCtx, cancelTerminate := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		schedulingCleanupTimeout,
+	)
+	terminateErr := m.executor.TerminateTask(
+		terminateCtx,
+		persistErr.executionID,
+		schedulingPersistenceFailure,
+	)
+	cancelTerminate()
+	if terminateErr != nil {
+		log.Error().Err(terminateErr).
+			Str("task_id", persistErr.taskID.String()).
+			Str("execution_id", persistErr.executionID).
+			Msg("failed to terminate execution after scheduling metadata persistence failed")
+		return executionErr
+	}
+
+	if !taskAlreadyPersisted {
+		return executionErr
+	}
+
+	statusCtx, cancelStatus := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		schedulingCleanupTimeout,
+	)
+	statusErr := m.taskStore.UpdateTaskStatus(statusCtx, &taskdef.TaskStatusUpdate{
+		ID:      persistErr.taskID,
+		Status:  taskcommon.TaskStatusFailed,
+		Message: message.ForFailure(persistErr),
+	})
+	cancelStatus()
+	if statusErr != nil {
+		log.Error().Err(statusErr).
+			Str("task_id", persistErr.taskID.String()).
+			Msg("failed to mark task failed after terminating unpersisted execution")
+	}
+
+	return executionErr
 }
 
 func (m *ManagerImpl) deferUnlinkedTask(

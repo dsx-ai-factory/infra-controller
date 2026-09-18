@@ -18,8 +18,8 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bmc_mock::HostMachineInfo;
 use bmc_mock::injection::InjectionStore;
+use bmc_mock::{HostMachineInfo, MockPowerState, SetSystemPowerError, SystemPowerControl};
 use carbide_uuid::machine::MachineId;
 use uuid::Uuid;
 
@@ -68,6 +68,25 @@ impl DeviceHandle {
             DeviceHandleInner::Machine(handle) => handle.mat_id(),
             DeviceHandleInner::Switch(handle) => handle.mat_id(),
             DeviceHandleInner::PowerShelf(handle) => handle.mat_id(),
+        }
+    }
+
+    pub(crate) fn set_system_power(
+        &self,
+        request: SystemPowerControl,
+    ) -> Result<(), SetSystemPowerError> {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.set_system_power(request),
+            DeviceHandleInner::Switch(handle) => handle.set_system_power(request),
+            DeviceHandleInner::PowerShelf(handle) => handle.set_system_power(request),
+        }
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.power_state(),
+            DeviceHandleInner::Switch(handle) => handle.power_state(),
+            DeviceHandleInner::PowerShelf(handle) => handle.power_state(),
         }
     }
 

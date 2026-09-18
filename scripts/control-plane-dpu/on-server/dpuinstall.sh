@@ -431,8 +431,15 @@ setup_hbn() {
 		echo "Waiting 20s for DPU to settle before file transfer..."
 		sleep 20
 
+		# SCP needs brackets around IPv6 hosts to separate the remote path.
+		# SSH continues to use the original host.
+		local scp_host="$DPU_SSH_HOST"
+		if [[ "$scp_host" == *:* && "$scp_host" != \[*\] ]]; then
+			scp_host="[$scp_host]"
+		fi
+
 		echo "Step 7.3: Copying dpucfg to DPU (startup config, HBN configs zip)..."
-		dpu_scp -r dpucfg "root@${DPU_SSH_HOST}:/root/" || return 1
+		dpu_scp -r dpucfg "root@${scp_host}:/root/" || return 1
 		echo "dpucfg transfer complete."
 
 		echo "Step 7.3b: Transferring HBN container image to DPU (compressed — this may take several minutes)..." >&3
@@ -440,7 +447,7 @@ setup_hbn() {
 		echo "         SCP may stall on the first attempt. It will be retried up to 3 times automatically." >&3
 		echo "         If all retries fail, re-run provision-dpu.sh to resume from this step." >&3
 		sleep 10
-		dpu_scp doca_hbn.tar.gz "root@${DPU_SSH_HOST}:${DPU_REMOTE_DIR}/" || return 1
+		dpu_scp doca_hbn.tar.gz "root@${scp_host}:${DPU_REMOTE_DIR}/" || return 1
 		echo "HBN image transfer complete."
 
 		echo "Step 7.3c: Decompressing HBN container image on DPU..."

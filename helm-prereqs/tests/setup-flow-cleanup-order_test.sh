@@ -12,7 +12,10 @@ if [[ "$(grep -Fc '"${SCRIPT_DIR}/cleanup-legacy-flow-managers.sh"' "${SETUP_SH}
     exit 1
 fi
 
-guard_line="$(grep -nF '_reject_bundled_flow_manager_upgrade' "${SETUP_SH}" | tail -1 | cut -d: -f1)"
+if ! guard_line="$(grep -nxF '_reject_bundled_flow_manager_upgrade' "${SETUP_SH}" | cut -d: -f1)"; then
+    echo "setup.sh must invoke _reject_bundled_flow_manager_upgrade on its own line" >&2
+    exit 1
+fi
 preflight_line="$(grep -nF 'source "${SCRIPT_DIR}/preflight.sh"' "${SETUP_SH}" | cut -d: -f1)"
 first_install_line="$(grep -nF 'helmfile sync -l name=postgres-operator' "${SETUP_SH}" | cut -d: -f1)"
 core_upgrade_line="$(grep -nF '(cd "${SCRIPT_DIR}/.." && "${NICO_CORE_CMD[@]}")' "${SETUP_SH}" | cut -d: -f1)"

@@ -13,7 +13,8 @@ import (
 // APIExploredEndpointGetAllRequest binds query parameters for GET /site-explorer/endpoint.
 // Pagination is bound separately via pagination.PageRequest.
 type APIExploredEndpointGetAllRequest struct {
-	SiteID string `query:"siteId"`
+	SiteID    string  `query:"siteId"`
+	MachineID *string `query:"machineId"`
 }
 
 // Validate checks the list query shape.
@@ -23,7 +24,13 @@ func (r *APIExploredEndpointGetAllRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validationis.UUID.Error(validationErrorInvalidUUID),
 		),
+		validation.Field(&r.MachineID, validation.When(r.MachineID != nil, validation.Required)),
 	)
+}
+
+// ToProto selects reports for the requested machine, or all reports when omitted.
+func (r *APIExploredEndpointGetAllRequest) ToProto() *corev1.ExploredEndpointSearchFilter {
+	return &corev1.ExploredEndpointSearchFilter{MachineId: r.MachineID}
 }
 
 // APIExploredEndpoint is a Site Explorer explored endpoint.

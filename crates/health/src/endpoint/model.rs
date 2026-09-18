@@ -126,12 +126,11 @@ impl BmcEndpoint {
             Some(EndpointMetadata::Switch(switch)) => {
                 switch.endpoint_role == SwitchEndpointRole::Bmc
             }
-            Some(EndpointMetadata::PowerShelf(_)) => {
-                // Power shelves may expose compatible LogServices, but behavior depends on
-                // hardware and firmware. Keep collection disabled until future implementation
-                // and validation establish support.
-                false
-            }
+            // LiteOn PF-1333-7R (firmware r1.3.8) exposes a standard
+            // `Managers/bmc/LogServices/EventLog` whose entries carry `Severity`
+            // and `Message` but a null `MessageId`; see `message_identity` in
+            // `collectors/logs/redfish.rs` for how identity is recovered.
+            Some(EndpointMetadata::PowerShelf(_)) => true,
             None => false,
         }
     }
@@ -232,6 +231,12 @@ pub struct PowerShelfData {
     pub id: Option<PowerShelfId>,
     /// Hardware serial number, when explicitly known.
     pub serial: Option<String>,
+
+    /// NVLink domain UUID of the rack the shelf powers, when known.
+    ///
+    /// The API power shelf record carries no domain, so API discovery resolves
+    /// it from the machines and switches that share the shelf's rack.
+    pub nvlink_domain_uuid: Option<NvLinkDomainId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -424,12 +429,13 @@ mod tests {
                     expect: false,
                 },
                 Check {
-                    scenario: "power shelf is not eligible",
+                    scenario: "power shelf is eligible",
                     input: Some(EndpointMetadata::PowerShelf(PowerShelfData {
                         id: None,
                         serial: None,
+                        nvlink_domain_uuid: None,
                     })),
-                    expect: false,
+                    expect: true,
                 },
                 Check {
                     scenario: "endpoint without metadata is not eligible",
@@ -470,6 +476,7 @@ mod tests {
                 endpoint.metadata = Some(EndpointMetadata::PowerShelf(PowerShelfData {
                     id,
                     serial: None,
+                    nvlink_domain_uuid: None,
                 }));
 
                 endpoint.log_identity().into_owned()

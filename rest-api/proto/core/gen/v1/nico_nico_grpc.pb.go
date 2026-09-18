@@ -236,6 +236,7 @@ const (
 	Forge_AddExpectedMachine_FullMethodName                                 = "/forge.Forge/AddExpectedMachine"
 	Forge_DeleteExpectedMachine_FullMethodName                              = "/forge.Forge/DeleteExpectedMachine"
 	Forge_UpdateExpectedMachine_FullMethodName                              = "/forge.Forge/UpdateExpectedMachine"
+	Forge_PatchExpectedMachine_FullMethodName                               = "/forge.Forge/PatchExpectedMachine"
 	Forge_GetExpectedMachine_FullMethodName                                 = "/forge.Forge/GetExpectedMachine"
 	Forge_GetAllExpectedMachines_FullMethodName                             = "/forge.Forge/GetAllExpectedMachines"
 	Forge_ReplaceAllExpectedMachines_FullMethodName                         = "/forge.Forge/ReplaceAllExpectedMachines"
@@ -244,9 +245,11 @@ const (
 	Forge_GetAllUnexpectedMachines_FullMethodName                           = "/forge.Forge/GetAllUnexpectedMachines"
 	Forge_CreateExpectedMachines_FullMethodName                             = "/forge.Forge/CreateExpectedMachines"
 	Forge_UpdateExpectedMachines_FullMethodName                             = "/forge.Forge/UpdateExpectedMachines"
+	Forge_PatchExpectedMachines_FullMethodName                              = "/forge.Forge/PatchExpectedMachines"
 	Forge_AddExpectedPowerShelf_FullMethodName                              = "/forge.Forge/AddExpectedPowerShelf"
 	Forge_DeleteExpectedPowerShelf_FullMethodName                           = "/forge.Forge/DeleteExpectedPowerShelf"
 	Forge_UpdateExpectedPowerShelf_FullMethodName                           = "/forge.Forge/UpdateExpectedPowerShelf"
+	Forge_PatchExpectedPowerShelf_FullMethodName                            = "/forge.Forge/PatchExpectedPowerShelf"
 	Forge_GetExpectedPowerShelf_FullMethodName                              = "/forge.Forge/GetExpectedPowerShelf"
 	Forge_GetAllExpectedPowerShelves_FullMethodName                         = "/forge.Forge/GetAllExpectedPowerShelves"
 	Forge_ReplaceAllExpectedPowerShelves_FullMethodName                     = "/forge.Forge/ReplaceAllExpectedPowerShelves"
@@ -255,6 +258,7 @@ const (
 	Forge_AddExpectedSwitch_FullMethodName                                  = "/forge.Forge/AddExpectedSwitch"
 	Forge_DeleteExpectedSwitch_FullMethodName                               = "/forge.Forge/DeleteExpectedSwitch"
 	Forge_UpdateExpectedSwitch_FullMethodName                               = "/forge.Forge/UpdateExpectedSwitch"
+	Forge_PatchExpectedSwitch_FullMethodName                                = "/forge.Forge/PatchExpectedSwitch"
 	Forge_GetExpectedSwitch_FullMethodName                                  = "/forge.Forge/GetExpectedSwitch"
 	Forge_GetAllExpectedSwitches_FullMethodName                             = "/forge.Forge/GetAllExpectedSwitches"
 	Forge_ReplaceAllExpectedSwitches_FullMethodName                         = "/forge.Forge/ReplaceAllExpectedSwitches"
@@ -930,6 +934,8 @@ type ForgeClient interface {
 	DeleteExpectedMachine(ctx context.Context, in *ExpectedMachineRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedMachine(ctx context.Context, in *ExpectedMachine, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedMachine(ctx context.Context, in *PatchExpectedMachineRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected machine
 	GetExpectedMachine(ctx context.Context, in *ExpectedMachineRequest, opts ...grpc.CallOption) (*ExpectedMachine, error)
 	// Get the BMC credentials for all expected machines
@@ -950,6 +956,8 @@ type ForgeClient interface {
 	CreateExpectedMachines(ctx context.Context, in *BatchExpectedMachineOperationRequest, opts ...grpc.CallOption) (*BatchExpectedMachineOperationResponse, error)
 	// Batch update expected machines
 	UpdateExpectedMachines(ctx context.Context, in *BatchExpectedMachineOperationRequest, opts ...grpc.CallOption) (*BatchExpectedMachineOperationResponse, error)
+	// Apply every patch in one transaction. Any failure rolls back the whole batch.
+	PatchExpectedMachines(ctx context.Context, in *PatchExpectedMachinesRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Expected Power Shelf Management
 	// Add expected power shelf
 	AddExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelf, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -957,6 +965,8 @@ type ForgeClient interface {
 	DeleteExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelfRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelf, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedPowerShelf(ctx context.Context, in *PatchExpectedPowerShelfRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected power shelf
 	GetExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelfRequest, opts ...grpc.CallOption) (*ExpectedPowerShelf, error)
 	// Get the BMC credentials for all expected power shelves
@@ -974,6 +984,8 @@ type ForgeClient interface {
 	DeleteExpectedSwitch(ctx context.Context, in *ExpectedSwitchRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedSwitch(ctx context.Context, in *ExpectedSwitch, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedSwitch(ctx context.Context, in *PatchExpectedSwitchRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected switch
 	GetExpectedSwitch(ctx context.Context, in *ExpectedSwitchRequest, opts ...grpc.CallOption) (*ExpectedSwitch, error)
 	// Get the BMC credentials for all expected switches
@@ -3598,6 +3610,16 @@ func (c *forgeClient) UpdateExpectedMachine(ctx context.Context, in *ExpectedMac
 	return out, nil
 }
 
+func (c *forgeClient) PatchExpectedMachine(ctx context.Context, in *PatchExpectedMachineRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedMachine_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) GetExpectedMachine(ctx context.Context, in *ExpectedMachineRequest, opts ...grpc.CallOption) (*ExpectedMachine, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ExpectedMachine)
@@ -3678,6 +3700,16 @@ func (c *forgeClient) UpdateExpectedMachines(ctx context.Context, in *BatchExpec
 	return out, nil
 }
 
+func (c *forgeClient) PatchExpectedMachines(ctx context.Context, in *PatchExpectedMachinesRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedMachines_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) AddExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelf, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
@@ -3702,6 +3734,16 @@ func (c *forgeClient) UpdateExpectedPowerShelf(ctx context.Context, in *Expected
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_UpdateExpectedPowerShelf_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) PatchExpectedPowerShelf(ctx context.Context, in *PatchExpectedPowerShelfRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedPowerShelf_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3782,6 +3824,16 @@ func (c *forgeClient) UpdateExpectedSwitch(ctx context.Context, in *ExpectedSwit
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_UpdateExpectedSwitch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) PatchExpectedSwitch(ctx context.Context, in *PatchExpectedSwitchRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedSwitch_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6822,6 +6874,8 @@ type ForgeServer interface {
 	DeleteExpectedMachine(context.Context, *ExpectedMachineRequest) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedMachine(context.Context, *ExpectedMachine) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedMachine(context.Context, *PatchExpectedMachineRequest) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected machine
 	GetExpectedMachine(context.Context, *ExpectedMachineRequest) (*ExpectedMachine, error)
 	// Get the BMC credentials for all expected machines
@@ -6842,6 +6896,8 @@ type ForgeServer interface {
 	CreateExpectedMachines(context.Context, *BatchExpectedMachineOperationRequest) (*BatchExpectedMachineOperationResponse, error)
 	// Batch update expected machines
 	UpdateExpectedMachines(context.Context, *BatchExpectedMachineOperationRequest) (*BatchExpectedMachineOperationResponse, error)
+	// Apply every patch in one transaction. Any failure rolls back the whole batch.
+	PatchExpectedMachines(context.Context, *PatchExpectedMachinesRequest) (*emptypb.Empty, error)
 	// Expected Power Shelf Management
 	// Add expected power shelf
 	AddExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error)
@@ -6849,6 +6905,8 @@ type ForgeServer interface {
 	DeleteExpectedPowerShelf(context.Context, *ExpectedPowerShelfRequest) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedPowerShelf(context.Context, *PatchExpectedPowerShelfRequest) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected power shelf
 	GetExpectedPowerShelf(context.Context, *ExpectedPowerShelfRequest) (*ExpectedPowerShelf, error)
 	// Get the BMC credentials for all expected power shelves
@@ -6866,6 +6924,8 @@ type ForgeServer interface {
 	DeleteExpectedSwitch(context.Context, *ExpectedSwitchRequest) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedSwitch(context.Context, *ExpectedSwitch) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedSwitch(context.Context, *PatchExpectedSwitchRequest) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected switch
 	GetExpectedSwitch(context.Context, *ExpectedSwitchRequest) (*ExpectedSwitch, error)
 	// Get the BMC credentials for all expected switches
@@ -7982,6 +8042,9 @@ func (UnimplementedForgeServer) DeleteExpectedMachine(context.Context, *Expected
 func (UnimplementedForgeServer) UpdateExpectedMachine(context.Context, *ExpectedMachine) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedMachine not implemented")
 }
+func (UnimplementedForgeServer) PatchExpectedMachine(context.Context, *PatchExpectedMachineRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedMachine not implemented")
+}
 func (UnimplementedForgeServer) GetExpectedMachine(context.Context, *ExpectedMachineRequest) (*ExpectedMachine, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetExpectedMachine not implemented")
 }
@@ -8006,6 +8069,9 @@ func (UnimplementedForgeServer) CreateExpectedMachines(context.Context, *BatchEx
 func (UnimplementedForgeServer) UpdateExpectedMachines(context.Context, *BatchExpectedMachineOperationRequest) (*BatchExpectedMachineOperationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedMachines not implemented")
 }
+func (UnimplementedForgeServer) PatchExpectedMachines(context.Context, *PatchExpectedMachinesRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedMachines not implemented")
+}
 func (UnimplementedForgeServer) AddExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method AddExpectedPowerShelf not implemented")
 }
@@ -8014,6 +8080,9 @@ func (UnimplementedForgeServer) DeleteExpectedPowerShelf(context.Context, *Expec
 }
 func (UnimplementedForgeServer) UpdateExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedPowerShelf not implemented")
+}
+func (UnimplementedForgeServer) PatchExpectedPowerShelf(context.Context, *PatchExpectedPowerShelfRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedPowerShelf not implemented")
 }
 func (UnimplementedForgeServer) GetExpectedPowerShelf(context.Context, *ExpectedPowerShelfRequest) (*ExpectedPowerShelf, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetExpectedPowerShelf not implemented")
@@ -8038,6 +8107,9 @@ func (UnimplementedForgeServer) DeleteExpectedSwitch(context.Context, *ExpectedS
 }
 func (UnimplementedForgeServer) UpdateExpectedSwitch(context.Context, *ExpectedSwitch) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedSwitch not implemented")
+}
+func (UnimplementedForgeServer) PatchExpectedSwitch(context.Context, *PatchExpectedSwitchRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedSwitch not implemented")
 }
 func (UnimplementedForgeServer) GetExpectedSwitch(context.Context, *ExpectedSwitchRequest) (*ExpectedSwitch, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetExpectedSwitch not implemented")
@@ -12672,6 +12744,24 @@ func _Forge_UpdateExpectedMachine_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_PatchExpectedMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedMachineRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedMachine(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedMachine_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedMachine(ctx, req.(*PatchExpectedMachineRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_GetExpectedMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ExpectedMachineRequest)
 	if err := dec(in); err != nil {
@@ -12816,6 +12906,24 @@ func _Forge_UpdateExpectedMachines_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_PatchExpectedMachines_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedMachinesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedMachines(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedMachines_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedMachines(ctx, req.(*PatchExpectedMachinesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_AddExpectedPowerShelf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ExpectedPowerShelf)
 	if err := dec(in); err != nil {
@@ -12866,6 +12974,24 @@ func _Forge_UpdateExpectedPowerShelf_Handler(srv interface{}, ctx context.Contex
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).UpdateExpectedPowerShelf(ctx, req.(*ExpectedPowerShelf))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_PatchExpectedPowerShelf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedPowerShelfRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedPowerShelf(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedPowerShelf_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedPowerShelf(ctx, req.(*PatchExpectedPowerShelfRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -13010,6 +13136,24 @@ func _Forge_UpdateExpectedSwitch_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).UpdateExpectedSwitch(ctx, req.(*ExpectedSwitch))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_PatchExpectedSwitch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedSwitchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedSwitch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedSwitch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedSwitch(ctx, req.(*PatchExpectedSwitchRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -18575,6 +18719,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_UpdateExpectedMachine_Handler,
 		},
 		{
+			MethodName: "PatchExpectedMachine",
+			Handler:    _Forge_PatchExpectedMachine_Handler,
+		},
+		{
 			MethodName: "GetExpectedMachine",
 			Handler:    _Forge_GetExpectedMachine_Handler,
 		},
@@ -18607,6 +18755,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_UpdateExpectedMachines_Handler,
 		},
 		{
+			MethodName: "PatchExpectedMachines",
+			Handler:    _Forge_PatchExpectedMachines_Handler,
+		},
+		{
 			MethodName: "AddExpectedPowerShelf",
 			Handler:    _Forge_AddExpectedPowerShelf_Handler,
 		},
@@ -18617,6 +18769,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateExpectedPowerShelf",
 			Handler:    _Forge_UpdateExpectedPowerShelf_Handler,
+		},
+		{
+			MethodName: "PatchExpectedPowerShelf",
+			Handler:    _Forge_PatchExpectedPowerShelf_Handler,
 		},
 		{
 			MethodName: "GetExpectedPowerShelf",
@@ -18649,6 +18805,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateExpectedSwitch",
 			Handler:    _Forge_UpdateExpectedSwitch_Handler,
+		},
+		{
+			MethodName: "PatchExpectedSwitch",
+			Handler:    _Forge_PatchExpectedSwitch_Handler,
 		},
 		{
 			MethodName: "GetExpectedSwitch",

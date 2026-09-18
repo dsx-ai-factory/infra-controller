@@ -8980,7 +8980,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 
 	// Setup instances with specific IP addresses for IP filtering tests
 	// Use instances from the array so they're both on st1 and will be on the same page
-	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[0], []string{"192.168.1.100", "192.168.1.101"})
+	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[0], []string{"192.168.1.100", "192.168.1.101", "2001:db8::1"})
 	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[1], []string{"192.168.2.200"})
 
 	e := echo.New()
@@ -9913,6 +9913,43 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			},
 			ipAddresses:   []string{"192.168.1.100", "192.168.2.200"},
 			wantErr:       false,
+			expectedCount: 2,
+			expectedTotal: 2,
+		},
+		{
+			name: "test Instance getall API endpoint success with expanded IPv6 address filter",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqSiteIDs:                  []string{st1.ID.String()},
+				reqInfrastructureProviderID: ip.ID.String(),
+				reqOrg:                      tnOrg1,
+				reqUser:                     tnu1,
+				respCode:                    http.StatusOK,
+			},
+			ipAddresses:            []string{"2001:0DB8:0:0:0:0:0:1"},
+			expectedCount:          1,
+			expectedTotal:          1,
+			expectedFirstEntryName: "test-instance-11",
+		},
+		{
+			name: "test Instance getall API endpoint success with mixed IP address filters",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqSiteIDs:                  []string{st1.ID.String()},
+				reqInfrastructureProviderID: ip.ID.String(),
+				reqOrg:                      tnOrg1,
+				reqUser:                     tnu1,
+				respCode:                    http.StatusOK,
+			},
+			ipAddresses:   []string{"2001:0db8::1", "192.168.2.200", "invalid-address"},
 			expectedCount: 2,
 			expectedTotal: 2,
 		},

@@ -22,7 +22,7 @@ use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialW
 use carbide_uuid::switch::SwitchId;
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::switch::{Switch, SwitchControllerState, SwitchDecommissioningState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -60,6 +60,7 @@ async fn suppress_dhcp(
         &NewBmcSuppression {
             bmc_mac_address: mac_address,
             subsystem: BmcSuppressionSubsystem::Dhcp,
+            source: BmcSuppressionSource::Decommissioning,
             reason: format!(
                 "managed switch {switch_id} is being decommissioned; suppressing {interface} DHCP"
             ),
@@ -85,6 +86,7 @@ async fn dhcp_suppression_acknowledged(
         &ctx.services.db_pool,
         mac_address,
         BmcSuppressionSubsystem::Dhcp,
+        BmcSuppressionSource::Decommissioning,
     )
     .await?
     .is_some_and(|suppression| suppression.acknowledged_at.is_some()))
@@ -142,6 +144,7 @@ async fn handle_suppressing_site_explorer(
         &NewBmcSuppression {
             bmc_mac_address: bmc_mac,
             subsystem: BmcSuppressionSubsystem::SiteExplorer,
+            source: BmcSuppressionSource::Decommissioning,
             reason: format!("managed switch {switch_id} is being decommissioned"),
         },
     )

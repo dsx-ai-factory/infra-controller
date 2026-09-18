@@ -2,7 +2,7 @@ apiVersion: v2
 name: nico-flow
 description: Helm chart for the NICo Flow task, policy, and automation service
 type: application
-version: 0.2.0
+version: 0.3.0
 appVersion: "latest"
 keywords:
   - nico

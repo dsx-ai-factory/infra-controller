@@ -48,8 +48,12 @@ use crate::pci::{UefiPciOrderingKey, UefiPciOrderingKeyParseError, normalize_uef
 use crate::power_shelf::power_shelf_id;
 use crate::switch::switch_id;
 
+/// Filters explored endpoints by values in their exploration reports.
 #[derive(Clone, Debug, Default)]
-pub struct ExploredEndpointSearchFilter {}
+pub struct ExploredEndpointSearchFilter {
+    /// Match this machine ID; `None` includes reports with any or no machine ID.
+    pub machine_id: Option<MachineId>,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ExploredManagedHostSearchFilter {}
@@ -471,6 +475,17 @@ pub enum PreingestionState {
         /// before this field existed still deserialize.
         #[serde(default)]
         attempt: u32,
+    },
+
+    /// RMS firmware submission or its resulting job is pending for one rack
+    /// compute tray.
+    ///
+    /// `None` is persisted before dispatch. If NICo restarts before replacing it
+    /// with the RMS job ID, the submission outcome is ambiguous and preingestion
+    /// fails closed instead of submitting the update again.
+    RackFirmwareUpdateWait {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backend_job_id: Option<String>,
     },
     UpgradeFirmwareWait {
         task_id: String,

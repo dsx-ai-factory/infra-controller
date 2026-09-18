@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Flow runtime config file
+templates:
+  - configmap.yaml
+tests:
+  - it: renders flowconfig.yaml with the built-in Flow defaults
+    release:
+      namespace: flow
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: flow-config-files
+      - equal:
+          path: metadata.namespace
+          value: flow
+      - equal:
+          path: data["flowconfig.yaml"]
+          value: |
+            inventory_run_frequency: "1m"
+            disable_inventory: false
+            leak_detection_interval: "1m"
+            disable_leak_detection: false
+
+  - it: renders overridden values
+    set:
+      flowConfig:
+        inventoryRunFrequency: 5m
+        disableInventory: true
+        leakDetectionInterval: 2h
+        disableLeakDetection: true
+    asserts:
+      - equal:
+          path: data["flowconfig.yaml"]
+          value: |
+            inventory_run_frequency: "5m"
+            disable_inventory: true
+            leak_detection_interval: "2h"
+            disable_leak_detection: true
+
+  - it: rejects a bare-number duration
+    set:
+      flowConfig.inventoryRunFrequency: 30
+    asserts:
+      - failedTemplate:
+          errorPattern: flowConfig.inventoryRunFrequency must be a Go duration string with a unit, such as 30s, 1m, or 1h30m; got "30"
+
+  - it: rejects a zero interval
+    set:
+      flowConfig.leakDetectionInterval: 0s
+    asserts:
+      - failedTemplate:
+          errorPattern: flowConfig.leakDetectionInterval must be greater than zero; got "0s"
+
+  - it: rejects a string boolean
+    set:
+      flowConfig.disableInventory: "true"
+    asserts:
+      - failedTemplate:
+          errorPattern: flowConfig.disableInventory must be a boolean \(true or false\); got "true"
+
+  - it: rejects a null boolean
+    set:
+      flowConfig.disableInventory: null
+    asserts:
+      - failedTemplate:
+          errorPattern: flowConfig.disableInventory must be true or false; the key is missing or null
+
+  - it: rejects the 0.2.x raw-string flowConfig
+    set:
+      flowConfig: |
+        leak_detection_interval: 5m
+    asserts:
+      - failedTemplate:
+          errorPattern: flowConfig must be a map of settings such as flowConfig.leakDetectionInterval, not the chart 0.2.x raw file string; see the nico-flow README section "Upgrading from 0.2.x"

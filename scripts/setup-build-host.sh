@@ -36,7 +36,7 @@ DOCKER_USER="${SUDO_USER:-$(id -un)}"
 # --- 1. System packages -------------------------------------------------------
 echo "=== [1/9] Installing system packages via apt ==="
 ${SUDO} apt-get update
-${SUDO} DEBIAN_FRONTEND=noninteractive apt-get install -y \
+${SUDO} env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential cpio direnv mkosi uidmap curl file fakeroot git \
     docker.io docker-buildx sccache protobuf-compiler libopenipmi-dev \
     libudev-dev libboost-dev libgrpc-dev libprotobuf-dev libssl-dev \

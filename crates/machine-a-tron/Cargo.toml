@@ -45,6 +45,7 @@ tokio-util = { workspace = true }
 tonic = { workspace = true }
 dhcproto = { workspace = true }
 base64 = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 axum = { workspace = true }
@@ -81,6 +82,7 @@ rms-mock = { package = "carbide-rms-mock", path = "../rms-mock" }
 
 [dev-dependencies]
 carbide-test-support = { path = "../test-support" }
+tokio = { workspace = true, features = ["test-util"] }
 toml = { workspace = true }
 
 [build-dependencies]

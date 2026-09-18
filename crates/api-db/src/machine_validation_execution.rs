@@ -27,7 +27,7 @@ use model::machine_validation::{
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
-use crate::{DatabaseError, DatabaseResult, machine_validation_suites};
+use crate::{ConditionalWrite, DatabaseError, DatabaseResult, machine_validation_suites};
 
 const DEFAULT_TIMEOUT_SECONDS: i64 = 7200;
 // M1 persists Scout's existing sequential result stream as a single attempt per test.
@@ -240,6 +240,15 @@ pub async fn record_result(
     Ok(first_terminal)
 }
 
+/// `HeartbeatNotAccepted` means the run is missing or inactive, the target does
+/// not belong to the run, or the targeted item or attempt is missing or inactive.
+/// These cases share one rejection; it does not diagnose which condition failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeartbeatNotAccepted;
+
+/// `record_heartbeat` records progress for an active run and, when provided,
+/// its active item and attempt. A rejected heartbeat can follow earlier writes
+/// in this transaction, so the caller must roll back on `NotApplied`.
 pub async fn record_heartbeat(
     txn: &mut PgConnection,
     validation_id: &MachineValidationId,
@@ -247,28 +256,32 @@ pub async fn record_heartbeat(
     attempt_id: Option<&MachineValidationAttemptId>,
     test_id: Option<&str>,
     observed_at: DateTime<Utc>,
-) -> DatabaseResult<bool> {
+) -> DatabaseResult<ConditionalWrite<(), HeartbeatNotAccepted>> {
     let targets_run_item = run_item_id.is_some() || attempt_id.is_some() || test_id.is_some();
-    let Some(run_item_id) =
+    let run_item_id =
         resolve_run_item_for_heartbeat(txn, validation_id, run_item_id, attempt_id, test_id)
-            .await?
-    else {
-        return if targets_run_item {
-            Ok(false)
-        } else {
-            update_run_heartbeat(txn, validation_id, observed_at).await
-        };
-    };
+            .await?;
+    if targets_run_item && run_item_id.is_none() {
+        return Ok(ConditionalWrite::NotApplied(HeartbeatNotAccepted));
+    }
 
     if !update_run_heartbeat(txn, validation_id, observed_at).await? {
-        return Ok(false);
+        return Ok(ConditionalWrite::NotApplied(HeartbeatNotAccepted));
     }
+
+    let Some(run_item_id) = run_item_id else {
+        return Ok(ConditionalWrite::Applied(()));
+    };
 
     if !update_run_item_heartbeat(txn, validation_id, &run_item_id, observed_at).await? {
-        return Ok(false);
+        return Ok(ConditionalWrite::NotApplied(HeartbeatNotAccepted));
     }
 
-    update_attempt_heartbeat(txn, &run_item_id, attempt_id, observed_at).await
+    if !update_attempt_heartbeat(txn, &run_item_id, attempt_id, observed_at).await? {
+        return Ok(ConditionalWrite::NotApplied(HeartbeatNotAccepted));
+    }
+
+    Ok(ConditionalWrite::Applied(()))
 }
 
 pub async fn find_stale_active_attempts(
@@ -334,23 +347,53 @@ pub async fn find_stale_active_attempts(
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
 
+/// `AttemptNotEligibleForTimeout` means the attempt is missing, its run or item
+/// is no longer active, the attempt is no longer `Running`, or neither timeout
+/// has expired. The write does not distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttemptNotEligibleForTimeout;
+
+/// `mark_attempt_stale_if_active` marks an active attempt and its item
+/// `Failed` if either the heartbeat timeout or the duration limit plus grace
+/// has expired at `now`.
+/// `stale_run_timeout` supplies both the heartbeat timeout and duration grace.
+/// The caller must hold the parent run lock in the same transaction, matching
+/// the parent-before-item order used by heartbeats and result persistence.
 pub async fn mark_attempt_stale_if_active(
     txn: &mut PgConnection,
     attempt_id: &MachineValidationAttemptId,
+    stale_run_timeout: std::time::Duration,
     now: DateTime<Utc>,
     failure_reason: &str,
-) -> DatabaseResult<Option<MachineValidationId>> {
+) -> DatabaseResult<ConditionalWrite<MachineValidationId, AttemptNotEligibleForTimeout>> {
+    let stale_run_timeout_seconds = i64::try_from(stale_run_timeout.as_secs()).unwrap_or(i64::MAX);
     const QUERY: &str = "
         WITH updated_attempt AS (
-            UPDATE machine_validation_attempts
+            UPDATE machine_validation_attempts attempt
             SET
                 state='Failed',
                 failure_classification='StaleHeartbeat',
                 ended_at=$2,
-                stderr_summary=COALESCE(stderr_summary, $3)
-            WHERE id=$1
-                AND state='Running'
-            RETURNING run_item_id
+                stderr_summary=COALESCE(attempt.stderr_summary, $3)
+            FROM machine_validation_run_items run_item
+            JOIN machine_validation validation ON validation.id=run_item.run_id
+            WHERE attempt.id=$1
+                AND attempt.run_item_id=run_item.id
+                AND attempt.state='Running'
+                AND run_item.state='Running'
+                AND validation.end_time IS NULL
+                AND validation.state IN ('Started', 'InProgress')
+                AND (
+                    COALESCE(
+                        attempt.last_heartbeat_at,
+                        attempt.started_at,
+                        run_item.last_heartbeat_at
+                    ) + ($4::bigint * INTERVAL '1 second') < $2
+                    OR attempt.started_at
+                        + (GREATEST(run_item.timeout_seconds, 0) * INTERVAL '1 second')
+                        + ($4::bigint * INTERVAL '1 second') < $2
+                )
+            RETURNING attempt.run_item_id
         ),
         updated_run_item AS (
             UPDATE machine_validation_run_items
@@ -364,13 +407,19 @@ pub async fn mark_attempt_stale_if_active(
         )
         SELECT run_id FROM updated_run_item";
 
-    sqlx::query_scalar::<_, MachineValidationId>(QUERY)
+    let updated = sqlx::query_scalar::<_, MachineValidationId>(QUERY)
         .bind(attempt_id)
         .bind(now)
         .bind(truncate_summary(failure_reason).unwrap_or_default())
+        .bind(stale_run_timeout_seconds)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(QUERY, e))?;
+
+    Ok(match updated {
+        Some(validation_id) => ConditionalWrite::Applied(validation_id),
+        None => ConditionalWrite::NotApplied(AttemptNotEligibleForTimeout),
+    })
 }
 
 async fn update_run_heartbeat(
@@ -987,6 +1036,56 @@ mod tests {
     }
 
     #[crate::sqlx_test]
+    async fn run_only_heartbeat_applies_until_completion(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine_validation::{MachineValidationState, MachineValidationStatus};
+
+        let observed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut txn = pool.begin().await?;
+        let id = insert_active_validation(txn.as_mut(), observed_at).await?;
+        assert_eq!(
+            record_heartbeat(txn.as_mut(), &id, None, None, None, observed_at).await?,
+            ConditionalWrite::Applied(())
+        );
+        txn.commit().await?;
+        let run = crate::machine_validation::find_by_id(&pool, &id).await?;
+        assert_eq!(run.last_heartbeat_at, Some(observed_at));
+
+        let mut txn = pool.begin().await?;
+        let ConditionalWrite::Applied(_) = crate::machine_validation::update_end_time_if_active(
+            txn.as_mut(),
+            &id,
+            &MachineValidationStatus {
+                state: MachineValidationState::Success,
+                ..MachineValidationStatus::default()
+            },
+        )
+        .await?
+        else {
+            panic!("active validation should complete");
+        };
+        assert_eq!(
+            record_heartbeat(
+                txn.as_mut(),
+                &id,
+                None,
+                None,
+                None,
+                observed_at + chrono::Duration::seconds(1),
+            )
+            .await?,
+            ConditionalWrite::NotApplied(HeartbeatNotAccepted)
+        );
+        // Commit the rejected call so the reload catches any unintended heartbeat write.
+        txn.commit().await?;
+        let run = crate::machine_validation::find_by_id(&pool, &id).await?;
+        assert_eq!(run.last_heartbeat_at, Some(observed_at));
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     async fn find_stale_active_attempts_respects_heartbeat_and_duration_fallback(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1047,6 +1146,91 @@ mod tests {
             stale_test_ids,
             BTreeSet::from(["legacy-stale", "stale-heartbeat"])
         );
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn mark_attempt_stale_if_active_preserves_both_timeouts(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        struct Case {
+            scenario: &'static str,
+            started_at: DateTime<Utc>,
+            last_heartbeat_at: DateTime<Utc>,
+        }
+
+        let now: DateTime<Utc> = "2026-09-16T12:00:00Z".parse()?;
+        let heartbeat_timeout = std::time::Duration::from_secs(60);
+        let cases = [
+            Case {
+                scenario: "expired heartbeat within duration limit",
+                started_at: now - chrono::Duration::seconds(61),
+                last_heartbeat_at: now - chrono::Duration::seconds(61),
+            },
+            Case {
+                scenario: "expired duration limit with current heartbeat",
+                started_at: now - chrono::Duration::seconds(1261),
+                last_heartbeat_at: now,
+            },
+        ];
+
+        for case in cases {
+            let mut txn = pool.begin().await?;
+            let validation_id = insert_active_validation(txn.as_mut(), case.started_at).await?;
+            let attempt_id = insert_attempt(
+                txn.as_mut(),
+                &validation_id,
+                case.scenario,
+                0,
+                MachineValidationAttemptState::Running,
+                Some(case.started_at),
+                Some(case.last_heartbeat_at),
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE machine_validation_run_items SET timeout_seconds=1200 WHERE run_id=$1",
+            )
+            .bind(validation_id)
+            .execute(txn.as_mut())
+            .await?;
+
+            crate::machine_validation::lock_by_id_no_key_update(txn.as_mut(), &validation_id)
+                .await?
+                .expect("the parent run exists");
+            assert_eq!(
+                mark_attempt_stale_if_active(
+                    txn.as_mut(),
+                    &attempt_id,
+                    heartbeat_timeout,
+                    now,
+                    "attempt timed out",
+                )
+                .await?,
+                ConditionalWrite::Applied(validation_id),
+                "{}",
+                case.scenario,
+            );
+            txn.commit().await?;
+
+            let attempt = find_attempt_by_id(&pool, &attempt_id).await?;
+            assert_eq!(
+                attempt.state,
+                MachineValidationAttemptState::Failed,
+                "{}",
+                case.scenario,
+            );
+            assert_eq!(attempt.ended_at, Some(now), "{}", case.scenario);
+            let items = find_run_items_by_run_id(&pool, &validation_id).await?;
+            assert_eq!(items.len(), 1, "{}", case.scenario);
+            assert_eq!(
+                items[0].state,
+                MachineValidationRunItemState::Failed,
+                "{}",
+                case.scenario,
+            );
+            assert_eq!(items[0].ended_at, Some(now), "{}", case.scenario);
+        }
 
         Ok(())
     }

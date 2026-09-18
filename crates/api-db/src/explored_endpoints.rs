@@ -121,15 +121,20 @@ impl From<DbExploredEndpoint> for ExploredEndpoint {
     }
 }
 
+/// Returns endpoint IPs whose exploration reports match `filter`.
 pub async fn find_ips(
     txn: impl DbReader<'_>,
-    // filter is currently is empty, so it is a placeholder for the future
-    _filter: model::site_explorer::ExploredEndpointSearchFilter,
+    filter: model::site_explorer::ExploredEndpointSearchFilter,
 ) -> Result<Vec<IpAddr>, DatabaseError> {
     #[derive(Debug, Clone, Copy, FromRow)]
     struct ExploredEndpointIp(IpAddr);
     // grab list of IPs
     let mut builder = sqlx::QueryBuilder::new("SELECT address FROM explored_endpoints");
+    if let Some(machine_id) = filter.machine_id {
+        builder
+            .push(" WHERE exploration_report->>'MachineId' = ")
+            .push_bind(machine_id);
+    }
     let query = builder.build_query_as();
     let ids: Vec<ExploredEndpointIp> = query
         .fetch_all(txn)
@@ -548,6 +553,31 @@ async fn set_preingestion(
     Ok(())
 }
 
+/// Set one preingestion state on every explored address for a physical BMC.
+///
+/// A BMC can have IPv4 and IPv6 endpoint rows. Rack firmware workflow state is
+/// device-scoped, so callers update all known aliases together.
+pub async fn set_preingestion_for_addresses(
+    addresses: &[IpAddr],
+    state: PreingestionState,
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError> {
+    if addresses.is_empty() {
+        return Ok(());
+    }
+
+    let query = "UPDATE explored_endpoints SET preingestion_state = $1 WHERE address = ANY($2)";
+
+    sqlx::query(query)
+        .bind(sqlx::types::Json(&state))
+        .bind(addresses)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(())
+}
+
 pub async fn set_preingestion_recheck_versions(
     address: IpAddr,
     txn: &mut PgConnection,
@@ -754,14 +784,19 @@ pub async fn set_preingestion_failed(
     set_preingestion(address, state, txn).await
 }
 
-/// If the endpoint's preingestion is in the terminal `Failed` state, reset it
-/// back to `Initial` so preingestion runs again from the top. States other than
-/// `Failed` are left untouched, so this is safe to call unconditionally when an
-/// operator clears an error. Returns true if a `Failed` state was actually reset.
+/// `PreingestionResetNotApplicable` means the endpoint is missing or its
+/// preingestion state is not `Failed`. The reset does not distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreingestionResetNotApplicable;
+
+/// `reset_failed_preingestion` resets `Failed` to `Initial` so preingestion can
+/// run again when an operator clears an error. Other states remain untouched.
+/// A missing or non-failed endpoint returns
+/// `NotApplied(PreingestionResetNotApplicable)`; database failures remain errors.
 pub async fn reset_failed_preingestion(
     address: IpAddr,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), PreingestionResetNotApplicable>, DatabaseError> {
     let query = "
 UPDATE explored_endpoints
 SET preingestion_state = '{\"state\":\"initial\"}'
@@ -771,7 +806,11 @@ WHERE address = $1 AND preingestion_state->>'state' = 'failed'";
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    Ok(result.rows_affected() > 0)
+    Ok(if result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(PreingestionResetNotApplicable)
+    })
 }
 
 pub async fn insert(
@@ -957,6 +996,81 @@ mod tests {
     use model::site_explorer::{Chassis, NetworkAdapter};
 
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn reset_failed_preingestion_reports_applied_or_not_applicable(pool: sqlx::PgPool) {
+        struct Case {
+            scenario: &'static str,
+            state: Option<PreingestionState>,
+            expected: ConditionalWrite<(), PreingestionResetNotApplicable>,
+            expected_state: Option<PreingestionState>,
+        }
+
+        let cases = [
+            Case {
+                scenario: "failed preingestion resets",
+                state: Some(PreingestionState::Failed {
+                    reason: "firmware installation failed".to_string(),
+                }),
+                expected: ConditionalWrite::Applied(()),
+                expected_state: Some(PreingestionState::Initial),
+            },
+            Case {
+                scenario: "firmware installation stays in progress",
+                state: Some(installing_state()),
+                expected: ConditionalWrite::NotApplied(PreingestionResetNotApplicable),
+                expected_state: Some(installing_state()),
+            },
+            Case {
+                scenario: "missing endpoint is not created",
+                state: None,
+                expected: ConditionalWrite::NotApplied(PreingestionResetNotApplicable),
+                expected_state: None,
+            },
+        ];
+
+        for case in cases {
+            let mut txn = pool.begin().await.unwrap();
+            let address = "10.0.4.1".parse().unwrap();
+            if let Some(state) = case.state {
+                seed_endpoint(&mut txn, "10.0.4.1", state).await;
+            }
+
+            assert_eq!(
+                reset_failed_preingestion(address, &mut txn).await.unwrap(),
+                case.expected,
+                "{}",
+                case.scenario,
+            );
+            let endpoints = find_all_by_ip(address, &mut txn).await.unwrap();
+            assert_eq!(
+                endpoints.first().map(|ep| &ep.preingestion_state),
+                case.expected_state.as_ref(),
+                "{}",
+                case.scenario,
+            );
+            txn.rollback().await.unwrap();
+        }
+    }
+
+    #[crate::sqlx_test]
+    async fn reset_failed_preingestion_propagates_database_errors(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *txn)
+            .await
+            .unwrap();
+
+        let error = reset_failed_preingestion("10.0.4.1".parse().unwrap(), &mut txn)
+            .await
+            .unwrap_err();
+        let DatabaseError::Sqlx(query_error) = error else {
+            panic!("expected a database error, got {error:?}");
+        };
+        let code = query_error.source.as_database_error().unwrap().code();
+        assert_eq!(code.as_deref(), Some("25006"));
+        txn.rollback().await.unwrap();
+    }
 
     #[crate::sqlx_test]
     async fn re_exploration_request_preserves_report_version(pool: sqlx::PgPool) {

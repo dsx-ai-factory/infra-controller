@@ -17,6 +17,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -38,6 +39,27 @@ func TestLeakStatusTo(t *testing.T) {
 	}
 	for in, want := range cases {
 		assert.Equal(t, want, LeakStatusTo(in), "LeakStatusTo(%q)", in)
+	}
+}
+
+func TestTaskTo(t *testing.T) {
+	appliedRuleID := uuid.New()
+	tests := []struct {
+		name          string
+		appliedRuleID *uuid.UUID
+		wantRuleID    string
+	}{
+		{name: "includes the applied rule", appliedRuleID: &appliedRuleID, wantRuleID: appliedRuleID.String()},
+		{name: "omits an unapplied rule"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			converted := TaskTo(&taskdef.Task{AppliedRuleID: test.appliedRuleID})
+
+			require.NotNil(t, converted)
+			require.Equal(t, test.wantRuleID, converted.GetAppliedRuleId().GetId())
+		})
 	}
 }
 
