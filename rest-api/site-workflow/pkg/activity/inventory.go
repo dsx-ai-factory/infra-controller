@@ -411,7 +411,9 @@ func (col *inventoryCollector[K, R, P]) buildInventoryPage(ctx context.Context, 
 	remainingItems := input.totalItems - col.itemsMissing - col.itemsPublished - pageItems
 	input.totalPages = input.pageNumber + ceilDiv(remainingItems, col.cloudPageSize)
 
-	page := col.impl.internalPagedInventory(col.allIDs, items, input)
+	reportedIDs := itemIDsForPage(input.pageNumber, input.totalPages, col.allIDs)
+
+	page := col.impl.internalPagedInventory(reportedIDs, items, input)
 
 	// Handle any requested post processing
 	if col.impl.internalPagedInventoryPostProcess != nil {
@@ -470,6 +472,17 @@ func (col *inventoryCollector[K, R, P]) execute(ctx context.Context, page P) err
 		TaskQueue: col.impl.config.TemporalPublishQueue,
 	}, col.workflowName, col.impl.config.SiteID, page)
 	return err
+}
+
+// itemIDsForPage returns the reported ID list for the page that carries it and nothing for the
+// rest. Cloud reads the list only where it runs its deletion sweep, on the page reporting itself
+// last, so sending it earlier repeats the whole Site once per page: at 1,664 Machines a page
+// spends more on IDs than on the 25 Machines it exists to deliver.
+func itemIDsForPage[T any](pageNumber, totalPages int, allItemIDs []T) []T {
+	if pageNumber != totalPages {
+		return nil
+	}
+	return allItemIDs
 }
 
 // ceilDiv divides and rounds up, reporting zero for a non-positive dividend or divisor.
