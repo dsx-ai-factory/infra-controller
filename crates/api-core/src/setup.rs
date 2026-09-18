@@ -1314,14 +1314,18 @@ async fn initialize_and_start_controllers<'a>(
                 );
             })?;
         let mut txn = Transaction::begin(db_pool).await?;
-        crate::handlers::expected_machine::create_missing_from(&mut txn, &expected_machines)
-            .await
-            .inspect_err(|err| {
-                tracing::error!(
-                    error = %err,
-                    "Unable to update database from expected_machines list, bailing",
-                );
-            })?;
+        crate::handlers::expected_machine::create_missing_from(
+            &mut txn,
+            common_pools,
+            &expected_machines,
+        )
+        .await
+        .inspect_err(|err| {
+            tracing::error!(
+                error = %err,
+                "Unable to update database from expected_machines list, bailing",
+            );
+        })?;
         txn.commit().await?;
         tracing::info!("Successfully wrote expected machines to db, continuing startup.");
     } else {

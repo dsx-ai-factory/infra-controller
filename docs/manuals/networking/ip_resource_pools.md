@@ -12,7 +12,7 @@ The NICo API server manages several distinct IP address pools. Each pool is draw
 
 Pool capacity planning is therefore a pre-deployment concern. Pools can be extended at runtime without a restart, but running out of addresses causes provisioning failures that must be resolved before work can continue.
 
-> **Note**: Tenant instance IP addresses — the addresses that instances see on their network interfaces — are not managed through IP resource pools.  The pools described on this page are infrastructure addresses, not tenant workload addresses.
+> **Note**: Tenant instance IP addresses — the addresses that instances see on their network interfaces — are not managed through IP resource pools. The pools described on this page are infrastructure addresses, not tenant workload addresses.
 
 ---
 
@@ -30,6 +30,10 @@ The following IP pools are recognized by the API server.
 Each managed DPU receives a loopback IP address from this pool. The loopback is advertised over BGP and serves as the VTEP address for the VXLAN underlay. It is also used for BGP peering identification.
 
 One address is consumed per DPU at the time the DPU is first registered with the system. If a DPU is decommissioned, its address is returned to the pool.
+
+By default, addresses are drawn automatically from the pool's auto-assign partition when a DPU is registered. Operators who need a specific DPU to always receive a specific loopback can instead reserve one; see [Deterministic DPU loopback reservations](#deterministic-dpu-loopback-reservations). Reserved addresses must be placed in a non-auto-assign range so automatic registration never hands them to a different DPU.
+
+An optional companion pool, `lo-ip-v6` (`type = "ipv6"`), supplies IPv6 DPU loopbacks with the same per-DPU allocation and reservation behavior when the site enables dual-stack underlay addressing.
 
 ### `vpc-dpu-lo` — VPC DPU Loopback IPs
 
@@ -67,6 +71,19 @@ ranges = [
 ]
 ```
 
+Each range accepts an optional `auto_assign` boolean, which defaults to `true`. A range with `auto_assign = false` is excluded from automatic allocation: its addresses are handed out only when explicitly requested, which is how [deterministic DPU loopback reservations](#deterministic-dpu-loopback-reservations) claim a specific address. Prefix-based definitions are always auto-assign, so carve reservable addresses out as an explicit `auto_assign = false` range.
+
+```toml
+[pools.lo-ip]
+type = "ipv4"
+ranges = [
+  # Handed out automatically to DPUs as they register.
+  { start = "10.180.62.1", end = "10.180.62.199" },
+  # Held back for deterministic per-DPU reservations.
+  { start = "10.180.62.200", end = "10.180.62.254", auto_assign = false },
+]
+```
+
 ### Pool type values
 
 Both IP pools described on this page use `type = "ipv4"`.
@@ -85,7 +102,6 @@ ranges = [
 ]
 ```
 
-
 ---
 
 ## Sizing
@@ -94,7 +110,7 @@ ranges = [
 
 One address is consumed per managed DPU. For a site with **H** hosts, each having **D** DPUs:
 
-```
+```text
 lo-ip pool size = H × D
 ```
 
@@ -106,7 +122,7 @@ For example, 100 hosts with 2 DPUs each require 200 addresses.
 
 Consumption depends on the number of VPCs and how broadly their instances are distributed across DPUs. In the worst case, every DPU participates in every VPC:
 
-```
+```text
 vpc-dpu-lo pool size (worst case) = number of VPCs × total number of DPUs
 ```
 
@@ -130,11 +146,47 @@ If `listen_only = true` is set in the API server configuration, pool registratio
 
 ---
 
+## Deterministic DPU loopback reservations
+
+By default NICo assigns each DPU an underlay loopback automatically from the auto-assign partition of `lo-ip` (and `lo-ip-v6`, when configured). A reservation lets an operator pin a specific address to a specific DPU ahead of time — for example, to align a DPU's VTEP address with an external routing or monitoring configuration.
+
+A reservation is declared on the DPU's host `ExpectedMachine`, keyed by the trimmed DPU pairing serial number (the same serial used for `fallback_dpu_serial_numbers`). Each reservation carries an optional IPv4 address, an optional IPv6 address, or both, and at least one address is required.
+
+### Requirements for a reserved address
+
+Each reserved address is validated when the reservation is created or changed and must satisfy all of the following:
+
+- It belongs to the matching pool: an IPv4 address to `lo-ip`, an IPv6 address to `lo-ip-v6`.
+- It sits in a non-auto-assign range (`auto_assign = false`), so automatic registration never claims it for another DPU.
+- It is not already reserved for, or allocated to, another DPU. DPU serial numbers and per-family addresses are unique across the site.
+
+A reservation that names an address in the wrong family, an address outside the pool, an auto-assignable address, or an address already in use is rejected. Re-submitting an unchanged reservation is a no-op.
+
+The reserved address is claimed atomically when the DPU's machine record is first created — during site exploration for a matched host, or during direct discovery resolved by the globally unique DPU serial. A family without a reservation keeps automatic allocation. Editing or removing a reservation does not readdress a DPU that already exists; the reservation applies the next time that DPU is ingested.
+
+### Managing reservations
+
+Reservations are managed through the `nico-admin-cli expected-machine` commands with the `--dpu-loopback-reservations` flag (a JSON array of `{ "dpu_serial_number", "loopback_ipv4", "loopback_ipv6" }` objects):
+
+- `add` and `patch` set or replace the full reservation list for a machine.
+- `update` and `replace-all` apply reservations from a JSON file.
+- Omitting the flag preserves the stored reservations; passing an empty array (`[]`) clears them.
+- `show` displays the current reservations.
+
+For example, reserve an IPv4 loopback for one DPU while leaving IPv6 automatic:
+
+```bash
+nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
+  --dpu-loopback-reservations '[{"dpu_serial_number":"MT2000X00001","loopback_ipv4":"10.180.62.200"}]'
+```
+
+---
+
 ## Runtime Operations
 
 ### Listing pools
 
-```
+```bash
 admin-cli resource-pool list
 ```
 
@@ -152,7 +204,7 @@ Monitor pools that are approaching their limit. When `Used` is near `Size`, the 
 
 ### Growing a pool
 
-```
+```bash
 admin-cli resource-pool grow -f <toml-file>
 ```
 
@@ -185,4 +237,3 @@ If the original pool was prefix-based, the grow file may also provide additional
 - `docs/manuals/vpc/vpc_network_virtualization.md` — end-to-end VPC network virtualization overview that ties VNI pools, IP pools, and routing profiles together
 - `docs/getting-started/prerequisites/network.md` — site-level networking requirements including IPv4 prefix sizing formulas
 - `docs/manuals/vpc/vpc_routing_profiles.md` — VPC routing profile configuration, which governs the VPC overlay network configuration and therefore drives `vpc-dpu-lo` consumption
-

@@ -238,6 +238,121 @@ async fn patch_expected_machine_preserves_unselected_fields(pool: PgPool) {
     assert_eq!(machine_row(&env.pool, id).await, expected);
 }
 
+/// Read back a machine's persisted DPU loopback reservations through the RPC,
+/// exercising the same hydration path operators observe.
+async fn reservations_of(env: &TestEnv, id: Uuid) -> Vec<forge::DpuLoopbackReservation> {
+    env.api
+        .get_expected_machine(Request::new(forge::ExpectedMachineRequest {
+            bmc_mac_address: String::new(),
+            id: rpc_id(id),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .dpu_loopback_reservations
+        .unwrap_or_default()
+        .reservations
+}
+
+/// A native patch that selects `dpu_loopback_reservations` validates each
+/// reserved address against its pool before persisting, replaces the stored set
+/// (an empty list clears it), and leaves the set untouched when the field is not
+/// selected. This is the only reservation validation the native patch path runs,
+/// so exercising it here guards the fast path against silently persisting an
+/// out-of-pool or auto-assignable address.
+#[crate::sqlx_test]
+async fn patch_expected_machine_dpu_loopback_reservations(pool: PgPool) {
+    use std::net::IpAddr;
+
+    let env = create_test_env(pool.clone()).await;
+
+    // Seed the loopback pool with one free requestable value and one auto-assign
+    // value the operator must not be able to reserve explicitly.
+    let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
+    let free: IpAddr = "192.0.2.10".parse().unwrap();
+    let auto_assign: IpAddr = "192.0.2.20".parse().unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![free], false)
+        .await
+        .unwrap();
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![auto_assign], true)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    let id = Uuid::new_v4();
+    env.api
+        .add_expected_machine(Request::new(machine(id, 0x60)))
+        .await
+        .unwrap();
+
+    let reservation = |serial: &str, v4: &str| forge::DpuLoopbackReservation {
+        dpu_serial_number: serial.to_string(),
+        loopback_ipv4: Some(v4.to_string()),
+        loopback_ipv6: None,
+    };
+    let patch = |reservations: Vec<forge::DpuLoopbackReservation>| {
+        Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                dpu_loopback_reservations: Some(forge::DpuLoopbackReservationList { reservations }),
+                ..Default::default()
+            }),
+            update_mask: mask(&["dpu_loopback_reservations"]),
+        })
+    };
+
+    // A reserved address outside the pool is rejected on the native path.
+    let error = env
+        .api
+        .patch_expected_machine(patch(vec![reservation("D1", "198.51.100.1")]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+    // An auto-assignable value cannot be explicitly reserved.
+    let error = env
+        .api
+        .patch_expected_machine(patch(vec![reservation("D1", "192.0.2.20")]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+    // A free, requestable value is accepted and stored.
+    env.api
+        .patch_expected_machine(patch(vec![reservation("D1", "192.0.2.10")]))
+        .await
+        .unwrap();
+    assert_eq!(
+        reservations_of(&env, id).await,
+        vec![reservation("D1", "192.0.2.10")]
+    );
+
+    // A patch that does not select the field leaves the reservation untouched.
+    env.api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                metadata: Some(forge::Metadata {
+                    name: "after".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            update_mask: mask(&["metadata.name"]),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        reservations_of(&env, id).await,
+        vec![reservation("D1", "192.0.2.10")]
+    );
+
+    // Selecting the field with an empty list clears the reservation.
+    env.api.patch_expected_machine(patch(vec![])).await.unwrap();
+    assert_eq!(reservations_of(&env, id).await, Vec::new());
+}
+
 #[crate::sqlx_test]
 async fn patch_expected_machine_sets_and_clears_nested_host_bmc_address(pool: PgPool) {
     let env = create_test_env(pool).await;

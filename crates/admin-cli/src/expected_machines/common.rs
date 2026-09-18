@@ -168,6 +168,55 @@ pub(crate) struct ExpectedMachineJson {
     /// Per-host lifecycle profile for settings that affect state-machine progression.
     #[serde(default)]
     pub(crate) host_lifecycle_profile: Option<HostLifecycleProfile>,
+    /// Deterministic DPU underlay loopback reservations. An omitted field or
+    /// explicit `null` preserves the stored reservations for file-based updates,
+    /// while an empty list clears them. `replace-all` forwards either form
+    /// unchanged, so an omitted field there preserves stored reservations and an
+    /// empty list clears them. Accepts either a bare array of reservations or
+    /// the `{ "reservations": [...] }` wrapper emitted by `show --output json`,
+    /// so a file copied from `show` round-trips without losing the field.
+    #[serde(default, deserialize_with = "deserialize_dpu_loopback_reservations")]
+    pub(crate) dpu_loopback_reservations: Option<rpc::forge::DpuLoopbackReservationList>,
+}
+
+/// Accept either a bare `[...]` array of reservations or the RPC wrapper object
+/// `{ "reservations": [...] }` emitted by `show --output json`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DpuLoopbackReservationsInput {
+    Wrapper(rpc::forge::DpuLoopbackReservationList),
+    Bare(Vec<rpc::forge::DpuLoopbackReservation>),
+}
+
+impl From<DpuLoopbackReservationsInput> for rpc::forge::DpuLoopbackReservationList {
+    fn from(input: DpuLoopbackReservationsInput) -> Self {
+        match input {
+            DpuLoopbackReservationsInput::Wrapper(list) => list,
+            DpuLoopbackReservationsInput::Bare(reservations) => {
+                rpc::forge::DpuLoopbackReservationList { reservations }
+            }
+        }
+    }
+}
+
+fn deserialize_dpu_loopback_reservations<'de, D>(
+    deserializer: D,
+) -> Result<Option<rpc::forge::DpuLoopbackReservationList>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<DpuLoopbackReservationsInput>::deserialize(deserializer)?.map(Into::into))
+}
+
+/// Parse the `--dpu-loopback-reservations` flag value into the RPC list.
+///
+/// The flag accepts a bare JSON array of reservations or the
+/// `{ "reservations": [...] }` wrapper, matching the file field. An empty list
+/// clears the stored reservations; omitting the flag preserves them.
+pub(crate) fn parse_dpu_loopback_reservations_flag(
+    json: &str,
+) -> Result<rpc::forge::DpuLoopbackReservationList, serde_json::Error> {
+    serde_json::from_str::<DpuLoopbackReservationsInput>(json).map(Into::into)
 }
 
 impl ExpectedMachineJson {
@@ -390,6 +439,91 @@ mod tests {
                     (rpc::forge::DpuMode::NoDpu, HostDpuPolicy::Ignore),
             }
         );
+    }
+
+    /// The reservation field distinguishes omitted/null (preserve on update)
+    /// from an explicit empty list (clear) and a populated list (replace), and
+    /// accepts both a bare array and the `show`-emitted wrapper so a
+    /// read-modify-write flow never loses the field.
+    #[test]
+    fn expected_machine_json_preserves_reservation_presence() {
+        scenarios!(
+            run = |reservations_json| {
+                let json = format!(
+                    r#"{{
+                        "bmc_mac_address": "AA:BB:CC:DD:EE:FF",
+                        "bmc_username": "root",
+                        "bmc_password": "pass",
+                        "chassis_serial_number": "SN-1"
+                        {reservations_json}
+                    }}"#,
+                );
+                serde_json::from_str::<ExpectedMachineJson>(&json)
+                    .map(|machine| {
+                        machine
+                            .dpu_loopback_reservations
+                            .map(|list| list.reservations.len())
+                    })
+                    .map_err(drop)
+            };
+            "reservations omitted" {
+                "" => Yields(None),
+            }
+
+            "reservations explicitly null" {
+                r#", "dpu_loopback_reservations": null"# => Yields(None),
+            }
+
+            "bare empty array clears" {
+                r#", "dpu_loopback_reservations": []"# => Yields(Some(0)),
+            }
+
+            "wrapper empty list clears" {
+                r#", "dpu_loopback_reservations": {"reservations": []}"# => Yields(Some(0)),
+            }
+
+            "bare populated array replaces" {
+                r#", "dpu_loopback_reservations": [{"dpu_serial_number": "SER1", "loopback_ipv4": "192.0.2.10"}]"# =>
+                    Yields(Some(1)),
+            }
+
+            "wrapper populated list replaces" {
+                r#", "dpu_loopback_reservations": {"reservations": [{"dpu_serial_number": "SER1", "loopback_ipv6": "2001:db8::1"}]}"# =>
+                    Yields(Some(1)),
+            }
+        );
+    }
+
+    /// A file copied from `show --output json` (which emits the wrapper form)
+    /// deserializes back into the file shape without losing reservations.
+    #[test]
+    fn expected_machine_json_round_trips_reservations_from_show_output() {
+        let output = rpc::forge::ExpectedMachine {
+            bmc_mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
+            bmc_username: "root".to_string(),
+            bmc_password: "pass".to_string(),
+            chassis_serial_number: "SN-1".to_string(),
+            dpu_loopback_reservations: Some(rpc::forge::DpuLoopbackReservationList {
+                reservations: vec![rpc::forge::DpuLoopbackReservation {
+                    dpu_serial_number: "SER1".to_string(),
+                    loopback_ipv4: Some("192.0.2.10".to_string()),
+                    loopback_ipv6: None,
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&output).expect("RPC output should serialize");
+        let input = serde_json::from_str::<ExpectedMachineJson>(&json)
+            .expect("RPC output should deserialize as file input");
+
+        let reservations = input
+            .dpu_loopback_reservations
+            .expect("reservations preserved")
+            .reservations;
+        assert_eq!(reservations.len(), 1);
+        assert_eq!(reservations[0].dpu_serial_number, "SER1");
+        assert_eq!(reservations[0].loopback_ipv4.as_deref(), Some("192.0.2.10"));
     }
 
     #[test]

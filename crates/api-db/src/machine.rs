@@ -159,6 +159,7 @@ pub async fn get_or_create(
     common_pools: Option<&CommonPools>,
     stable_machine_id: &MachineId,
     interface: &MachineInterfaceSnapshot,
+    requested_loopback_v6: Option<Ipv6Addr>,
 ) -> DatabaseResult<AnyMachine> {
     let existing_machine =
         find_one(&mut *txn, stable_machine_id, MachineSearchConfig::default()).await?;
@@ -205,6 +206,7 @@ pub async fn get_or_create(
             state,
             None,
             CURRENT_STATE_MODEL_VERSION,
+            requested_loopback_v6,
         )
         .await?;
         crate::machine_interface::associate_interface_with_machine(
@@ -1845,6 +1847,7 @@ pub async fn create(
     state: ManagedHostState,
     expected_machine_data: Option<&ExpectedMachineData>,
     state_model_version: i16,
+    requested_loopback_v6: Option<Ipv6Addr>,
 ) -> DatabaseResult<AnyMachine> {
     let stable_machine_id_string = stable_machine_id.to_string();
 
@@ -1874,7 +1877,13 @@ pub async fn create(
     let loopback_ip_v6 = if stable_machine_id.machine_type() == MachineType::Dpu {
         match common_pools {
             Some(common_pools) => {
-                allocate_loopback_ip_v6(common_pools, txn, &stable_machine_id_string).await?
+                allocate_loopback_ip_v6(
+                    common_pools,
+                    txn,
+                    &stable_machine_id_string,
+                    requested_loopback_v6,
+                )
+                .await?
             }
             None => None,
         }
@@ -2675,11 +2684,17 @@ pub async fn find_dpu_infos(txn: &mut PgConnection) -> Result<Vec<DpuInfo>, Data
 /// field cannot give one DPU two `lo-ip` values. A duplicate reservation for
 /// the same owner is reported as inconsistent state rather than picking one.
 ///
+/// `requested_value` selects a specific operator-reserved address from the
+/// non-auto-assign partition; `None` preserves the historical automatic
+/// assignment. A value already owned by this DPU is reused regardless, so a
+/// re-ingested reservation stays idempotent.
+///
 /// If the pool exists but is empty or has en error, return that.
 pub async fn allocate_loopback_ip(
     common_pools: &CommonPools,
     txn: &mut PgConnection,
     owner_id: &str,
+    requested_value: Option<IpAddr>,
 ) -> Result<IpAddr, DatabaseError> {
     let pool = &common_pools.ethernet.pool_loopback_ip;
 
@@ -2699,7 +2714,7 @@ pub async fn allocate_loopback_ip(
         txn,
         resource_pool::OwnerType::Machine,
         owner_id,
-        None,
+        requested_value,
     )
     .await
     {
@@ -2732,13 +2747,16 @@ pub async fn allocate_loopback_ip(
 }
 
 /// Allocates one IPv6 underlay loopback when `lo-ip-v6` is configured.
-/// `None` preserves IPv4-only sites where the optional pool is absent;
-/// exhaustion remains an error so a configured site cannot silently leave a
-/// DPU without its reserved address.
+/// An absent pool yields `None`, preserving IPv4-only sites; exhaustion remains
+/// an error so a configured site cannot silently leave a DPU without its
+/// address. `requested_value` selects a specific operator-reserved address from
+/// the non-auto-assign partition, while `None` keeps the automatic assignment;
+/// a value already owned by this DPU is reused either way.
 pub async fn allocate_loopback_ip_v6(
     common_pools: &CommonPools,
     txn: &mut PgConnection,
     owner_id: &str,
+    requested_value: Option<Ipv6Addr>,
 ) -> Result<Option<Ipv6Addr>, DatabaseError> {
     let pool = &common_pools.ethernet.pool_loopback_ip_v6;
     if !crate::resource_pool::pool_has_rows(txn, pool.name()).await? {
@@ -2761,7 +2779,7 @@ pub async fn allocate_loopback_ip_v6(
         txn,
         resource_pool::OwnerType::Machine,
         owner_id,
-        None,
+        requested_value,
     )
     .await
     {
@@ -3275,6 +3293,7 @@ pub async fn update_dpu_loopback_ips_v6(
                 common_pools,
                 txn.as_pgconn(),
                 &dpu_machine_id.to_string(),
+                None,
             )
             .await?
             .ok_or_else(|| {
@@ -3741,6 +3760,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
 
@@ -3905,6 +3925,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
         txn.commit().await?;
@@ -4039,6 +4060,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
 
@@ -4108,6 +4130,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
         setup_txn.commit().await?;
@@ -4221,6 +4244,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
         setup_txn.commit().await?;
@@ -4329,6 +4353,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         ))
         .await;
         let machine = machine?;
@@ -4381,6 +4406,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
         txn.commit().await?;
@@ -4527,6 +4553,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
 
@@ -4614,7 +4641,7 @@ mod test {
         let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = pool.begin().await.unwrap();
         let id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
-        super::create(&mut txn, None, &id, ManagedHostState::Ready, None, 2).await?;
+        super::create(&mut txn, None, &id, ManagedHostState::Ready, None, 2, None).await?;
         super::set_firmware_autoupdate(&mut txn, &id, Some(true)).await?;
         txn.commit().await?;
         let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = pool.begin().await.unwrap();
@@ -4650,6 +4677,7 @@ mod test {
                 &common_pools,
                 txn.as_mut(),
                 &dpu_machine_id.to_string(),
+                None,
             )
             .await?,
             None
@@ -4662,6 +4690,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
         assert_eq!(dpu.network_config.loopback_ip_v6, None);
@@ -4688,6 +4717,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
         assert_eq!(
@@ -4697,9 +4727,13 @@ mod test {
         txn.commit().await?;
 
         let mut txn = pool.begin().await?;
-        let reused =
-            super::allocate_loopback_ip_v6(&common_pools, txn.as_mut(), &first_dpu_id.to_string())
-                .await?;
+        let reused = super::allocate_loopback_ip_v6(
+            &common_pools,
+            txn.as_mut(),
+            &first_dpu_id.to_string(),
+            None,
+        )
+        .await?;
         assert_eq!(reused, first_dpu.network_config.loopback_ip_v6);
         let stats_after_reuse = crate::resource_pool::stats(txn.as_mut(), LOOPBACK_IP_V6).await?;
         assert_eq!(stats_after_reuse.used, 1);
@@ -4714,6 +4748,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await
         .expect_err("a configured but exhausted IPv6 loopback pool must fail DPU creation");
@@ -4739,9 +4774,11 @@ mod test {
 
         let mut txn = pool.begin().await?;
         let allocated =
-            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_id.to_string()).await?;
+            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_id.to_string(), None)
+                .await?;
         let reused =
-            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_id.to_string()).await?;
+            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_id.to_string(), None)
+                .await?;
         assert_eq!(allocated, reused);
 
         let stats = crate::resource_pool::stats(txn.as_mut(), LOOPBACK_IP).await?;
@@ -4776,10 +4813,59 @@ mod test {
             .await?;
         }
 
-        let error = super::allocate_loopback_ip(&common_pools, txn.as_mut(), &owner_id)
+        let error = super::allocate_loopback_ip(&common_pools, txn.as_mut(), &owner_id, None)
             .await
             .expect_err("two lo-ip values owned by one DPU must be rejected as inconsistent state");
         assert!(matches!(error, crate::DatabaseError::FailedPrecondition(_)));
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A reserved (non-auto-assign) `lo-ip` value is handed to a new DPU exactly
+    /// as requested -- the requested-value wiring used when a DPU machine is
+    /// created. A DPU that already owns an address keeps it even when a later
+    /// reservation names a different value, so editing or adding a reservation
+    /// never readdresses a live DPU.
+    #[crate::sqlx_test]
+    async fn ipv4_loopback_requested_value_is_honored_and_never_readdresses(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let common_pools = common_pools(&pool, None).await?;
+        let reserved: IpAddr = "192.0.2.100".parse()?;
+        let other_reserved: IpAddr = "192.0.2.101".parse()?;
+
+        let mut txn = pool.begin().await?;
+        // Add two reservable (non-auto-assign) values alongside the auto-assign
+        // prefix `common_pools` seeds.
+        crate::resource_pool::populate(
+            &common_pools.ethernet.pool_loopback_ip,
+            txn.as_mut(),
+            vec![reserved, other_reserved],
+            false,
+        )
+        .await?;
+
+        // A new DPU receives exactly the reserved value.
+        let dpu_a =
+            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?
+                .to_string();
+        let allocated =
+            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_a, Some(reserved))
+                .await?;
+        assert_eq!(allocated, reserved);
+
+        // A second DPU auto-allocates first; a later reservation for a different
+        // value returns the already-owned address unchanged.
+        let dpu_b =
+            MachineId::from_str("fm100ds27v4uuq7sgs4gsjummskt0b3tedugtpevjrbfh6su081n9jufcq0")?
+                .to_string();
+        let auto = super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_b, None).await?;
+        assert_ne!(auto, other_reserved);
+        let after_reservation =
+            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_b, Some(other_reserved))
+                .await?;
+        assert_eq!(after_reservation, auto);
 
         txn.rollback().await?;
         Ok(())
@@ -4801,6 +4887,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
         let allocated = dpu
@@ -4854,6 +4941,7 @@ mod test {
             &common_pools,
             txn.as_mut(),
             &dpu_machine_id.to_string(),
+            None,
         )
         .await?;
         assert_eq!(reused, Some(allocated));
@@ -4886,6 +4974,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
         for dpu_machine_id in &dpu_machine_ids {
@@ -4896,6 +4985,7 @@ mod test {
                 ManagedHostState::Ready,
                 None,
                 2,
+                None,
             )
             .await?;
         }
@@ -4990,6 +5080,7 @@ mod test {
             ManagedHostState::ForceDeletion,
             None,
             2,
+            None,
         )
         .await?;
         txn.commit().await?;
@@ -5019,12 +5110,14 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
         let reserved = super::allocate_loopback_ip_v6(
             &common_pools,
             txn.as_mut(),
             &dpu_machine_id.to_string(),
+            None,
         )
         .await?
         .expect("configured pool should reserve an IPv6 loopback");
@@ -5103,6 +5196,7 @@ mod test {
                 ManagedHostState::Ready,
                 None,
                 2,
+                None,
             )
             .await?;
         }
