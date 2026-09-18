@@ -79,9 +79,18 @@ that contains `PowerState` for power, boot override, BIOS, and VirtualMedia
 requests.
 
 The default libvirt device targets are `sdb` for `Cd` and `sdc` for `ConfigCd`.
-Confirm those targets are unused with `virsh domblklist DOMAIN --details` before
-inserting media. HTTP or HTTPS ISO URLs must be reachable from the host running
-the QEMU process. File paths must exist in that host's filesystem.
+At startup the backend creates empty CD-ROM drives at those targets, or reuses
+drives with its matching `ua-bmc-mock-vmedia-*` aliases. It refuses to claim a
+target occupied by an unrelated device. Ejecting media leaves the empty drive
+attached. HTTP or HTTPS ISO URLs must be reachable from the host running the
+QEMU process. File paths must exist in that host's filesystem.
+
+Boot and VirtualMedia requests wait for their backend operations before
+publishing the new Redfish state. Unsupported requests return HTTP 400;
+backend failures return HTTP 500 and leave the previous Redfish state intact.
+After a backend failure, restoration of the previous libvirt configuration is
+best-effort; any restoration failure is logged. Power commands remain queued
+notifications and report execution failures in the backend log.
 
 ## Apply boot-order changes with libvirt
 

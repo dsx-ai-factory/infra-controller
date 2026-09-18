@@ -66,6 +66,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+pub mod actor;
 mod ipmi;
 pub mod ipmi_sim;
 pub mod libvirt;
@@ -253,6 +254,48 @@ impl fmt::Display for MockPowerState {
 // Simulate a 5-second power cycle
 pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 
+/// Desired media for one configured virtual drive.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VirtualMediaState {
+    /// Redfish virtual drive identifier, such as Cd or ConfigCd.
+    pub device_id: String,
+    /// None ejects the image without removing the drive.
+    pub image: Option<String>,
+    /// Whether the inserted image is read-only.
+    pub write_protected: bool,
+}
+
+/// Failure while applying virtual media.
+#[derive(Debug, thiserror::Error)]
+pub enum SetVirtualMediaError {
+    /// The requested media cannot be represented by this backend.
+    #[error("invalid virtual media request: {0}")]
+    BadRequest(String),
+    /// An external operation failed; the request must not publish the desired state.
+    #[error("could not apply virtual media: {0}")]
+    Backend(String),
+}
+
+/// Effective boot settings supplied to a machine backend.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BootConfig {
+    /// Persistent boot device; None leaves the domain's saved boot order unchanged.
+    pub persistent_boot_selection: Option<BootOptionKind>,
+    /// Complete Redfish BootSourceOverride fields, not a partial PATCH.
+    pub boot_source_override: serde_json::Value,
+}
+
+/// Failure while applying boot settings.
+#[derive(Debug, thiserror::Error)]
+pub enum SetBootConfigError {
+    /// The requested boot settings are unsupported by this backend.
+    #[error("invalid boot configuration: {0}")]
+    BadRequest(String),
+    /// An external operation failed; the request must not publish the desired state.
+    #[error("could not apply boot configuration: {0}")]
+    Backend(String),
+}
+
 /// Backend operations for one BMC, selected by the router's concrete callback type.
 pub trait Callbacks: std::fmt::Debug + Send + Sync + 'static {
     fn get_power_state(&self) -> MockPowerState;
@@ -281,6 +324,23 @@ pub trait Callbacks: std::fmt::Debug + Send + Sync + 'static {
         self.send_power_command(reset_type)
     }
 
+    /// Applies media before the request commits its in-memory state.
+    fn set_virtual_media(
+        &self,
+        _state: VirtualMediaState,
+    ) -> impl Future<Output = Result<(), SetVirtualMediaError>> + Send {
+        async { Ok(()) }
+    }
+
+    /// Applies the complete effective boot configuration before committing it.
+    fn set_boot_config(
+        &self,
+        _config: BootConfig,
+    ) -> impl Future<Output = Result<(), SetBootConfigError>> + Send {
+        async { Ok(()) }
+    }
+
+    /// Notification only: fallible operations belong in the operation callbacks.
     fn state_refresh_indication(&self);
 }
 
