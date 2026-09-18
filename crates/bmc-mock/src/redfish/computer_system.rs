@@ -26,13 +26,14 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use serde_json::json;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch, json_patch};
 use crate::redfish::Builder;
 use crate::{
-    BootOptionKind, Callbacks, MachineRouterOptions, MockPowerState, POWER_CYCLE_DELAY,
-    SetSystemPowerError, http, redfish,
+    BootConfig, BootOptionKind, Callbacks, MachineRouterOptions, MockPowerState, POWER_CYCLE_DELAY,
+    SetBootConfigError, SetSystemPowerError, http, redfish,
 };
 
 pub(super) fn collection() -> redfish::Collection<'static> {
@@ -236,11 +237,41 @@ pub struct SystemState<C: Callbacks> {
     systems: Vec<SingleSystemState<C>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct BootSourceOverride {
     mode: Option<String>,
     enabled: Option<String>,
     target: Option<String>,
+}
+
+impl BootSourceOverride {
+    fn to_json(&self) -> serde_json::Value {
+        let value = [
+            ("BootSourceOverrideMode", &self.mode),
+            ("BootSourceOverrideEnabled", &self.enabled),
+            ("BootSourceOverrideTarget", &self.target),
+        ]
+        .into_iter()
+        .fold(serde_json::Map::new(), |mut object, (key, value)| {
+            if let Some(value) = value {
+                object.insert(key.to_string(), serde_json::Value::String(value.clone()));
+            }
+            object
+        });
+        serde_json::Value::Object(value)
+    }
+
+    fn apply(&mut self, boot: &serde_json::Value) {
+        for (key, field) in [
+            ("BootSourceOverrideMode", &mut self.mode),
+            ("BootSourceOverrideEnabled", &mut self.enabled),
+            ("BootSourceOverrideTarget", &mut self.target),
+        ] {
+            if let Some(value) = boot.get(key) {
+                *field = value.as_str().map(ToString::to_string);
+            }
+        }
+    }
 }
 
 pub(crate) struct SingleSystemState<C: Callbacks> {
@@ -253,6 +284,7 @@ pub(crate) struct SingleSystemState<C: Callbacks> {
     hpe_boot_order_override: Mutex<Option<Vec<String>>>,
     boot_option_overrides: Mutex<HashMap<String, serde_json::Value>>,
     boot_source_override: Mutex<BootSourceOverride>,
+    boot_update: AsyncMutex<()>,
     secure_boot_enabled: Arc<AtomicBool>,
     bios_overrides: Arc<Mutex<serde_json::Value>>,
 }
@@ -411,6 +443,7 @@ impl<C: Callbacks> SingleSystemState<C> {
             hpe_boot_order_override: Mutex::new(None),
             boot_option_overrides: Mutex::new(HashMap::new()),
             boot_source_override: Mutex::new(BootSourceOverride::default()),
+            boot_update: AsyncMutex::new(()),
             secure_boot_enabled: Arc::new(AtomicBool::new(false)),
             bios_overrides: Arc::new(Mutex::new(serde_json::json!({}))),
         }
@@ -516,51 +549,41 @@ impl<C: Callbacks> SingleSystemState<C> {
     }
 
     pub(crate) fn boot_source_override(&self) -> serde_json::Value {
-        let boot_source_override = self.boot_source_override.lock().unwrap();
-        let mut value = serde_json::Map::new();
-        if let Some(mode) = &boot_source_override.mode {
-            value.insert(
-                "BootSourceOverrideMode".to_string(),
-                serde_json::Value::String(mode.clone()),
-            );
-        }
-        if let Some(enabled) = &boot_source_override.enabled {
-            value.insert(
-                "BootSourceOverrideEnabled".to_string(),
-                serde_json::Value::String(enabled.clone()),
-            );
-        }
-        if let Some(target) = &boot_source_override.target {
-            value.insert(
-                "BootSourceOverrideTarget".to_string(),
-                serde_json::Value::String(target.clone()),
-            );
-        }
-        serde_json::Value::Object(value)
+        self.boot_source_override.lock().unwrap().to_json()
     }
 
-    fn apply_boot_source_override(&self, boot: &serde_json::Value) {
-        let has_override = [
-            "BootSourceOverrideMode",
-            "BootSourceOverrideEnabled",
-            "BootSourceOverrideTarget",
-        ]
-        .iter()
-        .any(|field| boot.get(field).is_some());
-        if !has_override {
-            return;
+    /// Apply backend changes before publishing any of the requested boot fields.
+    async fn update_boot_config(
+        &self,
+        boot: Option<&serde_json::Value>,
+        order: Option<Vec<String>>,
+        hpe_order: Option<Vec<String>>,
+    ) -> Result<(), SetBootConfigError> {
+        let _update = self.boot_update.lock().await;
+        let mut source = self.boot_source_override.lock().unwrap().clone();
+        if let Some(boot) = boot {
+            source.apply(boot);
         }
-
-        let mut boot_source_override = self.boot_source_override.lock().unwrap();
-        if let Some(value) = boot.get("BootSourceOverrideMode") {
-            boot_source_override.mode = value.as_str().map(ToString::to_string);
+        let current_order = self.boot_order_override();
+        let current_hpe_order = self.hpe_boot_order_override.lock().unwrap().clone();
+        let desired = BootConfig {
+            persistent_boot_selection: self.resolve_persistent_boot_selection_from(
+                order.as_deref().or(current_order.as_deref()),
+                hpe_order.as_deref().or(current_hpe_order.as_deref()),
+            ),
+            boot_source_override: source.to_json(),
+        };
+        if let Some(callbacks) = self.config.callbacks.as_ref() {
+            callbacks.set_boot_config(desired).await?;
         }
-        if let Some(value) = boot.get("BootSourceOverrideEnabled") {
-            boot_source_override.enabled = value.as_str().map(ToString::to_string);
+        if let Some(order) = order {
+            self.set_boot_order_override(order);
         }
-        if let Some(value) = boot.get("BootSourceOverrideTarget") {
-            boot_source_override.target = value.as_str().map(ToString::to_string);
+        if let Some(order) = hpe_order {
+            self.set_hpe_boot_order(order);
         }
+        *self.boot_source_override.lock().unwrap() = source;
+        Ok(())
     }
 
     /// Resolve the first configured HPE OEM boot entry, then standard
@@ -569,10 +592,18 @@ impl<C: Callbacks> SingleSystemState<C> {
     /// leave domain configuration unchanged in that case. Temporary overrides
     /// are excluded.
     pub(crate) fn resolve_persistent_boot_selection(&self) -> Option<BootOptionKind> {
-        self.hpe_boot_order_override
-            .lock()
-            .unwrap()
-            .as_ref()
+        self.resolve_persistent_boot_selection_from(
+            self.boot_order_override().as_deref(),
+            self.hpe_boot_order_override.lock().unwrap().as_deref(),
+        )
+    }
+
+    fn resolve_persistent_boot_selection_from(
+        &self,
+        order: Option<&[String]>,
+        hpe_order: Option<&[String]>,
+    ) -> Option<BootOptionKind> {
+        hpe_order
             .and_then(|order| {
                 order.iter().find_map(|entry| {
                     let (kind, reference) = entry
@@ -592,7 +623,7 @@ impl<C: Callbacks> SingleSystemState<C> {
                 })
             })
             .or_else(|| {
-                self.boot_order_override().and_then(|overrides| {
+                order.and_then(|overrides| {
                     overrides.first().and_then(|optref| {
                         self.config
                             .boot_options
@@ -819,36 +850,42 @@ async fn get_ethernet_interface_collection<C: Callbacks>(
         .into_ok_response()
 }
 
+fn requested_boot_order(boot: &serde_json::Value) -> Option<Vec<String>> {
+    boot.get("BootOrder")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+}
+
+fn boot_error_response(error: SetBootConfigError) -> Response {
+    let status = match &error {
+        SetBootConfigError::BadRequest(_) => StatusCode::BAD_REQUEST,
+        SetBootConfigError::Backend(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    json!({"error": error.to_string()}).into_response(status)
+}
+
 async fn patch_settings<C: Callbacks>(
     State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
-    Json(patch_settings): Json<serde_json::Value>,
+    Json(request): Json<serde_json::Value>,
 ) -> Response {
-    let Some(system_state) = state.system_state.find(&system_id) else {
+    let Some(system) = state.system_state.find(&system_id) else {
         return http::not_found();
     };
-    if let Some(boot) = patch_settings.get("Boot") {
-        if let Some(new_boot_order) = boot
-            .get("BootOrder")
-            .and_then(serde_json::Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(ToString::to_string)
-                    .collect()
-            })
-        {
-            match system_state.config.boot_order_mode {
-                BootOrderMode::ViaSettings => {
-                    system_state.set_boot_order_override(new_boot_order);
-                }
-                _ => {
-                    return json!("Boot order setup must use ComputerSystem resource")
-                        .into_response(StatusCode::BAD_REQUEST);
-                }
-            }
+    if let Some(boot) = request.get("Boot") {
+        let order = requested_boot_order(boot);
+        if order.is_some() && system.config.boot_order_mode != BootOrderMode::ViaSettings {
+            return json!("Boot order setup must use ComputerSystem resource")
+                .into_response(StatusCode::BAD_REQUEST);
         }
-        system_state.apply_boot_source_override(boot);
+        if let Err(error) = system.update_boot_config(Some(boot), order, None).await {
+            return boot_error_response(error);
+        }
     }
     json!({}).into_ok_response()
 }
@@ -856,44 +893,28 @@ async fn patch_settings<C: Callbacks>(
 async fn patch_system<C: Callbacks>(
     State(state): State<BmcState<C>>,
     Path(system_id): Path<String>,
-    Json(patch_system): Json<serde_json::Value>,
+    Json(request): Json<serde_json::Value>,
 ) -> Response {
-    let Some(system_state) = state.system_state.find(&system_id) else {
+    let Some(system) = state.system_state.find(&system_id) else {
         return http::not_found();
     };
-    let boot = patch_system.get("Boot");
-    let response = if let Some(new_boot_order) = boot
-        .and_then(|obj| obj.get("BootOrder"))
-        .and_then(serde_json::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(ToString::to_string)
-                .collect()
-        }) {
-        match system_state.config.boot_order_mode {
-            BootOrderMode::OrderedCollection => {
-                system_state.set_boot_order_override(new_boot_order);
-                if matches!(&state.oem_state, redfish::oem::State::DellIdrac(_)) {
-                    redfish::oem::dell::idrac::create_job_with_location(state.clone())
-                } else {
-                    json!({}).into_ok_response()
-                }
-            }
-            BootOrderMode::ViaSettings => json!("Boot order setup must use Settings resource")
-                .into_response(StatusCode::BAD_REQUEST),
-            BootOrderMode::Generic => {
-                system_state.set_boot_order_override(new_boot_order);
-                json!({}).into_ok_response()
-            }
+    if let Some(boot) = request.get("Boot") {
+        let order = requested_boot_order(boot);
+        if order.is_some() && system.config.boot_order_mode == BootOrderMode::ViaSettings {
+            return json!("Boot order setup must use Settings resource")
+                .into_response(StatusCode::BAD_REQUEST);
         }
-    } else {
-        json!({}).into_ok_response()
-    };
-    if let Some(boot) = boot {
-        system_state.apply_boot_source_override(boot);
+        let create_job = order.is_some()
+            && system.config.boot_order_mode == BootOrderMode::OrderedCollection
+            && matches!(&state.oem_state, redfish::oem::State::DellIdrac(_));
+        if let Err(error) = system.update_boot_config(Some(boot), order, None).await {
+            return boot_error_response(error);
+        }
+        if create_job {
+            return redfish::oem::dell::idrac::create_job_with_location(state.clone());
+        }
     }
-    response
+    json!({}).into_ok_response()
 }
 
 async fn post_reset_system<C: Callbacks>(
@@ -922,6 +943,7 @@ async fn post_reset_system<C: Callbacks>(
     // introduce a deadlock if the API server holds a lock on the row for this machine
     // while issuing a redfish call, and MachineStateMachine is blocked waiting for the row lock
     // to be released.
+    let _update = system_state.boot_update.lock().await;
     match callbacks.set_power_state(reset_type) {
         Ok(_) => {
             state.record_event(redfish::log_service::LogEntryDraft::reset_requested(
@@ -1063,7 +1085,12 @@ async fn patch_hpe_boot_settings<C: Callbacks>(
     let Some(system_state) = state.system_state.find(&system_id) else {
         return http::not_found();
     };
-    system_state.set_hpe_boot_order(request.persistent_boot_config_order);
+    if let Err(error) = system_state
+        .update_boot_config(None, None, Some(request.persistent_boot_config_order))
+        .await
+    {
+        return boot_error_response(error);
+    }
     json!({}).into_ok_response()
 }
 
@@ -1505,7 +1532,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::{NoopCallbacks, host_info};
-    use crate::{HardwareType, MachineRouterOptions, machine_router};
+    use crate::{HardwareType, MachineRouterOptions, SystemPowerControl, machine_router};
 
     /// Reads one successful JSON response from the in-process mock router.
     async fn get_json(router: &Router, path: &str) -> serde_json::Value {
@@ -1567,6 +1594,115 @@ mod tests {
             false,
             MachineRouterOptions::default(),
         )
+    }
+
+    #[derive(Debug)]
+    struct RejectBootConfig {
+        bad_request: bool,
+        requested: Mutex<Vec<BootConfig>>,
+    }
+
+    impl Callbacks for RejectBootConfig {
+        fn get_power_state(&self) -> MockPowerState {
+            MockPowerState::Off
+        }
+
+        fn send_power_command(
+            &self,
+            _reset_type: SystemPowerControl,
+        ) -> Result<(), SetSystemPowerError> {
+            Ok(())
+        }
+
+        fn state_refresh_indication(&self) {}
+
+        async fn set_boot_config(&self, config: BootConfig) -> Result<(), SetBootConfigError> {
+            self.requested.lock().unwrap().push(config);
+            Err(if self.bad_request {
+                SetBootConfigError::BadRequest("unsupported boot configuration".into())
+            } else {
+                SetBootConfigError::Backend("could not save boot configuration".into())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_boot_callbacks_leave_each_boot_resource_unchanged() {
+        let cases = [
+            (
+                HardwareType::DellPowerEdgeR750,
+                StatusCode::BAD_REQUEST,
+                "/redfish/v1/Systems/System.Embedded.1",
+                json!({"Boot": {
+                    "BootSourceOverrideEnabled": "Once",
+                    "BootSourceOverrideTarget": "Cd",
+                }}),
+            ),
+            (
+                HardwareType::WiwynnGB200Nvl,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "/redfish/v1/Systems/System_0/Settings",
+                json!({"Boot": {"BootOrder": ["Boot0020"]}}),
+            ),
+            (
+                HardwareType::HpeProliantDl380aGen11,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "/redfish/v1/Systems/1/Bios/oem/hpe/boot/settings",
+                json!({"PersistentBootConfigOrder": ["HD.BootOption.Boot0001"]}),
+            ),
+        ];
+        for (hardware, expected_status, path, request) in cases {
+            let callbacks = Arc::new(RejectBootConfig {
+                bad_request: expected_status == StatusCode::BAD_REQUEST,
+                requested: Mutex::new(Vec::new()),
+            });
+            let (router, state) = machine_router(
+                &host_info(hardware),
+                callbacks.clone(),
+                String::new(),
+                false,
+                MachineRouterOptions::default(),
+            );
+            let system = state.system_state.controlled_system().unwrap();
+            let snapshot = || {
+                (
+                    system.boot_source_override(),
+                    system.boot_order_override(),
+                    system.hpe_boot_order(),
+                )
+            };
+            let before = snapshot();
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method(Method::PATCH)
+                        .uri(path)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(request.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status, "{path}");
+            assert_eq!(snapshot(), before, "{path}");
+            let requested = callbacks.requested.lock().unwrap();
+            assert_eq!(requested.len(), 1, "{path}");
+            if request["Boot"].get("BootSourceOverrideTarget").is_some() {
+                assert_eq!(
+                    requested[0].boot_source_override["BootSourceOverrideTarget"],
+                    "Cd"
+                );
+                assert_eq!(
+                    requested[0].boot_source_override["BootSourceOverrideEnabled"],
+                    "Once"
+                );
+            } else {
+                assert_eq!(
+                    requested[0].persistent_boot_selection,
+                    Some(BootOptionKind::Disk)
+                );
+            }
+        }
     }
 
     #[tokio::test]

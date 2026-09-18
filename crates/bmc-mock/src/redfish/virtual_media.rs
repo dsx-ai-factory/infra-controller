@@ -20,13 +20,14 @@ use std::sync::Mutex;
 
 use axum::Router;
 use axum::extract::{Json, Path, State};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::json;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
-use crate::{Callbacks, http, redfish};
+use crate::{Callbacks, SetVirtualMediaError, VirtualMediaState as CallbackState, http, redfish};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceConfig {
@@ -45,6 +46,7 @@ struct Media {
 struct DeviceState {
     config: DeviceConfig,
     media: Mutex<Media>,
+    update: AsyncMutex<()>,
 }
 
 pub(crate) struct VirtualMediaState {
@@ -62,6 +64,7 @@ impl VirtualMediaState {
                         write_protected: true,
                         ..Default::default()
                     }),
+                    update: AsyncMutex::new(()),
                 })
                 .collect(),
         }
@@ -73,8 +76,11 @@ impl VirtualMediaState {
             .find(|device| device.config.id == device_id)
     }
 
-    pub(crate) fn desired_state(&self) -> Vec<serde_json::Value> {
-        self.devices.iter().map(DeviceState::state_json).collect()
+    pub(crate) fn desired_state(&self) -> Vec<CallbackState> {
+        self.devices
+            .iter()
+            .map(DeviceState::callback_state)
+            .collect()
     }
 }
 
@@ -198,12 +204,16 @@ async fn insert_media<C: Callbacks>(
         None => true,
         Some(_) => return http::bad_request("WriteProtected must be a boolean"),
     };
-    *device.media.lock().expect("mutex poisoned") = Media {
-        image: Some(image.to_string()),
-        inserted: true,
-        write_protected,
-    };
-    http::ok_no_content()
+    update_media(
+        state.callbacks.as_deref(),
+        device,
+        Media {
+            image: Some(image.to_string()),
+            inserted: true,
+            write_protected,
+        },
+    )
+    .await
 }
 
 async fn eject_media<C: Callbacks>(
@@ -218,14 +228,59 @@ async fn eject_media<C: Callbacks>(
     else {
         return http::not_found();
     };
-    *device.media.lock().expect("mutex poisoned") = Media {
-        write_protected: true,
-        ..Default::default()
-    };
+    update_media(
+        state.callbacks.as_deref(),
+        device,
+        Media {
+            write_protected: true,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+async fn update_media<C: Callbacks>(
+    callbacks: Option<&C>,
+    device: &DeviceState,
+    desired: Media,
+) -> Response {
+    let _update = device.update.lock().await;
+    if let Some(callbacks) = callbacks
+        && let Err(error) = callbacks
+            .set_virtual_media(CallbackState {
+                device_id: device.config.id.to_string(),
+                image: desired.image.clone(),
+                write_protected: desired.write_protected,
+            })
+            .await
+    {
+        tracing::error!(
+            device_id = %device.config.id,
+            error = %error,
+            "could not apply virtual media state",
+        );
+        return match error {
+            SetVirtualMediaError::BadRequest(message) => http::bad_request(&message),
+            SetVirtualMediaError::Backend(_) => {
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        };
+    }
+
+    *device.media.lock().expect("mutex poisoned") = desired;
     http::ok_no_content()
 }
 
 impl DeviceState {
+    fn callback_state(&self) -> CallbackState {
+        let media = self.media.lock().expect("mutex poisoned");
+        CallbackState {
+            device_id: self.config.id.to_string(),
+            image: media.image.clone(),
+            write_protected: media.write_protected,
+        }
+    }
+
     fn state_json(&self) -> serde_json::Value {
         let media = self.media.lock().expect("mutex poisoned");
         json!({
@@ -261,6 +316,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
+    use futures::FutureExt;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -299,14 +355,22 @@ mod tests {
 
     fn test_router_for(hardware_type: HardwareType) -> (Router, Arc<RecordingCallbacks>) {
         let callbacks = Arc::new(RecordingCallbacks::default());
-        let router = machine_router(
+        let router = router_for_callbacks(hardware_type, callbacks.clone());
+        (router, callbacks)
+    }
+
+    fn router_for_callbacks<C: Callbacks>(
+        hardware_type: HardwareType,
+        callbacks: Arc<C>,
+    ) -> Router {
+        machine_router(
             &host_info(hardware_type),
-            callbacks.clone(),
+            callbacks,
             "test-host-id".to_string(),
             false,
             MachineRouterOptions {
-                event_service: crate::EventServiceOverride::Profile,
                 bmc_reset_duration: None,
+                event_service: crate::EventServiceOverride::Profile,
                 virtual_media_devices: Some(vec![
                     DeviceConfig {
                         id: "Cd".into(),
@@ -321,8 +385,7 @@ mod tests {
                 ]),
             },
         )
-        .0;
-        (router, callbacks)
+        .0
     }
 
     #[tokio::test]
@@ -440,6 +503,88 @@ mod tests {
         assert_eq!(body.unwrap()["Inserted"], false);
 
         assert_eq!(callbacks.refresh_count.load(Ordering::Relaxed), 3);
+    }
+
+    #[derive(Debug)]
+    struct FailingFirstMediaUpdate {
+        update_count: AtomicUsize,
+        release_first: tokio::sync::Notify,
+    }
+
+    impl Callbacks for FailingFirstMediaUpdate {
+        fn get_power_state(&self) -> MockPowerState {
+            MockPowerState::Off
+        }
+
+        fn send_power_command(
+            &self,
+            _reset_type: SystemPowerControl,
+        ) -> Result<(), SetSystemPowerError> {
+            Ok(())
+        }
+
+        async fn set_virtual_media(
+            &self,
+            _state: CallbackState,
+        ) -> Result<(), SetVirtualMediaError> {
+            let update = self.update_count.fetch_add(1, Ordering::SeqCst);
+            if update != 0 {
+                return Ok(());
+            }
+            self.release_first.notified().await;
+            Err(SetVirtualMediaError::Backend(
+                "injected virtual-media failure".to_string(),
+            ))
+        }
+
+        fn state_refresh_indication(&self) {}
+    }
+
+    #[tokio::test]
+    async fn failed_callback_does_not_commit_or_overwrite_a_concurrent_media_change() {
+        let callbacks = Arc::new(FailingFirstMediaUpdate {
+            update_count: AtomicUsize::new(0),
+            release_first: tokio::sync::Notify::new(),
+        });
+        let router = router_for_callbacks(HardwareType::DellPowerEdgeR750, callbacks.clone());
+        let media = "/redfish/v1/Systems/System.Embedded.1/VirtualMedia/Cd";
+        let first_router = router.clone();
+        let mut first = Box::pin(async move {
+            request(
+                &first_router,
+                Method::POST,
+                &format!("{media}/Actions/VirtualMedia.InsertMedia"),
+                Some(json!({"Image": "/tmp/first.iso"})),
+            )
+            .await
+        });
+        assert!(first.as_mut().now_or_never().is_none());
+        assert_eq!(callbacks.update_count.load(Ordering::SeqCst), 1);
+
+        let (_, body) = request(&router, Method::GET, media, None).await;
+        let body = body.unwrap();
+        assert_eq!(body["Image"], serde_json::Value::Null);
+        assert_eq!(body["Inserted"], false);
+
+        let second_router = router.clone();
+        let mut second = Box::pin(async move {
+            request(
+                &second_router,
+                Method::POST,
+                &format!("{media}/Actions/VirtualMedia.InsertMedia"),
+                Some(json!({"Image": "/tmp/second.iso"})),
+            )
+            .await
+        });
+        assert!(second.as_mut().now_or_never().is_none());
+        assert_eq!(callbacks.update_count.load(Ordering::SeqCst), 1);
+        callbacks.release_first.notify_one();
+
+        assert_eq!(first.await.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(second.await.0, StatusCode::NO_CONTENT);
+        let (_, body) = request(&router, Method::GET, media, None).await;
+        assert_eq!(body.unwrap()["Image"], "/tmp/second.iso");
+        assert_eq!(callbacks.update_count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

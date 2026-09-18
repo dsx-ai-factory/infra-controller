@@ -35,7 +35,8 @@ use url::Url;
 use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult};
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
 use crate::{
-    BmcState, BootOptionKind, Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl,
+    BmcState, BootConfig, BootOptionKind, Callbacks, MockPowerState, SetBootConfigError,
+    SetSystemPowerError, SetVirtualMediaError, SystemPowerControl, VirtualMediaState,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -68,8 +69,9 @@ pub struct Config {
 /// Power reads return the last observation, initially Off, updated at actor startup
 /// and after power commands, binding, and refresh notifications. Power commands
 /// return once enqueued; execution failures are logged by the actor.
-/// Dropping the handle cancels the actor. Once binding starts, it finishes even if
-/// its caller stops awaiting the reply, to avoid interrupting XML updates.
+/// Boot and media callbacks wait for the actor's result. Queued requests whose
+/// callers have gone away are skipped; started operations finish even if their
+/// callers stop waiting. Dropping the handle cancels the actor.
 #[derive(Debug)]
 pub struct LibvirtCallbacks {
     mailbox: ActorMailbox<LibvirtMessage>,
@@ -88,6 +90,14 @@ enum LibvirtMessage {
     SendPowerCommand {
         reset_type: SystemPowerControl,
     },
+    SetBootConfig {
+        config: BootConfig,
+        reply: oneshot::Sender<Result<(), SetBootConfigError>>,
+    },
+    SetVirtualMedia {
+        state: VirtualMediaState,
+        reply: oneshot::Sender<Result<(), SetVirtualMediaError>>,
+    },
     Refresh,
 }
 
@@ -100,11 +110,10 @@ struct LibvirtBackend {
     power_state: Arc<RwLock<MockPowerState>>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default)]
 struct AppliedState {
-    persistent_boot_selection: Option<BootOptionKind>,
-    boot_source_override: serde_json::Value,
-    virtual_media: BTreeMap<String, serde_json::Value>,
+    boot: Option<BootConfig>,
+    virtual_media: BTreeMap<String, VirtualMediaState>,
 }
 
 impl LibvirtCallbacks {
@@ -137,16 +146,17 @@ impl LibvirtCallbacks {
         }
     }
 
-    /// Binds this backend to the generated BMC state and applies its initial
-    /// persistent boot selection to the inactive libvirt domain XML.
+    /// Binds this backend to the generated BMC state, provisions its virtual
+    /// CD-ROM drives, and applies the initial media and boot configuration.
     ///
-    /// Binding succeeds at most once. An initial boot-selection failure leaves
-    /// the backend unbound so the caller can retry.
+    /// Binding succeeds at most once. Failure leaves the backend unbound so the
+    /// caller can retry; drives already provisioned are reused on retry.
     ///
     /// # Errors
     ///
     /// Returns an error when the BMC has no controlled `ComputerSystem`, this
-    /// backend is already bound, or libvirt cannot apply the initial selection.
+    /// backend is already bound, a drive target belongs to another device, the
+    /// actor has stopped, or libvirt cannot apply the initial configuration.
     pub async fn bind_state(&self, state: &BmcState<Self>) -> Result<(), String> {
         let (reply, response) = oneshot::channel();
         self.mailbox
@@ -174,7 +184,15 @@ impl LibvirtBackend {
             return Err("libvirt backend state is already bound".to_string());
         }
         let applied = AppliedState::from(controlled_system);
-        self.set_persistent_boot_selection(applied.persistent_boot_selection)
+        for media in applied.virtual_media.values() {
+            self.ensure_virtual_media_device(&media.device_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            self.apply_virtual_media(media)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        self.apply_boot_config(applied.boot.as_ref().expect("initial boot configuration"))
             .await
             .map_err(|error| error.to_string())?;
         self.system_state = Some(state);
@@ -259,6 +277,9 @@ impl LibvirtBackend {
         self.domain_command("start").await?;
         let restore_boot = std::mem::take(&mut self.restore_boot_after_power_on);
         if restore_boot {
+            if let Some(boot) = self.applied_state.boot.as_mut() {
+                boot.boot_source_override["BootSourceOverrideEnabled"] = "Disabled".into();
+            }
             if let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) {
                 system_state.on_boot_completed();
             }
@@ -268,19 +289,16 @@ impl LibvirtBackend {
     }
 
     async fn restore_persistent_boot_order(&self) -> Result<(), SetSystemPowerError> {
-        let selection = self
-            .system_state
-            .as_ref()
-            .and_then(Weak::upgrade)
-            .and_then(|state| {
-                state
-                    .controlled_system()
-                    .and_then(SingleSystemState::resolve_persistent_boot_selection)
-            });
-        self.set_persistent_boot_selection(selection).await
+        self.set_persistent_boot_selection(self.effective_boot_config()?.persistent_boot_selection)
+            .await
     }
 
-    async fn reapply_effective_boot_order(&mut self) -> Result<(), SetSystemPowerError> {
+    fn effective_boot_config(&self) -> Result<BootConfig, SetSystemPowerError> {
+        // The actor may process an IPMI power command before the HTTP task has
+        // published a successful boot callback's result into Redfish state.
+        if let Some(config) = &self.applied_state.boot {
+            return Ok(config.clone());
+        }
         let Some(state) = self.system_state.as_ref().and_then(Weak::upgrade) else {
             return Err(SetSystemPowerError::CommandSendError(
                 "libvirt backend is not bound to BMC mock state".to_string(),
@@ -291,13 +309,14 @@ impl LibvirtBackend {
                 "BMC mock state has no controlled ComputerSystem".to_string(),
             ));
         };
-        let boot_source_override = system.boot_source_override();
-        if boot_source_override_is_active(&boot_source_override) {
-            self.set_boot_source_override(&boot_source_override).await
-        } else {
-            self.set_persistent_boot_selection(system.resolve_persistent_boot_selection())
-                .await
-        }
+        Ok(BootConfig {
+            persistent_boot_selection: system.resolve_persistent_boot_selection(),
+            boot_source_override: system.boot_source_override(),
+        })
+    }
+
+    async fn reapply_effective_boot_order(&mut self) -> Result<(), SetSystemPowerError> {
+        self.apply_boot_config(&self.effective_boot_config()?).await
     }
 
     async fn set_persistent_boot_selection(
@@ -353,29 +372,131 @@ impl LibvirtBackend {
             })
     }
 
-    async fn target_is_attached(&self, target: &str) -> Result<bool, VirtualMediaError> {
+    async fn domain_xml(&self, inactive: bool) -> Result<String, VirtualMediaError> {
+        let arguments = if inactive {
+            vec!["dumpxml", "--inactive", self.config.domain.as_str()]
+        } else {
+            vec!["dumpxml", self.config.domain.as_str()]
+        };
         let output = self
-            .virsh(&["domblklist", "--details", &self.config.domain])
+            .virsh(&arguments)
             .await
             .map_err(VirtualMediaError::Command)?;
-        let output = String::from_utf8(output.stdout).map_err(|error| {
-            VirtualMediaError::Command(format!("virsh domblklist returned invalid UTF-8: {error}"))
-        })?;
-        Ok(output.lines().any(|line| {
-            line.split_whitespace()
-                .nth(2)
-                .is_some_and(|value| value == target)
-        }))
+        String::from_utf8(output.stdout).map_err(|error| {
+            VirtualMediaError::Command(format!("virsh dumpxml returned invalid UTF-8: {error}"))
+        })
     }
 
-    async fn detach_target(&self, target: &str) -> VirtualMediaResult {
-        if !self.target_is_attached(target).await? {
+    async fn require_owned_target(
+        &self,
+        device_id: &str,
+        target: &str,
+        inactive: bool,
+    ) -> VirtualMediaResult {
+        let xml = self.domain_xml(inactive).await?;
+        match virtual_media_target_ownership(&xml, device_id, target)
+            .map_err(VirtualMediaError::Command)?
+        {
+            TargetOwnership::Owned => Ok(()),
+            TargetOwnership::Missing => Err(VirtualMediaError::Command(format!(
+                "libvirt domain {} has no {} virtual-media CD-ROM at target {target}",
+                self.config.domain,
+                if inactive { "persistent" } else { "live" },
+            ))),
+            TargetOwnership::Foreign { device, bus, alias } => {
+                Err(VirtualMediaError::Command(format!(
+                    "libvirt target {target} is already used by an unowned device (device={}, bus={}, alias={})",
+                    device.as_deref().unwrap_or("unknown"),
+                    bus.as_deref().unwrap_or("unknown"),
+                    alias.as_deref().unwrap_or("none"),
+                )))
+            }
+        }
+    }
+
+    async fn ensure_virtual_media_device(&self, device_id: &str) -> VirtualMediaResult {
+        let target = self.target_for_device(device_id)?;
+        let xml = self.domain_xml(true).await?;
+        let persistent_owned = match virtual_media_target_ownership(&xml, device_id, target)
+            .map_err(VirtualMediaError::Command)?
+        {
+            TargetOwnership::Owned => true,
+            TargetOwnership::Foreign { device, bus, alias } => {
+                return Err(VirtualMediaError::Command(format!(
+                    "refusing to claim libvirt target {target} in persistent configuration: it is already used by an unowned device (device={}, bus={}, alias={})",
+                    device.as_deref().unwrap_or("unknown"),
+                    bus.as_deref().unwrap_or("unknown"),
+                    alias.as_deref().unwrap_or("none"),
+                )));
+            }
+            TargetOwnership::Missing => false,
+        };
+        let active = self.domain_is_active().await?;
+        let live_owned = if active {
+            let xml = self.domain_xml(false).await?;
+            match virtual_media_target_ownership(&xml, device_id, target)
+                .map_err(VirtualMediaError::Command)?
+            {
+                TargetOwnership::Owned => true,
+                TargetOwnership::Foreign { device, bus, alias } => {
+                    return Err(VirtualMediaError::Command(format!(
+                        "refusing to claim libvirt target {target} in live configuration: it is already used by an unowned device (device={}, bus={}, alias={})",
+                        device.as_deref().unwrap_or("unknown"),
+                        bus.as_deref().unwrap_or("unknown"),
+                        alias.as_deref().unwrap_or("none"),
+                    )));
+                }
+                TargetOwnership::Missing => false,
+            }
+        } else {
+            false
+        };
+        if persistent_owned && (!active || live_owned) {
             return Ok(());
         }
-        self.virsh(&["detach-disk", &self.config.domain, target, "--persistent"])
+
+        let xml = empty_virtual_media_xml(device_id, target)?;
+        let file = tempfile::NamedTempFile::new().map_err(|error| {
+            VirtualMediaError::Command(format!("could not create temporary device XML: {error}"))
+        })?;
+        tokio::fs::write(file.path(), xml.as_bytes())
+            .await
+            .map_err(|error| {
+                VirtualMediaError::Command(format!("could not write temporary device XML: {error}"))
+            })?;
+        let file_path = file.path().to_string_lossy();
+        let mut arguments = vec![
+            "attach-device",
+            self.config.domain.as_str(),
+            file_path.as_ref(),
+        ];
+        if active && !live_owned {
+            arguments.push("--live");
+        }
+        if !persistent_owned {
+            arguments.push("--config");
+        }
+        self.virsh(&arguments)
             .await
             .map(drop)
             .map_err(VirtualMediaError::Command)
+    }
+
+    async fn domain_is_active(&self) -> Result<bool, VirtualMediaError> {
+        let output = self
+            .virsh(&["domstate", &self.config.domain])
+            .await
+            .map_err(VirtualMediaError::Command)?;
+        let state = String::from_utf8(output.stdout).map_err(|error| {
+            VirtualMediaError::Command(format!("virsh domstate returned invalid UTF-8: {error}"))
+        })?;
+        match state.trim() {
+            "running" | "idle" | "blocked" | "paused" | "in shutdown" | "pmsuspended" => Ok(true),
+            "shut off" | "crashed" => Ok(false),
+            state => Err(VirtualMediaError::Command(format!(
+                "virsh domstate returned an unknown domain state: {state}"
+            ))),
+        }
     }
 
     async fn set_boot_source_override(
@@ -412,8 +533,22 @@ impl LibvirtBackend {
         write_protected: bool,
     ) -> VirtualMediaResult {
         let target = self.target_for_device(device_id)?;
-        self.detach_target(target).await?;
         let xml = virtual_media_xml(device_id, target, image, write_protected)?;
+        self.update_virtual_media(device_id, target, &xml).await
+    }
+
+    async fn update_virtual_media(
+        &self,
+        device_id: &str,
+        target: &str,
+        xml: &str,
+    ) -> VirtualMediaResult {
+        self.require_owned_target(device_id, target, true).await?;
+        let active = self.domain_is_active().await?;
+        if active {
+            self.require_owned_target(device_id, target, false).await?;
+        }
+
         let file = tempfile::NamedTempFile::new().map_err(|error| {
             VirtualMediaError::Command(format!("could not create temporary device XML: {error}"))
         })?;
@@ -422,104 +557,62 @@ impl LibvirtBackend {
             .map_err(|error| {
                 VirtualMediaError::Command(format!("could not write temporary device XML: {error}"))
             })?;
-        self.virsh(&[
-            "attach-device",
-            &self.config.domain,
-            file.path().to_string_lossy().as_ref(),
-            "--persistent",
-        ])
-        .await
-        .map(drop)
-        .map_err(VirtualMediaError::Command)
+        let file_path = file.path().to_string_lossy();
+        let mut arguments = vec![
+            "update-device",
+            self.config.domain.as_str(),
+            file_path.as_ref(),
+        ];
+        if active {
+            arguments.push("--live");
+        }
+        arguments.push("--config");
+        self.virsh(&arguments)
+            .await
+            .map(drop)
+            .map_err(VirtualMediaError::Command)
     }
 
     async fn eject_virtual_media(&self, device_id: &str) -> VirtualMediaResult {
         let target = self.target_for_device(device_id)?;
-        self.detach_target(target).await
+        let xml = empty_virtual_media_xml(device_id, target)?;
+        self.update_virtual_media(device_id, target, &xml).await
     }
 
-    async fn apply_virtual_media(&self, state: &serde_json::Value) -> VirtualMediaResult {
-        let device_id = state
-            .get("Id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                VirtualMediaError::BadRequest("virtual media state has no Id".to_string())
-            })?;
-        let inserted = state
-            .get("Inserted")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        if !inserted {
-            return self.eject_virtual_media(device_id).await;
-        }
-        let image = state
-            .get("Image")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                VirtualMediaError::BadRequest(format!(
-                    "inserted virtual media device {device_id} has no Image"
-                ))
-            })?;
-        let write_protected = state
-            .get("WriteProtected")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        self.insert_virtual_media(device_id, image, write_protected)
+    async fn apply_virtual_media(&self, state: &VirtualMediaState) -> VirtualMediaResult {
+        let Some(image) = state.image.as_deref() else {
+            return self.eject_virtual_media(&state.device_id).await;
+        };
+        self.insert_virtual_media(&state.device_id, image, state.write_protected)
             .await
     }
 
-    async fn reconcile_state(&mut self, desired: AppliedState) -> Result<(), String> {
-        let desired_override_active = boot_source_override_is_active(&desired.boot_source_override);
-        if desired.boot_source_override != self.applied_state.boot_source_override
-            && desired_override_active
-        {
-            self.set_boot_source_override(&desired.boot_source_override)
+    async fn apply_boot_config(&mut self, config: &BootConfig) -> Result<(), SetSystemPowerError> {
+        if boot_source_override_is_active(&config.boot_source_override) {
+            self.set_boot_source_override(&config.boot_source_override)
                 .await
-                .map_err(|error| error.to_string())?;
-        } else if !desired_override_active
-            && (desired.boot_source_override != self.applied_state.boot_source_override
-                || desired.persistent_boot_selection
-                    != self.applied_state.persistent_boot_selection)
-        {
-            self.set_persistent_boot_selection(desired.persistent_boot_selection)
-                .await
-                .map_err(|error| error.to_string())?;
+        } else {
+            self.set_persistent_boot_selection(config.persistent_boot_selection)
+                .await?;
+            self.restore_boot_after_power_on = false;
+            Ok(())
         }
-        self.applied_state.boot_source_override = desired.boot_source_override;
-        self.applied_state.persistent_boot_selection = desired.persistent_boot_selection;
-        for (device_id, desired_device) in desired.virtual_media {
-            if self.applied_state.virtual_media.get(&device_id) == Some(&desired_device) {
-                continue;
-            }
-            self.apply_virtual_media(&desired_device)
-                .await
-                .map_err(|error| error.to_string())?;
-            self.applied_state
-                .virtual_media
-                .insert(device_id, desired_device);
-        }
-        Ok(())
     }
 }
 
 impl<C: Callbacks> From<&SingleSystemState<C>> for AppliedState {
     fn from(system: &SingleSystemState<C>) -> Self {
-        let virtual_media = system
-            .virtual_media()
-            .into_iter()
-            .flat_map(|virtual_media| virtual_media.desired_state())
-            .filter_map(|state| {
-                let device_id = state
-                    .get("Id")
-                    .and_then(serde_json::Value::as_str)?
-                    .to_string();
-                Some((device_id, state))
-            })
-            .collect();
         Self {
-            persistent_boot_selection: system.resolve_persistent_boot_selection(),
-            boot_source_override: system.boot_source_override(),
-            virtual_media,
+            boot: Some(BootConfig {
+                persistent_boot_selection: system.resolve_persistent_boot_selection(),
+                boot_source_override: system.boot_source_override(),
+            }),
+            virtual_media: system
+                .virtual_media()
+                .into_iter()
+                .flat_map(|media| media.desired_state())
+                .map(|media| (media.device_id.clone(), media))
+                .collect(),
         }
     }
 }
@@ -588,30 +681,69 @@ impl LibvirtBackend {
         }
     }
 
-    async fn refresh(&mut self) {
-        let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) else {
-            tracing::error!(
-                domain = %self.config.domain,
-                "libvirt backend is not bound to BMC mock state",
-            );
-            return;
-        };
-        let Some(controlled_system) = system_state.controlled_system() else {
-            tracing::error!(
-                domain = %self.config.domain,
-                "BMC mock state has no controlled ComputerSystem",
-            );
-            return;
-        };
-        if let Err(error) = self
-            .reconcile_state(AppliedState::from(controlled_system))
-            .await
-        {
-            tracing::error!(
-                domain = %self.config.domain,
-                error = %error,
-                "could not reconcile libvirt domain with BMC mock state",
-            );
+    async fn set_boot_config(&mut self, config: BootConfig) -> Result<(), SetBootConfigError> {
+        // Invalidate before awaiting IO: an interrupted update is not a known applied value.
+        let previous = self.applied_state.boot.take();
+        match self.apply_boot_config(&config).await {
+            Ok(()) => {
+                self.applied_state.boot = Some(config);
+                Ok(())
+            }
+            Err(SetSystemPowerError::BadRequest(message)) => {
+                self.applied_state.boot = previous;
+                Err(SetBootConfigError::BadRequest(message))
+            }
+            Err(SetSystemPowerError::CommandSendError(message)) => {
+                if let Some(previous) = previous {
+                    match self.apply_boot_config(&previous).await {
+                        Ok(()) => self.applied_state.boot = Some(previous),
+                        Err(rollback) => tracing::warn!(
+                            domain = %self.config.domain, %rollback,
+                            "could not restore boot configuration after failed update",
+                        ),
+                    }
+                }
+                Err(SetBootConfigError::Backend(message))
+            }
+        }
+    }
+
+    async fn set_virtual_media(
+        &mut self,
+        state: VirtualMediaState,
+    ) -> Result<(), SetVirtualMediaError> {
+        let previous = self.applied_state.virtual_media.remove(&state.device_id);
+        match self.apply_virtual_media(&state).await {
+            Ok(()) => {
+                self.applied_state
+                    .virtual_media
+                    .insert(state.device_id.clone(), state);
+                Ok(())
+            }
+            Err(VirtualMediaError::BadRequest(message)) => {
+                if let Some(previous) = previous {
+                    self.applied_state
+                        .virtual_media
+                        .insert(previous.device_id.clone(), previous);
+                }
+                Err(SetVirtualMediaError::BadRequest(message))
+            }
+            Err(VirtualMediaError::Command(message)) => {
+                if let Some(previous) = previous {
+                    match self.apply_virtual_media(&previous).await {
+                        Ok(()) => {
+                            self.applied_state
+                                .virtual_media
+                                .insert(previous.device_id.clone(), previous);
+                        }
+                        Err(rollback) => tracing::warn!(
+                            domain = %self.config.domain, %rollback,
+                            "could not restore virtual media after failed update",
+                        ),
+                    }
+                }
+                Err(SetVirtualMediaError::Backend(message))
+            }
         }
     }
 }
@@ -644,10 +776,19 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                 }
                 self.refresh_power_state().await;
             }
+            LibvirtMessage::SetBootConfig { config, reply } => {
+                if !reply.is_closed() {
+                    reply.send(self.set_boot_config(config).await).ok();
+                }
+            }
+            LibvirtMessage::SetVirtualMedia { state, reply } => {
+                if !reply.is_closed() {
+                    reply.send(self.set_virtual_media(state).await).ok();
+                }
+            }
             LibvirtMessage::Refresh => {
-                // Clear before reading state so changes during reconciliation queue another refresh.
+                // Changes during the power query can queue another observation.
                 self.refresh_pending.store(false, Ordering::SeqCst);
-                self.refresh().await;
                 self.refresh_power_state().await;
             }
         }
@@ -667,6 +808,29 @@ impl Callbacks for LibvirtCallbacks {
         self.mailbox
             .send(LibvirtMessage::SendPowerCommand { reset_type })
             .map_err(|error| SetSystemPowerError::CommandSendError(error.to_string()))
+    }
+
+    async fn set_boot_config(&self, config: BootConfig) -> Result<(), SetBootConfigError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::SetBootConfig { config, reply })
+            .map_err(|error| SetBootConfigError::Backend(error.to_string()))?;
+        response
+            .await
+            .map_err(|error| SetBootConfigError::Backend(error.to_string()))?
+    }
+
+    async fn set_virtual_media(
+        &self,
+        state: VirtualMediaState,
+    ) -> Result<(), SetVirtualMediaError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::SetVirtualMedia { state, reply })
+            .map_err(|error| SetVirtualMediaError::Backend(error.to_string()))?;
+        response
+            .await
+            .map_err(|error| SetVirtualMediaError::Backend(error.to_string()))?
     }
 
     fn state_refresh_indication(&self) {
@@ -713,6 +877,98 @@ fn set_boot_order_xml(xml: &str, devices: &[&str]) -> Result<String, String> {
     }
     String::from_utf8(writer.into_inner())
         .map_err(|error| format!("generated libvirt domain XML is invalid UTF-8: {error}"))
+}
+
+#[derive(Debug, PartialEq)]
+enum TargetOwnership {
+    Missing,
+    Owned,
+    Foreign {
+        device: Option<String>,
+        bus: Option<String>,
+        alias: Option<String>,
+    },
+}
+
+fn xml_attribute(element: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>, String> {
+    for attribute in element.attributes() {
+        let attribute = attribute
+            .map_err(|error| format!("could not parse libvirt domain XML attribute: {error}"))?;
+        if attribute.key.as_ref() == name {
+            return String::from_utf8(attribute.value.into_owned())
+                .map(Some)
+                .map_err(|error| {
+                    format!("libvirt domain XML attribute is invalid UTF-8: {error}")
+                });
+        }
+    }
+    Ok(None)
+}
+
+fn virtual_media_target_ownership(
+    xml: &str,
+    device_id: &str,
+    target: &str,
+) -> Result<TargetOwnership, String> {
+    let expected_alias = format!("ua-bmc-mock-vmedia-{device_id}");
+    let mut reader = Reader::from_str(xml);
+    let mut inside_disk = false;
+    let mut disk_device = None;
+    let mut disk_target = None;
+    let mut disk_bus = None;
+    let mut disk_alias = None;
+    let mut ownership = TargetOwnership::Missing;
+
+    loop {
+        let event = reader
+            .read_event()
+            .map_err(|error| format!("could not parse libvirt domain XML: {error}"))?;
+        match event {
+            Event::Start(element) if element.name().as_ref() == b"disk" => {
+                inside_disk = true;
+                disk_device = xml_attribute(&element, b"device")?;
+                disk_target = None;
+                disk_bus = None;
+                disk_alias = None;
+            }
+            Event::Start(element) | Event::Empty(element)
+                if inside_disk && element.name().as_ref() == b"target" =>
+            {
+                disk_target = xml_attribute(&element, b"dev")?;
+                disk_bus = xml_attribute(&element, b"bus")?;
+            }
+            Event::Start(element) | Event::Empty(element)
+                if inside_disk && element.name().as_ref() == b"alias" =>
+            {
+                disk_alias = xml_attribute(&element, b"name")?;
+            }
+            Event::End(element) if element.name().as_ref() == b"disk" => {
+                if disk_target.as_deref() == Some(target) {
+                    if ownership != TargetOwnership::Missing {
+                        return Err(format!(
+                            "libvirt domain has more than one disk at target {target}"
+                        ));
+                    }
+                    ownership = if disk_device.as_deref() == Some("cdrom")
+                        && disk_bus.as_deref() == Some("sata")
+                        && disk_alias.as_deref() == Some(expected_alias.as_str())
+                    {
+                        TargetOwnership::Owned
+                    } else {
+                        TargetOwnership::Foreign {
+                            device: disk_device.take(),
+                            bus: disk_bus.take(),
+                            alias: disk_alias.take(),
+                        }
+                    };
+                }
+                inside_disk = false;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(ownership)
 }
 
 enum MediaSource {
@@ -839,6 +1095,38 @@ fn virtual_media_xml(
     })
 }
 
+fn empty_virtual_media_xml(device_id: &str, target: &str) -> Result<String, VirtualMediaError> {
+    let mut writer = Writer::new(Vec::new());
+    let mut disk = BytesStart::new("disk");
+    disk.push_attribute(("type", "file"));
+    disk.push_attribute(("device", "cdrom"));
+    writer.write_event(Event::Start(disk)).unwrap();
+
+    let mut driver = BytesStart::new("driver");
+    driver.push_attribute(("name", "qemu"));
+    driver.push_attribute(("type", "raw"));
+    writer.write_event(Event::Empty(driver)).unwrap();
+
+    let mut target_element = BytesStart::new("target");
+    target_element.push_attribute(("dev", target));
+    target_element.push_attribute(("bus", "sata"));
+    writer.write_event(Event::Empty(target_element)).unwrap();
+    writer
+        .write_event(Event::Empty(BytesStart::new("readonly")))
+        .unwrap();
+    let mut alias = BytesStart::new("alias");
+    let alias_name = format!("ua-bmc-mock-vmedia-{device_id}");
+    alias.push_attribute(("name", alias_name.as_str()));
+    writer.write_event(Event::Empty(alias)).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("disk")))
+        .unwrap();
+
+    String::from_utf8(writer.into_inner()).map_err(|error| {
+        VirtualMediaError::Command(format!("generated device XML is invalid UTF-8: {error}"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::Yields;
@@ -901,5 +1189,69 @@ mod tests {
         assert!(actual.contains("<source file=\"/tmp/config.iso\"/>"));
         assert!(actual.contains("<target dev=\"sdc\" bus=\"sata\"/>"));
         assert!(!actual.contains("<readonly/>"));
+    }
+
+    #[test]
+    fn identifies_owned_virtual_media_targets() {
+        let owned = empty_virtual_media_xml("Cd", "sdb").unwrap();
+        assert!(!owned.contains("<source"));
+        let foreign_alias = owned.replace("ua-bmc-mock-vmedia-Cd", "another-drive");
+        let foreign_device = owned.replace("device=\"cdrom\"", "device=\"disk\"");
+        let foreign_bus = owned.replace("bus=\"sata\"", "bus=\"scsi\"");
+        check_cases(
+            [
+                Case {
+                    scenario: "empty domain",
+                    input: String::new(),
+                    expect: Yields(TargetOwnership::Missing),
+                },
+                Case {
+                    scenario: "owned empty CD-ROM",
+                    input: owned.clone(),
+                    expect: Yields(TargetOwnership::Owned),
+                },
+                Case {
+                    scenario: "different target",
+                    input: owned.replace("sdb", "sdc"),
+                    expect: Yields(TargetOwnership::Missing),
+                },
+                Case {
+                    scenario: "foreign alias",
+                    input: foreign_alias,
+                    expect: Yields(TargetOwnership::Foreign {
+                        device: Some("cdrom".into()),
+                        bus: Some("sata".into()),
+                        alias: Some("another-drive".into()),
+                    }),
+                },
+                Case {
+                    scenario: "foreign disk type",
+                    input: foreign_device,
+                    expect: Yields(TargetOwnership::Foreign {
+                        device: Some("disk".into()),
+                        bus: Some("sata".into()),
+                        alias: Some("ua-bmc-mock-vmedia-Cd".into()),
+                    }),
+                },
+                Case {
+                    scenario: "foreign bus",
+                    input: foreign_bus,
+                    expect: Yields(TargetOwnership::Foreign {
+                        device: Some("cdrom".into()),
+                        bus: Some("scsi".into()),
+                        alias: Some("ua-bmc-mock-vmedia-Cd".into()),
+                    }),
+                },
+            ],
+            |disk| {
+                virtual_media_target_ownership(
+                    &format!("<domain><devices>{disk}</devices></domain>"),
+                    "Cd",
+                    "sdb",
+                )
+            },
+        );
+        let duplicate = format!("<domain><devices>{owned}{owned}</devices></domain>");
+        assert!(virtual_media_target_ownership(&duplicate, "Cd", "sdb").is_err());
     }
 }
