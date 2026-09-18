@@ -134,8 +134,9 @@ func (s *Session) fetchAll(path string, extraQuery map[string]string) ([]map[str
 			return nil, err
 		}
 		var items []map[string]interface{}
-		if err := json.Unmarshal(body, &items); err != nil {
-			return all, nil
+		err = json.Unmarshal(body, &items)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s page %d: %w", path, page, err)
 		}
 		all = append(all, items...)
 		if pag := hdrs.Get("X-Pagination"); pag != "" {
