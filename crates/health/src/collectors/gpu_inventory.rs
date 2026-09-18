@@ -144,7 +144,7 @@ impl<B: Bmc + 'static> GpuInventoryCollector<B> {
             return false;
         };
         let raw = entity.raw();
-        let id = &raw.base.id;
+        let id = &raw.id;
         let state = raw
             .status
             .as_ref()

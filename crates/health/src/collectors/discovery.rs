@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::{StreamExt, stream};
+use nv_redfish::ServiceRoot;
 use nv_redfish::core::{Bmc, EntityTypeRef, ToSnakeCase};
-use nv_redfish::{Resource, ServiceRoot};
 
 use crate::HealthError;
 use crate::collectors::inventory::{
@@ -395,7 +395,7 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
             for sensor in &sensors {
                 sensor_ids.insert(sensor.odata_id().to_string());
             }
-            let entity_id = entity.odata_id().to_string();
+            let entity_id = entity.raw().odata_id.to_string();
             let oem_capacity_watts = if entity.raw().power_capacity_watts.flatten().is_some() {
                 None
             } else {
@@ -415,7 +415,7 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                             // warning.
                             tracing::debug!(
                                 capacity_watts = raw,
-                                power_supply = %entity.odata_id(),
+                                power_supply = %entity.raw().odata_id,
                                 bmc_address = ?self.endpoint.addr,
                                 rack_id = self.endpoint.rack_id.as_ref().map(tracing::field::display),
                                 "Ignoring invalid LiteOn OEM power supply capacity"
@@ -570,7 +570,7 @@ pub(in crate::collectors) fn gpu_processor_ids<B: Bmc>(
         .iter()
         .filter_map(|entity| match entity {
             DiscoveredEntity::Processor { entity, .. } if is_gpu_processor(entity) => {
-                Some(entity.odata_id().to_string())
+                Some(entity.raw().odata_id.to_string())
             }
             _ => None,
         })
@@ -602,7 +602,7 @@ fn is_gpu_chassis<B: Bmc>(
                 .any(|processor| gpu_processors.contains(&processor.odata_id().to_string()))
         });
 
-    links_a_gpu_processor || id_names_gpu_module(&raw.base.id)
+    links_a_gpu_processor || id_names_gpu_module(&raw.id)
 }
 
 /// Whether a chassis id names a GPU module, for platforms that expose GPU
@@ -739,7 +739,6 @@ mod bmc_mock_integration_tests {
     use bmc_mock::test_support::{
         TestBmc, TestBmcHandle, liteon_powershelf_bmc, nvidia_dgx_h100_bmc, wiwynn_gb200_bmc,
     };
-    use nv_redfish::Resource as _;
     use serde_json::json;
 
     use super::{
@@ -792,7 +791,7 @@ mod bmc_mock_integration_tests {
                     entity,
                     oem_capacity_watts,
                     ..
-                } => Some((entity.id().to_string(), *oem_capacity_watts)),
+                } => Some((entity.raw().id.clone(), *oem_capacity_watts)),
                 _ => None,
             })
             .collect();
@@ -848,10 +847,10 @@ mod bmc_mock_integration_tests {
                 .unwrap_or_default()
             {
                 if is_gpu_processor::<TestBmc>(&processor) {
-                    gpu_processors.insert(processor.odata_id().to_string());
+                    gpu_processors.insert(processor.raw().odata_id.to_string());
                 }
                 identities.insert(
-                    processor.id().to_string(),
+                    processor.raw().id.clone(),
                     gpu_identity_from_processor::<TestBmc>(&processor),
                 );
             }
@@ -875,7 +874,7 @@ mod bmc_mock_integration_tests {
         let mut identities = BTreeMap::new();
         for chassis in chassis_list.members().await.expect("chassis members") {
             identities.insert(
-                chassis.id().to_string(),
+                chassis.raw().id.clone(),
                 gpu_identity_from_chassis::<TestBmc>(&chassis, gpu_processors),
             );
         }
