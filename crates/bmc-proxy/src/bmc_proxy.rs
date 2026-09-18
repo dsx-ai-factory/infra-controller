@@ -59,6 +59,7 @@ use crate::metrics::{
     AuthContextMissing, MethodLabel, PrincipalAllowListDenied, RequestAclDenied,
     UpstreamAuthRetried, UpstreamRequestCompleted, UpstreamStatus,
 };
+use crate::span_isolation::SpanIsolationMiddleware;
 
 const TLS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Redfish's session token header, per DMTF. Applied on egress and stripped
@@ -1331,6 +1332,7 @@ fn build_http_client() -> Result<reqwest_middleware::ClientWithMiddleware, BmcPr
         })?;
     Ok(reqwest_middleware::ClientBuilder::new(client)
         .with(reqwest_tracing::TracingMiddleware::default())
+        .with(SpanIsolationMiddleware)
         .build())
 }
 
