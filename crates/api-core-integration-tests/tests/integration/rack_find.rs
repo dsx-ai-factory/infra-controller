@@ -17,7 +17,7 @@
 
 use carbide_test_harness::prelude::*;
 use carbide_uuid::rack::{RackId, RackProfileId};
-use rpc::forge::{AdminForceDeleteRackRequest, DeleteRackRequest};
+use rpc::forge::{AdminForceDeleteRackRequest, DeleteRackRequest, DeletedFilter};
 use tonic::Code;
 
 #[sqlx_test]
@@ -95,6 +95,41 @@ async fn test_find_rack_by_id(pool: PgPool) {
     assert!(racks[0].created.is_some());
     assert!(racks[0].deleted.is_none());
     assert!(!racks[0].version.is_empty());
+}
+
+#[sqlx_test]
+async fn test_find_rack_ids_filters_deleted_racks(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool).build().await;
+    let TestRack { id: rack_id } = env.create_rack(RackProfileId::new("rack")).await;
+
+    env.api()
+        .delete_rack(tonic::Request::new(DeleteRackRequest {
+            id: rack_id.to_string(),
+        }))
+        .await?;
+
+    let active_ids = env
+        .api()
+        .find_rack_ids(tonic::Request::new(rpc::forge::RackSearchFilter::default()))
+        .await?
+        .into_inner()
+        .rack_ids;
+    assert!(!active_ids.contains(&rack_id));
+
+    let deleted_ids = env
+        .api()
+        .find_rack_ids(tonic::Request::new(rpc::forge::RackSearchFilter {
+            deleted: DeletedFilter::Only as i32,
+            ..Default::default()
+        }))
+        .await?
+        .into_inner()
+        .rack_ids;
+    assert_eq!(deleted_ids, vec![rack_id]);
+
+    Ok(())
 }
 
 #[sqlx_test]

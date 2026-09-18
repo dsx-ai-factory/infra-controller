@@ -360,7 +360,8 @@ fn machine_data(machine: &rpc::forge::Machine) -> MachineData {
         nvlink_domain_uuid: machine
             .nvlink_info
             .as_ref()
-            .and_then(|info| info.domain_uuid),
+            .and_then(|info| info.domain_uuid)
+            .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
         driver_version: unique_gpu_driver_version(machine.discovery_info.as_ref()),
     }
 }
@@ -574,15 +575,7 @@ impl ApiEndpointSource {
         })
     }
 
-    async fn fetch_rack_inventory(&self) -> Result<Vec<RackInventory>, HealthError> {
-        let rack_ids = self
-            .api
-            .client
-            .find_rack_ids(rpc::forge::RackSearchFilter::default())
-            .await
-            .map_err(HealthError::ApiInvocationError)?
-            .rack_ids;
-
+    async fn find_by_ids_page_size(&self) -> Result<usize, HealthError> {
         // A zero limit means the server does not cap find-by-ID requests. Keep
         // pages bounded in that case, and otherwise honor the advertised cap.
         const PREFERRED_PAGE_SIZE: usize = 100;
@@ -595,7 +588,23 @@ impl ApiEndpointSource {
             .runtime_config
             .unwrap_or_default()
             .max_find_by_ids as usize;
-        let page_size = effective_find_by_ids_page_size(PREFERRED_PAGE_SIZE, max_find_by_ids);
+
+        Ok(effective_find_by_ids_page_size(
+            PREFERRED_PAGE_SIZE,
+            max_find_by_ids,
+        ))
+    }
+
+    async fn fetch_rack_inventory(&self) -> Result<Vec<RackInventory>, HealthError> {
+        let rack_ids = self
+            .api
+            .client
+            .find_rack_ids(rpc::forge::RackSearchFilter::default())
+            .await
+            .map_err(HealthError::ApiInvocationError)?
+            .rack_ids;
+
+        let page_size = self.find_by_ids_page_size().await?;
 
         let mut inventory = Vec::with_capacity(rack_ids.len());
         for rack_ids in rack_ids.chunks(page_size) {
@@ -745,46 +754,62 @@ impl ApiEndpointSource {
     }
 
     async fn fetch_switch_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
-        let switch_request = rpc::forge::SwitchQuery {
-            name: None,
-            switch_id: None,
-        };
-
-        let response = self
+        let page_size = self.find_by_ids_page_size().await?;
+        let switch_ids = self
             .api
             .client
-            .find_switches(switch_request)
+            .find_switch_ids(rpc::forge::SwitchSearchFilter::default())
             .await
-            .map_err(HealthError::ApiInvocationError)?;
-        let mut endpoints = Vec::new();
-        let mut components = Vec::new();
+            .map_err(HealthError::ApiInvocationError)?
+            .ids;
+        let mut endpoints = Vec::with_capacity(switch_ids.len());
+        let mut components = Vec::with_capacity(switch_ids.len());
         let mut inventory_error = None;
 
-        for switch in response.switches {
-            include_component_inventory(
-                switch_component_inventory(&switch),
-                &mut components,
-                &mut inventory_error,
-            );
-            match self.extract_switch_endpoint(&switch) {
-                Ok(endpoint) => endpoints.push(endpoint),
-                Err(error) => tracing::warn!(
-                    ?switch,
-                    ?error,
-                    rack_id = switch.rack_id.as_ref().map(tracing::field::display),
-                    "Could not add switch endpoint due to error"
-                ),
+        for requested_ids in switch_ids.chunks(page_size) {
+            let switches = self
+                .api
+                .client
+                .find_switches_by_ids(rpc::forge::SwitchesByIdsRequest {
+                    switch_ids: requested_ids.to_vec(),
+                })
+                .await
+                .map_err(HealthError::ApiInvocationError)?
+                .switches;
+            if switches.len() != requested_ids.len() {
+                return Err(HealthError::GenericError(format!(
+                    "switch inventory response returned {} of {} requested switches",
+                    switches.len(),
+                    requested_ids.len()
+                )));
             }
 
-            match self.extract_switch_host_endpoint(&switch) {
-                Ok(Some(endpoint)) => endpoints.push(endpoint),
-                Ok(None) => {}
-                Err(error) => tracing::warn!(
-                    ?switch,
-                    ?error,
-                    rack_id = switch.rack_id.as_ref().map(tracing::field::display),
-                    "Could not add switch host endpoint due to error"
-                ),
+            for switch in switches {
+                include_component_inventory(
+                    switch_component_inventory(&switch),
+                    &mut components,
+                    &mut inventory_error,
+                );
+                match self.extract_switch_endpoint(&switch) {
+                    Ok(endpoint) => endpoints.push(endpoint),
+                    Err(error) => tracing::warn!(
+                        ?switch,
+                        ?error,
+                        rack_id = switch.rack_id.as_ref().map(tracing::field::display),
+                        "Could not add switch endpoint due to error"
+                    ),
+                }
+
+                match self.extract_switch_host_endpoint(&switch) {
+                    Ok(Some(endpoint)) => endpoints.push(endpoint),
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        ?switch,
+                        ?error,
+                        rack_id = switch.rack_id.as_ref().map(tracing::field::display),
+                        "Could not add switch host endpoint due to error"
+                    ),
+                }
             }
         }
 
@@ -800,35 +825,51 @@ impl ApiEndpointSource {
     }
 
     async fn fetch_power_shelf_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
-        let request = rpc::forge::PowerShelfQuery {
-            name: None,
-            power_shelf_id: None,
-        };
-
-        let response = self
+        let page_size = self.find_by_ids_page_size().await?;
+        let power_shelf_ids = self
             .api
             .client
-            .find_power_shelves(request)
+            .find_power_shelf_ids(rpc::forge::PowerShelfSearchFilter::default())
             .await
-            .map_err(HealthError::ApiInvocationError)?;
-        let mut endpoints = Vec::new();
-        let mut components = Vec::new();
+            .map_err(HealthError::ApiInvocationError)?
+            .ids;
+        let mut endpoints = Vec::with_capacity(power_shelf_ids.len());
+        let mut components = Vec::with_capacity(power_shelf_ids.len());
         let mut inventory_error = None;
 
-        for power_shelf in response.power_shelves {
-            include_component_inventory(
-                power_shelf_component_inventory(&power_shelf),
-                &mut components,
-                &mut inventory_error,
-            );
-            match self.extract_power_shelf_endpoint(&power_shelf) {
-                Ok(endpoint) => endpoints.push(endpoint),
-                Err(error) => tracing::warn!(
-                    ?power_shelf,
-                    ?error,
-                    rack_id = power_shelf.rack_id.as_ref().map(tracing::field::display),
-                    "Could not add power shelf endpoint due to error"
-                ),
+        for requested_ids in power_shelf_ids.chunks(page_size) {
+            let power_shelves = self
+                .api
+                .client
+                .find_power_shelves_by_ids(rpc::forge::PowerShelvesByIdsRequest {
+                    power_shelf_ids: requested_ids.to_vec(),
+                })
+                .await
+                .map_err(HealthError::ApiInvocationError)?
+                .power_shelves;
+            if power_shelves.len() != requested_ids.len() {
+                return Err(HealthError::GenericError(format!(
+                    "power shelf inventory response returned {} of {} requested power shelves",
+                    power_shelves.len(),
+                    requested_ids.len()
+                )));
+            }
+
+            for power_shelf in power_shelves {
+                include_component_inventory(
+                    power_shelf_component_inventory(&power_shelf),
+                    &mut components,
+                    &mut inventory_error,
+                );
+                match self.extract_power_shelf_endpoint(&power_shelf) {
+                    Ok(endpoint) => endpoints.push(endpoint),
+                    Err(error) => tracing::warn!(
+                        ?power_shelf,
+                        ?error,
+                        rack_id = power_shelf.rack_id.as_ref().map(tracing::field::display),
+                        "Could not add power shelf endpoint due to error"
+                    ),
+                }
             }
         }
 
@@ -1364,6 +1405,42 @@ mod tests {
                 };
 
                 switch.nvlink_domain_uuid
+            },
+        );
+    }
+
+    #[test]
+    fn machine_inventory_uses_non_nil_api_domain() {
+        let domain = NvLinkDomainId::from_str("9f4b45ec-705a-4af4-89f7-a112bc9c8f4e")
+            .expect("valid domain UUID");
+
+        check_values(
+            [
+                Check {
+                    scenario: "domain is missing",
+                    input: None,
+                    expect: None,
+                },
+                Check {
+                    scenario: "nil domain is absent",
+                    input: Some(NvLinkDomainId::nil()),
+                    expect: None,
+                },
+                Check {
+                    scenario: "non-nil API machine field",
+                    input: Some(domain),
+                    expect: Some(domain),
+                },
+            ],
+            |domain_uuid| {
+                machine_data(&rpc::forge::Machine {
+                    nvlink_info: Some(rpc::forge::MachineNvLinkInfo {
+                        domain_uuid,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .nvlink_domain_uuid
             },
         );
     }

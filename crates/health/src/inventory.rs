@@ -205,7 +205,11 @@ impl ComponentSeries {
                     .as_ref()
                     .map(ToString::to_string)
                     .unwrap_or_default(),
-                String::new(),
+                power_shelf
+                    .nvlink_domain_uuid
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
                 false,
                 false,
                 String::new(),
@@ -475,16 +479,25 @@ mod tests {
 
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_uuid::nvlink::NvLinkDomainId;
+    use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
     use mac_address::MacAddress;
     use prometheus::{Encoder, TextEncoder};
 
     use super::*;
-    use crate::endpoint::{EndpointMetadata, SwitchData, SwitchEndpointRole};
+    use crate::endpoint::{EndpointMetadata, PowerShelfData, SwitchData, SwitchEndpointRole};
 
     fn test_switch_id(seed: u8) -> SwitchId {
         SwitchId::new(SwitchIdSource::Tpm, [seed; 32], SwitchType::NvLink)
+    }
+
+    fn test_power_shelf_id() -> PowerShelfId {
+        PowerShelfId::new(
+            PowerShelfIdSource::ProductBoardChassisSerial,
+            [8; 32],
+            PowerShelfType::Rack,
+        )
     }
 
     fn switch_component(role: SwitchEndpointRole, mac: &str) -> ComponentInventory {
@@ -604,6 +617,25 @@ mod tests {
                 case.scenario
             );
         }
+    }
+
+    #[test]
+    fn power_shelf_inventory_preserves_nvlink_domain() {
+        let domain = NvLinkDomainId::from_str("77777777-7777-7777-7777-777777777777").unwrap();
+        let component = ComponentInventory {
+            rack_id: RackId::new("D09"),
+            bmc_mac: None,
+            metadata: EndpointMetadata::PowerShelf(PowerShelfData {
+                id: Some(test_power_shelf_id()),
+                serial: None,
+                nvlink_domain_uuid: Some(domain),
+            }),
+        };
+        let rack = RackSeries::from_inventory(&rack());
+
+        let series = ComponentSeries::from_inventory(&component, &rack).unwrap();
+
+        assert_eq!(series.nvl_domain, domain.to_string());
     }
 
     #[test]
