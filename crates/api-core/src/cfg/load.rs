@@ -223,8 +223,20 @@ pub fn parse_carbide_config(
     config_path: &Path,
     site_config_path: Option<&Path>,
 ) -> eyre::Result<Arc<CarbideConfig>> {
-    let merged_config =
-        merged_carbide_config_figment(config_path, site_config_path, Env::prefixed("CARBIDE_API_"));
+    parse_carbide_config_with_environment(
+        config_path,
+        site_config_path,
+        Env::prefixed("CARBIDE_API_"),
+    )
+}
+
+/// Parse and validate configuration with an explicit environment provider.
+fn parse_carbide_config_with_environment(
+    config_path: &Path,
+    site_config_path: Option<&Path>,
+    environment: impl Provider,
+) -> eyre::Result<Arc<CarbideConfig>> {
+    let merged_config = merged_carbide_config_figment(config_path, site_config_path, environment);
     let (mut config, unknown_fields) = extract_with_unknown_fields::<CarbideConfig>(&merged_config)
         .wrap_err("failed to load configuration files")?;
     tracing::info!(
@@ -406,7 +418,7 @@ mod tests {
         let mut logs = stream.subscribe();
         let subscriber = tracing_subscriber::registry().with(LogStreamLayer::new(stream));
         let config = tracing::subscriber::with_default(subscriber, || {
-            parse_carbide_config(&config_path, None)
+            parse_carbide_config_with_environment(&config_path, None, Figment::new())
         })
         .expect("strict configuration with the deprecated key must load");
 
