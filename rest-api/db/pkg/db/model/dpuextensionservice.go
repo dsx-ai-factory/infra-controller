@@ -6,10 +6,6 @@ package model
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,8 +34,6 @@ const (
 	DpuExtensionServiceStatusReady = "Ready"
 	// DpuExtensionServiceStatusError is the status of a DpuExtensionService that is in error mode
 	DpuExtensionServiceStatusError = "Error"
-	// DpuExtensionServiceStatusUpdating indicates that the DpuExtensionService is being updated on the Site
-	DpuExtensionServiceStatusUpdating = "Updating"
 	// DpuExtensionServiceStatusDeleting indicates that the DpuExtensionService is being deleted
 	DpuExtensionServiceStatusDeleting = "Deleting"
 
@@ -53,7 +47,6 @@ var (
 		DpuExtensionServiceStatusPending:  true,
 		DpuExtensionServiceStatusReady:    true,
 		DpuExtensionServiceStatusError:    true,
-		DpuExtensionServiceStatusUpdating: true,
 		DpuExtensionServiceStatusDeleting: true,
 	}
 
@@ -68,56 +61,12 @@ var (
 
 	// DpuExtensionServiceServiceTypeKubernetesPod indicates an extension service running as a Kubernetes pod
 	DpuExtensionServiceServiceTypeKubernetesPod = "KubernetesPod"
-	// DpuExtensionServiceServiceTypeDpfHelmChart indicates an extension service managed as a DPF Helm chart
-	DpuExtensionServiceServiceTypeDpfHelmChart = "DpfHelmChart"
 
 	// DpuExtensionServiceServiceTypeMap is a map of valid service types for the DpuExtensionService model
 	DpuExtensionServiceServiceTypeMap = map[string]bool{
 		DpuExtensionServiceServiceTypeKubernetesPod: true,
-		DpuExtensionServiceServiceTypeDpfHelmChart:  true,
 	}
 )
-
-// dpuExtensionServiceLifecycleStatePrefix is the proto enum value prefix that Core omits from the lifecycle envelope
-const dpuExtensionServiceLifecycleStatePrefix = "DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_"
-
-// DpuExtensionServiceStatusFromLifecycleStatus maps Core's reconciliation state
-// onto a DpuExtensionService status. Core carries the state as a JSON envelope
-// rather than the proto enum, so an absent or unrecognized state is an error.
-func DpuExtensionServiceStatusFromLifecycleStatus(lifecycleStatus *corev1.LifecycleStatus) (string, error) {
-	if lifecycleStatus == nil {
-		return "", errors.New("lifecycle status is not set")
-	}
-
-	var envelope struct {
-		State string `json:"state"`
-	}
-	if err := json.Unmarshal([]byte(lifecycleStatus.State), &envelope); err != nil {
-		return "", fmt.Errorf("failed to parse lifecycle state %q: %w", lifecycleStatus.State, err)
-	}
-
-	state, ok := corev1.DpuExtensionServiceLifecycleState_value[dpuExtensionServiceLifecycleStatePrefix+strings.ToUpper(envelope.State)]
-	if !ok {
-		return "", fmt.Errorf("unrecognized lifecycle state %q", envelope.State)
-	}
-
-	switch corev1.DpuExtensionServiceLifecycleState(state) {
-	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_CREATING:
-		return DpuExtensionServiceStatusPending, nil
-	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_READY:
-		return DpuExtensionServiceStatusReady, nil
-	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_UPDATING:
-		return DpuExtensionServiceStatusUpdating, nil
-	// Deleted stays Deleting because the projection lives until inventory omits the service
-	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_DELETING,
-		corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_DELETED:
-		return DpuExtensionServiceStatusDeleting, nil
-	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_FAILED:
-		return DpuExtensionServiceStatusError, nil
-	default:
-		return "", fmt.Errorf("unmapped lifecycle state %q", envelope.State)
-	}
-}
 
 // DpuExtensionServiceVersionInfo is a data structure to capture information for a specific DPU Extension Service version
 type DpuExtensionServiceVersionInfo struct {
@@ -573,9 +522,7 @@ func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		query := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID)
-
-		_, err := query.Exec(ctx)
+		_, err := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID).Exec(ctx)
 		if err != nil {
 			return nil, err
 		}

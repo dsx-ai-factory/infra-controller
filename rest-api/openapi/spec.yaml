@@ -281,7 +281,7 @@ tags:
   - name: DPU Extension Service
     x-displayName: DPU Extension Service
     description: |-
-      DPU Extension Service allows users to run custom services in the DPUs of their Instances. KubernetesPod is delivered through the DPU agent; DpfHelmChart is reconciled through DPF.
+      DPU Extension Service allows users to run custom services in the DPUs of their Instances. Currently K8s pods are the only supported service type.
   - name: SSH Key Group
     x-displayName: SSH Key Group
     description: |-
@@ -14467,18 +14467,8 @@ paths:
       summary: Delete DPU Extension Service
       operationId: delete-dpu-extension-service
       responses:
-        '202':
-          description: DPF Helm chart deletion accepted; reconciliation continues asynchronously
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-              examples:
-                example-1:
-                  value:
-                    message: Deletion request was accepted
         '204':
-          description: Kubernetes Pod service deleted synchronously
+          description: No Content
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -14509,8 +14499,6 @@ paths:
         Update a specific DPU Extension Service.
 
         DPU Extension Service must be owned by current Tenant. A new version will be created if data or credentials are modified.
-
-        For a `DpfHelmChart` service, `credentials` and `observability` are unsupported, and `data` is accepted only while the service is `Ready` and only when it differs from the current definition.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       requestBody:
@@ -28663,7 +28651,6 @@ components:
           description: Type of the DPU Extension Service
           enum:
             - KubernetesPod
-            - DpfHelmChart
         siteId:
           type: string
           format: uuid
@@ -28711,7 +28698,6 @@ components:
         - Pending
         - Ready
         - Error
-        - Updating
         - Deleting
     DpuExtensionServiceSummary:
       title: DpuExtensionServiceSummary
@@ -28737,7 +28723,6 @@ components:
           description: Type of the DPU Extension Service
           enum:
             - KubernetesPod
-            - DpfHelmChart
         latestVersion:
           type:
             - string
@@ -28815,21 +28800,19 @@ components:
           description: Type of the DPU Extension Service
           enum:
             - KubernetesPod
-            - DpfHelmChart
         siteId:
           type: string
           format: uuid
           description: ID for the Site the DPU Extension Service belongs to
         data:
           type: string
-          maxLength: 131072
-          description: Deployment spec, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. KubernetesPod requires a parseable Pod manifest declaring at least one container, whose kind, when present, is Pod. DpfHelmChart requires a strict JSON object with repoURL, chartName, chartVersion, security.privileged, and optional values; repoURL must use https:// or oci://, and serviceDaemonSet.nodeSelector is unsupported.
+          description: Deployment spec for the DPU Extension Service
         credentials:
           $ref: '#/components/schemas/DpuExtensionServiceCredentials'
-          description: Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
+          description: Credentials to download resources specified in DPU Extension Service data
         observability:
           $ref: '#/components/schemas/DpuExtensionServiceObservability'
-          description: Observability configuration for the DPU Extension Service version; unsupported for DpfHelmChart
+          description: Observability configuration for the DPU Extension Service version
       required:
         - name
         - serviceType
@@ -28866,14 +28849,13 @@ components:
           type:
             - string
             - 'null'
-          maxLength: 131072
-          description: Deployment spec for the DPU Extension Service, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. For KubernetesPod this is the same Pod manifest accepted on create. For DpfHelmChart this is the same strict JSON definition accepted on create and updates stable V1 in place.
+          description: Deployment spec for the DPU Extension Service
         credentials:
           $ref: '#/components/schemas/DpuExtensionServiceCredentials'
-          description: Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
+          description: Credentials to download resources specified in DPU Extension Service data
         observability:
           $ref: '#/components/schemas/DpuExtensionServiceObservability'
-          description: Observability configuration for the DPU Extension Service version; unsupported for DpfHelmChart
+          description: Observability configuration for the DPU Extension Service version
     DpuExtensionServiceCredentials:
       title: DpuExtensionServiceCredentials
       type: object
@@ -28967,7 +28949,7 @@ components:
     DpuExtensionServiceDeployment:
       title: DpuExtensionServiceDeployment
       type: object
-      description: Describes placement of a DPU Extension Service on DPUs of an Instance. For DpfHelmChart, Running means the DPF placement label was applied; it does not report Helm release or workload health.
+      description: Describes a deployment of a DPU Extension Service on DPUs of an Instance
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           dpuExtensionService:

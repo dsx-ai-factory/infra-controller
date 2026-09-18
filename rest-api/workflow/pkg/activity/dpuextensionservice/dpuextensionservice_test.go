@@ -107,8 +107,6 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 	st3 := util.TestBuildSite(t, dbSession, ip, "test-site-3", cdbm.SiteStatusRegistered, nil, user)
 	st4 := util.TestBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, nil, user)
 	st5 := util.TestBuildSite(t, dbSession, ip, "test-site-5", cdbm.SiteStatusRegistered, nil, user)
-	st6 := util.TestBuildSite(t, dbSession, ip, "test-site-6", cdbm.SiteStatusRegistered, nil, user)
-	st7 := util.TestBuildSite(t, dbSession, ip, "test-site-7", cdbm.SiteStatusRegistered, nil, user)
 
 	// Create DPU Extension Services with different statuses
 	version1 := fmt.Sprintf("V1-T%d", time.Now().Unix()*1000000)
@@ -153,15 +151,6 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 		HasCredentials: false,
 		Created:        time.Now().UTC().Round(time.Microsecond),
 	}, []string{version1}, cdbm.DpuExtensionServiceStatusReady, user)
-	dpfVersionInfo := &cdbm.DpuExtensionServiceVersionInfo{
-		Version:        version1,
-		Data:           "test-data",
-		HasCredentials: false,
-		Created:        time.Now().UTC().Round(time.Microsecond),
-	}
-	dpfUpdating := util.TestBuildDpuExtensionService(t, dbSession, "test-dpu-extension-service-dpf-updating", st6, tenant, cdbm.DpuExtensionServiceServiceTypeDpfHelmChart, cutil.GetPtr(version1), dpfVersionInfo, []string{version1}, cdbm.DpuExtensionServiceStatusReady, user)
-	dpfDeleted := util.TestBuildDpuExtensionService(t, dbSession, "test-dpu-extension-service-dpf-deleted", st6, tenant, cdbm.DpuExtensionServiceServiceTypeDpfHelmChart, cutil.GetPtr(version1), dpfVersionInfo, []string{version1}, cdbm.DpuExtensionServiceStatusReady, user)
-	dpfNoLifecycle := util.TestBuildDpuExtensionService(t, dbSession, "test-dpu-extension-service-dpf-no-lifecycle", st7, tenant, cdbm.DpuExtensionServiceServiceTypeDpfHelmChart, cutil.GetPtr(version1), dpfVersionInfo, []string{version1}, cdbm.DpuExtensionServiceStatusPending, user)
 
 	// Build DPU Extension Services for paged testing
 	pagedDpuExtensionServices := []*cdbm.DpuExtensionService{}
@@ -231,9 +220,7 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 		updatedDpuExtensionServices []*cdbm.DpuExtensionService
 		deletedDpuExtensionServices []*cdbm.DpuExtensionService
 		expectedCreated             map[uuid.UUID]time.Time
-		expectedStatuses            map[uuid.UUID]string
 		expectTimestampParseError   bool
-		expectLifecycleError        bool
 		wantErr                     bool
 	}{
 		{
@@ -396,84 +383,6 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 			wantErr:                   false,
 		},
 		{
-			name: "test DPF Helm chart DPU Extension Service inventory processing maps Core lifecycle state to status",
-			fields: fields{
-				dbSession:      dbSession,
-				siteClientPool: tSiteClientPool,
-				env:            env,
-			},
-			args: args{
-				ctx:    ctx,
-				siteID: st6.ID,
-				dpuExtensionServiceInventory: &corev1.DpuExtensionServiceInventory{
-					DpuExtensionServices: []*corev1.DpuExtensionService{
-						{
-							ServiceId: dpfUpdating.ID.String(),
-							LatestVersionInfo: &corev1.DpuExtensionServiceVersionInfo{
-								Version:       "V2",
-								Data:          "updated-test-data",
-								Created:       time.Now().UTC().Round(time.Microsecond).Format(DpuExtensionServiceTimeFormat),
-								HasCredential: false,
-							},
-							ActiveVersions:  []string{"V2"},
-							LifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"updating"}`},
-						},
-						{
-							ServiceId: dpfDeleted.ID.String(),
-							LatestVersionInfo: &corev1.DpuExtensionServiceVersionInfo{
-								Version:       "V2",
-								Data:          "updated-test-data",
-								Created:       time.Now().UTC().Round(time.Microsecond).Format(DpuExtensionServiceTimeFormat),
-								HasCredential: false,
-							},
-							ActiveVersions:  []string{"V2"},
-							LifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"deleted"}`},
-						},
-					},
-					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-				},
-			},
-			updatedDpuExtensionServices: []*cdbm.DpuExtensionService{dpfUpdating, dpfDeleted},
-			expectedStatuses: map[uuid.UUID]string{
-				dpfUpdating.ID: cdbm.DpuExtensionServiceStatusUpdating,
-				dpfDeleted.ID:  cdbm.DpuExtensionServiceStatusDeleting,
-			},
-			wantErr: false,
-		},
-		{
-			name: "test DPF Helm chart DPU Extension Service inventory processing keeps status when Core lifecycle is absent",
-			fields: fields{
-				dbSession:      dbSession,
-				siteClientPool: tSiteClientPool,
-				env:            env,
-			},
-			args: args{
-				ctx:    ctx,
-				siteID: st7.ID,
-				dpuExtensionServiceInventory: &corev1.DpuExtensionServiceInventory{
-					DpuExtensionServices: []*corev1.DpuExtensionService{
-						{
-							ServiceId: dpfNoLifecycle.ID.String(),
-							LatestVersionInfo: &corev1.DpuExtensionServiceVersionInfo{
-								Version:       "V2",
-								Data:          "updated-test-data",
-								Created:       time.Now().UTC().Round(time.Microsecond).Format(DpuExtensionServiceTimeFormat),
-								HasCredential: false,
-							},
-							ActiveVersions: []string{"V2"},
-						},
-					},
-					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-				},
-			},
-			updatedDpuExtensionServices: []*cdbm.DpuExtensionService{dpfNoLifecycle},
-			expectedStatuses: map[uuid.UUID]string{
-				dpfNoLifecycle.ID: cdbm.DpuExtensionServiceStatusPending,
-			},
-			expectLifecycleError: true,
-			wantErr:              false,
-		},
-		{
 			name: "test DPU Extension Service inventory processing with failed status",
 			fields: fields{
 				dbSession:      dbSession,
@@ -574,7 +483,6 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 			err := mde.UpdateDpuExtensionServicesInDB(tt.args.ctx, tt.args.siteID, tt.args.dpuExtensionServiceInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
 			assert.Equal(t, tt.expectTimestampParseError, bytes.Contains(logOutput.Bytes(), []byte("failed to parse timestamp for version info")))
-			assert.Equal(t, tt.expectLifecycleError, bytes.Contains(logOutput.Bytes(), []byte("failed to derive DPU Extension Service status from Core lifecycle status")))
 
 			if tt.wantErr {
 				return
@@ -585,9 +493,7 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 			// Check that DPU Extension Service status was updated in DB
 			for _, dpuExtService := range tt.updatedDpuExtensionServices {
 				updatedDpuExtService, _ := dpuExtensionServiceDAO.GetByID(ctx, nil, dpuExtService.ID, nil)
-				if expectedStatus, ok := tt.expectedStatuses[dpuExtService.ID]; ok {
-					assert.Equal(t, expectedStatus, updatedDpuExtService.Status)
-				} else if dpuExtService.Status != cdbm.DpuExtensionServiceStatusDeleting {
+				if dpuExtService.Status != cdbm.DpuExtensionServiceStatusDeleting {
 					assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, updatedDpuExtService.Status)
 				}
 

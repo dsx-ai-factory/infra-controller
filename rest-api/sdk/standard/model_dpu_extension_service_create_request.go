@@ -32,11 +32,11 @@ type DpuExtensionServiceCreateRequest struct {
 	ServiceType string `json:"serviceType"`
 	// ID for the Site the DPU Extension Service belongs to
 	SiteId string `json:"siteId"`
-	// Deployment spec, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. KubernetesPod requires a parseable Pod manifest declaring at least one container, whose kind, when present, is Pod. DpfHelmChart requires a strict JSON object with repoURL, chartName, chartVersion, security.privileged, and optional values; repoURL must use https:// or oci://, and serviceDaemonSet.nodeSelector is unsupported.
+	// Deployment spec for the DPU Extension Service
 	Data string `json:"data"`
-	// Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
+	// Credentials to download resources specified in DPU Extension Service data
 	Credentials *DpuExtensionServiceCredentials `json:"credentials,omitempty"`
-	// Observability configuration for the DPU Extension Service version; unsupported for DpfHelmChart
+	// Observability configuration for the DPU Extension Service version
 	Observability *DpuExtensionServiceObservability `json:"observability,omitempty"`
 }
 

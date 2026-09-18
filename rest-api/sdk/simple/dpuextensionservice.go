@@ -194,7 +194,7 @@ func (dm DpuExtensionServiceManager) Delete(ctx context.Context, id string) *Api
 	ctx = WithLogger(ctx, dm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, dm.client.Config.Token)
 
-	_, resp, err := dm.client.apiClient.DPUExtensionServiceAPI.DeleteDpuExtensionService(ctx, dm.client.apiMetadata.Organization, id).Execute()
+	resp, err := dm.client.apiClient.DPUExtensionServiceAPI.DeleteDpuExtensionService(ctx, dm.client.apiMetadata.Organization, id).Execute()
 	return HandleResponseError(resp, err)
 }
 

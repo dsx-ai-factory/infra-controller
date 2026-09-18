@@ -26,7 +26,6 @@ const (
 	DPUEXTENSIONSERVICESTATUS_PENDING  DpuExtensionServiceStatus = "Pending"
 	DPUEXTENSIONSERVICESTATUS_READY    DpuExtensionServiceStatus = "Ready"
 	DPUEXTENSIONSERVICESTATUS_ERROR    DpuExtensionServiceStatus = "Error"
-	DPUEXTENSIONSERVICESTATUS_UPDATING DpuExtensionServiceStatus = "Updating"
 	DPUEXTENSIONSERVICESTATUS_DELETING DpuExtensionServiceStatus = "Deleting"
 )
 
@@ -35,7 +34,6 @@ var AllowedDpuExtensionServiceStatusEnumValues = []DpuExtensionServiceStatus{
 	"Pending",
 	"Ready",
 	"Error",
-	"Updating",
 	"Deleting",
 }
 
