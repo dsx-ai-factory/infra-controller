@@ -68,6 +68,13 @@ impl SwitchCreator {
                 .await
             {
                 Ok(true) => {
+                    tracing::info!(
+                        bmc_ip_address = %explored_managed_switch.bmc_ip,
+                        bmc_mac_address = %expected_switch.bmc_mac_address,
+                        rack_id = ?expected_switch.rack_id,
+                        "Created managed switch from explored endpoint"
+                    );
+
                     metrics.created_switches_count += 1;
                     if metrics.created_switches_count as u64 == self.config.switches_created_per_run
                     {
