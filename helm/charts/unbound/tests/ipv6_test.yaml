@@ -1,4 +1,4 @@
-# IPv6 exposure is opt-in and must preserve operator-owned DNS startup and configuration.
+# IPv6 Service exposure is opt-in and must preserve operator-owned DNS startup and configuration.
 suite: Unbound IPv6 exposure
 templates: [service.yaml, service-monitor.yaml, deployment.yaml, configmap.yaml]
 set:
@@ -68,6 +68,18 @@ tests:
             UNBOUND_CONTROL_DIR: /etc/unbound/keys
         template: configmap.yaml
         documentIndex: 0
+
+  # Default access rules apply to both families independently of Service exposure.
+  - it: allows both address families in the default access-control configuration
+    template: configmap.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: data["access_control.conf"]
+          value: |
+            server:
+                access-control: 0.0.0.0/0 allow
+                access-control: ::/0 allow
 
   # Operator overrides must survive IPv6 enablement instead of being replaced by a generated config.
   - it: preserves the supplied command and access-control configuration
