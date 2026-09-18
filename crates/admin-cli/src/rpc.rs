@@ -1102,6 +1102,10 @@ impl ApiClient {
             .as_deref()
             .map(serde_json::from_str::<Vec<rpc::ExpectedInterface>>)
             .transpose()?;
+        let parsed_reservations = dpu_loopback_reservations
+            .as_deref()
+            .map(crate::expected_machines::common::parse_dpu_loopback_reservations_flag)
+            .transpose()?;
         let paths = [
             (bmc_username.is_some(), "bmc_username"),
             (bmc_password.is_some(), "bmc_password"),
@@ -1132,6 +1136,7 @@ impl ApiClient {
                 "host_lifecycle_profile.disable_lockdown",
             ),
             (parsed_interfaces.is_some(), "host_nics"),
+            (parsed_reservations.is_some(), "dpu_loopback_reservations"),
         ]
         .into_iter()
         .filter(|(selected, _)| *selected)
@@ -1159,15 +1164,9 @@ impl ApiClient {
                     .id
             }
         };
-        // Legacy records can be selected by MAC even when they have no ID. The
-        // native PATCH RPC has no update-mask path for DPU loopback reservations,
-        // so a request that sets them must skip the fast path entirely and use
-        // the legacy read-modify-write, which applies every field including the
-        // reservations. Otherwise a successful native patch would return early
-        // and silently drop them.
-        if dpu_loopback_reservations.is_none()
-            && let Some(resolved_id) = resolved_id
-        {
+        // Legacy records can be selected by MAC even when they have no ID, so
+        // the native fast path only runs once the record resolves to an ID.
+        if let Some(resolved_id) = resolved_id {
             let metadata = (meta_name.is_some() || meta_description.is_some() || labels.is_some())
                 .then(|| rpc::Metadata {
                     name: meta_name.clone().unwrap_or_default(),
@@ -1194,6 +1193,7 @@ impl ApiClient {
                     bmc_ip_allocation: bmc_ip_allocation.map(|allocation| allocation as i32),
                     host_lifecycle_profile,
                     host_nics: parsed_interfaces.unwrap_or_default(),
+                    dpu_loopback_reservations: parsed_reservations,
                     ..Default::default()
                 }),
                 ..Default::default()

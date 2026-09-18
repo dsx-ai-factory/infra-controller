@@ -64,11 +64,8 @@ use crate::expected_machines::common::HostDpuPolicy;
 "dpf_enabled",
 "default_pause_ingestion_and_poweron",
 "interfaces",
-<<<<<<< HEAD
 "disable_lockdown",
-=======
 "dpu_loopback_reservations",
->>>>>>> 9dc5662dd (feat: add deterministic DPU underlay loopback reservations)
 ])))]
 #[command(after_long_help = "\
 EXAMPLES:

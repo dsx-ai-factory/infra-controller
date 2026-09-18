@@ -686,6 +686,7 @@ async fn apply_machine_patches(
     for patch in patches {
         match apply_machine_patch(
             &mut txn,
+            &api.common_pools,
             patch,
             api.runtime_config.retained_boot_interface_window,
         )
@@ -707,6 +708,7 @@ async fn apply_machine_patches(
 
 async fn apply_machine_patch(
     txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
     request: ExpectedMachinePatch,
     retained_window: Option<chrono::Duration>,
 ) -> Result<Vec<PreallocationSuccess>, CarbideError> {
@@ -798,6 +800,25 @@ async fn apply_machine_patch(
             .host_lifecycle_profile
             .and_then(|profile| profile.disable_lockdown);
     }
+    // Applying reservations replaces the stored set (an empty list clears it).
+    // Keep the pre-patch machine so the pool check can treat an unchanged
+    // per-DPU address as a no-op, and validate against live pool state below --
+    // the native patch path performs no other reservation validation.
+    let reservation_baseline = if fields.contains(UpdateField::DpuLoopbackReservations) {
+        let baseline = machine.clone();
+        let reservations = patch
+            .dpu_loopback_reservations
+            .take()
+            .unwrap_or_default()
+            .reservations
+            .into_iter()
+            .map(DpuLoopbackReservation::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        machine.data.dpu_loopback_reservations = Some(reservations);
+        Some(baseline)
+    } else {
+        None
+    };
     fields.update_metadata(patch.metadata, &mut machine.data.metadata)?;
     // Match the replacement RPC's validation of the complete metadata.
     machine
@@ -806,6 +827,9 @@ async fn apply_machine_patch(
         .validate(false)
         .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
     validate_expected_machine_for_insert(&machine)?;
+    if let Some(baseline) = reservation_baseline.as_ref() {
+        validate_reservation_pool_membership(txn, common_pools, &machine, Some(baseline)).await?;
+    }
     let preallocations = update_preallocated_interfaces(txn, &machine, retained_window).await?;
     db::expected_machine::update(txn, &machine).await?;
     Ok(preallocations)

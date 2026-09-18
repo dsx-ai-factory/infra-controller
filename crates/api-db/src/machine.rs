@@ -3994,6 +3994,7 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
+            None,
         )
         .await?;
         txn.commit().await?;
