@@ -23,8 +23,8 @@ use carbide_instrument::emit;
 use lazy_static::lazy_static;
 use mac_address::MacAddress;
 use model::expected_machine::{
-    BmcIpAllocationType, DpuLoopbackReservation, ExpectedInterface, ExpectedMachine, ExpectedMachineData,
-    ExpectedMachineRequest, HostDpuPolicy, LegacyHostBmcOverrides,
+    BmcIpAllocationType, DpuLoopbackReservation, ExpectedInterface, ExpectedMachine,
+    ExpectedMachineData, ExpectedMachineRequest, HostDpuPolicy, LegacyHostBmcOverrides,
 };
 use model::resource_pool::ResourcePool;
 use model::resource_pool::common::CommonPools;
@@ -87,27 +87,25 @@ pub(crate) async fn add(
     let machine = parse_expected_machine_for_insert(request.into_inner(), None)?;
 
     let mut txn = api.txn_begin().await?;
-<<<<<<< HEAD
+    validate_expected_machine(&mut txn, &api.common_pools, &machine, None).await?;
     // Convert through CarbideError so a duplicate BMC MAC becomes AlreadyExists; the direct
     // DatabaseError to Status conversion reports it as FailedPrecondition.
     db::expected_machine::create(&mut txn, machine)
         .await
         .map_err(CarbideError::from)?;
-=======
-    validate_reservation_pool_membership(&mut txn, &api.common_pools, &machine, None).await?;
-    db::expected_machine::create(&mut txn, machine).await?;
->>>>>>> cd3ddd7a7 (feat: add deterministic DPU underlay loopback reservations)
 
     txn.commit().await?;
 
     Ok(tonic::Response::new(()))
 }
 
-/// `parse_expected_machine_for_insert` converts an RPC request and runs every
-/// validation required before creating an `ExpectedMachine`.
+/// `parse_expected_machine_for_insert` converts an RPC request into a
+/// normalized `ExpectedMachine`. It does not validate the result; callers run
+/// [`validate_expected_machine`] (shape plus pool membership) inside their
+/// transaction before creating the row.
 ///
-/// Keeping parsing separate from [`add`] lets [`replace_all`] reject every bad
-/// replacement before it clears the current inventory.
+/// Keeping parsing separate from [`add`] lets [`replace_all`] parse and validate
+/// every replacement before it clears the current inventory.
 fn parse_expected_machine_for_insert(
     request: rpc::ExpectedMachine,
     previous: Option<&ExpectedMachine>,
@@ -174,7 +172,6 @@ fn parse_expected_machine_for_insert(
     };
 
     normalize_host_bmc_configuration(&mut machine, previous, overrides)?;
-    validate_expected_machine_for_insert(&machine)?;
     Ok(machine)
 }
 
@@ -198,10 +195,9 @@ fn validate_expected_machine_for_insert(machine: &ExpectedMachine) -> Result<(),
 /// [`validate_reservation_pool_membership`]. The cheap shape checks run first so
 /// a malformed request never pays for pool lookups.
 ///
-/// Call sites that parse via [`parse_expected_machine_for_insert`] already run
-/// the shape checks there and only need the pool step; this wrapper is for the
-/// sites that hold an already-normalized machine and would otherwise call both
-/// halves back to back.
+/// Every create path runs this on an already-normalized machine inside its
+/// transaction: `add` and `replace_all` after [`parse_expected_machine_for_insert`],
+/// and `insert_expected_machine` plus the batch helpers on the machine they build.
 async fn validate_expected_machine(
     txn: &mut sqlx::PgConnection,
     common_pools: &CommonPools,
@@ -842,8 +838,7 @@ pub(crate) async fn replace_all(
     for replacement in replacements {
         let existing = find_previous_expected_machine(&previous, &replacement);
         let parsed = parse_expected_machine_for_insert(replacement, existing)?;
-        validate_reservation_pool_membership(&mut txn, &api.common_pools, &parsed, existing)
-            .await?;
+        validate_expected_machine(&mut txn, &api.common_pools, &parsed, existing).await?;
         if !seen_bmc_macs.insert(parsed.bmc_mac_address) {
             return Err(CarbideError::InvalidArgument(format!(
                 "duplicate expected machine BMC MAC address {} in replacement list",
