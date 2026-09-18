@@ -14,6 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! Sequential message processing with cancellable, scheduled messages.
+//!
+//! The owner runs and supervises the actor task. The mailbox is unbounded so
+//! synchronous control paths can send without awaiting capacity; callers must
+//! bound or coalesce externally generated work before enqueueing it.
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,18 +27,23 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
+/// Handler decision after processing one message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ActorResult {
+pub enum ActorResult {
+    /// Continue processing messages.
     Noop,
+    /// Stop the actor and discard remaining messages and alarms.
     Stop,
 }
 
+/// Opaque identifier for one scheduled message in an actor's mailbox.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct AlarmId(u64);
+pub struct AlarmId(u64);
 
+/// Sending failed because the actor's message receiver has been dropped.
 #[derive(Debug, thiserror::Error)]
 #[error("actor mailbox is closed")]
-pub(crate) struct ActorMailboxClosed;
+pub struct ActorMailboxClosed;
 
 #[derive(Debug)]
 enum MailboxCommand<Message> {
@@ -46,8 +56,9 @@ enum MailboxCommand<Message> {
     Cancel(AlarmId),
 }
 
+/// Cloneable sender for an actor's immediate and scheduled messages.
 #[derive(Debug)]
-pub(crate) struct ActorMailbox<Message> {
+pub struct ActorMailbox<Message> {
     tx: mpsc::UnboundedSender<MailboxCommand<Message>>,
     next_alarm_id: Arc<AtomicU64>,
     cancelled_alarms: Arc<Mutex<HashSet<AlarmId>>>,
@@ -64,13 +75,15 @@ impl<Message> Clone for ActorMailbox<Message> {
 }
 
 impl<Message> ActorMailbox<Message> {
-    pub(crate) fn send(&self, message: Message) -> Result<(), ActorMailboxClosed> {
+    /// Enqueues a message without waiting for its processing; fails if the actor has stopped.
+    pub fn send(&self, message: Message) -> Result<(), ActorMailboxClosed> {
         self.tx
             .send(MailboxCommand::Send(message))
             .map_err(|_| ActorMailboxClosed)
     }
 
-    pub(crate) fn send_at(
+    /// Schedules a message for the deadline, or later if another message is still running.
+    pub fn send_at(
         &self,
         deadline: Instant,
         message: Message,
@@ -88,7 +101,8 @@ impl<Message> ActorMailbox<Message> {
         Ok(alarm_id)
     }
 
-    pub(crate) fn cancel(&self, alarm_id: AlarmId) {
+    /// Cancels a scheduled message that has not begun processing.
+    pub fn cancel(&self, alarm_id: AlarmId) {
         self.cancelled_alarms
             .lock()
             .expect("cancelled alarms lock must not be poisoned")
@@ -96,7 +110,8 @@ impl<Message> ActorMailbox<Message> {
         self.tx.send(MailboxCommand::Cancel(alarm_id)).ok();
     }
 
-    pub(crate) fn replace_alarm(
+    /// Cancels the previous alarm, if any, and schedules its replacement.
+    pub fn replace_alarm(
         &self,
         alarm_id: Option<AlarmId>,
         deadline: Instant,
@@ -109,11 +124,18 @@ impl<Message> ActorMailbox<Message> {
     }
 }
 
-pub(crate) trait ActorCallbacks<Message> {
-    async fn message(&mut self, mailbox: &ActorMailbox<Message>, message: Message) -> ActorResult;
+/// State-owned message handler; each invocation completes before the next begins.
+pub trait ActorCallbacks<Message> {
+    /// Processes one message and determines whether the actor continues running.
+    fn message(
+        &mut self,
+        mailbox: &ActorMailbox<Message>,
+        message: Message,
+    ) -> impl Future<Output = ActorResult> + Send;
 }
 
-pub(crate) struct Actor<State, Message> {
+/// Sequential executor for a state object's messages and alarms.
+pub struct Actor<State, Message> {
     state: State,
     mailbox: ActorMailbox<Message>,
     mailbox_rx: mpsc::UnboundedReceiver<MailboxCommand<Message>>,
@@ -126,7 +148,8 @@ impl<State, Message> Actor<State, Message>
 where
     State: ActorCallbacks<Message>,
 {
-    pub(crate) fn new(state: State, initial_message: Message) -> (Self, ActorMailbox<Message>) {
+    /// Creates an actor with its first message queued; the owner must run and supervise it.
+    pub fn new(state: State, initial_message: Message) -> (Self, ActorMailbox<Message>) {
         let (tx, mailbox_rx) = mpsc::unbounded_channel();
         let cancelled_alarms = Arc::new(Mutex::new(HashSet::new()));
         let mailbox = ActorMailbox {
@@ -150,7 +173,9 @@ where
         )
     }
 
-    pub(crate) async fn run(mut self) {
+    /// Processes messages until the handler returns `Stop` or the owner cancels this future.
+    /// The actor retains a mailbox for self-messages, so dropping external mailboxes does not stop it.
+    pub async fn run(mut self) {
         loop {
             while self
                 .alarms
