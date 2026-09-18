@@ -145,12 +145,14 @@ func TestFirmwareControl_HappyPath(t *testing.T) {
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
-		Operation:     operations.FirmwareOperationUpgrade,
-		TargetVersion: "fw-bundle-id-v1",
-		SubTargets:    []string{"bmc", "bios"},
-		AccessToken:   "compute-token",
+		Operation:            operations.FirmwareOperationUpgrade,
+		TargetVersion:        "fw-bundle-id-v1",
+		SubTargets:           []string{"bmc", "bios"},
+		AccessToken:          "compute-token",
+		OverrideVersionCheck: true,
 	})
 	require.NoError(t, err)
+	require.True(t, client.LastUpdateComponentFirmwareRequest().GetForceUpdate())
 	require.Equal(
 		t,
 		"compute-token",

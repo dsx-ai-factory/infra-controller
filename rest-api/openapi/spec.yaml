@@ -24837,6 +24837,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this operation to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -24881,6 +24890,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this operation to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -25006,6 +25024,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this batch to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -26017,6 +26044,15 @@ components:
           description: |-
             Operation Rule to pin for each target's firmware Task. Null to let
             Flow's default rule resolution pick one.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -26209,6 +26245,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this batch to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -26396,6 +26441,15 @@ components:
           description: |-
             Optional Operation Rule UUID. When set, pins this firmware update to
             the named rule and overrides Flow's default rule resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false

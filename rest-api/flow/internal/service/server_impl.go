@@ -1408,6 +1408,7 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 		RuleID:                 protobuf.UUIDStringFrom(req.GetRuleId()),
 		SubTargets:             req.GetSubTargets(),
 		OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+		OverrideVersionCheck:   req.GetOverrideVersionCheck(),
 	}
 	err := rs.encryptFirmwareAuthenticationData(info, req.GetAuthenticationData())
 	if err != nil {

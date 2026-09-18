@@ -2237,6 +2237,7 @@ func ExecuteFirmwareUpdateWorkflow(
 	siteID string,
 	ruleID *string,
 	overrideReadinessCheck bool,
+	overrideVersionCheck bool,
 	workflowID string,
 	entityName string,
 ) (*flowv1.SubmitTaskResponse, error) {
@@ -2247,7 +2248,11 @@ func ExecuteFirmwareUpdateWorkflow(
 		Description:            fmt.Sprintf("API firmware update %s", entityName),
 		RuleId:                 GetFlowUUIDPtr(ruleID),
 		OverrideReadinessCheck: overrideReadinessCheck,
+		OverrideVersionCheck:   overrideVersionCheck,
 		AuthenticationData:     authenticationData,
+	}
+	if overrideVersionCheck {
+		workflowID += "-override-version-check"
 	}
 
 	conflictPolicy := temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING

@@ -140,10 +140,12 @@ func TestFirmwareControl(t *testing.T) {
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
-		TargetVersion: "2.0.0",
-		AccessToken:   "switch-token",
+		TargetVersion:        "2.0.0",
+		AccessToken:          "switch-token",
+		OverrideVersionCheck: true,
 	})
 	assert.NoError(t, err)
+	assert.True(t, client.LastUpdateComponentFirmwareRequest().GetForceUpdate())
 	assert.Equal(
 		t,
 		"switch-token",

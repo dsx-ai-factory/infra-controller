@@ -381,6 +381,7 @@ func (m *Manager) FirmwareControl(
 			info.TargetVersion,
 			computeTraySubs,
 			info.AccessToken,
+			info.OverrideVersionCheck,
 			info.OverrideReadinessCheck,
 		); err != nil {
 			return err
@@ -411,6 +412,7 @@ func (m *Manager) firmwareControlComputeTrays(
 	targetVersion string,
 	computeTraySubs []string,
 	accessToken string,
+	overrideVersionCheck bool,
 	bypassStateController bool,
 ) error {
 	subComponents, err := firmwarecomponents.ParseNICoComputeTray(computeTraySubs)
@@ -426,6 +428,7 @@ func (m *Manager) firmwareControlComputeTrays(
 			},
 		},
 		TargetVersion:         targetVersion,
+		ForceUpdate:           overrideVersionCheck,
 		BypassStateController: bypassStateController,
 	}
 	if accessToken != "" {

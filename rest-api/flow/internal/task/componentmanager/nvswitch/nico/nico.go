@@ -362,6 +362,7 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 			},
 		},
 		TargetVersion:         info.TargetVersion,
+		ForceUpdate:           info.OverrideVersionCheck,
 		BypassStateController: info.OverrideReadinessCheck,
 	}
 	if info.AccessToken != "" {

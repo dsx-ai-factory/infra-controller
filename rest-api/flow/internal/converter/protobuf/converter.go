@@ -1449,6 +1449,7 @@ func ScheduledOperationFrom(
 			TargetVersion:          r.UpgradeFirmware.GetTargetVersion(),
 			SubTargets:             r.UpgradeFirmware.GetSubTargets(),
 			OverrideReadinessCheck: r.UpgradeFirmware.GetOverrideReadinessCheck(),
+			OverrideVersionCheck:   r.UpgradeFirmware.GetOverrideVersionCheck(),
 		}
 
 		if r.UpgradeFirmware.GetStartTime() != nil {

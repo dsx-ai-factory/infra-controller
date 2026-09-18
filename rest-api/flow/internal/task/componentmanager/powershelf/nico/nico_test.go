@@ -144,10 +144,12 @@ func TestFirmwareControl(t *testing.T) {
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
-		TargetVersion: "1.2.3",
-		AccessToken:   "powershelf-token",
+		TargetVersion:        "1.2.3",
+		AccessToken:          "powershelf-token",
+		OverrideVersionCheck: true,
 	})
 	assert.NoError(t, err)
+	assert.True(t, client.LastUpdateComponentFirmwareRequest().GetForceUpdate())
 	assert.Equal(
 		t,
 		"powershelf-token",
