@@ -62,6 +62,8 @@ The following tools must be installed on the machine that you will use to run `s
 | `jq` | 1.6 | `brew install jq` | `apt install jq` / `yum install jq` |
 | `ssh-keygen` | any | built-in | built-in |
 
+Core virtual IP address (VIP) preflight also requires Python 3 with PyYAML installed in the `python3` environment. It parses the selected Core values file as YAML and validates supplied VIP annotations for enabled external `LoadBalancer` Services. Existing `externalService` configurations can omit VIP annotations for automatic allocation. Explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs. The DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`.
+
 The `helmfile` tool requires the `helm-diff` plugin. Install it as follows:
 
 ```bash
@@ -344,6 +346,8 @@ MetalLB provides LoadBalancer IPs for NICo Core services (nico-api, DHCP, DNS, P
 NICo includes a built-in NTP service (`nico-ntp`). This is a 3-replica chrony StatefulSet where each replica gets its own MetalLB VIP.
 
 To use the service, set `nico-ntp.externalService.enabled: true`, assign three VIPs from your internal pool via `nico-ntp.externalService.perPodAnnotations`, and set `nico-dhcp.config.kea.hookParameters.ntpServer` to a comma-separated list of those same VIPs so DPUs receive them over DHCP. Enterprise NTP server IPs in `siteConfig.ntp_servers` continue to be used for BMC pre-ingestion time sync independently of `nico-ntp`.
+
+For the DPU-local server to advertise NTP through DHCPv6 option 56, provide reachable IPv6 NTP addresses under `unbound.localData` for the NTP hostname baked into the agent (`carbide-ntp.forge` by default). The Unbound chart emits IPv6 entries as AAAA records. Without an AAAA record, the IPv4 NTP path remains available but there is no service-discovered IPv6 NTP fallback.
 </Note>
 
 Edit `helm-prereqs/values/metallb-config.yaml`--this file ships pre-populated with example values. Replace all values labeled `# EXAMPLE` with your site-specific configuration before running `setup.sh`.
@@ -408,7 +412,7 @@ The `preflight.sh` script checks the following:
 | Category | Checks |
 |----------|--------|
 | Environment variables | Conditional image variables are set; registry has no URL scheme; UUID is valid if set; KUBECONFIG path exists if set |
-| Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen` are in PATH |
+| Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen` are in PATH. Core VIP validation also requires Python 3 with PyYAML. |
 | `values/metallb-config.yaml` | File exists; YAML is valid; at least one IPAddressPool defined; exactly one advertisement mode active (BGP or L2, not both); example placeholder hostnames not still present |
 | Cluster reachability | `kubectl` can reach the API server. |
 | Node resources | At least three schedulable nodes |
