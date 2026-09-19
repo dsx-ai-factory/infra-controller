@@ -2137,6 +2137,12 @@ jobs:
           lint: 'true'
           template: 'true'
 
+      - name: Test nico-fmds listener command
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml busybox
+          /usr/bin/python3 -B bluefield/charts/nico-fmds/tests/test_listener_command.py
+
   build-push-bluefield-helm-charts:
     needs:
       - prepare
