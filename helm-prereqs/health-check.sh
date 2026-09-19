@@ -418,12 +418,15 @@ fi
 # --------------------------------------------------------------------------
 section "NICo Pods"
 _check_deployment  "${NICO_NS}" nico-api
+_check_deployment  "${NICO_NS}" nico-bmc-proxy
 _check_deployment  "${NICO_NS}" nico-dhcp
 _check_statefulset "${NICO_NS}" nico-dns
+_check_deployment  "${NICO_NS}" nico-hardware-health
 _check_deployment  "${NICO_NS}" nico-pxe
+_check_deployment  "${NICO_NS}" nico-ssh-console-rs
 
 # Optional pods: warn if the deployment doesn't exist, fail if it exists but isn't ready
-for _OPT_DEP in nico-hardware-health nico-ssh-console-rs nico-dsx-exchange-consumer; do
+for _OPT_DEP in nico-dsx-exchange-consumer; do
   if kc get deployment -n "${NICO_NS}" "${_OPT_DEP}" &>/dev/null; then
     _check_deployment "${NICO_NS}" "${_OPT_DEP}"
   else
@@ -433,14 +436,17 @@ done
 
 section "NICo Flow"
 FLOW_NS="${FLOW_NS:-flow}"
+REST_NS="${REST_NS:-nico-rest}"
 if kc get ns "${FLOW_NS}" &>/dev/null; then
   _check_deployment "${FLOW_NS}" flow
   for _S in flow.nico.nico-pg-cluster.credentials \
             flow-certificate temporal-client-certs nico-roots; do
     _check_secret_exists "${FLOW_NS}" "${_S}"
   done
+elif kc get ns "${REST_NS}" &>/dev/null; then
+  fail "flow namespace not present - NICo REST is installed but Flow is missing (setup.sh phase 7h installs it with REST)"
 else
-  skip "flow namespace not present — flow disabled or not yet deployed"
+  skip "flow namespace not present - NICo REST not installed (--skip-rest was used); Flow installs together with REST"
 fi
 
 section "RMS (Rack Manager Service)"

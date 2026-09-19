@@ -94,7 +94,6 @@ if ! ${_SOURCED}; then
         case "$1" in
             --skip-core)      SKIP_CORE=true ;;
             --skip-rest)      SKIP_REST=true ;;
-            --skip-flow)      SKIP_FLOW=true ;;
             --skip-dpf)       INSTALL_DPF=false ;;
             --install-dpf)    INSTALL_DPF=true ;;
             --skip-rms)       INSTALL_RMS=false ;;

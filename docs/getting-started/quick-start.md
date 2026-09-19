@@ -443,7 +443,6 @@ You can combine common options as needed:
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Phase 6. |
 | `--skip-core` | Skip the Phase 6 NICo Core Helm release. |
-| `--skip-flow` | Skip Phase 7h NICo Flow. Also set `flow.enabled=false` in `helm-prereqs/values.yaml` to omit Flow prerequisites. |
 | `--skip-rest` | Skip all Phase 7 NICo REST phases. |
 | `--skip-rms` | Skip Phase 5c Rack Management Service (installs by default; `NICO_RMS_IMAGE_TAG` required otherwise). |
 | `--with-observability` | Install the optional local metrics, logs, and traces stack before Phase 7. This also runs with `--skip-rest`; see [`helm-prereqs/observability/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/README.md) for standalone installation. |
@@ -472,7 +471,7 @@ before continuing.
 | 5c | RMS (Rack Management Service) (default; `--skip-rms` to opt out) |
 | 6 | **NICo Core** (nico helm release) |
 | 7a-7g | **NICo REST** base stack (source and CA setup, PostgreSQL, Keycloak, Temporal, REST services) |
-| 7h | **NICo Flow**, unless `--skip-flow` is used |
+| 7h | **NICo Flow** |
 | 7i | **NICo REST site-agent** |
 
 The following components are deployed:
@@ -497,7 +496,7 @@ NICo REST                  (../helm/rest/nico-rest)
   ├── keycloak              (dev OIDC IdP, nico-dev realm)
   ├── temporal              (temporal-helm/temporal, mTLS)
   └── nico-rest             (API, cert-manager, workflow, site-manager)
-NICo Flow                  (../helm/charts/nico-flow)
+NICo Flow                  (../helm/nico-flow)
 NICo REST site-agent       (../helm/rest/nico-rest-site-agent - StatefulSet, bootstrap via site-manager)
 ```
 

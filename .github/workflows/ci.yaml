@@ -1799,7 +1799,7 @@ jobs:
             helm/charts/nico-dhcp
             helm/charts/nico-dns
             helm/charts/nico-dsx-exchange-consumer
-            helm/charts/nico-flow
+            helm/nico-flow
             helm/charts/nico-hardware-health
             helm/charts/nico-machine-a-tron
             helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
