@@ -1880,6 +1880,9 @@ jobs:
       - name: Test Vault Kubernetes URLs
         run: bash helm-prereqs/tests/vault-kubernetes-url_test.sh
 
+      - name: Test health check namespaces
+        run: bash helm-prereqs/tests/health-check-namespaces_test.sh
+
       - name: Test observability installer DPU output
         run: bash helm-prereqs/tests/install-observability-dpu-output_test.sh
 

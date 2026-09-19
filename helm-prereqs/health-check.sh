@@ -66,6 +66,14 @@ pass "kubectl: cluster reachable"
 # --------------------------------------------------------------------------
 section "Namespace Detection"
 
+# Two-label names may be `service.namespace`; longer names must include `.svc`.
+_service_namespace() {
+  local address="${1#*://}"
+  if [[ "${address}" =~ ^[a-z0-9-]+\.([a-z0-9-]+)(\.svc(\.[a-z0-9.-]+)?)?(:[0-9]+)?(/.*)?$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
 # NICo namespace: find the namespace containing vault-cluster-info
 if [[ -z "${NICO_NS:-}" ]]; then
   NICO_NS=$(kubectl get configmap -A \
@@ -79,7 +87,7 @@ fi
 if [[ -z "${VAULT_NS:-}" ]]; then
   _VAULT_SVC=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
     -o jsonpath='{.data.VAULT_SERVICE}' || true)
-  VAULT_NS=$(printf '%s' "${_VAULT_SVC}" | sed 's|https\?://||' | cut -d: -f1 | cut -d. -f2)
+  VAULT_NS=$(_service_namespace "${_VAULT_SVC}")
   VAULT_NS="${VAULT_NS:-vault}"
 fi
 VAULT_ADDR=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
@@ -91,7 +99,7 @@ VAULT_ADDR=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
 if [[ -z "${POSTGRES_NS:-}" ]]; then
   _DB_HOST=$(kc get configmap -n "${NICO_NS}" nico-system-nico-database-config \
     -o jsonpath='{.data.DB_HOST}' || true)
-  POSTGRES_NS=$(printf '%s' "${_DB_HOST}" | cut -d. -f2)
+  POSTGRES_NS=$(_service_namespace "${_DB_HOST}")
   POSTGRES_NS="${POSTGRES_NS:-postgres}"
 fi
 
