@@ -163,6 +163,31 @@ func (s *PostgresStore) GetRacksByIDs(
 	return results, nil
 }
 
+// GetRackByExternalID retrieves a rack by its external inventory ID.
+func (s *PostgresStore) GetRackByExternalID(
+	ctx context.Context,
+	externalID string,
+	withComponents bool,
+) (*rack.Rack, error) {
+	if externalID == "" {
+		return nil, errors.GRPCErrorInvalidArgument("rack external id is not specified")
+	}
+
+	var rackDAO model.Rack
+	query := s.pg.DB.NewSelect().Model(&rackDAO).Where("r.external_id = ?", externalID)
+	if withComponents {
+		query = query.Relation("Components").Relation("Components.BMCs")
+	}
+	if err := query.Scan(ctx); err != nil {
+		return nil, s.checkDBGetError(
+			err,
+			fmt.Sprintf("rack with external id %s", externalID),
+		)
+	}
+
+	return dao.RackFrom(&rackDAO), nil
+}
+
 // GetRackBySerial retrieves a rack by its serial number and manufacturer.
 func (s *PostgresStore) GetRackBySerial(
 	ctx context.Context,
