@@ -6,6 +6,11 @@
 ## Enable/disable the controller
 enabled: false
 
+## Exactly one controller must manage a namespace. The Deployment is a fixed
+## single replica with a Recreate rollout, and there is deliberately no replica
+## count value: the controller has no leader election, so a second active pod
+## duplicates reconcile work and races on the same Services.
+
 ## Container image configuration.
 ##
 ## IMPORTANT: Production deployments must override these defaults.
