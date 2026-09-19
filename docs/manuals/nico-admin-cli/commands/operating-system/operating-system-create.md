@@ -22,6 +22,13 @@ nico-admin-cli operating-system create <-n|--name>
 
 Create a new operating system definition.
 
+Specify exactly one OS variant: either --ipxe-script or
+--ipxe-template-id.
+
+For templated iPXE requirements, artifact configuration, and
+synchronization rules, see
+[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md).
+
 ## OPTIONS
 
 `-n, --name <NAME>`
@@ -107,8 +114,9 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli operating-system create --name ubuntu-22.04 --org fds34511233a
-nico-admin-cli operating-system create --name ubuntu-22.04 --org fds34511233a --description "Ubuntu 22.04 base" --is-active false
+nico-admin-cli operating-system create --name provider-ubuntu-22.04 --ipxe-template-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli operating-system create --name tenant-ubuntu-22.04 --org fds34511233a --ipxe-template-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli operating-system create --name tenant-custom-ipxe --org fds34511233a --description "Custom tenant boot script" --is-active false --allow-override --ipxe-script "#!ipxe …"
 ```
 
 ---

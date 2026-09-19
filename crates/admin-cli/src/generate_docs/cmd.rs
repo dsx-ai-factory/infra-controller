@@ -271,11 +271,15 @@ fn strip_sections(md: &str, names: &[&str]) -> String {
     out
 }
 
-/// Turns bare URLs used in terminal help into links that render correctly in
-/// generated command-reference pages. Terminal help keeps the plain URL, while
-/// the Markdown reference gains a reader-friendly label.
+/// Turns documentation references used in terminal help into links that render
+/// correctly in generated command-reference pages. Terminal help keeps the
+/// plain reference, while the Markdown reference gains a reader-friendly label.
 fn format_markdown_links(md: &str) -> String {
     md.replace(
+        "docs/configuration/templated-ipxe-operating-systems.md",
+        "[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md)",
+    )
+    .replace(
         "https://docs.rs/duration-str/latest/duration_str/",
         "[duration-str documentation](https://docs.rs/duration-str/latest/duration_str/)",
     )
@@ -517,6 +521,15 @@ fn intro(d: CliDomain) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{clean_pandoc_markdown, format_markdown_links};
+
+    #[test]
+    fn repository_doc_paths_become_links_in_generated_markdown() {
+        let markdown = "See docs/configuration/templated-ipxe-operating-systems.md.";
+        assert_eq!(
+            format_markdown_links(markdown),
+            "See [Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md)."
+        );
+    }
 
     #[test]
     fn bare_urls_become_valid_markdown_links() {

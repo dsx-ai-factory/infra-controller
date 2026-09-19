@@ -18,6 +18,10 @@ nico-admin-cli operating-system set-cached-url <--set>
 
 Set or clear cached_url on OS artifacts.
 
+For cache strategies, readiness behavior, and the complete templated
+iPXE workflow, see
+[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md).
+
 ## OPTIONS
 
 `--set <NAME=URL>`
