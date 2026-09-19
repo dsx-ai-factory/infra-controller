@@ -85,6 +85,9 @@ type InstancePowerCall struct {
 	ApplyUpdates bool
 }
 
+// Close is a no-op because the mock owns no connection or certificate watcher.
+func (c *mockClient) Close() error { return nil }
+
 // NewMockClient returns a "GRPC" client that returns mock values so it can be used in unit tests.
 func NewMockClient() MockClient {
 	return &mockClient{
