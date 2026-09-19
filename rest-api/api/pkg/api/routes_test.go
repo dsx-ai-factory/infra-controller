@@ -57,6 +57,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"expected-machine":          9,
 		"expected-power-shelf":      5,
 		"expected-rack":             7,
+		"expected-rack-group":       7,
 		"expected-switch":           5,
 		"instance-type":             5,
 		"machine":                   21,
