@@ -42,7 +42,7 @@ fn sensor_attribution(metric: &MetricSample) -> Option<SensorAttribution> {
     (attribution != SensorAttribution::default()).then_some(attribution)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum SensorHealth {
     Ok,
     Warning,
@@ -100,16 +100,25 @@ impl HealthReportProcessor {
     }
 
     fn classify(health: &SensorThresholdContext, reading: f64) -> SensorHealth {
-        if let Some(max) = health.range_max
-            && reading > max
-        {
-            return SensorHealth::SensorFailure;
-        }
+        // A range where min >= max carries no information (e.g. a vendor
+        // that reports 0/0 instead of omitting the field — confirmed on
+        // real Delta firmware). Treat it as absent rather than failing
+        // every reading outside a single degenerate point.
+        let range_is_degenerate =
+            matches!((health.range_min, health.range_max), (Some(min), Some(max)) if min >= max);
 
-        if let Some(min) = health.range_min
-            && reading < min
-        {
-            return SensorHealth::SensorFailure;
+        if !range_is_degenerate {
+            if let Some(max) = health.range_max
+                && reading > max
+            {
+                return SensorHealth::SensorFailure;
+            }
+
+            if let Some(min) = health.range_min
+                && reading < min
+            {
+                return SensorHealth::SensorFailure;
+            }
         }
 
         if let Some(upper_fatal) = health.upper_fatal
@@ -438,5 +447,64 @@ mod tests {
 
         assert!(emitted.is_empty());
         assert!(processor.windows.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use carbide_test_support::{Check, check_values};
+    use nv_redfish::resource::Health as BmcHealth;
+
+    use super::{HealthReportProcessor, SensorHealth};
+    use crate::sink::SensorThresholdContext;
+
+    /// `(range_min, range_max, reading) -> SensorHealth`, with every other
+    /// threshold absent, so each case isolates the range check alone.
+    fn classify_reading(
+        (range_min, range_max, reading): (Option<f64>, Option<f64>, f64),
+    ) -> SensorHealth {
+        let health = SensorThresholdContext {
+            entity_type: "power_supply".to_string(),
+            sensor_id: "test_sensor".to_string(),
+            upper_fatal: None,
+            lower_fatal: None,
+            upper_critical: None,
+            lower_critical: None,
+            upper_caution: None,
+            lower_caution: None,
+            range_max,
+            range_min,
+            bmc_health: BmcHealth::Ok,
+        };
+        HealthReportProcessor::classify(&health, reading)
+    }
+
+    #[test]
+    fn degenerate_and_valid_ranges() {
+        check_values(
+            [
+                Check {
+                    scenario: "0/0 range (real Delta firmware shape) does not fail a positive reading",
+                    input: (Some(0.0), Some(0.0), 24.0),
+                    expect: SensorHealth::Ok,
+                },
+                Check {
+                    scenario: "a genuine range still catches a reading above max",
+                    input: (Some(0.0), Some(100.0), 150.0),
+                    expect: SensorHealth::SensorFailure,
+                },
+                Check {
+                    scenario: "a genuine range still catches a reading below min",
+                    input: (Some(0.0), Some(100.0), -5.0),
+                    expect: SensorHealth::SensorFailure,
+                },
+                Check {
+                    scenario: "no range at all is unaffected",
+                    input: (None, None, 24.0),
+                    expect: SensorHealth::Ok,
+                },
+            ],
+            classify_reading,
+        );
     }
 }
