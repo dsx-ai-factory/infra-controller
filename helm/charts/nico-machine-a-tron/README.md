@@ -25,6 +25,52 @@ helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
 When `mat-k8s-controller` is enabled, it always deploys into the same namespace
 as nico-machine-a-tron. The controller does not support a separate namespace.
 
+## Helm-Only Deployment
+
+The chart creates the Kubernetes resources that
+`helm-prereqs/setup-machine-a-tron.sh` otherwise creates: the namespace, its
+`nico.nvidia.com/managed` label, and the image pull Secret. Those resources need
+no setup script after helm-prereqs has installed the cert-manager ClusterIssuer
+and the External Secrets Operator (ESO):
+
+- `global.namespaceOverride` with `createNamespace: true` creates the namespace
+  and labels it `nico.nvidia.com/managed: "true"`, so the `nico-roots`
+  ClusterExternalSecret from helm-prereqs syncs the site CA into it.
+- `imagePullSecret.create: true` creates the `machine-a-tron-pull` Secret from the
+  base64-encoded Docker configuration JSON in `imagePullSecret.dockerconfigjson`.
+  Reference it from `global.imagePullSecrets`.
+- A pod that defines only `racks` (clearing the default group with
+  `machines.rack-machines: null`) still gets the bare `[machines]` table that
+  machine-a-tron requires at startup.
+
+The chart does not seed the site-default Vault credentials or write the NICo
+Core site configuration. Follow the
+[deployment guide](../../../docs/development/machine-a-tron-deployment.md) for
+those steps.
+
+The example scopes the Docker configuration JSON to the registry that
+machine-a-tron pulls from and uses the registry login variables from the
+deployment guide. It writes the base64-encoded payload to a temporary file that
+`mktemp` creates with mode 0600. Passing the file with `--set-file` keeps the
+credential out of Helm's process arguments, and the last step removes the file:
+
+```bash
+registry="${NICO_IMAGE_REGISTRY%%/*}"
+user="${REGISTRY_PULL_USERNAME:-\$oauthtoken}"
+auth="$(printf '%s' "${user}:${REGISTRY_PULL_SECRET}" | base64 | tr -d '\n')"
+dockerconfig="$(mktemp)"  # created with mode 0600
+printf '{"auths":{"%s":{"username":"%s","password":"%s","auth":"%s"}}}' \
+  "$registry" "$user" "$REGISTRY_PULL_SECRET" "$auth" \
+  | base64 | tr -d '\n' > "$dockerconfig"
+helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
+  --set global.namespaceOverride=nico-mat \
+  --set imagePullSecret.create=true \
+  --set-file imagePullSecret.dockerconfigjson="$dockerconfig" \
+  --set 'global.imagePullSecrets[0].name=machine-a-tron-pull' \
+  -f my-values.yaml
+rm -f "$dockerconfig"
+```
+
 ## Deployment Modes
 
 | Mode | Use Case | Real HW Compatible | Network Setup |
