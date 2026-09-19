@@ -25,7 +25,29 @@ use uuid::Uuid;
 
 use crate::errors::CarbideCliError;
 
+/// Update an expected switch.
+///
+/// Select the switch by either BMC MAC address or ID. Supply BMC credentials, NVOS credentials,
+/// or a switch serial number; other update flags must accompany one of those options.
+/// Omitted fields and empty metadata names or descriptions remain unchanged. Supplied labels
+/// replace the whole label collection. Supplied NVOS MAC addresses replace the stored list.
+///
+/// Core PATCH requires each selected username/password pair to contain both nonempty values.
+/// BMC and NVOS pairs can change independently. Omit both flags to preserve a pair. Two empty
+/// BMC values also preserve that pair; empty NVOS values are rejected by PATCH.
+/// Legacy fallback uses the validation rules on the older server.
+///
+/// The command first tries Core PATCH, which merges selected fields atomically. It falls back to
+/// the legacy update on `Unimplemented` or `PermissionDenied`, or when a MAC lookup returns no ID.
+/// Legacy fallback preserves omitted fields and accepts either selector when Core supports the
+/// switch update mask introduced in https://github.com/dsx-ai-factory/infra-controller/pull/3706.
+/// Earlier servers use a full replacement: select by BMC MAC address and supply every value you
+/// need to preserve. The legacy request still requires authorization. Other PATCH errors and
+/// failed legacy updates remain errors.
+///
+/// https://github.com/dsx-ai-factory/infra-controller/pull/6359
 #[derive(Parser, Debug, Serialize, Deserialize)]
+#[clap(verbatim_doc_comment)]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -96,21 +118,21 @@ pub(crate) struct Args {
     #[clap(
         long = "meta-name",
         value_name = "META_NAME",
-        help = "The name that should be used as part of the Metadata for newly created Switches. If empty, the SwitchId will be used"
+        help = "Replace the metadata name. An empty or omitted value leaves it unchanged"
     )]
     meta_name: Option<String>,
 
     #[clap(
         long = "meta-description",
         value_name = "META_DESCRIPTION",
-        help = "The description that should be used as part of the Metadata for newly created Machines"
+        help = "Replace the metadata description. An empty or omitted value leaves it unchanged"
     )]
     meta_description: Option<String>,
 
     #[clap(
         long = "label",
         value_name = "LABEL",
-        help = "A label that will be added as metadata for the newly created Machine. The labels key and value must be separated by a : character",
+        help = "Replace all metadata labels with the supplied key or key:value entries. Repeat for each label. Omission preserves labels",
         action = clap::ArgAction::Append
     )]
     labels: Option<Vec<String>>,

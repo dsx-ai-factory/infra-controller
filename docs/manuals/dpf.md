@@ -1258,9 +1258,11 @@ nico-admin-cli expected-machine patch \
 
 #### 3.7.c. `nico-admin-cli expected-machine update --filename` — single-host update from JSON
 
-Updates one entry from a JSON file. The JSON shape uses
-`chassis_serial_number` (not `serial_number`) and any field omitted from the
-file is **preserved** server-side.
+Updates one entry from a JSON file. Use `chassis_serial_number`, not
+`serial_number`. Omitted or `null` metadata clears the stored name,
+description, and labels, including in the example below. Refer to the
+[expected-machine update reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/expected-machine/expected-machine-update.md)
+for required fields, preservation rules, and legacy fallback behavior.
 
 `em.json`:
 
@@ -1278,8 +1280,8 @@ file is **preserved** server-side.
 nico-admin-cli expected-machine update --filename em.json
 ```
 
-This is the most ergonomic path for "toggle DPF on one already-existing
-expected machine without touching anything else."
+To change only DPF, use `expected-machine patch` with `--dpf-enabled`
+and a BMC MAC address or ID selector.
 
 #### 3.7.d. `nico-admin-cli expected-machine replace-all --filename` — destructive full reload
 
@@ -1316,7 +1318,7 @@ This is **not a merge**. Any expected-machine row that is not present in the fil
 | Goal | Path |
 | --- | --- |
 | Add a new host with DPF enabled | `nico-admin-cli expected-machine add … --dpf-enabled true` |
-| Flip DPF on an existing entry, preserving everything else | `nico-admin-cli expected-machine update --filename em.json` |
+| Change only DPF on an existing entry | `nico-admin-cli expected-machine patch … --dpf-enabled true` |
 | Flip DPF inline with one or more other fields | `nico-admin-cli expected-machine patch … --dpf-enabled true` |
 | Replace the entire inventory | `nico-admin-cli expected-machine replace-all --filename em-all.json` |
 | Inspect current value | `nico-admin-cli expected-machine show <bmc-mac>` |

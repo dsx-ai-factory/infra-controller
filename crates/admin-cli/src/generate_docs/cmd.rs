@@ -292,6 +292,14 @@ fn format_markdown_links(md: &str) -> String {
         "[Phone-home](../../../../configuration/tenant_management.md#phone-home)",
     )
     .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/pull/3706",
+        "[masked switch updates](https://github.com/dsx-ai-factory/infra-controller/pull/3706)",
+    )
+    .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/pull/6359",
+        "[Core PATCH RPCs](https://github.com/dsx-ai-factory/infra-controller/pull/6359)",
+    )
+    .replace(
         "https://host:50051",
         "[https://host:50051](https://host:50051)",
     )

@@ -21,7 +21,29 @@ nico-admin-cli expected-power-shelf update
 
 ## DESCRIPTION
 
-Update expected power shelf
+Update an expected power shelf.
+
+Select the shelf by either BMC MAC address or ID. Supply BMC credentials
+or a shelf serial number; other update flags must accompany one of those
+options. With Core PATCH, supplied fields replace their stored values
+and omitted fields remain unchanged. Supplied labels replace the whole
+label collection. An empty metadata name or description clears that
+field.
+
+Supply BMC username and password together. Core PATCH requires both
+values to be nonempty; omitting both preserves credentials. Legacy
+fallback uses the validation rules on the older server.
+
+The command first tries Core PATCH, which merges selected fields
+atomically. It falls back to the legacy update on `Unimplemented` or
+`PermissionDenied`, or when a MAC lookup returns no ID. The legacy
+shelf update sends a full replacement: omitted values can be cleared,
+and selecting by ID is rejected. For this path, select by BMC MAC
+address and supply every value you need to preserve. The legacy request
+still requires authorization. Other PATCH errors and failed legacy
+updates remain errors.
+
+[Core PATCH RPCs](https://github.com/dsx-ai-factory/infra-controller/pull/6359)
 
 ## OPTIONS
 
@@ -47,22 +69,22 @@ Chassis serial number of the expected power shelf
 
 `--meta-name <META_NAME>`
 
-The name that should be used as part of the Metadata for newly created
-Power Shelves. If empty, the Power Shelf Id will be used
+Replace the metadata name. An empty value clears it; PATCH preserves it
+when omitted
 
 `--meta-description <META_DESCRIPTION>`
 
-The description that should be used as part of the Metadata for newly
-created Power Shelves
+Replace the metadata description. An empty value clears it; PATCH
+preserves it when omitted
 
 `--label <LABEL>`
 
-A label that will be added as metadata for the newly created Machine.
-The labels key and value must be separated by a : character
+Replace all metadata labels with the supplied key or key:value entries.
+Repeat for each label. PATCH preserves omitted labels
 
 `--host_name <HOST_NAME>`
 
-Host name of the power shelf
+Unsupported for expected power shelf updates. Omit this option
 
 `--rack_id <RACK_ID>`
 
