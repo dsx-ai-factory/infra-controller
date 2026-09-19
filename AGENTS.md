@@ -79,7 +79,9 @@ infra-controller/
   and document every supported `orderBy` value and its default in OpenAPI. Do
   not rely on an upstream API or database's implicit result order.
 
-All task automation uses `cargo-make`. Install it with:
+Core Rust build, test, lint, and packaging workflows are primarily exposed
+through `cargo-make`. Use direct Cargo commands where this document explicitly
+lists them. REST API workflows use the top-level or `rest-api/` Makefiles.
 
 ```bash
 cargo install cargo-make
@@ -216,8 +218,9 @@ Follow the shared [Engineering Guidelines](CONTRIBUTING.md#engineering-guideline
 for scope control, reuse-before-new-code, evidence-backed assumptions, and
 verification expectations.
 
-See [`STYLE_GUIDE.md`](STYLE_GUIDE.md) for detailed Rust coding conventions.
-Make sure to review it to ensure changes meet the expected style of the codebase.
+Before modifying Rust or Go code, read `STYLE_GUIDE.md` and follow the sections
+relevant to the change. Where this file explicitly narrows a rule—such as test
+case selection—the rule in this file takes precedence.
 
 Use the narrowest Rust visibility required by actual callers. Do not use `pub`
 to suppress dead-code warnings or widen production visibility solely for unit
