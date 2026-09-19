@@ -496,7 +496,10 @@ func (m *ManagerImpl) resolveAndExecuteTask(
 	task *taskdef.Task,
 	targetRack *rack.Rack,
 ) error {
-	ruleID := operations.ExtractRuleID(task.Operation.Info)
+	ruleID, err := operations.ExtractRuleID(task.Operation.Info)
+	if err != nil {
+		return fmt.Errorf("extract operation rule ID: %w", err)
+	}
 
 	rule, err := m.ruleResolver.ResolveRule(
 		ctx, task.Operation.Type, task.Operation.Code, task.RackID, ruleID,
