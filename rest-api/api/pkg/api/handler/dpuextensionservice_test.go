@@ -13,15 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +20,15 @@ import (
 	"github.com/stretchr/testify/require"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -282,11 +282,10 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cdesh := CreateDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        common.GetTestConfig(),
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       common.GetTestConfig(),
 			}
 
 			// Setup echo server/context
@@ -474,10 +473,9 @@ func TestGetAllDpuExtensionServiceHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gadesh := GetAllDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -648,10 +646,9 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gdesh := GetDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -973,11 +970,10 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			capturedUpdateRequest = nil
 
 			udesh := UpdateDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -1180,11 +1176,10 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ddesh := DeleteDpuExtensionServiceHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -1364,11 +1359,10 @@ func TestGetDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gdesvh := GetDpuExtensionServiceVersionHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context
@@ -1633,11 +1627,10 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ddesvh := DeleteDpuExtensionServiceVersionHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			// Setup echo server/context

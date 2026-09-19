@@ -613,11 +613,13 @@ type OperatingSystemSQLDAO struct {
 // The returned OperatingSystem will not have any related structs (InfrastructureProvider/Site) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ossd OperatingSystemSQLDAO) Create(ctx context.Context, tx *db.Tx, input OperatingSystemCreateInput) (*OperatingSystem, error) {
+func (ossd OperatingSystemSQLDAO) Create(ctx context.Context, tx *db.Tx, input OperatingSystemCreateInput) (_ *OperatingSystem, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.Create")
 	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
+		defer func() {
+			operatingSystemSQLDAOSpan.EndWith(retErr)
+		}()
 
 		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "name", input.Name)
 	}
@@ -675,11 +677,13 @@ func (ossd OperatingSystemSQLDAO) Create(ctx context.Context, tx *db.Tx, input O
 // GetByID returns a OperatingSystem by ID
 // Included relations can be a subset of the following: "InfrastructureProvider", "Tenant"
 // returns db.ErrDoesNotExist error if the record is not found
-func (ossd OperatingSystemSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*OperatingSystem, error) {
+func (ossd OperatingSystemSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *OperatingSystem, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.GetByID")
 	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
+		defer func() {
+			operatingSystemSQLDAOSpan.EndWith(retErr)
+		}()
 
 		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "id", id.String())
 	}
@@ -708,11 +712,13 @@ func (ossd OperatingSystemSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uui
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in OperatingSystemOrderByDefault in ascending order
-func (ossd OperatingSystemSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter OperatingSystemFilterInput, page paginator.PageInput, includeRelations []string) ([]OperatingSystem, int, error) {
+func (ossd OperatingSystemSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter OperatingSystemFilterInput, page paginator.PageInput, includeRelations []string) (_ []OperatingSystem, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.GetAll")
 	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
+		defer func() {
+			operatingSystemSQLDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	oss := []OperatingSystem{}
@@ -814,11 +820,13 @@ func (ossd OperatingSystemSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ossd OperatingSystemSQLDAO) Update(ctx context.Context, tx *db.Tx, input OperatingSystemUpdateInput) (*OperatingSystem, error) {
+func (ossd OperatingSystemSQLDAO) Update(ctx context.Context, tx *db.Tx, input OperatingSystemUpdateInput) (_ *OperatingSystem, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.Update")
 	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
+		defer func() {
+			operatingSystemSQLDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	it := &OperatingSystem{
@@ -884,8 +892,8 @@ func (ossd OperatingSystemSQLDAO) Update(ctx context.Context, tx *db.Tx, input O
 	}
 	if input.ImageAuthToken != nil {
 		it.ImageAuthToken = input.ImageAuthToken
+		// never put the token value on the span - spans are exported in plaintext
 		updatedFields = append(updatedFields, "image_auth_token")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "image_auth_token", *input.ImageAuthToken)
 	}
 	if input.ImageDisk != nil {
 		it.ImageDisk = input.ImageDisk
@@ -980,11 +988,13 @@ func (ossd OperatingSystemSQLDAO) Update(ctx context.Context, tx *db.Tx, input O
 // parameters when true, the are set to null in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (ossd OperatingSystemSQLDAO) Clear(ctx context.Context, tx *db.Tx, input OperatingSystemClearInput) (*OperatingSystem, error) {
+func (ossd OperatingSystemSQLDAO) Clear(ctx context.Context, tx *db.Tx, input OperatingSystemClearInput) (_ *OperatingSystem, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.Clear")
 	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
+		defer func() {
+			operatingSystemSQLDAOSpan.EndWith(retErr)
+		}()
 		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "id", input.OperatingSystemId.String())
 	}
 
@@ -1090,11 +1100,13 @@ func (ossd OperatingSystemSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Op
 // Delete deletes an OperatingSystem by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (ossd OperatingSystemSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ossd OperatingSystemSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.Delete")
 	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
+		defer func() {
+			operatingSystemSQLDAOSpan.EndWith(retErr)
+		}()
 		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "id", id.String())
 	}
 

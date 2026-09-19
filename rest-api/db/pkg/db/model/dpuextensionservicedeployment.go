@@ -157,11 +157,13 @@ type DpuExtensionServiceDeploymentSQLDAO struct {
 }
 
 // Create creates a new DpuExtensionServiceDeployment
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) Create(ctx context.Context, tx *db.Tx, input DpuExtensionServiceDeploymentCreateInput) (*DpuExtensionServiceDeployment, error) {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) Create(ctx context.Context, tx *db.Tx, input DpuExtensionServiceDeploymentCreateInput) (_ *DpuExtensionServiceDeployment, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.Create")
 	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
+		defer func() {
+			desdDAOSpan.EndWith(retErr)
+		}()
 
 		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "dpu_extension_service_id", input.DpuExtensionServiceID.String())
 		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "version", input.Version)
@@ -176,11 +178,13 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) Create(ctx context.Context, tx
 
 // GetByID returns a DpuExtensionServiceDeployment by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*DpuExtensionServiceDeployment, error) {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *DpuExtensionServiceDeployment, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.GetByID")
 	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
+		defer func() {
+			desdDAOSpan.EndWith(retErr)
+		}()
 
 		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "id", id.String())
 	}
@@ -208,11 +212,13 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetByID(ctx context.Context, t
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if page.OrderBy is nil, then records are ordered by column specified in DpuExtensionServiceDeploymentOrderByDefault in ascending order
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DpuExtensionServiceDeploymentFilterInput, page paginator.PageInput, includeRelations []string) ([]DpuExtensionServiceDeployment, int, error) {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DpuExtensionServiceDeploymentFilterInput, page paginator.PageInput, includeRelations []string) (_ []DpuExtensionServiceDeployment, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.GetAll")
 	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
+		defer func() {
+			desdDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	desds := []DpuExtensionServiceDeployment{}
@@ -309,11 +315,13 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetAll(ctx context.Context, tx
 
 // Update updates specified fields of an existing DpuExtensionServiceDeployment
 // The updated fields are assumed to be set to non-null values
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) Update(ctx context.Context, tx *db.Tx, input DpuExtensionServiceDeploymentUpdateInput) (*DpuExtensionServiceDeployment, error) {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) Update(ctx context.Context, tx *db.Tx, input DpuExtensionServiceDeploymentUpdateInput) (_ *DpuExtensionServiceDeployment, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.Update")
 	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
+		defer func() {
+			desdDAOSpan.EndWith(retErr)
+		}()
 
 		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "id", input.DpuExtensionServiceDeploymentID.String())
 	}
@@ -353,11 +361,13 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) Update(ctx context.Context, tx
 // Delete deletes a DpuExtensionServiceDeployment by ID
 // error is returned only if there is a db error
 // if the object being deleted doesn't exist, error is not returned
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.Delete")
 	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
+		defer func() {
+			desdDAOSpan.EndWith(retErr)
+		}()
 
 		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "id", id.String())
 	}
@@ -371,7 +381,7 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) Delete(ctx context.Context, tx
 }
 
 // CreateMultiple creates multiple DpuExtensionServiceDeployments
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []DpuExtensionServiceDeploymentCreateInput) ([]DpuExtensionServiceDeployment, error) {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []DpuExtensionServiceDeploymentCreateInput) (_ []DpuExtensionServiceDeployment, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
@@ -379,7 +389,9 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) CreateMultiple(ctx context.Con
 	// Create a child span and set the attributes for current request
 	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.CreateMultiple")
 	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
+		defer func() {
+			desdDAOSpan.EndWith(retErr)
+		}()
 		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "batch_size", len(inputs))
 	}
 

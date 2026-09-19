@@ -19,17 +19,15 @@ import (
 
 // RotateCredentialHandler stages a site-wide credential rotation.
 type RotateCredentialHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewRotateCredentialHandler returns a handler that stages a credential rotation.
 func NewRotateCredentialHandler(dbSession *cdb.Session, scp *sc.ClientPool) RotateCredentialHandler {
 	return RotateCredentialHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -45,7 +43,7 @@ func NewRotateCredentialHandler(dbSession *cdb.Session, scp *sc.ClientPool) Rota
 // @Success 200 {object} model.APICredentialRotationResult
 // @Router /v2/org/{org}/nico/credential/rotation [post]
 func (h RotateCredentialHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("CredentialRotation", "Rotate", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("CredentialRotation", "Rotate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -88,18 +86,16 @@ func (h RotateCredentialHandler) Handle(c echo.Context) error {
 
 // GetCredentialRotationStatusHandler reports convergence of a site-wide rotation.
 type GetCredentialRotationStatusHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetCredentialRotationStatusHandler returns a handler that reports rotation
 // convergence.
 func NewGetCredentialRotationStatusHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetCredentialRotationStatusHandler {
 	return GetCredentialRotationStatusHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -116,7 +112,7 @@ func NewGetCredentialRotationStatusHandler(dbSession *cdb.Session, scp *sc.Clien
 // @Success 200 {object} model.APICredentialRotationStatus
 // @Router /v2/org/{org}/nico/credential/rotation [get]
 func (h GetCredentialRotationStatusHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("CredentialRotation", "GetStatus", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("CredentialRotation", "GetStatus", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

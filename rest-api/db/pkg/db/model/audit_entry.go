@@ -89,11 +89,13 @@ type AuditEntrySQLDAO struct {
 }
 
 // Create creates an AuditEntry from the given parameters
-func (aed AuditEntrySQLDAO) Create(ctx context.Context, tx *db.Tx, input AuditEntryCreateInput) (*AuditEntry, error) {
+func (aed AuditEntrySQLDAO) Create(ctx context.Context, tx *db.Tx, input AuditEntryCreateInput) (_ *AuditEntry, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, daoSpan := aed.tracerSpan.CreateChildInCurrentContext(ctx, "AuditEntryDAO.Create")
 	if daoSpan != nil {
-		defer daoSpan.End()
+		defer func() {
+			daoSpan.EndWith(retErr)
+		}()
 		aed.tracerSpan.SetAttribute(daoSpan, "endpoint", input.Endpoint)
 	}
 
@@ -127,11 +129,13 @@ func (aed AuditEntrySQLDAO) Create(ctx context.Context, tx *db.Tx, input AuditEn
 	return aed.GetByID(ctx, tx, entry.ID)
 }
 
-func (aed AuditEntrySQLDAO) Update(ctx context.Context, tx *db.Tx, input AuditEntryUpdateInput) (*AuditEntry, error) {
+func (aed AuditEntrySQLDAO) Update(ctx context.Context, tx *db.Tx, input AuditEntryUpdateInput) (_ *AuditEntry, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, daoSpan := aed.tracerSpan.CreateChildInCurrentContext(ctx, "AuditEntryDAO.Update")
 	if daoSpan != nil {
-		defer daoSpan.End()
+		defer func() {
+			daoSpan.EndWith(retErr)
+		}()
 		aed.tracerSpan.SetAttribute(daoSpan, "id", input.ID.String())
 	}
 
@@ -168,11 +172,13 @@ func (aed AuditEntrySQLDAO) Update(ctx context.Context, tx *db.Tx, input AuditEn
 	return aed.GetByID(ctx, tx, entry.ID)
 }
 
-func (aed AuditEntrySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (*AuditEntry, error) {
+func (aed AuditEntrySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (_ *AuditEntry, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, daoSpan := aed.tracerSpan.CreateChildInCurrentContext(ctx, "AuditEntryDAO.GetByID")
 	if daoSpan != nil {
-		defer daoSpan.End()
+		defer func() {
+			daoSpan.EndWith(retErr)
+		}()
 		aed.tracerSpan.SetAttribute(daoSpan, "id", id.String())
 	}
 
@@ -190,11 +196,13 @@ func (aed AuditEntrySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID
 	return entry, nil
 }
 
-func (aed AuditEntrySQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter AuditEntryFilterInput, page paginator.PageInput) ([]AuditEntry, int, error) {
+func (aed AuditEntrySQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter AuditEntryFilterInput, page paginator.PageInput) (_ []AuditEntry, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, daoSpan := aed.tracerSpan.CreateChildInCurrentContext(ctx, "AuditEntryDAO.GetAll")
 	if daoSpan != nil {
-		defer daoSpan.End()
+		defer func() {
+			daoSpan.EndWith(retErr)
+		}()
 	}
 
 	var entries []AuditEntry

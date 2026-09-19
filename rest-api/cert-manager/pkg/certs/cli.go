@@ -142,7 +142,10 @@ func NewCommand() *cli.Command {
 
 			<-ctx.Done()
 
-			gracePeriod := 5 * time.Second
+			// Both HTTP services drain on ctx cancellation for at most this
+			// long. Waiting here keeps their spans ahead of the trace flush
+			// that follows in main.
+			gracePeriod := core.DefaultShutDownGracePeriod
 			log.Infof("Shut down requested, wait for %v grace period ...", gracePeriod)
 			time.Sleep(gracePeriod)
 			log.Infof("Server terminated.")

@@ -18,6 +18,9 @@ import (
 	"os"
 	"strings"
 
+	"time"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	goipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	"github.com/metal-stack/v"
 	"github.com/urfave/cli/v2"
@@ -25,6 +28,18 @@ import (
 )
 
 func main() {
+	otelShutdown, otelErr := cotel.Bootstrap(context.Background(), cotel.ExporterConfigured(), "nico-ipam")
+	if otelErr != nil {
+		log.Printf("failed to initialize tracing: %v", otelErr)
+	} else {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := otelShutdown(shutdownCtx); err != nil {
+				log.Printf("failed to shut down tracing: %v", err)
+			}
+		}()
+	}
 
 	app := &cli.App{
 		Name:    "go-ipam server",

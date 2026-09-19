@@ -124,11 +124,13 @@ type TenantSiteSQLDAO struct {
 }
 
 // GetByID returns a TenantSite by ID
-func (tssd TenantSiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*TenantSite, error) {
+func (tssd TenantSiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *TenantSite, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.GetByID")
 	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
+		defer func() {
+			tnsDAOSpan.EndWith(retErr)
+		}()
 
 		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "id", id.String())
 	}
@@ -155,11 +157,13 @@ func (tssd TenantSiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUI
 // GetByTenantIDAndSiteID returns a TenantSite by Tenant ID and Site ID
 // If there are more than one entry for the same Tenant ID and Site ID (which is not a normal case), it will return the first one
 // TODO: Add a unique constraint on Tenant ID, Site ID and deleted
-func (tssd TenantSiteSQLDAO) GetByTenantIDAndSiteID(ctx context.Context, tx *db.Tx, tenantID uuid.UUID, siteID uuid.UUID, includeRelations []string) (*TenantSite, error) {
+func (tssd TenantSiteSQLDAO) GetByTenantIDAndSiteID(ctx context.Context, tx *db.Tx, tenantID uuid.UUID, siteID uuid.UUID, includeRelations []string) (_ *TenantSite, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.GetBySiteAndTenantID")
 	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
+		defer func() {
+			tnsDAOSpan.EndWith(retErr)
+		}()
 
 		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "tenant_id", tenantID.String())
 		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "site_id", siteID.String())
@@ -186,11 +190,13 @@ func (tssd TenantSiteSQLDAO) GetByTenantIDAndSiteID(ctx context.Context, tx *db.
 
 // GetAll returns a list of TenantSites filtered by tenantID, tenantOrg, siteID, offset, limit and orderBy
 // if orderBy is nil, then records are ordered by column specified in TenantSiteOrderByDefault in ascending order
-func (tssd TenantSiteSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter TenantSiteFilterInput, page paginator.PageInput, includeRelations []string) ([]TenantSite, int, error) {
+func (tssd TenantSiteSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter TenantSiteFilterInput, page paginator.PageInput, includeRelations []string) (_ []TenantSite, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.GetAll")
 	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
+		defer func() {
+			tnsDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	tss := []TenantSite{}
@@ -239,11 +245,13 @@ func (tssd TenantSiteSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Tenan
 }
 
 // Create creates a new TenantSite from the given parameters
-func (tssd TenantSiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input TenantSiteCreateInput) (*TenantSite, error) {
+func (tssd TenantSiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input TenantSiteCreateInput) (_ *TenantSite, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.Create")
 	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
+		defer func() {
+			tnsDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	var normConfig TenantSiteConfig
@@ -275,11 +283,13 @@ func (tssd TenantSiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input Tenant
 }
 
 // Update updates an existing TenantSite from the given parameters
-func (tssd TenantSiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input TenantSiteUpdateInput) (*TenantSite, error) {
+func (tssd TenantSiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input TenantSiteUpdateInput) (_ *TenantSite, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.Update")
 	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
+		defer func() {
+			tnsDAOSpan.EndWith(retErr)
+		}()
 
 		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "id", input.TenantSiteID.String())
 	}
@@ -336,11 +346,13 @@ func (tssd TenantSiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input Tenant
 }
 
 // Delete deletes a TenantSite by ID
-func (tssd TenantSiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (tssd TenantSiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnsDAOSpan := tssd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantSiteDAO.Delete")
 	if tnsDAOSpan != nil {
-		defer tnsDAOSpan.End()
+		defer func() {
+			tnsDAOSpan.EndWith(retErr)
+		}()
 
 		tssd.tracerSpan.SetAttribute(tnsDAOSpan, "id", id.String())
 	}

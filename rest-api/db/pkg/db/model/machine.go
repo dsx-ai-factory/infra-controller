@@ -411,11 +411,13 @@ type MachineSQLDAO struct {
 // The returned Machine will not have any related structs filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (msd MachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineCreateInput) (*Machine, error) {
+func (msd MachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineCreateInput) (_ *Machine, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.Create")
 	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
+		defer func() {
+			machineDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	m := &Machine{
@@ -459,11 +461,13 @@ func (msd MachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineCre
 
 // GetByID returns a Machine by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (msd MachineSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, includeRelations []string, forUpdate bool) (*Machine, error) {
+func (msd MachineSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, includeRelations []string, forUpdate bool) (_ *Machine, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetByID")
 	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
+		defer func() {
+			machineDAOSpan.EndWith(retErr)
+		}()
 
 		msd.tracerSpan.SetAttribute(machineDAOSpan, "id", id)
 	}
@@ -494,11 +498,13 @@ func (msd MachineSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, incl
 // GetCountByStatus returns count of Machines for given status
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned map is 0
-func (msd MachineSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, siteID *uuid.UUID, instanceTypeID *uuid.UUID) (map[string]int, error) {
+func (msd MachineSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, siteID *uuid.UUID, instanceTypeID *uuid.UUID) (_ map[string]int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetCountByStatus")
 	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
+		defer func() {
+			machineDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	m := &Machine{}
@@ -731,11 +737,13 @@ func (m *Machine) MatchesLabelSelector(selector map[string]string) bool {
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in MachineOrderByDefault in ascending order
-func (msd MachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput, includeRelations []string) ([]Machine, int, error) {
+func (msd MachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput, includeRelations []string) (_ []Machine, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetAll")
 	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
+		defer func() {
+			machineDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	var machines []Machine
@@ -870,11 +878,13 @@ func (msd MachineSQLDAO) GetDistinctLabelValues(ctx context.Context, tx *db.Tx, 
 // The updated fields are assumed to be set to non-null values
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (msd MachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input MachineUpdateInput) (*Machine, error) {
+func (msd MachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input MachineUpdateInput) (_ *Machine, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.Update")
 	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
+		defer func() {
+			machineDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	results, err := msd.UpdateMultiple(ctx, tx, []MachineUpdateInput{input})
@@ -887,11 +897,13 @@ func (msd MachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input MachineUpd
 // Clear sets parameters of an existing Machine to null values in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (msd MachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineClearInput) (*Machine, error) {
+func (msd MachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineClearInput) (_ *Machine, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.Clear")
 	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
+		defer func() {
+			machineDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	m := &Machine{
@@ -976,11 +988,13 @@ func (msd MachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineClea
 // Delete deletes an Machine by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (msd MachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, machineID string, purge bool) error {
+func (msd MachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, machineID string, purge bool) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.Delete")
 	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
+		defer func() {
+			machineDAOSpan.EndWith(retErr)
+		}()
 
 		msd.tracerSpan.SetAttribute(machineDAOSpan, "id", machineID)
 	}
@@ -1007,7 +1021,9 @@ func (msd MachineSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter Machine
 	// Create a child span and set the attributes for current request
 	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetCount")
 	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
+		defer func() {
+			machineDAOSpan.EndWith(err)
+		}()
 	}
 
 	query := db.GetIDB(tx, msd.dbSession).NewSelect().Model((*Machine)(nil))
@@ -1024,7 +1040,7 @@ func (msd MachineSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter Machine
 // The updated fields are assumed to be set to non-null values
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []MachineUpdateInput) ([]Machine, error) {
+func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []MachineUpdateInput) (_ []Machine, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
@@ -1032,7 +1048,9 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 	// Create a child span and set the attributes for current request
 	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.UpdateMultiple")
 	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
+		defer func() {
+			machineDAOSpan.EndWith(retErr)
+		}()
 		msd.tracerSpan.SetAttribute(machineDAOSpan, "batch_size", len(inputs))
 	}
 

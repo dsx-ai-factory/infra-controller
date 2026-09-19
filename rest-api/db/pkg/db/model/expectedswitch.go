@@ -314,11 +314,13 @@ type ExpectedSwitchSQLDAO struct {
 // The returned ExpectedSwitch will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (essd ExpectedSwitchSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedSwitchCreateInput) (*ExpectedSwitch, error) {
+func (essd ExpectedSwitchSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedSwitchCreateInput) (_ *ExpectedSwitch, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.Create")
 	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
+		defer func() {
+			expectedSwitchDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	es := ExpectedSwitch{
@@ -362,11 +364,13 @@ func (essd ExpectedSwitchSQLDAO) Create(ctx context.Context, tx *db.Tx, input Ex
 
 // Get returns an ExpectedSwitch by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (essd ExpectedSwitchSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedSwitch, error) {
+func (essd ExpectedSwitchSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, includeRelations []string, forUpdate bool) (_ *ExpectedSwitch, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.Get")
 	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
+		defer func() {
+			expectedSwitchDAOSpan.EndWith(retErr)
+		}()
 
 		essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "id", expectedSwitchID.String())
 	}
@@ -465,11 +469,13 @@ func (essd ExpectedSwitchSQLDAO) setQueryWithFilter(filter ExpectedSwitchFilterI
 // Errors are returned only when there is a db related error
 // If records not found, then error is nil, but length of returned slice is 0
 // If orderBy is nil, then records are ordered by column specified in ExpectedSwitchOrderByDefault in ascending order
-func (essd ExpectedSwitchSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedSwitch, int, error) {
+func (essd ExpectedSwitchSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, page paginator.PageInput, includeRelations []string) (_ []ExpectedSwitch, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.GetAll")
 	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
+		defer func() {
+			expectedSwitchDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	var expectedSwitches []ExpectedSwitch
@@ -513,11 +519,13 @@ func (essd ExpectedSwitchSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter E
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (essd ExpectedSwitchSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedSwitchUpdateInput) (*ExpectedSwitch, error) {
+func (essd ExpectedSwitchSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedSwitchUpdateInput) (_ *ExpectedSwitch, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.Update")
 	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
+		defer func() {
+			expectedSwitchDAOSpan.EndWith(retErr)
+		}()
 
 		essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "id", input.ExpectedSwitchID.String())
 	}
@@ -614,11 +622,13 @@ func (essd ExpectedSwitchSQLDAO) Update(ctx context.Context, tx *db.Tx, input Ex
 }
 
 // Clear sets parameters of an existing ExpectedSwitch to null values in db
-func (essd ExpectedSwitchSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (*ExpectedSwitch, error) {
+func (essd ExpectedSwitchSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (_ *ExpectedSwitch, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.Clear")
 	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
+		defer func() {
+			expectedSwitchDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	es := &ExpectedSwitch{
@@ -689,11 +699,13 @@ func (essd ExpectedSwitchSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Exp
 
 // Delete deletes an ExpectedSwitch by ID
 // Error is returned only if there is a db error
-func (essd ExpectedSwitchSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID) error {
+func (essd ExpectedSwitchSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedSwitchDAOSpan := essd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedSwitchDAO.Delete")
 	if expectedSwitchDAOSpan != nil {
-		defer expectedSwitchDAOSpan.End()
+		defer func() {
+			expectedSwitchDAOSpan.EndWith(retErr)
+		}()
 
 		essd.tracerSpan.SetAttribute(expectedSwitchDAOSpan, "id", expectedSwitchID.String())
 	}

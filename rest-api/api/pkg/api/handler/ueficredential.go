@@ -17,17 +17,15 @@ import (
 
 // CreateUEFICredentialHandler creates a site-default host or DPU UEFI credential.
 type CreateUEFICredentialHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateUEFICredentialHandler returns a handler for creating a UEFI credential.
 func NewCreateUEFICredentialHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateUEFICredentialHandler {
 	return CreateUEFICredentialHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -43,7 +41,7 @@ func NewCreateUEFICredentialHandler(dbSession *cdb.Session, scp *sc.ClientPool) 
 // @Success 201 {object} model.APIUEFICredential
 // @Router /v2/org/{org}/nico/credential/uefi [post]
 func (h CreateUEFICredentialHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("UEFICredential", "Create", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("UEFICredential", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

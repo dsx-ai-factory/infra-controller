@@ -130,11 +130,13 @@ type SSHKeySQLDAO struct {
 }
 
 // Create creates a new SSHKey from the given parameters
-func (sksd SSHKeySQLDAO) Create(ctx context.Context, tx *db.Tx, input SSHKeyCreateInput) (*SSHKey, error) {
+func (sksd SSHKeySQLDAO) Create(ctx context.Context, tx *db.Tx, input SSHKeyCreateInput) (_ *SSHKey, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sshKeyDAOSpan := sksd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyDAO.Create")
 	if sshKeyDAOSpan != nil {
-		defer sshKeyDAOSpan.End()
+		defer func() {
+			sshKeyDAOSpan.EndWith(retErr)
+		}()
 
 		sksd.tracerSpan.SetAttribute(sshKeyDAOSpan, "name", input.Name)
 	}
@@ -170,11 +172,13 @@ func (sksd SSHKeySQLDAO) Create(ctx context.Context, tx *db.Tx, input SSHKeyCrea
 
 // GetByID returns a SSHKey by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (sksd SSHKeySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*SSHKey, error) {
+func (sksd SSHKeySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *SSHKey, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sshKeyDAOSpan := sksd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyDAO.GetByID")
 	if sshKeyDAOSpan != nil {
-		defer sshKeyDAOSpan.End()
+		defer func() {
+			sshKeyDAOSpan.EndWith(retErr)
+		}()
 
 		sksd.tracerSpan.SetAttribute(sshKeyDAOSpan, "id", id.String())
 	}
@@ -202,11 +206,13 @@ func (sksd SSHKeySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, i
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in SSHKeyOrderByDefault in ascending order
-func (sksd SSHKeySQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyFilterInput, page paginator.PageInput, includeRelations []string) ([]SSHKey, int, error) {
+func (sksd SSHKeySQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyFilterInput, page paginator.PageInput, includeRelations []string) (_ []SSHKey, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sshKeyDAOSpan := sksd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyDAO.GetAll")
 	if sshKeyDAOSpan != nil {
-		defer sshKeyDAOSpan.End()
+		defer func() {
+			sshKeyDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	sks := []SSHKey{}
@@ -275,11 +281,13 @@ func (sksd SSHKeySQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyFil
 
 // Update updates specified fields of an existing SSHKey
 // The updated fields are assumed to be set to non-null values
-func (sksd SSHKeySQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyUpdateInput) (*SSHKey, error) {
+func (sksd SSHKeySQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyUpdateInput) (_ *SSHKey, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sshKeyDAOSpan := sksd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyDAO.Update")
 	if sshKeyDAOSpan != nil {
-		defer sshKeyDAOSpan.End()
+		defer func() {
+			sshKeyDAOSpan.EndWith(retErr)
+		}()
 
 		sksd.tracerSpan.SetAttribute(sshKeyDAOSpan, "id", input.SSHKeyID)
 	}
@@ -341,11 +349,13 @@ func (sksd SSHKeySQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyUpda
 // Delete deletes an SSHKey by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (sksd SSHKeySQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (sksd SSHKeySQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sshKeyDAOSpan := sksd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyDAO.DeleteByID")
 	if sshKeyDAOSpan != nil {
-		defer sshKeyDAOSpan.End()
+		defer func() {
+			sshKeyDAOSpan.EndWith(retErr)
+		}()
 
 		sksd.tracerSpan.SetAttribute(sshKeyDAOSpan, "id", id.String())
 	}

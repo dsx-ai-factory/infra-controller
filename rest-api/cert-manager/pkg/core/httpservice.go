@@ -23,9 +23,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	semconv "go.opentelemetry.io/otel/semconv/v1.11.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -75,6 +72,12 @@ type HTTPService struct {
 	isTLS bool
 }
 
+// DefaultShutDownGracePeriod bounds `http.Server.Shutdown` for the services
+// the constructors below create. The command that owns their lifecycle waits
+// this long for them to drain before it flushes traces, and the deployments
+// give the pod five seconds in total, so both budgets must stay inside that.
+const DefaultShutDownGracePeriod = 3 * time.Second
+
 // NewHTTPService creates a new service
 func NewHTTPService(addr string) *HTTPService {
 	return &HTTPService{
@@ -84,7 +87,7 @@ func NewHTTPService(addr string) *HTTPService {
 		ReadTimeout:         5 * time.Second,
 		WriteTimeout:        10 * time.Second,
 		IdleTimeout:         120 * time.Second,
-		ShutDownGracePeriod: 3 * time.Second,
+		ShutDownGracePeriod: DefaultShutDownGracePeriod,
 	}
 }
 
@@ -97,7 +100,7 @@ func NewTLSService(addr, certFile, keyFile string) *HTTPService {
 		ReadTimeout:         5 * time.Second,
 		WriteTimeout:        10 * time.Second,
 		IdleTimeout:         120 * time.Second,
-		ShutDownGracePeriod: 3 * time.Second,
+		ShutDownGracePeriod: DefaultShutDownGracePeriod,
 		KeyFile:             keyFile,
 		CertFile:            certFile,
 		isTLS:               true,
@@ -529,12 +532,6 @@ func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 				log.WithField("status_code", w.statusCode).Debugf("Handler finished")
 				if count != nil {
 					count.WithLabelValues(r.URL.Path, r.Method, fmt.Sprintf("%d", w.statusCode)).Inc()
-				}
-				// TODO(mcamp) this is a hack to get lightstep to recognize the span
-				// as an error. Either lightstep launcher or otelmux (probably the latter) should give us
-				// a hook to set this attribute. Until then we'll just set it here.
-				if v, _ := semconv.SpanStatusFromHTTPStatusCode(w.statusCode); v == codes.Error {
-					trace.SpanFromContext(r.Context()).SetAttributes(attribute.Bool("error", true))
 				}
 				// Return the writer back to the pool
 				putRRW(w)

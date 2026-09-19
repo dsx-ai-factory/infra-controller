@@ -241,11 +241,13 @@ type SiteSQLDAO struct {
 }
 
 // GetByID returns a Site by its ID
-func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool) (*Site, error) {
+func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool) (_ *Site, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, stDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.GetByID")
 	if stDAOSpan != nil {
-		defer stDAOSpan.End()
+		defer func() {
+			stDAOSpan.EndWith(retErr)
+		}()
 
 		ssd.tracerSpan.SetAttribute(stDAOSpan, "id", id.String())
 	}
@@ -330,7 +332,9 @@ func (ssd SiteSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SiteFilterIn
 	// Create a child span and set the attributes for current request
 	ctx, stDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.GetAll")
 	if stDAOSpan != nil {
-		defer stDAOSpan.End()
+		defer func() {
+			stDAOSpan.EndWith(err)
+		}()
 	}
 
 	sts := []Site{}
@@ -379,7 +383,9 @@ func (ssd SiteSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter SiteFilter
 	// Create a child span and set the attributes for current request
 	ctx, siteDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.GetCount")
 	if siteDAOSpan != nil {
-		defer siteDAOSpan.End()
+		defer func() {
+			siteDAOSpan.EndWith(err)
+		}()
 	}
 	sts := []Site{}
 
@@ -397,11 +403,13 @@ func (ssd SiteSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter SiteFilter
 }
 
 // Create creates a Site from the given parameters
-func (ssd SiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input SiteCreateInput) (*Site, error) {
+func (ssd SiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input SiteCreateInput) (_ *Site, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, stDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.Create")
 	if stDAOSpan != nil {
-		defer stDAOSpan.End()
+		defer func() {
+			stDAOSpan.EndWith(retErr)
+		}()
 
 		ssd.tracerSpan.SetAttribute(stDAOSpan, "name", input.Name)
 	}
@@ -442,11 +450,13 @@ func (ssd SiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input SiteCreateInp
 }
 
 // Update updates a Site from the given parameters
-func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInput) (*Site, error) {
+func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInput) (_ *Site, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, stDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.Update")
 	if stDAOSpan != nil {
-		defer stDAOSpan.End()
+		defer func() {
+			stDAOSpan.EndWith(retErr)
+		}()
 		ssd.tracerSpan.SetAttribute(stDAOSpan, "id", input.SiteID.String())
 	}
 
@@ -519,14 +529,13 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 
 	if input.RegistrationToken != nil {
 		st.RegistrationToken = input.RegistrationToken
+		// never put the token value on the span - spans are exported in plaintext
 		updatedFields = append(updatedFields, "registration_token")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "registration_token", *input.RegistrationToken)
 	}
 
 	if input.RegistrationTokenExpiration != nil {
 		st.RegistrationTokenExpiration = input.RegistrationTokenExpiration
 		updatedFields = append(updatedFields, "registration_token_expiration")
-		ssd.tracerSpan.SetAttribute(stDAOSpan, "registration_token_expiration", *input.RegistrationTokenExpiration)
 	}
 
 	if input.IsInfinityEnabled != nil {
@@ -628,11 +637,13 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 }
 
 // Delete deletes a Site by its ID
-func (ssd SiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ssd SiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, stDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SiteDAO.DeleteByID")
 	if stDAOSpan != nil {
-		defer stDAOSpan.End()
+		defer func() {
+			stDAOSpan.EndWith(retErr)
+		}()
 
 		ssd.tracerSpan.SetAttribute(stDAOSpan, "id", id.String())
 	}

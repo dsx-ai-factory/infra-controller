@@ -29,6 +29,7 @@ import (
 	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -46,23 +47,21 @@ const (
 
 // BatchCreateInstanceHandler is the API Handler for creating multiple instances with topology-optimized allocation
 type BatchCreateInstanceHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	dps        dpsclient.PowerProvisioner
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
 }
 
 // NewBatchCreateInstanceHandler initializes and returns a new handler for batch creating Instances
 func NewBatchCreateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) BatchCreateInstanceHandler {
 	return BatchCreateInstanceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		dps:        dps,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
+		dps:       dps,
 	}
 }
 
@@ -298,17 +297,11 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("started API handler for batch instance creation")
 
 	// Create a child span and set the attributes for current request
-	newctx, handlerSpan := bcih.tracerSpan.CreateChildInContext(ctx, "BatchCreateInstanceHandler", logger)
-	if handlerSpan != nil {
-		// Set newly created span context as a current context
-		ctx = newctx
+	ctx, handlerSpan := cotel.StartSpan(ctx, "BatchCreateInstanceHandler")
+	defer handlerSpan.End()
+	cotel.SetAttribute(handlerSpan, attribute.String("org", org))
 
-		defer handlerSpan.End()
-
-		bcih.tracerSpan.SetAttribute(handlerSpan, attribute.String("org", org), logger)
-	}
-
-	dbUser, logger, err := common.GetUserAndEnrichLogger(c, logger, bcih.tracerSpan, handlerSpan)
+	dbUser, logger, err := common.GetUserAndEnrichLogger(c, logger, handlerSpan)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}

@@ -459,11 +459,13 @@ type SubnetSQLDAO struct {
 // Create creates a new Subnet from the given parameters
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ssd SubnetSQLDAO) Create(ctx context.Context, tx *db.Tx, input SubnetCreateInput) (*Subnet, error) {
+func (ssd SubnetSQLDAO) Create(ctx context.Context, tx *db.Tx, input SubnetCreateInput) (_ *Subnet, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.Create")
 	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
+		defer func() {
+			sbDAOSpan.EndWith(retErr)
+		}()
 
 		ssd.tracerSpan.SetAttribute(sbDAOSpan, "name", input.Name)
 	}
@@ -513,11 +515,13 @@ func (ssd SubnetSQLDAO) Create(ctx context.Context, tx *db.Tx, input SubnetCreat
 // GetByID returns a Subnet by ID
 // includeRelation can be a subset of Vpc, Domain, Tenant
 // returns db.ErrDoesNotExist error if the record is not found
-func (ssd SubnetSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Subnet, error) {
+func (ssd SubnetSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Subnet, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.GetByID")
 	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
+		defer func() {
+			sbDAOSpan.EndWith(retErr)
+		}()
 
 		ssd.tracerSpan.SetAttribute(sbDAOSpan, "id", id.String())
 	}
@@ -544,11 +548,13 @@ func (ssd SubnetSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, in
 // GetCountByStatus returns count of Subnets for given status
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned map is 0
-func (ssd SubnetSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, tenantID *uuid.UUID, vpcID *uuid.UUID) (map[string]int, error) {
+func (ssd SubnetSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, tenantID *uuid.UUID, vpcID *uuid.UUID) (_ map[string]int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.GetCountByStatus")
 	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
+		defer func() {
+			sbDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	s := &Subnet{}
@@ -592,11 +598,13 @@ func (ssd SubnetSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, tenantI
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in SubnetOrderByDefault in ascending order
-func (ssd SubnetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SubnetFilterInput, page paginator.PageInput, includeRelations []string) ([]Subnet, int, error) {
+func (ssd SubnetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SubnetFilterInput, page paginator.PageInput, includeRelations []string) (_ []Subnet, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.GetAll")
 	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
+		defer func() {
+			sbDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	ss := []Subnet{}
@@ -682,11 +690,13 @@ func (ssd SubnetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SubnetFilt
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ssd SubnetSQLDAO) Update(ctx context.Context, tx *db.Tx, input SubnetUpdateInput) (*Subnet, error) {
+func (ssd SubnetSQLDAO) Update(ctx context.Context, tx *db.Tx, input SubnetUpdateInput) (_ *Subnet, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.Update")
 	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
+		defer func() {
+			sbDAOSpan.EndWith(retErr)
+		}()
 
 		ssd.tracerSpan.SetAttribute(sbDAOSpan, "id", input.SubnetId.String())
 	}
@@ -808,11 +818,13 @@ func (ssd SubnetSQLDAO) Update(ctx context.Context, tx *db.Tx, input SubnetUpdat
 // parameters description, tenantID when true, the are set to null in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (ssd SubnetSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SubnetClearInput) (*Subnet, error) {
+func (ssd SubnetSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SubnetClearInput) (_ *Subnet, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.Clear")
 	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
+		defer func() {
+			sbDAOSpan.EndWith(retErr)
+		}()
 
 		ssd.tracerSpan.SetAttribute(sbDAOSpan, "id", input.SubnetId.String())
 	}
@@ -892,11 +904,13 @@ func (ssd SubnetSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SubnetClearI
 // Delete deletes an Subnet by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (ssd SubnetSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ssd SubnetSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sbDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SubnetDAO.Delete")
 	if sbDAOSpan != nil {
-		defer sbDAOSpan.End()
+		defer func() {
+			sbDAOSpan.EndWith(retErr)
+		}()
 
 		ssd.tracerSpan.SetAttribute(sbDAOSpan, "id", id.String())
 	}

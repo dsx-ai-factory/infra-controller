@@ -129,11 +129,13 @@ type SSHKeyGroupInstanceAssociationSQLDAO struct {
 }
 
 // Create creates a new SSHKeyGroupInstanceAssociation from the given parameters
-func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) Create(ctx context.Context, tx *db.Tx, input SSHKeyGroupInstanceAssociationCreateInput) (*SSHKeyGroupInstanceAssociation, error) {
+func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) Create(ctx context.Context, tx *db.Tx, input SSHKeyGroupInstanceAssociationCreateInput) (_ *SSHKeyGroupInstanceAssociation, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, SSHKeyGroupInstanceAssociationDAOSpan := skgiasd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupInstanceAssociationSQLDAO.Create")
 	if SSHKeyGroupInstanceAssociationDAOSpan != nil {
-		defer SSHKeyGroupInstanceAssociationDAOSpan.End()
+		defer func() {
+			SSHKeyGroupInstanceAssociationDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	skgia := &SSHKeyGroupInstanceAssociation{
@@ -159,11 +161,13 @@ func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) Create(ctx context.Context, 
 
 // GetByID returns a SSHKeyGroupInstanceAssociation by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*SSHKeyGroupInstanceAssociation, error) {
+func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *SSHKeyGroupInstanceAssociation, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, SSHKeyGroupInstanceAssociationDAOSpan := skgiasd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupInstanceAssociationSQLDAO.GetByID")
 	if SSHKeyGroupInstanceAssociationDAOSpan != nil {
-		defer SSHKeyGroupInstanceAssociationDAOSpan.End()
+		defer func() {
+			SSHKeyGroupInstanceAssociationDAOSpan.EndWith(retErr)
+		}()
 
 		skgiasd.tracerSpan.SetAttribute(SSHKeyGroupInstanceAssociationDAOSpan, "id", id.String())
 	}
@@ -191,11 +195,13 @@ func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) GetByID(ctx context.Context,
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in SSHKeyGroupInstanceAssociationOrderByDefault in ascending order
-func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyGroupInstanceAssociationFilterInput, page paginator.PageInput, includeRelations []string) ([]SSHKeyGroupInstanceAssociation, int, error) {
+func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyGroupInstanceAssociationFilterInput, page paginator.PageInput, includeRelations []string) (_ []SSHKeyGroupInstanceAssociation, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, SSHKeyGroupInstanceAssociationDAOSpan := skgiasd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupInstanceAssociationSQLDAO.GetAll")
 	if SSHKeyGroupInstanceAssociationDAOSpan != nil {
-		defer SSHKeyGroupInstanceAssociationDAOSpan.End()
+		defer func() {
+			SSHKeyGroupInstanceAssociationDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	skgias := []SSHKeyGroupInstanceAssociation{}
@@ -237,11 +243,13 @@ func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) GetAll(ctx context.Context, 
 }
 
 // Update updates specified fields of an existing SSHKeyGroupInstanceAssociation
-func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyGroupInstanceAssociationUpdateInput) (*SSHKeyGroupInstanceAssociation, error) {
+func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyGroupInstanceAssociationUpdateInput) (_ *SSHKeyGroupInstanceAssociation, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, SSHKeyGroupInstanceAssociationDAOSpan := skgiasd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupInstanceAssociationSQLDAO.Update")
 	if SSHKeyGroupInstanceAssociationDAOSpan != nil {
-		defer SSHKeyGroupInstanceAssociationDAOSpan.End()
+		defer func() {
+			SSHKeyGroupInstanceAssociationDAOSpan.EndWith(retErr)
+		}()
 		skgiasd.tracerSpan.SetAttribute(SSHKeyGroupInstanceAssociationDAOSpan, "id", input.SSHKeyGroupInstanceAssociationID.String())
 	}
 
@@ -287,11 +295,13 @@ func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) Update(ctx context.Context, 
 // Delete deletes an SSHKeyGroupInstanceAssociation by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, SSHKeyGroupInstanceAssociationDAOSpan := skgiasd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupInstanceAssociationSQLDAO.Delete")
 	if SSHKeyGroupInstanceAssociationDAOSpan != nil {
-		defer SSHKeyGroupInstanceAssociationDAOSpan.End()
+		defer func() {
+			SSHKeyGroupInstanceAssociationDAOSpan.EndWith(retErr)
+		}()
 		skgiasd.tracerSpan.SetAttribute(SSHKeyGroupInstanceAssociationDAOSpan, "id", id.String())
 	}
 
@@ -308,7 +318,7 @@ func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) Delete(ctx context.Context, 
 }
 
 // CreateMultiple creates multiple SSHKeyGroupInstanceAssociations from the given parameters
-func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []SSHKeyGroupInstanceAssociationCreateInput) ([]SSHKeyGroupInstanceAssociation, error) {
+func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []SSHKeyGroupInstanceAssociationCreateInput) (_ []SSHKeyGroupInstanceAssociation, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
@@ -316,7 +326,9 @@ func (skgiasd SSHKeyGroupInstanceAssociationSQLDAO) CreateMultiple(ctx context.C
 	// Create a child span and set the attributes for current request
 	ctx, SSHKeyGroupInstanceAssociationDAOSpan := skgiasd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupInstanceAssociationSQLDAO.CreateMultiple")
 	if SSHKeyGroupInstanceAssociationDAOSpan != nil {
-		defer SSHKeyGroupInstanceAssociationDAOSpan.End()
+		defer func() {
+			SSHKeyGroupInstanceAssociationDAOSpan.EndWith(retErr)
+		}()
 		skgiasd.tracerSpan.SetAttribute(SSHKeyGroupInstanceAssociationDAOSpan, "batch_size", len(inputs))
 	}
 
