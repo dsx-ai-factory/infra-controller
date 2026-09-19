@@ -279,6 +279,25 @@ func TestManagerImpl_SubmitTask(t *testing.T) {
 	})
 }
 
+func TestManagerImpl_CancelTask(t *testing.T) {
+	taskID := uuid.New()
+	store := &managerTaskStore{tasksByID: map[uuid.UUID]*taskdef.Task{
+		taskID: {
+			ID:     taskID,
+			Status: taskcommon.TaskStatusFailed,
+		},
+	}}
+	executor := &managerExecutor{}
+	manager := &ManagerImpl{taskStore: store, executor: executor}
+
+	err := manager.CancelTask(context.Background(), taskID)
+
+	require.ErrorIs(t, err, ErrTaskNotCancellable)
+	require.ErrorContains(t, err, "status failed")
+	require.Zero(t, executor.terminateCalls)
+	require.Empty(t, store.statusUpdates)
+}
+
 func TestValidateSubmissionRackTargets_InjectExpectationNeedsNoRule(t *testing.T) {
 	rackID := uuid.New()
 	resolvedRack := newTestRack(rackID, "rack-1")

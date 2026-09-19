@@ -12820,6 +12820,18 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Task has already finished with status `Succeeded` or `Failed` and cannot be cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                terminal-task:
+                  value:
+                    source: nico
+                    message: 'task cannot be cancelled: task 550e8400-e29b-41d4-a716-446655440000 has status failed'
+                    data: null
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:

@@ -1092,6 +1092,9 @@ func (rs *FlowServerImpl) CancelTask(
 	}
 
 	if err := rs.taskManager.CancelTask(ctx, taskID); err != nil {
+		if errors.Is(err, taskmanager.ErrTaskNotCancellable) {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
 		return nil, err
 	}
 
