@@ -238,7 +238,6 @@ state-controller = { path = "../state-controller", features = ["test-support"] }
 
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
 ctor = { workspace = true }
-figment = { workspace = true, features = ["env", "test", "toml"] }
 mockito = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
