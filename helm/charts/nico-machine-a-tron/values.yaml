@@ -10,7 +10,7 @@
 ##    - INCOMPATIBLE with real hardware
 ##
 ## 2. CONTROLLER MODE (Large-Scale Testing) - mat-k8s-controller.enabled: true
-##    - Controller dynamically creates ClusterIP Services per BMC
+##    - Controller dynamically creates a Service per BMC (BMC IP as externalIP)
 ##    - Supports multi-pod deployments via `pods` configuration
 ##    - Compatible with real hardware
 ##
@@ -282,7 +282,7 @@ hwMacAddressRanges:
   ## Bits per allocated range (8 = 256 MACs per range allocation)
   rangeHostBits: 8
 
-##   - N ClusterIP BMC services (when mat-k8s-controller.enabled)
+##   - N BMC Services, one per BMC (when mat-k8s-controller.enabled)
 ##
 ##
 ## BMC count per GB200 NVL72 rack: 71
@@ -347,17 +347,17 @@ pods:
 #        hwType: wiwynn_gb200_nvl
 #        hostCount: 252       # 18 trays × 14 racks
 #        dpuPerHostCount: 2   # 2 BF3 per tray
-#        bmcDhcpRelayAddress: "10.96.64.1"
+#        bmcDhcpRelayAddress: "10.200.0.1"
 #        underlayDhcpRelayAddress: "192.168.176.1"
 #      switches:
 #        hwType: nvidia_switch_nd5200_ld
 #        hostCount: 126       # 9 switches × 14 racks
-#        bmcDhcpRelayAddress: "10.96.64.1"
+#        bmcDhcpRelayAddress: "10.200.0.1"
 #        underlayDhcpRelayAddress: "192.168.176.1"
 #      power:
 #        hwType: liteon_power_shelf
 #        hostCount: 112       # 8 shelves × 14 racks
-#        bmcDhcpRelayAddress: "10.96.64.1"
+#        bmcDhcpRelayAddress: "10.200.0.1"
 #        underlayDhcpRelayAddress: "192.168.176.1"
 #
 #  mat-1:
@@ -366,7 +366,7 @@ pods:
 #        hwType: wiwynn_gb200_nvl
 #        hostCount: 252
 #        dpuPerHostCount: 2
-#        bmcDhcpRelayAddress: "10.96.64.1"
+#        bmcDhcpRelayAddress: "10.200.0.1"
 #        underlayDhcpRelayAddress: "192.168.176.1"
 #      # ... same pattern
 
@@ -405,14 +405,14 @@ configFiles:
   #     hw_type = "supermicro_gb300_nvl"
   #     host_count = 10
   #     dpu_per_host_count = 2
-  #     oob_dhcp_relay_address = "10.96.64.1"
+  #     oob_dhcp_relay_address = "10.200.0.1"
   #     admin_dhcp_relay_address = "192.168.176.1"
   #
   #     [machines.switches]
   #     hw_type = "nvidia_switch_nd5200_ld"
   #     host_count = 5
   #     dpu_per_host_count = 0
-  #     oob_dhcp_relay_address = "10.96.64.1"
+  #     oob_dhcp_relay_address = "10.200.0.1"
   #     admin_dhcp_relay_address = "192.168.176.1"
   matConfigs: {}
 
@@ -426,7 +426,8 @@ configFiles:
 ##   - Finds bmc-mock Services via label: nvidia-infra-controller/mat-service=true
 ##   - Polls /machines/status from each discovered instance
 ##
-## for ClusterIP assignment. See README troubleshooting for ClusterIP conflicts.
+## BMC IPs are published as Service externalIPs; the BMC network must not
+## overlap the cluster ServiceCIDR or pod CIDR. See README Requirements.
 ##
 mat-k8s-controller:
   enabled: false

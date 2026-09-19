@@ -30,7 +30,7 @@ as nico-machine-a-tron. The controller does not support a separate namespace.
 | Mode | Use Case | Real HW Compatible | Network Setup |
 |------|----------|--------------------|---------------|
 | **Override Mode** | Development | No | Simple - single endpoint |
-| **Controller Mode** | Scale testing | Yes | Per-BMC ClusterIP (controller-managed) |
+| **Controller Mode** | Scale testing | Yes | Per-BMC Service, BMC IP as externalIP (controller-managed) |
 
 **Default:** Override Mode (controller disabled, single pod).
 
@@ -133,7 +133,7 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 5
         dpuPerHostCount: 2
-        bmcDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
+        bmcDhcpRelayAddress: "10.200.0.1"  # All pods share same relay
         underlayDhcpRelayAddress: "10.104.0.1"
   mat-1:
     machines:
@@ -141,7 +141,7 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 5
         dpuPerHostCount: 2
-        bmcDhcpRelayAddress: "10.96.64.1"
+        bmcDhcpRelayAddress: "10.200.0.1"
         underlayDhcpRelayAddress: "10.104.0.1"
 
 macAddressPool:
@@ -158,7 +158,7 @@ mat-k8s-controller:
 1. Controller discovers machine-a-tron pods via
    `nvidia-infra-controller/mat-service=true` label
 2. Polls `/machines/status` from each discovered machine-a-tron instance
-3. Creates Services with BMC IP as ClusterIP
+3. Creates a Service per BMC with the BMC IP in `spec.externalIPs`
 4. Services route traffic to correct pod via `nvidia-infra-controller/pod-name`
    selector
 5. Deletes stale Services when machines disappear
@@ -179,7 +179,7 @@ metadata:
     nvidia-infra-controller/mat-machine-type: host
   annotations:
     nvidia-infra-controller/mat-id: "uuid-..."
-    nvidia-infra-controller/mat-bmc-ip: "10.96.64.5"
+    nvidia-infra-controller/mat-bmc-ip: "10.200.0.5"
     nvidia-infra-controller/mat-hardware-type: wiwynn_gb200_nvl
   ownerReferences:
   - apiVersion: apps/v1
@@ -187,8 +187,9 @@ metadata:
     name: nico-machine-a-tron-mat-0  # The mat pod this Service routes to
     uid: <deployment-uid>
 spec:
-  type: ClusterIP
-  clusterIP: 10.96.64.5  # BMC IP assigned by NICo
+  type: ClusterIP  # clusterIP is allocated by the apiserver
+  externalIPs:
+  - 10.200.0.5  # BMC IP assigned by NICo
   ports:
   - name: redfish
     port: 443
@@ -210,13 +211,31 @@ adds a dynamic target UDP port for IPMI access.
 
 ### Requirements
 
-- `bmcDhcpRelayAddress` must be within Kubernetes ServiceCIDR
+- The BMC network (the NICo `networks` prefix that `bmcDhcpRelayAddress`
+  belongs to) must not overlap the Kubernetes ServiceCIDR, the pod CIDR, the
+  node network, or any network the nodes or pods must otherwise reach. The
+  controller publishes BMC IPs as Service `externalIPs`, which the apiserver
+  neither allocates nor validates and for which kube-proxy programs
+  forwarding rules on every node, so an overlap silently collides with a
+  dynamically allocated clusterIP or hides the real destination. This is a
+  hard requirement: `helm-prereqs/setup-machine-a-tron.sh` refuses a
+  `SCALE_OOB_PREFIX` inside the ServiceCIDR, and a direct Helm install must
+  verify it before deploying because neither the chart nor the controller
+  checks it.
+- DHCP relay mode (see DHCP Relay Mode) is the exception: NICo resolves the
+  BMC network from the DHCP relay address, which in that mode is each pod's
+  relay Service clusterIP, so the BMC network must contain the relay
+  clusterIPs rather than use the `10.200.0.0/18` example below. Give the
+  relay Services a small dedicated ServiceCIDR (`10.96.127.0/24` in that
+  section) and keep the BMC network clear of every other ServiceCIDR.
 - NICo assigns unique BMC IPs from the configured network
-- Default ServiceCIDR ranges:
+- Default ServiceCIDR ranges to stay clear of:
   - `10.96.0.0/12` - vanilla Kubernetes (kubeadm)
   - `10.96.0.0/16` - KinD
   - `10.43.0.0/16` - K3s
 - Check with: `kubectl cluster-info dump | grep service-cluster-ip-range`
+- The `DenyServiceExternalIPs` admission plugin must not be enabled on the
+  apiserver
 
 ### NICo Configuration
 
@@ -229,8 +248,8 @@ allow_insecure_discovery = true
 # Network for all machine-a-tron BMCs
 [networks.MAT-BMC-SERVICES]
 type = "underlay"
-prefix = "10.96.64.0/18"
-gateway = "10.96.64.1"
+prefix = "10.200.0.0/18"
+gateway = "10.200.0.1"
 mtu = 1500
 ```
 
@@ -262,7 +281,7 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 10
         dpuPerHostCount: 2
-        bmcDhcpRelayAddress: "10.96.64.1"
+        bmcDhcpRelayAddress: "10.200.0.1"
         underlayDhcpRelayAddress: "10.104.0.1"
 ```
 
@@ -513,25 +532,31 @@ prefix and will not resolve in real clusters.
 
 ## Troubleshooting
 
-### ClusterIP already allocated
+### Use of external IPs is denied by admission control
 
 ```text
-creating service mat-bmc-host-xxx: Service is invalid: spec.clusterIP:
-provided IP is already allocated
+creating service mat-bmc-host-xxx: services "mat-bmc-host-xxx" is forbidden:
+Use of external IPs is denied by admission control
 ```
 
-The BMC IP conflicts with an existing Service. Either:
+The `DenyServiceExternalIPs` admission plugin is enabled on the apiserver. It
+has no per-namespace exemption and must be disabled.
 
-- Use a different `bmcDhcpRelayAddress` range
-- Reserve a ServiceCIDR for machine-a-tron (K8s 1.29+)
+### BMC IP served by another Service
 
-### ClusterIP outside ServiceCIDR
+The BMC network overlaps the Kubernetes ServiceCIDR and the apiserver allocated
+a BMC address as the clusterIP of another Service. The controller recreates a
+colliding Service it manages itself; any other holder is left alone. Move the
+BMC network outside the ServiceCIDR (see Requirements).
 
-```text
-failed to allocate IP: the provided network does not match the current range
-```
+### Upgrading from a controller that set the BMC IP as clusterIP
 
-The BMC IP range is outside Kubernetes ServiceCIDR
+Those versions required the BMC network inside the ServiceCIDR; move it outside
+first (see Requirements). Each existing BMC Service is then deleted and
+recreated once, moving the address from `clusterIP` to `externalIPs`. While the
+BMC network still overlaps the ServiceCIDR, a recreated Service can be allocated
+another published BMC IP as its clusterIP and is recreated again on a later
+pass; the controller logs one warning per pass while this happens.
 
 ### No instances discovered
 
