@@ -1889,6 +1889,12 @@ jobs:
       - name: Test observability install summary
         run: bash helm-prereqs/tests/install-observability-summary_test.sh
 
+      - name: Test pinned submodule sync
+        run: bash helm-prereqs/tests/setup-pinned-submodule-sync_test.sh
+
+      - name: Test doca-platform pin
+        run: bash helm-prereqs/tests/doca-platform-pin_test.sh
+
   build-push-helm-prereqs-chart:
     needs:
       - prepare

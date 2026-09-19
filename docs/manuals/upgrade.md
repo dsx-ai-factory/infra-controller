@@ -41,7 +41,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 - CRD schemas are updated to their new versions via server-side apply.
 - ConfigMaps and Secrets produced by Helm are updated to reflect new chart values.
 - The NICo Core and REST database schemas are migrated forward by their respective pre-upgrade Jobs.
-- DPF operator and DPUService images are updated to the new `NICO_DPF_VERSION`.
+- DPF operator and DPUService images are updated to the release the `helm-prereqs/doca-platform` submodule is pinned to.
 
 ## Pre-upgrade checklist
 
@@ -176,7 +176,7 @@ export NICO_CORE_IMAGE_TAG=v2.1.0                      # new Core tag
 export NICO_REST_IMAGE_TAG=v2.1.0                      # new REST tag
 ```
 
-If you are upgrading DPF as part of this release, the DPF version is read from `NICO_DPF_VERSION` (defaulting to the value baked into `setup.sh`). You do not normally need to set this explicitly unless your site uses a pinned version.
+If you are upgrading DPF as part of this release, the DPF version is the pinned `helm-prereqs/doca-platform` commit of the `setup.sh` you run: the submodule gitlink in a git checkout, or `helm-prereqs/doca-platform.pin` in the packaged `nico-prereqs` chart, which `setup.sh` clones at that commit. There is no version variable to set, and both paths install the same commit. Air-gapped sites that set `NICO_DPF_SRC` manage that checkout themselves: update it to the same commit (`git submodule status helm-prereqs/doca-platform`, or the sha in `doca-platform.pin`), because `setup.sh` installs whatever it contains and only warns when its HEAD differs from the pin. Remove `NICO_DPF_VERSION` and `NICO_DPF_SRC_DIR` from your environment files: `setup.sh` now rejects them when installing DPF. A leftover `helm-prereqs/.dpf-src/` clone from earlier releases is no longer used and can be deleted.
 
 DPF is enabled by default, and on DPF sites two more variables are **required** — preflight raises hard errors when they are unset:
 
@@ -338,7 +338,7 @@ helm template metallb metallb/metallb --version "${METALLB_VERSION}" \
 
 ### 2.0 → 2.1: DPF version update
 
-The default `NICO_DPF_VERSION` in `setup.sh` is updated with each NICo minor release to the tested DOCA Platform Framework version. On a 2.0→2.1 upgrade, DPF is upgraded from its 2.0 version to the 2.1 version automatically as part of phase 5b.
+The `helm-prereqs/doca-platform` submodule pin is updated with each NICo minor release to the tested DOCA Platform Framework version. On a 2.0→2.1 upgrade, DPF is upgraded from its 2.0 version to the 2.1 version automatically as part of phase 5b.
 
 DPF manages DPU provisioning state in `DPUCluster`, `DPUService`, and `DPF` CRs, all of which persist across the upgrade. In-flight DPU provisioning workflows may pause while the DPF operator restarts; they resume automatically when the new operator pod comes up.
 

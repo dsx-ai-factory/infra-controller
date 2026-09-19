@@ -53,13 +53,19 @@
 #   NICO_SKIP_DPF          Skip the DPF (DOCA Platform Framework) DPU provisioning
 #                          stack, which installs by DEFAULT. Default: false.
 #                          Same as --skip-dpf. (NICO_INSTALL_DPF=false honored too.)
-#   NICO_DPF_VERSION       doca-platform tag to clone/install. Default: v26.4.0
-#   NICO_DPF_SRC_DIR       Where the doca-platform clone is cached.
-#                          Default: helm-prereqs/.dpf-src
+#   NICO_DPF_SRC           Local doca-platform checkout to install the DPF
+#                          operator chart from. Default: unset - the source is
+#                          the pinned helm-prereqs/doca-platform commit: the git
+#                          submodule in a git checkout of this repo, or a clone
+#                          of the commit in helm-prereqs/doca-platform.pin when
+#                          running from the packaged chart (both need git and
+#                          network; on airgapped hosts, clone doca-platform at
+#                          the pinned commit yourself and set this variable).
 #   NICO_DPF_IMAGE_REPO    DPF operator image repository. Default the public NGC
 #                          image nvcr.io/nvidia/doca/dpf-system. Point at your own
 #                          registry (mirror or self-built) to match Core/REST.
-#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Default: NICO_DPF_VERSION.
+#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Default: v26.4.0, the release
+#                          the doca-platform submodule is pinned to.
 #   NICO_DPF_IMAGE_PULL_SECRET
 #                          Pull secret for the DPF/DOCA images. Unset by default —
 #                          the GA nvidia/doca images are public and pull
@@ -233,6 +239,21 @@ case "${INSTALL_CONTOUR}" in
     *) echo "Error: NICO_INSTALL_CONTOUR must be true or false (got '${INSTALL_CONTOUR}')"; exit 1 ;;
 esac
 
+# Reject the retired DPF source knobs, but only when DPF is being installed so
+# a stale env file does not abort a --skip-dpf run.
+_reject_retired_dpf_vars() {
+    local _v
+    [[ "${INSTALL_DPF}" == "true" ]] || return 0
+    for _v in NICO_DPF_VERSION NICO_DPF_SRC_DIR; do
+        if [[ -n "${!_v:-}" ]]; then
+            echo "Error: ${_v} is retired - the DPF source is the pinned helm-prereqs/doca-platform submodule."
+            echo "  → Set NICO_DPF_SRC for a local checkout, NICO_DPF_IMAGE_TAG for the image tag."
+            return 1
+        fi
+    done
+}
+_reject_retired_dpf_vars
+
 # The predecessor Flow chart bundled PSM and NSM in the Flow Deployment. This
 # release does not provide an automatic migration for those workloads. Stop
 # before preflight creates temporary check Pods or any installation phase can
@@ -338,16 +359,21 @@ VAULT_NS="${VAULT_NS:-vault}"
 CERT_MANAGER_NS="${CERT_MANAGER_NS:-cert-manager}"
 NICO_MANAGE_DEFAULT_STORAGE_CLASS="${NICO_MANAGE_DEFAULT_STORAGE_CLASS:-true}"
 NICO_STORAGE_CLASS="${NICO_STORAGE_CLASS:-local-path-persistent}"
-NICO_DPF_VERSION="${NICO_DPF_VERSION:-v26.4.0}"
-NICO_DPF_SRC_DIR="${NICO_DPF_SRC_DIR:-${SCRIPT_DIR}/.dpf-src}"
+# The DPF operator chart comes from the pinned helm-prereqs/doca-platform
+# commit: the git submodule in a git checkout, or a clone of the commit in
+# doca-platform.pin from the packaged chart (bump both together to move
+# versions). NICO_DPF_SRC points at a local checkout instead (airgapped or
+# self-managed).
+NICO_DPF_SRC="${NICO_DPF_SRC:-}"
 NICO_DPF_NGC_API_KEY="${NICO_DPF_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}"
 NICO_DPF_NICO_NGC_API_KEY="${NICO_DPF_NICO_NGC_API_KEY:-${NICO_DPF_NGC_API_KEY}}"
 # DPF operator image. Defaults to the public NGC image (anonymous pull). To use
 # your own registry (mirror or self-built, e.g. matching NICO_IMAGE_REGISTRY),
 # set NICO_DPF_IMAGE_REPO/_TAG and NICO_DPF_IMAGE_PULL_SECRET. The tag defaults
-# to the chart version (NICO_DPF_VERSION) but can differ for a self-built image.
+# to the release the doca-platform submodule is pinned to (bump both together)
+# but can differ for a self-built image.
 NICO_DPF_IMAGE_REPO="${NICO_DPF_IMAGE_REPO:-nvcr.io/nvidia/doca/dpf-system}"
-NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-${NICO_DPF_VERSION}}"
+NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-v26.4.0}"
 # RMS (rack-manager chart, phase 5c). The chart ships as the helm-prereqs/nv-rms
 # git submodule, pinned to a reviewed nv-rms commit (bump the pin to move
 # versions). Image tags are git-describe style and decoupled from the chart -
@@ -866,6 +892,101 @@ until ROLE_ID_B64="$(kubectl get secret nico-vault-approle-tokens \
 done
 echo "Vault AppRole credentials ready"
 
+# The commit helm-prereqs/<name> is pinned to: the gitlink in a git checkout of
+# this repo, else the helm-prereqs/<name>.pin file that ships with the packaged
+# chart (tests keep the two equal). Prints nothing when neither exists.
+#   $1 submodule name under helm-prereqs/
+_pinned_submodule_commit() {
+    local _name="$1" _pin
+    _pin="$(git -C "${SCRIPT_DIR}/.." rev-parse ":helm-prereqs/${_name}" 2>/dev/null || true)"
+    [[ -n "${_pin}" ]] || \
+        _pin="$(grep -E -m1 '^[0-9a-f]{40}$' "${SCRIPT_DIR}/${_name}.pin" 2>/dev/null || true)"
+    printf '%s' "${_pin}"
+}
+
+# Align a pinned helm-prereqs/<name> submodule to the commit this repo records.
+# The pin is the supply-chain boundary: the commit is pinned and reviewed here
+# and git verifies the hash on checkout, so setup.sh never clones a mutable
+# ref. In a git checkout the submodule is initialized; from the packaged chart
+# (no .git, no gitlink) the commit in <name>.pin is cloned shallowly instead.
+# A dirty checkout is refused so the pin stays meaningful.
+#   $1 submodule name under helm-prereqs/   $2 upstream URL (airgap hint)
+#   $3 override to set on an airgapped host, e.g. NICO_RMS_CHART=<clone>/helm
+_sync_pinned_submodule() {
+    local _name="$1" _url="$2" _override="$3" _pin
+    local _dir="${SCRIPT_DIR}/${_name}"
+    if [[ -e "${_dir}/.git" ]] && \
+       [[ -n "$(git -C "${_dir}" status --porcelain 2>/dev/null)" ]]; then
+        echo "Error: helm-prereqs/${_name} has local modifications."
+        echo "  → Commit/stash them upstream, restore the submodule, or point"
+        echo "    ${_override%%=*} at your modified checkout explicitly."
+        return 1
+    fi
+    if git -C "${SCRIPT_DIR}/.." rev-parse --git-dir &>/dev/null; then
+        echo "Syncing the ${_name} submodule to the pinned commit..."
+        if ! git -C "${SCRIPT_DIR}/.." submodule update --init --checkout --depth 1 -- "helm-prereqs/${_name}"; then
+            echo "Error: could not sync the ${_name} submodule to the pinned commit."
+            echo "  → On an airgapped host, clone ${_url} at the pinned commit"
+            echo "    (git -C ${SCRIPT_DIR}/.. submodule status) and set ${_override}."
+            return 1
+        fi
+        echo "helm-prereqs/${_name}: $(git -C "${_dir}" rev-parse --short HEAD 2>/dev/null || echo pinned)"
+        return 0
+    fi
+    _pin="$(_pinned_submodule_commit "${_name}")"
+    if [[ -z "${_pin}" ]]; then
+        echo "Error: ${SCRIPT_DIR}/.. is not a git checkout and ${SCRIPT_DIR}/${_name}.pin is missing, so the ${_name} source cannot be synced."
+        echo "  → Run setup.sh from a git clone of this repository or the packaged"
+        echo "    nico-prereqs chart, or clone ${_url} at the pinned commit and set ${_override}."
+        return 1
+    fi
+    if [[ -e "${_dir}/.git" && "$(git -C "${_dir}" rev-parse HEAD 2>/dev/null)" == "${_pin}" ]]; then
+        echo "helm-prereqs/${_name}: ${_pin:0:9} (already at the pinned commit)"
+        return 0
+    fi
+    echo "Cloning ${_name} at the pinned commit ${_pin:0:9} (${_name}.pin)..."
+    if [[ ! -e "${_dir}/.git" ]]; then
+        git init -q "${_dir}" && git -C "${_dir}" remote add origin "${_url}"
+    fi
+    # Fetch the commit by sha (GitHub allows it); a server that refuses a
+    # shallow fetch by sha gets a full fetch and a checkout of the sha.
+    if git -C "${_dir}" fetch -q --depth 1 origin "${_pin}" 2>/dev/null; then
+        git -C "${_dir}" checkout -q --detach FETCH_HEAD
+    else
+        echo "  shallow fetch by commit refused; fetching the full history..."
+        git -C "${_dir}" fetch -q origin && git -C "${_dir}" checkout -q --detach "${_pin}"
+    fi || {
+        echo "Error: could not clone ${_url} at the pinned commit ${_pin:0:9}."
+        echo "  → On an airgapped host, clone it at that commit and set ${_override}."
+        return 1
+    }
+    if [[ "$(git -C "${_dir}" rev-parse HEAD 2>/dev/null)" != "${_pin}" ]]; then
+        echo "Error: helm-prereqs/${_name} HEAD is not the pinned commit ${_pin:0:9} after the clone."
+        return 1
+    fi
+    echo "helm-prereqs/${_name}: ${_pin:0:9}"
+}
+
+# Warn (never fail) when the doca-platform source in use is not at the pinned
+# helm-prereqs/doca-platform commit. Local git reads only, no network: a shallow
+# sync carries no tags, so the release tag is not compared.
+#   $1 doca-platform source dir
+_warn_dpf_source_mismatch() {
+    local _src="$1" _head _pin _top
+    _top="$(git -C "${_src}" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ ! -e "${_src}/.git" && "${_top}" != "$(cd "${_src}" 2>/dev/null && pwd -P)" ]]; then
+        echo "WARNING: ${_src} is not a git checkout; cannot verify it matches the pinned helm-prereqs/doca-platform commit."
+        return 0
+    fi
+    _head="$(git -C "${_src}" rev-parse HEAD 2>/dev/null || true)"
+    _pin="$(_pinned_submodule_commit doca-platform)"
+    if [[ -z "${_head}" || -z "${_pin}" ]]; then
+        echo "WARNING: could not read ${_src} HEAD or the pinned helm-prereqs/doca-platform commit to compare them."
+    elif [[ "${_head}" != "${_pin}" ]]; then
+        echo "WARNING: ${_src} HEAD ${_head:0:9} differs from the pinned helm-prereqs/doca-platform commit ${_pin:0:9}."
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # 5b. DPF (DOCA Platform Framework) — optional DPU provisioning stack.
 #     Needs StorageClass (1), MetalLB (1c), cert-manager (2). Must complete
@@ -877,7 +998,7 @@ echo "Vault AppRole credentials ready"
 # ---------------------------------------------------------------------------
 if "${INSTALL_DPF}"; then
     _SETUP_PHASE="[5b] DPF operator stack"
-    echo "=== [5b] DPF (DOCA Platform Framework) ${NICO_DPF_VERSION} ==="
+    echo "=== [5b] DPF (DOCA Platform Framework) ==="
 
     # 5b.1 Prerequisite operators (Argo CD, Kamaji, maintenance-operator, NFD),
     #      pinned from doca-platform deploy/helmfiles/prereqs.yaml. All land in
@@ -1020,39 +1141,30 @@ if "${INSTALL_DPF}"; then
         echo "approver-policy not installed — built-in cert-manager approver auto-approves; skipping CertificateRequestPolicy."
     fi
 
-    # 5b.4 Clone doca-platform at the pinned tag (cached, shallow, idempotent).
-    if [[ -d "${NICO_DPF_SRC_DIR}/.git" ]]; then
-        echo "Reusing doca-platform clone at ${NICO_DPF_SRC_DIR} (tag ${NICO_DPF_VERSION})..."
-        git -C "${NICO_DPF_SRC_DIR}" fetch --depth 1 origin \
-            "refs/tags/${NICO_DPF_VERSION}:refs/tags/${NICO_DPF_VERSION}" 2>/dev/null || true
-        git -C "${NICO_DPF_SRC_DIR}" checkout -q -f "refs/tags/${NICO_DPF_VERSION}"
+    # 5b.4 Resolve the doca-platform source: an explicit NICO_DPF_SRC override,
+    #      or the pinned helm-prereqs/doca-platform commit (the submodule in a
+    #      git checkout, a clone of doca-platform.pin from the packaged chart;
+    #      same contract as the nv-rms submodule in 5c).
+    if [[ -n "${NICO_DPF_SRC}" ]]; then
+        _DPF_SRC="${NICO_DPF_SRC}"
+        echo "Using local doca-platform source: ${_DPF_SRC}"
     else
-        # A leftover non-git or partially-cloned directory (e.g. a clone killed
-        # mid-run, or disk-full) would make `git clone` fail with "destination
-        # path already exists and is not empty" on every retry — remove it first
-        # so a re-run always recovers. Guard the rm -rf against a dangerous
-        # NICO_DPF_SRC_DIR override (empty / root / $HOME) before deleting.
-        case "${NICO_DPF_SRC_DIR}" in
-            ""|"/"|"${HOME}"|"${HOME}/")
-                echo "ERROR: refusing to remove NICO_DPF_SRC_DIR='${NICO_DPF_SRC_DIR}' — set it to a dedicated clone dir."
-                exit 1 ;;
-        esac
-        if [[ -e "${NICO_DPF_SRC_DIR}" ]]; then
-            echo "ERROR: '${NICO_DPF_SRC_DIR}' exists but is not a doca-platform Git clone."
-            echo "  Remove it explicitly and re-run (refusing to auto-delete a non-clone path)."
-            exit 1
-        fi
-        echo "Cloning doca-platform ${NICO_DPF_VERSION}..."
-        git clone --depth 1 --branch "${NICO_DPF_VERSION}" \
-            https://github.com/NVIDIA/doca-platform.git "${NICO_DPF_SRC_DIR}"
+        _sync_pinned_submodule doca-platform https://github.com/NVIDIA/doca-platform \
+            'NICO_DPF_SRC=<clone>'
+        _DPF_SRC="${SCRIPT_DIR}/doca-platform"
     fi
+    if [[ ! -d "${_DPF_SRC}/deploy/charts/dpf-operator" ]]; then
+        echo "Error: '${_DPF_SRC}' has no deploy/charts/dpf-operator - not a doca-platform checkout."
+        exit 1
+    fi
+    _warn_dpf_source_mismatch "${_DPF_SRC}"
 
-    # 5b.5 DPF operator chart from the clone. NICo overrides (docs/manuals/dpf.md
+    # 5b.5 DPF operator chart from the source. NICo overrides (docs/manuals/dpf.md
     #      §2): NodeFeatureRules off because NFD labels nodes via its own config
     #      (PCI class 0200). The in-repo source chart ships EMPTY
     #      controllerManager.image (CI stamps it when publishing to NGC), so we
-    #      set it explicitly — matching the published nvidia/doca chart. Repo is
-    #      overridable; the tag tracks NICO_DPF_VERSION.
+    #      set it explicitly - matching the published nvidia/doca chart. Repo and
+    #      tag are overridable; the tag defaults to the pinned release.
     #      Image pull secret: the GA nvidia/doca images are PUBLIC, so by default
     #      the operator pulls them anonymously. Attaching a registry-scoped
     #      secret that lacks nvidia/doca entitlement makes nvcr.io 403 the pull
@@ -1063,7 +1175,7 @@ if "${INSTALL_DPF}"; then
         _dpf_op_pull_args+=(--set "imagePullSecrets[0].name=${NICO_DPF_IMAGE_PULL_SECRET}")
     fi
     helm upgrade --install dpf-operator \
-        "${NICO_DPF_SRC_DIR}/deploy/charts/dpf-operator" \
+        "${_DPF_SRC}/deploy/charts/dpf-operator" \
         --namespace dpf-operator-system \
         --set "enableNodeFeatureRules=false" \
         ${_dpf_op_pull_args[@]+"${_dpf_op_pull_args[@]}"} \
@@ -1332,35 +1444,15 @@ if "${INSTALL_RMS}"; then
     fi
 
     # 5c.3 Resolve the chart: an explicit NICO_RMS_CHART override, or the
-    #      pinned helm-prereqs/nv-rms git submodule. The submodule is the
-    #      supply-chain boundary: the commit is pinned and reviewed in this
-    #      repo, and git verifies the hash on init - setup.sh never clones an
-    #      arbitrary ref. Airgapped hosts clone nv-rms out-of-band and point
-    #      NICO_RMS_CHART at it.
+    #      pinned helm-prereqs/nv-rms git submodule. Airgapped hosts clone
+    #      nv-rms out-of-band and point NICO_RMS_CHART at it.
     if [[ -n "${NICO_RMS_CHART}" ]]; then
         _RMS_CHART="${NICO_RMS_CHART}"
         echo "Using local rack-manager chart: ${_RMS_CHART}"
     else
-        _RMS_SUBMODULE="${SCRIPT_DIR}/nv-rms"
-        # The pin is only a boundary if the working tree honors it: refuse a
-        # dirty submodule, then align HEAD to the gitlink this repo records.
-        if [[ -d "${_RMS_SUBMODULE}/.git" || -f "${_RMS_SUBMODULE}/.git" ]] && \
-           [[ -n "$(git -C "${_RMS_SUBMODULE}" status --porcelain 2>/dev/null)" ]]; then
-            echo "Error: helm-prereqs/nv-rms has local modifications."
-            echo "  → Commit/stash them upstream, restore the submodule, or point"
-            echo "    NICO_RMS_CHART at your modified chart explicitly."
-            exit 1
-        fi
-        echo "Syncing the nv-rms submodule to the pinned commit..."
-        if ! git -C "${SCRIPT_DIR}/.." submodule update --init --checkout -- helm-prereqs/nv-rms; then
-            echo "Error: could not sync the nv-rms submodule to the pinned commit."
-            echo "  → On an airgapped host, clone https://github.com/dsx-ai-factory/nv-rms"
-            echo "    at the pinned commit (git -C ${SCRIPT_DIR}/.. submodule status) and"
-            echo "    set NICO_RMS_CHART=<clone>/helm."
-            exit 1
-        fi
-        _RMS_CHART="${_RMS_SUBMODULE}/helm"
-        echo "rack-manager chart: ${_RMS_CHART} ($(git -C "${_RMS_SUBMODULE}" rev-parse --short HEAD 2>/dev/null || echo pinned))"
+        _sync_pinned_submodule nv-rms https://github.com/dsx-ai-factory/nv-rms \
+            'NICO_RMS_CHART=<clone>/helm'
+        _RMS_CHART="${SCRIPT_DIR}/nv-rms/helm"
     fi
 
     # 5c.4 Wait for the ESO-synced DB credentials. The rms database/user are
