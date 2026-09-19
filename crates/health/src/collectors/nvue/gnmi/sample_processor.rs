@@ -1197,7 +1197,7 @@ mod tests {
         let addr = BmcAddr {
             ip: "10.0.0.1".parse().unwrap(),
             port: None,
-            mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+            mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
         };
         let event_context = EventContext {
             endpoint_key: "aa:bb:cc:dd:ee:ff".to_string(),
@@ -1268,7 +1268,7 @@ mod tests {
                 addr: BmcAddr {
                     ip: "10.0.0.1".parse().unwrap(),
                     port: None,
-                    mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+                    mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
                 },
                 collector_type: NVUE_GNMI_SAMPLE_STREAM_ID,
                 labels: Default::default(),

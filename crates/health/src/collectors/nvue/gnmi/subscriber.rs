@@ -634,7 +634,7 @@ pub(crate) fn spawn_gnmi_collector(
         .metadata
         .as_ref()
         .and_then(|m| m.serial_number().map(str::to_string))
-        .unwrap_or_else(|| endpoint.addr.mac.to_string());
+        .unwrap_or_else(|| endpoint.key());
 
     let switch_connect_host = endpoint.switch_connect_host_for_uri().into_owned();
     let sample_event_context = EventContext::from_endpoint(endpoint, NVUE_GNMI_SAMPLE_STREAM_ID);
@@ -1442,9 +1442,11 @@ mod tests {
         BmcAddr {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
             port: Some(443),
-            mac: "55:66:77:88:99:cc"
-                .parse::<MacAddress>()
-                .expect("valid mac"),
+            mac: Some(
+                "55:66:77:88:99:cc"
+                    .parse::<MacAddress>()
+                    .expect("valid mac"),
+            ),
         }
     }
 
@@ -1452,7 +1454,7 @@ mod tests {
     struct CredentialFetchProjection {
         result: Result<(Option<String>, Option<String>), String>,
         calls: usize,
-        observed_addrs: Vec<(IpAddr, Option<u16>, String)>,
+        observed_addrs: Vec<(IpAddr, Option<u16>, Option<MacAddress>)>,
     }
 
     fn expected_credential_fetch(
@@ -1462,7 +1464,7 @@ mod tests {
         CredentialFetchProjection {
             result,
             calls: 1,
-            observed_addrs: vec![(addr.ip, addr.port, addr.mac.to_string())],
+            observed_addrs: vec![(addr.ip, addr.port, addr.mac)],
         }
     }
 
@@ -1478,7 +1480,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .map(|addr| (addr.ip, addr.port, addr.mac.to_string()))
+            .map(|addr| (addr.ip, addr.port, addr.mac))
             .collect();
 
         CredentialFetchProjection {
