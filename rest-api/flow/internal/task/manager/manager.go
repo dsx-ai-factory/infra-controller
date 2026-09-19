@@ -996,7 +996,10 @@ func (m *ManagerImpl) resolveOperationRule(
 	op operation.Wrapper,
 	rackID uuid.UUID,
 ) (*operationrules.OperationRule, error) {
-	ruleID := operations.ExtractRuleID(op.Info)
+	ruleID, err := operations.ExtractRuleID(op.Info)
+	if err != nil {
+		return nil, fmt.Errorf("extract operation rule ID: %w", err)
+	}
 	return m.ruleResolver.ResolveRule(ctx, op.Type, op.Code, rackID, ruleID)
 }
 

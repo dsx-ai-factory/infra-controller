@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 )
@@ -102,6 +103,7 @@ func TestExtractRuleID(t *testing.T) {
 		name     string
 		info     json.RawMessage
 		expected *uuid.UUID
+		wantErr  string
 	}{
 		{
 			name:     "present and valid",
@@ -119,25 +121,41 @@ func TestExtractRuleID(t *testing.T) {
 			expected: nil,
 		},
 		{
-			name:     "invalid UUID",
-			info:     json.RawMessage(`{"rule_id":"not-a-uuid"}`),
-			expected: nil,
+			name:    "null",
+			info:    json.RawMessage(`{"rule_id":null}`),
+			wantErr: "rule_id must not be null",
 		},
 		{
-			name:     "invalid JSON",
-			info:     json.RawMessage(`{broken`),
-			expected: nil,
+			name:    "invalid UUID",
+			info:    json.RawMessage(`{"rule_id":"not-a-uuid"}`),
+			wantErr: "must be a valid non-zero UUID",
 		},
 		{
-			name:     "nil input",
-			info:     nil,
-			expected: nil,
+			name:    "zero UUID",
+			info:    json.RawMessage(`{"rule_id":"00000000-0000-0000-0000-000000000000"}`),
+			wantErr: "must be a valid non-zero UUID",
+		},
+		{
+			name:    "invalid JSON",
+			info:    json.RawMessage(`{broken`),
+			wantErr: "decode operation info",
+		},
+		{
+			name:    "nil input",
+			info:    nil,
+			wantErr: "decode operation info",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ExtractRuleID(tt.info)
+			result, err := ExtractRuleID(tt.info)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -153,7 +171,8 @@ func TestRuleID_RoundTrip_PowerControl(t *testing.T) {
 	raw, err := info.Marshal()
 	assert.NoError(t, err)
 
-	extracted := ExtractRuleID(raw)
+	extracted, err := ExtractRuleID(raw)
+	require.NoError(t, err)
 	assert.NotNil(t, extracted)
 	assert.Equal(t, ruleID, *extracted)
 }
@@ -165,7 +184,8 @@ func TestRuleID_RoundTrip_BringUp(t *testing.T) {
 	raw, err := info.Marshal()
 	assert.NoError(t, err)
 
-	extracted := ExtractRuleID(raw)
+	extracted, err := ExtractRuleID(raw)
+	require.NoError(t, err)
 	assert.NotNil(t, extracted)
 	assert.Equal(t, ruleID, *extracted)
 }
@@ -180,7 +200,8 @@ func TestRuleID_RoundTrip_FirmwareControl(t *testing.T) {
 	raw, err := info.Marshal()
 	assert.NoError(t, err)
 
-	extracted := ExtractRuleID(raw)
+	extracted, err := ExtractRuleID(raw)
+	require.NoError(t, err)
 	assert.NotNil(t, extracted)
 	assert.Equal(t, ruleID, *extracted)
 }
@@ -193,6 +214,7 @@ func TestRuleID_OmittedWhenEmpty(t *testing.T) {
 	raw, err := info.Marshal()
 	assert.NoError(t, err)
 
-	extracted := ExtractRuleID(raw)
+	extracted, err := ExtractRuleID(raw)
+	require.NoError(t, err)
 	assert.Nil(t, extracted)
 }
