@@ -67,6 +67,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use version_compare::Cmp;
+mod attester_inventory;
 mod endpoint_explorer;
 pub use endpoint_explorer::{AuthenticatedBmc, EndpointExplorer};
 mod endpoint_exploration_service;
@@ -3027,7 +3028,9 @@ impl SiteExplorer {
                             .await?;
                             endpoint_report_update_attempts += 1;
                             match report_write {
-                                ConditionalWrite::Applied(()) => {}
+                                ConditionalWrite::Applied(()) => {
+                                    attester_inventory::record(&report, &mut txn).await?;
+                                }
                                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
                                     // Skip transient remediation: it would use
                                     // the rejected report's stale endpoint snapshot.
@@ -3079,6 +3082,7 @@ impl SiteExplorer {
                                 &mut txn,
                             )
                             .await?;
+                            attester_inventory::record(&report, &mut txn).await?;
                             insert_endpoint_attempts += 1;
                         }
                         Err(e) => {

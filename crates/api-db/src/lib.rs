@@ -19,6 +19,7 @@
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
 pub mod attestation;
+pub mod attestation_profile;
 pub mod bmc_metadata;
 pub mod bmc_redfish_session;
 pub mod bmc_suppression;
@@ -44,6 +45,7 @@ pub mod expected_switch;
 pub mod explored_endpoints;
 pub mod explored_managed_host;
 pub mod extension_service;
+pub mod hardware_class_attesters;
 pub mod health_history;
 pub mod health_report;
 pub mod host_firmware_config;

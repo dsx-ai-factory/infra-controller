@@ -41,7 +41,7 @@ async fn explore_lenovo_gb300() {
         Some(HwType::LenovoGb300),
     );
 
-    let report = nv_generate_exploration_report(h.service_root, &config)
+    let report = nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &config)
         .await
         .unwrap();
     assert_eq!(report.endpoint_type, EndpointType::Bmc);

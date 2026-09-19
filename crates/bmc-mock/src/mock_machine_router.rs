@@ -161,6 +161,7 @@ fn machine_router_inner<C: Callbacks>(
             }
         })
         .add_routes(crate::redfish::chassis::add_routes)
+        .add_routes(crate::redfish::component_integrity::add_routes)
         .add_routes(crate::redfish::manager::add_routes)
         .add_routes(crate::redfish::update_service::add_routes)
         .add_routes(crate::redfish::task_service::add_routes)
@@ -216,6 +217,7 @@ fn machine_router_inner<C: Callbacks>(
         availability: availability.clone(),
         callbacks: Some(callbacks.clone()),
         exposes_computer_systems: machine_info.exposes_computer_systems(),
+        component_integrities: machine_info.component_integrity_config(),
     };
     let account_service_state = state.account_service_state.clone();
     let session_service_state = state.session_service_state.clone();

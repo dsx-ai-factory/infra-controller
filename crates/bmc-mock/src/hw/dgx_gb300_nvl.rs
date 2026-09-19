@@ -49,6 +49,25 @@ impl DgxGB300Nvl<'_> {
         Some(crate::EventServiceConfig::default())
     }
 
+    /// The tray's ERoTs: the BMC's own, plus one per CPU and GPU this profile
+    /// models. Synthetic, since the scrape the rest of this profile comes from
+    /// does not cover `ComponentIntegrity`; the Ids follow the chassis Ids
+    /// above and the `ERoT_BMC_0` spelling the libredfish simulator uses. Every
+    /// member is SPDM and enabled, which is what a healthy tray reports.
+    pub(crate) fn component_integrity_config(
+        &self,
+    ) -> Vec<redfish::component_integrity::ComponentIntegrity> {
+        let erot = |id: String| redfish::component_integrity::ComponentIntegrity {
+            id: id.into(),
+            integrity_type: "SPDM".into(),
+            enabled: true,
+        };
+        std::iter::once(erot("ERoT_BMC_0".to_string()))
+            .chain((0..self.cpu.len()).map(|n| erot(format!("HGX_ERoT_CPU_{n}"))))
+            .chain((0..self.gpu.len()).map(|n| erot(format!("HGX_ERoT_GPU_{n}"))))
+            .collect()
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "BMC_0";
         let bmc_eth_builder = |eth| {

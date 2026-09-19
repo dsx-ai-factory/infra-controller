@@ -38,10 +38,11 @@ use mac_address::MacAddress;
 use model::errors::{ErrorCode, ErrorSubsystem, OperatorError, OperatorErrorSchema};
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::site_explorer::{
-    BootOption, BootOrder, Chassis, ComputerSystem, ComputerSystemAttributes,
-    EndpointExplorationError, EndpointExplorationReport, EndpointType, EthernetInterface,
-    InternalLockdownStatus, Inventory, LockdownStatus, MachineSetupDiff, MachineSetupStatus,
-    Manager, NetworkAdapter, PCIeDevice, SecureBootStatus, Service, UefiDevicePath,
+    BootOption, BootOrder, Chassis, ComponentIntegrityEntry, ComputerSystem,
+    ComputerSystemAttributes, EndpointExplorationError, EndpointExplorationReport, EndpointType,
+    EthernetInterface, InternalLockdownStatus, Inventory, LockdownStatus, MachineSetupDiff,
+    MachineSetupStatus, Manager, NetworkAdapter, PCIeDevice, SecureBootStatus, Service,
+    UefiDevicePath, derive_hardware_class,
 };
 use regex::Regex;
 
@@ -454,6 +455,19 @@ impl RedfishClient {
             })
             .ok();
 
+        let component_integrities =
+            fetch_component_integrities(client.as_ref(), &service_root).await;
+
+        // `Vendor` rather than `vendor_string()`, which falls back to an
+        // arbitrary key of an unordered `Oem` map. A class has to derive the
+        // same way on every exploration, or the profile keyed to it stops
+        // applying.
+        let hardware_class = derive_hardware_class(
+            Some(&system),
+            service_root.vendor.as_deref(),
+            service_root.product.as_deref(),
+        );
+
         Ok(EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
@@ -463,7 +477,9 @@ impl RedfishClient {
             systems: vec![system],
             chassis,
             service,
+            component_integrities,
             vendor,
+            hardware_class: Some(hardware_class),
             versions: HashMap::default(),
             model: None,
             power_shelf_id: None,
@@ -508,8 +524,8 @@ impl RedfishClient {
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
         let (nv_pool, credentials) = self.nv_pool_and_credentials(access);
-        let service_root = nv_pool
-            .service_root_with_cache_predicate(bmc_ip_address, credentials, |root| {
+        let (service_root, bmc) = nv_pool
+            .service_root_and_bmc(bmc_ip_address, credentials, |root| {
                 let complete = root.root.chassis.is_some() && root.root.managers.is_some();
                 if !complete {
                     tracing::warn!(
@@ -527,6 +543,7 @@ impl RedfishClient {
             })?;
 
         let mut report = bmc_explorer::nv_generate_exploration_report(
+            bmc.as_ref(),
             service_root,
             &nv_bmc_explore_config(boot_interface),
         )
@@ -1586,6 +1603,41 @@ async fn fetch_secure_boot_status(client: &dyn Redfish) -> Result<SecureBootStat
     let is_enabled = secure_boot_enable && secure_boot_current_boot.is_enabled();
 
     Ok(SecureBootStatus { is_enabled })
+}
+
+/// What the BMC says it can attest, unfiltered.
+///
+/// `None` both when the service root advertises no collection and when the
+/// fetch fails: the list drives attestation coverage, while scheduling reads
+/// the collection live from the BMC, so losing it must not fail an exploration
+/// that otherwise succeeded.
+async fn fetch_component_integrities(
+    client: &dyn Redfish,
+    service_root: &libredfish::model::service_root::ServiceRoot,
+) -> Option<Vec<ComponentIntegrityEntry>> {
+    // A BMC without the collection has nothing to list, and asking anyway only
+    // buys a 404.
+    service_root.component_integrity.as_ref()?;
+
+    let collection = client
+        .get_component_integrities()
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(%error, "Failed to fetch the ComponentIntegrity collection.");
+        })
+        .ok()?;
+
+    Some(
+        collection
+            .members
+            .iter()
+            .map(|member| ComponentIntegrityEntry {
+                id: member.id.clone(),
+                component_integrity_type: member.component_integrity_type.clone(),
+                component_integrity_enabled: member.component_integrity_enabled,
+            })
+            .collect(),
+    )
 }
 
 async fn fetch_lockdown_status(client: &dyn Redfish) -> Result<LockdownStatus, RedfishError> {

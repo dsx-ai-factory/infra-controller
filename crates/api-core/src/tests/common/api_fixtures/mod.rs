@@ -89,6 +89,9 @@ use health_report::{HealthReport, HealthReportApplyMode};
 use ipnetwork::IpNetwork;
 use libnmxc::NmxcPool;
 use measured_boot::pcr::PcrRegisterValue;
+use model::attestation::profile::{
+    AttestationPolicyDocument, AttesterSelection, AttesterSelectionMode, ComponentIdMatch,
+};
 use model::attestation::spdm::Verifier;
 use model::hardware_info::{HardwareInfo, TpmEkCertificate};
 use model::instance_type::InstanceTypeMachineCapabilityFilter;
@@ -135,7 +138,7 @@ use crate::measured_boot::convert_vec;
 use crate::test_support::builder::TestApiBuilder;
 use crate::test_support::default_config;
 use crate::test_support::fixture_config::{
-    DpuConfigExt as _, FixtureDefault as _, ManagedHostConfigExt as _,
+    DpuConfigExt as _, FixtureDefault as _, MOCK_HOST_HARDWARE_CLASS, ManagedHostConfigExt as _,
 };
 use crate::test_support::ib_fabric::ib_fabric_test_manager;
 pub(in crate::tests) use crate::test_support::network::{
@@ -1322,6 +1325,30 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
 
     if let Some(val) = overrides.dhcp_lease_expiry_handling {
         config.dhcp_lease_expiry_handling = val;
+    }
+
+    // A machine only attests if a profile covers its hardware class, and in
+    // production an operator writes that profile. Tests have no operator, so
+    // seed one for the mock host whenever a test turns SPDM on.
+    //
+    // It allowlists the GPU attesters rather than taking every eligible one:
+    // the simulator's `ERoT_BMC_0` passes eligibility but answers
+    // `NotSupported` when asked for firmware, so attestation would never
+    // finish. Tests for the outcomes that schedule nothing change the class
+    // instead of deleting this, since creating the host attests it first.
+    if config.spdm.enabled {
+        let mut conn = db_pool.acquire().await.expect("no available connections");
+        db::attestation_profile::create(
+            &mut conn,
+            MOCK_HOST_HARDWARE_CLASS,
+            &AttestationPolicyDocument::new(AttesterSelection {
+                mode: AttesterSelectionMode::Allowlist,
+                component_ids: vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())],
+            }),
+            "test fixture",
+        )
+        .await
+        .expect("failed to seed the mock host's attestation profile");
     }
 
     let config = Arc::new(config);

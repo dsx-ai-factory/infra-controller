@@ -18,6 +18,7 @@
 pub(super) mod api;
 mod astra;
 pub(super) mod attestation;
+pub(super) mod attestation_profile;
 pub(super) mod bmc_credential_rotation;
 pub(super) mod bmc_endpoint_explorer;
 pub(super) mod bmc_metadata;

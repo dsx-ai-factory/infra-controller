@@ -16,6 +16,7 @@
  */
 
 mod chassis;
+mod component_integrity;
 mod computer_system;
 mod error;
 pub mod hw;
@@ -37,8 +38,9 @@ use itertools::Itertools;
 use mac_address::MacAddress;
 use manager::ExploredManager;
 use model::site_explorer::{
-    EndpointExplorationReport, EndpointType, InternalLockdownStatus, LockdownStatus,
-    MachineSetupDiff, MachineSetupStatus,
+    ComponentIntegrityEntry, ComputerSystem, EndpointExplorationReport, EndpointType,
+    InternalLockdownStatus, LockdownStatus, MachineSetupDiff, MachineSetupStatus,
+    derive_hardware_class,
 };
 use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
@@ -123,7 +125,11 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
     }
 }
 
+/// `bmc` is the client `root` was fetched through. It is passed separately
+/// because nv-redfish keeps the service root's client private, and the
+/// `ComponentIntegrity` collection is a resource nv-redfish does not model.
 pub async fn nv_generate_exploration_report<B: Bmc>(
+    bmc: &B,
     mut root: Arc<ServiceRoot<B>>,
     config: &Config<'_, B>,
 ) -> Result<EndpointExplorationReport, Error<B>> {
@@ -131,13 +137,20 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let mut explored_chassis =
         ExploredChassisCollection::explore(&root, &chassis_explore_config).await?;
     let explored_inventories = ExploredInventories::explore(&root).await?;
+    let component_integrities = component_integrity::explore(bmc, &root).await;
 
     // Delta power shelves do not expose a `/redfish/v1/Systems` collection (and
     // report no vendor in the service root, so nv-redfish fabricates the path
     // and gets a 404). Detect them from the chassis and synthesize the report
     // from chassis + manager data instead of fetching a ComputerSystem.
     if explored_chassis.is_delta_powershelf() {
-        return build_delta_powershelf_report(&root, explored_chassis, explored_inventories).await;
+        return build_delta_powershelf_report(
+            &root,
+            explored_chassis,
+            explored_inventories,
+            component_integrities,
+        )
+        .await;
     }
 
     if explored_chassis.is_bluefield2() {
@@ -314,6 +327,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let system = explored_system.to_model(hw_type, &explored_chassis, &pcie_devices)?;
     let manager = explored_manager.to_model()?;
     let service = explored_inventories.to_model(hw_type);
+    let hardware_class = hardware_class(&root, &system);
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
@@ -324,7 +338,9 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         systems: vec![system],
         chassis: explored_chassis.to_model(),
         service,
+        component_integrities,
         vendor: hw_type.and_then(|hw_type| hw_type.bmc_vendor()),
+        hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
         power_shelf_id: None,
@@ -373,6 +389,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
     root: &ServiceRoot<B>,
     explored_chassis: ExploredChassisCollection<B>,
     explored_inventories: ExploredInventories<B>,
+    component_integrities: Option<Vec<ComponentIntegrityEntry>>,
 ) -> Result<EndpointExplorationReport, Error<B>> {
     let hw_type = hw::HwType::DeltaPowerShelf;
 
@@ -390,6 +407,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
     let explored_manager = ExploredManager::explore(manager, &manager::Config::default()).await?;
 
     let system = explored_chassis.synthesized_powershelf_system();
+    let hardware_class = hardware_class(root, &system);
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
@@ -400,7 +418,9 @@ async fn build_delta_powershelf_report<B: Bmc>(
         systems: vec![system],
         chassis: explored_chassis.to_model(),
         service: explored_inventories.to_model(Some(hw_type)),
+        component_integrities,
         vendor: hw_type.bmc_vendor(),
+        hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
         power_shelf_id: None,
@@ -418,6 +438,16 @@ async fn build_delta_powershelf_report<B: Bmc>(
         revision_id: None,
         remediation_error: None,
     })
+}
+
+/// The class recorded for an endpoint: the host system's reported identity,
+/// with the service root standing in for the fields it left empty.
+fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
+    derive_hardware_class(
+        Some(system),
+        root.vendor().map(Vendor::into_inner),
+        root.product().map(Product::into_inner),
+    )
 }
 
 pub(crate) fn hw_type<B: Bmc>(

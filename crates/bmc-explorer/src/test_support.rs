@@ -120,7 +120,7 @@ pub async fn generate_report_for_machine(
     machine_info: MachineInfo,
 ) -> Result<EndpointExplorationReport, MockExplorerError> {
     let bmc = bmc_mock::test_support::bmc_for_machine(machine_info).await;
-    nv_generate_exploration_report(bmc.service_root, &explorer_config()).await
+    nv_generate_exploration_report(bmc.bmc.as_ref(), bmc.service_root, &explorer_config()).await
 }
 
 pub async fn generate_managed_host_reports(
