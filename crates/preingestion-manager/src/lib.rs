@@ -44,8 +44,6 @@ use carbide_utils::periodic_timer::PeriodicTimer;
 use chrono::{DateTime, Utc};
 use component_manager::compute_tray_manager::ComputeTrayManager;
 pub use config::PreingestionManagerConfig;
-use db::ConditionalWrite::{Applied, NotApplied};
-use db::explored_endpoints::EndpointReportNotCurrent;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{DatabaseError, WithTransaction};
 use futures_util::FutureExt;
@@ -246,6 +244,13 @@ impl PreingestionManager {
                 return Ok(());
             }
         };
+
+        // A failed priority probe drops the request, so renew it for every
+        // endpoint we are still waiting on.
+        db.with_txn(|txn| {
+            db::explored_endpoints::request_exploration_for_preingest_waiting(txn).boxed()
+        })
+        .await??;
 
         let items = db::explored_endpoints::find_preingest_not_waiting_not_error(&db)
             .boxed()
@@ -938,18 +943,9 @@ impl PreingestionManagerStatic {
                                     txn,
                                 )
                                 .await?;
-                                match db::explored_endpoints::re_explore_if_version_matches(
-                                    endpoint.address,
-                                    endpoint.report_version,
-                                    txn,
-                                )
-                                .await?
-                                {
-                                    Applied(()) | NotApplied(EndpointReportNotCurrent) => {}
-                                }
 
-                                // Wait for fresh inventory even if the endpoint
-                                // no longer matched our re-exploration request.
+                                // We need site explorer to requery the version; this also
+                                // requests a priority exploration.
                                 db::explored_endpoints::set_waiting_for_explorer_refresh(
                                     endpoint.address,
                                     txn,

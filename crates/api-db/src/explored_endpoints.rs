@@ -503,15 +503,32 @@ pub async fn re_explore_if_version_matches(
     }
 }
 
-/// set_waiting_for_explorer_refresh sets a flag that will be cleared next time try_update runs.
+/// Marks the endpoint as waiting for a fresh report and requests a priority
+/// exploration; `try_update` clears both flags when it stores the next report.
 pub async fn set_waiting_for_explorer_refresh(
     address: IpAddr,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
-    let query =
-        "UPDATE explored_endpoints SET waiting_for_explorer_refresh = true WHERE address = $1";
+    let query = "UPDATE explored_endpoints SET waiting_for_explorer_refresh = true, exploration_requested = true WHERE address = $1";
     sqlx::query(query)
         .bind(address)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
+}
+
+/// Re-requests a priority exploration for every endpoint that waits for a
+/// refresh without a pending request while preingestion is driving it; endpoints
+/// in `initial`, `complete` or `failed` are not preingestion waits.
+pub async fn request_exploration_for_preingest_waiting(
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError> {
+    let query = "
+UPDATE explored_endpoints SET exploration_requested = true
+WHERE waiting_for_explorer_refresh AND NOT exploration_requested
+    AND preingestion_state->>'state' NOT IN ('initial', 'complete', 'failed')";
+    sqlx::query(query)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -993,7 +1010,9 @@ pub async fn set_pause_ingestion_and_poweron(
 
 #[cfg(test)]
 mod tests {
-    use model::site_explorer::{Chassis, NetworkAdapter};
+    use std::time::Duration;
+
+    use model::site_explorer::{Chassis, EndpointExplorationError, NetworkAdapter};
 
     use super::*;
 
@@ -1209,5 +1228,170 @@ mod tests {
         let endpoints = find_by_mac_address(&mut *txn, mac_address).await.unwrap();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].address, address);
+    }
+
+    /// `set_waiting_for_explorer_refresh` sets both `waiting_for_explorer_refresh`
+    /// and `exploration_requested`; a later `try_update` clears both.
+    #[crate::sqlx_test]
+    async fn set_waiting_for_explorer_refresh_requests_priority_exploration(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        let address: IpAddr = "10.0.3.1".parse().unwrap();
+        let report = EndpointExplorationReport::default();
+        insert(address, &report, false, &mut txn).await.unwrap();
+
+        let before = find_all_by_ip(address, &mut txn).await.unwrap();
+        assert_eq!(before.len(), 1);
+        assert!(!before[0].waiting_for_explorer_refresh);
+        assert!(!before[0].exploration_requested);
+
+        set_waiting_for_explorer_refresh(address, &mut txn)
+            .await
+            .unwrap();
+
+        let waiting = find_all_by_ip(address, &mut txn).await.unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert!(
+            waiting[0].waiting_for_explorer_refresh,
+            "endpoint is waiting for a refresh"
+        );
+        assert!(
+            waiting[0].exploration_requested,
+            "refresh request is served with priority"
+        );
+
+        assert_eq!(
+            try_update(address, waiting[0].report_version, &report, false, &mut txn)
+                .await
+                .unwrap(),
+            ConditionalWrite::Applied(()),
+            "report update applies to the current version"
+        );
+
+        let after = find_all_by_ip(address, &mut txn).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert!(!after[0].waiting_for_explorer_refresh);
+        assert!(!after[0].exploration_requested);
+    }
+
+    /// A failed probe drops the request `set_waiting_for_explorer_refresh` made;
+    /// `request_exploration_for_preingest_waiting` restores it only for endpoints
+    /// preingestion is still driving.
+    #[crate::sqlx_test]
+    async fn request_exploration_for_preingest_waiting_re_requests_parked_endpoints(
+        pool: sqlx::PgPool,
+    ) {
+        struct Case {
+            name: &'static str,
+            address: IpAddr,
+            /// `None` keeps the `initial` state that `insert` stores.
+            state: Option<PreingestionState>,
+            parked: bool,
+            probe_fails: bool,
+            re_requested: bool,
+        }
+        let cases = [
+            Case {
+                name: "parked after the initial BMC reset",
+                address: "10.0.3.2".parse().unwrap(),
+                state: Some(PreingestionState::InitialBMCReset {
+                    phase: InitialBmcResetPhase::WaitForExplorerRefresh,
+                }),
+                parked: true,
+                probe_fails: true,
+                re_requested: true,
+            },
+            Case {
+                name: "parked after preingestion completed",
+                address: "10.0.3.3".parse().unwrap(),
+                state: Some(PreingestionState::Complete),
+                parked: true,
+                probe_fails: true,
+                re_requested: false,
+            },
+            Case {
+                name: "failed probe before preingestion started",
+                address: "10.0.3.4".parse().unwrap(),
+                state: None,
+                parked: false,
+                probe_fails: true,
+                re_requested: false,
+            },
+            Case {
+                name: "in preingestion and not waiting",
+                address: "10.0.3.5".parse().unwrap(),
+                state: Some(PreingestionState::RecheckVersions),
+                parked: false,
+                probe_fails: false,
+                re_requested: false,
+            },
+        ];
+        let error = EndpointExplorationError::ConnectionTimeout {
+            details: "bmc rebooting".to_string(),
+        };
+        let mut txn = pool.begin().await.unwrap();
+        for case in &cases {
+            insert(
+                case.address,
+                &EndpointExplorationReport::default(),
+                false,
+                &mut txn,
+            )
+            .await
+            .unwrap();
+            if let Some(state) = &case.state {
+                set_preingestion(case.address, state.clone(), &mut txn)
+                    .await
+                    .unwrap();
+            }
+            if case.parked {
+                set_waiting_for_explorer_refresh(case.address, &mut txn)
+                    .await
+                    .unwrap();
+            }
+            if case.probe_fails {
+                let version =
+                    find_all_by_ip(case.address, &mut txn).await.unwrap()[0].report_version;
+                assert_eq!(
+                    try_update_last_exploration_error(
+                        case.address,
+                        version,
+                        &error,
+                        Duration::from_secs(1),
+                        &mut txn,
+                    )
+                    .await
+                    .unwrap(),
+                    ConditionalWrite::Applied(()),
+                    "{}: error update applies to the current version",
+                    case.name
+                );
+            }
+            let before = find_all_by_ip(case.address, &mut txn).await.unwrap();
+            assert!(
+                !before[0].exploration_requested,
+                "{}: no request is pending before the re-request",
+                case.name
+            );
+        }
+
+        request_exploration_for_preingest_waiting(&mut txn)
+            .await
+            .unwrap();
+
+        for case in &cases {
+            let after = find_all_by_ip(case.address, &mut txn).await.unwrap();
+            assert_eq!(after.len(), 1, "{}", case.name);
+            assert_eq!(
+                after[0].exploration_requested, case.re_requested,
+                "{}: exploration_requested after the preingestion re-request",
+                case.name
+            );
+            assert_eq!(
+                after[0].waiting_for_explorer_refresh,
+                case.parked || case.probe_fails,
+                "{}: waiting_for_explorer_refresh is left as the probe set it",
+                case.name
+            );
+        }
     }
 }
