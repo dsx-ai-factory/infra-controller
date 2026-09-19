@@ -27,18 +27,21 @@ MAT_MODE=scale HOST_COUNT=1000 helm-prereqs/setup-machine-a-tron.sh -y
 ## Architecture: Controller Mode
 
 The `mat-k8s-controller` dynamically creates one ClusterIP Service per BMC:
+
 - Discovers machine-a-tron pods via `nvidia-infra-controller/mat-service=true` label
 - Polls `/machines/status` from each pod
 - Creates Services with ClusterIP = BMC IP (assigned by NICo DHCP)
 - Services route to correct pod via `nvidia-infra-controller/pod-name` selector
 
 **Requirements:**
+
 - `bmcDhcpRelayAddress` must be within Kubernetes ServiceCIDR
 - NICo siteConfig needs `allow_insecure_discovery = true` and a network
   covering the BMC IP range
 - Leave `site_explorer.bmc_proxy` unset — NICo dials each BMC's ClusterIP directly
 
 **Example NICo siteConfig:**
+
 ```toml
 allow_insecure_discovery = true
 
@@ -60,7 +63,7 @@ in the scripts/charts with explanatory comments.
 |---|-------|------------|-----|
 | 1 | Every nico-api call fails `client error (Connect)` after a site reprovision | machine-a-tron trusts the old CA (stale `nico-roots` copy) and presents a cert signed by it | Script refreshes `nico-roots` + Vault secrets from nico-system and deletes the client-cert secret so cert-manager reissues from the current CA |
 | 2 | Redfish redirect silently ignored | Docs said `override_target_host` — never a valid field; the real field is `bmc_proxy = "host:port"`, and it must be the **cross-namespace FQDN** (site-explorer runs in nico-system; a bare service name doesn't resolve) | Script sets `bmc_proxy` correctly; docs fixed |
-| 3 | site-explorer aborts every run: `MissingCredentials` | `machines/bmc/site/root` isn't in default kvSeeds; the seeded UEFI creds ship with **empty** passwords which fail validation | Script seeds the full chain |
+| 3 | site-explorer aborts every run: `MissingCredentials` | `machines/bmc/site/root` isn't in default kvSeeds; the seeded UEFI creds ship with **empty** passwords which fail validation | The script seeds the full chain. Alternatively, `siteCredentials` in `helm-prereqs/values.yaml` provides the three as a credential-file Secret ([Site Credentials Secret](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#site-credentials-secret)) |
 | 4 | Host BMCs 401 while DPUs explore fine | Host and DPU mock factory passwords differ (`factory_password` vs `0penBmc`); the host factory Vault path vendor segment is **lowercase** (`…/dell` — `BMCVendor`'s `Display` lowercases; the earlier capital-`Dell` seed was read by nobody) | Script seeds both factory creds on the correct paths |
 | 5 | machine-a-tron's expected-machine registration 403s (each failed record is logged and startup exits non-zero) | `Machineatron` principal missing from the `AddExpectedMachine` RBAC grant - an oversight; it holds the sibling grants (`DiscoverDhcp`, `CreateNetworkSegment`, `GetExpectedSwitch`) | One-line fix in `internal_rbac_rules.rs`; script includes a DB fallback for nico-api builds without it |
 | 6 | Endpoints permanently stuck `AvoidLockout` (NICO-SITEEXPLORER-144) on a fresh deploy | Per-MAC rotated creds (`machines/bmc/<mac>/root`) survive cleanup; a fresh mock is at factory password but the per-MAC entry makes site-explorer present the old rotated one → 401 latch, self-perpetuating by design | Cleanup purges per-MAC creds; setup self-heals stale ones (only when the machine graph is truly empty — machines AND interfaces at 0) |

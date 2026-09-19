@@ -197,7 +197,13 @@ and `machines/all_hosts/site_default/uefi-metadata-items/auth`. The two UEFI
 paths are created by the nico-prereqs `kvSeeds` but with **empty passwords**,
 which fails the check (`vault does not have a valid password entry`) — they
 must be re-seeded with any non-empty password. `machines/bmc/site/root` is not
-seeded at all; without it every run aborts with `MissingCredentials`.
+seeded by default; without it every run aborts with `MissingCredentials`.
+Enabling `siteCredentials` in `helm-prereqs/values.yaml` provides all three as
+a Kubernetes Secret that nico-api reads as its credential file ahead of Vault.
+Refer to
+[Site Credentials Secret](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#site-credentials-secret).
+`setup-machine-a-tron.sh` Phase 4 still seeds them in Vault, and the file
+shadows those entries.
 
 For the default BlueField-3 simulation, the **credential rotation flow**
 requires this exact chain, which `setup-machine-a-tron.sh` Phase 4 handles:
@@ -488,4 +494,4 @@ The `machine_dhcp_records` view inner-joins the singleton control row `machine_i
 | `Refusing to create managed host`; machine-a-tron logs `PermissionDenied` on registration | nico-api build lacks the `Machineatron` → `AddExpectedMachine` RBAC grant | Rebuild nico-api with the grant (internal_rbac_rules.rs); the setup script also has a DB fallback |
 | `SIGSEGV` compiling `aws-lc-sys` | QEMU emulates the `.S` assembler, which crashes | True cross-compilation (native arm64 host → x86_64 target) instead of QEMU |
 | site-explorer aborts with `MissingCredentials .../uefi-metadata-items/auth` | kvSeeds create the UEFI creds with **empty** passwords, which fail validation | Re-seed both site_default UEFI creds with any non-empty password |
-| site-explorer aborts with `MissingCredentials machines/bmc/site/root` | Site BMC root cred not in default `kvSeeds` | Seed `secrets/machines/bmc/site/root` = `root`/&lt;non-factory password&gt; in Vault |
+| site-explorer aborts with `MissingCredentials machines/bmc/site/root` | Site BMC root cred not in default `kvSeeds` | Seed `secrets/machines/bmc/site/root` = `root`/&lt;non-factory password&gt; in Vault, or enable `siteCredentials` in `helm-prereqs/values.yaml` ([Site Credentials Secret](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#site-credentials-secret)) |

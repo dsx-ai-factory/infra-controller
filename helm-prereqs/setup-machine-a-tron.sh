@@ -37,10 +37,12 @@
 #    We always re-copy nico-roots from nico-system and (Phase 8) delete the old
 #    cert secret so cert-manager reissues from the CURRENT CA.
 #
-#  * BMC site-root credential (Phase 5): site-explorer's check_preconditions
+#  * BMC site-root credential (Phase 4): site-explorer's check_preconditions
 #    requires the Vault credential machines/bmc/site/root. It is NOT in the
-#    default nico-prereqs kvSeeds, so without it site-explorer aborts every run
-#    with MissingCredentials and never explores anything.
+#    default nico-prereqs kvSeeds; the chart provides it only through the
+#    siteCredentials Secret (off by default), so without either site-explorer
+#    aborts every run with MissingCredentials and never explores anything.
+#    Phase 4 seeds it when it is absent or still at a factory value.
 #
 #  * bmc_proxy field name (Phase 6): the site_explorer config field is
 #    `bmc_proxy = "host:port"` (a single string). `override_target_host` is NOT
