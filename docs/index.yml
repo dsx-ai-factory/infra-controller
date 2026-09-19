@@ -378,6 +378,8 @@ navigation:
               path: development/build-guide.md
             - page: Machine-a-tron Deployment
               path: development/machine-a-tron-deployment.md
+            - page: Machine-a-tron RMS Mock
+              path: development/machine-a-tron-rms-mock.md
         - page: Glossary
           path: glossary.md
 

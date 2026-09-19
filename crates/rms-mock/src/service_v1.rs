@@ -21,11 +21,15 @@
 //! bodies, so every method must exist here even when it is out of scope. The
 //! out-of-scope ones are generated rather than written out, so that a `librms`
 //! bump which adds an RPC fails to compile in one obvious place instead of
-//! silently returning a router 404.
+//! silently returning a router 404. The firmware, NVOS, and switch lifecycle
+//! RPCs are delegated to their own modules.
 
 use librms::protos::rack_manager::rack_manager_server::RackManager;
 
-use crate::envelope::{BatchOutcome, NodeResult, UNMATCHED_NODE, matched_or_not, node_batch};
+use crate::envelope::{
+    BatchOutcome, NodeResult, UNMATCHED_NODE, job_states, matched_or_not, node_batch,
+    require_job_id,
+};
 use crate::fabric::Candidate;
 use crate::resolve::NodeRef;
 use crate::{RmsMock, SimPowerState, rms};
@@ -51,11 +55,22 @@ fn bmc_mac_of(r: &NodeRef<'_>) -> eyre::Result<mac_address::MacAddress> {
 macro_rules! rack_manager_impl {
     (
         implemented { $($implemented:tt)* }
+        delegated { $($delegated:ident($dreq:ident) -> $dres:ident => $handler:path,)* }
         unimplemented { $($method:ident($req:ident) -> $res:ident,)* }
     ) => {
         #[tonic::async_trait]
         impl RackManager for RmsMock {
             $($implemented)*
+
+            $(
+                /// Served by its domain module.
+                async fn $delegated(
+                    &self,
+                    request: tonic::Request<rms::$dreq>,
+                ) -> std::result::Result<tonic::Response<rms::$dres>, tonic::Status> {
+                    $handler(self, request).await
+                }
+            )*
 
             $(
                 /// Out of scope for the mock.
@@ -212,7 +227,7 @@ rack_manager_impl! {
             }))
         }
 
-        /// Report the state of a job.
+        /// Report the state of a job and, when asked, of its children.
         ///
         /// The requested id is always echoed, even for a job unknown to this
         /// process; a failed job carries its reason in `error_message`.
@@ -220,26 +235,12 @@ rack_manager_impl! {
             &self,
             request: tonic::Request<rms::GetJobStatusRequest>,
         ) -> std::result::Result<tonic::Response<rms::GetJobStatusResponse>, tonic::Status> {
-            let job_id = &request.get_ref().job_id;
-            let status = self.jobs.observe(job_id);
+            let req = request.get_ref();
+            require_job_id(&req.job_id)?;
+            let status = self.observe_job(&req.job_id);
 
             Ok(tonic::Response::new(rms::GetJobStatusResponse {
-                job_states: vec![rms::JobStatus {
-                    job_id: job_id.clone(),
-                    parent_job_id: None,
-                    // A rack's fabric is one job; there are no children.
-                    child_job_ids: Vec::new(),
-                    // Never the proto3 default, which callers read as unknown.
-                    execution_state: status.state.as_execution_state(),
-                    error_message: status.error_message,
-                    error_code: 0,
-                    result_json: String::new(),
-                    state_description: status.state.as_wire_str().to_owned(),
-                    rack_id: Some(status.rack_id),
-                    node_id: Some(status.node_id),
-                    created_at: None,
-                    updated_at: None,
-                }],
+                job_states: job_states(&status, req.include_child_job_states),
             }))
         }
 
@@ -345,8 +346,9 @@ rack_manager_impl! {
 
         /// Begin configuring certificates on the given switches.
         ///
-        /// Nothing is installed; each matched node gets a job, and an
-        /// unmatched node is a per-node failure with no job.
+        /// Nothing is installed; the batch is a parent job with a child per
+        /// matched node, and an unmatched node is a per-node failure with no
+        /// job.
         async fn configure_switch_certificate(
             &self,
             request: tonic::Request<rms::ConfigureSwitchCertificateRequest>,
@@ -355,24 +357,26 @@ rack_manager_impl! {
             let inventory = self.inventory.nodes();
             let refs = crate::resolve::resolve_nodes(&inventory, request.get_ref().nodes.as_ref());
 
-            let jobs = refs
-                .iter()
-                .filter(|r| r.matched())
-                .map(|r| rms::ConfigureSwitchCertificateJobInfo {
-                    node_id: r.node_id.to_owned(),
-                    job_id: self.jobs.start(r.node_id, r.rack_id),
+            let batch = self
+                .jobs
+                .start_batch(refs.iter().filter(|r| r.matched()), None);
+            let jobs = batch
+                .children
+                .into_iter()
+                .map(|(node_id, job_id)| rms::ConfigureSwitchCertificateJobInfo {
+                    node_id: node_id.to_owned(),
+                    job_id,
                 })
-                .collect::<Vec<_>>();
-
-            let batch_job_id = jobs.first().map(|j| j.job_id.as_str()).unwrap_or_default();
+                .collect();
 
             Ok(tonic::Response::new(rms::ConfigureSwitchCertificateResponse {
-                response: Some(node_batch(&matched_or_not(&refs), batch_job_id)),
+                response: Some(node_batch(&matched_or_not(&refs), &batch.parent)),
                 jobs,
             }))
         }
 
-        /// Report progress of a certificate configuration job.
+        /// Report progress of a certificate configuration job, parent or
+        /// child.
         ///
         /// A job id the mock has no record of is reported completed.
         async fn get_configure_switch_certificate_job_status(
@@ -383,7 +387,8 @@ rack_manager_impl! {
             tonic::Status,
         > {
             let job_id = &request.get_ref().job_id;
-            let status = self.jobs.observe(job_id);
+            require_job_id(job_id)?;
+            let status = self.observe_job(job_id);
 
             Ok(tonic::Response::new(
                 rms::GetConfigureSwitchCertificateJobStatusResponse {
@@ -401,6 +406,16 @@ rack_manager_impl! {
                 },
             ))
         }
+    }
+
+    delegated {
+        list_firmware_objects(ListFirmwareObjectsRequest) -> ListFirmwareObjectsResponse => crate::firmware::list_firmware_objects,
+        apply_firmware_object(ApplyFirmwareObjectRequest) -> ApplyFirmwareObjectResponse => crate::firmware::apply_firmware_object,
+        get_firmware_job_status(GetFirmwareJobStatusRequest) -> GetFirmwareJobStatusResponse => crate::firmware::get_firmware_job_status,
+        apply_switch_system_image(ApplySwitchSystemImageRequest) -> ApplySwitchSystemImageResponse => crate::nvos::apply_switch_system_image,
+        get_switch_system_image_job_status(GetSwitchSystemImageJobStatusRequest) -> GetSwitchSystemImageJobStatusResponse => crate::nvos::get_switch_system_image_job_status,
+        update_switch_system_password(UpdateSwitchSystemPasswordRequest) -> UpdateSwitchSystemPasswordResponse => crate::lifecycle::update_switch_system_password,
+        batch_reset_switch_factory_default(BatchResetSwitchFactoryDefaultRequest) -> BatchResetSwitchFactoryDefaultResponse => crate::lifecycle::batch_reset_switch_factory_default,
     }
 
     unimplemented {
@@ -424,17 +439,13 @@ rack_manager_impl! {
         get_rack_firmware_inventory(GetRackFirmwareInventoryRequest) -> GetRackFirmwareInventoryResponse,
         add_firmware_object(AddFirmwareObjectRequest) -> AddFirmwareObjectResponse,
         get_firmware_object(GetFirmwareObjectRequest) -> GetFirmwareObjectResponse,
-        list_firmware_objects(ListFirmwareObjectsRequest) -> ListFirmwareObjectsResponse,
         delete_firmware_object(DeleteFirmwareObjectRequest) -> DeleteFirmwareObjectResponse,
         set_default_firmware_object(SetDefaultFirmwareObjectRequest) -> SetDefaultFirmwareObjectResponse,
         apply_stored_firmware_object(ApplyStoredFirmwareObjectRequest) -> ApplyStoredFirmwareObjectResponse,
-        apply_firmware_object(ApplyFirmwareObjectRequest) -> ApplyFirmwareObjectResponse,
-        apply_switch_system_image(ApplySwitchSystemImageRequest) -> ApplySwitchSystemImageResponse,
         apply_stored_switch_system_image(ApplyStoredSwitchSystemImageRequest) -> ApplyStoredSwitchSystemImageResponse,
         get_firmware_object_history(GetFirmwareObjectHistoryRequest) -> GetFirmwareObjectHistoryResponse,
         list_switch_firmware(ListSwitchFirmwareRequest) -> ListSwitchFirmwareResponse,
         push_switch_firmware(PushSwitchFirmwareRequest) -> PushSwitchFirmwareResponse,
-        batch_reset_switch_factory_default(BatchResetSwitchFactoryDefaultRequest) -> BatchResetSwitchFactoryDefaultResponse,
         configure_scale_up_fabric_manager(ConfigureScaleUpFabricManagerRequest) -> ConfigureScaleUpFabricManagerResponse,
         batch_reset_switch_sdn_factory_default(BatchResetSwitchSdnFactoryDefaultRequest) -> BatchResetSwitchSdnFactoryDefaultResponse,
         get_scale_up_fabric_state(GetScaleUpFabricStateRequest) -> GetScaleUpFabricStateResponse,
@@ -442,8 +453,5 @@ rack_manager_impl! {
         set_scale_up_fabric_telemetry_interface_state(SetScaleUpFabricTelemetryInterfaceStateRequest) -> SetScaleUpFabricTelemetryInterfaceStateResponse,
         batch_disable_switch_mtls(BatchDisableSwitchMtlsRequest) -> BatchDisableSwitchMtlsResponse,
         list_switch_system_images(ListSwitchSystemImagesRequest) -> ListSwitchSystemImagesResponse,
-        get_switch_system_image_job_status(GetSwitchSystemImageJobStatusRequest) -> GetSwitchSystemImageJobStatusResponse,
-        update_switch_system_password(UpdateSwitchSystemPasswordRequest) -> UpdateSwitchSystemPasswordResponse,
-        get_firmware_job_status(GetFirmwareJobStatusRequest) -> GetFirmwareJobStatusResponse,
     }
 }
