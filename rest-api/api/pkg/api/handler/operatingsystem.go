@@ -1268,7 +1268,7 @@ func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
 
 	dbossas := []cdbm.OperatingSystemSiteAssociation{}
 	sttsmap := map[uuid.UUID]*cdbm.TenantSite{}
-	if os.Type == cdbm.OperatingSystemTypeImage {
+	if os.Type == cdbm.OperatingSystemTypeImage || os.Type == cdbm.OperatingSystemTypeTemplatedIPXE {
 		// Get all OperatingSystemSiteAssociations
 		ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(gsh.dbSession)
 		dbossas, _, err = ossaDAO.GetAll(
@@ -1286,7 +1286,9 @@ func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
 			logger.Error().Err(err).Msg("error retrieving Operating System Site associations from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Operating System Site associations from DB", nil)
 		}
+	}
 
+	if os.Type == cdbm.OperatingSystemTypeImage && tenant != nil {
 		// Get all TenantSite records for the Tenant
 		tsDAO := cdbm.NewTenantSiteDAO(gsh.dbSession)
 		tss, _, err := tsDAO.GetAll(
