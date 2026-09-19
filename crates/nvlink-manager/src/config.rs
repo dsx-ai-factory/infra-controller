@@ -19,12 +19,43 @@ use carbide_utils::config::as_std_duration;
 use duration_str::deserialize_duration;
 use serde::{Deserialize, Serialize};
 
+/// Deserializes a duration and rejects zero.
+fn deserialize_positive_duration<'de, D>(deserializer: D) -> Result<std::time::Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let duration: std::time::Duration = deserialize_duration(deserializer)?;
+    if duration.is_zero() {
+        return Err(serde::de::Error::custom(
+            "duration must be greater than zero",
+        ));
+    }
+
+    Ok(duration)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NvLinkConfig {
     /// Enables NvLink partitioning.
     #[serde(default)]
     pub enabled: bool,
+
+    /// Enables read-only discovery of rack NVLink domains through NMX-C Hello.
+    ///
+    /// This has no effect when `enabled` is true because the partition monitor
+    /// already records the domain observed from each rack's NMX-C endpoint.
+    #[serde(default)]
+    pub domain_discovery_enabled: bool,
+
+    /// Maximum duration for one read-only domain-discovery database or NMX-C operation.
+    /// Must be greater than zero.
+    #[serde(
+        default = "NvLinkConfig::default_domain_discovery_operation_timeout",
+        deserialize_with = "deserialize_positive_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub domain_discovery_operation_timeout: std::time::Duration,
 
     /// Defaults to 1 Minute if not specified.
     #[serde(
@@ -67,6 +98,10 @@ pub struct NvLinkConfig {
 impl NvLinkConfig {
     pub const fn default_monitor_run_interval() -> std::time::Duration {
         std::time::Duration::from_secs(60)
+    }
+
+    pub const fn default_domain_discovery_operation_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(30)
     }
 
     pub const fn default_partition_monitor_max_concurrent_groups() -> std::num::NonZeroUsize {
@@ -135,6 +170,8 @@ impl Default for NvLinkConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            domain_discovery_enabled: false,
+            domain_discovery_operation_timeout: Self::default_domain_discovery_operation_timeout(),
             monitor_run_interval: Self::default_monitor_run_interval(),
             nmx_c_tls_ca_cert_path: None,
             nmx_c_tls_client_cert_path: None,
@@ -155,14 +192,21 @@ mod test {
 
     #[test]
     fn deserialize_serialize_nvlink_config() {
-        let value_json =
-            r#"{"enabled": true, "allow_insecure": true, "monitor_run_interval": "33" }"#;
+        let value_json = r#"{
+            "enabled": true,
+            "domain_discovery_enabled": true,
+            "domain_discovery_operation_timeout": "17s",
+            "allow_insecure": true,
+            "monitor_run_interval": "33"
+        }"#;
 
         let nvlink_config: NvLinkConfig = serde_json::from_str(value_json).unwrap();
         assert_eq!(
             nvlink_config,
             NvLinkConfig {
                 enabled: true,
+                domain_discovery_enabled: true,
+                domain_discovery_operation_timeout: std::time::Duration::from_secs(17),
                 monitor_run_interval: std::time::Duration::from_secs(33),
                 nmx_c_tls_ca_cert_path: None,
                 nmx_c_tls_client_cert_path: None,
@@ -174,6 +218,79 @@ mod test {
                 partition_monitor_max_concurrent_groups:
                     NvLinkConfig::default_partition_monitor_max_concurrent_groups(),
             }
+        );
+    }
+
+    #[test]
+    fn domain_discovery_defaults_to_disabled_when_omitted() {
+        let config: NvLinkConfig = serde_json::from_str(r#"{"allow_insecure":false}"#).unwrap();
+
+        assert!(!config.enabled);
+        assert!(!config.domain_discovery_enabled);
+        assert_eq!(
+            config.domain_discovery_operation_timeout,
+            NvLinkConfig::default_domain_discovery_operation_timeout()
+        );
+        assert!(!config.allow_insecure);
+    }
+
+    #[test]
+    fn deserialize_secure_read_only_domain_discovery() {
+        let config: NvLinkConfig = serde_json::from_str(
+            r#"{
+                "enabled": false,
+                "domain_discovery_enabled": true,
+                "domain_discovery_operation_timeout": "12s",
+                "allow_insecure": false,
+                "nmx_c_tls_ca_cert_path": "/tls/ca.crt",
+                "nmx_c_tls_client_cert_path": "/tls/client.crt",
+                "nmx_c_tls_client_key_path": "/tls/client.key",
+                "nmx_c_tls_authority": "nmxc.example.internal",
+                "nmx_c_endpoint_port": 9370
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!config.enabled);
+        assert!(config.domain_discovery_enabled);
+        assert_eq!(
+            config.domain_discovery_operation_timeout,
+            std::time::Duration::from_secs(12)
+        );
+        assert!(!config.allow_insecure);
+        assert_eq!(
+            config.nmx_c_tls_ca_cert_path.as_deref(),
+            Some("/tls/ca.crt")
+        );
+        assert_eq!(
+            config.nmx_c_tls_client_cert_path.as_deref(),
+            Some("/tls/client.crt")
+        );
+        assert_eq!(
+            config.nmx_c_tls_client_key_path.as_deref(),
+            Some("/tls/client.key")
+        );
+        assert_eq!(
+            config.nmx_c_tls_authority.as_deref(),
+            Some("nmxc.example.internal")
+        );
+        assert_eq!(config.nmx_c_endpoint_port, Some(9370));
+    }
+
+    #[test]
+    fn deserialize_zero_domain_discovery_operation_timeout_is_rejected() {
+        let err = serde_json::from_str::<NvLinkConfig>(
+            r#"{
+                "domain_discovery_operation_timeout": "0s",
+                "allow_insecure": false
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("duration must be greater than zero"),
+            "unexpected error: {err}"
         );
     }
 

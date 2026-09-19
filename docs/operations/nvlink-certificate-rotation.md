@@ -486,7 +486,9 @@ The following table describes the certificate rotation settings:
 Set `nvlink_config.enabled` according to whether the site uses automated NVLink
 partition reconciliation. The certificate monitor needs only its nested
 `enabled` setting, so an alert-only deployment can leave
-`nvlink_config.enabled = false`.
+`nvlink_config.enabled = false`. Read-only rack-domain discovery is controlled
+independently by `nvlink_config.domain_discovery_enabled` and does not allow
+partition changes.
 </Note>
 
 Set the server certificate's renewal time comfortably earlier than the NICo

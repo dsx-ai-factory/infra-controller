@@ -111,7 +111,7 @@ behavior.
 | `ewethers_config` | `Option<EwEthersConfig>` | — | `networking` | Cluster Interconnect (east-west Ethernet) config (see [EwEthersConfig](#ewethersconfig)). Accepts the legacy `dpa_config` section name; legacy inline `mqtt_endpoint`, `mqtt_broker_port`, `hb_interval`, and `auth` keys are migrated into `svpc` at load time with a deprecation warning. |
 | `dsx_exchange_event_bus` | `Option<DsxExchangeEventBusConfig>` | — | `integrations` | MQTT event bus for managed-host state publishing plus BMS metadata subscription and rack/isolation/heartbeat publishing (see [DsxExchangeEventBusConfig](#dsxexchangeeventbusconfig)). |
 | `datacenter_asn` | `u32` | `11414` | `networking` | Datacenter ASN used by FNN for DC-specific route targets. |
-| `nvlink_config` | `Option<NvLinkConfig>` | — | `hardware` | NvLink partitioning via NMX-C (see [NvLinkConfig](#nvlinkconfig)). |
+| `nvlink_config` | `Option<NvLinkConfig>` | — | `hardware` | NVLink partitioning or read-only rack-domain discovery through NMX-C (refer to [NvLinkConfig](#nvlinkconfig)). |
 | `power_manager_options` | `PowerManagerOptions` | *(see below)* | `hardware` | Power management timing (see [PowerManagerOptions](#powermanageroptions)). |
 | `sitename` | `Option<String>` | — | `server` | Human-readable site name exposed to tenants via FMDS. |
 | `auto_machine_repair_plugin` | `AutoMachineRepairPluginConfig` | *(default)* | `machines` | Auto-repair configuration for failed machines. |
@@ -506,8 +506,10 @@ shipped configuration selects a plaintext mode.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `enabled` | `bool` | `false` | Enables NvLink partitioning. |
-| `monitor_run_interval` | `Duration` | `60s` | NvLink monitor polling interval. |
+| `enabled` | `bool` | `false` | Enables NVLink partitioning. |
+| `domain_discovery_enabled` | `bool` | `false` | When partitioning is disabled, enables read-only NMX-C `Hello` polling that records the observed domain on rack components. Partitioning already performs this discovery when enabled. |
+| `domain_discovery_operation_timeout` | `Duration` | `30s` | Maximum duration for each discovery database operation and each per-rack NMX-C observation, including metadata persistence. Must be greater than zero. |
+| `monitor_run_interval` | `Duration` | `60s` | NVLink partition or read-only domain-discovery polling interval. |
 | `nmx_c_tls_ca_cert_path` | `Option<String>` | — | Extra CA bundle for verifying the NMX-C server over HTTPS. |
 | `nmx_c_tls_client_cert_path` | `Option<String>` | — | Client certificate for mTLS to NMX-C. |
 | `nmx_c_tls_client_key_path` | `Option<String>` | — | Client private key for mTLS to NMX-C. |

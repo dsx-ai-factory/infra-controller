@@ -190,6 +190,8 @@ Configure the NMX-C client under `[nvlink_config]`:
 ```toml
 [nvlink_config]
 enabled = true
+domain_discovery_enabled = false
+domain_discovery_operation_timeout = "30s"
 monitor_run_interval = "60s"
 
 # TLS material for NMX-C. The CA path is required by the certificate
@@ -206,12 +208,41 @@ allow_insecure = false
 
 | Field | Purpose |
 | ----- | ------- |
+| `enabled` | Enables automated NVLink partition reconciliation. Defaults to `false` |
+| `domain_discovery_enabled` | When partition reconciliation is disabled, periodically performs read-only NMX-C `Hello` calls and records the observed domain on rack components. Defaults to `false`; `enabled = true` already performs this discovery |
+| `domain_discovery_operation_timeout` | Maximum duration for each discovery database operation and each per-rack NMX-C observation, including metadata persistence. Defaults to `30s` and must be greater than zero |
+| `monitor_run_interval` | Interval used by the enabled partition monitor or read-only domain discovery. Defaults to `60s` |
 | `nmx_c_tls_ca_cert_path` | Optional PEM containing additional CAs for normal NMX-C connectivity. The certificate monitor requires this file and does not use the system trust store |
 | `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C |
 | `nmx_c_tls_client_key_path` | Optional client key matching the certificate above |
 | `nmx_c_tls_authority` | Optional override for the expected server name during certificate verification (SNI / hostname check) |
 | `nmx_c_endpoint_port` | Optional gRPC port used when deriving an endpoint from a switch NVOS IP; defaults to `9370` |
 | `allow_insecure` | Development option that can select plaintext HTTP for rack-derived endpoints when no client certificate and key are configured. It does not disable certificate-monitor TLS verification |
+
+To publish rack-to-domain associations without allowing NICo to change NMX-C
+partitions, leave partition reconciliation disabled and enable read-only domain
+discovery. Configure the same verified TLS or mTLS settings shown above:
+
+```toml
+[nvlink_config]
+enabled = false
+domain_discovery_enabled = true
+domain_discovery_operation_timeout = "30s"
+monitor_run_interval = "60s"
+
+nmx_c_tls_ca_cert_path = "/etc/nico/nmxc/ca.pem"
+nmx_c_tls_client_cert_path = "/etc/nico/nmxc/client.crt"
+nmx_c_tls_client_key_path = "/etc/nico/nmxc/client.key"
+nmx_c_tls_authority = "nmxc.example.internal"
+nmx_c_endpoint_port = 9370
+allow_insecure = false
+```
+
+This mode selects one ready Fabric Manager control-plane switch per rack,
+preferring the primary switch, and calls only NMX-C `Hello`. It records a
+non-nil domain UUID on that rack's switches and power shelves. It does not load,
+create, update, or remove NVLink partitions. Failed observations retain the
+last valid domain and are retried on the next interval.
 
 Rack-associated machines use the NVOS IP of a ready Fabric Manager
 control-plane switch in the rack. Machines without a rack association use an

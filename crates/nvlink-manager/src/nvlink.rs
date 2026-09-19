@@ -51,6 +51,35 @@ pub mod test_support {
         gpu_uids: Vec<u64>,
     }
 
+    /// NMX-C operations observed by [`NmxcSimClient`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum NmxcSimOperation {
+        Hello,
+        GetDomainProperties,
+        GetDomainStateInfo,
+        GetTopologyInfo,
+        GetComputeNodeCount,
+        GetComputeNodeInfoList,
+        GetGpuInfoList,
+        GetSwitchNodeCount,
+        GetSwitchNodeInfoList,
+        GetPartitionCount,
+        GetPartitionIdList,
+        GetPartitionInfoList,
+        CreatePartition,
+        DeletePartition,
+        AddGpusToPartition,
+        RemoveGpusFromPartition,
+    }
+
+    #[derive(Clone, Debug)]
+    enum NmxcSimHelloBehavior {
+        Success(String),
+        MissingHeader,
+        Failure,
+        Hang,
+    }
+
     /// In-memory NMX-C gRPC API mock, mirroring [`NmxmSimClient`] partition presets for tests.
     #[derive(Debug)]
     pub struct NmxcSimClient {
@@ -59,6 +88,9 @@ pub mod test_support {
         _fail_after_n_creates: Option<Arc<Mutex<usize>>>,
         _grpc_pool: Option<NmxcClientPool>,
         _simulator_endpoint: Option<Endpoint>,
+        _operations: Arc<Mutex<Vec<NmxcSimOperation>>>,
+        _hello_behavior: Arc<Mutex<NmxcSimHelloBehavior>>,
+        _fail_create_client: bool,
     }
 
     impl Default for NmxcSimClient {
@@ -69,6 +101,11 @@ pub mod test_support {
                 _fail_after_n_creates: None,
                 _grpc_pool: None,
                 _simulator_endpoint: None,
+                _operations: Arc::new(Mutex::new(Vec::new())),
+                _hello_behavior: Arc::new(Mutex::new(NmxcSimHelloBehavior::Success(
+                    "ffffffff-ffff-ffff-ffff-ffffffffffff".to_string(),
+                ))),
+                _fail_create_client: false,
             }
         }
     }
@@ -169,6 +206,57 @@ pub mod test_support {
             client
         }
 
+        /// Returns the ordered NMX-C operations observed by this simulator.
+        pub fn operations(&self) -> Vec<NmxcSimOperation> {
+            self._operations.lock().unwrap().clone()
+        }
+
+        /// Returns a simulator whose `Hello` response carries `domain_uuid`.
+        pub fn with_hello_domain_uuid(domain_uuid: impl Into<String>) -> Self {
+            Self {
+                _hello_behavior: Arc::new(Mutex::new(NmxcSimHelloBehavior::Success(
+                    domain_uuid.into(),
+                ))),
+                ..Self::default()
+            }
+        }
+
+        /// Returns a simulator whose `Hello` response omits `server_header`.
+        pub fn with_missing_hello_header() -> Self {
+            Self {
+                _hello_behavior: Arc::new(Mutex::new(NmxcSimHelloBehavior::MissingHeader)),
+                ..Self::default()
+            }
+        }
+
+        /// Returns a simulator whose `Hello` operation fails.
+        pub fn with_hello_failure() -> Self {
+            Self {
+                _hello_behavior: Arc::new(Mutex::new(NmxcSimHelloBehavior::Failure)),
+                ..Self::default()
+            }
+        }
+
+        /// Returns a simulator whose `Hello` operation remains pending until cancelled.
+        pub fn with_hanging_hello() -> Self {
+            Self {
+                _hello_behavior: Arc::new(Mutex::new(NmxcSimHelloBehavior::Hang)),
+                ..Self::default()
+            }
+        }
+
+        /// Returns a simulator pool that cannot create an NMX-C client.
+        pub fn with_client_creation_failure() -> Self {
+            Self {
+                _fail_create_client: true,
+                ..Self::default()
+            }
+        }
+
+        fn record_operation(&self, operation: NmxcSimOperation) {
+            self._operations.lock().unwrap().push(operation);
+        }
+
         fn default_gpu_uids() -> Vec<u64> {
             vec![
                 0xdb488cb17978480,
@@ -235,12 +323,23 @@ pub mod test_support {
     #[::async_trait::async_trait]
     impl Nmxc for NmxcSimClient {
         async fn hello(&mut self, _gateway_id: &str) -> Result<nmxc_model::ServerHello, NmxcError> {
-            Ok(nmxc_model::ServerHello {
-                server_header: Some({
+            self.record_operation(NmxcSimOperation::Hello);
+            let hello_behavior = self._hello_behavior.lock().unwrap().clone();
+            let server_header = match hello_behavior {
+                NmxcSimHelloBehavior::Success(domain_uuid) => Some({
                     let mut header = Self::success_server_header();
-                    header.domain_uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff".to_string();
+                    header.domain_uuid = domain_uuid;
                     header
                 }),
+                NmxcSimHelloBehavior::MissingHeader => None,
+                NmxcSimHelloBehavior::Failure => {
+                    return Err(NmxcError::invalid_response("simulated Hello failure"));
+                }
+                NmxcSimHelloBehavior::Hang => return std::future::pending().await,
+            };
+
+            Ok(nmxc_model::ServerHello {
+                server_header,
                 components_ver: vec![],
                 capabilities: vec![],
                 host_os_details: String::new(),
@@ -255,6 +354,7 @@ pub mod test_support {
             _context: Option<nmxc_model::Context>,
             _gateway_id: &str,
         ) -> Result<nmxc_model::DomainProperties, NmxcError> {
+            self.record_operation(NmxcSimOperation::GetDomainProperties);
             Ok(nmxc_model::DomainProperties {
                 server_header: Some(Self::success_server_header()),
                 context: None,
@@ -280,6 +380,7 @@ pub mod test_support {
             _context: Option<nmxc_model::Context>,
             _gateway_id: &str,
         ) -> Result<nmxc_model::DomainStateInfo, NmxcError> {
+            self.record_operation(NmxcSimOperation::GetDomainStateInfo);
             Ok(nmxc_model::DomainStateInfo {
                 server_header: Some(Self::success_server_header()),
                 context: None,
@@ -295,6 +396,7 @@ pub mod test_support {
             _context: Option<nmxc_model::Context>,
             _gateway_id: &str,
         ) -> Result<nmxc_model::FmTopologyInfo, NmxcError> {
+            self.record_operation(NmxcSimOperation::GetTopologyInfo);
             Ok(nmxc_model::FmTopologyInfo {
                 server_header: Some(Self::success_server_header()),
                 context: None,
@@ -306,6 +408,7 @@ pub mod test_support {
             &mut self,
             _req: nmxc_model::GetComputeNodeCountRequest,
         ) -> Result<GetComputeNodeCountResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::GetComputeNodeCount);
             Ok(GetComputeNodeCountResponse {
                 server_header: Some(Self::success_server_header()),
                 context: None,
@@ -317,6 +420,7 @@ pub mod test_support {
             &mut self,
             _req: nmxc_model::GetComputeNodeInfoListRequest,
         ) -> Result<GetComputeNodeInfoListResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::GetComputeNodeInfoList);
             Ok(GetComputeNodeInfoListResponse {
                 server_header: Some(Self::success_server_header()),
                 context: None,
@@ -328,6 +432,7 @@ pub mod test_support {
             &mut self,
             _req: nmxc_model::GetGpuInfoListRequest,
         ) -> Result<GetGpuInfoListResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::GetGpuInfoList);
             Ok(GetGpuInfoListResponse {
                 server_header: Some(Self::success_server_header()),
                 context: None,
@@ -339,6 +444,7 @@ pub mod test_support {
             &mut self,
             _req: nmxc_model::GetSwitchNodeCountRequest,
         ) -> Result<GetSwitchNodeCountResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::GetSwitchNodeCount);
             Ok(GetSwitchNodeCountResponse {
                 server_header: Some(Self::success_server_header()),
                 context: None,
@@ -350,6 +456,7 @@ pub mod test_support {
             &mut self,
             _req: nmxc_model::GetSwitchNodeInfoListRequest,
         ) -> Result<GetSwitchNodeInfoListResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::GetSwitchNodeInfoList);
             Ok(GetSwitchNodeInfoListResponse {
                 server_header: Some(Self::success_server_header()),
                 context: None,
@@ -361,6 +468,7 @@ pub mod test_support {
             &mut self,
             _req: nmxc_model::GetPartitionCountRequest,
         ) -> Result<GetPartitionCountResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::GetPartitionCount);
             let n = self._partitions.lock().unwrap().len() as u32;
             Ok(GetPartitionCountResponse {
                 server_header: Some(Self::success_server_header()),
@@ -373,6 +481,7 @@ pub mod test_support {
             &mut self,
             _req: nmxc_model::GetPartitionIdListRequest,
         ) -> Result<GetPartitionIdListResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::GetPartitionIdList);
             let parts = self._partitions.lock().unwrap();
             let partition_list = parts
                 .iter()
@@ -394,6 +503,7 @@ pub mod test_support {
             &mut self,
             req: nmxc_model::GetPartitionInfoListRequest,
         ) -> Result<GetPartitionInfoListResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::GetPartitionInfoList);
             let parts = self._partitions.lock().unwrap();
             let partition_info_list: Vec<nmxc_model::PartitionInfo> =
                 if req.partition_id_list.is_empty() {
@@ -421,6 +531,7 @@ pub mod test_support {
             &mut self,
             req: nmxc_model::CreatePartitionRequest,
         ) -> Result<nmxc_model::CreatePartitionResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::CreatePartition);
             if let Some(fail_counter) = &self._fail_after_n_creates {
                 let mut fail_counter = fail_counter.lock().unwrap();
                 if *fail_counter == 0 {
@@ -453,6 +564,7 @@ pub mod test_support {
             &mut self,
             req: nmxc_model::DeletePartitionRequest,
         ) -> Result<nmxc_model::DeletePartitionResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::DeletePartition);
             let pid = req.partition_id.map(|p| p.partition_id).unwrap_or_default();
             self._partitions
                 .lock()
@@ -469,6 +581,7 @@ pub mod test_support {
             &mut self,
             req: nmxc_model::UpdatePartitionRequest,
         ) -> Result<nmxc_model::UpdatePartitionResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::AddGpusToPartition);
             let pid = req
                 .partition_id
                 .as_ref()
@@ -495,6 +608,7 @@ pub mod test_support {
             &mut self,
             req: nmxc_model::UpdatePartitionRequest,
         ) -> Result<nmxc_model::UpdatePartitionResponse, NmxcError> {
+            self.record_operation(NmxcSimOperation::RemoveGpusFromPartition);
             let pid = req
                 .partition_id
                 .as_ref()
@@ -518,6 +632,9 @@ pub mod test_support {
     #[::async_trait::async_trait]
     impl NmxcPool for NmxcSimClient {
         async fn create_client(&self, endpoint: Endpoint) -> Result<Box<dyn Nmxc>, NmxcError> {
+            if self._fail_create_client {
+                return Err(NmxcError::Uninitialized);
+            }
             if let Some(pool) = &self._grpc_pool {
                 let ep = if Self::nvlink_nmxc_endpoint_is_set(&endpoint) {
                     endpoint
@@ -534,6 +651,9 @@ pub mod test_support {
                 _fail_after_n_creates: self._fail_after_n_creates.clone(),
                 _grpc_pool: self._grpc_pool.clone(),
                 _simulator_endpoint: self._simulator_endpoint.clone(),
+                _operations: self._operations.clone(),
+                _hello_behavior: self._hello_behavior.clone(),
+                _fail_create_client: self._fail_create_client,
             }))
         }
     }
