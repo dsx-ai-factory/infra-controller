@@ -262,6 +262,87 @@ func testMachineBuildStatusDetail(t *testing.T, dbSession *cdb.Session, entityID
 	assert.Equal(t, status, ssd.Status)
 }
 
+func TestNetworkCapabilityDeviceType(t *testing.T) {
+	tests := []struct {
+		name        string
+		deviceType  *corev1.MachineCapabilityDeviceType
+		want        cdbm.MachineCapabilityDeviceType
+		wantWarning bool
+	}{
+		{
+			name: "omitted device type",
+		},
+		{
+			name:       "unknown sentinel",
+			deviceType: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN.Enum(),
+		},
+		{
+			name:       "DPU device type",
+			deviceType: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU.Enum(),
+			want:       cdbm.MachineCapabilityDeviceTypeDPU,
+		},
+		{
+			name:       "SpectrumX device type",
+			deviceType: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X.Enum(),
+			want:       cdbm.MachineCapabilityDeviceTypeSpectrumX,
+		},
+		{
+			name:        "unsupported device type",
+			deviceType:  corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK.Enum(),
+			wantWarning: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logOutput bytes.Buffer
+			got := networkCapabilityDeviceType(zerolog.New(&logOutput), tt.deviceType)
+
+			require.NotNil(t, got)
+			assert.Equal(t, tt.want, *got)
+			assert.Equal(t, tt.wantWarning, strings.Contains(logOutput.String(), "unsupported MachineCapabilityDeviceType for Network capability; defaulting to empty"))
+		})
+	}
+}
+
+func TestGpuCapabilityDeviceType(t *testing.T) {
+	tests := []struct {
+		name        string
+		deviceType  *corev1.MachineCapabilityDeviceType
+		want        cdbm.MachineCapabilityDeviceType
+		wantWarning bool
+	}{
+		{
+			name: "omitted device type",
+		},
+		{
+			name:       "unknown sentinel",
+			deviceType: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN.Enum(),
+		},
+		{
+			name:       "NVLink device type",
+			deviceType: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK.Enum(),
+			want:       cdbm.MachineCapabilityDeviceTypeNVLink,
+		},
+		{
+			name:        "unsupported device type",
+			deviceType:  corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU.Enum(),
+			wantWarning: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logOutput bytes.Buffer
+			got := gpuCapabilityDeviceType(zerolog.New(&logOutput), tt.deviceType)
+
+			require.NotNil(t, got)
+			assert.Equal(t, tt.want, *got)
+			assert.Equal(t, tt.wantWarning, strings.Contains(logOutput.String(), "unsupported MachineCapabilityDeviceType for GPU capability; defaulting to empty"))
+		})
+	}
+}
+
 func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 	dbSession := testMachineInitDB(t)
 	defer dbSession.Close()

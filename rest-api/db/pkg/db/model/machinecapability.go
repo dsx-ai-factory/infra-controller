@@ -162,10 +162,15 @@ func (d MachineCapabilityDeviceType) ToProto() corev1.MachineCapabilityDeviceTyp
 }
 
 // FromProto populates the receiver from a workflow proto enum,
-// mirroring `(MachineCapabilityDeviceType).ToProto`. An unknown proto
-// enum leaves the receiver as the empty string with a warning logged.
+// mirroring `(MachineCapabilityDeviceType).ToProto`. The `UNKNOWN`
+// sentinel is the enum's defined "unspecified" value, so it leaves the
+// receiver as the empty string without a warning, exactly as an omitted
+// field does. An unrecognized proto enum also leaves the receiver empty,
+// but logs a warning so schema drift is surfaced.
 func (d *MachineCapabilityDeviceType) FromProto(p corev1.MachineCapabilityDeviceType) {
 	switch p {
+	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN:
+		*d = ""
 	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU:
 		*d = MachineCapabilityDeviceTypeDPU
 	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK:

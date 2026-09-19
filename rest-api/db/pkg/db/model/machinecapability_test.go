@@ -4,10 +4,12 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"sort"
+	"strings"
 	"testing"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -17,6 +19,8 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
@@ -1684,6 +1688,50 @@ func TestMachineCapability_ToProto(t *testing.T) {
 		assert.Equal(t, corev1.MachineCapabilityType(0), proto.CapabilityType)
 		assert.Nil(t, proto.DeviceType)
 	})
+}
+
+func TestMachineCapabilityDeviceType_FromProto(t *testing.T) {
+	tests := []struct {
+		name        string
+		proto       corev1.MachineCapabilityDeviceType
+		want        MachineCapabilityDeviceType
+		wantWarning bool
+	}{
+		{
+			name:  "unknown sentinel maps to empty without warning",
+			proto: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN,
+		},
+		{
+			name:  "DPU",
+			proto: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU,
+			want:  MachineCapabilityDeviceTypeDPU,
+		},
+		{
+			name:  "NVLink",
+			proto: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK,
+			want:  MachineCapabilityDeviceTypeNVLink,
+		},
+		{
+			name:        "unrecognized wire value warns",
+			proto:       corev1.MachineCapabilityDeviceType(9999),
+			wantWarning: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logOutput bytes.Buffer
+			original := log.Logger
+			log.Logger = zerolog.New(&logOutput)
+			defer func() { log.Logger = original }()
+
+			var got MachineCapabilityDeviceType
+			got.FromProto(tt.proto)
+
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantWarning, strings.Contains(logOutput.String(), "unsupported MachineCapabilityDeviceType requested"))
+		})
+	}
 }
 
 func TestMachineCapability_FromProto(t *testing.T) {
