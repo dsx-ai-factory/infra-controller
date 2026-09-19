@@ -263,7 +263,18 @@ verification expectations.
   behavior explicitly. If an operation can power-cycle or otherwise disrupt a
   tenant workload, check `Machine.IsAssigned` (or the equivalent association)
   and reject unless the product requirement explicitly allows Provider Admins
-  to override tenant attachment
+  to override tenant attachment. When an explicit override uses a low-level
+  Core cleanup RPC, state separately whether it first requests a graceful
+  workload shutdown and whether later cleanup may forcibly restart the host.
+  State both in the API contract and interactive confirmation. After Core
+  accepts forced Machine deletion, clean up REST records only when Core cleanup
+  is complete, no Instance deletion was requested or Instance remains attached,
+  and removing the Machine preserves Allocation Constraints. Otherwise retain
+  the Machine, tenant-owned Instance, and related records so inventory can mark
+  missing resources as Error and their owners can deliberately clean them up.
+  Keep eligible cleanup idempotent so a retry can complete it. Keep the attachment
+  check and destructive mutation inside the same Machine lock boundary so a
+  concurrent allocation cannot attach a workload between them.
 - Avoid declaring new types that are just an array of another type. Simply use an
   array of the original object
 - Be prudent when declaring utility functions that pass around arbitrary set of

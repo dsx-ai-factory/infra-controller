@@ -128,7 +128,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "vpc-two\r")
 		terminal.waitFor(t, "VPC prefix name")
 		terminal.send(t, "tenant-ipv6-prefix\r")
-		terminal.waitFor(t, "IP block:")
+		terminal.waitFor(t, "tenant-ready-v6")
 		prefixPickerTranscript := terminal.transcript()
 		// The two spaces after the IPv4 block name keep this check distinct
 		// from the similarly named tenant-ready-v6 row.
@@ -324,6 +324,21 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 			terminal.waitFor(t, `"status": "accepted"`)
 		}
 
+		// Explicit Machine force deletion states the attached-workload restriction
+		// and sends force=true only after both confirmations.
+		machineDeleteStart := len(terminal.transcript())
+		terminal.send(t, "machine delete --force host")
+		terminal.waitFor(t, "machine delete --force host-one")
+		terminal.send(t, "\t\r")
+		terminal.waitFor(t, "Force delete Machine machine-1?")
+		terminal.send(t, "y\r")
+		terminal.waitFor(t, "Run machine delete (DELETE)?")
+		terminal.send(t, "y\r")
+		terminal.waitFor(t, "Deletion request was accepted")
+		machineDeleteTranscript := terminal.transcript()[machineDeleteStart:]
+		assert.Contains(t, machineDeleteTranscript, "Allocation capacity would be insufficient")
+		assert.Contains(t, machineDeleteTranscript, "Attached Instances require --allow-delete-with-instance")
+
 		// Flags preceding a generated path argument must not disable
 		// resource-name completion, and the structured API error must render.
 		terminal.send(t, "machine status-history --page-size 10 host")
@@ -454,6 +469,13 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		for _, request := range powerRequests {
 			assert.JSONEq(t, `{"action":"ForceRestart"}`, request.Body)
 		}
+
+		machineDeleteRequests := recorder.matching(
+			http.MethodDelete,
+			"/v2/org/acme/nico/machine/machine-1",
+		)
+		require.Len(t, machineDeleteRequests, 1)
+		assert.Equal(t, "force=true", machineDeleteRequests[0].Query)
 
 		versionRequests := recorder.matching(
 			http.MethodGet,
@@ -955,6 +977,10 @@ func newInteractiveRegressionHandler(recorder *cliRegressionRecorder) http.Handl
 			request.URL.Path == "/v2/org/acme/nico/machine/machine-1/power":
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = io.WriteString(w, `{"status":"accepted"}`)
+		case request.Method == http.MethodDelete &&
+			request.URL.Path == "/v2/org/acme/nico/machine/machine-1":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{"message":"Deletion request was accepted"}`)
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/dpu-extension-service":
 			_, _ = io.WriteString(w, `[

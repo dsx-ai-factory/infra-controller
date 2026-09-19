@@ -10868,6 +10868,32 @@ paths:
         - Machine
       summary: Delete a Machine from a Site
       operationId: delete-machine
+      parameters:
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: force
+          description: Request forced deletion on the Site, including host, DPU, and BMC interfaces. Requires a Registered Site. Machines marked missing on Site can be force deleted without waiting 24 hours, including when their missing-status history is unavailable. This alone does not override attached Instances, assigned Instance Types, or Allocation Constraints. BMC credentials, discovery suppressions, and retained boot-interface pairs are preserved; orphaned DPF resources are not overridden.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithInstanceType
+          description: Requires force=true when enabled. Authorize removing an assigned Instance Type on the Site. This does not authorize deletion of an attached Instance or violating Allocation Constraints.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithInstance
+          description: Requires force=true when enabled. Authorize deletion of the attached Instance control-plane record on the Site without first requesting a graceful workload shutdown; cleanup may forcibly restart the host. Also authorizes removal of its Instance Type, even if allowDeleteWithInstanceType=false. REST Machine, Instance, interfaces, capabilities, and Instance Type associations are retained for deliberate cleanup by their owners. Allocation Constraints require a separate acknowledgment.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithAllocation
+          description: Requires force=true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. Does not imply either Instance or Instance Type deletion permission.
+
       responses:
         '202':
           description: Deletion request was accepted
@@ -10876,7 +10902,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/MessageResponse'
               examples:
-                example-1:
+                normal-deletion:
                   value:
                     message: Deletion request was accepted
         '400':
@@ -10886,13 +10912,44 @@ paths:
         '404':
           description: Describes an error response for 404 Not Found
           $ref: '#/components/responses/GenericHttpError'
+        '412':
+          description: The Machine deletion preconditions were not met.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '429':
+          $ref: '#/components/responses/ResourceExhaustedError'
         '422':
           description: Describes an error response for 422 Unprocessable Content
           $ref: '#/components/responses/GenericHttpError'
         '500':
           description: Describes an error response for 500 Internal Server Error
           $ref: '#/components/responses/GenericHttpError'
-      description: Org must have an Infrastructure Provider entity. Machine must belong to the Provider. User must have authorization role with `PROVIDER_ADMIN` suffix. Machine must meet certain criteria to be eligible for deletion.
+        '503':
+          description: A dependency required to delete the Machine is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '504':
+          description: The Machine deletion request timed out.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+      description: >-
+        Requires Provider Admin access to the Machine's Infrastructure Provider.
+        Regular deletion requires the Machine to be missing on Site for at least 24 hours,
+        with no attached Instance or assigned Instance Type.
+
+        Forced deletion requires a Registered Site and the applicable overrides below.
+        Machines marked missing on Site can also be force deleted without the 24-hour wait required for regular deletion.
+        REST records are removed only after Site cleanup completes, with no Instance deletion
+        requested and sufficient remaining Allocation capacity. Otherwise, records remain
+        for inventory to mark missing Machines and Instances as `Error`, then their owners
+        can explicitly clean them up. Allocation Constraints remain unchanged.
+        HTTP 202 confirms acceptance, not completion.
   '/v2/org/{org}/nico/machine/{machineId}/bmc/reset':
     parameters:
       - schema:
