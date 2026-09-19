@@ -2845,6 +2845,36 @@ message LinkedExpectedSwitch {
   optional common.RackId rack_id = 6;
 }
 
+message ExpectedRackGroup {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Externally assigned identifier for the rack group.
+  optional common.RackGroupId rack_group_id = 1;
+  // External group-level NVLink topology identifier.
+  string topology = 2;
+  // Racks spanned by this group, independent of the device membership.
+  repeated common.RackId rack_ids = 3;
+  // Descriptive attributes such as name, manufacturer, and location labels.
+  Metadata metadata = 4;
+  repeated ExpectedRackGroupMember members = 5;
+}
+
+message ExpectedRackGroupMember {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // External device classification, manufacturer, and inventory identifier.
+  string type = 1;
+  string manufacturer = 2;
+  string id = 3;
+}
+
+message ExpectedRackGroupRequest {
+  string rack_group_id = 1;
+}
+
+message ExpectedRackGroupList {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  repeated ExpectedRackGroup expected_rack_groups = 1;
+}
+
 message ExpectedRack {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   // The rack identifier. Same rack_id referenced by expected machines, switches, and power shelves.
@@ -11114,34 +11144,4 @@ message PatchExpectedMachinesRequest {
   // succeed together or no row changes. No resource or credentials are echoed
   // in the response. An empty list is invalid.
   repeated PatchExpectedMachineRequest patches = 1;
-}
-
-message ExpectedRackGroup {
-  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  // Externally assigned identifier for the rack group.
-  optional common.RackGroupId rack_group_id = 1;
-  // External group-level NVLink topology identifier.
-  string topology = 2;
-  // Racks spanned by this group, independent of the device membership.
-  repeated common.RackId rack_ids = 3;
-  // Descriptive attributes such as name, manufacturer, and location labels.
-  Metadata metadata = 4;
-  repeated ExpectedRackGroupMember members = 5;
-}
-
-message ExpectedRackGroupMember {
-  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  // External device classification, manufacturer, and inventory identifier.
-  string type = 1;
-  string manufacturer = 2;
-  string id = 3;
-}
-
-message ExpectedRackGroupRequest {
-  string rack_group_id = 1;
-}
-
-message ExpectedRackGroupList {
-  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  repeated ExpectedRackGroup expected_rack_groups = 1;
 }
