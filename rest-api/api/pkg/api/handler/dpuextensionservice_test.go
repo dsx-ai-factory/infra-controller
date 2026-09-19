@@ -178,10 +178,19 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		Name:        dpfServiceName,
 		Description: cutil.GetPtr("Test DPF Description"),
 		ServiceType: model.DpuExtensionServiceTypeDpfHelmChart,
+		DpuTarget:   cutil.GetPtr(model.DpuExtensionServiceDpuTargetAllActive),
 		SiteID:      st1.ID.String(),
 		Data:        validDpfHelmChartDataForHandlerTest,
 	}
 	dpfBodyBytes, _ := json.Marshal(dpfBody)
+
+	missingDpuTargetBody := dpfBody
+	missingDpuTargetBody.DpuTarget = nil
+	missingDpuTargetBodyBytes, _ := json.Marshal(missingDpuTargetBody)
+
+	emptyDpuTargetBody := dpfBody
+	emptyDpuTargetBody.DpuTarget = cutil.GetPtr("")
+	emptyDpuTargetBodyBytes, _ := json.Marshal(emptyDpuTargetBody)
 
 	dpfUnknownLifecycleBody := dpfBody
 	dpfUnknownLifecycleBody.Name = dpfUnknownLifecycleServiceName
@@ -198,12 +207,13 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	invalidBodyBytes := []byte(`{"name": "test"}`)
 
 	tests := []struct {
-		name           string
-		reqOrgName     string
-		reqBody        string
-		user           *cdbm.User
-		expectedErr    bool
-		expectedStatus int
+		name              string
+		reqOrgName        string
+		reqBody           string
+		user              *cdbm.User
+		expectedErr       bool
+		expectedStatus    int
+		expectedErrorData map[string]string
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -236,6 +246,30 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
+		},
+		// A missing Helm target must return its field-level validation detail in the API error body.
+		{
+			name:           "error when DPF Helm chart omits DPU target",
+			reqOrgName:     tnOrg,
+			reqBody:        string(missingDpuTargetBodyBytes),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrorData: map[string]string{
+				"dpuTarget": "must be specified for `DpfHelmChart` services",
+			},
+		},
+		// An empty Helm target must fail
+		{
+			name:           "error when DPF Helm chart DPU target is empty",
+			reqOrgName:     tnOrg,
+			reqBody:        string(emptyDpuTargetBodyBytes),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrorData: map[string]string{
+				"dpuTarget": "must be specified for `DpfHelmChart` services",
+			},
 		},
 		{
 			name:           "error when site does not exist",
@@ -308,6 +342,14 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
 
+			if tt.expectedErrorData != nil {
+				var response struct {
+					Data map[string]string `json:"data"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, tt.expectedErrorData, response.Data)
+			}
+
 			if !tt.expectedErr && rec.Code == http.StatusCreated {
 				var apiDES model.APIDpuExtensionService
 				err := json.Unmarshal(rec.Body.Bytes(), &apiDES)
@@ -326,6 +368,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 				}
 				assert.Equal(t, expectedBody.Name, apiDES.Name)
 				assert.Equal(t, expectedBody.ServiceType, apiDES.ServiceType)
+				assert.Equal(t, expectedBody.DpuTarget, apiDES.DpuTarget)
 				assert.Equal(t, expectedBody.SiteID, apiDES.SiteID)
 				assert.Equal(t, version, *apiDES.Version)
 				assert.Equal(t, []string{version}, apiDES.ActiveVersions)
@@ -334,6 +377,8 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 				assert.Equal(t, expectedBody.Name, capturedCreateRequest.ServiceName)
 				assert.Equal(t, expectedBody.Data, capturedCreateRequest.Data)
 				if expectedBody.ServiceType == model.DpuExtensionServiceTypeDpfHelmChart {
+					require.NotNil(t, capturedCreateRequest.DpuTarget)
+					assert.Equal(t, corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE, *capturedCreateRequest.DpuTarget)
 					assert.Nil(t, capturedCreateRequest.Credential)
 					assert.Nil(t, capturedCreateRequest.Observability)
 					return

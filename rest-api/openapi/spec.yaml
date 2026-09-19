@@ -30221,6 +30221,9 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        dpuTarget:
+          $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
+          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
         siteId:
           type: string
           format: uuid
@@ -30270,6 +30273,16 @@ components:
         - Error
         - Updating
         - Deleting
+    DpuExtensionServiceDpuTarget:
+      title: DpuExtensionServiceDpuTarget
+      type:
+        - string
+        - 'null'
+      description: DPU placement policy. Primary targets the host's primary attached DPU; AllActive targets DPUs used by instance networking, including legacy fallbacks; All targets every attached DPU.
+      enum:
+        - Primary
+        - AllActive
+        - All
     DpuExtensionServiceSummary:
       title: DpuExtensionServiceSummary
       type: object
@@ -30295,6 +30308,9 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        dpuTarget:
+          $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
+          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
         latestVersion:
           type:
             - string
@@ -30373,6 +30389,9 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        dpuTarget:
+          $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
+          description: Required for DpfHelmChart services and unsupported for KubernetesPod services
         siteId:
           type: string
           format: uuid
