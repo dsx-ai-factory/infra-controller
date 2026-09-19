@@ -3558,13 +3558,14 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if networkConfig.detectMultiDPU {
-		dpuCapability, capabilityErr := fetchInstanceMultiDPUCapability(s, machine.ID)
-		if capabilityErr != nil {
-			return capabilityErr
-		}
-		networkConfig.dpuCapability = dpuCapability
+	networkCapability, capabilityErr := fetchInstanceNetworkCapabilities(s, machine.ID)
+	if capabilityErr != nil {
+		return capabilityErr
 	}
+	if networkConfig.detectMultiDPU && networkCapability.hasMultiDPU() {
+		networkConfig.dpuCapability = networkCapability.multiDPU
+	}
+
 	name, err := PromptText("Instance name", true)
 	if err != nil {
 		return err
@@ -3600,6 +3601,13 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
+	var infiniBandInterfaces []map[string]interface{}
+	if networkCapability.hasInfiniBand() {
+		infiniBandInterfaces, err = promptInstanceInfiniBandInterfaces(s, networkCapability.infiniBand)
+		if err != nil {
+			return err
+		}
+	}
 
 	sshKeyGroupIDs, err := promptOptionalResourceIDs(s, ctx, "ssh-key-group", "SSH key group")
 	if err != nil {
@@ -3616,6 +3624,9 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 	}
 	if len(interfaces) > 0 {
 		body["interfaces"] = interfaces
+	}
+	if len(infiniBandInterfaces) > 0 {
+		body["infinibandInterfaces"] = infiniBandInterfaces
 	}
 	if networkConfig.autoNetwork {
 		body["autoNetwork"] = true
@@ -3695,7 +3706,26 @@ type instanceDPUDeviceNetworkCapability struct {
 	count int
 }
 
-func fetchInstanceMultiDPUCapability(s *Session, machineID string) (*instanceDPUDeviceNetworkCapability, error) {
+type instanceInfiniBandCapability struct {
+	name            string
+	count           int
+	inactiveDevices []int
+}
+
+type instanceNetworkCapability struct {
+	multiDPU   *instanceDPUDeviceNetworkCapability
+	infiniBand *instanceInfiniBandCapability
+}
+
+func (c *instanceNetworkCapability) hasMultiDPU() bool {
+	return c.multiDPU != nil
+}
+
+func (c *instanceNetworkCapability) hasInfiniBand() bool {
+	return c.infiniBand != nil
+}
+
+func fetchInstanceNetworkCapabilities(s *Session, machineID string) (*instanceNetworkCapability, error) {
 	body, _, err := s.Client.Do(
 		"GET",
 		apiPath(s, "machine/{id}"),
@@ -3711,10 +3741,11 @@ func fetchInstanceMultiDPUCapability(s *Session, machineID string) (*instanceDPU
 
 	var machine struct {
 		MachineCapabilities []struct {
-			Type       string `json:"type"`
-			Name       string `json:"name"`
-			Count      *int   `json:"count"`
-			DeviceType string `json:"deviceType"`
+			Type            string `json:"type"`
+			Name            string `json:"name"`
+			Count           *int   `json:"count"`
+			DeviceType      string `json:"deviceType"`
+			InactiveDevices []int  `json:"inactiveDevices"`
 		} `json:"machineCapabilities"`
 	}
 	err = json.Unmarshal(body, &machine)
@@ -3722,26 +3753,35 @@ func fetchInstanceMultiDPUCapability(s *Session, machineID string) (*instanceDPU
 		return nil, fmt.Errorf("parsing capabilities for machine %s: %w", machineID, err)
 	}
 
+	networkCapability := &instanceNetworkCapability{}
 	for _, capability := range machine.MachineCapabilities {
-		if !strings.EqualFold(capability.Type, "Network") {
-			continue
-		}
-		if !strings.EqualFold(capability.DeviceType, "DPU") {
-			continue
-		}
-		if capability.Count == nil || *capability.Count <= 1 {
-			continue
-		}
 		name := capability.Name
+		count := capability.Count
 		if name == "" {
 			continue
 		}
-		return &instanceDPUDeviceNetworkCapability{
-			name:  name,
-			count: *capability.Count,
-		}, nil
+		if count == nil || *count <= 0 {
+			continue
+		}
+		if strings.EqualFold(capability.Type, "Network") {
+			if !strings.EqualFold(capability.DeviceType, "DPU") || *count <= 1 {
+				continue
+			}
+			if networkCapability.multiDPU == nil {
+				networkCapability.multiDPU = &instanceDPUDeviceNetworkCapability{
+					name:  name,
+					count: *count,
+				}
+			}
+		} else if strings.EqualFold(capability.Type, "InfiniBand") {
+			networkCapability.infiniBand = &instanceInfiniBandCapability{
+				name:            name,
+				count:           *count,
+				inactiveDevices: capability.InactiveDevices,
+			}
+		}
 	}
-	return nil, nil
+	return networkCapability, nil
 }
 
 // promptInstanceInterfaces builds the interfaces[] array for an instance
@@ -3767,12 +3807,12 @@ func promptInstanceInterfaces(s *Session, networkConfig instanceNetworkConfig) (
 	usedResourceIDs := make(map[string]bool)
 	usedVirtualFunctionIDs := make(map[int]bool)
 	for {
-		label := networkConfig.singular + " for interface"
+		label := networkConfig.singular + " for Ethernet interface"
 		if len(ifaces) > 0 {
 			if len(usedVirtualFunctionIDs) == virtualFunctionIDCount {
 				return ifaces, nil
 			}
-			confirmLabel := fmt.Sprintf("Add another interface (have %d)?", len(ifaces))
+			confirmLabel := fmt.Sprintf("Add another Ethernet interface (have %d)?", len(ifaces))
 			more, confirmErr := PromptConfirm(confirmLabel)
 			if confirmErr != nil {
 				return ifaces, confirmErr
@@ -3845,6 +3885,114 @@ func fetchReadyInstanceNetworkResources(s *Session, networkConfig instanceNetwor
 		}
 	}
 	return items, nil
+}
+
+type activeInfiniBandDevice struct {
+	capabilityName string
+	deviceInstance int
+}
+
+func promptInstanceInfiniBandInterfaces(
+	s *Session,
+	capability *instanceInfiniBandCapability,
+) ([]map[string]interface{}, error) {
+	readyPartitions, err := fetchReadyInstanceInfiniBandPartitions(s)
+	if err != nil {
+		return nil, fmt.Errorf("listing Ready InfiniBand partitions for selected site: %w", err)
+	}
+	if len(readyPartitions) == 0 {
+		fmt.Fprintf(
+			os.Stderr,
+			"%s no InfiniBand interfaces can be configured because no Ready InfiniBand partitions are available for this site\n",
+			Dim("note:"),
+		)
+		return nil, nil
+	}
+
+	configure, err := PromptConfirm("Configure an InfiniBand interface?")
+	if err != nil {
+		return nil, err
+	}
+	if !configure {
+		return nil, nil
+	}
+
+	activeDevices := make([]activeInfiniBandDevice, 0)
+	inactiveDevices := make(map[int]bool, len(capability.inactiveDevices))
+	for _, deviceInstance := range capability.inactiveDevices {
+		inactiveDevices[deviceInstance] = true
+	}
+	for deviceInstance := range capability.count {
+		if inactiveDevices[deviceInstance] {
+			continue
+		}
+		activeDevices = append(activeDevices, activeInfiniBandDevice{
+			capabilityName: capability.name,
+			deviceInstance: deviceInstance,
+		})
+	}
+	if len(activeDevices) == 0 {
+		fmt.Fprintf(
+			os.Stderr,
+			"%s no active InfiniBand interfaces are available on the selected machine\n",
+			Dim("note:"),
+		)
+		return nil, nil
+	}
+
+	interfaces := make([]map[string]interface{}, 0, len(activeDevices))
+	for activeDeviceIndex, activeDevice := range activeDevices {
+		if activeDeviceIndex > 0 {
+			more, confirmErr := PromptConfirm("Configure another InfiniBand interface?")
+			if confirmErr != nil {
+				return interfaces, confirmErr
+			}
+			if !more {
+				return interfaces, nil
+			}
+		}
+
+		label := fmt.Sprintf(
+			"InfiniBand partition for interface %s %d",
+			activeDevice.capabilityName,
+			activeDevice.deviceInstance,
+		)
+		partition, selectErr := s.Resolver.SelectFromItems(label, readyPartitions)
+		if selectErr != nil {
+			return interfaces, selectErr
+		}
+		interfaces = append(interfaces, map[string]interface{}{
+			"partitionId":    partition.ID,
+			"device":         activeDevice.capabilityName,
+			"deviceInstance": activeDevice.deviceInstance,
+			"isPhysical":     true,
+		})
+	}
+	return interfaces, nil
+}
+
+func fetchReadyInstanceInfiniBandPartitions(s *Session) ([]NamedItem, error) {
+	query := map[string]string{
+		"orderBy": "NAME_ASC",
+		"status":  "Ready",
+	}
+	if s.Scope.SiteID != "" {
+		query["siteId"] = s.Scope.SiteID
+	}
+
+	resources, err := s.fetchAll(apiPath(s, "infiniband-partition"), query)
+	if err != nil {
+		return nil, err
+	}
+	partitions := make([]NamedItem, len(resources))
+	for i, resource := range resources {
+		partitions[i] = NamedItem{
+			Name: str(resource, "name"),
+			ID:   str(resource, "id"),
+			Raw:  resource,
+		}
+	}
+	return partitions, nil
 }
 
 const (

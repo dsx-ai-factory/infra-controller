@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
@@ -115,36 +116,64 @@ func TestInstanceNetworkConfigForVPC(t *testing.T) {
 	})
 }
 
-func TestFetchInstanceMultiDPUCapability(t *testing.T) {
+func TestFetchInstanceNetworkCapabilities(t *testing.T) {
 	tests := []struct {
 		name         string
 		responseBody string
 		status       int
-		want         *instanceDPUDeviceNetworkCapability
+		want         *instanceNetworkCapability
 		wantErr      string
 	}{
 		{
-			name: "finds dual DPU network capability",
+			name: "finds DPU and InfiniBand capabilities",
 			responseBody: `{
 				"machineCapabilities":[
 					{"type":"GPU","name":"H100","count":8},
-					{"type":"Network","name":"BlueField-3","deviceType":"DPU","count":2}
+					{"type":"Network","name":"BlueField-3","deviceType":"DPU","count":2},
+					{"type":"InfiniBand","name":"ConnectX-7","count":3,"inactiveDevices":[1]}
 				]
 			}`,
 			status: http.StatusOK,
-			want: &instanceDPUDeviceNetworkCapability{
-				name:  "BlueField-3",
-				count: 2,
+			want: &instanceNetworkCapability{
+				multiDPU: &instanceDPUDeviceNetworkCapability{
+					name:  "BlueField-3",
+					count: 2,
+				},
+				infiniBand: &instanceInfiniBandCapability{
+					name:            "ConnectX-7",
+					count:           3,
+					inactiveDevices: []int{1},
+				},
 			},
 		},
 		{
-			name: "ignores a single DPU",
+			name: "keeps the last InfiniBand capability",
 			responseBody: `{
 				"machineCapabilities":[
-					{"type":"Network","name":"BlueField-3","deviceType":"DPU","count":1}
+					{"type":"InfiniBand","name":"ConnectX-6","count":1},
+					{"type":"InfiniBand","name":"ConnectX-7","count":2,"inactiveDevices":[0]}
 				]
 			}`,
 			status: http.StatusOK,
+			want: &instanceNetworkCapability{
+				infiniBand: &instanceInfiniBandCapability{
+					name:            "ConnectX-7",
+					count:           2,
+					inactiveDevices: []int{0},
+				},
+			},
+		},
+		{
+			name: "ignores a single DPU and invalid empty capabilities",
+			responseBody: `{
+				"machineCapabilities":[
+					{"type":"Network","name":"BlueField-3","deviceType":"DPU","count":1},
+					{"type":"InfiniBand","name":"","count":2},
+					{"type":"InfiniBand","name":"ConnectX-7","count":0}
+				]
+			}`,
+			status: http.StatusOK,
+			want:   &instanceNetworkCapability{},
 		},
 		{
 			name: "ignores non-DPU network capability",
@@ -154,6 +183,7 @@ func TestFetchInstanceMultiDPUCapability(t *testing.T) {
 				]
 			}`,
 			status: http.StatusOK,
+			want:   &instanceNetworkCapability{},
 		},
 		{
 			name:         "reports malformed machine response",
@@ -184,7 +214,7 @@ func TestFetchInstanceMultiDPUCapability(t *testing.T) {
 				"acme",
 				"",
 			)
-			got, err := fetchInstanceMultiDPUCapability(session, "machine-1")
+			got, err := fetchInstanceNetworkCapabilities(session, "machine-1")
 
 			if test.wantErr != "" {
 				require.Error(t, err)
@@ -722,4 +752,153 @@ func TestFetchReadyInstanceNetworkResourcesOmitsStatusFromPickerItems(t *testing
 	require.Len(t, items, 2)
 	assert.Empty(t, items[0].Status)
 	assert.Empty(t, items[1].Status)
+}
+
+func TestPromptInstanceInfiniBandInterfaces(t *testing.T) {
+	tests := []struct {
+		name         string
+		capability   *instanceInfiniBandCapability
+		responseBody string
+		status       int
+		input        string
+		want         []map[string]interface{}
+		wantErr      string
+		wantNote     string
+	}{
+		{
+			name: "reports when no Ready partitions are available",
+			capability: &instanceInfiniBandCapability{
+				name:  "ConnectX-7",
+				count: 1,
+			},
+			responseBody: `[]`,
+			wantNote:     "no InfiniBand interfaces can be configured because no Ready InfiniBand partitions are available for this site",
+		},
+		{
+			name: "declining configuration returns no interfaces",
+			capability: &instanceInfiniBandCapability{
+				name:  "ConnectX-7",
+				count: 1,
+			},
+			responseBody: `[{"id":"partition-1","name":"training","status":"Ready"}]`,
+			input:        "n\n",
+		},
+		{
+			name: "configures active devices in index order",
+			capability: &instanceInfiniBandCapability{
+				name:            "ConnectX-7",
+				count:           3,
+				inactiveDevices: []int{1},
+			},
+			responseBody: `[{"id":"partition-1","name":"training","status":"Ready"}]`,
+			input:        "y\ny\n",
+			want: []map[string]interface{}{
+				{
+					"partitionId":    "partition-1",
+					"device":         "ConnectX-7",
+					"deviceInstance": 0,
+					"isPhysical":     true,
+				},
+				{
+					"partitionId":    "partition-1",
+					"device":         "ConnectX-7",
+					"deviceInstance": 2,
+					"isPhysical":     true,
+				},
+			},
+		},
+		{
+			name: "stops before the next active device when declined",
+			capability: &instanceInfiniBandCapability{
+				name:            "ConnectX-7",
+				count:           3,
+				inactiveDevices: []int{1},
+			},
+			responseBody: `[{"id":"partition-1","name":"training","status":"Ready"}]`,
+			input:        "y\nn\n",
+			want: []map[string]interface{}{
+				{
+					"partitionId":    "partition-1",
+					"device":         "ConnectX-7",
+					"deviceInstance": 0,
+					"isPhysical":     true,
+				},
+			},
+		},
+		{
+			name: "reports when every device is inactive",
+			capability: &instanceInfiniBandCapability{
+				name:            "ConnectX-7",
+				count:           2,
+				inactiveDevices: []int{0, 1},
+			},
+			responseBody: `[{"id":"partition-1","name":"training","status":"Ready"}]`,
+			input:        "y\n",
+			wantNote:     "no active InfiniBand interfaces are available on the selected machine",
+		},
+		{
+			name: "returns partition lookup errors",
+			capability: &instanceInfiniBandCapability{
+				name:  "ConnectX-7",
+				count: 1,
+			},
+			responseBody: `{"message":"unavailable"}`,
+			status:       http.StatusServiceUnavailable,
+			wantErr:      "listing Ready InfiniBand partitions for selected site",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requestCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				requestCount++
+				assert.Equal(t, "/v2/org/acme/nico/infiniband-partition", request.URL.Path)
+				assert.Equal(t, "NAME_ASC", request.URL.Query().Get("orderBy"))
+				assert.Equal(t, "Ready", request.URL.Query().Get("status"))
+				assert.Equal(t, "site-1", request.URL.Query().Get("siteId"))
+				if test.status != 0 {
+					w.WriteHeader(test.status)
+				}
+				_, writeErr := io.WriteString(w, test.responseBody)
+				require.NoError(t, writeErr)
+			}))
+			defer server.Close()
+
+			session := NewSession(
+				appcli.NewClient(server.URL, "acme", "token", nil, false),
+				"acme",
+				"",
+			)
+			session.Scope.SiteID = "site-1"
+
+			oldStderr := os.Stderr
+			stderrReader, stderrWriter, pipeErr := os.Pipe()
+			require.NoError(t, pipeErr)
+			os.Stderr = stderrWriter
+
+			var got []map[string]interface{}
+			_, err := withStdin(t, test.input, func() (string, error) {
+				var promptErr error
+				got, promptErr = promptInstanceInfiniBandInterfaces(session, test.capability)
+				return "", promptErr
+			})
+
+			require.NoError(t, stderrWriter.Close())
+			os.Stderr = oldStderr
+			stderrOutput, readErr := io.ReadAll(stderrReader)
+			require.NoError(t, readErr)
+			require.NoError(t, stderrReader.Close())
+
+			if test.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), test.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, test.want, got)
+			}
+			assert.Contains(t, string(stderrOutput), test.wantNote)
+			assert.Equal(t, 1, requestCount)
+		})
+	}
 }
