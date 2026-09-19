@@ -8,6 +8,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 	cli "github.com/urfave/cli/v2"
+	authenticationclient "k8s.io/client-go/kubernetes/typed/authentication/v1"
+	"k8s.io/client-go/rest"
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/pki"
@@ -23,6 +25,11 @@ func NewCommand() *cli.Command {
 		Name:  "NICo Credentials Service",
 		Usage: "NICo Credentials Service",
 		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:     "allowed-service-account",
+				Usage:    "Only this Kubernetes identity may issue certificates (system:serviceaccount:namespace:name)",
+				Required: true,
+			},
 			&cli.BoolFlag{
 				Name:  "debug",
 				Usage: "Log debug message to stderr",
@@ -101,12 +108,24 @@ func NewCommand() *cli.Command {
 			ctx := c.Context
 			log := core.GetLogger(ctx)
 
+			cfg, err := rest.InClusterConfig()
+			if err != nil {
+				return err
+			}
+			cfg.Timeout = 5 * time.Second
+			authClient, err := authenticationclient.NewForConfig(cfg)
+			if err != nil {
+				return err
+			}
+
 			o := Options{
-				Addr:         ":" + c.String("tls-port"),
-				InsecureAddr: ":" + c.String("insecure-port"),
-				DNSName:      c.String("dns-name"),
-				CABaseDNS:    c.String("ca-base-dns"),
-				sentryDSN:    c.String("sentry-dsn"),
+				AllowedServiceAccount: c.String("allowed-service-account"),
+				TokenReviewer:         authClient.TokenReviews(),
+				Addr:                  ":" + c.String("tls-port"),
+				InsecureAddr:          ":" + c.String("insecure-port"),
+				DNSName:               c.String("dns-name"),
+				CABaseDNS:             c.String("ca-base-dns"),
+				sentryDSN:             c.String("sentry-dsn"),
 			}
 
 			// Use native Go PKI for certificate generation
