@@ -2719,6 +2719,7 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 		user           *cdbm.User
 		os             *cdbm.OperatingSystem
 		expectedStatus int
+		expectedSite   *cdbm.Site
 	}{
 		{
 			name:           "provider admin can read provider-owned OS",
@@ -2726,6 +2727,7 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 			user:           provUser,
 			os:             provOSA,
 			expectedStatus: http.StatusOK,
+			expectedSite:   siteA,
 		},
 		{
 			name:           "tenant admin can read provider OS at accessible site",
@@ -2733,6 +2735,7 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 			user:           tnUser,
 			os:             provC,
 			expectedStatus: http.StatusOK,
+			expectedSite:   siteC,
 		},
 		{
 			name:           "tenant admin cannot read provider OS at inaccessible site",
@@ -2772,9 +2775,29 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 			ec.SetRequest(ec.Request().WithContext(reqCtx))
 
 			gh := GetOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg}
+			if tc.expectedSite != nil {
+				// Provider definitions created by the API are template-based.
+				_, updateErr := osDAO.Update(ctx, nil, cdbm.OperatingSystemUpdateInput{
+					OperatingSystemId: tc.os.ID,
+					OsType:            cutil.GetPtr(cdbm.OperatingSystemTypeTemplatedIPXE),
+				})
+				require.NoError(t, updateErr)
+			}
 			err := gh.Handle(ec)
 			assert.Nil(t, err)
 			require.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedStatus == http.StatusOK {
+				var response model.APIOperatingSystem
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				if tc.expectedSite == nil {
+					assert.Empty(t, response.SiteAssociations)
+				} else {
+					require.Len(t, response.SiteAssociations, 1)
+					require.NotNil(t, response.SiteAssociations[0].Site)
+					assert.Equal(t, tc.expectedSite.ID.String(), response.SiteAssociations[0].Site.ID)
+					assert.Equal(t, cdbm.OperatingSystemSiteAssociationStatusSynced, response.SiteAssociations[0].Status)
+				}
+			}
 		})
 	}
 }
