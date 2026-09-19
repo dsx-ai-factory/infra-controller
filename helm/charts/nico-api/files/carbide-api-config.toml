@@ -5,6 +5,8 @@
 # for the respective environment
 
 listen = "[::]:1079"
+# Required: the chart's readinessProbe and livenessProbe target this port.
+# Removing metrics_endpoint leaves the pod permanently un-Ready.
 metrics_endpoint = "[::]:1080"
 alt_metric_prefix = "nico_"
 database_url = "postgres://replaced-by-env-var"

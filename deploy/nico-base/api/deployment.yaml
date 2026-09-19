@@ -160,13 +160,28 @@ spec:
               containerPort: 1080
             - name: profiler
               containerPort: 1081
+          # Both probes target port 1080, which only exists when
+          # `metrics_endpoint` is set in carbide-api-config.toml. Removing
+          # that setting leaves the pod permanently un-Ready with no other
+          # indication why.
           livenessProbe:
             failureThreshold: 3
             httpGet:
+              path: /health
               port: 1080
               scheme: HTTP
             initialDelaySeconds: 20
             periodSeconds: 20
+            successThreshold: 1
+            timeoutSeconds: 20
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /ready
+              port: 1080
+              scheme: HTTP
+            initialDelaySeconds: 20
+            periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 20
           volumeMounts:

@@ -21,6 +21,8 @@
 # for the respective environment
 
 listen = "[::]:1079"
+# Required: the deployment's readinessProbe and livenessProbe target this
+# port. Removing metrics_endpoint leaves the pod permanently un-Ready.
 metrics_endpoint = "[::]:1080"
 database_url = "postgres://replaced-by-env-var"
 asn = 4294967000
