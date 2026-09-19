@@ -7,15 +7,19 @@ officially published release artifacts.
 ## Reporting a Vulnerability
 
 If you discover a potential security vulnerability, do not submit it through
-GitHub Issues, pull requests, Discussions, GitHub Security Advisories, GitHub
-private vulnerability reporting, or other public channels. Report it directly
-to NVIDIA PSIRT through one of these channels:
+public GitHub Issues, pull requests, Discussions, or other public channels.
+Report the vulnerability privately through one of these channels, in order of
+preference:
 
 - **Web (preferred):**
-  [NVIDIA Vulnerability Disclosure Program](https://www.nvidia.com/en-us/security/report-vulnerability/)
+  [NVIDIA Vulnerability Disclosure Program](https://www.nvidia.com/en-us/product-security/report-vulnerability/)
 - **Email:** [psirt@nvidia.com](mailto:psirt@nvidia.com). Encrypt sensitive
   information using the
-  [NVIDIA public PGP key](https://www.nvidia.com/en-us/security/pgp-key).
+  [NVIDIA public PGP key](https://www.nvidia.com/en-us/security/pgp-key/).
+- **GitHub:** Use the repository's
+  [private vulnerability reporting](https://github.com/dsx-ai-factory/infra-controller/security/advisories/new)
+  form (Security tab → **Report a vulnerability**). Project security responders
+  will route the report to NVIDIA PSIRT for coordinated handling.
 
 Please include the following information:
 
@@ -32,7 +36,7 @@ Please include the following information:
 NVIDIA PSIRT manages vulnerability intake, validation, remediation
 coordination, and disclosure. Response timing, coordinated disclosure,
 and reporter acknowledgement are governed by the
-[NVIDIA PSIRT policies](https://www.nvidia.com/en-us/security/psirt-policies/).
+[NVIDIA PSIRT policies](https://www.nvidia.com/en-us/product-security/psirt-policies/).
 
 ## Security Architecture & Context
 
@@ -74,11 +78,11 @@ and handles sensitive credentials and tenant state.
   workflows. Versioned routes require Bearer JWT processing through configured
   JWKS issuers or Keycloak. REST workflows use Temporal and site-agent/Core gRPC
   proxying to reach site-local Core services.
-- **Managed-host and DPU agents**: Scout runs for limited lifecycle phases on hosts for inventory,
-  cleanup, validation, and health checks. The DPU agent runs persistently on the
-  BlueField DPU, polls Core for desired state, configures HBN/network isolation,
-  manages local DHCP and metadata service behavior, and applies updates or
-  hotfixes.
+- **Managed-host and DPU agents**: Scout runs for limited lifecycle phases on
+  hosts for inventory, cleanup, validation, and health checks. The DPU agent runs
+  persistently on the BlueField DPU, polls Core for desired state, configures
+  HBN/network isolation, manages local DHCP and metadata service behavior, and
+  applies updates or hotfixes.
 - **PXE, cloud-init, DHCP, DNS, and metadata services**: PXE serves boot scripts,
   cloud-init data, static boot artifacts, Scout firmware scripts, and bootstrap
   CA material. DPU-side DHCP handles host DHCP locally. FMDS-style metadata
@@ -241,6 +245,12 @@ and support scripts.
   development defaults are not production hardening guidance.
 
 ## Supported Versions and Security Updates
+
+The [NICo release notes](https://docs.nvidia.com/infra-controller/documentation/release-notes)
+are the canonical source for release status. Releases labeled **current** or
+**maintenance** receive security updates. Releases labeled **EOL** no longer
+receive updates. See [SUPPORT.md](SUPPORT.md) for the support lifecycle and
+upgrade guidance.
 
 The software is provided "as is" without warranties of any kind. Features,
 APIs, and configurations may change in future releases. Security fixes should
