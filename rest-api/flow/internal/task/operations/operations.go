@@ -4,6 +4,7 @@
 package operations
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -20,18 +21,29 @@ import (
 // JSON or a malformed rule ID is rejected instead of selecting a default rule.
 func ExtractRuleID(info json.RawMessage) (*uuid.UUID, error) {
 	var peek struct {
-		RuleID string `json:"rule_id"`
+		RuleID json.RawMessage `json:"rule_id"`
 	}
 	err := json.Unmarshal(info, &peek)
 	if err != nil {
 		return nil, fmt.Errorf("decode operation info: %w", err)
 	}
-	if peek.RuleID == "" {
+	if len(peek.RuleID) == 0 {
 		return nil, nil
 	}
-	parsed, err := uuid.Parse(peek.RuleID)
+	if bytes.Equal(bytes.TrimSpace(peek.RuleID), []byte("null")) {
+		return nil, fmt.Errorf("rule_id must not be null")
+	}
+
+	var ruleID string
+	if err := json.Unmarshal(peek.RuleID, &ruleID); err != nil {
+		return nil, fmt.Errorf("decode rule_id: %w", err)
+	}
+	if ruleID == "" {
+		return nil, nil
+	}
+	parsed, err := uuid.Parse(ruleID)
 	if err != nil || parsed == uuid.Nil {
-		return nil, fmt.Errorf("rule_id %q must be a valid non-zero UUID", peek.RuleID)
+		return nil, fmt.Errorf("rule_id %q must be a valid non-zero UUID", ruleID)
 	}
 	return &parsed, nil
 }

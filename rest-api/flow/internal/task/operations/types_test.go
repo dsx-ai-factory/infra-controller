@@ -121,6 +121,11 @@ func TestExtractRuleID(t *testing.T) {
 			expected: nil,
 		},
 		{
+			name:    "null",
+			info:    json.RawMessage(`{"rule_id":null}`),
+			wantErr: "rule_id must not be null",
+		},
+		{
 			name:    "invalid UUID",
 			info:    json.RawMessage(`{"rule_id":"not-a-uuid"}`),
 			wantErr: "must be a valid non-zero UUID",
