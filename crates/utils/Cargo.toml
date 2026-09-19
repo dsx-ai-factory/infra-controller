@@ -49,6 +49,7 @@ opentelemetry_sdk = { workspace = true, optional = true }
 prometheus = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["postgres"], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

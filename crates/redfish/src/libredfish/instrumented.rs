@@ -32,13 +32,12 @@
 //! This backend's `outcome` has a third value beyond the shared helper's
 //! ok/error: `unsupported`, for calls a vendor answers with a local
 //! [`RedfishError::NotSupported`] stub -- an expected answer, not an
-//! external-call failure (see [`instrumented_redfish`]).
+//! external-call failure (see [`InstrumentedRedfish::instrumented_redfish`]).
 //!
 //! Two kinds of methods are written out by hand rather than by the
-//! delegation macro. Password-bearing operations redact their password
-//! arguments from the error *before* the RED helper writes its failure WARN
-//! -- call sites redact only after the error has come back to them, which
-//! would be too late for that log line. And
+//! delegation macro. Password-bearing operations supply their password
+//! arguments to the instrumentation boundary, which sanitizes the error
+//! before either logging or returning it. And
 //! [`Redfish::ac_powercycle_supported_by_power`] is a local capability
 //! check with no BMC I/O to meter, so it delegates plainly.
 
@@ -47,6 +46,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use carbide_instrument::red;
+use carbide_utils::redfish::log_redfish_http_error;
 use libredfish::model::account_service::ManagerAccount;
 use libredfish::model::certificate::Certificate;
 use libredfish::model::component_integrity::{CaCertificate, ComponentIntegrities, Evidence};
@@ -71,61 +71,82 @@ use libredfish::{
     SpxNicModelAndName, Status, SystemPowerControl,
 };
 
-use super::redact_password;
-
 /// The `backend` label every Redfish external call records under.
 pub(super) const REDFISH_BACKEND: &str = "redfish";
 
 /// A [`Redfish`] client whose every call records the RED triad.
 pub(super) struct InstrumentedRedfish {
     inner: Box<dyn Redfish>,
+    /// Retained only to scrub an untrusted BMC response before it is logged or returned.
+    authentication_password: Option<String>,
 }
 
 impl InstrumentedRedfish {
-    pub(super) fn new(inner: Box<dyn Redfish>) -> Self {
-        Self { inner }
+    pub(super) fn new(inner: Box<dyn Redfish>, authentication_password: Option<String>) -> Self {
+        Self {
+            inner,
+            authentication_password: authentication_password
+                .filter(|password| !password.is_empty()),
+        }
+    }
+
+    /// Times a single Redfish call on the shared RED instrument. The client's
+    /// authentication password and any password arguments belonging to this
+    /// operation are union-redacted before an error is logged or returned.
+    async fn instrumented_redfish<'a, T, const N: usize>(
+        &'a self,
+        operation: &'static str,
+        additional_sensitive_values: [&'a str; N],
+        call: impl Future<Output = Result<T, RedfishError>> + 'a,
+    ) -> Result<T, RedfishError> {
+        instrumented_redfish_call(
+            operation,
+            true,
+            self.authentication_password
+                .as_deref()
+                .into_iter()
+                .chain(additional_sensitive_values),
+            call,
+        )
+        .await
     }
 }
 
-/// [`redact_password`], skipping the empty string: `str::replace` with an
-/// empty needle would garble the message instead of redacting anything, and
-/// an empty current password is a real input (`uefi_setup` probes with one).
-fn redact_nonempty(error: RedfishError, password: &str) -> RedfishError {
-    if password.is_empty() {
-        error
-    } else {
-        redact_password(error, password)
-    }
-}
-
-/// Redacts two passwords with union masking: matches that touch or overlap
-/// in the text (one password containing the other, or the two sharing a
-/// boundary, like `foobar`/`foo` or `abcdef`/`defghi` in `abcdefghi`) redact
-/// as one merged span, so a sequential replace can never leave a fragment of
-/// either password behind for the failure WARN.
-fn redact_both(error: RedfishError, a: &str, b: &str) -> RedfishError {
-    super::redact_passwords(error, &[a, b])
-}
-
-/// Times a single Redfish call on the shared RED instrument, with the outcome
-/// vocabulary this backend needs: a [`RedfishError::NotSupported`] answer
-/// records `outcome = "unsupported"` and logs nothing. Vendors answer
-/// capability probes (lockdown status, boot options) with local
-/// `NotSupported` stubs as a matter of course, so the refusal is data the
-/// caller owns -- counting it as `error` would inflate the failure rate with
-/// expected answers, and a WARN per probe would flood the logs fleet-wide.
-/// The split also shows, per operation, what a fleet's BMCs don't support.
-/// Everything else matches [`red::instrumented`]: `ok` records silently,
-/// real failures record `error` and write the same single WARN.
-async fn instrumented_redfish<T>(
+/// Instruments client creation without changing its existing outcome contract:
+/// every initialization error remains an `error`, including `NotSupported`.
+pub(super) async fn instrumented_redfish_initialization<T, const N: usize>(
     operation: &'static str,
+    sensitive_values: [&str; N],
     call: impl Future<Output = Result<T, RedfishError>>,
 ) -> Result<T, RedfishError> {
+    instrumented_redfish_call(operation, false, sensitive_values, call).await
+}
+
+/// Records `NotSupported` as an expected `unsupported` outcome for ordinary
+/// operations, while initialization deliberately passes `false` so it keeps
+/// the pre-existing error contract. All other failures emit one WARN.
+async fn instrumented_redfish_call<'a, T>(
+    operation: &'static str,
+    not_supported_is_expected: bool,
+    sensitive_values: impl IntoIterator<Item = &'a str>,
+    call: impl Future<Output = Result<T, RedfishError>>,
+) -> Result<T, RedfishError> {
+    let sensitive_values = sensitive_values
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
     let started = Instant::now();
     let result = call.await;
+    let result = if sensitive_values.is_empty() {
+        result
+    } else {
+        result.map_err(|error| super::redact_passwords(error, &sensitive_values))
+    };
+    let is_expected_not_supported =
+        not_supported_is_expected && matches!(&result, Err(RedfishError::NotSupported(_)));
     let outcome = match &result {
         Ok(_) => "ok",
-        Err(RedfishError::NotSupported(_)) => "unsupported",
+        Err(_) if is_expected_not_supported => "unsupported",
         Err(_) => "error",
     };
     red::record(
@@ -135,9 +156,28 @@ async fn instrumented_redfish<T>(
         started.elapsed().as_secs_f64() * 1_000.0,
     );
     if let Err(error) = &result
-        && !matches!(error, RedfishError::NotSupported(_))
+        && !is_expected_not_supported
     {
-        tracing::warn!(backend = REDFISH_BACKEND, operation, error = %error, "external call failed");
+        match error {
+            RedfishError::HTTPErrorCode {
+                url,
+                status_code,
+                response_body,
+            } => log_redfish_http_error(
+                REDFISH_BACKEND,
+                operation,
+                url,
+                status_code.as_u16(),
+                response_body,
+                sensitive_values.iter().copied(),
+            ),
+            _ => tracing::warn!(
+                backend = REDFISH_BACKEND,
+                operation,
+                error = %error,
+                "external call failed"
+            ),
+        }
     }
     result
 }
@@ -159,8 +199,9 @@ macro_rules! delegate_with_red {
                 & $selflt self
                 $(, $arg : $ty )*
             ) -> RedfishFuture<$lt, Result<$ok, RedfishError>> {
-                Box::pin(instrumented_redfish(
+                Box::pin(self.instrumented_redfish(
                     stringify!($method),
+                    [],
                     self.inner.$method($( $arg ),*),
                 ))
             }
@@ -350,22 +391,20 @@ impl Redfish for InstrumentedRedfish {
 
     // MARK: - Password-bearing operations
     //
-    // These redact their password arguments from the error before returning
-    // it, so the RED helper's failure WARN (and everything downstream) only
-    // ever sees the redacted form. Callers that redact again find nothing
-    // left to replace.
+    // These add their password arguments to the authentication password at the
+    // instrumentation boundary. Redacting the complete set in one pass avoids
+    // partial leaks when two sensitive values overlap.
 
     fn change_password<'a>(
         &'a self,
         username: &'a str,
         new_pass: &'a str,
     ) -> RedfishFuture<'a, Result<(), RedfishError>> {
-        Box::pin(instrumented_redfish("change_password", async move {
-            self.inner
-                .change_password(username, new_pass)
-                .await
-                .map_err(|error| redact_nonempty(error, new_pass))
-        }))
+        Box::pin(self.instrumented_redfish(
+            "change_password",
+            [new_pass],
+            self.inner.change_password(username, new_pass),
+        ))
     }
 
     fn change_password_by_id<'a>(
@@ -373,12 +412,11 @@ impl Redfish for InstrumentedRedfish {
         account_id: &'a str,
         new_pass: &'a str,
     ) -> RedfishFuture<'a, Result<(), RedfishError>> {
-        Box::pin(instrumented_redfish("change_password_by_id", async move {
-            self.inner
-                .change_password_by_id(account_id, new_pass)
-                .await
-                .map_err(|error| redact_nonempty(error, new_pass))
-        }))
+        Box::pin(self.instrumented_redfish(
+            "change_password_by_id",
+            [new_pass],
+            self.inner.change_password_by_id(account_id, new_pass),
+        ))
     }
 
     fn create_user<'a>(
@@ -387,12 +425,11 @@ impl Redfish for InstrumentedRedfish {
         password: &'a str,
         role_id: RoleId,
     ) -> RedfishFuture<'a, Result<(), RedfishError>> {
-        Box::pin(instrumented_redfish("create_user", async move {
-            self.inner
-                .create_user(username, password, role_id)
-                .await
-                .map_err(|error| redact_nonempty(error, password))
-        }))
+        Box::pin(self.instrumented_redfish(
+            "create_user",
+            [password],
+            self.inner.create_user(username, password, role_id),
+        ))
     }
 
     fn change_uefi_password<'a>(
@@ -400,24 +437,25 @@ impl Redfish for InstrumentedRedfish {
         current_uefi_password: &'a str,
         new_uefi_password: &'a str,
     ) -> RedfishFuture<'a, Result<Option<String>, RedfishError>> {
-        Box::pin(instrumented_redfish("change_uefi_password", async move {
-            self.inner
-                .change_uefi_password(current_uefi_password, new_uefi_password)
-                .await
-                .map_err(|error| redact_both(error, current_uefi_password, new_uefi_password))
-        }))
+        Box::pin(
+            self.instrumented_redfish(
+                "change_uefi_password",
+                [current_uefi_password, new_uefi_password],
+                self.inner
+                    .change_uefi_password(current_uefi_password, new_uefi_password),
+            ),
+        )
     }
 
     fn clear_uefi_password<'a>(
         &'a self,
         current_uefi_password: &'a str,
     ) -> RedfishFuture<'a, Result<Option<String>, RedfishError>> {
-        Box::pin(instrumented_redfish("clear_uefi_password", async move {
-            self.inner
-                .clear_uefi_password(current_uefi_password)
-                .await
-                .map_err(|error| redact_nonempty(error, current_uefi_password))
-        }))
+        Box::pin(self.instrumented_redfish(
+            "clear_uefi_password",
+            [current_uefi_password],
+            self.inner.clear_uefi_password(current_uefi_password),
+        ))
     }
 
     // MARK: - Local capability check
@@ -430,7 +468,7 @@ impl Redfish for InstrumentedRedfish {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::testing::MetricsCapture;
+    use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture};
     use carbide_secrets::credentials::{CredentialKey, CredentialType};
 
     use super::*;
@@ -449,7 +487,7 @@ mod tests {
             )
             .await
             .expect("sim client");
-        InstrumentedRedfish::new(client)
+        InstrumentedRedfish::new(client, None)
     }
 
     #[tokio::test]
@@ -504,6 +542,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn initialization_failure_is_redacted_before_logging_and_returning() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let mut result = None;
+        let logs = carbide_instrument::testing::capture_logs(|| {
+            result = Some(rt.block_on(instrumented_redfish_initialization::<(), 1>(
+                "create_client",
+                ["secret"],
+                std::future::ready(Err(RedfishError::HTTPErrorCode {
+                    url: "https://bmc.example/redfish/v1".to_string(),
+                    status_code: http::StatusCode::UNAUTHORIZED,
+                    response_body:
+                        r#"{"error":{"message":"credential s\u0065cret rejected"}}"#.to_string(),
+                })),
+            )));
+        });
+
+        let error = result
+            .expect("captured result")
+            .expect_err("initialization failure remains an error");
+        let RedfishError::HTTPErrorCode { response_body, .. } = error else {
+            panic!("HTTP error remains an HTTP error after redaction");
+        };
+        let response: serde_json::Value =
+            serde_json::from_str(&response_body).expect("redacted body remains valid JSON");
+        assert_eq!(response["error"]["message"], "credential REDACTED rejected");
+
+        let log = logs.first().expect("one initialization failure log");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(log.field("error"), Some("credential REDACTED rejected"));
+    }
+
     /// The three-way outcome split: a vendor's local `NotSupported` answer
     /// records `unsupported` with no log line, a genuine failure records
     /// `error` with the single WARN, and both errors propagate untouched.
@@ -515,8 +587,10 @@ mod tests {
         let metrics = MetricsCapture::start();
         let logs = carbide_instrument::testing::capture_logs(|| {
             rt.block_on(async {
-                instrumented_redfish::<()>(
+                instrumented_redfish_call::<()>(
                     "lockdown_status",
+                    true,
+                    [],
                     std::future::ready(Err(RedfishError::NotSupported(
                         "vendor answers locally".to_string(),
                     ))),
@@ -524,17 +598,33 @@ mod tests {
                 .await
                 .expect_err("the refusal still propagates");
 
-                instrumented_redfish::<()>(
+                let error = instrumented_redfish_call::<()>(
                     "lockdown_status",
-                    std::future::ready(Err(RedfishError::GenericError {
-                        error: "boom".to_string(),
+                    true,
+                    [],
+                    std::future::ready(Err(RedfishError::HTTPErrorCode {
+                        url: "https://bmc.example/redfish/v1/Systems/1".to_string(),
+                        status_code: http::StatusCode::INTERNAL_SERVER_ERROR,
+                        response_body: r#"{
+                            "error": {
+                                "@Message.ExtendedInfo": [{
+                                    "Message": "internal service error"
+                                }]
+                            }
+                        }"#
+                        .to_string(),
                     })),
                 )
                 .await
                 .expect_err("the error still propagates");
+                assert!(matches!(error, RedfishError::HTTPErrorCode { .. }));
             });
         });
 
+        let log = logs
+            .iter()
+            .find(|log| log.message == "external call failed")
+            .expect("the genuine failure warns");
         assert_eq!(
             logs.iter()
                 .filter(|log| log.message == "external call failed")
@@ -542,6 +632,15 @@ mod tests {
             1,
             "only the genuine failure warns; unsupported stays quiet, got {logs:?}",
         );
+        assert_eq!(log.field("backend"), Some(REDFISH_BACKEND));
+        assert_eq!(log.field("operation"), Some("lockdown_status"));
+        assert_eq!(
+            log.field("url"),
+            Some("https://bmc.example/redfish/v1/Systems/1")
+        );
+        assert_eq!(log.field("http_status"), Some("500"));
+        assert_eq!(log.field_kind("http_status"), Some(CapturedFieldKind::U64));
+        assert_eq!(log.field("error"), Some("internal service error"));
         assert_eq!(
             metrics.histogram_count_delta(
                 "carbide_external_call_duration_milliseconds",
@@ -566,59 +665,48 @@ mod tests {
         );
     }
 
-    /// The containment case: one password contains the other; a naive
-    /// shorter-first replace would fragment the longer one and leak its tail.
     #[test]
-    fn redact_both_survives_contained_passwords() {
-        let error = RedfishError::GenericError {
-            error: "rejected foobar, and foo separately".to_string(),
-        };
-        let redacted = redact_both(error, "foobar", "foo");
-        assert!(
-            matches!(
-                &redacted,
-                RedfishError::GenericError { error } if error == "rejected REDACTED, and REDACTED separately"
-            ),
-            "both passwords must redact fully with no fragments, got {redacted:?}",
-        );
-    }
+    fn ordinary_failure_redacts_authentication_password_before_logging_and_returning() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let sim = RedfishSim::default();
+        let inner = rt
+            .block_on(sim.create_client(
+                "localhost",
+                None,
+                RedfishAuth::Direct("root".to_string(), "secret".to_string()),
+                None,
+            ))
+            .expect("sim client");
+        let client = InstrumentedRedfish::new(inner, Some("secret".to_string()));
+        let mut result: Option<Result<(), RedfishError>> = None;
+        let logs = carbide_instrument::testing::capture_logs(|| {
+            result = Some(rt.block_on(client.instrumented_redfish(
+                "get_system",
+                [],
+                std::future::ready(Err(RedfishError::HTTPErrorCode {
+                    url: "https://bmc.example/redfish/v1/Systems/1".to_string(),
+                    status_code: http::StatusCode::INTERNAL_SERVER_ERROR,
+                    response_body:
+                        r#"{"error":{"message":"credential s\u0065cret rejected"}}"#.to_string(),
+                })),
+            )));
+        });
 
-    /// The partial-overlap case: the two passwords share a boundary in the
-    /// text, so any sequential replace leaks a fragment of one of them; the
-    /// union mask redacts the merged span as one.
-    #[test]
-    fn redact_both_survives_partially_overlapping_passwords() {
-        let error = RedfishError::GenericError {
-            error: "rejected abcdefghi".to_string(),
+        let error = result
+            .expect("captured result")
+            .expect_err("the simulated HTTP failure remains an error");
+        let RedfishError::HTTPErrorCode { response_body, .. } = error else {
+            panic!("HTTP error remains an HTTP error after redaction");
         };
-        let redacted = redact_both(error, "abcdef", "defghi");
-        assert!(
-            matches!(
-                &redacted,
-                RedfishError::GenericError { error } if error == "rejected REDACTED"
-            ),
-            "the overlapping span must redact as one with no fragments, got {redacted:?}",
-        );
-    }
+        let response: serde_json::Value =
+            serde_json::from_str(&response_body).expect("redacted body remains valid JSON");
+        assert_eq!(response["error"]["message"], "credential REDACTED rejected");
 
-    #[test]
-    fn redact_nonempty_redacts_only_a_nonempty_password() {
-        let error = RedfishError::GenericError {
-            error: "rejected pass123".to_string(),
-        };
-        let redacted = redact_nonempty(error, "pass123");
-        assert!(
-            matches!(&redacted, RedfishError::GenericError { error } if error == "rejected REDACTED"),
-            "expected the password redacted, got {redacted:?}",
-        );
-
-        let error = RedfishError::GenericError {
-            error: "boom".to_string(),
-        };
-        let untouched = redact_nonempty(error, "");
-        assert!(
-            matches!(&untouched, RedfishError::GenericError { error } if error == "boom"),
-            "an empty password must leave the message untouched, got {untouched:?}",
-        );
+        let log = logs.first().expect("one ordinary failure log");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(log.field("operation"), Some("get_system"));
+        assert_eq!(log.field("error"), Some("credential REDACTED rejected"));
     }
 }

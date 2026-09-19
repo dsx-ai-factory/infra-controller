@@ -33,6 +33,7 @@ use carbide_authn::middleware::{
 };
 use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
 use carbide_utils::HostPortPair;
+use carbide_utils::redfish::redact_redfish_response_body;
 use forge_tls::client_config::ClientCert;
 use http::{HeaderMap, Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -65,11 +66,16 @@ const TLS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Redfish's session token header, per DMTF. Applied on egress and stripped
 /// on ingress by [`copy_request_headers`].
 const REDFISH_AUTH_TOKEN_HEADER: &str = "X-Auth-Token";
-/// Bodies up to this size are buffered and forwarded with the exact framing
+/// Request bodies up to this size are buffered and forwarded with the exact framing
 /// BMCs have always seen. Anything larger -- Redfish multipart firmware
 /// pushes, mainly -- is streamed through instead of being rejected, which the
 /// old 8 MiB hard cap did. (8 MiB matches nginx ingress controller defaults.)
 const MAX_BUFFERED_BODY_SIZE: usize = 8 * 1024 * 1024;
+/// Reuse the established request-body bound when inspecting error responses;
+/// anything larger is omitted rather than risking an unbounded allocation or
+/// forwarding a credential that could not be searched safely.
+const MAX_REDACTABLE_ERROR_BODY_SIZE: usize = MAX_BUFFERED_BODY_SIZE;
+const OMITTED_BMC_ERROR_RESPONSE: &str = r#"{"error":{"message":"BMC error response omitted because it could not be safely sanitized"}}"#;
 /// Total-request budget for ordinary exchanges; the shared client's default
 /// and the base that streamed-upload timeouts build on.
 const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -754,7 +760,7 @@ async fn proxy_request_inner(
     let rejected = |status: reqwest::StatusCode| {
         status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
     };
-    if rejected(upstream_response.status()) && upstream_body.is_replayable() {
+    if rejected(upstream_response.response.status()) && upstream_body.is_replayable() {
         evict_cached_credentials(target_ip, &state.credential_cache).await;
         emit(UpstreamAuthRetried {
             method: MethodLabel::from(&parts.method),
@@ -770,9 +776,19 @@ async fn proxy_request_inner(
         .await?;
     }
 
-    let status = upstream_response.status();
-    let headers = upstream_response.headers().clone();
-    let body = Body::from_stream(upstream_response.bytes_stream());
+    let UpstreamResponse {
+        response,
+        sensitive_value,
+    } = upstream_response;
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = prepare_response_body(
+        status,
+        &headers,
+        Body::from_stream(response.bytes_stream()),
+        sensitive_value.as_deref(),
+    )
+    .await;
 
     if rejected(status) {
         evict_cached_credentials(target_ip, &state.credential_cache).await;
@@ -793,6 +809,14 @@ enum UpstreamBody {
         body: Option<Body>,
         declared_length: u64,
     },
+}
+
+/// The final response and the authentication secret used for that exact
+/// attempt. Keeping them together ensures a refreshed credential is used to
+/// sanitize the response produced by the retry, not the stale first attempt.
+struct UpstreamResponse {
+    response: reqwest::Response,
+    sensitive_value: Option<String>,
 }
 
 impl UpstreamBody {
@@ -858,7 +882,7 @@ async fn send_upstream(
     parts: &http::request::Parts,
     path_and_query: http::uri::PathAndQuery,
     upstream_body: &mut UpstreamBody,
-) -> Result<reqwest::Response, Response<Body>> {
+) -> Result<UpstreamResponse, Response<Body>> {
     let mut bmc_client_info = create_client(
         target_ip,
         &state.api_client,
@@ -880,6 +904,13 @@ async fn send_upstream(
         .http_client
         .request(parts.method.clone(), upstream_uri.to_string())
         .headers(bmc_client_info.header_map);
+    // Retain only the password or token long enough to sanitize this attempt's
+    // final error response. The downstream proxy client intentionally has no
+    // access to the BMC credential and therefore cannot perform this step.
+    let sensitive_value = bmc_client_info
+        .credentials
+        .sensitive_value()
+        .map(str::to_owned);
     let upstream_request = bmc_client_info
         .credentials
         .apply_to_request(upstream_request)
@@ -897,7 +928,65 @@ async fn send_upstream(
         status: UpstreamStatus::from_result(&upstream_result),
         took: started.elapsed(),
     });
-    upstream_result.map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))
+    upstream_result
+        .map(|response| UpstreamResponse {
+            response,
+            sensitive_value,
+        })
+        .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))
+}
+
+/// Buffers only final HTTP error responses that have a known authentication
+/// secret, so they can be scrubbed before leaving the credential-owning proxy.
+/// Successful responses, redirects, and responses without a secret retain the
+/// existing streaming path. Uninspectable error bodies fail closed rather than
+/// forwarding bytes that may contain the credential.
+async fn prepare_response_body(
+    status: reqwest::StatusCode,
+    headers: &HeaderMap,
+    body: Body,
+    sensitive_value: Option<&str>,
+) -> PreparedResponseBody {
+    let Some(sensitive_value) = sensitive_value.filter(|value| !value.is_empty()) else {
+        return PreparedResponseBody::Unchanged(body);
+    };
+    if !status.is_client_error() && !status.is_server_error() {
+        return PreparedResponseBody::Unchanged(body);
+    }
+    // Automatic decompression is disabled on the upstream client. If the caller
+    // negotiated a content coding, omit an encoded error instead of searching
+    // encoded bytes and potentially forwarding a hidden secret.
+    if has_non_identity_content_encoding(headers) {
+        return PreparedResponseBody::Replaced(Body::from(OMITTED_BMC_ERROR_RESPONSE));
+    }
+
+    let Ok(body) = axum::body::to_bytes(body, MAX_REDACTABLE_ERROR_BODY_SIZE).await else {
+        return PreparedResponseBody::Replaced(Body::from(OMITTED_BMC_ERROR_RESPONSE));
+    };
+    let Ok(text) = std::str::from_utf8(&body) else {
+        return PreparedResponseBody::Replaced(Body::from(OMITTED_BMC_ERROR_RESPONSE));
+    };
+    let redacted = redact_redfish_response_body(text, [sensitive_value]);
+    if redacted == text {
+        PreparedResponseBody::Unchanged(Body::from(body))
+    } else {
+        PreparedResponseBody::Redacted(Body::from(redacted))
+    }
+}
+
+fn has_non_identity_content_encoding(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(http::header::CONTENT_ENCODING)
+        .iter()
+        .any(|value| {
+            let Ok(value) = value.to_str() else {
+                return true;
+            };
+            value.split(',').any(|encoding| {
+                let encoding = encoding.trim();
+                encoding.is_empty() || !encoding.eq_ignore_ascii_case("identity")
+            })
+        })
 }
 
 async fn ip_for_forwarded_target(
@@ -1026,17 +1115,41 @@ fn request_principal_ids(auth_context: &AuthContext<()>) -> Vec<String> {
     principals
 }
 
+enum PreparedResponseBody {
+    Unchanged(Body),
+    Redacted(Body),
+    Replaced(Body),
+}
+
 fn build_response(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
-    body: Body,
+    body: PreparedResponseBody,
 ) -> Response<Body> {
+    let body_was_rewritten = !matches!(&body, PreparedResponseBody::Unchanged(_));
+    let body_was_replaced = matches!(&body, PreparedResponseBody::Replaced(_));
+    let body = match body {
+        PreparedResponseBody::Unchanged(body)
+        | PreparedResponseBody::Redacted(body)
+        | PreparedResponseBody::Replaced(body) => body,
+    };
     let mut response = Response::builder().status(status);
     for (name, value) in headers {
-        if is_hop_by_hop_header(name.as_str()) || name == reqwest::header::CONTENT_LENGTH {
+        if is_hop_by_hop_header(name.as_str())
+            || name == reqwest::header::CONTENT_LENGTH
+            || (body_was_rewritten
+                && (name == reqwest::header::CONTENT_ENCODING
+                    || name == reqwest::header::ETAG
+                    || name.as_str().eq_ignore_ascii_case("content-md5")
+                    || name.as_str().eq_ignore_ascii_case("digest")))
+            || (body_was_replaced && name == reqwest::header::CONTENT_TYPE)
+        {
             continue;
         }
         response = response.header(name, value);
+    }
+    if body_was_replaced {
+        response = response.header(reqwest::header::CONTENT_TYPE, "application/json");
     }
     response.body(body).unwrap()
 }
@@ -1176,6 +1289,14 @@ enum BmcCredentials {
 }
 
 impl BmcCredentials {
+    fn sensitive_value(&self) -> Option<&str> {
+        let value = match self {
+            Self::UsernamePassword { password, .. } => password,
+            Self::SessionToken { token } => token,
+        };
+        (!value.is_empty()).then_some(value)
+    }
+
     fn apply_to_request(
         self,
         request: reqwest_middleware::RequestBuilder,
@@ -1320,6 +1441,12 @@ async fn get_bmc_credentials(
 
 fn build_http_client() -> Result<reqwest_middleware::ClientWithMiddleware, BmcProxyError> {
     let client = reqwest::Client::builder()
+        // Keep the proxy's error-sanitization boundary explicit even if a
+        // workspace dependency enables a reqwest decompression feature later.
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::limited(5))
         .connect_timeout(std::time::Duration::from_secs(5)) // Limit connections to 5 seconds
@@ -1373,13 +1500,14 @@ mod tests {
 
     use super::{
         BmcCredentials, BmcProxyState, CREDENTIAL_CACHE_IDLE_TTL, ConnectionFailReason,
-        CredentialCache, ForwardedTarget, IP_CACHE_TTL, MAX_BUFFERED_BODY_SIZE, MethodLabel,
-        TcpAcceptFailed, TlsCertificateReloadFailed, TlsConnectionFailed, UpstreamBody,
-        authorize_principal_allow_list, bmc_proxy_request_span, bounded_cache, build_authority,
-        build_http_client, build_response, copy_request_headers, create_client,
+        CredentialCache, ForwardedTarget, IP_CACHE_TTL, MAX_BUFFERED_BODY_SIZE,
+        MAX_REDACTABLE_ERROR_BODY_SIZE, MethodLabel, OMITTED_BMC_ERROR_RESPONSE,
+        PreparedResponseBody, TcpAcceptFailed, TlsCertificateReloadFailed, TlsConnectionFailed,
+        UpstreamBody, authorize_principal_allow_list, bmc_proxy_request_span, bounded_cache,
+        build_authority, build_http_client, build_response, copy_request_headers, create_client,
         evict_cached_credentials, forwarded_header_value, idle_bounded_cache,
         ip_for_forwarded_target, is_hop_by_hop_header, method_supports_body,
-        parse_forwarded_host_value, request_principal_ids, span_status,
+        parse_forwarded_host_value, prepare_response_body, request_principal_ids, span_status,
     };
 
     const TEST_CONFIG: &str = r#"
@@ -1440,6 +1568,7 @@ mod tests {
         Authorization,
         AuthToken,
         Forwarded,
+        AcceptEncoding,
         ContentLength,
         Connection,
         Upgrade,
@@ -1669,6 +1798,10 @@ mod tests {
             HeaderCopyCase::Forwarded => (
                 HeaderName::from_static("forwarded"),
                 HeaderValue::from_static("host=10.0.0.1"),
+            ),
+            HeaderCopyCase::AcceptEncoding => (
+                axum::http::header::ACCEPT_ENCODING,
+                HeaderValue::from_static("gzip, br"),
             ),
             HeaderCopyCase::ContentLength => (
                 axum::http::header::CONTENT_LENGTH,
@@ -1988,6 +2121,10 @@ mod tests {
                 HeaderCopyCase::Forwarded => vec![],
             }
 
+            "accept encoding copied" {
+                HeaderCopyCase::AcceptEncoding => vec!["accept-encoding".to_string()],
+            }
+
             "content length filtered" {
                 HeaderCopyCase::ContentLength => vec![],
             }
@@ -2007,6 +2144,23 @@ mod tests {
             "tracestate filtered" {
                 HeaderCopyCase::TraceState => vec![],
             }
+        );
+    }
+
+    #[test]
+    fn upstream_requests_preserve_the_callers_response_encoding_preference() {
+        let mut source = HeaderMap::new();
+        source.insert(
+            axum::http::header::ACCEPT_ENCODING,
+            HeaderValue::from_static("gzip, identity;q=0"),
+        );
+        let mut dest = HeaderMap::new();
+
+        copy_request_headers(&source, &mut dest);
+
+        assert_eq!(
+            dest.get(axum::http::header::ACCEPT_ENCODING),
+            Some(&HeaderValue::from_static("gzip, identity;q=0"))
         );
     }
 
@@ -2346,6 +2500,45 @@ mod tests {
     }
 
     #[test]
+    fn bmc_credentials_expose_only_the_auth_secret_for_response_redaction() {
+        check_values(
+            [
+                Check {
+                    scenario: "username and password",
+                    input: BmcCredentials::UsernamePassword {
+                        username: "admin".to_string(),
+                        password: "secret".to_string(),
+                    },
+                    expect: Some("secret".to_string()),
+                },
+                Check {
+                    scenario: "session token",
+                    input: BmcCredentials::SessionToken {
+                        token: "token-123".to_string(),
+                    },
+                    expect: Some("token-123".to_string()),
+                },
+                Check {
+                    scenario: "empty password",
+                    input: BmcCredentials::UsernamePassword {
+                        username: "admin".to_string(),
+                        password: String::new(),
+                    },
+                    expect: None,
+                },
+                Check {
+                    scenario: "empty session token",
+                    input: BmcCredentials::SessionToken {
+                        token: String::new(),
+                    },
+                    expect: None,
+                },
+            ],
+            |credentials| credentials.sensitive_value().map(str::to_owned),
+        );
+    }
+
+    #[test]
     fn bmc_username_password_credentials_use_basic_auth() {
         let client = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
         let request = client.get("https://example.com/redfish/v1");
@@ -2596,7 +2789,11 @@ mod tests {
             Result::<Bytes, Infallible>::Ok(Bytes::from_static(br#""ok"}"#)),
         ]));
 
-        let response = build_response(reqwest::StatusCode::OK, &headers, body);
+        let response = build_response(
+            reqwest::StatusCode::OK,
+            &headers,
+            PreparedResponseBody::Unchanged(body),
+        );
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -2615,6 +2812,198 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body, Bytes::from_static(br#"{"value":"ok"}"#));
+    }
+
+    #[tokio::test]
+    async fn final_http_error_response_redacts_the_upstream_credential() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            reqwest::header::CONTENT_LENGTH,
+            HeaderValue::from_static("999"),
+        );
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+        headers.insert(reqwest::header::ETAG, HeaderValue::from_static("error-v1"));
+        let body = Body::from(
+            r#"{"error":{"@Message.ExtendedInfo":[{"Message":"credential s\u0065cret rejected"}]}}"#,
+        );
+        let body = prepare_response_body(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &headers,
+            body,
+            Some("secret"),
+        )
+        .await;
+        assert!(matches!(&body, PreparedResponseBody::Redacted(_)));
+
+        let response = build_response(reqwest::StatusCode::INTERNAL_SERVER_ERROR, &headers, body);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.headers().get(reqwest::header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/json"))
+        );
+        assert!(
+            !response
+                .headers()
+                .contains_key(reqwest::header::CONTENT_LENGTH)
+        );
+        assert!(
+            !response
+                .headers()
+                .contains_key(reqwest::header::CONTENT_ENCODING)
+        );
+        assert!(!response.headers().contains_key(reqwest::header::ETAG));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&body).expect("redacted body remains UTF-8");
+        assert!(!body.contains("secret"));
+        assert!(!body.contains(r"s\u0065cret"));
+        assert!(body.contains("credential REDACTED rejected"));
+    }
+
+    #[tokio::test]
+    async fn plain_text_error_response_redacts_a_session_token() {
+        let credentials = BmcCredentials::SessionToken {
+            token: "token-123".to_string(),
+        };
+        let headers = HeaderMap::new();
+        let prepared = prepare_response_body(
+            reqwest::StatusCode::BAD_GATEWAY,
+            &headers,
+            Body::from("session token-123 rejected"),
+            credentials.sensitive_value(),
+        )
+        .await;
+        assert!(matches!(&prepared, PreparedResponseBody::Redacted(_)));
+        let prepared = match prepared {
+            PreparedResponseBody::Redacted(body) => body,
+            PreparedResponseBody::Unchanged(_) | PreparedResponseBody::Replaced(_) => {
+                unreachable!("the session token should be redacted")
+            }
+        };
+        let body = prepared.collect().await.unwrap().to_bytes();
+        assert_eq!(body, Bytes::from_static(b"session REDACTED rejected"));
+    }
+
+    #[tokio::test]
+    async fn unmatched_error_and_success_bodies_remain_unchanged() {
+        let headers = HeaderMap::new();
+        for (status, body) in [
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "an unrelated BMC error",
+            ),
+            (
+                reqwest::StatusCode::OK,
+                "successful value containing secret",
+            ),
+        ] {
+            let prepared =
+                prepare_response_body(status, &headers, Body::from(body), Some("secret")).await;
+            assert!(matches!(&prepared, PreparedResponseBody::Unchanged(_)));
+            let prepared = match prepared {
+                PreparedResponseBody::Unchanged(body) => body,
+                PreparedResponseBody::Redacted(_) | PreparedResponseBody::Replaced(_) => {
+                    unreachable!("the response body should remain unchanged")
+                }
+            };
+            let actual = prepared.collect().await.unwrap().to_bytes();
+            assert_eq!(actual, Bytes::from(body));
+        }
+    }
+
+    #[tokio::test]
+    async fn uninspectable_error_response_fails_closed() {
+        let mut body = vec![b'x'; MAX_REDACTABLE_ERROR_BODY_SIZE + 1];
+        body[.."secret".len()].copy_from_slice(b"secret");
+        let headers = HeaderMap::new();
+        let prepared = prepare_response_body(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &headers,
+            Body::from(body),
+            Some("secret"),
+        )
+        .await;
+        assert!(matches!(&prepared, PreparedResponseBody::Replaced(_)));
+        let response = build_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &reqwest::header::HeaderMap::new(),
+            prepared,
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            body,
+            Bytes::from_static(OMITTED_BMC_ERROR_RESPONSE.as_bytes())
+        );
+        assert!(
+            !body
+                .windows("secret".len())
+                .any(|window| window == b"secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn encoded_error_response_fails_closed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+        let prepared = prepare_response_body(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &headers,
+            Body::from("opaque encoded bytes"),
+            Some("secret"),
+        )
+        .await;
+        assert!(matches!(&prepared, PreparedResponseBody::Replaced(_)));
+
+        let response = build_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &headers,
+            prepared,
+        );
+        assert!(
+            !response
+                .headers()
+                .contains_key(reqwest::header::CONTENT_ENCODING)
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            body,
+            Bytes::from_static(OMITTED_BMC_ERROR_RESPONSE.as_bytes())
+        );
+    }
+
+    #[tokio::test]
+    async fn encoded_success_response_remains_unchanged() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+        let prepared = prepare_response_body(
+            reqwest::StatusCode::OK,
+            &headers,
+            Body::from("opaque encoded bytes"),
+            Some("secret"),
+        )
+        .await;
+        assert!(matches!(&prepared, PreparedResponseBody::Unchanged(_)));
+
+        let response = build_response(reqwest::StatusCode::OK, &headers, prepared);
+        assert_eq!(
+            response.headers().get(reqwest::header::CONTENT_ENCODING),
+            Some(&HeaderValue::from_static("gzip"))
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, Bytes::from_static(b"opaque encoded bytes"));
     }
 
     const TLS_FAILURE_METRIC: &str = "carbide_bmc_proxy_tls_connection_fail_total";
