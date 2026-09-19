@@ -3319,10 +3319,53 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '400':
+          description: The VPC ID is invalid, the VPC does not belong to the requested organization, its Site is not Registered, or it still has associated Subnets, VPC Prefixes, or Instances.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                deletion-precondition-not-satisfied:
+                  value:
+                    source: nico
+                    message: Cannot delete VPC, one or more Subnets exist for this VPC
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another VPC power operation is in progress, or an Instance was associated with the VPC after the initial deletion checks.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                power-operation-in-progress:
+                  value:
+                    source: nico
+                    message: Another power operation is already in progress for the VPC
+                    data: null
+        '412':
+          description: Site-side Core rejected the deletion because its preconditions were not satisfied.
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: Site-side Core could not perform the deletion because a required resource was exhausted.
+          $ref: '#/components/responses/ResourceExhaustedError'
+        '500':
+          description: The request failed because of an unexpected database, workflow, or Site communication error, including a workflow timeout.
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Core version does not implement VPC deletion.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Site-side Core or the Site workflow service is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
       description: |-
         Delete a specific VPC by ID.
+
+        Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Delete those dependent resources first.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
