@@ -126,6 +126,11 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 			body:    `{"spectrumXPartitionId":"8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3","device":"NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC","deviceInstance":0,"attachmentType":"Physical"}`,
 			wantErr: false,
 		},
+		{
+			name:    "deviceInstance exceeding uint32 cannot wrap during conversion",
+			body:    `{"spectrumXPartitionId":"8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3","device":"ConnectX-8","deviceInstance":4294967296,"attachmentType":"Physical"}`,
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

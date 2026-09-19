@@ -1450,17 +1450,19 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		respUserDataContains         *string
 		respUserData                 *string
 		// prepareReq runs before the handler (e.g. insert a Machine and set req.MachineID) so cases stay self-contained.
-		prepareReq func(t *testing.T, req *model.APIInstanceCreateRequest)
+		prepareReq  func(t *testing.T, req *model.APIInstanceCreateRequest)
+		afterHandle func(t *testing.T, rec *httptest.ResponseRecorder)
 	}
 
-	tests := []struct {
+	type createCase struct {
 		name                     string
 		fields                   fields
 		args                     args
 		expectedControllerVpcIDs map[string]uuid.UUID
 		wantErr                  bool
 		verifyChildSpanner       bool
-	}{
+	}
+	tests := []createCase{
 		{
 			name: "test Instance create API endpoint rejects power profile when DPS power management is disabled",
 			fields: fields{
@@ -3886,6 +3888,89 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 	}
+	for _, scenario := range []struct {
+		name          string
+		targeted      bool
+		missing       bool
+		count         uint32
+		lookupErr     error
+		allocationErr error
+		status        int
+	}{
+		{name: "targeted SpectrumX create", targeted: true, count: 1, status: http.StatusCreated},
+		{name: "SpectrumX ordinal rejected before writes", targeted: true, status: http.StatusBadRequest},
+		{name: "Core missing targeted SpectrumX machine", targeted: true, missing: true, status: http.StatusConflict},
+		{name: "SpectrumX discovery timeout does not allocate", targeted: true, lookupErr: tp.NewTimeoutError(enums.TIMEOUT_TYPE_START_TO_CLOSE, nil), status: http.StatusGatewayTimeout},
+		{name: "Instance Type skips incompatible SpectrumX machines", count: 1, status: http.StatusCreated},
+		{name: "Core allocation can reject successful SpectrumX preflight", targeted: true, count: 1, allocationErr: errors.New("inventory changed"), status: http.StatusInternalServerError},
+	} {
+		var selected *cdbm.Machine
+		var rejected *cdbm.Machine
+		var siteClient *tmocks.Client
+		tests = append(tests, createCase{
+			name:   scenario.name,
+			fields: fields{dbSession: dbSession, tc: tc, cfg: cfg},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{}, reqOrg: tnOrg, reqUser: tnu1, respCode: scenario.status,
+				prepareReq: func(t *testing.T, req *model.APIInstanceCreateRequest) {
+					partition := testBuildSpectrumXPartition(t, dbSession, uuid.NewString(), tnOrg, st1, tn1, nil, cdbm.SpectrumXPartitionStatusReady)
+					selected = testInstanceBuildMachine(t, dbSession, ip.ID, st1.ID, cutil.GetPtr(false), nil)
+					*req = model.APIInstanceCreateRequest{
+						Name: uuid.NewString(), TenantID: tn1.ID.String(), VpcID: vpc1.ID.String(), IpxeScript: cutil.GetPtr(common.DefaultIpxeScript),
+						Interfaces:           []model.APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(subnet1.ID.String())}},
+						SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{SpectrumXPartitionID: partition.ID.String(), Device: "ConnectX-8", DeviceInstance: cutil.GetPtr(0), AttachmentType: cdbm.SpectrumXAttachmentTypePhysical}},
+					}
+					if scenario.targeted {
+						req.MachineID = &selected.ID
+					} else {
+						it := testInstanceBuildInstanceType(t, dbSession, ip, uuid.NewString(), st1, cdbm.InstanceStatusReady)
+						testInstanceSiteBuildAllocationContraints(t, dbSession, al1, cdbm.AllocationResourceTypeInstanceType, it.ID, cdbm.AllocationConstraintTypeReserved, 1, ipu)
+						testInstanceBuildMachineInstanceType(t, dbSession, selected, it)
+						rejected = testInstanceBuildMachine(t, dbSession, ip.ID, st1.ID, cutil.GetPtr(false), nil)
+						testInstanceBuildMachineInstanceType(t, dbSession, rejected, it)
+						req.InstanceTypeID = cutil.GetPtr(it.ID.String())
+					}
+					siteClient = &tmocks.Client{}
+					previous := scp.IDClientMap[st1.ID.String()]
+					scp.IDClientMap[st1.ID.String()] = siteClient
+					t.Cleanup(func() { scp.IDClientMap[st1.ID.String()] = previous })
+					inventory := map[string]*corev1.Machine{}
+					if !scenario.missing {
+						inventory[selected.ID] = testSpectrumXMachine(selected.ID, "ConnectX-8", scenario.count)
+					}
+					testSpectrumXDiscovery(t, siteClient, inventory, scenario.lookupErr).Once()
+					if scenario.status == http.StatusCreated || scenario.allocationErr != nil {
+						run := &tmocks.WorkflowRun{}
+						run.On("GetID").Return(uuid.NewString())
+						run.On("Get", mock.Anything, mock.Anything).Return(scenario.allocationErr)
+						siteClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateInstanceV2", mock.Anything).Return(run, nil).Once()
+					}
+				},
+				afterHandle: func(t *testing.T, rec *httptest.ResponseRecorder) {
+					siteClient.AssertExpectations(t)
+					machine, err := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, selected.ID, nil, false)
+					require.NoError(t, err)
+					assert.Equal(t, scenario.status == http.StatusCreated, machine.IsAssigned)
+					if rejected != nil {
+						machine, err = cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, rejected.ID, nil, false)
+						require.NoError(t, err)
+						assert.False(t, machine.IsAssigned)
+					}
+					instances, _, err := cdbm.NewInstanceDAO(dbSession).GetAll(ctx, nil, cdbm.InstanceFilterInput{MachineIDs: []string{selected.ID}}, cdbp.PageInput{}, nil)
+					require.NoError(t, err)
+					if scenario.status == http.StatusCreated {
+						require.Len(t, instances, 1)
+						var response model.APIInstance
+						require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+						assert.Equal(t, &selected.ID, response.MachineID)
+						require.Len(t, response.SpectrumXAttachments, 1)
+					} else {
+						assert.Empty(t, instances)
+					}
+				},
+			},
+		})
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			csh := CreateInstanceHandler{
@@ -3917,6 +4002,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
 				t.Errorf("CreateInstanceHandler.Handle() error = %v, wantErr %v", err, tt.wantErr)
 			}
+			if tt.args.afterHandle != nil {
+				tt.args.afterHandle(t, rec)
+			}
 
 			if tt.args.respCode != rec.Code {
 				t.Errorf("CreateInstanceHandler.Handle() resp = %v", rec.Body.String())
@@ -3925,6 +4013,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			require.Equal(t, tt.args.respCode, rec.Code)
 			if tt.args.respMessage != "" {
 				assert.Contains(t, rec.Body.String(), tt.args.respMessage)
+			}
+			if tt.args.afterHandle != nil {
+				return // SpectrumX cases assert their own persisted state and response above.
 			}
 			if tt.args.respCode != http.StatusCreated {
 				return
@@ -4885,6 +4976,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		expectedSiteSpectrumXAttachmentCount  *int
 		expectedRespSpectrumXAttachmentCount  *int
 		expectedSiteSpectrumXAttachmentType   *corev1.SpxAttachmentType
+		expectSpectrumXValidationFailure      bool
 		// When true, only assert len(siteReq.Config.Nvlink.GpuConfigs) matches the request (e.g. NVLink no-op where workflow uses DB order).
 		nvLinkGpuConfigsVerifyCountOnly bool
 		// When non-nil, expected len(siteReq.Config.Nvlink.GpuConfigs) for verifySiteControllerRequest (default: len(reqData.NVLinkInterfaces)).
@@ -4929,6 +5021,20 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 			verifySiteControllerRequest: true,
 			verifyChildSpanner:          true,
+		},
+		{
+			name:   "SpectrumX replacement validation failure does not mutate the instance",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Name: cutil.GetPtr("must-not-persist"), IpxeScript: os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+						SpectrumXPartitionID: sxp1.ID.String(), Device: "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC", DeviceInstance: cutil.GetPtr(1), AttachmentType: cdbm.SpectrumXAttachmentTypePhysical,
+					}},
+				},
+				reqInstance: inst1.ID.String(), reqOrg: tnOrg1, reqUser: tnu1,
+				respCode: http.StatusBadRequest, expectSpectrumXValidationFailure: true,
+			},
 		},
 		{
 			name: "test Instance update marks the Instance configuring for a SpectrumX-only update",
@@ -7474,9 +7580,25 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			if tt.args.beforeHandle != nil {
 				tt.args.beforeHandle(t)
 			}
+			var beforeSpectrumXInstance *cdbm.Instance
+			if len(tt.args.reqData.SpectrumXAttachments) > 0 && (tt.args.respCode == http.StatusOK || tt.args.expectSpectrumXValidationFailure) {
+				var readErr error
+				beforeSpectrumXInstance, readErr = cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil)
+				require.NoError(t, readErr)
+				require.NotNil(t, beforeSpectrumXInstance.MachineID)
+				id := *beforeSpectrumXInstance.MachineID
+				testSpectrumXDiscovery(t, tsc, map[string]*corev1.Machine{id: testSpectrumXMachine(id, "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC", 1)}, nil).Once()
+			}
 
 			if err := uih.Handle(ec); (err != nil) != tt.wantErr {
 				t.Errorf("UpdateInstanceHandler.Handle() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.args.expectSpectrumXValidationFailure {
+				after, readErr := cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, beforeSpectrumXInstance.ID, nil)
+				require.NoError(t, readErr)
+				assert.Equal(t, beforeSpectrumXInstance.Name, after.Name)
+				assert.Equal(t, beforeSpectrumXInstance.Status, after.Status)
+				assert.Equal(t, beforeSpectrumXInstance.Updated, after.Updated)
 			}
 
 			if tt.args.respCode != rec.Code {
