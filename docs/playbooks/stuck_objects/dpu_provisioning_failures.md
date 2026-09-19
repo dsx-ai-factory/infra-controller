@@ -54,6 +54,10 @@ Check:
 - DPF operator status.
 - `nico-dpu-agent` startup logs once the OS boots.
 
+If an NVIDIA BlueField-2 DPU remains in `DPUInitializing/Init` and exposes
+`ib0` and `ib1` instead of Ethernet interfaces, use
+[Machine Stuck in DPUInitializing/Init During Ingestion](dpu_initializing_init.md).
+
 ### `WaitingForNetworkConfig`
 
 The parent state determines what this repeated substate name means:
