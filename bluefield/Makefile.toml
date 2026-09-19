@@ -620,38 +620,38 @@ dependencies = ["setup-forge-dpu-deb-ci"]
 
 [tasks.helm-package-carbide-otelcol]
 category = "Build"
-description = "Package the carbide-otelcol Helm chart"
+description = "Package the nico-otelcol Helm chart"
 workspace = false
 script = '''
     mkdir -p ${REPO_ROOT}/target/charts/
-    helm package ${REPO_ROOT}/bluefield/charts/carbide-otelcol -d ${REPO_ROOT}/target/charts/
+    helm package ${REPO_ROOT}/bluefield/charts/nico-otelcol -d ${REPO_ROOT}/target/charts/
 '''
 
 [tasks.helm-package-carbide-dpu-agent]
 category = "Build"
-description = "Package the carbide-dpu-agent Helm chart"
+description = "Package the nico-dpu-agent Helm chart"
 workspace = false
 script = '''
     mkdir -p ${REPO_ROOT}/target/charts/
-    helm package ${REPO_ROOT}/bluefield/charts/carbide-dpu-agent -d ${REPO_ROOT}/target/charts/
+    helm package ${REPO_ROOT}/bluefield/charts/nico-dpu-agent -d ${REPO_ROOT}/target/charts/
 '''
 
 [tasks.helm-package-carbide-dhcp-server]
 category = "Build"
-description = "Package the carbide-dhcp-server Helm chart"
+description = "Package the nico-dhcp-server Helm chart"
 workspace = false
 script = '''
     mkdir -p ${REPO_ROOT}/target/charts/
-    helm package ${REPO_ROOT}/bluefield/charts/carbide-dhcp-server -d ${REPO_ROOT}/target/charts/
+    helm package ${REPO_ROOT}/bluefield/charts/nico-dhcp-server -d ${REPO_ROOT}/target/charts/
 '''
 
 [tasks.helm-package-carbide-fmds]
 category = "Build"
-description = "Package the carbide-fmds Helm chart"
+description = "Package the nico-fmds Helm chart"
 workspace = false
 script = '''
     mkdir -p ${REPO_ROOT}/target/charts/
-    helm package ${REPO_ROOT}/bluefield/charts/carbide-fmds -d ${REPO_ROOT}/target/charts/
+    helm package ${REPO_ROOT}/bluefield/charts/nico-fmds -d ${REPO_ROOT}/target/charts/
 '''
 
 [tasks.helm-package-all]
@@ -671,6 +671,7 @@ description = "Build the carbide-otelcol container image for arm64"
 workspace = false
 script = '''
     docker build \
+        --platform linux/arm64 \
         -t ${CARBIDE_IMAGE_REGISTRY:-nvcr.io/nvidia/carbide}/otelcol-contrib:${DPU_AGENT_PKG_VERSION} \
         -f ${REPO_ROOT}/bluefield/containers/otelcol-contrib/Dockerfile \
         ${REPO_ROOT}
@@ -682,6 +683,7 @@ description = "Build the carbide-dpu-agent container image for arm64"
 workspace = false
 script = '''
     docker build \
+        --platform linux/arm64 \
         -t ${CARBIDE_IMAGE_REGISTRY:-nvcr.io/nvidia/carbide}/forge-dpu-agent:${DPU_AGENT_PKG_VERSION} \
         -f ${REPO_ROOT}/bluefield/containers/forge-dpu-agent/Dockerfile \
         ${REPO_ROOT}
@@ -694,6 +696,7 @@ description = "Build the carbide-dhcp-server container image for arm64"
 workspace = false
 script = '''
     docker build \
+        --platform linux/arm64 \
         -t ${CARBIDE_IMAGE_REGISTRY:-nvcr.io/nvidia/carbide}/forge-dhcp-server:${DPU_AGENT_PKG_VERSION} \
         -f ${REPO_ROOT}/bluefield/containers/forge-dhcp-server/Dockerfile \
         ${REPO_ROOT}
@@ -706,6 +709,7 @@ description = "Build the carbide-dpu-otel-agent container image for arm64"
 workspace = false
 script = '''
     docker build \
+        --platform linux/arm64 \
         -t ${CARBIDE_IMAGE_REGISTRY:-nvcr.io/nvidia/carbide}/forge-dpu-otel-agent:${DPU_AGENT_PKG_VERSION} \
         -f ${REPO_ROOT}/bluefield/containers/forge-dpu-otel-agent/Dockerfile \
         ${REPO_ROOT}
@@ -718,11 +722,24 @@ description = "Build the carbide-fmds container image for arm64"
 workspace = false
 script = '''
     docker build \
+        --platform linux/arm64 \
         -t ${CARBIDE_IMAGE_REGISTRY:-nvcr.io/nvidia/carbide}/carbide-fmds:${DPU_AGENT_PKG_VERSION} \
         -f ${REPO_ROOT}/bluefield/containers/carbide-fmds/Dockerfile \
         ${REPO_ROOT}
 '''
 dependencies = ["build-fmds"]
+
+[tasks.docker-build-transceiver-exporter]
+category = "Build"
+description = "Build the transceiver-exporter container image for arm64"
+workspace = false
+script = '''
+    docker build \
+        --platform linux/arm64 \
+        -t ${CARBIDE_IMAGE_REGISTRY:-nvcr.io/nvidia/carbide}/transceiver-exporter:${DPU_AGENT_PKG_VERSION} \
+        -f ${REPO_ROOT}/bluefield/containers/transceiver-exporter/Dockerfile \
+        ${REPO_ROOT}
+'''
 
 [tasks.docker-build-all]
 category = "Build"
@@ -734,4 +751,5 @@ dependencies = [
   "docker-build-dhcp-server",
   "docker-build-dpu-otel-agent",
   "docker-build-fmds",
+  "docker-build-transceiver-exporter",
 ]
