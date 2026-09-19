@@ -34,6 +34,7 @@ carbide-redfish = { path = "../redfish" }
 carbide-secrets = { path = "../secrets" }
 carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid" }
+component-manager = { path = "../component-manager" }
 config-version = { path = "../config-version" }
 
 # these are alphabetized
@@ -45,7 +46,6 @@ futures-util = { workspace = true }
 itertools = { workspace = true }
 http = { workspace = true }
 libredfish = { workspace = true }
-librms = { workspace = true }
 mac_address = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
@@ -77,6 +77,7 @@ carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-rpc = { path = "../rpc", features = ["test-support"] }
 carbide-site-explorer = { path = ".", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
+component-manager = { path = "../component-manager", features = ["test-support"] }
 
 tokio = { workspace = true, features = ["macros", "rt"] }
 tonic = { workspace = true }

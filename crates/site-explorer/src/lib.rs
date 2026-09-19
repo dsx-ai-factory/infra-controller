@@ -34,6 +34,7 @@ use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineType;
 use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
 use chrono::Utc;
+use component_manager::MachineInfoProvider;
 use config::SiteExplorerConfig;
 use db::explored_endpoints::EndpointReportNotCurrent;
 use db::{
@@ -42,7 +43,6 @@ use db::{
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
-use librms::RmsApi;
 use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::errors::OperatorError;
@@ -452,7 +452,6 @@ pub struct SiteExplorer {
     /// Backstops the persisted BMC-reset timestamps for the reset rate limit,
     /// so a reset whose timestamp write failed still throttles the next reset.
     recent_bmc_resets: RecentBmcResets,
-    // rms_client: Option<Arc<dyn RmsApi>>,
 }
 
 /// State captured once and applied throughout a Site Explorer iteration.
@@ -478,7 +477,7 @@ impl SiteExplorer {
         common_pools: Arc<CommonPools>,
         work_lock_manager_handle: WorkLockManagerHandle,
         rack_profiles: RackProfileConfig,
-        rms_client: Option<Arc<dyn RmsApi>>,
+        machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         credential_manager: Arc<dyn CredentialManager>,
         dpf_enabled_at_site: bool,
     ) -> Self {
@@ -503,7 +502,7 @@ impl SiteExplorer {
                 explorer_config.clone(),
                 common_pools,
                 rack_profiles,
-                rms_client.clone(),
+                machine_info_provider,
                 credential_manager,
                 dpf_enabled_at_site,
             ),

@@ -20,17 +20,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_instrument::emit;
-use carbide_rack::rms_node_type::compute_node_identity_for_profile;
-use carbide_secrets::credentials::{
-    BmcCredentialType, CredentialKey, CredentialManager, Credentials,
-};
+use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialManager};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId};
+use component_manager::{MachineInfoProvider, MachineLocationTarget};
 use db::machine::MachineNetworkConfigNotCurrent;
 use db::{ConditionalWrite, Transaction};
 use itertools::Itertools;
-use librms::RmsApi;
-use librms::protos::rack_manager as rms;
 use mac_address::MacAddress;
 use model::bmc_info::BmcInfo;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
@@ -78,19 +74,19 @@ pub struct MachineCreator {
     config: SiteExplorerConfig,
     common_pools: Arc<CommonPools>,
     rack_profiles: Arc<RackProfileConfig>,
-    rms_client: Option<Arc<dyn RmsApi>>,
+    machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
     credential_manager: Arc<dyn CredentialManager>,
     dpf_enabled_at_site: bool,
 }
 
 impl MachineCreator {
-    /// Creates a machine creator with site configuration and optional RMS integration.
+    /// Creates a machine creator with an optional machine-information provider.
     pub fn new(
         database_connection: PgPool,
         config: SiteExplorerConfig,
         common_pools: Arc<CommonPools>,
         rack_profiles: Arc<RackProfileConfig>,
-        rms_client: Option<Arc<dyn RmsApi>>,
+        machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         credential_manager: Arc<dyn CredentialManager>,
         dpf_enabled_at_site: bool,
     ) -> Self {
@@ -99,7 +95,7 @@ impl MachineCreator {
             config,
             common_pools,
             rack_profiles,
-            rms_client,
+            machine_info_provider,
             credential_manager,
             dpf_enabled_at_site,
         }
@@ -160,7 +156,7 @@ impl MachineCreator {
         &self,
         bmc_ips: &[IpAddr],
     ) -> SiteExplorerResult<()> {
-        let Some(rms_client) = &self.rms_client else {
+        let Some(machine_info_provider) = &self.machine_info_provider else {
             return Ok(());
         };
         if bmc_ips.is_empty() {
@@ -169,8 +165,9 @@ impl MachineCreator {
 
         let identities =
             db::machine::find_rms_identities_by_bmc_ips(&self.database_connection, bmc_ips).await?;
+
         let mut machine_ids_by_node_id = HashMap::new();
-        let mut nodes = Vec::new();
+        let mut targets = Vec::new();
 
         for identity in identities {
             if identity.slot_number.is_some() && identity.tray_index.is_some() {
@@ -196,19 +193,19 @@ impl MachineCreator {
                 );
                 continue;
             };
-            let node_identity = match compute_node_identity_for_profile(rack_profile) {
-                Ok(node_identity) => node_identity,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        %rack_id,
-                        %rack_profile_id,
-                        host_machine_id = %identity.id,
-                        "Rack profile cannot identify a compute node for RMS slot and tray reconciliation"
-                    );
-                    continue;
-                }
-            };
+
+            if let Err(error) = machine_info_provider.validate_profile(rack_profile) {
+                tracing::warn!(
+                    %error,
+                    %rack_id,
+                    %rack_profile_id,
+                    host_machine_id = %identity.id,
+                    "Rack profile cannot identify a compute node for RMS slot and tray reconciliation"
+                );
+
+                continue;
+            }
+
             let host_machine_id = match identity.id.parse::<MachineId>() {
                 Ok(host_machine_id) => host_machine_id,
                 Err(error) => {
@@ -229,46 +226,29 @@ impl MachineCreator {
                 })
                 .await
                 .ok()
-                .flatten()
-                .map(
-                    |Credentials::UsernamePassword { username, password }| rms::Credentials {
-                        auth: Some(rms::credentials::Auth::UserPass(rms::UsernamePassword {
-                            username,
-                            password,
-                        })),
-                    },
-                );
+                .flatten();
 
-            let mut node = rms::NodeInfo {
-                node_id: identity.id.clone(),
-                rack_id: rack_id.to_string(),
-                r#type: None,
-                node_descriptor: None,
-                bmc_endpoint: Some(rms::Endpoint {
-                    interface: Some(rms::NetworkInterface {
-                        ip_address: identity.bmc_ip.to_string(),
-                        mac_address: identity.bmc_mac_address.to_string(),
-                        host_name: None,
-                    }),
-                    port: 443,
-                    credentials: bmc_credentials,
-                }),
-                ..Default::default()
-            };
-            node_identity.apply_to_node_info(&mut node);
-            machine_ids_by_node_id.insert(identity.id, host_machine_id);
-            nodes.push(node);
+            let node_id = identity.id;
+
+            machine_ids_by_node_id.insert(node_id.clone(), host_machine_id);
+
+            targets.push(MachineLocationTarget {
+                node_id,
+                rack_id,
+                profile: rack_profile,
+                bmc_ip: identity.bmc_ip,
+                bmc_mac: identity.bmc_mac_address,
+                credentials: bmc_credentials,
+            });
         }
 
-        if nodes.is_empty() {
+        if targets.is_empty() {
             return Ok(());
         }
 
         let response = match tokio::time::timeout(
             RMS_MACHINE_LOCATION_TIMEOUT,
-            rms_client.batch_get_node_device_info(rms::BatchGetNodeDeviceInfoRequest {
-                nodes: Some(rms::NodeSet { nodes }),
-            }),
+            machine_info_provider.get_machine_locations(targets),
         )
         .await
         {
@@ -287,7 +267,7 @@ impl MachineCreator {
             }
         };
 
-        for details in response.node_device_details {
+        for details in response {
             let Some(host_machine_id) = machine_ids_by_node_id.remove(&details.node_id) else {
                 tracing::warn!(
                     rms_node_id = %details.node_id,
@@ -295,7 +275,10 @@ impl MachineCreator {
                 );
                 continue;
             };
-            let (slot_number, tray_index) = rms_slot_and_tray(&details);
+
+            let (slot_number, tray_index) =
+                machine_location_values(details.slot_number, details.tray_index);
+
             persist_machine_slot_and_tray(
                 &self.database_connection,
                 host_machine_id,
@@ -614,7 +597,9 @@ impl MachineCreator {
         )
         .await?;
 
-        if let (Some(rack_id), Some(_)) = (&expected_machine.data.rack_id, &self.rms_client) {
+        if let (Some(rack_id), Some(machine_info_provider)) =
+            (&expected_machine.data.rack_id, &self.machine_info_provider)
+        {
             let Some(rack_profile_id) = rack_profile_id.as_ref() else {
                 return Err(SiteExplorerError::InvalidArgument(format!(
                     "rack {rack_id} has no rack_profile_id for RMS slot and tray lookup for host machine {host_machine_id}"
@@ -627,7 +612,8 @@ impl MachineCreator {
                 )));
             };
 
-            compute_node_identity_for_profile(rack_profile)
+            machine_info_provider
+                .validate_profile(rack_profile)
                 .map_err(|error| SiteExplorerError::InvalidArgument(error.to_string()))?;
         }
 
@@ -1589,12 +1575,16 @@ impl MachineCreator {
     }
 }
 
-fn rms_slot_and_tray(details: &rms::NodeDeviceInfo) -> (Option<i32>, Option<i32>) {
-    let slot_number = crate::rms_location_value(details.slot_number).unwrap_or_else(|value| {
+fn machine_location_values(
+    slot_number: Option<u32>,
+    tray_index: Option<u32>,
+) -> (Option<i32>, Option<i32>) {
+    let slot_number = crate::rms_location_value(slot_number).unwrap_or_else(|value| {
         emit(SiteExplorerMachineSlotTrayValueInvalid::SlotNumber { value });
         None
     });
-    let tray_index = crate::rms_location_value(details.tray_index).unwrap_or_else(|value| {
+
+    let tray_index = crate::rms_location_value(tray_index).unwrap_or_else(|value| {
         emit(SiteExplorerMachineSlotTrayValueInvalid::TrayIndex { value });
         None
     });

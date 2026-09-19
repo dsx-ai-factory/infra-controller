@@ -57,6 +57,9 @@ use crate::compute_tray_manager::{
 };
 use crate::config::ComponentManagerConfig;
 use crate::error::ComponentManagerError;
+use crate::machine_info_provider::{
+    MachineInfoProvider, MachineLocationError, MachineLocationObservation, MachineLocationTarget,
+};
 use crate::nv_switch_manager::{
     Backend as NvSwitchBackend, ConfigureSwitchCertificateJobStatus, NvSwitchManager,
     ScaleUpFabricManagerJobStatus, ScaleUpFabricResponseStatus, ScaleUpFabricServiceStatuses,
@@ -256,6 +259,85 @@ impl RmsSwitchSystemImageStatusApi for librms::RackManagerApi {
 /// RMS implementation of durable rack-level firmware-object operations.
 struct RmsRackFirmwareUpdateManager {
     client: Arc<dyn RmsApi>,
+}
+
+/// RMS implementation of machine slot and tray discovery.
+struct RmsMachineInfoProvider {
+    client: Arc<dyn RmsApi>,
+}
+
+impl crate::machine_info_provider::sealed::Sealed for RmsMachineInfoProvider {}
+
+#[async_trait::async_trait]
+impl MachineInfoProvider for RmsMachineInfoProvider {
+    fn validate_profile(&self, profile: &RackProfile) -> Result<(), MachineLocationError> {
+        compute_node_identity_for_profile(profile)
+            .map(|_| ())
+            .map_err(MachineLocationError::new)
+    }
+
+    async fn get_machine_locations(
+        &self,
+        targets: Vec<MachineLocationTarget<'_>>,
+    ) -> Result<Vec<MachineLocationObservation>, MachineLocationError> {
+        let nodes = targets
+            .into_iter()
+            .map(machine_location_node_info)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let response = self
+            .client
+            .batch_get_node_device_info(rms::BatchGetNodeDeviceInfoRequest {
+                nodes: Some(rms::NodeSet { nodes }),
+            })
+            .await
+            .map_err(MachineLocationError::new)?;
+
+        Ok(response
+            .node_device_details
+            .into_iter()
+            .map(|details| MachineLocationObservation {
+                node_id: details.node_id,
+                slot_number: details.slot_number,
+                tray_index: details.tray_index,
+            })
+            .collect())
+    }
+}
+
+fn machine_location_node_info(
+    target: MachineLocationTarget<'_>,
+) -> Result<rms::NodeInfo, MachineLocationError> {
+    let node_identity =
+        compute_node_identity_for_profile(target.profile).map_err(MachineLocationError::new)?;
+
+    let credentials = target.credentials.map(|credentials| match credentials {
+        Credentials::UsernamePassword { username, password } => rms::Credentials {
+            auth: Some(rms::credentials::Auth::UserPass(rms::UsernamePassword {
+                username,
+                password,
+            })),
+        },
+    });
+
+    let mut node = rms::NodeInfo {
+        node_id: target.node_id,
+        rack_id: target.rack_id.to_string(),
+        bmc_endpoint: Some(rms::Endpoint {
+            interface: Some(rms::NetworkInterface {
+                ip_address: target.bmc_ip.to_string(),
+                mac_address: target.bmc_mac.to_string(),
+                host_name: None,
+            }),
+            port: 443,
+            credentials,
+        }),
+        ..Default::default()
+    };
+
+    node_identity.apply_to_node_info(&mut node);
+
+    Ok(node)
 }
 
 impl crate::rack_firmware_update_manager::sealed::Sealed for RmsRackFirmwareUpdateManager {}
@@ -1037,6 +1119,11 @@ fn apply_nvos_job_status_response(
 /// Creates the RMS implementation of durable rack-level NVOS operations.
 pub fn rms_nvos_update_manager(client: Arc<dyn RmsApi>) -> impl NvosUpdateManager {
     RmsNvosUpdateManager { client }
+}
+
+/// Creates the RMS implementation of machine slot and tray discovery.
+pub fn rms_machine_info_provider(client: Arc<dyn RmsApi>) -> impl MachineInfoProvider {
+    RmsMachineInfoProvider { client }
 }
 
 /// Creates the RMS implementation of durable rack-level firmware-object operations.
@@ -4654,6 +4741,124 @@ mod tests {
             result,
             Err(ComponentManagerError::RejectedBeforeDispatch(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn machine_location_maps_request_and_response() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mock = Arc::new(MockRmsApi::new());
+
+        let provider = RmsMachineInfoProvider {
+            client: mock.clone(),
+        };
+
+        let profile = test_rms_profile();
+        let rack_id = RackId::new("rack-1");
+
+        mock.enqueue_batch_get_node_device_info(Ok(rms::BatchGetNodeDeviceInfoResponse {
+            status: rms::ReturnCode::Failure as i32,
+            message: "ignored top-level status".into(),
+            node_device_details: vec![rms::NodeDeviceInfo {
+                node_id: "node-1".into(),
+                slot_number: Some(u32::MAX),
+                tray_index: Some(3),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .await;
+
+        let observations = provider
+            .get_machine_locations(vec![MachineLocationTarget {
+                node_id: "node-1".into(),
+                rack_id: rack_id.clone(),
+                profile: &profile,
+                bmc_ip: CT_IP_1.parse()?,
+                bmc_mac: CT_MAC_1.parse()?,
+                credentials: Some(Credentials::new("admin", "password")),
+            }])
+            .await?;
+
+        assert_eq!(
+            observations,
+            vec![MachineLocationObservation {
+                node_id: "node-1".into(),
+                slot_number: Some(u32::MAX),
+                tray_index: Some(3),
+            }]
+        );
+
+        let calls = mock.batch_get_node_device_info_calls().await;
+
+        let [call] = calls.as_slice() else {
+            panic!("expected one RMS machine-location request");
+        };
+
+        let Some(nodes) = &call.nodes else {
+            panic!("expected RMS request nodes");
+        };
+
+        let [node] = nodes.nodes.as_slice() else {
+            panic!("expected one RMS request node");
+        };
+
+        assert_eq!(node.node_id, "node-1");
+        assert_eq!(node.rack_id, rack_id.to_string());
+        assert_eq!(node.r#type, Some(rms::NodeType::ComputeGb200Nvidia as i32));
+
+        let endpoint = node.bmc_endpoint.as_ref().expect("BMC endpoint");
+        let interface = endpoint.interface.as_ref().expect("BMC interface");
+
+        assert_eq!(interface.ip_address, CT_IP_1);
+        assert_eq!(interface.mac_address, CT_MAC_1);
+        assert_eq!(endpoint.port, 443);
+        assert!(endpoint.credentials.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn machine_location_preserves_rms_error() -> Result<(), Box<dyn std::error::Error>> {
+        let mock = Arc::new(MockRmsApi::new());
+
+        let provider = RmsMachineInfoProvider {
+            client: mock.clone(),
+        };
+
+        let profile = test_rms_profile();
+
+        let error =
+            RackManagerError::ApiInvocationError(tonic::Status::unavailable("RMS unavailable"));
+
+        let expected = error.to_string();
+
+        mock.enqueue_batch_get_node_device_info(Err(error)).await;
+
+        let result = provider
+            .get_machine_locations(vec![MachineLocationTarget {
+                node_id: "node-1".into(),
+                rack_id: RackId::new("rack-1"),
+                profile: &profile,
+                bmc_ip: CT_IP_1.parse()?,
+                bmc_mac: CT_MAC_1.parse()?,
+                credentials: None,
+            }])
+            .await;
+
+        let Err(error) = result else {
+            panic!("expected RMS machine-location lookup failure");
+        };
+
+        assert_eq!(error.to_string(), expected);
+
+        let source = std::error::Error::source(&error).ok_or_else(|| {
+            std::io::Error::other("machine-location error source was not retained")
+        })?;
+
+        assert_eq!(source.to_string(), expected);
+        assert!(source.downcast_ref::<RackManagerError>().is_some());
+
+        Ok(())
     }
 
     #[test]
