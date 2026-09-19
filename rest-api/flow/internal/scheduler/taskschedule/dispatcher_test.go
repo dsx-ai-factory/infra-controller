@@ -967,6 +967,39 @@ func TestSubmitScopeTasks(t *testing.T) {
 		assert.Equal(t, ruleUUID, *capturedReq.RuleID)
 	})
 
+	t.Run("invalid persisted rule ID fails before task submission", func(t *testing.T) {
+		tmpl, err := MarshalTemplate(
+			taskcommon.TaskTypePowerControl,
+			taskcommon.OpCodePowerControlPowerOn,
+			json.RawMessage(`{}`),
+			TemplateOptions{RuleID: "not-a-uuid"},
+		)
+		require.NoError(t, err)
+
+		called := false
+		manager := &mockTaskManager{
+			submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
+				called = true
+				return []uuid.UUID{taskID}, nil
+			},
+		}
+		dispatcher := newDispatcher(nil, nil, manager)
+		schedule := &dbmodel.TaskSchedule{
+			ID:                uuid.New(),
+			Name:              "sched",
+			OperationTemplate: tmpl,
+		}
+
+		_, _, err = dispatcher.submitScopeTasks(
+			context.Background(),
+			schedule,
+			[]*dbmodel.TaskScheduleScope{{ID: scopeID, RackID: rackID}},
+			now,
+		)
+		require.ErrorContains(t, err, "invalid rule_id")
+		assert.False(t, called)
+	})
+
 	t.Run("SubmitTask error — scope skipped, all-fail error returned", func(t *testing.T) {
 		ts := &dbmodel.TaskSchedule{ID: uuid.New(), Name: "sched", OperationTemplate: validTemplate}
 		scope := &dbmodel.TaskScheduleScope{ID: scopeID, RackID: rackID}
