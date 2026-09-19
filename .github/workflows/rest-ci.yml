@@ -37,7 +37,7 @@ jobs:
           fetch-depth: 0
 
       - name: Check REST CI final-gate inventory
-        run: python3 -B .github/ci/check_ci_gate.py inventory --policy rest .github/workflows/rest-ci.yml
+        run: python3 -B .github/ci/check_ci_gate.py inventory --workflow rest .github/workflows/rest-ci.yml
 
       - name: Check REST CI concurrency policy
         run: bash scripts/check-ci-concurrency.sh rest
@@ -240,17 +240,16 @@ jobs:
   # ============================================================================
   # AGGREGATOR — single required check for branch protection
   # ============================================================================
-  # Passes only when every required job reports `success` or `skipped`.
-  # `skipped` counts as pass — that's how core-only PRs unblock when the
-  # `changes` gate intentionally skips the REST pipeline, and it is also what
-  # lets `build-and-push` and `build-and-push-pr` both sit in needs when
-  # exactly one of the two ever runs.
-  # Any other result, plus missing or malformed data, fails closed.
+  # This is the final required REST check. A skip passes only when `changes`
+  # says REST does not need to run, or when the ref chooses the other Docker
+  # job. Failures, cancellations, malformed decisions, and other skips fail.
   # Every job that can determine REST CI health is listed so an upstream
   # failure cannot be hidden when its downstream jobs become `skipped`.
   # The checker in `changes` rejects every job that is neither gated nor
   # exempted and protects `if: always()` so a failed dependency cannot skip
   # this required check.
+  # When a gated REST job gains another condition, update its allowed skip in
+  # `.github/ci/check_ci_gate.py`. The current Docker ref split has direct tests.
   rest-ci-pass:
     name: rest-ci-pass
     runs-on: linux-amd64-cpu4
@@ -275,4 +274,4 @@ jobs:
       - name: Decide pass/fail
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
-        run: python3 -B .github/ci/check_ci_gate.py results
+        run: python3 -B .github/ci/check_ci_gate.py results --workflow rest
