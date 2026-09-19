@@ -70,6 +70,9 @@ struct RedfishSimState {
     /// (perfectly in sync); tests set it to simulate a BMC clock that is out of
     /// sync to exercise the time-sync reset/retry path.
     bmc_time_offset_seconds: i64,
+    /// When enabled, powered-off hosts report the stable BlueField-3
+    /// StandbyOffline state as `Paused`.
+    paused_when_off: bool,
     /// Records every call to `RedfishClientPool::create_client` so tests can
     /// assert what vendor was passed at each call site.
     create_client_calls: Vec<CreateClientCall>,
@@ -407,6 +410,11 @@ impl RedfishSim {
     /// the time-sync threshold to simulate an out-of-sync BMC clock.
     pub fn set_bmc_time_offset_seconds(&self, offset: i64) {
         self.state.lock().unwrap().bmc_time_offset_seconds = offset;
+    }
+
+    /// Make powered-off hosts report `Paused`, matching BlueField-3.
+    pub fn set_paused_when_off(&self, paused: bool) {
+        self.state.lock().unwrap().paused_when_off = paused;
     }
 
     /// Returns a snapshot of every `create_client` call made through this sim,
@@ -755,7 +763,15 @@ impl Redfish for RedfishSimClient {
     fn get_power_state<'a>(
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::PowerState, RedfishError>> {
-        Box::pin(async move { Ok(self.state.lock().unwrap().hosts[&self._host].power) })
+        Box::pin(async move {
+            let state = self.state.lock().unwrap();
+            let power = state.hosts[&self._host].power;
+            Ok(if state.paused_when_off && power == PowerState::Off {
+                PowerState::Paused
+            } else {
+                power
+            })
+        })
     }
 
     fn get_power_metrics<'a>(
