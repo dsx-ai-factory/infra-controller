@@ -95,6 +95,8 @@ jobs:
               - '!helm/rest/**'
               - '!docs/**'
               - '!fern/**'
+            expected_component_rest:
+              - 'rest-api/{Makefile,proto/core/src/v1/nico_nico.proto,**/expected{machine,powershelf,switch,component}*.go,api/pkg/api/handler/util/common/grpcproxy.go,common/pkg/grpcproxy/**,common/pkg/util/encryption.go,site-workflow/pkg/{workflow,activity}/grpcproxy.go,site-workflow/pkg/util/temporal.go,site-workflow/pkg/grpc/client/proxy.go}'
 
       - name: Decide whether Core CI should run
         id: gate
@@ -102,11 +104,16 @@ jobs:
           REF: ${{ github.ref }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
           NON_REST_CHANGED: ${{ steps.non-rest-changes.outputs.non_rest }}
+          EXPECTED_COMPONENT_REST_CHANGED: ${{ steps.non-rest-changes.outputs.expected_component_rest }}
         run: |
           run_core_ci=true
 
           if [[ "${REF}" =~ ^refs/heads/pull-request/[0-9]+$ ]]; then
             run_core_ci="${NON_REST_CHANGED}"
+            # The expected-component REST tests need the real Core service.
+            if [[ "${EXPECTED_COMPONENT_REST_CHANGED}" == "true" ]]; then
+              run_core_ci=true
+            fi
           fi
 
           if [[ "${COMMIT_MESSAGE}" =~ ci-run-complete-pipeline ]]; then
@@ -1046,6 +1053,12 @@ jobs:
               sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;"
               createdb root
               cargo make test-release-container-services
+              # REST uses TCP and creates its own nicotest database in this
+              # container. Core keeps using its separate SQLx databases.
+              psql -c "ALTER USER root WITH PASSWORD \$\$core-patch-test\$\$;"
+              PATH="/usr/local/go/bin:${PATH}" CORE_PATCH_TEST_EXISTING_POSTGRES=1 \
+                PGPORT=5432 PGUSER=root PGPASSWORD=core-patch-test \
+                cargo make test-expected-component-rest-patch
               sccache --show-stats || true
               echo "sccache directory holds $(du -sh /sccache | cut -f1)"
             '

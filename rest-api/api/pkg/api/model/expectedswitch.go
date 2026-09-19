@@ -16,6 +16,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // nvosMacAddressRegexp matches the 6-octet, colon- or hyphen-separated MAC
@@ -176,6 +177,15 @@ type APIExpectedSwitchUpdateRequest struct {
 
 // Validate ensure the values passed in request are acceptable
 func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
+	credentialErr := validateExpectedComponentCredentialPair(esur.DefaultBmcUsername, esur.DefaultBmcPassword, "defaultBmcUsername", "defaultBmcPassword")
+	if credentialErr != nil {
+		return credentialErr
+	}
+	credentialErr = validateExpectedComponentCredentialPair(esur.NvOsUsername, esur.NvOsPassword, "nvOsUsername", "nvOsPassword")
+	if credentialErr != nil {
+		return credentialErr
+	}
+
 	if esur.ID != nil {
 		if *esur.ID == "" {
 			return validation.Errors{
@@ -200,6 +210,10 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 			validation.When(esur.DefaultBmcPassword != nil && *esur.DefaultBmcPassword != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Password consists only of whitespace")),
 			validation.Length(1, 20).Error("BMC Password must be 1-20 characters")),
+		validation.Field(&esur.NvOsUsername,
+			validation.NilOrNotEmpty.Error("NVOS Username cannot be empty")),
+		validation.Field(&esur.NvOsPassword,
+			validation.NilOrNotEmpty.Error("NVOS Password cannot be empty")),
 		validation.Field(&esur.SwitchSerialNumber,
 			validation.NilOrNotEmpty.Error("Switch Serial Number cannot be empty"),
 			validation.When(esur.SwitchSerialNumber != nil && *esur.SwitchSerialNumber != "",
@@ -231,6 +245,35 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 	}
 
 	return nil
+}
+
+// ToProto builds the Core patch from the updated cloud row and the fields
+// selected by this request. Call Validate before conversion and pass the
+// updated cloud row so derived metadata labels include its retained values.
+// Explicit zero and empty values remain updates.
+func (esur *APIExpectedSwitchUpdateRequest) ToProto(entity *cdbm.ExpectedSwitch) *corev1.PatchExpectedSwitchRequest {
+	resource := entity.ToProto(cdbm.ExpectedSwitchCredentials{
+		BmcUsername:  esur.DefaultBmcUsername,
+		BmcPassword:  esur.DefaultBmcPassword,
+		NvosUsername: esur.NvOsUsername,
+		NvosPassword: esur.NvOsPassword,
+	})
+	return &corev1.PatchExpectedSwitchRequest{
+		ExpectedSwitch: resource,
+		UpdateMask: expectedComponentUpdateMask(
+			expectedComponentUpdateField{"bmc_username", esur.DefaultBmcUsername != nil},
+			expectedComponentUpdateField{"bmc_password", esur.DefaultBmcPassword != nil},
+			expectedComponentUpdateField{"bmc_ip_address", esur.BmcIpAddress != nil},
+			expectedComponentUpdateField{"rack_id", esur.RackID != nil},
+			expectedComponentUpdateField{"metadata.name", esur.Name != nil},
+			expectedComponentUpdateField{"metadata.description", esur.Description != nil},
+			expectedComponentUpdateField{"metadata.labels", esur.Labels != nil || esur.Manufacturer != nil || esur.Model != nil || esur.SlotID != nil || esur.TrayIdx != nil || esur.HostID != nil},
+			expectedComponentUpdateField{"switch_serial_number", esur.SwitchSerialNumber != nil},
+			expectedComponentUpdateField{"nvos_mac_addresses", esur.NvosMacAddresses != nil},
+			expectedComponentUpdateField{"nvos_username", esur.NvOsUsername != nil},
+			expectedComponentUpdateField{"nvos_password", esur.NvOsPassword != nil},
+		),
+	}
 }
 
 // APIExpectedSwitch is the data structure to capture API representation of an ExpectedSwitch

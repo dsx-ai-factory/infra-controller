@@ -217,6 +217,39 @@ test-api:
 	$(MAKE) ensure-postgres
 	cd api && go test -p 1 ./... -count=1
 
+# Called by the Rust expected-component PATCH integration test while its real
+# Core listener is running. Local runs own a Docker database on a random
+# loopback port. CORE_PATCH_TEST_EXISTING_POSTGRES=1 instead uses CI's private
+# localhost PostgreSQL instance, with PGPORT, PGUSER, and PGPASSWORD required.
+# The test helper creates nicotest separately from Core's SQLx databases.
+# CI=false keeps the database helper from overriding localhost with postgres:5432.
+.PHONY: test-api-core-patch
+test-api-core-patch: TIMEOUT_COMMAND := $(shell command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null)
+test-api-core-patch:
+	@test -n "$$CORE_PATCH_TEST_ADDRESS" || { echo 'CORE_PATCH_TEST_ADDRESS must name the running Core test listener' >&2; exit 1; }
+	@test -n "$(TIMEOUT_COMMAND)" || { echo 'GNU timeout is required (timeout or gtimeout; install coreutils)' >&2; exit 1; }
+ifeq ($(CORE_PATCH_TEST_EXISTING_POSTGRES),1)
+	@: "$${PGPORT:?PGPORT is required for the existing CI PostgreSQL instance}" \
+		"$${PGUSER:?PGUSER is required for the existing CI PostgreSQL instance}" \
+		"$${PGPASSWORD:?PGPASSWORD is required for the existing CI PostgreSQL instance}"
+	@cd api && CI=false "$(TIMEOUT_COMMAND)" 15m go test -p 1 ./pkg/api/handler \
+		-run '^TestExpectedComponentPatchCoreIntegration$$' -timeout=5m -count=1
+else
+	@set -eu; \
+	container_name="nico-rest-core-patch-$$$$"; \
+	cleanup() { docker rm -f "$$container_name" >/dev/null 2>&1 || true; }; \
+	trap cleanup EXIT; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM; \
+	docker run -d --rm --name "$$container_name" -p 127.0.0.1::5432 \
+		-e POSTGRES_USER=$(POSTGRES_USER) -e POSTGRES_PASSWORD=$(POSTGRES_PASSWORD) \
+		-e POSTGRES_DB=$(POSTGRES_DB) $(POSTGRES_IMAGE) >/dev/null; \
+	postgres_port=$$(docker port "$$container_name" 5432/tcp | sed 's/.*://'); \
+	CI=false PGPORT="$$postgres_port" PGUSER=$(POSTGRES_USER) PGPASSWORD=$(POSTGRES_PASSWORD) \
+		GOFLAGS='-run=^TestExpectedComponentPatchCoreIntegration$$ -timeout=5m' \
+		"$(TIMEOUT_COMMAND)" 15m $(MAKE) test-api POSTGRES_CONTAINER_NAME="$$container_name" POSTGRES_PORT="$$postgres_port"
+endif
+
 test-auth:
 	$(MAKE) ensure-postgres
 	cd auth && go test -p 1 ./... -count=1

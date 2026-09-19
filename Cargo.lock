@@ -1275,6 +1275,7 @@ dependencies = [
 name = "carbide-api-core-integration-tests"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "carbide-api-core",
  "carbide-api-db",
  "carbide-api-model",

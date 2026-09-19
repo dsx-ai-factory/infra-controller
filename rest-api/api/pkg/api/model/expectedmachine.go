@@ -14,6 +14,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
@@ -193,6 +194,11 @@ type APIExpectedMachineUpdateRequest struct {
 
 // Validate ensure the values passed in request are acceptable
 func (emur *APIExpectedMachineUpdateRequest) Validate() error {
+	credentialErr := validateExpectedComponentCredentialPair(emur.DefaultBmcUsername, emur.DefaultBmcPassword, "defaultBmcUsername", "defaultBmcPassword")
+	if credentialErr != nil {
+		return credentialErr
+	}
+
 	if emur.ID != nil {
 		if *emur.ID == "" {
 			return validation.Errors{
@@ -252,6 +258,38 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 	}
 
 	return nil
+}
+
+// ToProto builds the Core patch from the updated cloud row and the fields
+// selected by this request. Call Validate before conversion and pass the
+// updated cloud row so derived metadata labels include its retained values.
+// Explicit zero and empty values remain updates.
+func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachine) *corev1.PatchExpectedMachineRequest {
+	resource := entity.ToProto(cdbm.ExpectedMachineCredentials{
+		Username: emur.DefaultBmcUsername,
+		Password: emur.DefaultBmcPassword,
+	})
+
+	// The DB row may still hold an address this PATCH omitted. Core needs
+	// the request value so nil preserves its reservation and "" clears it.
+	resource.BmcIpAddress = emur.BmcIpAddress
+	return &corev1.PatchExpectedMachineRequest{
+		ExpectedMachine: resource,
+		UpdateMask: expectedComponentUpdateMask(
+			expectedComponentUpdateField{"bmc_username", emur.DefaultBmcUsername != nil},
+			expectedComponentUpdateField{"bmc_password", emur.DefaultBmcPassword != nil},
+			expectedComponentUpdateField{"bmc_ip_address", emur.BmcIpAddress != nil},
+			expectedComponentUpdateField{"rack_id", emur.RackID != nil},
+			expectedComponentUpdateField{"metadata.name", emur.Name != nil},
+			expectedComponentUpdateField{"metadata.description", emur.Description != nil},
+			expectedComponentUpdateField{"metadata.labels", emur.Labels != nil || emur.Manufacturer != nil || emur.Model != nil || emur.SlotID != nil || emur.TrayIdx != nil || emur.HostID != nil},
+			expectedComponentUpdateField{"chassis_serial_number", emur.ChassisSerialNumber != nil},
+			expectedComponentUpdateField{"fallback_dpu_serial_numbers", emur.FallbackDPUSerialNumbers != nil},
+			expectedComponentUpdateField{"sku_id", emur.SkuID != nil},
+			expectedComponentUpdateField{"is_dpf_enabled", emur.IsDpfEnabled != nil},
+			expectedComponentUpdateField{"host_lifecycle_profile.disable_lockdown", emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
+		),
+	}
 }
 
 // APIExpectedMachine is the data structure to capture API representation of an ExpectedMachine

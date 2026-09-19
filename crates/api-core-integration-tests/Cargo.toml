@@ -58,6 +58,7 @@ component-manager = { path = "../component-manager" }
 config-version = { path = "../config-version", features = ["sqlx"] }
 
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+axum = { workspace = true }
 chrono = { workspace = true }
 const_format = { workspace = true }
 data-encoding = { workspace = true }
