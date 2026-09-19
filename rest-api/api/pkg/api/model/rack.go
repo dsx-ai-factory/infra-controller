@@ -356,22 +356,23 @@ func (ab *APIBMC) FromProto(protoBMC *flowv1.BMCInfo) {
 
 // APIRackComponent represents a component within a rack
 type APIRackComponent struct {
-	ID              string    `json:"id"`
-	RackID          string    `json:"rackId"`
-	Type            string    `json:"type"`
-	Name            string    `json:"name"`
-	SerialNumber    string    `json:"serialNumber"`
-	Manufacturer    string    `json:"manufacturer"`
-	Model           string    `json:"model"`
-	Description     string    `json:"description"`
-	FirmwareVersion string    `json:"firmwareVersion"`
-	SlotID          int32     `json:"slotId"`
-	TrayIdx         int32     `json:"trayIdx"`
-	HostID          int32     `json:"hostId"`
-	BMCs            []*APIBMC `json:"bmcs"`
-	PowerState      string    `json:"powerState"`
-	OperationStatus string    `json:"operationStatus"`
-	LeakStatus      string    `json:"leakStatus"`
+	ID                 string    `json:"id"`
+	RackID             string    `json:"rackId"`
+	Type               string    `json:"type"`
+	Name               string    `json:"name"`
+	SerialNumber       string    `json:"serialNumber"`
+	Manufacturer       string    `json:"manufacturer"`
+	Model              string    `json:"model"`
+	Description        string    `json:"description"`
+	FirmwareVersion    string    `json:"firmwareVersion"`
+	SlotID             int32     `json:"slotId"`
+	TrayIdx            int32     `json:"trayIdx"`
+	HostID             int32     `json:"hostId"`
+	BMCs               []*APIBMC `json:"bmcs"`
+	PowerState         string    `json:"powerState"`
+	OperationStatus    string    `json:"operationStatus"`
+	LeakStatus         string    `json:"leakStatus"`
+	LeakHandlingStatus string    `json:"leakHandlingStatus"`
 }
 
 // FromProto converts a proto Component to an APIRackComponent
@@ -385,6 +386,11 @@ func (arc *APIRackComponent) FromProto(protoComponent *flowv1.Component) {
 	arc.PowerState = protoComponent.GetPowerState()
 	arc.OperationStatus = enumOr(ProtoToAPIPhaseName, protoComponent.GetStatus().GetPhase(), "Unknown")
 	arc.LeakStatus = enumOr(ProtoToAPILeakStatusName, protoComponent.GetLeakStatus(), "Unknown")
+	arc.LeakHandlingStatus = enumOr(
+		ProtoToAPILeakHandlingStatusName,
+		protoComponent.GetLeakHandlingStatus(),
+		"Unknown",
+	)
 
 	// Get rack ID
 	arc.RackID = protoComponent.GetRackExternalId()

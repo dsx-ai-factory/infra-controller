@@ -317,11 +317,12 @@ func TestAPITray_FromProto(t *testing.T) {
 			Id:   &flowv1.UUID{Id: "tray-uuid"},
 			Name: "My Tray",
 		},
-		Position:       &flowv1.RackPosition{SlotId: 3, TrayIdx: 0, HostId: 1},
-		RackId:         &flowv1.UUID{Id: "rack-uuid"},
-		RackExternalId: "core-rack-1",
-		Status:         &flowv1.ComponentOperationStatus{Phase: flowv1.Phase_PHASE_IN_USE},
-		LeakStatus:     flowv1.LeakStatus_LEAK_STATUS_DETECTED,
+		Position:           &flowv1.RackPosition{SlotId: 3, TrayIdx: 0, HostId: 1},
+		RackId:             &flowv1.UUID{Id: "rack-uuid"},
+		RackExternalId:     "core-rack-1",
+		Status:             &flowv1.ComponentOperationStatus{Phase: flowv1.Phase_PHASE_IN_USE},
+		LeakStatus:         flowv1.LeakStatus_LEAK_STATUS_DETECTED,
+		LeakHandlingStatus: flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_SHUTTING_DOWN,
 	}
 	at := &APITray{}
 	at.FromProto(comp)
@@ -331,6 +332,7 @@ func TestAPITray_FromProto(t *testing.T) {
 	assert.Equal(t, "core-rack-1", at.RackID)
 	assert.Equal(t, "InUse", at.OperationStatus)
 	assert.Equal(t, "Leaking", at.LeakStatus)
+	assert.Equal(t, "ShuttingDown", at.LeakHandlingStatus)
 	assert.NotNil(t, at.Position)
 	assert.Equal(t, int32(3), at.Position.SlotID)
 	assert.Equal(t, int32(0), at.Position.TrayIdx)
@@ -339,12 +341,32 @@ func TestAPITray_FromProto(t *testing.T) {
 	at.FromProto(nil) // no-op, fields unchanged
 	assert.Equal(t, "comp-1", at.ID)
 
-	// A component with no computed operation status and no leak status
-	// resolves both fields to "Unknown".
+	// A component with no computed operation, leak, or leak-handling status
+	// resolves all three fields to "Unknown".
 	bare := &APITray{}
 	bare.FromProto(&flowv1.Component{Type: flowv1.ComponentType_COMPONENT_TYPE_COMPUTE})
 	assert.Equal(t, "Unknown", bare.OperationStatus)
 	assert.Equal(t, "Unknown", bare.LeakStatus)
+	assert.Equal(t, "Unknown", bare.LeakHandlingStatus)
+}
+
+func TestProtoToAPILeakHandlingStatusName(t *testing.T) {
+	tests := []struct {
+		status flowv1.LeakHandlingStatus
+		want   string
+	}{
+		{flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_UNKNOWN, "Unknown"},
+		{flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_NONE, "None"},
+		{flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_SHUTTING_DOWN, "ShuttingDown"},
+		{flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_DOWN, "Down"},
+		{flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_FAILED, "Failed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			assert.Equal(t, tt.want, ProtoToAPILeakHandlingStatusName[tt.status])
+		})
+	}
 }
 
 func TestAPITrayGetAllRequest_Validate(t *testing.T) {

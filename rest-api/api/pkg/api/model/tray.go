@@ -53,6 +53,16 @@ var ProtoToAPILeakStatusName = map[flowv1.LeakStatus]string{
 	flowv1.LeakStatus_LEAK_STATUS_NOT_DETECTED: "NoLeak",
 }
 
+// ProtoToAPILeakHandlingStatusName maps Flow's leakage-handling status to the
+// compact status exposed by the REST API.
+var ProtoToAPILeakHandlingStatusName = map[flowv1.LeakHandlingStatus]string{
+	flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_UNKNOWN:       "Unknown",
+	flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_NONE:          "None",
+	flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_SHUTTING_DOWN: "ShuttingDown",
+	flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_DOWN:          "Down",
+	flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_FAILED:        "Failed",
+}
+
 var validTrayTypesAny, ValidProtoComponentTypes = func() ([]interface{}, []flowv1.ComponentType) {
 	anyTypes := make([]interface{}, 0, len(APIToProtoComponentTypeName))
 	protoTypes := make([]flowv1.ComponentType, 0, len(APIToProtoComponentTypeName))
@@ -577,22 +587,23 @@ func (atp *APITrayPosition) FromProto(protoPosition *flowv1.RackPosition) {
 
 // APITray is the API representation of a Tray (Component) from Flow
 type APITray struct {
-	ID              string           `json:"id"`
-	Type            string           `json:"type"`
-	Name            string           `json:"name"`
-	Manufacturer    string           `json:"manufacturer"`
-	Model           string           `json:"model"`
-	SerialNumber    string           `json:"serialNumber"`
-	Description     string           `json:"description"`
-	FirmwareVersion string           `json:"firmwareVersion"`
-	PowerState      string           `json:"powerState"`
-	OperationStatus string           `json:"operationStatus"`
-	LeakStatus      string           `json:"leakStatus"`
-	Position        *APITrayPosition `json:"position"`
-	BMCs            []*APIBMC        `json:"bmcs"`
-	RackID          string           `json:"rackId"`
-	NVLinkDomainID  *string          `json:"nvLinkDomainId"`
-	TaskStats       APITaskStats     `json:"taskStats"`
+	ID                 string           `json:"id"`
+	Type               string           `json:"type"`
+	Name               string           `json:"name"`
+	Manufacturer       string           `json:"manufacturer"`
+	Model              string           `json:"model"`
+	SerialNumber       string           `json:"serialNumber"`
+	Description        string           `json:"description"`
+	FirmwareVersion    string           `json:"firmwareVersion"`
+	PowerState         string           `json:"powerState"`
+	OperationStatus    string           `json:"operationStatus"`
+	LeakStatus         string           `json:"leakStatus"`
+	LeakHandlingStatus string           `json:"leakHandlingStatus"`
+	Position           *APITrayPosition `json:"position"`
+	BMCs               []*APIBMC        `json:"bmcs"`
+	RackID             string           `json:"rackId"`
+	NVLinkDomainID     *string          `json:"nvLinkDomainId"`
+	TaskStats          APITaskStats     `json:"taskStats"`
 }
 
 // FromProto converts an Flow protobuf Component to an APITray
@@ -606,6 +617,11 @@ func (at *APITray) FromProto(comp *flowv1.Component) {
 	at.PowerState = comp.GetPowerState()
 	at.OperationStatus = enumOr(ProtoToAPIPhaseName, comp.GetStatus().GetPhase(), "Unknown")
 	at.LeakStatus = enumOr(ProtoToAPILeakStatusName, comp.GetLeakStatus(), "Unknown")
+	at.LeakHandlingStatus = enumOr(
+		ProtoToAPILeakHandlingStatusName,
+		comp.GetLeakHandlingStatus(),
+		"Unknown",
+	)
 	at.ID = comp.GetComponentId()
 	at.TaskStats.FromProto(comp.GetTaskStats())
 

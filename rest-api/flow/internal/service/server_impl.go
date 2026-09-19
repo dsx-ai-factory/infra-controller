@@ -154,7 +154,7 @@ func (rs *FlowServerImpl) GetRackInfoByID(
 	}
 
 	result := protobuf.RackTo(r)
-	if err := rs.populateTaskStats(ctx, []*pb.Rack{result}, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, []*pb.Rack{result}, nil); err != nil {
 		return nil, err
 	}
 	return &pb.GetRackInfoResponse{Rack: result}, nil
@@ -190,7 +190,7 @@ func (rs *FlowServerImpl) GetRackInfoBySerial(
 	}
 
 	result := protobuf.RackTo(r)
-	if err := rs.populateTaskStats(ctx, []*pb.Rack{result}, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, []*pb.Rack{result}, nil); err != nil {
 		return nil, err
 	}
 	return &pb.GetRackInfoResponse{Rack: result}, nil
@@ -438,7 +438,7 @@ func (rs *FlowServerImpl) GetComponentInfoByID(
 	}
 
 	result := protobuf.ComponentTo(c)
-	if err := rs.populateTaskStats(ctx, nil, []*pb.Component{result}); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, []*pb.Component{result}); err != nil {
 		return nil, err
 	}
 	return &pb.GetComponentInfoResponse{
@@ -500,7 +500,7 @@ func (rs *FlowServerImpl) GetComponentInfoBySerial(
 	}
 
 	result := protobuf.ComponentTo(c)
-	if err := rs.populateTaskStats(ctx, nil, []*pb.Component{result}); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, []*pb.Component{result}); err != nil {
 		return nil, err
 	}
 	return &pb.GetComponentInfoResponse{
@@ -579,7 +579,7 @@ func (rs *FlowServerImpl) GetListOfRacks(
 	for _, r := range racks {
 		results = append(results, protobuf.RackTo(r))
 	}
-	if err := rs.populateTaskStats(ctx, results, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, results, nil); err != nil {
 		return nil, err
 	}
 
@@ -1607,7 +1607,7 @@ func (rs *FlowServerImpl) GetComponents(
 	for _, c := range components {
 		results = append(results, protobuf.ComponentTo(c))
 	}
-	if err := rs.populateTaskStats(ctx, nil, results); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, results); err != nil {
 		return nil, err
 	}
 

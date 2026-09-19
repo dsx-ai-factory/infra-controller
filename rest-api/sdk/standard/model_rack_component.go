@@ -54,6 +54,8 @@ type RackComponent struct {
 	OperationStatus *string `json:"operationStatus,omitempty"`
 	// Whether the component is considered leaking coolant
 	LeakStatus *string `json:"leakStatus,omitempty"`
+	// Flow's leakage-handling status for the component. Unknown means Flow could not determine the status; None means no supported handling task exists; ShuttingDown means a forced-shutdown task is waiting, pending, or running; Down means it completed; and Failed means the latest supported handling task failed or was terminated. Down describes handling progress, not the component's current power state.
+	LeakHandlingStatus *string `json:"leakHandlingStatus,omitempty"`
 }
 
 // NewRackComponent instantiates a new RackComponent object
@@ -585,6 +587,38 @@ func (o *RackComponent) SetLeakStatus(v string) {
 	o.LeakStatus = &v
 }
 
+// GetLeakHandlingStatus returns the LeakHandlingStatus field value if set, zero value otherwise.
+func (o *RackComponent) GetLeakHandlingStatus() string {
+	if o == nil || IsNil(o.LeakHandlingStatus) {
+		var ret string
+		return ret
+	}
+	return *o.LeakHandlingStatus
+}
+
+// GetLeakHandlingStatusOk returns a tuple with the LeakHandlingStatus field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *RackComponent) GetLeakHandlingStatusOk() (*string, bool) {
+	if o == nil || IsNil(o.LeakHandlingStatus) {
+		return nil, false
+	}
+	return o.LeakHandlingStatus, true
+}
+
+// HasLeakHandlingStatus returns a boolean if a field has been set.
+func (o *RackComponent) HasLeakHandlingStatus() bool {
+	if o != nil && !IsNil(o.LeakHandlingStatus) {
+		return true
+	}
+
+	return false
+}
+
+// SetLeakHandlingStatus gets a reference to the given string and assigns it to the LeakHandlingStatus field.
+func (o *RackComponent) SetLeakHandlingStatus(v string) {
+	o.LeakHandlingStatus = &v
+}
+
 func (o RackComponent) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -642,6 +676,9 @@ func (o RackComponent) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.LeakStatus) {
 		toSerialize["leakStatus"] = o.LeakStatus
+	}
+	if !IsNil(o.LeakHandlingStatus) {
+		toSerialize["leakHandlingStatus"] = o.LeakHandlingStatus
 	}
 	return toSerialize, nil
 }

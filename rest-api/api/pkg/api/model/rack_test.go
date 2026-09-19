@@ -168,10 +168,11 @@ func TestNewAPIRack(t *testing.T) {
 						Position: &flowv1.RackPosition{
 							SlotId: 1,
 						},
-						ComponentId:    "nico-machine-123",
-						RackExternalId: "core-rack-with-components",
-						Status:         &flowv1.ComponentOperationStatus{Phase: flowv1.Phase_PHASE_READY},
-						LeakStatus:     flowv1.LeakStatus_LEAK_STATUS_NOT_DETECTED,
+						ComponentId:        "nico-machine-123",
+						RackExternalId:     "core-rack-with-components",
+						Status:             &flowv1.ComponentOperationStatus{Phase: flowv1.Phase_PHASE_READY},
+						LeakStatus:         flowv1.LeakStatus_LEAK_STATUS_NOT_DETECTED,
+						LeakHandlingStatus: flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_DOWN,
 					},
 					{
 						Type:           flowv1.ComponentType_COMPONENT_TYPE_TORSWITCH,
@@ -194,25 +195,27 @@ func TestNewAPIRack(t *testing.T) {
 				OperationStatus: "Unknown",
 				Components: []*APIRackComponent{
 					{
-						ID:              "nico-machine-123",
-						RackID:          "core-rack-with-components",
-						Type:            "Compute",
-						Name:            "compute-node-1",
-						SerialNumber:    "CSN001",
-						Manufacturer:    "NVIDIA",
-						FirmwareVersion: "1.0.0",
-						SlotID:          1,
-						OperationStatus: "Ready",
-						LeakStatus:      "NoLeak",
+						ID:                 "nico-machine-123",
+						RackID:             "core-rack-with-components",
+						Type:               "Compute",
+						Name:               "compute-node-1",
+						SerialNumber:       "CSN001",
+						Manufacturer:       "NVIDIA",
+						FirmwareVersion:    "1.0.0",
+						SlotID:             1,
+						OperationStatus:    "Ready",
+						LeakStatus:         "NoLeak",
+						LeakHandlingStatus: "Down",
 					},
 					{
-						ID:              "nico-switch-456",
-						RackID:          "core-rack-with-components",
-						Type:            "TORSwitch",
-						Name:            "switch-1",
-						SlotID:          48,
-						OperationStatus: "Unknown",
-						LeakStatus:      "Unknown",
+						ID:                 "nico-switch-456",
+						RackID:             "core-rack-with-components",
+						Type:               "TORSwitch",
+						Name:               "switch-1",
+						SlotID:             48,
+						OperationStatus:    "Unknown",
+						LeakStatus:         "Unknown",
+						LeakHandlingStatus: "Unknown",
 					},
 				},
 			},
@@ -286,6 +289,7 @@ func TestNewAPIRack(t *testing.T) {
 					assert.Equal(t, wantComp.SlotID, gotComp.SlotID)
 					assert.Equal(t, wantComp.OperationStatus, gotComp.OperationStatus)
 					assert.Equal(t, wantComp.LeakStatus, gotComp.LeakStatus)
+					assert.Equal(t, wantComp.LeakHandlingStatus, gotComp.LeakHandlingStatus)
 				}
 			} else {
 				assert.Nil(t, got.Components)

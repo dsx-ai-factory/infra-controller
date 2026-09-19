@@ -1460,6 +1460,13 @@ func (s *managerTaskStore) ListNonTerminalTasksForRacks(
 	panic("managerTaskStore.ListNonTerminalTasksForRacks: not implemented")
 }
 
+func (s *managerTaskStore) LatestLeakageShutdownTaskStatuses(
+	_ context.Context,
+	_ []uuid.UUID,
+) (map[uuid.UUID]taskcommon.TaskStatus, error) {
+	panic("managerTaskStore.LatestLeakageShutdownTaskStatuses: not implemented")
+}
+
 func (s *managerTaskStore) UpdateScheduledTask(_ context.Context, task *taskdef.Task) error {
 	s.updateScheduledCalls++
 	s.updatedScheduledTask = task

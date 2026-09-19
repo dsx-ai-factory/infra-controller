@@ -12074,6 +12074,8 @@ paths:
                               macAddress: 'AA:BB:CC:DD:EE:01'
                               ipAddress: 10.0.0.101
                           powerState: 'on'
+                          leakStatus: Leaking
+                          leakHandlingStatus: ShuttingDown
           headers:
             X-Pagination:
               schema:
@@ -12162,6 +12164,8 @@ paths:
                             macAddress: 'AA:BB:CC:DD:EE:01'
                             ipAddress: 10.0.0.101
                         powerState: 'on'
+                        leakStatus: NoLeak
+                        leakHandlingStatus: None
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -14274,6 +14278,8 @@ paths:
                       description: Compute tray in slot 1
                       firmwareVersion: 2.1.0
                       powerState: 'on'
+                      leakStatus: Leaking
+                      leakHandlingStatus: Down
                       position:
                         slotId: 1
                         trayIdx: 0
@@ -14345,6 +14351,8 @@ paths:
                     description: Compute tray in slot 1
                     firmwareVersion: 2.1.0
                     powerState: 'on'
+                    leakStatus: Leaking
+                    leakHandlingStatus: Failed
                     position:
                       slotId: 1
                       trayIdx: 0
@@ -24379,6 +24387,8 @@ components:
                   macAddress: 'AA:BB:CC:DD:EE:01'
                   ipAddress: 10.0.0.101
               powerState: 'on'
+              leakStatus: Leaking
+              leakHandlingStatus: ShuttingDown
       properties:
         id:
           type: string
@@ -24592,6 +24602,20 @@ components:
             - NoLeak
             - Leaking
           description: Whether the component is considered leaking coolant
+        leakHandlingStatus:
+          type: string
+          enum:
+            - Unknown
+            - None
+            - ShuttingDown
+            - Down
+            - Failed
+          description: |-
+            Flow's leakage-handling status for the component. Unknown means Flow could not
+            determine the status; None means no supported handling task exists; ShuttingDown
+            means a forced-shutdown task is waiting, pending, or running; Down means it
+            completed; and Failed means the latest supported handling task failed or was
+            terminated. Down describes handling progress, not the component's current power state.
     BMCInfo:
       title: BMCInfo
       type: object
@@ -24623,6 +24647,8 @@ components:
           description: Compute tray in slot 1
           firmwareVersion: 2.1.0
           powerState: 'on'
+          leakStatus: NoLeak
+          leakHandlingStatus: None
           position:
             slotId: 1
             trayIdx: 0
@@ -24685,6 +24711,20 @@ components:
             - NoLeak
             - Leaking
           description: Whether the tray is considered leaking coolant
+        leakHandlingStatus:
+          type: string
+          enum:
+            - Unknown
+            - None
+            - ShuttingDown
+            - Down
+            - Failed
+          description: |-
+            Flow's leakage-handling status for the tray. Unknown means Flow could not determine
+            the status; None means no supported handling task exists; ShuttingDown means a
+            forced-shutdown task is waiting, pending, or running; Down means it completed; and
+            Failed means the latest supported handling task failed or was terminated. Down
+            describes handling progress, not the tray's current power state.
         position:
           $ref: '#/components/schemas/TrayPosition'
           description: 'Position of the Tray within the Rack'
