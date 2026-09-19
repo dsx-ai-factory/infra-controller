@@ -25,6 +25,19 @@ use sqlx::PgConnection;
 use super::DatabaseError;
 use crate::db_read::DbReader;
 
+/// Returns whether a constraint reports a NetworkPrefix overlap conflict.
+/// Core uses the same names for client errors and bounded allocation retries.
+pub fn is_overlap_constraint(constraint: Option<&str>) -> bool {
+    matches!(
+        constraint,
+        Some(
+            "network_prefixes_prefix_excl"
+                | "network_prefixes_global_prefix_excl"
+                | "network_prefixes_scoped_prefix_excl"
+        )
+    )
+}
+
 fn ip_to_u128(ip: IpAddr) -> u128 {
     match ip {
         IpAddr::V4(ip) => u128::from(u32::from(ip)),
@@ -305,16 +318,31 @@ pub async fn delete_for_segment(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-// Update the VPC prefix for this segment prefix using the values
-// from the specified vpc_prefix.
+/// Associates a segment prefix with its exact VPC prefix.
+/// Only explicitly non-stretched Tenant linknets in the same VPC inherit scope.
+/// Tenant segments created through the public API and legacy segments without
+/// `can_stretch = false` remain global even after adoption.
 pub async fn set_vpc_prefix(
     value: &mut NetworkPrefix,
     txn: &mut PgConnection,
     vpc_prefix_id: &VpcPrefixId,
     prefix: &IpNetwork,
 ) -> Result<(), DatabaseError> {
-    let query =
-        "UPDATE network_prefixes SET vpc_prefix_id=$1, vpc_prefix=$2 WHERE id=$3 RETURNING *";
+    let query = r#"
+        UPDATE network_prefixes AS np
+        SET vpc_prefix_id = $1,
+            vpc_prefix = $2,
+            overlap_vpc_id = CASE
+                WHEN ns.network_segment_type = 'tenant'
+                    AND ns.can_stretch = false
+                    AND ns.vpc_id = vp.vpc_id
+                THEN vp.overlap_vpc_id
+                ELSE NULL
+            END
+        FROM network_vpc_prefixes AS vp, network_segments AS ns
+        WHERE np.id = $3 AND vp.id = $1 AND ns.id = np.segment_id
+        RETURNING np.*
+    "#;
     let network_prefix = sqlx::query_as::<_, NetworkPrefix>(query)
         .bind(vpc_prefix_id)
         .bind(prefix)
@@ -352,6 +380,21 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn overlap_constraint_names_share_one_error_classification() {
+        carbide_test_support::value_scenarios!(run = is_overlap_constraint;
+            "overlap constraints" {
+                Some("network_prefixes_prefix_excl") => true,
+                Some("network_prefixes_global_prefix_excl") => true,
+                Some("network_prefixes_scoped_prefix_excl") => true,
+            }
+            "other database failures" {
+                Some("network_prefix_family") => false,
+                None => false,
+            }
+        );
+    }
+
     #[crate::sqlx_test]
     async fn allocation_occupancy_uses_exact_parent_and_global_unparented_prefixes(
         pool: sqlx::PgPool,
@@ -377,7 +420,8 @@ mod tests {
         // that future state in this isolated test database so this query's
         // exact-parent behavior is protected now.
         sqlx::query(
-            "ALTER TABLE network_vpc_prefixes DROP CONSTRAINT network_vpc_prefixes_globally_unique",
+            "ALTER TABLE network_vpc_prefixes DROP CONSTRAINT network_vpc_prefixes_globally_unique,
+             DROP CONSTRAINT network_vpc_prefixes_global_prefix_excl",
         )
         .execute(&mut *txn)
         .await?;

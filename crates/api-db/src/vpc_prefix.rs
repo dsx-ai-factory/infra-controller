@@ -408,8 +408,9 @@ pub async fn persist(
                 vpc_id,
                 site_prefix_id,
                 controller_state,
-                controller_state_version)
-            VALUES ($1, $2, $3, $4::json, $5, $6, $7, $8::json, $9)
+                controller_state_version,
+                overlap_vpc_id)
+            VALUES ($1, $2, $3, $4::json, $5, $6, $7, $8::json, $9, $10)
             RETURNING *";
     let vpc_prefix: VpcPrefix = match sqlx::query_as(insert_query)
         .bind(value.id)
@@ -421,12 +422,20 @@ pub async fn persist(
         .bind(value.site_prefix_id)
         .bind(sqlx::types::Json(&initial_state))
         .bind(initial_version)
+        .bind(value.overlap_vpc_id)
         .fetch_one(&mut *txn)
         .await
     {
         Ok(vpc_prefix) => vpc_prefix,
         Err(sqlx::Error::Database(error))
-            if error.constraint() == Some("network_vpc_prefixes_globally_unique") =>
+            if matches!(
+                error.constraint(),
+                Some(
+                    "network_vpc_prefixes_globally_unique"
+                        | "network_vpc_prefixes_global_prefix_excl"
+                        | "network_vpc_prefixes_scoped_prefix_excl"
+                )
+            ) =>
         {
             return Err(DatabaseError::InvalidArgument(format!(
                 "The requested VPC prefix ({}) overlaps an existing or deleting VPC prefix",

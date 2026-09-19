@@ -438,7 +438,7 @@ pub(crate) async fn save_without_reverse_zones(
         Err(DatabaseError::Sqlx(AnnotatedSqlxError {
             source: sqlx::Error::Database(e),
             ..
-        })) if e.constraint() == Some("network_prefixes_prefix_excl") => {
+        })) if db::network_prefix::is_overlap_constraint(e.constraint()) => {
             return Err(CarbideError::InvalidArgument(
                 "prefix overlaps with an existing one".to_string(),
             ));

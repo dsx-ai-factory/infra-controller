@@ -5052,6 +5052,7 @@ async fn create_tenant_overlay_prefix_with_prefix(
             id: uuid::Uuid::new_v4().into(),
             site_prefix_id: None,
             vpc_id,
+            overlap_vpc_id: None,
             config: VpcPrefixConfig { prefix },
             metadata: Metadata {
                 name: name.to_string(),

@@ -412,6 +412,15 @@ pub(crate) async fn create(
         .validate(true)
         .map_err(CarbideError::from)?;
 
+    new_prefix.overlap_vpc_id = selected_site_prefix.as_ref().and_then(|site_prefix| {
+        super::tenant_prefix_overlap::vpc_prefix_overlap_scope(
+            &api.runtime_config,
+            site_prefix,
+            vpc,
+            new_prefix.config.prefix,
+        )
+    });
+
     let vpc_prefix = db::persist(new_prefix, expected_vpc_version, &mut txn).await?;
     let vpc_prefix_id = vpc_prefix.id;
     let vpc_prefix_network = vpc_prefix.config.prefix;

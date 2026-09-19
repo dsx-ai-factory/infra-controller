@@ -108,6 +108,35 @@ fn site_prefix_is_eligible(site_prefix: &SitePrefix, vpc: &Vpc, prefix: IpNetwor
         )
 }
 
+/// Selects database scope for a new eligible tenant-managed IPv4 prefix.
+/// Tenant-managed SitePrefix creation is IPv4-only; other families stay global.
+/// This does not authorize overlap: pair, VNI, receiver, and Instance checks
+/// still apply, as do the original global database exclusions.
+pub(super) fn vpc_prefix_overlap_scope(
+    runtime_config: &CarbideConfig,
+    site_prefix: &SitePrefix,
+    vpc: &Vpc,
+    prefix: IpNetwork,
+) -> Option<VpcId> {
+    if !runtime_config.tenant_prefix_overlap_enabled
+        || !prefix.is_ipv4()
+        || vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn
+        || site_prefix.status.lifecycle_state != SitePrefixLifecycleState::Ready
+        || !site_prefix_is_eligible(site_prefix, vpc, prefix)
+        || !site_policy_is_isolated(runtime_config)
+    {
+        return None;
+    }
+
+    runtime_config
+        .fnn
+        .as_ref()?
+        .resolve_vpc_routing_profile(&vpc.config)
+        .ok()?
+        .is_eligible_for_tenant_prefix_overlap()
+        .then_some(vpc.id)
+}
+
 /// `pair_is_eligible` returns whether two `VpcPrefix` records may reuse one
 /// exact CIDR.
 ///
@@ -990,6 +1019,55 @@ mod tests {
             version: ConfigVersion::initial(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn database_scope_requires_an_eligible_tenant_prefix() {
+        #[derive(Debug)]
+        enum Ineligible {
+            SiteGateDisabled,
+            OperatorRoot,
+            ProfileNotEligible,
+            Ipv6,
+        }
+        let prefix = "10.123.1.0/24".parse().unwrap();
+        let vpc = vpc("scope-test", Some(10200));
+        let root = site_prefix("scope-test", "10.123.0.0/16".parse().unwrap());
+        let config = eligible_config();
+        assert_eq!(
+            vpc_prefix_overlap_scope(&config, &root, &vpc, prefix),
+            Some(vpc.id)
+        );
+
+        for scenario in [
+            Ineligible::SiteGateDisabled,
+            Ineligible::OperatorRoot,
+            Ineligible::ProfileNotEligible,
+            Ineligible::Ipv6,
+        ] {
+            let mut config = config.clone();
+            let mut root = root.clone();
+            let mut vpc = vpc.clone();
+            let mut prefix = prefix;
+            match scenario {
+                Ineligible::SiteGateDisabled => config.tenant_prefix_overlap_enabled = false,
+                Ineligible::OperatorRoot => {
+                    root.status.authority = SitePrefixAuthority::OperatorManaged
+                }
+                Ineligible::ProfileNotEligible => {
+                    vpc.config.routing_profile_type = Some("UNSAFE".into())
+                }
+                Ineligible::Ipv6 => {
+                    root.config.prefix = "fd00:3891::/64".parse().unwrap();
+                    prefix = "fd00:3891::/80".parse().unwrap();
+                }
+            }
+            assert_eq!(
+                vpc_prefix_overlap_scope(&config, &root, &vpc, prefix),
+                None,
+                "{scenario:?}"
+            );
         }
     }
 

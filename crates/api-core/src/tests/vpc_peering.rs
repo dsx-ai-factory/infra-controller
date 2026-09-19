@@ -354,6 +354,7 @@ async fn retain_peering_overlap_prefix(
             id: retained_prefix_id,
             site_prefix_id: Some(root.id),
             vpc_id: source.id.unwrap(),
+            overlap_vpc_id: None,
             config: VpcPrefixConfig {
                 prefix: "10.120.1.0/24".parse()?,
             },

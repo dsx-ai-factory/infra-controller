@@ -227,6 +227,7 @@ async fn hold_vpc_prefix_create<'a>(
             id,
             site_prefix_id: Some(site_prefix_id),
             vpc_id,
+            overlap_vpc_id: None,
             config: VpcPrefixConfig {
                 prefix: prefix.parse()?,
             },
@@ -515,6 +516,74 @@ async fn change_vpc_routing_profile_preserves_workload_and_checks_interface_over
             .into_inner(),
         before_reverse
     );
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn generated_linknets_inherit_scope_but_adopted_segments_stay_global(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let tenant = "scope-inheritance";
+    create_overlap_tenant(&env, tenant).await?;
+    let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "scoped VPC", Some("OVERLAP")).await;
+    let root_id = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.123.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+
+    // The public API creates stretched Tenant segments. They remain global
+    // after adoption; only generated linknets inherit the VPC scope.
+    let direct_id = NetworkSegmentId::new();
+    env.api
+        .create_network_segment(Request::new(attached_segment_request(
+            direct_id,
+            vpc_id,
+            "10.123.1.0/27",
+            "10.123.1.1",
+            rpc::forge::NetworkSegmentType::Tenant,
+        )))
+        .await?;
+    let parent_id = VpcPrefixId::new();
+    env.api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            parent_id,
+            vpc_id,
+            Some(root_id),
+            "10.123.1.0/24",
+        )))
+        .await?;
+    let parent_scope: Option<VpcId> =
+        sqlx::query_scalar("SELECT overlap_vpc_id FROM network_vpc_prefixes WHERE id = $1")
+            .bind(parent_id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(parent_scope, Some(vpc_id));
+    let adopted: (Option<VpcPrefixId>, Option<VpcId>) = sqlx::query_as(
+        "SELECT vpc_prefix_id, overlap_vpc_id FROM network_prefixes WHERE segment_id = $1",
+    )
+    .bind(direct_id)
+    .fetch_one(&env.pool)
+    .await?;
+    assert_eq!(adopted, (Some(parent_id), None));
+
+    let mut txn = env.pool.begin().await?;
+    let allocator = PrefixAllocator::new(parent_id, "10.123.1.0/24".parse()?, None, 31)?;
+    let prefix = allocator.next_free_prefix(&mut txn).await?;
+    let (generated_id, _) = allocator
+        .allocate_network_segment_for_prefix(&mut txn, vpc_id, prefix)
+        .await?;
+    let generated: (Option<VpcPrefixId>, Option<VpcId>) = sqlx::query_as(
+        "SELECT vpc_prefix_id, overlap_vpc_id FROM network_prefixes WHERE segment_id = $1",
+    )
+    .bind(generated_id)
+    .fetch_one(&mut *txn)
+    .await?;
+    assert_eq!(generated, (Some(parent_id), Some(vpc_id)));
+    txn.commit().await?;
     Ok(())
 }
 
@@ -2227,6 +2296,15 @@ async fn exact_site_prefix_attachment_enforces_lineage_and_round_trips(
         .await?
         .into_inner();
     assert_eq!(created.site_prefix_id, Some(ready_parent));
+    let scope: Option<VpcId> =
+        sqlx::query_scalar("SELECT overlap_vpc_id FROM network_vpc_prefixes WHERE id = $1")
+            .bind(vpc_prefix_id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(
+        scope, None,
+        "tenant ownership alone does not select isolated scope"
+    );
 
     let persisted = find_vpc_prefix(&env, vpc_prefix_id)
         .await
@@ -2740,6 +2818,7 @@ async fn tenant_managed_lineage_blocks_virtualization_transition_and_race(
             id: racing_vpc_prefix_id,
             site_prefix_id: Some(racing_parent_id),
             vpc_id: racing_vpc_id,
+            overlap_vpc_id: None,
             config: VpcPrefixConfig {
                 prefix: "10.91.1.0/24".parse()?,
             },

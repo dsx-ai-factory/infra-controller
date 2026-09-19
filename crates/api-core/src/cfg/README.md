@@ -961,6 +961,43 @@ Even when the application accepts an eligible pair, the existing `VpcPrefix`
 exclusion rejects overlapping `VpcPrefix` persistence until the cutover tracked
 by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892).
 
+#### Stored prefix scope
+
+`network_vpc_prefixes.overlap_vpc_id` and `network_prefixes.overlap_vpc_id` are
+internal database fields, not API or configuration settings. `NULL` means the
+row remains globally exclusive. Core sets a VPC ID only for a new IPv4
+`VpcPrefix` using an eligible tenant-managed SitePrefix and routing profile,
+with the site overlap gate enabled. Generated, non-stretched Tenant linknets
+inherit that ID from their exact parent. Direct segments remain global even
+when a VpcPrefix adopts them.
+
+Existing rows and inserts from older binaries remain global. An older binary
+can also create a global child beneath a scoped parent. The additive migration
+retains both original global exclusions, so application rollback does not allow
+overlap or require a database rollback. The four additional exclusions protect
+global rows from each other and scoped rows within the same VPC, including rows
+awaiting deletion. They do not compare a global row with a scoped row.
+
+The migration blocks reads and writes to these prefix tables while building
+the indexes. Access resumes when the migration commits.
+
+The following read-only query must return ten rows, all with `convalidated = t`.
+The scope checks and foreign key prove that each non-null key agrees with its
+stored VPC/parent relationship; the original exclusions still prevent overlap.
+This is a structural check, not approval to drop those exclusions: the
+[#3892 cutover](https://github.com/dsx-ai-factory/infra-controller/issues/3892)
+must also make every writer and allocation check respect global scope, including
+parented global children, and verify the supported application versions.
+Core's startup checks continue to validate runtime routing policy.
+
+```sql
+SELECT conname, convalidated
+FROM pg_constraint
+WHERE conrelid IN ('network_vpc_prefixes'::regclass, 'network_prefixes'::regclass)
+  AND (conname LIKE '%overlap%' OR contype = 'x')
+ORDER BY conname;
+```
+
 ### `VpcDefinition`
 
 | Field | Type | Default | Description |

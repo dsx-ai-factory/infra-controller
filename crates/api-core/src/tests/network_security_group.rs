@@ -2092,6 +2092,7 @@ async fn tenant_prefix_overlap_gate_off_preserves_policy_contraction(
             id: prefix_id,
             site_prefix_id: Some(root.id),
             vpc_id: other_id,
+            overlap_vpc_id: None,
             config: model::vpc_prefix::VpcPrefixConfig {
                 prefix: "10.117.1.0/24".parse()?,
             },

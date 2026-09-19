@@ -832,6 +832,7 @@ async fn instance_overlap_gate_off_preserves_rootless_admin_transition(pool: sql
             id: VpcPrefixId::new(),
             site_prefix_id: Some(root.id),
             vpc_id,
+            overlap_vpc_id: None,
             config: VpcPrefixConfig {
                 prefix: "10.250.1.0/24".parse().unwrap(),
             },
@@ -947,6 +948,7 @@ async fn create_deleting_instance_overlap_source(env: &TestEnv) -> NetworkSegmen
             id: retained_prefix_id,
             site_prefix_id: Some(root.id),
             vpc_id: other_id,
+            overlap_vpc_id: None,
             config: VpcPrefixConfig { prefix },
             metadata: model::metadata::Metadata {
                 name: "draining prefix".to_string(),
@@ -2506,6 +2508,7 @@ async fn create_fnn_vpc_prefix_fixture(
                 id: uuid::Uuid::new_v4().into(),
                 site_prefix_id: None,
                 vpc_id,
+                overlap_vpc_id: None,
                 config: model::vpc_prefix::VpcPrefixConfig { prefix },
                 metadata: model::metadata::Metadata {
                     name: vpc_prefix_name.to_string(),
