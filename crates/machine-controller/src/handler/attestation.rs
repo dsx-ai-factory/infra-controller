@@ -131,16 +131,20 @@ struct AttestationScheduled {
 
 /// Schedules SPDM attestation for a machine according to the profile its
 /// hardware class resolves to, writing one work row per selected attester.
+///
+/// `connect` is called only once the profile turns out to need the BMC.
+/// Building a client authenticates against it, so taking a built one would
+/// contact every BMC whose profile answers without it.
 pub async fn trigger_attestation(
     db_pool: &PgPool,
-    redfish_client: Box<dyn libredfish::Redfish>,
+    connect: impl AsyncFnOnce() -> Result<Box<dyn libredfish::Redfish>, StateHandlerError>,
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     redfish_timeout_duration: std::time::Duration,
 ) -> Result<SchedulingResult, StateHandlerError> {
     let result = schedule(
         db_pool,
-        redfish_client,
+        connect,
         bmc_info,
         machine_id,
         redfish_timeout_duration,
@@ -161,7 +165,7 @@ pub async fn trigger_attestation(
 
 async fn schedule(
     db_pool: &PgPool,
-    redfish_client: Box<dyn libredfish::Redfish>,
+    connect: impl AsyncFnOnce() -> Result<Box<dyn libredfish::Redfish>, StateHandlerError>,
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     redfish_timeout_duration: std::time::Duration,
@@ -217,6 +221,10 @@ async fn schedule(
     if selection.mode == AttesterSelectionMode::None {
         return Ok(settled(SchedulingOutcome::AttestationDisabled));
     }
+
+    // Past every outcome the profile settles on its own, so this is the first
+    // point the BMC has to answer for.
+    let redfish_client = connect().await?;
 
     let service_root_future = redfish_client.get_service_root();
 
@@ -435,14 +443,13 @@ pub(crate) async fn handle_spdm_trigger_state(
     next_spdm_state: ManagedHostState,
     next_skip_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    // create redfish client
-    let redfish_client = services
-        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await?;
-
     let result = trigger_attestation(
         &services.db_pool,
-        redfish_client,
+        async || {
+            services
+                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
+                .await
+        },
         &mh_snapshot.host_snapshot.status.bmc_info,
         host_machine_id,
         std::time::Duration::MAX,

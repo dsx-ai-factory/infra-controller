@@ -20,6 +20,7 @@ use carbide_uuid::machine::MachineId;
 use db::ObjectFilter;
 use model::attestation::spdm as model_spdm;
 use model::machine::machine_search_config::MachineSearchConfig;
+use state_controller::state_handler::StateHandlerError;
 use tokio::time as tt;
 use tonic::{Request, Response, Status};
 
@@ -87,32 +88,39 @@ pub(crate) async fn trigger_machine_attestation(
             .await?;
     drop(db_reader);
 
-    let redfish_client_future = api.redfish_pool.client_by_info(&bmc_access_info);
-
-    let redfish_client = match tt::timeout(redfish_timeout_duration, redfish_client_future).await {
-        Ok(redfish_result) => redfish_result.map_err(|e| CarbideError::RedfishClientCreation {
-            inner: Box::new(e),
-            machine_id,
-        })?,
-        Err(_) => {
-            return Err(Status::from(CarbideError::Internal {
-                message: format!(
-                    "redfish creation could not finish in {} seconds",
-                    redfish_timeout_duration.as_secs()
-                ),
-            }));
+    // Called only if the machine's profile turns out to need the BMC: creating
+    // a client authenticates against it, which the profile-only outcomes
+    // report without.
+    let connect = async || {
+        let redfish_client_future = api.redfish_pool.client_by_info(&bmc_access_info);
+        match tt::timeout(redfish_timeout_duration, redfish_client_future).await {
+            Ok(redfish_result) => redfish_result.map_err(StateHandlerError::from),
+            Err(_) => Err(StateHandlerError::GenericError(eyre::eyre!(
+                "redfish creation could not finish in {} seconds",
+                redfish_timeout_duration.as_secs()
+            ))),
         }
     };
 
     let result = trigger_attestation(
         api.pg_pool(),
-        redfish_client,
+        connect,
         bmc_info,
         &machine_id,
         redfish_timeout_duration,
     )
     .await
-    .map_err(|e| CarbideError::AttestationError(format!("trigger error: {e}")))?;
+    .map_err(|error| match error {
+        // Reaching the BMC is the only external service this path calls, so
+        // an operator gets the reachability mitigation that carries rather
+        // than a generic attestation failure.
+        StateHandlerError::ExternalServiceError(redfish) => {
+            CarbideError::RedfishError(libredfish::RedfishError::GenericError {
+                error: redfish.to_string(),
+            })
+        }
+        other => CarbideError::AttestationError(format!("trigger error: {other}")),
+    })?;
 
     Ok(Response::new(rpc::SpdmMachineAttestationTriggerResponse {
         machine_id: Some(machine_id),
