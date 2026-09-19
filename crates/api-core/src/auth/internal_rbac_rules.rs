@@ -881,6 +881,34 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(
+            "AddExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "DeleteExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "UpdateExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "GetExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "GetAllExpectedRackGroups",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "ReplaceAllExpectedRackGroups",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "DeleteAllExpectedRackGroups",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
             "FindSwitchStateHistories",
             vec![ForgeAdminCLI, Machineatron, Flow],
         );

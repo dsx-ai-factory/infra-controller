@@ -205,3 +205,8 @@ enum SystemPowerControl {
   // AC powercycle. This is equivalent to unplugging and reconnecting power cables. Not supported on Vikings.
   SYSTEM_POWER_CONTROL_AC_POWERCYCLE = 6;
 }
+
+message RackGroupId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::rack::RackGroupId";
+  string id = 1;
+}
