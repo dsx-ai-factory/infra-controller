@@ -34,8 +34,10 @@ use tonic::{Code, Request};
 
 use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
 use crate::tests::common::api_fixtures::{
-    TestEnv, TestEnvOverrides, create_test_env, create_test_env_with_overrides, get_config,
+    TestEnv, TestEnvOverrides, create_managed_host, create_test_env,
+    create_test_env_with_overrides, get_config,
 };
+use crate::tests::common::postgres::wait_for_blocked_query;
 
 fn tenant_managed_site_prefix(
     prefix: &str,
@@ -170,6 +172,367 @@ async fn empty_site_prefix_inventory_and_missing_get_are_valid(pool: sqlx::PgPoo
         .unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
     assert_eq!(error.message(), "at least one ID must be provided");
+}
+
+#[crate::sqlx_test]
+async fn dpu_isolation_includes_retained_tenant_roots_without_reactivating_operator_roots(
+    pool: sqlx::PgPool,
+) {
+    let mut config = get_config();
+    config.max_site_prefix_isolation_rules = 1;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            site_prefixes: Some(vec![
+                "10.217.0.9/16".parse().unwrap(),
+                "fd00::/48".parse().unwrap(),
+            ]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(!env.config.tenant_prefix_overlap_enabled);
+
+    // These retained rows model a site that lowered its rule limit. Protection
+    // must still include every lifecycle state rather than fail DPU rendering.
+    for (tenant, prefix, state) in [
+        (
+            "tenant-a",
+            "10.42.0.0/25",
+            SitePrefixLifecycleState::Provisioning,
+        ),
+        (
+            "tenant-b",
+            "10.42.0.128/25",
+            SitePrefixLifecycleState::Ready,
+        ),
+        ("tenant-c", "172.16.0.0/24", SitePrefixLifecycleState::Error),
+        (
+            "tenant-d",
+            "192.168.0.0/24",
+            SitePrefixLifecycleState::Deleting,
+        ),
+    ] {
+        create_fixture_tenant(&env, tenant).await.unwrap();
+        persist_tenant_site_prefix(&env, tenant_managed_site_prefix(prefix, tenant), state).await;
+    }
+    let retired_operator = persist_configured_site_prefix(&env, "198.51.100.0/24").await;
+    let mut txn = env.pool.begin().await.unwrap();
+    db::site_prefix::reconcile_configured(&mut txn, &[])
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(
+        db::site_prefix::find_by_ids(&env.pool, &[retired_operator.id])
+            .await
+            .unwrap()[0]
+            .status
+            .lifecycle_state,
+        SitePrefixLifecycleState::Deleting,
+    );
+
+    let host = create_managed_host(&env).await;
+    let response = env
+        .api
+        .get_managed_host_network_config(Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(host.dpu_ids[0]),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        response.site_fabric_prefixes,
+        [
+            "10.42.0.0/24",
+            "10.217.0.0/16",
+            "172.16.0.0/24",
+            "192.168.0.0/24",
+            "fd00::/48",
+        ]
+    );
+    assert_eq!(
+        response.deprecated_deny_prefixes,
+        [
+            "10.42.0.0/24",
+            "10.217.0.0/16",
+            "172.16.0.0/24",
+            "192.168.0.0/24",
+        ]
+    );
+}
+
+#[crate::sqlx_test]
+async fn site_prefix_isolation_admission_counts_compacted_site_rules(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config.max_site_prefix_isolation_rules = 3;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            site_prefixes: Some(vec!["10.217.0.0/16".parse().unwrap()]),
+            ..Default::default()
+        },
+    )
+    .await;
+    create_fixture_tenant(&env, "tenant-a").await.unwrap();
+    create_fixture_tenant(&env, "tenant-b").await.unwrap();
+
+    let mut created_ids = Vec::new();
+    for (tenant, prefix) in [
+        ("tenant-a", "10.42.0.0/25"),
+        ("tenant-b", "10.42.0.128/25"),
+        ("tenant-a", "172.16.0.0/24"),
+    ] {
+        let id = SitePrefixId::new();
+        let created = env
+            .api
+            .create_site_prefix(Request::new(creation_request(id, tenant, prefix)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            created.status.unwrap().lifecycle_state,
+            RpcSitePrefixLifecycleState::Provisioning as i32
+        );
+        created_ids.push(id);
+    }
+    env.api
+        .delete_site_prefix(Request::new(SitePrefixDeletionRequest {
+            id: Some(created_ids[2]),
+            tenant_organization_id: "tenant-a".to_string(),
+        }))
+        .await
+        .unwrap();
+
+    let rejected_id = SitePrefixId::new();
+    let error = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            rejected_id,
+            "tenant-b",
+            "192.168.0.0/24",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.message(),
+        "SitePrefix isolation rule limit reached: rules in use 3, after creation 4, limit 3"
+    );
+    assert!(
+        error
+            .metadata()
+            .get("nico-error-mitigation")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("max_site_prefix_isolation_rules")
+    );
+    assert!(
+        db::site_prefix::find_by_ids(&env.pool, &[rejected_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let history = env
+        .api
+        .find_site_prefix_state_histories(Request::new(SitePrefixStateHistoriesRequest {
+            site_prefix_ids: vec![rejected_id],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(history.histories.is_empty());
+}
+
+#[crate::sqlx_test]
+async fn lowered_isolation_limit_preserves_retry_but_rejects_a_compacting_new_root(
+    pool: sqlx::PgPool,
+) {
+    let mut config = get_config();
+    config.max_site_prefix_isolation_rules = 1;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            site_prefixes: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .await;
+    for tenant in ["tenant-a", "tenant-b", "tenant-c"] {
+        create_fixture_tenant(&env, tenant).await.unwrap();
+    }
+    let existing = persist_tenant_site_prefix(
+        &env,
+        tenant_managed_site_prefix("10.1.0.0/24", "tenant-a"),
+        SitePrefixLifecycleState::Provisioning,
+    )
+    .await;
+    persist_tenant_site_prefix(
+        &env,
+        tenant_managed_site_prefix("10.2.0.0/24", "tenant-b"),
+        SitePrefixLifecycleState::Provisioning,
+    )
+    .await;
+    let retry = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            existing.id,
+            "tenant-a",
+            "10.1.0.0/24",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retry.id, Some(existing.id));
+    assert_eq!(retry.metadata.unwrap().name, existing.metadata.name);
+
+    let error = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            SitePrefixId::new(),
+            "tenant-c",
+            "10.0.0.0/8",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.message(),
+        "SitePrefix isolation rule limit reached: rules in use 2, after creation 1, limit 1"
+    );
+}
+
+#[crate::sqlx_test]
+async fn tenant_site_prefix_admission_rejects_configured_denied_space(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config.deny_prefixes = vec!["10.2.0.0/16".parse().unwrap(), "fd00::/8".parse().unwrap()];
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            site_prefixes: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .await;
+    create_fixture_tenant(&env, "tenant-a").await.unwrap();
+    create_fixture_tenant(&env, "tenant-b").await.unwrap();
+    let existing = persist_tenant_site_prefix(
+        &env,
+        tenant_managed_site_prefix("10.2.0.0/24", "tenant-a"),
+        SitePrefixLifecycleState::Provisioning,
+    )
+    .await;
+    let retry = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            existing.id,
+            "tenant-a",
+            "10.2.0.0/24",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retry.id, Some(existing.id));
+
+    for prefix in ["10.2.1.0/24", "10.0.0.0/8"] {
+        let error = env
+            .api
+            .create_site_prefix(Request::new(creation_request(
+                SitePrefixId::new(),
+                "tenant-b",
+                prefix,
+            )))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert!(error.message().contains(&format!(
+            "tenant SitePrefix {prefix} overlaps configured deny prefix 10.2.0.0/16"
+        )));
+    }
+    let created = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            SitePrefixId::new(),
+            "tenant-b",
+            "192.168.0.0/24",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(created.config.unwrap().prefix, "192.168.0.0/24");
+}
+
+#[crate::sqlx_test]
+async fn concurrent_tenant_roots_share_the_site_isolation_limit(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config.max_site_prefix_isolation_rules = 1;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            site_prefixes: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .await;
+    create_fixture_tenant(&env, "tenant-a").await.unwrap();
+    create_fixture_tenant(&env, "tenant-b").await.unwrap();
+
+    let mut blocker = env.pool.begin().await.unwrap();
+    db::tenant_prefix_overlap::lock_checks(&mut blocker)
+        .await
+        .unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let first_id = SitePrefixId::new();
+    let second_id = SitePrefixId::new();
+    let first_api = env.api.clone();
+    let first = tokio::spawn(async move {
+        first_api
+            .create_site_prefix(Request::new(creation_request(
+                first_id,
+                "tenant-a",
+                "10.1.0.0/24",
+            )))
+            .await
+    });
+    let first_pid =
+        wait_for_blocked_query(&env.pool, blocker_pid, "tenant_prefix_overlap:checks").await;
+    let second_api = env.api.clone();
+    let second = tokio::spawn(async move {
+        second_api
+            .create_site_prefix(Request::new(creation_request(
+                second_id,
+                "tenant-b",
+                "10.2.0.0/24",
+            )))
+            .await
+    });
+    wait_for_blocked_query(&env.pool, first_pid, "tenant_prefix_overlap:checks").await;
+    blocker.commit().await.unwrap();
+    let results = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let error = results.into_iter().find_map(Result::err).unwrap();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.message(),
+        "SitePrefix isolation rule limit reached: rules in use 1, after creation 2, limit 1"
+    );
+    assert_eq!(
+        db::site_prefix::find_by_ids(&env.pool, &[first_id, second_id])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[crate::sqlx_test]

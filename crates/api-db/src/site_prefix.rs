@@ -646,6 +646,18 @@ pub async fn count_tenant_managed(
         .map_err(|_| DatabaseError::internal(format!("invalid SitePrefix count {used}")))
 }
 
+/// Returns distinct retained tenant prefixes in every lifecycle state.
+/// Deleting roots remain protected until their lifecycle finishes removal.
+/// Order is unspecified; callers that need stable output must sort or compact it.
+pub async fn find_tenant_prefixes(db: impl DbReader<'_>) -> DatabaseResult<Vec<IpNetwork>> {
+    let query = "SELECT DISTINCT prefix FROM site_prefixes WHERE authority = $1";
+    sqlx::query_scalar(query)
+        .bind(SitePrefixAuthority::TenantManaged)
+        .fetch_all(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Returns tenant quota use for the owners present in one inventory response.
 pub async fn count_tenant_managed_by_organizations(
     db: impl DbReader<'_>,

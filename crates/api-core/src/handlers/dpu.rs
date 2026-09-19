@@ -572,12 +572,7 @@ async fn get_managed_host_network_config_inner(
     let deny_prefixes =
         deny_prefixes_for_agent(&api.eth_data.deny_prefixes, network_virtualization_type);
 
-    let site_fabric_networks = api
-        .eth_data
-        .site_fabric_prefixes
-        .as_ref()
-        .map(|s| s.as_ip_slice())
-        .unwrap_or_default();
+    let site_fabric_networks = super::site_prefix::protected_prefixes(api, &mut txn).await?;
     let site_fabric_prefixes: Vec<String> = site_fabric_networks
         .iter()
         .map(|net| net.to_string())
@@ -585,7 +580,7 @@ async fn get_managed_host_network_config_inner(
 
     let deprecated_deny_prefixes = deprecated_deny_prefixes_for_agent(
         &deny_prefixes,
-        site_fabric_networks,
+        &site_fabric_networks,
         api.runtime_config.vpc_isolation_behavior,
         network_virtualization_type,
     );

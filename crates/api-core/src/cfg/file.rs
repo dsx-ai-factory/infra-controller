@@ -76,6 +76,7 @@ use crate::CarbideError;
 
 pub(crate) const DEFAULT_DPU_NUM_OF_VFS: u32 = carbide_dpf::DEFAULT_DPU_NUM_OF_VFS;
 pub(crate) const MAX_DPU_NUM_OF_VFS: u32 = 126;
+const MAX_SITE_PREFIX_ISOLATION_RULES: u32 = 64;
 
 // Deployment selectors must never reuse labels whose values NICo supplies independently.
 // The shared marker would make every deployment select every DPUNode, while the contextual
@@ -256,6 +257,17 @@ pub struct CarbideConfig {
     /// and keep their CIDR reserved.
     #[serde(default = "default_max_site_prefixes_per_tenant")]
     pub max_site_prefixes_per_tenant: u32,
+
+    /// Maximum compacted configured and retained tenant prefixes permitted when
+    /// creating a tenant SitePrefix. Defaults to 64; accepts 0 through 64.
+    /// Zero blocks creation, and lowering the limit never removes protection.
+    /// Changes require a restart. Raising the supported ceiling requires the
+    /// qualification tracked by https://github.com/dsx-ai-factory/infra-controller/issues/3902.
+    #[serde(
+        default = "default_max_site_prefix_isolation_rules",
+        deserialize_with = "deserialize_site_prefix_isolation_limit"
+    )]
+    pub max_site_prefix_isolation_rules: u32,
 
     /// List of aggregate IPv4 prefixes (in CIDR notation) that contain prefixes assigned
     /// to tenants so that they themselves can announce to the DPU.  E.g., BYOIP
@@ -4143,6 +4155,23 @@ pub fn default_max_site_prefixes_per_tenant() -> u32 {
     8
 }
 
+pub(crate) fn default_max_site_prefix_isolation_rules() -> u32 {
+    MAX_SITE_PREFIX_ISOLATION_RULES
+}
+
+fn deserialize_site_prefix_isolation_limit<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let limit = u32::deserialize(deserializer)?;
+    if limit > MAX_SITE_PREFIX_ISOLATION_RULES {
+        return Err(serde::de::Error::custom(format!(
+            "max_site_prefix_isolation_rules must be between 0 and {MAX_SITE_PREFIX_ISOLATION_RULES}"
+        )));
+    }
+    Ok(limit)
+}
+
 pub fn default_max_network_security_group_size() -> u32 {
     200
 }
@@ -5007,6 +5036,27 @@ path = "credentials.yaml"
                 "" => false,
                 "tenant_prefix_overlap_enabled = false" => false,
                 "tenant_prefix_overlap_enabled = true" => true,
+            }
+        );
+    }
+
+    #[test]
+    fn site_prefix_isolation_limit_defaults_and_bounds() {
+        scenarios!(
+            run = |patch| Figment::new()
+                .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                .merge(Toml::string(patch))
+                .extract::<CarbideConfig>()
+                .map(|config| config.max_site_prefix_isolation_rules)
+                .map_err(Box::new);
+            "accepted limits" {
+                "" => Yields(64),
+                "max_site_prefix_isolation_rules = 0" => Yields(0),
+                "max_site_prefix_isolation_rules = 64" => Yields(64),
+            }
+            "outside the initial supported range" {
+                "max_site_prefix_isolation_rules = 65" => Fails,
+                "max_site_prefix_isolation_rules = -1" => Fails,
             }
         );
     }

@@ -131,11 +131,13 @@ pub async fn find_overlapping_vpc_prefix_pairs(
 }
 
 /// `lock_checks` serializes participating transactions that could create an
-/// overlap between a `VpcPrefix` and another stored prefix.
+/// overlap between a `VpcPrefix` and another stored prefix, or add a SitePrefix
+/// to the site's isolation rules.
 ///
 /// Callers acquire it before any resource lock, then read, validate, and write
-/// in the same transaction. Otherwise, two requests can each see no overlap
-/// and both commit. PostgreSQL releases the lock on commit or rollback.
+/// in the same transaction. Otherwise, two requests can each see no overlap or
+/// enough rule capacity and both commit. PostgreSQL releases the lock on commit
+/// or rollback.
 pub async fn lock_checks(txn: &mut PgTransaction<'_>) -> DatabaseResult<()> {
     let query = "SELECT pg_advisory_xact_lock(\
             hashtextextended('tenant_prefix_overlap:checks', 0))";

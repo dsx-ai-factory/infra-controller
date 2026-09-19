@@ -49,7 +49,8 @@ use crate::cfg::file::{
     VpcPrefixStateControllerConfig, default_bmc_session_lockout_threshold,
     default_database_pool_acquire_timeout, default_database_pool_idle_timeout,
     default_database_pool_max_lifetime, default_database_startup_retry_timeout,
-    default_max_find_by_ids, default_max_site_prefixes_per_tenant, default_pxe_public_base_url,
+    default_max_find_by_ids, default_max_site_prefix_isolation_rules,
+    default_max_site_prefixes_per_tenant, default_pxe_public_base_url,
 };
 #[cfg(test)]
 use crate::cfg::file::{
@@ -183,6 +184,7 @@ pub fn get() -> CarbideConfig {
         site_fabric_prefixes: vec![],
         tenant_prefix_overlap_enabled: false,
         max_site_prefixes_per_tenant: default_max_site_prefixes_per_tenant(),
+        max_site_prefix_isolation_rules: default_max_site_prefix_isolation_rules(),
         anycast_site_prefixes: vec![],
         common_tenant_host_asn: None,
         vpc_isolation_behavior: <_ as Default>::default(),

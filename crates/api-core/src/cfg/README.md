@@ -50,6 +50,7 @@ behavior.
 | `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IP prefixes (v4/v6) assigned for tenant use within this site. |
 | `tenant_prefix_overlap_enabled` | `bool` | `false` | `networking` | Site opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). The existing `VpcPrefix` exclusion continues to prevent overlapping `VpcPrefix` persistence until the cutover tracked by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892). |
 | `max_site_prefixes_per_tenant` | `u32` | `8` | `networking` | Maximum tenant-managed SitePrefixes retained for one tenant at this site. Prefixes awaiting removal still count against this limit and keep their CIDR reserved. |
+| `max_site_prefix_isolation_rules` | `u32` | `64` | `networking` | Maximum effective SitePrefix isolation rules for new tenant-root admission; accepts `0` through `64`. See [SitePrefix isolation rules](#siteprefix-isolation-rules). |
 | `anycast_site_prefixes` | `Vec<Ipv4Network>` | `[]` | `networking` | Aggregate IPv4 prefixes containing tenant-announced prefixes (e.g., BYOIP). **Deprecated.** Use [`routing_profiles.allowed_anycast_prefixes`](#fnnroutingprofileconfig) instead. |
 | `common_tenant_host_asn` | `Option<u32>` | — | `networking` | ASN that tenants use to peer with the DPU. If unset, any ASN is accepted. |
 | `vpc_isolation_behavior` | `VpcIsolationBehaviorType` | `MutualIsolation` | `networking` | VPC isolation policy: `mutual_isolation` or `open`. |
@@ -825,6 +826,42 @@ client-certificate authentication is not used.
 Unset properties retain presence information so a VPC's inline
 `routing_profile_overrides` can inherit them. After the named profile and VPC
 override are combined, properties still unset use the effective defaults above.
+
+### SitePrefix isolation rules
+
+Core includes current configured `site_fabric_prefixes` and retained tenant-managed
+SitePrefixes in DPU isolation input. Duplicate, contained, and adjacent prefixes
+are combined only when the resulting list covers exactly the same addresses.
+The result is sorted by address family, address, and prefix length. Logical
+SitePrefix records and their ownership are unchanged.
+
+An empty configured `site_fabric_prefixes` list contributes no operator roots;
+it does not suppress isolation for retained tenant-managed SitePrefixes. A site
+with neither configured nor tenant roots still sends an empty list.
+
+`max_site_prefix_isolation_rules` limits this combined list when creating a
+tenant-managed root. It defaults to `64` and accepts integers from `0` through
+`64`; configuration loading rejects other values. Changes require restarting
+Core. Zero blocks new roots. The initial ceiling is an operational restriction,
+not a hardware-capacity guarantee; raising it requires the qualification tracked
+by [#3902](https://github.com/dsx-ai-factory/infra-controller/issues/3902).
+The separate `max_site_prefixes_per_tenant` quota still counts logical tenant roots.
+
+If existing use exceeds a lowered limit, new roots are rejected even when adding
+one would compact the list below that limit. Existing roots continue to render,
+and a retry using an existing ID and unchanged immutable fields still returns
+that root. Core reports `ResourceExhausted` with the current, proposed, and maximum
+rule counts for rejected creation. Configured sites above the limit still start
+and render their complete protection. New tenant roots intersecting a configured
+`deny_prefixes` entry are rejected with `InvalidArgument`.
+
+Tenant roots remain included in every retained lifecycle state, including
+`Deleting`, even when `tenant_prefix_overlap_enabled` is false. New tenant roots remain
+`Provisioning` and cannot be used for new VpcPrefixes until the DPU readiness
+work in [#6314](https://github.com/dsx-ai-factory/infra-controller/issues/6314).
+Operator-managed roots still follow the current configuration file: historical
+operator rows marked `Deleting` are not added back to DPU responses. Safe removal
+of configured roots is also tracked in #6314.
 
 ### Tenant prefix overlap checks
 

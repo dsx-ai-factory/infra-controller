@@ -207,6 +207,19 @@ pub enum CarbideError {
     #[error("tenant SitePrefix quota reached: {used} of {limit} retained SitePrefixes are in use")]
     TenantSitePrefixQuotaExceeded { used: u32, limit: u32 },
 
+    /// New tenant SitePrefixes are blocked by the site's effective isolation rule limit.
+    #[error(
+        "SitePrefix isolation rule limit reached: rules in use {used}, after creation {requested}, limit {limit}"
+    )]
+    SitePrefixIsolationLimitExceeded {
+        /// Number of compacted configured and retained tenant prefixes.
+        used: usize,
+        /// Number of compacted prefixes if the new root were admitted.
+        requested: usize,
+        /// Configured maximum for admitting new tenant roots.
+        limit: u32,
+    },
+
     #[error("host is not available for allocation due to health probe alert")]
     UnhealthyHost,
 
@@ -468,6 +481,7 @@ impl OperatorError for CarbideError {
             | CarbideError::AddressAlreadyInUse(_) => ErrorCode::nico(Api, 412),
             CarbideError::ResourceExhausted(_)
             | CarbideError::TenantSitePrefixQuotaExceeded { .. }
+            | CarbideError::SitePrefixIsolationLimitExceeded { .. }
             | CarbideError::DhcpError(_) => ErrorCode::nico(Api, 429),
             CarbideError::UnavailableError(_) => ErrorCode::nico(Api, 503),
             CarbideError::RedfishError(error) if is_dpu_bios_attributes_not_ready(error) => {
@@ -499,6 +513,10 @@ impl OperatorError for CarbideError {
             CarbideError::TenantSitePrefixQuotaExceeded { .. } => Some(
                 "Review the tenant's retained SitePrefixes; complete removal of an unneeded prefix \
                  or increase max_site_prefixes_per_tenant if additional roots are intended.",
+            ),
+            CarbideError::SitePrefixIsolationLimitExceeded { .. } => Some(
+                "Review the configured and retained tenant SitePrefixes and max_site_prefix_isolation_rules; \
+                 existing protection is retained until prefixes can be safely removed.",
             ),
             _ => None,
         }
@@ -548,7 +566,8 @@ impl From<CarbideError> for tonic::Status {
             e @ CarbideError::BmcMacIpMismatch { .. } => Status::invalid_argument(e.to_string()),
             CarbideError::UnhealthyHost => Status::failed_precondition(error.to_string()),
             CarbideError::ResourceExhausted(kind) => Status::resource_exhausted(kind),
-            error @ CarbideError::TenantSitePrefixQuotaExceeded { .. } => {
+            error @ (CarbideError::TenantSitePrefixQuotaExceeded { .. }
+            | CarbideError::SitePrefixIsolationLimitExceeded { .. }) => {
                 Status::resource_exhausted(error.to_string())
             }
             error @ CarbideError::ConcurrentModificationError(_, _) => {
