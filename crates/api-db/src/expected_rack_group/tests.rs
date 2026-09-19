@@ -5,6 +5,98 @@
 
 use super::*;
 
+#[crate::sqlx_test]
+async fn expected_rack_group_migration_defaults(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    // Reapply the new table migration to the predecessor shape (no group table).
+    sqlx::query("DROP TABLE expected_rack_groups")
+        .execute(&mut *txn)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20260917160000_expected_rack_groups.sql"
+    ))
+    .execute(&mut *txn)
+    .await?;
+    sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, rack_ids, members) VALUES ('defaults', 'topology', '[]', '[]')")
+        .execute(&mut *txn).await?;
+    let loaded = find_by_rack_group_id(&mut txn, &RackGroupId::new("defaults"))
+        .await?
+        .unwrap();
+    assert_eq!(loaded.metadata, Metadata::default());
+    let mut boundary = group("boundary");
+    boundary.metadata.name = "n".repeat(256);
+    boundary.metadata.description = "d".repeat(1024);
+    create(&mut txn, &boundary).await?;
+    assert_eq!(
+        find_by_rack_group_id(&mut txn, &boundary.rack_group_id).await?,
+        Some(boundary)
+    );
+    txn.rollback().await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn expected_rack_group_concurrent_replacements(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Duration;
+
+    // Exercise an empty table (no row to lock), then an existing snapshot.
+    for populated in [false, true] {
+        let mut first = pool.begin().await?;
+        clear(&mut first).await?;
+        if populated {
+            create(&mut first, &group("old")).await?;
+        }
+        first.commit().await?;
+
+        let mut first = pool.begin().await?;
+        clear(&mut first).await?;
+        let mut second = pool.begin().await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *second)
+            .await?;
+        let writer = tokio::spawn(async move {
+            clear(&mut second).await.unwrap();
+            create(&mut second, &group("second")).await.unwrap();
+            second.commit().await.unwrap();
+        });
+
+        let blocked = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 AND NOT granted)",
+                )
+                .bind(pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                if writer.is_finished() {
+                    panic!("replacement bypassed the writer lock");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if blocked.is_err() {
+            writer.abort();
+        }
+        blocked.expect("second replacement must wait for the first transaction");
+        create(&mut first, &group("first")).await?;
+        first.commit().await?;
+        tokio::time::timeout(Duration::from_secs(5), writer).await??;
+        let mut reader = pool.begin().await?;
+        assert_eq!(find_all(&mut reader).await?, vec![group("second")]);
+        reader.rollback().await?;
+    }
+    Ok(())
+}
+
 fn group(id: &str) -> ExpectedRackGroup {
     ExpectedRackGroup {
         rack_group_id: RackGroupId::new(id),

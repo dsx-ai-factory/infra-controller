@@ -4,7 +4,7 @@ CREATE TABLE expected_rack_groups (
     topology varchar(128) NOT NULL,
     rack_ids jsonb NOT NULL,
     members jsonb NOT NULL,
-    metadata_name varchar(255) NOT NULL,
-    metadata_description text NOT NULL,
-    metadata_labels jsonb NOT NULL
+    metadata_name varchar(256) NOT NULL DEFAULT '',
+    metadata_description varchar(1024) NOT NULL DEFAULT '',
+    metadata_labels jsonb NOT NULL DEFAULT '{}'
 );

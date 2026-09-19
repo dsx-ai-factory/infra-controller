@@ -76,9 +76,6 @@ impl TryFrom<rpc::forge::ExpectedRackGroup> for ExpectedRackGroup {
         metadata
             .validate(false)
             .map_err(|e| invalid(&e.to_string()))?;
-        if metadata.name.len() > 255 {
-            return Err(invalid("metadata name exceeds 255 characters"));
-        }
         Ok(Self {
             rack_group_id,
             topology: RackGroupTopology::new(value.topology),
@@ -141,5 +138,24 @@ mod tests {
         empty.rack_ids.clear();
         empty.members.clear();
         assert!(ExpectedRackGroup::try_from(empty).is_ok());
+    }
+
+    #[test]
+    fn expected_rack_group_metadata_boundaries() {
+        for (name_len, description_len, valid) in
+            [(256, 1024, true), (257, 1024, false), (256, 1025, false)]
+        {
+            let mut input = wire();
+            input.metadata = Some(rpc::forge::Metadata {
+                name: "n".repeat(name_len),
+                description: "d".repeat(description_len),
+                labels: vec![],
+            });
+            assert_eq!(
+                ExpectedRackGroup::try_from(input).is_ok(),
+                valid,
+                "name={name_len}, description={description_len}"
+            );
+        }
     }
 }

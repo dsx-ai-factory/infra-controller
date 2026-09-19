@@ -24,7 +24,9 @@ pub(crate) async fn add_expected_rack_group(
         .try_into()
         .map_err(CarbideError::from)?;
     let mut txn = api.txn_begin().await?;
-    db_expected_rack_group::create(&mut txn, &group).await?;
+    db_expected_rack_group::create(&mut txn, &group)
+        .await
+        .map_err(CarbideError::from)?;
     txn.commit().await?;
     Ok(Response::new(()))
 }
@@ -38,7 +40,9 @@ pub(crate) async fn update_expected_rack_group(
         .try_into()
         .map_err(CarbideError::from)?;
     let mut txn = api.txn_begin().await?;
-    db_expected_rack_group::update(&mut txn, &group).await?;
+    db_expected_rack_group::update(&mut txn, &group)
+        .await
+        .map_err(CarbideError::from)?;
     txn.commit().await?;
     Ok(Response::new(()))
 }
@@ -52,7 +56,9 @@ pub(crate) async fn delete_expected_rack_group(
             CarbideError::InvalidArgument(format!("invalid rack group ID: {error}"))
         })?;
     let mut txn = api.txn_begin().await?;
-    db_expected_rack_group::delete(&mut txn, &rack_group_id).await?;
+    db_expected_rack_group::delete(&mut txn, &rack_group_id)
+        .await
+        .map_err(CarbideError::from)?;
     txn.commit().await?;
     Ok(Response::new(()))
 }
@@ -67,7 +73,8 @@ pub(crate) async fn get_expected_rack_group(
         })?;
     let mut txn = api.txn_begin().await?;
     let group = db_expected_rack_group::find_by_rack_group_id(&mut txn, &rack_group_id)
-        .await?
+        .await
+        .map_err(CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "expected_rack_group",
             id: rack_group_id.to_string(),
@@ -81,7 +88,9 @@ pub(crate) async fn get_all_expected_rack_groups(
     _request: Request<()>,
 ) -> Result<Response<rpc::ExpectedRackGroupList>, Status> {
     let mut txn = api.txn_begin().await?;
-    let groups = db_expected_rack_group::find_all(&mut txn).await?;
+    let groups = db_expected_rack_group::find_all(&mut txn)
+        .await
+        .map_err(CarbideError::from)?;
     txn.commit().await?;
     Ok(Response::new(rpc::ExpectedRackGroupList {
         expected_rack_groups: groups.into_iter().map(Into::into).collect(),
@@ -112,9 +121,13 @@ pub(crate) async fn replace_all_expected_rack_groups(
         }
     }
 
-    db_expected_rack_group::clear(&mut txn).await?;
+    db_expected_rack_group::clear(&mut txn)
+        .await
+        .map_err(CarbideError::from)?;
     for group in &groups {
-        db_expected_rack_group::create(&mut txn, group).await?;
+        db_expected_rack_group::create(&mut txn, group)
+            .await
+            .map_err(CarbideError::from)?;
     }
     txn.commit().await?;
     Ok(Response::new(()))
@@ -125,7 +138,9 @@ pub(crate) async fn delete_all_expected_rack_groups(
     _request: Request<()>,
 ) -> Result<Response<()>, Status> {
     let mut txn = api.txn_begin().await?;
-    db_expected_rack_group::clear(&mut txn).await?;
+    db_expected_rack_group::clear(&mut txn)
+        .await
+        .map_err(CarbideError::from)?;
     txn.commit().await?;
     Ok(Response::new(()))
 }

@@ -136,6 +136,13 @@ pub async fn delete(txn: &mut PgConnection, rack_group_id: &RackGroupId) -> Data
 }
 
 pub async fn clear(txn: &mut PgConnection) -> DatabaseResult<()> {
+    // Like expected-machine replacement, exclude all writers until the replacement
+    // commits. Ordinary reads remain available. Call before any replacement writes.
+    let lock = "LOCK TABLE expected_rack_groups IN SHARE ROW EXCLUSIVE MODE";
+    sqlx::query(lock)
+        .execute(&mut *txn)
+        .await
+        .map_err(|err| DatabaseError::query(lock, err))?;
     let query = "DELETE FROM expected_rack_groups";
     sqlx::query(query)
         .execute(txn)
