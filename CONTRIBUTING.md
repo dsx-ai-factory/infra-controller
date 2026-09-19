@@ -325,8 +325,8 @@ in the pull request.
 
 ## Build Guide
 
-For pinned dependency updates, image testing, and build optimization trade-offs, see the
-[Build Guide](docs/development/build-guide.md).
+For test debugging profiles, pinned dependency updates, image testing, and build optimization
+trade-offs, see the [Build Guide](docs/development/build-guide.md).
 
 ## Questions?
 
