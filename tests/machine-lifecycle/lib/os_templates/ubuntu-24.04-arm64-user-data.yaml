@@ -1,0 +1,33 @@
+#cloud-config
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+disable_root: true
+ssh_pwauth: __MLT_ALLOW_PW__
+chpasswd:
+    expire: false
+users:
+    # The qcow image already contains this account. Keep it locked rather than
+    # inheriting any password state baked into the image.
+    - name: nvidia
+      lock_passwd: true
+    - name: machine-lifecycle-test-user
+      sudo: ALL=(ALL) NOPASSWD:ALL
+      groups: sudo
+      shell: /bin/bash
+      lock_passwd: __MLT_LOCK_PASSWD__
+      passwd: __MLT_USER_PASSWORD__
+      ssh_authorized_keys:
+        - __MLT_SSH_PUBLIC_KEY__

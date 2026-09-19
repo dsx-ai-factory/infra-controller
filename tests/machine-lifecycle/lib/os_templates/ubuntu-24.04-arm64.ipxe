@@ -1,0 +1,32 @@
+#!ipxe
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# These versioned artifacts intentionally define MLT's built-in ARM64 OS
+# profile.
+set boot-loader https://d1veq6e8nuk2fy.cloudfront.net/nke-isos/qcow/efi/aarch64/2026-06-10/1781128122/qcow-imager.efi
+set image-url https://d1veq6e8nuk2fy.cloudfront.net/nke-isos/qcow/images/24.04/aarch64/lvm/2026-06-10/950/nke-24.04-aarch64-lvm-2026-06-10-950.qcow2
+
+set disk-strategy smallest
+
+# GB200 exposes its ARM serial console as ttyAMA0. Keep this aligned with the
+# qcow imager's preferred aarch64 serial port so early boot output is captured.
+set console-config console=tty0 console=ttyAMA0,115200
+set kernel-params pci=realloc=off reboot=pci loglevel=1 iommu=pt intel_iommu=on
+set luks-key luks.key=changeit
+set cloud-init-ds ds=nocloud-net;s=${cloudinit-url}
+
+chain ${boot-loader} ${console-config} ${kernel-params} ${luks-key} image_url=${image-url} disk_strategy=${disk-strategy} ${cloud-init-ds} update_grub_template=yes update_grub_cfg=yes
+boot

@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[project]
+name = "machine-lifecycle-test"
+version = "0.1.0"
+license = "Apache-2.0"
+requires-python = "==3.12.*"
+dependencies = [
+    "bcrypt>=5.0.0",
+    "cryptography>=46.0.3",
+    "paramiko>=4.0.0",
+    "hvac>=2.4.0",
+    # Confirms the rendered cloud-init user-data is valid YAML before it is
+    # handed to NICo, rather than after a provision cycle fails on it.
+    "pyyaml>=6.0.2",
+    "pytest>=9.0.1",
+    "requests>=2.32.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lib"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.6",
+]
+
+[tool.pytest]
+filterwarnings = [
+    'ignore:.*pytest\.mark\.T\d{7}.*:pytest.PytestUnknownMarkWarning',
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Ruff default ruleset
+select = [
+    "F",      # pyflakes: syntax errors and basic mistakes
+    "E4",      # pycodestyle: import errors (E4xx)
+    "E7",      # pycodestyle: statement errors (E7xx)
+    "E9",      # pycodestyle: runtime errors (E9xx)
+]
+
+# Optional extra rules
+extend-select = [
+    "E1",      # pycodestyle: indentation errors (E1xx)
+#    "E2",      # pycodestyle: whitespace errors (E2xx)
+#    "E3",      # pycodestyle: blank line errors (E3xx)
+    "E5",      # pycodestyle: line-length errors (E5xx)
+#    "I",       # isort: import sorting
+#    "UP",      # pyupgrade: outdated syntax
+#    "B",       # flake8-bugbear: common bugs and design issues
+#    "C4",      # flake8-comprehensions: unnecessary generators and comprehensions
+#    "SIM",     # flake8-simplify: code that can be simplified
+#    "A",       # flake8-builtins: shadowed builtins
+#    "ANN",     # flake8-annotations: missing type annotations
+#    "RUF",     # ruff-specific rules
+]
+
+# Rules to explicitly ignore
+ignore = [
+    "E111",    # pycodestyle: indentation with invalid multiple  <- handled by formatter
+    "E114",    # pycodestyle: comment indentation with invalid multiple  <- handled by formatter
+    "E117",    # pycodestyle: over-indented  <- handled by formatter
+    "E501",    # pycodestyle: line too long  <- handled by formatter
+]

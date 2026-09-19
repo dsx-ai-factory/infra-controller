@@ -1,0 +1,180 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Portable inputs for one machine lifecycle test run. Environment variables
+# documented in README.md may override any value in this file.
+
+[site]
+name = "example-site"
+
+[target]
+machine_id = "replace-with-a-host-machine-id"
+expected_dpu_count = 2
+
+# MLT creates the VPC and VPC prefix when absent, and validates compatible
+# existing resources before reuse. The tenant-derived IPv4 IP block must
+# already exist because MLT does not create IP blocks.
+[resources]
+vpc_name = "machine-lifecycle-test-fnn-vpc"
+vpc_prefix_name = "machine-lifecycle-test-vpc-prefix"
+ip_block_name = "replace-with-a-tenant-ip-block"
+vpc_prefix_length = 30
+# Delete only the VPC and/or prefix created by this run. Reused resources are
+# never deleted. Set false to preserve newly created resources after the run.
+cleanup = true
+# Whether MLT may create the VPC and prefix when none of that name exists. Set
+# false where they are provisioned for you externally: a misspelt name then
+# fails the run instead of quietly creating a second resource beside the one
+# you meant to use.
+create_missing = true
+
+# Best-effort cleanup of temporary MLT OS definitions left by interrupted jobs.
+# It only considers tenant-owned iPXE definitions carrying MLT's exact name and
+# description markers, and preserves any definition still referenced by an
+# instance.
+[os_janitor]
+enabled = false
+minimum_age_hours = 24
+dry_run = true
+
+[lifecycle]
+mode = "full"
+provision_cycles = 1
+skip_factory_reset = false
+test_sitewide_bmc_fallback = false
+
+# Optional break-glass access to an instance a failed run leaves behind. A run
+# that fails before teardown does not delete its instance, but the SSH identity
+# it provisioned with is generated in memory and dies with the process -- so
+# without one of these the machine is unreachable. Both default to off, and the
+# two are independent: either works on its own.
+[debug]
+# A public key of your own, authorized alongside the run's ephemeral one. There
+# is nothing secret to publish or store, so prefer this where SSH will reach
+# the instance. Also settable as $MLT_DEBUG_SSH_PUBLIC_KEY.
+# ssh_public_key = "ssh-ed25519 AAAA... you@host"
+
+# Mint a random password per run for machine-lifecycle-test-user -- the same
+# account the test logs in as -- and write it to $ARTIFACT_DIR/debug-access.txt.
+# Covers the case where the box installed but never came up on the network,
+# leaving the BMC serial console as the only way in. It does not help if
+# autoinstall itself fails: no account in this file exists until the installer
+# has finished and rebooted. That account carries passwordless sudo, so treat
+# the published password as root.
+#
+# Enabling this is what sets cloud-init's ssh_pwauth; with it off, every
+# account's password stays locked. This is a switch, not somewhere to put a
+# password of your own -- the run generates its own and this only turns it on.
+# Also settable as $ENABLE_MLT_DEBUG_CONSOLE_PASSWORD.
+# enable_console_password = true
+
+# Skip deprovisioning so the instance is still there to log into afterwards.
+# On a passing run the delete follows the SSH check immediately, so there is
+# otherwise no window in which to reach the box by hand.
+#
+# The run is failed on purpose when this is set: it did not exercise the
+# deletion half of the lifecycle, and a green tick would be mistaken for a
+# full end-to-end validation later. The machine stays allocated until the
+# instance is deleted by hand, so this is for a deliberate debugging session
+# and not something to leave switched on. Rejected with more than one
+# provision cycle, since every later cycle would strand another instance.
+# Also settable as $ENABLE_MLT_DEBUG_KEEP_INSTANCE.
+# keep_instance = true
+
+# Best-effort snapshots are written only when ingestion or assignment times
+# out. Failures while collecting diagnostics never replace the original test
+# failure.
+[diagnostics]
+enabled = true
+output_directory = "artifacts/diagnostics"
+
+# Kubernetes log collection is optional because deployments and runner RBAC
+# differ between installations. It requires get access to pods/log in every
+# configured namespace.
+[diagnostics.kubernetes]
+enabled = false
+# By default, logs are requested from the start of the current MLT run. Set this
+# to use a fixed window instead.
+# lookback_minutes = 30
+max_bytes_per_container = 5000000
+
+# Add one table for each deployment whose pod logs should be collected.
+# [[diagnostics.kubernetes.workloads]]
+# namespace = "replace-with-the-namespace"
+# deployment = "replace-with-the-deployment"
+
+# How to reach the gRPC API the admin-cli speaks -- not the REST API -- and the
+# identity to present to it. Omit the whole section where that API accepts an
+# unauthenticated in-cluster caller; the admin-cli is then invoked exactly as it
+# is without it.
+#
+# The address is required, not defaulted: on a name the server certificate does
+# not cover, the client retries rather than failing, so an omission presents as
+# a hang.
+[grpc_api]
+url = "https://replace-with-the-api-service:1079"
+root_ca_path = "/var/run/secrets/replace-with-the-roots-secret/ca.crt"
+
+# Where to mint the client certificate. Omit this table where callers need no
+# certificate. Authorization may depend on subject fields the PKI role stamps
+# rather than on the common name alone, so the role has to be one issued for
+# CLI clients. A run can take several hours; choose a TTL that covers one.
+[grpc_api.client_certificate]
+vault_pki_mount = "replace-with-the-pki-mount"
+vault_pki_role = "replace-with-the-client-role"
+common_name = "replace-with-the-client-common-name"
+ttl = "12h"
+
+# How the test obtains its NICo bearer token: an OAuth 2.0 client-credentials
+# exchange, and where the client credential is read from. Omit the whole
+# section when NICO_TOKEN supplies a bearer directly; then nothing here is used.
+#
+# auth_method:
+#   kubernetes  the pod's own service-account token (no external credential)
+#   jwt         a JWT from a file or environment variable
+#   token       $VAULT_TOKEN or ~/.vault-token, for developer machines
+# secret_engine:
+#   kv-v2       a KV-v2 secret at secret_path under secret_mount
+#   raw         a logical read of the full secret_path, for engines that issue
+#               credentials on demand. secret_mount does not apply and is
+#               rejected rather than ignored.
+[oauth]
+# The authorization server's token endpoint, and the scope to request. Both are
+# deployment-specific: a token issued by one authorization server is rejected by
+# an API that trusts another. Endpoints must be https, except via localhost for
+# a port-forward, because the credential crosses this connection.
+#
+# The grant parameters are sent as query parameters rather than in the form
+# body RFC 6749 describes. That is what the deployments MLT runs against accept
+# today; a different authorization server may need the body form instead.
+token_url = "https://replace-with-the-authorization-server/token"
+scope = "carbide"
+# Where the client_id/client_secret pair is stored. OAUTH_CREDENTIAL can
+# supply the pair directly instead, in which case none of the rest applies.
+vault_address = "https://vault.example.test"
+vault_namespace = ""
+# A CA bundle for the Vault's TLS certificate. Leave empty to trust the system
+# store, which is right for a Vault with a publicly-issued certificate.
+vault_cacert = ""
+auth_method = "kubernetes"
+auth_mount = "kubernetes"
+# Left empty, a Kubernetes role name is taken from the service-account token.
+auth_role = ""
+auth_jwt_source = "file:/var/run/secrets/kubernetes.io/serviceaccount/token"
+secret_engine = "kv-v2"
+secret_mount = "secrets"
+secret_path = "replace-with-the-credential-path"
+client_id_field = "client_id"
+client_secret_field = "secret"
