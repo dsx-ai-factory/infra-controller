@@ -65,15 +65,13 @@ Use percentage-based thresholds for IP availability, not absolute counts.
 | Warning |  < 10 stuck | 60m |
 | Critical | >= 10 stuck | 60m |
 
-### State-handler latency
+### State-controller iteration latency
 
-Alert when average iteration latency exceeds the threshold.
-
-| Metric | Threshold | Duration |
-|--------|-----------|----------|
-| State-handler latency | > 120 seconds | 10m |
-
-Applies to machine, network-segment and IB-partition state handlers.
+The `NicoStateHandlerLatency` alert fires when average iteration latency exceeds 120 seconds
+(120000ms) for 10 minutes, or if any of the iteration latency metrics are absent. It monitors
+`carbide_machines_iteration_latency_milliseconds`, `carbide_network_segments_iteration_latency_milliseconds`,
+and `carbide_ib_partitions_iteration_latency_milliseconds` histograms using `rate(_sum)/rate(_count)`
+because the default histogram buckets max at 10 seconds.
 
 ### API availability
 
@@ -121,11 +119,10 @@ histogram_quantile(0.95,
 ) / 1000 < 1
 ```
 
-**State update / reconciliation** uses `carbide_machines_handler_latency_in_state_milliseconds`
-histogram. The production alert threshold (120s) is more lenient than the SLO target (60s) to
-reduce noise. Related metrics include `carbide_machines_iteration_latency_milliseconds` for
-full iteration time and `carbide_machines_per_state_above_sla` for objects exceeding configured
-per-state thresholds.
+**State controller iteration latency** is covered by `NicoStateHandlerLatency` described
+[above](#state-controller-iteration-latency). Related metrics include
+`carbide_machines_handler_latency_in_state_milliseconds` for per-state handler time and
+`carbide_machines_per_state_above_sla` for objects exceeding configured per-state thresholds.
 
 ## 3. Site-related thresholds
 
