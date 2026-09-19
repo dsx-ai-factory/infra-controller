@@ -906,7 +906,7 @@ jobs:
     uses: ./.github/workflows/docker-build.yml
     with:
       dockerfile_path: dev/k8s/machine-a-tron-controller/Dockerfile
-      context_path: dev/k8s/machine-a-tron-controller
+      context_path: .
       image_name: ${{ needs.prepare.outputs.image_registry }}/mat-k8s-controller
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/mat-k8s-controller:${{ needs.prepare.outputs.major_minor_version }}-latest

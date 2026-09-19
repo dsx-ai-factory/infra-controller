@@ -79,3 +79,10 @@ Target selector - matches machine-a-tron pods
 {{- define "mat-k8s-controller.targetSelector" -}}
 {{- default "app.kubernetes.io/name=nico-machine-a-tron" .Values.config.targetSelector }}
 {{- end }}
+
+{{/*
+Base name of the gateway resources (ConfigMap, Service, Certificate, TLS Secret)
+*/}}
+{{- define "mat-k8s-controller.gateway.fullname" -}}
+{{- printf "%s-gateway" (include "mat-k8s-controller.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
