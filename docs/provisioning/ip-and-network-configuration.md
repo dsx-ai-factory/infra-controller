@@ -526,7 +526,7 @@ UFM endpoints under `default.ufm.<initial_domain_name>` are one example of recor
 
 Operators do not edit `nico-dns` zone files directly. Zone content is a function of `nico-api`'s database state.
 
-For the record catalog these zones serve - machine, BMC, and instance names, plus the automatically derived reverse zones and their lifecycle - refer to [DNS](../configuration/dns.md).
+For machine, BMC, and instance records served from authoritative forward zones, along with separately derived PTR records and reverse-DNS limitations, refer to [DNS](../configuration/dns.md).
 
 To configure `nico-dns`:
 
