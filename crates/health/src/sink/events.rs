@@ -121,7 +121,7 @@ impl EventContext {
             .and_then(|machine| machine.driver_version.as_deref())
     }
 
-    /// Returns the PHR component category for endpoints with typed metadata.
+    /// Returns the component category for endpoints with typed metadata.
     pub fn component_type(&self) -> Option<&'static str> {
         self.metadata.as_ref().map(EndpointMetadata::component_type)
     }

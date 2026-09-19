@@ -43,8 +43,9 @@ use crate::bmc::{
     bmc_latency_endpoint_labels,
 };
 use crate::endpoint::{
-    BmcAddr, BmcCredentials, BmcEndpoint, EndpointMetadata, EndpointSource, MachineData,
-    PowerShelfData, SharedSystemUuid, SwitchData, SwitchEndpointRole,
+    BmcAddr, BmcCredentials, BmcEndpoint, ComponentInventory, EndpointMetadata, EndpointSnapshot,
+    EndpointSource, InventorySnapshot, MachineData, PowerShelfData, RackInventory,
+    SharedSystemUuid, SwitchData, SwitchEndpointRole,
 };
 use crate::metrics::BmcLatencyMetrics;
 
@@ -290,14 +291,31 @@ fn switch_endpoint_metadata(
     endpoint_role: SwitchEndpointRole,
     nmxt_enabled: bool,
 ) -> Result<EndpointMetadata, HealthError> {
-    let config = switch
+    if switch.config.is_none() {
+        return Err(HealthError::GenericError(
+            "switch endpoint does not have serial".into(),
+        ));
+    }
+
+    Ok(EndpointMetadata::Switch(switch_data(
+        switch,
+        endpoint_role,
+        nmxt_enabled,
+    )))
+}
+
+fn switch_data(
+    switch: &rpc::forge::Switch,
+    endpoint_role: SwitchEndpointRole,
+    nmxt_enabled: bool,
+) -> SwitchData {
+    let serial = switch
         .config
         .as_ref()
-        .ok_or_else(|| HealthError::GenericError("switch endpoint does not have serial".into()))?;
+        .map(|config| config.name.clone())
+        .unwrap_or_default();
 
-    let serial = config.name.clone();
-
-    Ok(EndpointMetadata::Switch(SwitchData {
+    SwitchData {
         id: switch.id,
         serial,
         slot_number: switch
@@ -313,9 +331,127 @@ fn switch_endpoint_metadata(
             .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
         endpoint_role,
         is_primary: switch.is_primary,
-        nmxc_enabled: config.enable_nmxc || switch.is_primary,
+        nmxc_enabled: switch
+            .config
+            .as_ref()
+            .is_some_and(|config| config.enable_nmxc)
+            || switch.is_primary,
         nmxt_enabled,
+    }
+}
+
+fn machine_data(machine: &rpc::forge::Machine) -> MachineData {
+    MachineData {
+        machine_id: machine.id,
+        machine_serial: machine
+            .discovery_info
+            .as_ref()
+            .and_then(|info| info.dmi_data.as_ref())
+            .map(|dmi| dmi.chassis_serial.clone()),
+        system_uuid: SharedSystemUuid::default(),
+        slot_number: machine
+            .placement_in_rack
+            .as_ref()
+            .and_then(|placement| placement.slot_number),
+        tray_index: machine
+            .placement_in_rack
+            .as_ref()
+            .and_then(|placement| placement.tray_index),
+        nvlink_domain_uuid: machine
+            .nvlink_info
+            .as_ref()
+            .and_then(|info| info.domain_uuid)
+            .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
+        driver_version: unique_gpu_driver_version(machine.discovery_info.as_ref()),
+    }
+}
+
+fn inventory_bmc_mac(bmc_info: Option<&rpc::forge::BmcInfo>) -> Option<MacAddress> {
+    bmc_info
+        .and_then(|info| info.mac.as_deref())
+        .and_then(|mac| MacAddress::from_str(mac).ok())
+}
+
+fn machine_component_inventory(
+    machine: &rpc::forge::Machine,
+) -> Result<Option<ComponentInventory>, HealthError> {
+    let Some(rack_id) = machine.rack_id.clone() else {
+        return Ok(None);
+    };
+    let machine_id = machine.id.ok_or_else(|| {
+        HealthError::GenericError(format!(
+            "machine assigned to rack {rack_id} is missing its component ID"
+        ))
+    })?;
+
+    Ok(Some(ComponentInventory {
+        rack_id,
+        metadata: EndpointMetadata::Machine(MachineData {
+            machine_id: Some(machine_id),
+            ..machine_data(machine)
+        }),
+        bmc_mac: inventory_bmc_mac(machine.bmc_info.as_ref()),
     }))
+}
+
+fn switch_component_inventory(
+    switch: &rpc::forge::Switch,
+) -> Result<Option<ComponentInventory>, HealthError> {
+    let Some(rack_id) = switch.rack_id.clone() else {
+        return Ok(None);
+    };
+    let switch_id = switch.id.ok_or_else(|| {
+        HealthError::GenericError(format!(
+            "switch assigned to rack {rack_id} is missing its component ID"
+        ))
+    })?;
+
+    Ok(Some(ComponentInventory {
+        rack_id,
+        metadata: EndpointMetadata::Switch(SwitchData {
+            id: Some(switch_id),
+            ..switch_data(switch, SwitchEndpointRole::Bmc, false)
+        }),
+        bmc_mac: inventory_bmc_mac(switch.bmc_info.as_ref()),
+    }))
+}
+
+fn power_shelf_component_inventory(
+    power_shelf: &rpc::forge::PowerShelf,
+) -> Result<Option<ComponentInventory>, HealthError> {
+    let Some(rack_id) = power_shelf.rack_id.clone() else {
+        return Ok(None);
+    };
+    let power_shelf_id = power_shelf.id.ok_or_else(|| {
+        HealthError::GenericError(format!(
+            "power shelf assigned to rack {rack_id} is missing its component ID"
+        ))
+    })?;
+
+    Ok(Some(ComponentInventory {
+        rack_id,
+        metadata: EndpointMetadata::PowerShelf(PowerShelfData {
+            id: Some(power_shelf_id),
+            serial: None,
+            nvlink_domain_uuid: power_shelf
+                .nvlink_domain_uuid
+                .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
+        }),
+        bmc_mac: inventory_bmc_mac(power_shelf.bmc_info.as_ref()),
+    }))
+}
+
+fn include_component_inventory(
+    result: Result<Option<ComponentInventory>, HealthError>,
+    components: &mut Vec<ComponentInventory>,
+    inventory_error: &mut Option<HealthError>,
+) {
+    match result {
+        Ok(Some(component)) => components.push(component),
+        Ok(None) => {}
+        Err(error) if inventory_error.is_none() => *inventory_error = Some(error),
+        Err(_) => {}
+    }
 }
 
 pub struct ApiEndpointSource {
@@ -333,6 +469,20 @@ struct CachedBmcClient {
     client: Arc<BmcClient>,
     kind: ApiCredentialKind,
     system_uuid: SharedSystemUuid,
+}
+
+struct ComponentEndpointFetch {
+    endpoints: Vec<Arc<BmcEndpoint>>,
+    components: Vec<ComponentInventory>,
+    inventory_error: Option<HealthError>,
+}
+
+fn effective_find_by_ids_page_size(preferred: usize, advertised_max: usize) -> usize {
+    if advertised_max == 0 {
+        preferred
+    } else {
+        preferred.min(advertised_max)
+    }
 }
 
 impl ApiEndpointSource {
@@ -373,15 +523,146 @@ impl ApiEndpointSource {
     }
 
     pub async fn fetch_bmc_hosts(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
-        let mut endpoints = self.fetch_machine_endpoints().await?;
-        endpoints.extend(self.fetch_switch_endpoints().await);
-        endpoints.extend(self.fetch_power_shelf_endpoints().await);
+        Ok(self.fetch_component_endpoints().await?.endpoints)
+    }
+
+    async fn fetch_component_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
+        let ComponentEndpointFetch {
+            mut endpoints,
+            mut components,
+            mut inventory_error,
+        } = self.fetch_machine_endpoints().await?;
+
+        match self.fetch_power_shelf_endpoints().await {
+            Ok(power_shelves) => {
+                endpoints.extend(power_shelves.endpoints);
+                components.extend(power_shelves.components);
+                if inventory_error.is_none() {
+                    inventory_error = power_shelves.inventory_error;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(?error, "Failed to fetch power shelf endpoints");
+                if inventory_error.is_none() {
+                    inventory_error = Some(error);
+                }
+            }
+        }
+        match self.fetch_switch_endpoints().await {
+            Ok(switches) => {
+                endpoints.extend(switches.endpoints);
+                components.extend(switches.components);
+                if inventory_error.is_none() {
+                    inventory_error = switches.inventory_error;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(?error, "Failed to fetch switch endpoints");
+                if inventory_error.is_none() {
+                    inventory_error = Some(error);
+                }
+            }
+        }
 
         self.prune_bmc_client_cache(&endpoints);
 
         tracing::info!(endpoint_count = endpoints.len(), "Prepared endpoints");
 
-        Ok(endpoints)
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        })
+    }
+
+    async fn find_by_ids_page_size(&self) -> Result<usize, HealthError> {
+        // A zero limit means the server does not cap find-by-ID requests. Keep
+        // pages bounded in that case, and otherwise honor the advertised cap.
+        const PREFERRED_PAGE_SIZE: usize = 100;
+        let max_find_by_ids = self
+            .api
+            .client
+            .version(true)
+            .await
+            .map_err(HealthError::ApiInvocationError)?
+            .runtime_config
+            .unwrap_or_default()
+            .max_find_by_ids as usize;
+
+        Ok(effective_find_by_ids_page_size(
+            PREFERRED_PAGE_SIZE,
+            max_find_by_ids,
+        ))
+    }
+
+    async fn fetch_rack_inventory(&self) -> Result<Vec<RackInventory>, HealthError> {
+        let rack_ids = self
+            .api
+            .client
+            .find_rack_ids(rpc::forge::RackSearchFilter::default())
+            .await
+            .map_err(HealthError::ApiInvocationError)?
+            .rack_ids;
+
+        let page_size = self.find_by_ids_page_size().await?;
+
+        let mut inventory = Vec::with_capacity(rack_ids.len());
+        for rack_ids in rack_ids.chunks(page_size) {
+            let racks = self
+                .api
+                .client
+                .find_racks_by_ids(rack_ids.to_vec())
+                .await
+                .map_err(HealthError::ApiInvocationError)?;
+            if racks.racks.len() != rack_ids.len() {
+                return Err(HealthError::GenericError(format!(
+                    "rack inventory response returned {} of {} requested racks",
+                    racks.racks.len(),
+                    rack_ids.len()
+                )));
+            }
+
+            for rack in racks.racks {
+                let rack_id = rack.id.ok_or_else(|| {
+                    HealthError::GenericError(
+                        "rack inventory response contains a rack without an ID".to_string(),
+                    )
+                })?;
+                let (created_seconds, created_nanos) = rack
+                    .created
+                    .map(|created| (Some(created.seconds), Some(created.nanos)))
+                    .unwrap_or((None, None));
+
+                inventory.push(RackInventory {
+                    rack_id,
+                    created_seconds,
+                    created_nanos,
+                });
+            }
+        }
+
+        Ok(inventory)
+    }
+
+    async fn fetch_endpoint_snapshot(&self) -> Result<EndpointSnapshot, HealthError> {
+        let ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        } = self.fetch_component_endpoints().await?;
+
+        let inventory = match inventory_error {
+            Some(error) => Err(error),
+            None => self
+                .fetch_rack_inventory()
+                .await
+                .map(|racks| Some(InventorySnapshot { racks, components })),
+        };
+
+        Ok(EndpointSnapshot {
+            endpoints,
+            inventory,
+        })
     }
 
     fn prune_bmc_client_cache(&self, live_endpoints: &[Arc<BmcEndpoint>]) {
@@ -399,7 +680,7 @@ impl ApiEndpointSource {
         }
     }
 
-    async fn fetch_machine_endpoints(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
+    async fn fetch_machine_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
         let machine_ids = self
             .api
             .client
@@ -416,6 +697,8 @@ impl ApiEndpointSource {
         );
 
         let mut endpoints = Vec::new();
+        let mut components = Vec::new();
+        let mut inventory_error = None;
 
         // Page by id count, but keep each reply well under tonic's 4 MiB receive
         // limit: a page of 100 machines has exceeded it in the field at about
@@ -437,8 +720,20 @@ impl ApiEndpointSource {
                 requested_machine_count = ids_chunk.len(),
                 "Fetched machine details"
             );
+            if machines.machines.len() != ids_chunk.len() && inventory_error.is_none() {
+                inventory_error = Some(HealthError::GenericError(format!(
+                    "machine inventory response returned {} of {} requested components",
+                    machines.machines.len(),
+                    ids_chunk.len()
+                )));
+            }
 
             for machine in machines.machines {
+                include_component_inventory(
+                    machine_component_inventory(&machine),
+                    &mut components,
+                    &mut inventory_error,
+                );
                 match self.extract_machine_endpoint(&machine) {
                     Ok(endpoint) => endpoints.push(endpoint),
                     Err(error) => tracing::warn!(
@@ -451,88 +746,142 @@ impl ApiEndpointSource {
             }
         }
 
-        Ok(endpoints)
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        })
     }
 
-    async fn fetch_switch_endpoints(&self) -> Vec<Arc<BmcEndpoint>> {
-        let switch_request = rpc::forge::SwitchQuery {
-            name: None,
-            switch_id: None,
-        };
+    async fn fetch_switch_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
+        let page_size = self.find_by_ids_page_size().await?;
+        let switch_ids = self
+            .api
+            .client
+            .find_switch_ids(rpc::forge::SwitchSearchFilter::default())
+            .await
+            .map_err(HealthError::ApiInvocationError)?
+            .ids;
+        let mut endpoints = Vec::with_capacity(switch_ids.len());
+        let mut components = Vec::with_capacity(switch_ids.len());
+        let mut inventory_error = None;
 
-        match self.api.client.find_switches(switch_request).await {
-            Ok(response) => {
-                let mut endpoints = Vec::new();
+        for requested_ids in switch_ids.chunks(page_size) {
+            let switches = self
+                .api
+                .client
+                .find_switches_by_ids(rpc::forge::SwitchesByIdsRequest {
+                    switch_ids: requested_ids.to_vec(),
+                })
+                .await
+                .map_err(HealthError::ApiInvocationError)?
+                .switches;
+            if switches.len() != requested_ids.len() {
+                return Err(HealthError::GenericError(format!(
+                    "switch inventory response returned {} of {} requested switches",
+                    switches.len(),
+                    requested_ids.len()
+                )));
+            }
 
-                for switch in response.switches {
-                    match self.extract_switch_endpoint(&switch) {
-                        Ok(endpoint) => endpoints.push(endpoint),
-                        Err(error) => tracing::warn!(
-                            ?switch,
-                            ?error,
-                            rack_id = switch.rack_id.as_ref().map(tracing::field::display),
-                            "Could not add switch endpoint due to error"
-                        ),
-                    }
-
-                    match self.extract_switch_host_endpoint(&switch) {
-                        Ok(Some(endpoint)) => endpoints.push(endpoint),
-                        Ok(None) => {}
-                        Err(error) => tracing::warn!(
-                            ?switch,
-                            ?error,
-                            rack_id = switch.rack_id.as_ref().map(tracing::field::display),
-                            "Could not add switch host endpoint due to error"
-                        ),
-                    }
+            for switch in switches {
+                include_component_inventory(
+                    switch_component_inventory(&switch),
+                    &mut components,
+                    &mut inventory_error,
+                );
+                match self.extract_switch_endpoint(&switch) {
+                    Ok(endpoint) => endpoints.push(endpoint),
+                    Err(error) => tracing::warn!(
+                        ?switch,
+                        ?error,
+                        rack_id = switch.rack_id.as_ref().map(tracing::field::display),
+                        "Could not add switch endpoint due to error"
+                    ),
                 }
 
-                tracing::debug!(
-                    switch_endpoint_count = endpoints.len(),
-                    "Fetched switch endpoints"
-                );
-                endpoints
-            }
-            Err(error) => {
-                tracing::warn!(?error, "Failed to fetch switch endpoints");
-                Vec::new()
+                match self.extract_switch_host_endpoint(&switch) {
+                    Ok(Some(endpoint)) => endpoints.push(endpoint),
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        ?switch,
+                        ?error,
+                        rack_id = switch.rack_id.as_ref().map(tracing::field::display),
+                        "Could not add switch host endpoint due to error"
+                    ),
+                }
             }
         }
+
+        tracing::debug!(
+            switch_endpoint_count = endpoints.len(),
+            "Fetched switch endpoints"
+        );
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        })
     }
 
-    async fn fetch_power_shelf_endpoints(&self) -> Vec<Arc<BmcEndpoint>> {
-        let request = rpc::forge::PowerShelfQuery {
-            name: None,
-            power_shelf_id: None,
-        };
+    async fn fetch_power_shelf_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
+        let page_size = self.find_by_ids_page_size().await?;
+        let power_shelf_ids = self
+            .api
+            .client
+            .find_power_shelf_ids(rpc::forge::PowerShelfSearchFilter::default())
+            .await
+            .map_err(HealthError::ApiInvocationError)?
+            .ids;
+        let mut endpoints = Vec::with_capacity(power_shelf_ids.len());
+        let mut components = Vec::with_capacity(power_shelf_ids.len());
+        let mut inventory_error = None;
 
-        match self.api.client.find_power_shelves(request).await {
-            Ok(response) => {
-                let mut endpoints = Vec::new();
-
-                for power_shelf in response.power_shelves {
-                    match self.extract_power_shelf_endpoint(&power_shelf) {
-                        Ok(endpoint) => endpoints.push(endpoint),
-                        Err(error) => tracing::warn!(
-                            ?power_shelf,
-                            ?error,
-                            rack_id = power_shelf.rack_id.as_ref().map(tracing::field::display),
-                            "Could not add power shelf endpoint due to error"
-                        ),
-                    }
-                }
-
-                tracing::debug!(
-                    power_shelf_endpoint_count = endpoints.len(),
-                    "Fetched power shelf endpoints"
-                );
-                endpoints
+        for requested_ids in power_shelf_ids.chunks(page_size) {
+            let power_shelves = self
+                .api
+                .client
+                .find_power_shelves_by_ids(rpc::forge::PowerShelvesByIdsRequest {
+                    power_shelf_ids: requested_ids.to_vec(),
+                })
+                .await
+                .map_err(HealthError::ApiInvocationError)?
+                .power_shelves;
+            if power_shelves.len() != requested_ids.len() {
+                return Err(HealthError::GenericError(format!(
+                    "power shelf inventory response returned {} of {} requested power shelves",
+                    power_shelves.len(),
+                    requested_ids.len()
+                )));
             }
-            Err(error) => {
-                tracing::warn!(?error, "Failed to fetch power shelf endpoints");
-                Vec::new()
+
+            for power_shelf in power_shelves {
+                include_component_inventory(
+                    power_shelf_component_inventory(&power_shelf),
+                    &mut components,
+                    &mut inventory_error,
+                );
+                match self.extract_power_shelf_endpoint(&power_shelf) {
+                    Ok(endpoint) => endpoints.push(endpoint),
+                    Err(error) => tracing::warn!(
+                        ?power_shelf,
+                        ?error,
+                        rack_id = power_shelf.rack_id.as_ref().map(tracing::field::display),
+                        "Could not add power shelf endpoint due to error"
+                    ),
+                }
             }
         }
+
+        tracing::debug!(
+            power_shelf_endpoint_count = endpoints.len(),
+            "Fetched power shelf endpoints"
+        );
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        })
     }
 
     fn extract_machine_endpoint(
@@ -545,30 +894,9 @@ impl ApiEndpointSource {
             ));
         };
         let addr = BmcAddr::try_from(bmc_info)?;
-        let metadata = machine.id.map(|machine_id| {
-            EndpointMetadata::Machine(MachineData {
-                machine_id: Some(machine_id),
-                machine_serial: machine
-                    .discovery_info
-                    .as_ref()
-                    .and_then(|info| info.dmi_data.as_ref())
-                    .map(|dmi| dmi.chassis_serial.clone()),
-                system_uuid: SharedSystemUuid::default(),
-                slot_number: machine
-                    .placement_in_rack
-                    .as_ref()
-                    .and_then(|placement| placement.slot_number),
-                tray_index: machine
-                    .placement_in_rack
-                    .as_ref()
-                    .and_then(|placement| placement.tray_index),
-                nvlink_domain_uuid: machine
-                    .nvlink_info
-                    .as_ref()
-                    .and_then(|info| info.domain_uuid),
-                driver_version: unique_gpu_driver_version(machine.discovery_info.as_ref()),
-            })
-        });
+        let metadata = machine
+            .id
+            .map(|_| EndpointMetadata::Machine(machine_data(machine)));
 
         self.endpoint_for(
             addr,
@@ -748,6 +1076,10 @@ impl EndpointSource for ApiEndpointSource {
     fn fetch_bmc_hosts<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>> {
         Box::pin(self.fetch_bmc_hosts())
     }
+
+    fn fetch_snapshot<'a>(&'a self) -> BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
+        Box::pin(self.fetch_endpoint_snapshot())
+    }
 }
 
 impl TryFrom<&rpc::forge::BmcInfo> for BmcAddr {
@@ -827,7 +1159,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use carbide_test_support::{Check, check_values, value_scenarios};
+    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
     use carbide_uuid::nvlink::NvLinkDomainId;
+    use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
     use nv_redfish::bmc_http::reqwest::ClientParams as ReqwestClientParams;
 
@@ -853,6 +1187,18 @@ mod tests {
 
     fn test_switch_id() -> SwitchId {
         SwitchId::new(SwitchIdSource::Tpm, [7u8; 32], SwitchType::NvLink)
+    }
+
+    fn test_machine_id() -> MachineId {
+        MachineId::new(MachineIdSource::Tpm, [8u8; 32], MachineType::Host)
+    }
+
+    fn test_power_shelf_id() -> PowerShelfId {
+        PowerShelfId::new(
+            PowerShelfIdSource::ProductBoardChassisSerial,
+            [9u8; 32],
+            PowerShelfType::Rack,
+        )
     }
 
     fn make_test_client(_kind: ApiCredentialKind) -> Result<Arc<BmcClient>, HealthError> {
@@ -922,6 +1268,101 @@ mod tests {
     }
 
     #[test]
+    fn inventory_page_size_honors_server_limit() {
+        check_values(
+            [
+                Check {
+                    scenario: "server advertises no limit",
+                    input: (100, 0),
+                    expect: 100,
+                },
+                Check {
+                    scenario: "server limit is below preferred size",
+                    input: (100, 75),
+                    expect: 75,
+                },
+                Check {
+                    scenario: "server limit exceeds preferred size",
+                    input: (100, 200),
+                    expect: 100,
+                },
+            ],
+            |(preferred, advertised_max)| {
+                effective_find_by_ids_page_size(preferred, advertised_max)
+            },
+        );
+    }
+
+    #[test]
+    fn authoritative_component_inventory_does_not_require_bmc_endpoint() {
+        let rack_id = RackId::new("RACK_1");
+        let machine = machine_component_inventory(&rpc::forge::Machine {
+            id: Some(test_machine_id()),
+            rack_id: Some(rack_id.clone()),
+            bmc_info: Some(rpc::forge::BmcInfo {
+                mac: Some("not-a-mac".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+        let switch = switch_component_inventory(&rpc::forge::Switch {
+            id: Some(test_switch_id()),
+            rack_id: Some(rack_id.clone()),
+            bmc_info: None,
+            is_primary: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+        let power_shelf = power_shelf_component_inventory(&rpc::forge::PowerShelf {
+            id: Some(test_power_shelf_id()),
+            rack_id: Some(rack_id),
+            bmc_info: None,
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+
+        assert!(machine.bmc_mac.is_none());
+        assert!(switch.bmc_mac.is_none());
+        assert!(power_shelf.bmc_mac.is_none());
+        assert!(matches!(machine.metadata, EndpointMetadata::Machine(_)));
+        assert!(matches!(switch.metadata, EndpointMetadata::Switch(_)));
+        assert!(matches!(
+            power_shelf.metadata,
+            EndpointMetadata::PowerShelf(_)
+        ));
+    }
+
+    #[test]
+    fn missing_racked_component_identity_rejects_inventory_snapshot() {
+        let rack_id = RackId::new("RACK_1");
+        let errors = [
+            machine_component_inventory(&rpc::forge::Machine {
+                rack_id: Some(rack_id.clone()),
+                ..Default::default()
+            })
+            .unwrap_err(),
+            switch_component_inventory(&rpc::forge::Switch {
+                rack_id: Some(rack_id.clone()),
+                ..Default::default()
+            })
+            .unwrap_err(),
+            power_shelf_component_inventory(&rpc::forge::PowerShelf {
+                rack_id: Some(rack_id),
+                ..Default::default()
+            })
+            .unwrap_err(),
+        ];
+
+        for error in errors {
+            assert!(error.to_string().contains("missing its component ID"));
+        }
+    }
+
+    #[test]
     fn switch_endpoint_metadata_uses_non_nil_api_domain() {
         let domain = NvLinkDomainId::from_str("9f4b45ec-705a-4af4-89f7-a112bc9c8f4e")
             .expect("valid domain UUID");
@@ -964,6 +1405,42 @@ mod tests {
                 };
 
                 switch.nvlink_domain_uuid
+            },
+        );
+    }
+
+    #[test]
+    fn machine_inventory_uses_non_nil_api_domain() {
+        let domain = NvLinkDomainId::from_str("9f4b45ec-705a-4af4-89f7-a112bc9c8f4e")
+            .expect("valid domain UUID");
+
+        check_values(
+            [
+                Check {
+                    scenario: "domain is missing",
+                    input: None,
+                    expect: None,
+                },
+                Check {
+                    scenario: "nil domain is absent",
+                    input: Some(NvLinkDomainId::nil()),
+                    expect: None,
+                },
+                Check {
+                    scenario: "non-nil API machine field",
+                    input: Some(domain),
+                    expect: Some(domain),
+                },
+            ],
+            |domain_uuid| {
+                machine_data(&rpc::forge::Machine {
+                    nvlink_info: Some(rpc::forge::MachineNvLinkInfo {
+                        domain_uuid,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .nvlink_domain_uuid
             },
         );
     }

@@ -81,6 +81,53 @@ pub struct BmcEndpoint {
     pub bmc: Arc<BmcClient>,
 }
 
+/// Authoritative rack lifecycle metadata returned by NICo discovery.
+///
+/// `created_seconds` and `created_nanos` identify the rack-ingestion session used
+/// by the Rack Health Prometheus contract. They remain optional so older or
+/// non-NICo endpoint sources can decline to publish session-scoped inventory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RackInventory {
+    pub rack_id: RackId,
+    pub created_seconds: Option<i64>,
+    pub created_nanos: Option<i32>,
+}
+
+/// Authoritative metadata for one component assigned to a rack.
+///
+/// This record is independent of collector endpoint construction so components
+/// remain in inventory when their BMC connection details are absent or invalid.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComponentInventory {
+    /// Rack to which the component is assigned.
+    pub rack_id: RackId,
+    /// Stable component identity, placement, and domain metadata from the API.
+    pub metadata: EndpointMetadata,
+    /// BMC MAC address when the API supplies a valid value.
+    pub bmc_mac: Option<MacAddress>,
+}
+
+/// One complete authoritative component-inventory observation.
+pub struct InventorySnapshot {
+    /// Rack lifecycle records used to establish inventory sessions.
+    pub racks: Vec<RackInventory>,
+    /// Components assigned to those racks, independent of collector endpoints.
+    pub components: Vec<ComponentInventory>,
+}
+
+/// Endpoints discovered for collection and the optional authoritative inventory
+/// observation made during the same source fetch.
+pub struct EndpointSnapshot {
+    /// Usable endpoints that can be assigned to telemetry collectors.
+    pub endpoints: Vec<Arc<BmcEndpoint>>,
+    /// Authoritative inventory outcome for this fetch.
+    ///
+    /// `Ok(None)` means the source does not provide authoritative inventory,
+    /// `Ok(Some(_))` is a complete observation, and `Err(_)` means inventory was
+    /// incomplete while `endpoints` may still be used for collection.
+    pub inventory: Result<Option<InventorySnapshot>, HealthError>,
+}
+
 impl BmcEndpoint {
     pub fn key(&self) -> String {
         self.addr.mac.to_string()
@@ -182,7 +229,7 @@ impl EndpointMetadata {
         }
     }
 
-    /// Returns the PHR component category represented by this endpoint metadata.
+    /// Returns the component category represented by this endpoint metadata.
     pub const fn component_type(&self) -> &'static str {
         match self {
             Self::Machine(_) => "compute_node",
@@ -318,6 +365,22 @@ impl From<BmcCredentials> for nv_redfish::bmc_http::BmcCredentials {
 
 pub trait EndpointSource: Send + Sync {
     fn fetch_bmc_hosts<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>>;
+
+    /// Fetches collector endpoints together with any authoritative inventory
+    /// observation supplied by this source.
+    ///
+    /// The default supports auxiliary endpoint sources, which do not define an
+    /// authoritative inventory population. An outer error means endpoint
+    /// discovery itself failed. An inventory error is returned inside the
+    /// snapshot so usable collector endpoints are preserved.
+    fn fetch_snapshot<'a>(&'a self) -> BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
+        Box::pin(async move {
+            Ok(EndpointSnapshot {
+                endpoints: self.fetch_bmc_hosts().await?,
+                inventory: Ok(None),
+            })
+        })
+    }
 }
 
 #[cfg(test)]

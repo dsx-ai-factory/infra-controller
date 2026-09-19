@@ -333,6 +333,7 @@ pub enum SwitchNvosUpdateState {
 #[derive(Clone, Debug, Default)]
 pub struct RackSearchFilter {
     pub label: Option<crate::metadata::LabelFilter>,
+    pub deleted: crate::DeletedFilter,
 }
 
 pub fn derive_rack_aggregate_health(sources: &HealthReportSources) -> health_report::HealthReport {
