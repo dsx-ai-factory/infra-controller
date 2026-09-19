@@ -2,12 +2,13 @@
 
 Thank you for your interest in contributing to NVIDIA Infra Controller!
 
-We welcome contributions of all sizes — from fixing a typo in the docs to
-adding a new API endpoint. Whether you're a first-time contributor or a
-seasoned open-source developer, there's a place for you here.
+We welcome contributions of all sizes, from fixing a typo in the docs to adding
+a new API endpoint. Whether you are a first-time contributor or a seasoned
+open-source developer, there is a place for you here.
 
-All project participants are expected to follow the
-[code of conduct](CODE_OF_CONDUCT.md).
+By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+Project roles, decision authority, and pull request appeals are documented in
+[GOVERNANCE.md](GOVERNANCE.md) and [MAINTAINERS.md](MAINTAINERS.md).
 
 > The software is provided "as is" without warranties of any kind. Features,
 > APIs, and configurations may change in future releases. For production
@@ -25,11 +26,11 @@ All project participants are expected to follow the
 ## Developer Certificate of Origin (DCO)
 
 NVIDIA Infra Controller requires the Developer Certificate of Origin (DCO)
-process to be followed for all contributions.
+process for all contributions.
 
 The DCO is a lightweight way for contributors to certify that they wrote or
 otherwise have the right to submit the code they are contributing. The full
-text of the DCO can be found at
+text is available at
 [developercertificate.org](https://developercertificate.org/):
 
 ```text
@@ -71,9 +72,8 @@ By making a contribution to this project, I certify that:
 
 ### Signing Off Your Commits
 
-To sign off on a commit for DCO compliance, you must add a `Signed-off-by` line
-to your commit message. This is done by using the `-s` or `--signoff` flag when
-committing:
+To sign off on a commit for DCO compliance, add a `Signed-off-by` line to the
+commit message by using the `-s` or `--signoff` flag:
 
 ```bash
 git commit -s -S -m "Your commit message"
@@ -83,7 +83,8 @@ The `-s` flag adds the DCO sign-off trailer. The `-S` flag cryptographically
 signs the commit, which is also required for this repository. See
 [Cryptographic Commit Signatures](#cryptographic-commit-signatures) for details.
 
-**Tip:** You can create a Git alias to always sign off and cryptographically sign:
+**Tip:** You can create a Git alias to always sign off and cryptographically
+sign:
 
 ```bash
 git config --global alias.ci 'commit -s -S'
@@ -96,7 +97,8 @@ This will automatically add a line like this to your commit message:
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
-Make sure your `user.name` and `user.email` are set correctly in your Git configuration:
+Make sure your `user.name` and `user.email` are set correctly in your Git
+configuration:
 
 ```bash
 git config --global user.name "Your Name"
@@ -124,7 +126,7 @@ protection.
 
 ### DCO Enforcement
 
-All pull requests are automatically checked for DCO compliance via DCO bot.
+All pull requests are automatically checked for DCO compliance by the DCO bot.
 Pull requests with commits missing a DCO sign-off cannot be merged until all
 commits are properly signed off.
 
@@ -134,7 +136,8 @@ The `main` branch requires cryptographically signed commits. This is separate
 from the DCO sign-off:
 
 - `-s` or `--signoff` adds the `Signed-off-by` DCO trailer to the commit message.
-- `-S` cryptographically signs the commit with your configured GPG or SSH signing key.
+- `-S` cryptographically signs the commit with your configured GPG or SSH
+  signing key.
 
 Every commit in a pull request must include both. For new commits, use both flags:
 
@@ -323,11 +326,27 @@ in the pull request.
 - Be responsive to feedback and code review comments.
 - Ensure all CI checks pass before requesting review.
 
+### Merge Requirements
+
+A pull request must meet all of the following before it can be merged:
+
+- All required CI checks pass.
+- At least one maintainer who did not author the pull request approves it.
+- All review comments are resolved.
+- Every commit has the required DCO sign-off and cryptographic signature.
+- User-visible changes include an entry in [`fern/changelog`](fern/changelog/).
+
+Maintainers must not merge their own pull requests without approval from another
+maintainer. Trivial documentation corrections and automated dependency updates
+still require the repository's configured approval and CI requirements.
+
 ## Build Guide
 
-For pinned dependency updates, image testing, and build optimization trade-offs, see the
-[Build Guide](docs/development/build-guide.md).
+For pinned dependency updates, image testing, and build optimization trade-offs,
+see the [Build Guide](docs/development/build-guide.md).
 
 ## Questions?
 
-If you have questions about contributing, please open an issue for discussion.
+If you have questions about contributing, use
+[GitHub Discussions](https://github.com/dsx-ai-factory/infra-controller/discussions).
+Use GitHub Issues for actionable bug reports and feature requests.

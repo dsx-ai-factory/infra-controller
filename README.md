@@ -11,20 +11,49 @@
 NVIDIA Infra Controller (NICo) delivers zero-touch lifecycle automation for
 bare-metal systems that secures datacenter infrastructure at its foundation.
 
-It is an API-based microservice that provides site-local, zero-trust,
-bare-metal lifecycle management with DPU-enforced isolation. NICo automates the complexity
-of the bare-metal lifecycle to fast-track building next generation AI Cloud offerings.
+NICo is an open-source infrastructure component in DSX OS. It provides
+site-local, zero-trust, bare-metal lifecycle management with DPU-enforced
+isolation. NICo automates the complexity of the bare-metal lifecycle to
+fast-track building next-generation AI cloud offerings.
+
+## Project Resources
+
+- [Documentation](https://docs.nvidia.com/infra-controller/documentation/home)
+  and the [Quick Start Guide](https://docs.nvidia.com/infra-controller/documentation/getting-started/quick-start-guide)
+- [Contribution guidelines](CONTRIBUTING.md) for development setup and pull
+  request requirements
+- [GitHub Discussions](https://github.com/dsx-ai-factory/infra-controller/discussions)
+  for questions and community conversations
+- [Governance](GOVERNANCE.md) and [maintainer roles](MAINTAINERS.md) for project
+  decision-making and ownership
+- [Code of Conduct](CODE_OF_CONDUCT.md) for participation expectations and
+  [conduct reporting](mailto:GitHub_Conduct@nvidia.com)
+- [Security policy](SECURITY.md) for the approved private vulnerability
+  reporting paths
+- [Support policy](SUPPORT.md) for community, security, and commercial support
+  paths and the supported-release lifecycle
+- [Release notes](https://docs.nvidia.com/infra-controller/documentation/release-notes)
+  for current, maintenance, and end-of-life release status
 
 ## Getting Started
 
-- Go to the [NVIDIA Infra Controller overview](docs/overview/what-is-nico.md) to get an overview of NICo architecture and capabilities.
-- Or, go straight to the [Quick Start Guide](https://docs.nvidia.com/infra-controller/documentation/getting-started/quick-start-guide) to start setting up your site for NICo.
-- The [NICo web documentation](https://docs.nvidia.com/infra-controller/documentation/home) is available online.
-- Check out [Local Development with DevSpace](dev/deployment/devspace/README.md) to run NICo locally with mock systems.
+- Go to the
+  [NVIDIA Infra Controller overview](docs/overview/what-is-nico.md) for an
+  overview of NICo architecture and capabilities.
+- Go straight to the
+  [Quick Start Guide](https://docs.nvidia.com/infra-controller/documentation/getting-started/quick-start-guide)
+  to start setting up your site for NICo.
+- The
+  [NICo web documentation](https://docs.nvidia.com/infra-controller/documentation/home)
+  is available online.
+- Use
+  [Local Development with DevSpace](dev/deployment/devspace/README.md) to run
+  NICo locally with mock systems.
 
 ## Bare-Metal Cluster Setup
 
-`helm-prereqs/setup.sh` deploys the full NVIDIA Infra Controller stack onto a bare-metal Kubernetes cluster in three layers:
+`helm-prereqs/setup.sh` deploys the full NVIDIA Infra Controller stack onto a
+bare-metal Kubernetes cluster in three layers:
 
 | Layer | What it installs | Helm release |
 |-------|-----------------|--------------|
@@ -44,19 +73,23 @@ of the bare-metal lifecycle to fast-track building next generation AI Cloud offe
 # 1. Build and push amd64/arm64 container images from this clone.
 #    See docs/manuals/building_nico_containers.md for the build-host prerequisites.
 export IMAGE_REGISTRY=my-registry.example.com/infra-controller
-make images IMAGE_REGISTRY="${IMAGE_REGISTRY}"   # NICo Core (nico) + REST service images
+# Build NICo Core (nico) and REST service images.
+make images IMAGE_REGISTRY="${IMAGE_REGISTRY}"
 
 # 2. Set environment variables
 export KUBECONFIG=/path/to/kubeconfig
 export NICO_IMAGE_REGISTRY="${IMAGE_REGISTRY}"
 export NICO_CORE_IMAGE_TAG=NICO_CORE_TAG             # e.g. 2.0.0-pr-58-g38a54a3f
 export NICO_REST_IMAGE_TAG=NICO_REST_TAG             # e.g. 2.0.0-pr-58-g38a54a3f
-# export REGISTRY_PULL_SECRET=RAW_API_KEY            # optional; raw key for authenticated registries
+# Optional raw key for authenticated registries:
+# export REGISTRY_PULL_SECRET=RAW_API_KEY
 
 # DPF (DOCA Platform Framework) DPU provisioning installs BY DEFAULT.
 # Set these three variables, or pass --skip-dpf to opt out:
-export NICO_DPF_DPU_INTERFACE=<nic-facing-dpus>     # controller NIC for the DPU cluster VIP
-export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>  # floating IP the DPUs use to reach their control plane
+# Controller NIC for the DPU cluster VIP:
+export NICO_DPF_DPU_INTERFACE=<nic-facing-dpus>
+# Floating IP the DPUs use to reach their control plane:
+export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>
 export NICO_DPF_BMC_ROOT_PASSWORD=<bmc-password>    # site-wide BMC root password
 # Refer to helm-prereqs/README.md §DPF for full variable reference.
 
@@ -83,7 +116,9 @@ cd helm-prereqs
 ./clean.sh
 ```
 
-See [helm-prereqs/README.md](helm-prereqs/README.md) for the full reference: PKI architecture, PostgreSQL setup, phase-by-phase description, secrets reference, and troubleshooting.
+See [helm-prereqs/README.md](helm-prereqs/README.md) for the full reference,
+including PKI architecture, PostgreSQL setup, phase-by-phase descriptions,
+secrets, and troubleshooting.
 
 ## Contributing
 
