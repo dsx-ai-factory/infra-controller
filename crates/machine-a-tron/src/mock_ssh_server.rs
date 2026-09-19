@@ -28,8 +28,9 @@ use russh::keys::PublicKeyBase64;
 use russh::server::{Auth, ChannelOpenHandle, Config, Msg, Server as _, Session, run_stream};
 use russh::{Channel, ChannelId, ChannelWriteHalf, MethodKind, MethodSet, Pty, server};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::console_output::ConsoleOutputController;
 
@@ -39,7 +40,7 @@ const INTERACTIVE_OUTPUT_CAPACITY: usize = 32;
 pub struct MockSshServerHandle {
     pub host_pubkey: String,
     pub port: u16,
-    _shutdown_handle: Option<oneshot::Sender<()>>,
+    _drop_guard: DropGuard,
 }
 
 #[derive(Debug, Clone)]
@@ -77,11 +78,13 @@ pub async fn spawn(
     let host_key =
         russh::keys::PrivateKey::random(&mut UnwrapErr(&mut rng), russh::keys::Algorithm::Ed25519)?;
     let host_pubkey = host_key.public_key_base64();
+    let cancel_token = CancellationToken::new();
     let server = Server {
         prompt_hostname,
         prompt_behavior,
         require_credentials,
         console_output,
+        cancel_token: cancel_token.clone(),
     };
     let listener = if let Some(port) = port {
         let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
@@ -96,18 +99,16 @@ pub async fn spawn(
 
     let port = listener.local_addr()?.port();
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(server.run(
         Arc::new(russh::server::Config {
             keys: vec![host_key],
             ..Default::default()
         }),
         listener,
-        rx,
     ));
 
     Ok(MockSshServerHandle {
-        _shutdown_handle: Some(tx),
+        _drop_guard: cancel_token.drop_guard(),
         port,
         host_pubkey,
     })
@@ -118,16 +119,12 @@ struct Server {
     prompt_hostname: Arc<dyn HostnameQuerying>,
     prompt_behavior: PromptBehavior,
     require_credentials: Option<Credentials>,
+    cancel_token: CancellationToken,
     console_output: Option<ConsoleOutputController>,
 }
 
 impl Server {
-    async fn run(
-        mut self,
-        config: Arc<Config>,
-        socket: TcpListener,
-        mut shutdown: oneshot::Receiver<()>,
-    ) -> eyre::Result<()> {
+    async fn run(mut self, config: Arc<Config>, socket: TcpListener) -> eyre::Result<()> {
         loop {
             tokio::select! {
                 accept_result = socket.accept() => {
@@ -172,7 +169,7 @@ impl Server {
                     }
                 },
 
-                _ = &mut shutdown => break,
+                _ = self.cancel_token.cancelled() => break,
             }
         }
 
@@ -335,6 +332,7 @@ impl server::Handler for MockSshHandler {
         _session: &mut Session,
     ) -> StdResult<(), Self::Error> {
         tracing::debug!("channel_open_session");
+
         reply.accept().await;
         let (_, output) = channel.split();
         let (interactive_output, interactive) = mpsc::channel(INTERACTIVE_OUTPUT_CAPACITY);

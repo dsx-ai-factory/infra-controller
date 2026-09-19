@@ -109,14 +109,27 @@ pub struct Api {
     /// `[node_auth] enabled`; installed into the authn middleware by the
     /// listener.
     pub(crate) node_jwt_validator: Option<Arc<crate::node_auth::NodeJwtValidator>>,
+    pub(crate) console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
 }
 
 pub(crate) type ScoutStreamType =
     Pin<Box<dyn Stream<Item = Result<rpc::ScoutStreamScoutBoundMessage, Status>> + Send>>;
+pub(crate) type ConsoleLogStreamType = crate::console_logs::ConsoleLogStream;
 
 #[tonic::async_trait]
 impl Forge for Api {
     type ScoutStreamStream = ScoutStreamType;
+    type StreamConsoleLogsStream = ConsoleLogStreamType;
+
+    async fn stream_console_logs(
+        &self,
+        request: Request<::rpc::protos::console_log::StreamConsoleLogsRequest>,
+    ) -> Result<Response<Self::StreamConsoleLogsStream>, Status> {
+        self.console_log_source
+            .stream(request.into_inner())
+            .await
+            .map(Response::new)
+    }
 
     async fn version(
         &self,

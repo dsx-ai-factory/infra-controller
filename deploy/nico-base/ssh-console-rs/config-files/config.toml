@@ -16,6 +16,8 @@
 #
 ## What address to listen on.
 listen_address = "[::]:22"
+api_listen_address = "[::]:1079"
+api_allowed_client_spiffe_id = "spiffe://nico.local/nico-system/sa/nico-api"
 metrics_address = "[::]:9009"
 
 ## Address for nico-api

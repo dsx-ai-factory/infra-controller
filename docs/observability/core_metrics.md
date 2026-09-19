@@ -275,6 +275,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_site_prefix_admission_total</td><td>counter</td><td>Number of completed tenant SitePrefix admission attempts, by result.</td></tr>
 <tr><td>carbide_site_prefix_retirements_total</td><td>counter</td><td>Number of tenant SitePrefix retirements, by previous lifecycle state.</td></tr>
 <tr><td>carbide_spdm_evidence_collection_unexpected_task_states_total</td><td>counter</td><td>Number of unexpected SPDM evidence collection task states, by task state and next action.</td></tr>
+<tr><td>carbide_ssh_console_stream_lines_dropped_total</td><td>counter</td><td>Number of console lines omitted from client-specific streams, by reason</td></tr>
 <tr><td>carbide_state_handler_wakeup_failures_total</td><td>counter</td><td>Number of times a machine&#39;s state handler could not be woken after an observed or desired state change</td></tr>
 <tr><td>carbide_static_address_assignments_total</td><td>counter</td><td>Number of static address assignment attempts, by outcome.</td></tr>
 <tr><td>carbide_static_address_preallocations_total</td><td>counter</td><td>Number of static address preallocation outcomes recorded, by outcome; successful outcomes are counted only after commit.</td></tr>
