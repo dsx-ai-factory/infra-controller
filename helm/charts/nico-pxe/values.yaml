@@ -50,6 +50,15 @@ replicas: 1
 ## a positive integer (validated at render).
 fileDescriptorLimit: 65536
 
+## Optional component image. When repository is empty, the chart uses the
+## global image and its pull policy. When repository is set and tag is empty,
+## the component tag defaults to latest; an empty pull policy uses the global
+## pull policy.
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: ""
+
 ## Optional init containers (general-purpose pass-through)
 initContainers: []
 
@@ -83,6 +92,8 @@ bootArtifactContainers: []
 #     command: ["sh", "-c", "cp -r /machine-validation /forge-boot-artifacts/blobs/internal"]
 
 ## Boot artifact serving configuration
+## The chart always mounts writable scratch storage at <servePath>/blobs/internal,
+## including when no boot artifact init containers are configured.
 bootArtifacts:
   servePath: /forge-boot-artifacts
 

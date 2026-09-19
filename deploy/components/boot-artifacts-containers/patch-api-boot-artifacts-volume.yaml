@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+- op: add
+  path: /spec/template/spec/volumes/0
+  value:
+    name: boot-artifacts
+    emptyDir: {}
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/0
+  value:
+    name: boot-artifacts
+    mountPath: /forge-boot-artifacts/blobs/internal

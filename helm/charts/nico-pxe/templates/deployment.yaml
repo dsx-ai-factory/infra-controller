@@ -34,6 +34,8 @@ spec:
         kubectl.kubernetes.io/default-container: {{ include "nico-pxe.name" . }}
     spec:
       serviceAccountName: {{ include "nico-pxe.name" . }}
+      securityContext:
+        fsGroup: 10001
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -97,8 +99,11 @@ spec:
                 name: {{ include "nico-pxe.name" . }}-env-config
                 optional: {{ .Values.envFrom.pxeEnvConfig.optional | default true }}
           {{- end }}
-          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          imagePullPolicy: {{ include "nico-pxe.imagePullPolicy" . }}
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
             capabilities:
               add:
                 - SYS_PTRACE
@@ -116,10 +121,8 @@ spec:
               mountPath: /var/run/secrets/bootstrap-root-ca
               readOnly: true
             {{- end }}
-            {{- if .Values.bootArtifactContainers }}
             - name: boot-artifacts
-              mountPath: /forge-boot-artifacts/blobs/internal
-            {{- end }}
+              mountPath: {{ printf "%s/blobs/internal" (trimSuffix "/" .Values.bootArtifacts.servePath) | quote }}
       volumes:
         - name: spiffe
           secret:
@@ -140,7 +143,5 @@ spec:
                 path: ca.crt
           {{- end }}
         {{- end }}
-        {{- if .Values.bootArtifactContainers }}
         - name: boot-artifacts
           emptyDir: {}
-        {{- end }}
