@@ -411,10 +411,11 @@ impl TestEnv {
             rack_firmware_update_manager: test_rack_firmware_update_manager(&self.rms_sim),
             credential_manager: self.test_credential_manager.clone(),
             component_manager: self.test_component_manager.clone(),
-            nmx_cluster_switch_mtls_services:
-                component_manager::config::switch_mtls_services_as_i32(
-                    &component_manager::config::effective_nmx_cluster_switch_mtls_services(&[]),
-                ),
+            switch_mtls_services: self
+                .config
+                .switch_state_controller
+                .switch_mtls_services
+                .clone(),
             firmware_object_fetcher: self.firmware_object_fetcher.clone(),
             per_object_metrics_registry: self.per_object_metrics_registry(),
         }
@@ -1706,10 +1707,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
                 } else {
                     None
                 },
-                nmx_cluster_switch_mtls_services:
-                    component_manager::config::switch_mtls_services_as_i32(
-                        &component_manager::config::effective_nmx_cluster_switch_mtls_services(&[]),
-                    ),
+                switch_mtls_services: config.switch_state_controller.switch_mtls_services.clone(),
                 firmware_object_fetcher: firmware_object_fetcher.clone(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
             }

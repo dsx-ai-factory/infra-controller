@@ -4073,10 +4073,16 @@ async fn rms_configure_switch_certificate(
     domain_name: Option<&str>,
     services: Option<&[i32]>,
 ) -> Result<String, ComponentManagerError> {
+    // RMS has no Hello probe for a telemetry-only certificate binding.
+    let test_hello = !matches!(
+        services,
+        Some([service]) if *service == rms::SwitchService::ScaleUpFabricTelemetry as i32
+    );
+
     let request = rms::ConfigureSwitchCertificateRequest {
         nodes: Some(rms::NodeSet { nodes }),
         services: services.map(<[i32]>::to_vec).unwrap_or_default(),
-        test_hello: true,
+        test_hello,
         domain: domain_name.map(str::to_owned),
     };
 
@@ -7605,6 +7611,8 @@ mod tests {
             calls[0].services,
             crate::config::switch_mtls_services_as_i32(&SwitchMtlsService::default_services())
         );
+
+        assert!(calls[0].test_hello);
     }
 
     #[carbide_macros::sqlx_test]

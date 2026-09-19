@@ -581,7 +581,7 @@ TOML section: `[rack_state_controller]`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
-| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack `ConfigureNmxCluster` uses a fixed `nvue_api` binding before RMS V2 selects and configures the primary switch. |
+| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack `ConfigureNmxCluster` binds `nvue_api` before RMS V2. RMS V2 binds NMX-C on the selected primary. gNMI requires an explicit `switch_mtls_services` entry; nmx-telemetry uses the effective service list. |
 
 ### `SwitchStateControllerConfig`
 
@@ -590,7 +590,7 @@ TOML section: `[switch_state_controller]`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
-| `switch_mtls_services` | `Vec<SwitchMtlsService>` | all four values below | mTLS certificate bindings applied by switch state-controller operations and direct `ComponentConfigureSwitchCertificate` RPC calls. A non-empty list replaces the default. Omission and `[]` both use the default. |
+| `switch_mtls_services` | `Vec<SwitchMtlsService>` | all four values below for switch and direct operations | mTLS certificate bindings selected by switch state-controller and direct `ComponentConfigureSwitchCertificate` operations. The switch state-controller omits primary-only cluster applications on non-primary switches; the direct RPC is unchanged. Rack `ConfigureNmxCluster` uses this effective list for primary nmx-telemetry and requires an explicit entry for gNMI. A non-empty list replaces the switch/direct default. Omission and `[]` both use that default. |
 
 `switch_mtls_services` accepts these RMS service values:
 
@@ -601,8 +601,12 @@ TOML section: `[switch_state_controller]`.
 | `scale_up_fabric_manager` | Scale-up fabric manager service |
 | `scale_up_fabric_telemetry_interface` | Scale-up fabric telemetry interface service |
 
-`switch_mtls_services` selects server-side certificate bindings. It does not
-enable the underlying service. For workflow scope, see
+Rack `ConfigureNmxCluster` always applies `nvue_api` to every switch and also
+applies `scale_up_fabric_telemetry_interface` when explicitly configured. RMS V2 selects
+the primary, binds NMX-C to the current NVUE material, and reconciles the fabric.
+NICo then binds `scale_up_fabric_telemetry` on that primary when selected by the effective service list.
+Binding a cluster application can enable cluster state on its target switch.
+For workflow scope, see
 [Switch Certificate Configuration](https://docs.nvidia.com/infra-controller/documentation/architecture/state-machines/switch-certificate-configuration).
 
 ### `ObservabilityConfig`
