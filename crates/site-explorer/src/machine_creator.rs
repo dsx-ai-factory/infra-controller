@@ -81,7 +81,6 @@ pub struct MachineCreator {
 
 impl MachineCreator {
     /// Creates a machine creator with an optional machine-information provider.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         database_connection: PgPool,
         config: SiteExplorerConfig,

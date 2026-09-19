@@ -4818,7 +4818,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn machine_location_preserves_rms_error_text() -> Result<(), Box<dyn std::error::Error>> {
+    async fn machine_location_preserves_rms_error() -> Result<(), Box<dyn std::error::Error>> {
         let mock = Arc::new(MockRmsApi::new());
 
         let provider = RmsMachineInfoProvider {
@@ -4850,6 +4850,13 @@ mod tests {
         };
 
         assert_eq!(error.to_string(), expected);
+
+        let source = std::error::Error::source(&error).ok_or_else(|| {
+            std::io::Error::other("machine-location error source was not retained")
+        })?;
+
+        assert_eq!(source.to_string(), expected);
+        assert!(source.downcast_ref::<RackManagerError>().is_some());
 
         Ok(())
     }

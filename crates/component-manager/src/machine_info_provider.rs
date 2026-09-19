@@ -3,6 +3,7 @@
 
 //! Backend-neutral contracts for machine slot and tray discovery.
 
+use std::error::Error;
 use std::net::IpAddr;
 #[cfg(feature = "test-support")]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -88,13 +89,20 @@ pub struct MachineLocationObservation {
 }
 
 /// Failure returned by a machine-location backend.
+///
+/// The underlying backend error remains available through [`Error::source`].
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
-pub struct MachineLocationError(String);
+pub struct MachineLocationError(#[source] Box<dyn Error + Send + Sync>);
 
 impl MachineLocationError {
-    pub(crate) fn new(error: impl ToString) -> Self {
-        Self(error.to_string())
+    pub(crate) fn new(error: impl Error + Send + Sync + 'static) -> Self {
+        Self(Box::new(error))
+    }
+
+    #[cfg(feature = "test-support")]
+    fn message(message: impl ToString) -> Self {
+        Self(message.to_string().into())
     }
 }
 
@@ -140,12 +148,12 @@ impl TestMachineInfoProvider {
         self.responses.lock().await.push_back(Ok(locations));
     }
 
-    /// Queues a provider error for the next query.
+    /// Queues a synthetic provider error for the next query.
     pub async fn enqueue_error(&self, error: impl ToString) {
         self.responses
             .lock()
             .await
-            .push_back(Err(MachineLocationError::new(error)));
+            .push_back(Err(MachineLocationError::message(error)));
     }
 
     /// Sets the delay applied before each query completes.
@@ -181,10 +189,10 @@ impl MachineInfoProvider for TestMachineInfoProvider {
             tokio::time::sleep(delay).await;
         }
 
-        self.responses
-            .lock()
-            .await
-            .pop_front()
-            .unwrap_or_else(|| Ok(Vec::new()))
+        self.responses.lock().await.pop_front().ok_or_else(|| {
+            MachineLocationError::message(
+                "no TestMachineInfoProvider response was queued for the query",
+            )
+        })?
     }
 }
