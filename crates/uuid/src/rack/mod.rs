@@ -169,6 +169,114 @@ mod legacy_rpc {
     }
 }
 
+/// The `RackGroupId` uniquely identifies a logical group of expected racks.
+///
+/// The identifier is assigned by the external inventory system and is therefore
+/// represented as an opaque string rather than a UUID.
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[serde(transparent)]
+#[cfg_attr(feature = "sqlx", sqlx(transparent))]
+pub struct RackGroupId(String);
+
+impl RackGroupId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Debug for RackGroupId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+impl Display for RackGroupId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for RackGroupId {
+    type Err = RackIdParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Err(RackIdParseError::Empty);
+        }
+        Ok(Self(s.to_string()))
+    }
+}
+
+impl From<&str> for RackGroupId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<String> for RackGroupId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl AsRef<str> for RackGroupId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl prost::Message for RackGroupId {
+    fn encode_raw(&self, buf: &mut impl BufMut)
+    where
+        Self: Sized,
+    {
+        rack_group_id_rpc::RackGroupId::from(self.clone()).encode_raw(buf);
+    }
+
+    fn merge_field(
+        &mut self,
+        tag: u32,
+        wire_type: WireType,
+        buf: &mut impl Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), DecodeError>
+    where
+        Self: Sized,
+    {
+        let mut msg = rack_group_id_rpc::RackGroupId::from(self.clone());
+        msg.merge_field(tag, wire_type, buf, ctx)?;
+        self.0 = msg.id;
+        Ok(())
+    }
+
+    fn encoded_len(&self) -> usize {
+        rack_group_id_rpc::RackGroupId::from(self.clone()).encoded_len()
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+mod rack_group_id_rpc {
+    #[derive(prost::Message)]
+    pub(super) struct RackGroupId {
+        #[prost(string, tag = "1")]
+        pub(super) id: String,
+    }
+
+    impl From<super::RackGroupId> for RackGroupId {
+        fn from(value: super::RackGroupId) -> Self {
+            Self { id: value.0 }
+        }
+    }
+}
+
 /// The `RackProfileId` identifies which rack profile (hardware identity
 /// and expected device capabilities) applies to a rack.
 ///
@@ -297,7 +405,7 @@ mod tests {
         Empty,
     }
 
-    // RackId and RackProfileId are parallel `serde(transparent)` newtypes with the
+    // RackId, RackGroupId, and RackProfileId are parallel `serde(transparent)` newtypes with the
     // same `FromStr` (rejecting only the empty string with `RackIdParseError::Empty`)
     // and the same JSON behavior. The parse and serde tables run one generic helper
     // over both types, so each type only supplies its own distinct inputs.
@@ -328,6 +436,17 @@ mod tests {
     #[test]
     fn rack_id_types_parse() {
         scenarios!(
+            run = parse_as::<RackGroupId>;
+            "rack group name" {
+                "nvl5-gp1-jhb01" => Yields("nvl5-gp1-jhb01".to_string()),
+            }
+
+            "empty rack group ID" {
+                "" => FailsWith(ParseFailure::Empty),
+            }
+        );
+
+        scenarios!(
             run = parse_as::<RackId>;
             "legacy ps100-encoded rack ID" {
                 "ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg" => Yields(
@@ -349,6 +468,17 @@ mod tests {
 
             "empty rack ID" {
                 "" => FailsWith(ParseFailure::Empty),
+            }
+        );
+
+        scenarios!(
+            run = deserialize_as::<RackGroupId>;
+            "valid string" {
+                "\"nvl5-gp1-jhb01\"" => Yields("nvl5-gp1-jhb01".to_string()),
+            }
+
+            "non-string JSON" {
+                "42" => Fails,
             }
         );
 
@@ -404,6 +534,10 @@ mod tests {
         let serialized = serde_json::to_string(&RackId::new("my-custom-rack"))
             .expect("failed to serialize rack ID");
         assert_eq!(serialized, "\"my-custom-rack\"");
+
+        let serialized = serde_json::to_string(&RackGroupId::new("nvl5-gp1-jhb01"))
+            .expect("failed to serialize rack group ID");
+        assert_eq!(serialized, "\"nvl5-gp1-jhb01\"");
 
         let serialized = serde_json::to_string(&RackProfileId::new("NVL72"))
             .expect("failed to serialize rack profile ID");
