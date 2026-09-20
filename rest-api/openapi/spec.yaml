@@ -12265,6 +12265,138 @@ paths:
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - Rack
+  '/v2/org/{org}/nico/rack/{id}/health-report':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: id
+        in: path
+        required: true
+        description: ID of the Rack
+    get:
+      summary: Retrieve all Rack health reports
+      operationId: get-all-rack-health-report
+      description: |-
+        Get all health report overrides for a specific Rack.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      tags:
+        - Rack
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site that owns the Rack
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MachineHealthReportEntry'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+    put:
+      summary: Create or update Rack health report
+      operationId: create-or-update-rack-health-report
+      description: |-
+        Add or update a health report override for a specific Rack.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      tags:
+        - Rack
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RackHealthReportEntryRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineHealthReportEntry'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/rack/{id}/health-report/{source}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: id
+        in: path
+        required: true
+        description: ID of the Rack
+      - schema:
+          type: string
+        name: source
+        in: path
+        required: true
+        description: Health report source
+    delete:
+      summary: Delete Rack health report
+      operationId: delete-rack-health-report
+      description: |-
+        Remove a health report override for a specific Rack.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      tags:
+        - Rack
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site that owns the Rack
+      responses:
+        '204':
+          description: Rack health report was successfully removed
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
   '/v2/org/{org}/nico/rack/{id}/validation':
     parameters:
       - schema:
@@ -14465,6 +14597,158 @@ paths:
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - Tray
+  '/v2/org/{org}/nico/tray/{id}/health-report':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: id
+        in: path
+        required: true
+        description: Component ID of the Tray
+    get:
+      summary: Retrieve all Tray health reports
+      operationId: get-all-tray-health-report
+      description: |-
+        Get all health report overrides for a specific Tray. `Compute` targets the Machine health report, `NVSwitch` targets the Switch health report, and `PowerShelf` targets the Power Shelf health report. If the Tray ID uses a recognized component namespace that conflicts with `type`, the request returns 400. If a valid ID in the selected namespace does not identify an existing resource, the request returns 404.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      tags:
+        - Tray
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site that owns the Tray
+        - schema:
+            type: string
+            enum:
+              - Compute
+              - NVSwitch
+              - PowerShelf
+          name: type
+          in: query
+          required: true
+          description: Tray type used to select the corresponding component health-report resource
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MachineHealthReportEntry'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+    put:
+      summary: Create or update Tray health report
+      operationId: create-or-update-tray-health-report
+      description: |-
+        Add or update a health report override for a specific Tray. `Compute` targets the Machine health report, `NVSwitch` targets the Switch health report, and `PowerShelf` targets the Power Shelf health report. If the Tray ID uses a recognized component namespace that conflicts with `type`, the request returns 400. If a valid ID in the selected namespace does not identify an existing resource, the request returns 404.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      tags:
+        - Tray
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrayHealthReportEntryRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineHealthReportEntry'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/tray/{id}/health-report/{source}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: id
+        in: path
+        required: true
+        description: Component ID of the Tray
+      - schema:
+          type: string
+        name: source
+        in: path
+        required: true
+        description: Health report source
+    delete:
+      summary: Delete Tray health report
+      operationId: delete-tray-health-report
+      description: |-
+        Remove a health report override for a specific Tray. `Compute` targets the Machine health report, `NVSwitch` targets the Switch health report, and `PowerShelf` targets the Power Shelf health report. If the Tray ID uses a recognized component namespace that conflicts with `type`, the request returns 400. If a valid ID in the selected namespace does not identify an existing resource, the request returns 404.
+
+        Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      tags:
+        - Tray
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site that owns the Tray
+        - schema:
+            type: string
+            enum:
+              - Compute
+              - NVSwitch
+              - PowerShelf
+          name: type
+          in: query
+          required: true
+          description: Tray type used to select the corresponding component health-report resource
+      responses:
+        '204':
+          description: Tray health report was successfully removed
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
   '/v2/org/{org}/nico/tray/{id}/validation':
     parameters:
       - schema:
@@ -17856,6 +18140,97 @@ components:
           alerts:
             - id: HostUpdateInProgress
               message: DPU reprovisioning in progress
+              classifications:
+                - PreventAllocations
+    RackHealthReportEntryRequest:
+      type: object
+      title: RackHealthReportEntryRequest
+      description: Request to add or update a Rack health report override.
+      required:
+        - siteId
+        - source
+        - mode
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site that owns the Rack.
+        source:
+          type: string
+          description: Health report source.
+        successes:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineHealthProbeSuccess'
+          description: Results from successful health probes for the Rack.
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineHealthProbeAlert'
+          description: Results from failed health probes for the Rack.
+        mode:
+          type: string
+          description: How updates to this health report should be handled
+          enum:
+            - Merge
+            - Replace
+      examples:
+        - siteId: 550e8400-e29b-41d4-a716-446655440000
+          source: overrides.sre
+          mode: Merge
+          alerts:
+            - id: RackMaintenanceInProgress
+              message: Rack maintenance in progress
+              classifications:
+                - PreventAllocations
+    TrayHealthReportEntryRequest:
+      type: object
+      title: TrayHealthReportEntryRequest
+      description: Request to add or update a Tray health report override.
+      required:
+        - siteId
+        - type
+        - source
+        - mode
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site that owns the Tray.
+        type:
+          type: string
+          description: Tray type used to select the corresponding component health-report resource.
+          enum:
+            - Compute
+            - NVSwitch
+            - PowerShelf
+        source:
+          type: string
+          description: Health report source.
+        successes:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineHealthProbeSuccess'
+          description: Results from successful health probes for the Tray.
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineHealthProbeAlert'
+          description: Results from failed health probes for the Tray.
+        mode:
+          type: string
+          description: How updates to this health report should be handled
+          enum:
+            - Merge
+            - Replace
+      examples:
+        - siteId: 550e8400-e29b-41d4-a716-446655440000
+          type: PowerShelf
+          source: overrides.sre
+          mode: Merge
+          alerts:
+            - id: PowerShelfMaintenanceInProgress
+              message: Power Shelf maintenance in progress
               classifications:
                 - PreventAllocations
     HostFirmwareArtifact:

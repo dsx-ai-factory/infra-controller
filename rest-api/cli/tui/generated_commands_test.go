@@ -109,6 +109,12 @@ func TestAllCommands_RegistersConciseAliases(t *testing.T) {
 		{name: "machine health-report delete", want: true},
 		{name: "machine health-report list", want: true},
 		{name: "machine health-report update", want: true},
+		{name: "rack health-report delete", want: true},
+		{name: "rack health-report list", want: true},
+		{name: "rack health-report update", want: true},
+		{name: "tray health-report delete", want: true},
+		{name: "tray health-report list", want: true},
+		{name: "tray health-report update", want: true},
 		{name: "health-report delete", want: false},
 		{name: "health-report list", want: false},
 		{name: "health-report update", want: false},
@@ -897,6 +903,11 @@ func TestResolveGeneratedResource_NilResolverReturnsErrorForInteractiveDependent
 	assert.True(t, supported)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "interactive resolver is required")
+
+	for _, command := range []string{"rack health-report delete", "tray health-report delete"} {
+		descriptor := GeneratedPathResourceDescriptor(command, "source")
+		assert.NotEmpty(t, descriptor.FreeFormReason, "%s must explain why source is entered directly", command)
+	}
 }
 
 func TestResolveGeneratedPathParameters_PreservesExplicitUnsupportedID(t *testing.T) {

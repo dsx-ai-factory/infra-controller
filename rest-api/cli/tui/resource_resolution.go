@@ -82,6 +82,8 @@ func GeneratedPathResourceDescriptor(commandName, parameter string) GeneratedRes
 	case commandName == "machine health-report delete" && strings.EqualFold(parameter, "source"):
 		descriptor.ResourceType = "health-report-source"
 		descriptor.ParentParameter = "machineId"
+	case (commandName == "rack health-report delete" || commandName == "tray health-report delete") && strings.EqualFold(parameter, "source"):
+		descriptor.FreeFormReason = "health report source discovery requires siteId and, for Tray, type query values, which are collected after path parameters; enter the source returned by the corresponding health-report list command"
 	case commandName == "instance-type machine-association delete" && strings.EqualFold(parameter, "machineAssociationId"):
 		descriptor.ResourceType = "instance-type-machine"
 		descriptor.ParentParameter = "instanceTypeId"

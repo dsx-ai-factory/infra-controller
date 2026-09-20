@@ -1258,6 +1258,21 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewGetRackHandler(dbSession, tc, scp, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/rack/:id/health-report",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllRackHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/rack/:id/health-report",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewCreateOrUpdateRackHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/rack/:id/health-report/:source",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteRackHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
 			Path:    apiPathPrefix + "/rack/:id/validation",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewValidateRackHandler(dbSession, tc, scp, cfg),
@@ -1307,6 +1322,21 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/tray/:id",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetTrayHandler(dbSession, tc, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/health-report",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllTrayHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/health-report",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewCreateOrUpdateTrayHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/health-report/:source",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteTrayHealthReportHandler(dbSession, scp, cfg),
 		},
 		{
 			Path:    apiPathPrefix + "/tray/:id/power",

@@ -1084,6 +1084,12 @@ func TestBuildCommands_RunnablePaths(t *testing.T) {
 		{name: "machine health report delete", path: []string{"machine", "health-report", "delete"}},
 		{name: "machine health report list", path: []string{"machine", "health-report", "list"}},
 		{name: "machine health report update", path: []string{"machine", "health-report", "update"}},
+		{name: "rack health report delete", path: []string{"rack", "health-report", "delete"}},
+		{name: "rack health report list", path: []string{"rack", "health-report", "list"}},
+		{name: "rack health report update", path: []string{"rack", "health-report", "update"}},
+		{name: "tray health report delete", path: []string{"tray", "health-report", "delete"}},
+		{name: "tray health report list", path: []string{"tray", "health-report", "list"}},
+		{name: "tray health report update", path: []string{"tray", "health-report", "update"}},
 	}
 
 	for _, test := range tests {

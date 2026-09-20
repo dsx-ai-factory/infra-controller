@@ -78,8 +78,8 @@ func TestNewAPIRoutes(t *testing.T) {
 		"rule":                      5,
 		"run":                       8,
 		"domain":                    4,
-		"rack":                      13,
-		"tray":                      9,
+		"rack":                      16,
+		"tray":                      12,
 		"stats":                     4,
 		"identity-config":           3,
 		"identity-token-delegation": 3,
@@ -122,6 +122,14 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodGet, siteExplorerEndpointPath)
 			siteExplorerActionPath := "/org/:orgName/" + cfg.GetAPIName() + "/site-explorer/endpoint/action"
 			assertRouteExists(t, got, http.MethodPost, siteExplorerActionPath)
+			rackHealthReportPath := "/org/:orgName/" + cfg.GetAPIName() + "/rack/:id/health-report"
+			assertRouteExists(t, got, http.MethodGet, rackHealthReportPath)
+			assertRouteExists(t, got, http.MethodPut, rackHealthReportPath)
+			assertRouteExists(t, got, http.MethodDelete, rackHealthReportPath+"/:source")
+			trayHealthReportPath := "/org/:orgName/" + cfg.GetAPIName() + "/tray/:id/health-report"
+			assertRouteExists(t, got, http.MethodGet, trayHealthReportPath)
+			assertRouteExists(t, got, http.MethodPut, trayHealthReportPath)
+			assertRouteExists(t, got, http.MethodDelete, trayHealthReportPath+"/:source")
 			uefiCredentialPath := "/org/:orgName/" + cfg.GetAPIName() + "/credential/uefi"
 			assertRouteExists(t, got, http.MethodPost, uefiCredentialPath)
 			measuredBootPath := "/org/:orgName/" + cfg.GetAPIName() + "/measured-boot"
