@@ -21,7 +21,6 @@ mod tar_router;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -31,16 +30,14 @@ use bmc_mock::mac_address_pool::{
     RangesConfig as MacAddressRangesConfig,
 };
 use bmc_mock::{
-    BmcCommand, BmcState, Callbacks, DpuFirmwareVersions, DpuMachineInfo, DpuSettings,
-    HardwareType, HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions,
-    MockPowerState, SetSystemPowerError, SystemPowerControl, VirtualMediaDeviceConfig,
-    redfish_error_envelope,
+    BmcState, Callbacks, DpuFirmwareVersions, DpuMachineInfo, DpuSettings, HardwareType,
+    HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions,
+    VirtualMediaDeviceConfig, redfish_error_envelope,
 };
 use command_line::{MachineRole, StateBackend};
 use mac_address::MacAddress;
 use tar_router::TarGzOption;
-use tokio::process::Command;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tracing::info;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
@@ -128,13 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             backend = ?generated_config.state_backend,
             "Using generated BMC mock",
         );
-        if generated_config.use_channel_callbacks {
-            let command_channel = spawn_qemu_reboot_handler(&mut backend_tasks);
-            let callbacks = Arc::new(ChannelCallbacks::new(command_channel));
-            let (router, state) = generated_mock(generated_config, callbacks);
-            let ipmi = start_ipmi_simulation(&state, args.enable_ipmi_simulation).await?;
-            (router, ipmi)
-        } else if let Some(libvirt_config) = generated_config.libvirt_config.clone() {
+        if let Some(libvirt_config) = generated_config.libvirt_config.clone() {
             let callbacks = Arc::new(bmc_mock::libvirt::LibvirtCallbacks::new(
                 libvirt_config,
                 &mut backend_tasks,
@@ -174,69 +165,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn spawn_qemu_reboot_handler(tasks: &mut JoinSet<()>) -> mpsc::UnboundedSender<BmcCommand> {
-    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
-    tasks.spawn(async move {
-        loop {
-            let Some(command) = command_rx.recv().await else {
-                break;
-            };
-            match command {
-                // Assume SetSystemPower is just a reboot
-                BmcCommand::SetSystemPower { .. } => {}
-                BmcCommand::StateRefreshIndication => continue,
-            }
-            // Bound one reboot attempt, including collecting the command output.
-            let reboot_output = match tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                Command::new("virsh")
-                    .arg("reboot")
-                    .arg("ManagedHost")
-                    .kill_on_drop(true)
-                    .output(),
-            ).await {
-                Ok(Ok(o)) => o,
-                Ok(Err(err)) if matches!(err.kind(), ErrorKind::NotFound) => {
-                    tracing::info!("`virsh` not found. Cannot reboot QEMU host.");
-                    continue;
-                }
-                Ok(Err(err)) => {
-                    tracing::error!(
-                        error = %err,
-                        "Failed to run virsh reboot for managed host",
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    tracing::error!(%error, "virsh reboot for managed host timed out after 30 seconds");
-                    continue;
-                }
-            };
-
-            match reboot_output.status.code() {
-                Some(0) => {
-                    tracing::debug!("Rebooted qemu managed host...");
-                }
-                Some(exit_code) => {
-                    tracing::error!(exit_code, "virsh reboot failed for managed host",);
-                    tracing::info!(
-                        stdout = %String::from_utf8_lossy(&reboot_output.stdout),
-                        "virsh reboot standard output",
-                    );
-                    tracing::info!(
-                        stderr = %String::from_utf8_lossy(&reboot_output.stderr),
-                        "virsh reboot standard error",
-                    );
-                }
-                None => {
-                    tracing::error!("Reboot command killed by signal");
-                }
-            }
-        }
-    });
-    command_tx
-}
-
 #[derive(Debug)]
 struct GeneratedMockConfig {
     machine_role: MachineRole,
@@ -247,7 +175,6 @@ struct GeneratedMockConfig {
     instance_index: u8,
     dpu_firmware: DpuFirmwareVersions,
     libvirt_config: Option<bmc_mock::libvirt::Config>,
-    use_channel_callbacks: bool,
     redfish_auth: bool,
     bmc_reset_duration: Option<std::time::Duration>,
 }
@@ -273,7 +200,6 @@ fn generated_mock_config(args: &command_line::Args) -> Result<GeneratedMockConfi
             instance_index: 0,
             dpu_firmware: DpuFirmwareVersions::default(),
             libvirt_config: None,
-            use_channel_callbacks: true,
             redfish_auth: args.redfish_auth,
             bmc_reset_duration: bmc_reset_duration(args),
         });
@@ -361,7 +287,6 @@ fn generated_mock_config(args: &command_line::Args) -> Result<GeneratedMockConfi
         instance_index: args.instance_index,
         dpu_firmware: args.dpu_firmware.clone().into(),
         libvirt_config,
-        use_channel_callbacks: false,
         redfish_auth: args.redfish_auth,
         bmc_reset_duration: bmc_reset_duration(args),
     })
@@ -479,41 +404,6 @@ fn generated_machine_info(config: &GeneratedMockConfig) -> MachineInfo {
     }
 }
 
-#[derive(Debug)]
-struct ChannelCallbacks {
-    command_channel: mpsc::UnboundedSender<BmcCommand>,
-}
-
-impl ChannelCallbacks {
-    fn new(command_channel: mpsc::UnboundedSender<BmcCommand>) -> Self {
-        Self { command_channel }
-    }
-}
-
-impl Callbacks for ChannelCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        MockPowerState::On
-    }
-
-    fn send_power_command(
-        &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
-        self.command_channel
-            .send(BmcCommand::SetSystemPower {
-                request: reset_type,
-                reply: None,
-            })
-            .map_err(|err| SetSystemPowerError::CommandSendError(err.to_string()))
-    }
-
-    fn state_refresh_indication(&self) {
-        let _ = self
-            .command_channel
-            .send(BmcCommand::StateRefreshIndication);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -568,15 +458,6 @@ mod tests {
         generated_mock_config(&args)
     }
 
-    #[test]
-    fn default_generated_mode_uses_channel_callbacks() {
-        let config = config(&["bmc-mock"]).unwrap();
-        assert_eq!(config.machine_role, MachineRole::Host);
-        assert_eq!(config.state_backend, StateBackend::Internal);
-        assert!(matches!(config.hardware_type, HardwareType::WiwynnGB200Nvl));
-        assert!(config.use_channel_callbacks);
-    }
-
     #[tokio::test]
     async fn hardware_profile_enables_event_service() {
         let config = config(&[
@@ -623,21 +504,6 @@ mod tests {
 
         let instantaneous = config(&["bmc-mock", "--bmc-reset-duration", "0"]).unwrap();
         assert!(instantaneous.bmc_reset_duration.is_none());
-    }
-
-    #[test]
-    fn preserves_the_existing_libvirt_shorthand() {
-        let config = config(&[
-            "bmc-mock",
-            "--libvirt-domain",
-            "host-01",
-            "--hardware-profile",
-            "dell_poweredge_r750",
-        ])
-        .unwrap();
-        assert_eq!(config.machine_role, MachineRole::Host);
-        assert_eq!(config.state_backend, StateBackend::Libvirt);
-        assert!(!config.use_channel_callbacks);
     }
 
     #[test]
