@@ -1792,6 +1792,7 @@ jobs:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
           charts: >-
+            bluefield/charts/nico-dpu-agent
             bluefield/charts/nico-otelcol
             helm
             helm/charts/nico-api
