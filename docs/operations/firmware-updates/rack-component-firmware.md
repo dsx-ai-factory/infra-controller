@@ -424,7 +424,7 @@ lower-level execution details.
 | No work starts after the REST response | Read the returned task. It may be waiting at the readiness gate or for an earlier rule stage. |
 | Task fails after about 30 minutes | Inspect the error for component IDs blocked by the readiness gate. Confirm tenant state and the persisted component operation status. |
 | Stage times out | Check Core and backend status. The built-in firmware rule polls for 45 minutes per attempt; a backend job can still be running when Flow times out. |
-| Rack-scale update fails before dispatch with an omitted or empty `version` | Confirm that every target belongs to one rack and that its rack profile has a reachable `firmware_object.url` returning a non-empty JSON object. |
+| Rack-scale update fails before dispatch with an omitted or empty `version` | Confirm that every target belongs to one rack and that its rack profile has a reachable `firmware_object.url` returning a non-empty response containing a JSON object. |
 | Rack-scale update rejects an explicit `version` | Confirm that `version` contains a valid SOT JSON object, serialized as a string, and that the selected firmware-download credential can access the referenced artifacts. |
 | Power-shelf request succeeds without updating a shelf | Confirm that the resolved operation rule contains a `PowerShelf` step. The built-in rule excludes power shelves. |
 | Firmware was flashed but is not active | Determine whether the platform requires an AC cycle. The built-in firmware rule does not include one. |

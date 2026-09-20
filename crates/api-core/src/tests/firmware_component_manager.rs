@@ -40,6 +40,8 @@ use component_manager::power_shelf_manager::{
 use component_manager::types::FirmwareUpdateOptions;
 use mac_address::MacAddress;
 use model::component_manager::{ComputeTrayComponent, PowerAction};
+use model::expected_power_shelf::ExpectedPowerShelf;
+use model::expected_switch::ExpectedSwitch;
 use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
 use model::rack::{MaintenanceActivity, RackConfig, RackState};
 use model::rack_type::RackFirmwareObjectConfig;
@@ -317,7 +319,7 @@ async fn compute_tray_direct_dispatch_forwards_force_update(
             &env.api,
             Request::new(rpc::UpdateComponentFirmwareRequest {
                 target_version: r#"{"Id":"test-firmware"}"#.to_string(),
-                access_token: None,
+                access_token: Some("test-token".to_owned()),
                 force_update,
                 bypass_state_controller: true,
                 target: Some(
@@ -351,9 +353,13 @@ async fn compute_tray_direct_dispatch_forwards_force_update(
             .collect::<Vec<_>>(),
         vec![false, true],
     );
-    assert!(
-        options.iter().all(|options| options.access_token.is_none()),
-        "the force-update fix must not change access-token handling",
+
+    assert_eq!(
+        options
+            .iter()
+            .map(|options| options.access_token.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("test-token"), Some("test-token")],
     );
 
     assert_eq!(
@@ -423,6 +429,8 @@ async fn create_firmware_object_fixture(
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let switch_id = SwitchId::from(uuid::Uuid::new_v4());
     let power_shelf_id = PowerShelfId::from(uuid::Uuid::new_v4());
+    let switch_bmc_mac = "02:00:00:00:00:01".parse::<MacAddress>()?;
+    let power_shelf_bmc_mac = "02:00:00:00:00:02".parse::<MacAddress>()?;
 
     let mut txn = pool.begin().await?;
 
@@ -441,6 +449,17 @@ async fn create_firmware_object_fixture(
         .execute(txn.as_mut())
         .await?;
 
+    db::expected_switch::create(
+        txn.as_mut(),
+        ExpectedSwitch {
+            bmc_mac_address: switch_bmc_mac,
+            serial_number: "rack-switch".to_owned(),
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        },
+    )
+    .await?;
+
     db::switch::create(
         txn.as_mut(),
         &NewSwitch {
@@ -450,11 +469,22 @@ async fn create_firmware_object_fixture(
                 enable_nmxc: false,
                 fabric_manager_config: None,
             },
-            bmc_mac_address: Some("02:00:00:00:00:01".parse::<MacAddress>()?),
+            bmc_mac_address: Some(switch_bmc_mac),
             metadata: None,
             rack_id: Some(rack_id.clone()),
             slot_number: Some(0),
             tray_index: Some(0),
+        },
+    )
+    .await?;
+
+    db::expected_power_shelf::create(
+        txn.as_mut(),
+        ExpectedPowerShelf {
+            bmc_mac_address: power_shelf_bmc_mac,
+            serial_number: "rack-power-shelf".to_owned(),
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
         },
     )
     .await?;
@@ -468,7 +498,7 @@ async fn create_firmware_object_fixture(
                 capacity: None,
                 voltage: None,
             },
-            bmc_mac_address: Some("02:00:00:00:00:02".parse::<MacAddress>()?),
+            bmc_mac_address: Some(power_shelf_bmc_mac),
             metadata: None,
             rack_id: Some(rack_id.clone()),
         },
