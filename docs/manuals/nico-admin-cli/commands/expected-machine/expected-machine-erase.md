@@ -21,7 +21,7 @@ Erase all expected machines
 
 `--confirm`
 
-Confirm that you want to erase all records.
+Required to erase all expected machine records.
 
 `--extended`
 

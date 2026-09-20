@@ -37,11 +37,14 @@ Show one expected power shelf by ID:
 pub(crate) struct Args {
     #[clap(
         default_value(None),
-        help = "BMC MAC address of the expected power shelf to show. Leave unset for all."
+        help = "BMC MAC address of the expected power shelf to show. Omit both this address and --id to list all expected power shelves."
     )]
     bmc_mac_address: Option<MacAddress>,
 
-    #[clap(long, help = "ID (UUID) of the expected power shelf to show.")]
+    #[clap(
+        long,
+        help = "ID (UUID) of the expected power shelf to show. Cannot be combined with a BMC MAC address."
+    )]
     id: Option<Uuid>,
 }
 
