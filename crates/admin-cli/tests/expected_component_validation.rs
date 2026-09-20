@@ -142,6 +142,32 @@ async fn rejected_expected_component_arguments_exit_before_contacting_core() {
             diagnostic: "cannot specify both --bmc-mac-address and --id; provide only one",
             usage: "Usage: nico-admin-cli expected-power-shelf update",
         },
+        Case {
+            scenario: "switch update requires a selector",
+            args: &[
+                "expected-switch",
+                "update",
+                "--switch-serial-number",
+                "SWITCH-003",
+            ],
+            diagnostic: "must specify either --bmc-mac-address or --id",
+            usage: "Usage: nico-admin-cli expected-switch update",
+        },
+        Case {
+            scenario: "switch update rejects conflicting selectors",
+            args: &[
+                "expected-switch",
+                "update",
+                "--id",
+                "12345678-1234-5678-90ab-cdef01234567",
+                "--bmc-mac-address",
+                "00:11:22:33:44:55",
+                "--switch-serial-number",
+                "SWITCH-003",
+            ],
+            diagnostic: "cannot specify both --bmc-mac-address and --id; provide only one",
+            usage: "Usage: nico-admin-cli expected-switch update",
+        },
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind private Core listener");
         listener
