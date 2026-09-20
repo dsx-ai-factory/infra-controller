@@ -1556,15 +1556,18 @@ pub(crate) async fn update_instance_config(
     )
     .await?;
 
+    let network_update_context = InstanceNetworkUpdateContext {
+        assign_implicit_vfs: implicit_vf_allocation,
+        validate_prefix_overlap: needs_overlap_check,
+        network_expands,
+    };
     update_instance_network_config(
         api,
         initial_instance,
         &mut config,
         &mh_snapshot,
-        implicit_vf_allocation,
+        network_update_context,
         &mut txn,
-        needs_overlap_check,
-        network_expands,
     )
     .await?;
 
@@ -1670,6 +1673,14 @@ pub(crate) async fn update_instance_config(
     Ok(Response::new(instance))
 }
 
+/// Carries request-derived decisions into network update handling so caller
+/// intent remains available after RPC conversion and resource reuse.
+struct InstanceNetworkUpdateContext {
+    assign_implicit_vfs: bool,
+    validate_prefix_overlap: bool,
+    network_expands: bool,
+}
+
 /// Validate a requested network change, reuse existing resources, and allocate
 /// resources for new interfaces before queuing the update. The Instance state
 /// machine promotes that configuration and advances `network_config_version`.
@@ -1678,10 +1689,8 @@ async fn update_instance_network_config(
     instance: &InstanceSnapshot,
     config: &mut InstanceConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
-    implicit_vf_allocation: bool,
+    context: InstanceNetworkUpdateContext,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    needs_overlap_check: bool,
-    network_expands: bool,
 ) -> Result<(), CarbideError> {
     if instance.update_network_config_request.is_some() {
         return Err(ConfigValidationError::InstanceNetworkConfigUpdateAlreadyInProgress.into());
@@ -1751,7 +1760,7 @@ async fn update_instance_network_config(
 
     let vf_inventory_source = instance_vf_inventory_source(mh_snapshot);
 
-    if implicit_vf_allocation {
+    if context.assign_implicit_vfs {
         assign_implicit_instance_vfs_from_effective_dpu_inventory(
             network,
             runtime_config,
@@ -1764,7 +1773,7 @@ async fn update_instance_network_config(
         .network
         .is_network_config_update_requested(network)
     {
-        if needs_overlap_check {
+        if context.validate_prefix_overlap {
             config
                 .network
                 .copy_existing_resources(&instance.config.network);
@@ -1773,7 +1782,7 @@ async fn update_instance_network_config(
                 txn,
                 config,
                 Some(instance),
-                network_expands,
+                context.network_expands,
             )
             .await?;
         }
@@ -1826,13 +1835,13 @@ async fn update_instance_network_config(
     )?;
     validate_instance_interface_routing_profiles(txn, network, runtime_config.fnn.as_ref()).await?;
 
-    if needs_overlap_check {
+    if context.validate_prefix_overlap {
         tenant_prefix_overlap::validate_instance_network(
             api,
             txn,
             config,
             Some(instance),
-            network_expands,
+            context.network_expands,
         )
         .await?;
     }
