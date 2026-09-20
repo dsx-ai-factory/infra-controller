@@ -24942,7 +24942,12 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version. When empty, null, or omitted, use the default firmware version for each targeted component.
+          description: |-
+            Target firmware input. NVLink Domain targets resolve to their member
+            racks. For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         ruleId:
           type: string
           format: uuid
@@ -24995,7 +25000,12 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version. When empty, null, or omitted, use the default firmware version for each targeted component.
+          description: |-
+            Target firmware input. NVLink Domain targets resolve to their member
+            racks. For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         ruleId:
           type: string
           format: uuid

@@ -193,6 +193,7 @@ impl TestApiBuilder {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_firmware_object_fetcher(
         self,
         firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,

@@ -257,9 +257,9 @@ explicit maintenance request can supply a firmware object instead. If no
 firmware object is available while a selected switch is in
 `WaitingForNVOSUpgrade` for a reprovision request whose initiator is
 `rack-{rack_id}`, the rack transitions to `Error` instead of skipping the NVOS
-phase. Rack-scale RMS firmware requests with an omitted or empty version resolve
-this source before dispatch and fail when the profile has no `firmware_object`.
-`fetch_timeout` defaults to `30s`.
+phase. Rack-scale RMS firmware requests with an omitted, null, empty, or
+whitespace-only version resolve this source before dispatch and fail when the
+profile has no `firmware_object`. `fetch_timeout` defaults to `30s`.
 
 `access_token_credential` optionally names a credential that contains a
 firmware artifact access token. NICo reads the secret when compute-tray
