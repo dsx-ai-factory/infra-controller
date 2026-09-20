@@ -740,6 +740,80 @@ async fn core_patch_errors_propagate_without_legacy_fallback() {
 }
 
 #[tokio::test]
+async fn machine_and_switch_selectors_reach_their_delete_or_show_rpc() {
+    struct Case {
+        scenario: &'static str,
+        args: &'static [&'static str],
+        method: &'static str,
+        check: fn(&RecordedRequest),
+    }
+
+    for case in [
+        Case {
+            scenario: "machine delete by positional MAC",
+            args: &["expected-machine", "delete", MAC],
+            method: "DeleteExpectedMachine",
+            check: |request| {
+                assert_eq!(
+                    request.decode::<forge::ExpectedMachineRequest>(),
+                    forge::ExpectedMachineRequest {
+                        bmc_mac_address: MAC.to_string(),
+                        id: None,
+                    },
+                );
+            },
+        },
+        Case {
+            scenario: "machine show by ID",
+            args: &["expected-machine", "show", "--id", ID],
+            method: "GetExpectedMachine",
+            check: |request| {
+                assert_eq!(
+                    request.decode::<forge::ExpectedMachineRequest>(),
+                    forge::ExpectedMachineRequest {
+                        bmc_mac_address: String::new(),
+                        id: Some(rpc_id()),
+                    },
+                );
+            },
+        },
+        Case {
+            scenario: "switch delete by ID",
+            args: &["expected-switch", "delete", "--id", ID],
+            method: "DeleteExpectedSwitch",
+            check: |request| {
+                assert_eq!(
+                    request.decode::<forge::ExpectedSwitchRequest>(),
+                    forge::ExpectedSwitchRequest {
+                        bmc_mac_address: String::new(),
+                        expected_switch_id: Some(rpc_id()),
+                    },
+                );
+            },
+        },
+        Case {
+            scenario: "switch show by positional MAC",
+            args: &["expected-switch", "show", MAC],
+            method: "GetExpectedSwitch",
+            check: |request| {
+                assert_eq!(
+                    request.decode::<forge::ExpectedSwitchRequest>(),
+                    forge::ExpectedSwitchRequest {
+                        bmc_mac_address: MAC.to_string(),
+                        expected_switch_id: None,
+                    },
+                );
+            },
+        },
+    ] {
+        let (result, requests) = dispatch(case.args, Code::Ok).await;
+        result.unwrap_or_else(|error| panic!("{}: {error}", case.scenario));
+        assert_methods(&requests, &[case.method]);
+        (case.check)(&requests[0]);
+    }
+}
+
+#[tokio::test]
 async fn shelf_delete_and_show_select_by_mac_or_id() {
     use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, check_cases_async};
@@ -809,15 +883,38 @@ async fn shelf_delete_and_show_select_by_mac_or_id() {
 }
 
 #[tokio::test]
-async fn shelf_show_without_a_selector_lists_all_shelves() {
+async fn show_without_a_selector_uses_the_list_rpc() {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
+
     // JSON exercises listing without the ASCII table's inventory lookups.
-    let (result, requests) = dispatch(
-        &["--format", "json", "expected-power-shelf", "show"],
-        Code::Ok,
+    check_cases_async(
+        [
+            Case {
+                scenario: "list machines",
+                input: "expected-machine",
+                expect: Yields(vec!["GetAllExpectedMachines".to_string()]),
+            },
+            Case {
+                scenario: "list switches",
+                input: "expected-switch",
+                expect: Yields(vec!["GetAllExpectedSwitches".to_string()]),
+            },
+            Case {
+                scenario: "list power shelves",
+                input: "expected-power-shelf",
+                expect: Yields(vec!["GetAllExpectedPowerShelves".to_string()]),
+            },
+        ],
+        |command| async move {
+            let (result, requests) =
+                dispatch(&["--format", "json", command, "show"], Code::Ok).await;
+            result
+                .map(|()| requests.into_iter().map(|request| request.method).collect())
+                .map_err(|error| error.to_string())
+        },
     )
     .await;
-    result.expect("show without a selector succeeds");
-    assert_methods(&requests, &["GetAllExpectedPowerShelves"]);
 }
 
 fn assert_core_error(result: CarbideCliResult<()>, code: Code) {
@@ -1015,7 +1112,17 @@ async fn mock_request(
                 Code::Ok,
             )
         }
-        "DeleteExpectedPowerShelf" => grpc_reply(Vec::new(), Code::Ok),
+        "DeleteExpectedMachine" | "DeleteExpectedSwitch" | "DeleteExpectedPowerShelf" => {
+            grpc_reply(Vec::new(), Code::Ok)
+        }
+        "GetAllExpectedMachines" => grpc_reply(
+            forge::ExpectedMachineList::default().encode_to_vec(),
+            Code::Ok,
+        ),
+        "GetAllExpectedSwitches" => grpc_reply(
+            forge::ExpectedSwitchList::default().encode_to_vec(),
+            Code::Ok,
+        ),
         "GetAllExpectedPowerShelves" => grpc_reply(
             forge::ExpectedPowerShelfList::default().encode_to_vec(),
             Code::Ok,
