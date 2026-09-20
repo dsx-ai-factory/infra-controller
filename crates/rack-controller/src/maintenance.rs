@@ -53,9 +53,9 @@ use model::machine::HostMachine;
 use model::rack::{
     ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
     FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosPasswordUpdateState,
-    NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackFirmwareUpgradeState,
-    RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState, RackState,
-    RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
+    NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackErrorRecoveryPolicy,
+    RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState,
+    RackState, RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
 };
 use model::rack_type::RackProfile;
 use state_controller::state_handler::{
@@ -305,7 +305,11 @@ async fn terminate_active_rack_maintenance(
         "Terminating rack maintenance",
     );
 
-    Ok(StateHandlerOutcome::transition(RackState::Error { cause }).with_txn(txn))
+    Ok(StateHandlerOutcome::transition(RackState::Error {
+        cause,
+        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+    })
+    .with_txn(txn))
 }
 
 /// Aggregated firmware progress for machines, switches, and power shelves
@@ -791,7 +795,10 @@ async fn transition_to_rack_error(
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     let cause = cause.into();
     tracing::warn!(rack_id = %rack_id, %cause, "Rack maintenance failed, transitioning to Error");
-    let outcome = StateHandlerOutcome::transition(RackState::Error { cause });
+    let outcome = StateHandlerOutcome::transition(RackState::Error {
+        cause,
+        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+    });
     clear_maintenance_requested_on_error(rack_id, state, outcome, ctx).await
 }
 
@@ -820,7 +827,11 @@ async fn transition_to_rack_error_with_firmware_job(
     db_rack::update_firmware_upgrade_job(txn.as_mut(), rack_id, Some(&job)).await?;
     db_rack::update(txn.as_mut(), rack_id, &state.config).await?;
 
-    Ok(StateHandlerOutcome::transition(RackState::Error { cause }).with_txn(txn))
+    Ok(StateHandlerOutcome::transition(RackState::Error {
+        cause,
+        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+    })
+    .with_txn(txn))
 }
 
 /// If `maintenance_requested` is set, clear it and persist the updated config
@@ -1347,10 +1358,7 @@ async fn start_configure_nmx_cluster(
         .await;
     }
 
-    let services = switch_mtls_services_as_i32(&[
-        SwitchMtlsService::NvueApi,
-        SwitchMtlsService::ScaleUpFabricManager,
-    ]);
+    let services = switch_mtls_services_as_i32(&[SwitchMtlsService::NvueApi]);
 
     let job_id = match component_manager
         .batch_configure_switch_certificate(&endpoints, None, Some(&services))
@@ -2033,6 +2041,20 @@ pub async fn handle_maintenance(
                     .await;
                 };
 
+                tracing::info!(
+                    rack_id = %id,
+                    firmware_source = if uses_stored_token {
+                        "maintenance_request"
+                    } else {
+                        "rack_profile"
+                    },
+                    machine_count = inventory.machines.len(),
+                    switch_count = inventory.switches.len(),
+                    component_count = components.len(),
+                    force_update,
+                    "Submitting rack firmware update"
+                );
+
                 let submit_result = rack_firmware_update_manager
                     .start_firmware_update(RackFirmwareUpdateRequest {
                         rack_id: id,
@@ -2079,6 +2101,15 @@ pub async fn handle_maintenance(
                         .await;
                     }
                 };
+
+                tracing::info!(
+                    rack_id = %id,
+                    backend_job_id = ?job.job_id,
+                    machine_result_count = job.machines.len(),
+                    switch_result_count = job.switches.len(),
+                    power_shelf_result_count = job.power_shelves.len(),
+                    "Rack firmware update was accepted"
+                );
 
                 let mut txn = ctx.services.db_pool.begin().await?;
                 let power_shelf_ids = db_power_shelf::find_ids(
@@ -2169,8 +2200,11 @@ pub async fn handle_maintenance(
                         state.config.maintenance_requested = None;
                         db_rack::update(recovery_txn.as_mut(), id, &state.config).await?;
                     }
-                    return Ok(StateHandlerOutcome::transition(RackState::Error { cause })
-                        .with_txn(recovery_txn));
+                    return Ok(StateHandlerOutcome::transition(RackState::Error {
+                        cause,
+                        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+                    })
+                    .with_txn(recovery_txn));
                 }
 
                 let Some(rack_firmware_update_manager) =
@@ -2365,8 +2399,11 @@ pub async fn handle_maintenance(
                             state.config.maintenance_requested = None;
                             db_rack::update(recovery_txn.as_mut(), id, &state.config).await?;
                         }
-                        Ok(StateHandlerOutcome::transition(RackState::Error { cause })
-                            .with_txn(recovery_txn))
+                        Ok(StateHandlerOutcome::transition(RackState::Error {
+                            cause,
+                            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+                        })
+                        .with_txn(recovery_txn))
                     }
                     DeviceFirmwareProgress::Completed { completed, total } => {
                         let now = chrono::Utc::now();
@@ -2691,6 +2728,7 @@ pub async fn handle_maintenance(
 
                         return Ok(StateHandlerOutcome::transition(RackState::Error {
                             cause: cause.to_string(),
+                            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                         })
                         .with_txn(txn));
                     };
@@ -2903,6 +2941,7 @@ pub async fn handle_maintenance(
                     }
                     return Ok(StateHandlerOutcome::transition(RackState::Error {
                         cause: format!("NVOS update failed: {}/{} switches failed", failed, total),
+                        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                     })
                     .with_txn(txn));
                 }

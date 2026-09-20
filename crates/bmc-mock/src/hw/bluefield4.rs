@@ -164,10 +164,10 @@ impl Bluefield4<'_> {
         MacAddress::new([bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]])
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = Self::SYSTEM_ID;
         let boot_opt_builder = |id: &str, kind| {
             redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id), kind)

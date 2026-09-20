@@ -15,17 +15,28 @@
  * limitations under the License.
  */
 
-//! Direct-invocation tests for the Switch `Maintenance` state handler.
+//! Switch maintenance admission, completion, and request replacement.
 
+use carbide_secrets::credentials::{
+    BmcCredentialType, CredentialKey, CredentialWriter, Credentials,
+};
 use carbide_switch_controller::context::{
     SwitchStateHandlerContextObjects, SwitchStateHandlerServices,
 };
 use carbide_switch_controller::handler::SwitchStateHandler;
 use carbide_switch_controller::metrics::SwitchMetrics;
 use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
+use carbide_uuid::rack::RackProfileId;
 use carbide_uuid::switch::SwitchId;
+use component_manager::mock::MockNvSwitchManager;
+use component_manager::nv_switch_manager::ConfigureSwitchCertificateJobStatus;
 use db::switch as db_switch;
-use model::switch::{Switch, SwitchControllerState, SwitchMaintenanceOperation};
+use librms::protos::rack_manager as rms;
+use model::component_manager::ConfigureSwitchCertificateState;
+use model::switch::{
+    ConfigureCertificateState, Switch, SwitchControllerState, SwitchMaintenanceOperation,
+};
+use model::test_support::TEST_RMS_RACK_PROFILE_ID;
 use rpc::common::SystemPowerControl;
 use rpc::forge::component_power_control_request::Target;
 use rpc::forge::forge_server::Forge;
@@ -36,8 +47,11 @@ use tonic::Request;
 
 use crate::common::{
     ControllerEnv, default_switch_mtls_services, new_switch, set_switch_controller_state,
+    set_switch_rack_id,
 };
-use crate::state_controller::build_test_component_manager;
+use crate::state_controller::{
+    build_test_component_manager, mock_component_manager, run_switch_controller_with_services,
+};
 
 fn cm_power_action(operation: SwitchMaintenanceOperation) -> SystemPowerControl {
     match operation {
@@ -53,7 +67,8 @@ async fn request_switch_maintenance_via_cm(
     switch_id: &SwitchId,
     operation: SwitchMaintenanceOperation,
 ) {
-    env.api
+    let response = env
+        .api
         .component_power_control(Request::new(ComponentPowerControlRequest {
             target: Some(Target::SwitchIds(SwitchIdList {
                 ids: vec![*switch_id],
@@ -62,7 +77,15 @@ async fn request_switch_maintenance_via_cm(
             bypass_state_controller: false,
         }))
         .await
-        .expect("component_power_control should succeed");
+        .expect("component_power_control should succeed")
+        .into_inner();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(
+        response.results[0].status(),
+        rpc::forge::ComponentManagerStatusCode::Success,
+        "{:?}",
+        response.results
+    );
 }
 
 async fn load_switch(env: &ControllerEnv, id: &SwitchId) -> Switch {
@@ -174,6 +197,7 @@ async fn ready_transitions_to_maintenance_when_request_is_set(
             next_state: SwitchControllerState::Maintenance {
                 operation: SwitchMaintenanceOperation::PowerOff,
                 configure_certificate: None,
+                ..
             },
             ..
         }
@@ -207,4 +231,259 @@ async fn ready_state_does_not_invoke_power_control(
     );
 
     Ok(())
+}
+
+#[sqlx_test]
+async fn preserves_replacement_maintenance_after_power_completion(pool: sqlx::PgPool) {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let switch_id = new_switch(&env, None, None).await.unwrap();
+    let rack = env
+        .harness
+        .create_rack(RackProfileId::new(TEST_RMS_RACK_PROFILE_ID))
+        .await;
+    let bmc_mac_address = load_switch(&env, &switch_id).await.bmc_mac_address.unwrap();
+    for key in [
+        CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+        },
+        CredentialKey::SwitchNvosAdmin { bmc_mac_address },
+    ] {
+        env.test_credential_manager
+            .set_credentials(
+                &key,
+                &Credentials::UsernamePassword {
+                    username: "admin".into(),
+                    password: "password".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let mut txn = pool.begin().await.unwrap();
+    set_switch_rack_id(&mut txn, &switch_id, &rack.id)
+        .await
+        .unwrap();
+    set_switch_controller_state(&mut txn, &switch_id, SwitchControllerState::Ready)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    for succeeds in [true, false] {
+        request_switch_maintenance_via_cm(&env, &switch_id, SwitchMaintenanceOperation::PowerOn)
+            .await;
+        env.run_switch_controller_iteration().await;
+        let original = load_switch(&env, &switch_id)
+            .await
+            .switch_maintenance_requested
+            .unwrap();
+        assert_eq!(
+            load_switch(&env, &switch_id).await.controller_state.value,
+            SwitchControllerState::maintenance_for_request(original.clone())
+        );
+        env.rms_sim
+            .queue_batch_set_power_state_response(Ok(rms::BatchSetPowerStateResponse {
+                response: Some(rms::NodeBatchResponse {
+                    status: if succeeds {
+                        rms::ReturnCode::Success
+                    } else {
+                        rms::ReturnCode::Failure
+                    } as i32,
+                    message: "injected power response".into(),
+                    ..Default::default()
+                }),
+            }))
+            .await;
+        let (arrival, release) = env.rms_sim.block_next_batch_set_power_state().await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(env.run_switch_controller_iteration(), async {
+                arrival.await.unwrap();
+                request_switch_maintenance_via_cm(
+                    &env,
+                    &switch_id,
+                    SwitchMaintenanceOperation::PowerOff,
+                )
+                .await;
+                release.send(()).unwrap();
+            });
+        })
+        .await
+        .expect("blocked power call and replacement request should finish");
+
+        let completed = load_switch(&env, &switch_id).await;
+        assert!(matches!(
+            (succeeds, completed.controller_state.value),
+            (true, SwitchControllerState::Ready) | (false, SwitchControllerState::Error { .. })
+        ));
+        let replacement = completed.switch_maintenance_requested.unwrap();
+        assert_ne!(original, replacement);
+        assert_eq!(replacement.operation, SwitchMaintenanceOperation::PowerOff);
+
+        env.run_switch_controller_iteration().await;
+        assert_eq!(
+            load_switch(&env, &switch_id).await.controller_state.value,
+            SwitchControllerState::maintenance_for_request(replacement)
+        );
+        env.rms_sim
+            .queue_batch_set_power_state_response(Ok(rms::BatchSetPowerStateResponse {
+                response: Some(rms::NodeBatchResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    ..Default::default()
+                }),
+            }))
+            .await;
+        env.run_switch_controller_iteration().await;
+        let completed = load_switch(&env, &switch_id).await;
+        assert_eq!(
+            completed.controller_state.value,
+            SwitchControllerState::Ready
+        );
+        assert!(completed.switch_maintenance_requested.is_none());
+        let calls = env.rms_sim.submitted_batch_set_power_state_requests().await;
+        assert_eq!(
+            calls.last().unwrap().operation,
+            rms::PowerOperation::Off as i32
+        );
+    }
+}
+
+#[sqlx_test]
+async fn certificate_completion_preserves_replacement_after_controller_reload(pool: sqlx::PgPool) {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let switch_id = new_switch(&env, Some("Switch4".into()), None)
+        .await
+        .unwrap();
+    let bmc_mac_address = load_switch(&env, &switch_id).await.bmc_mac_address.unwrap();
+    for key in [
+        CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+        },
+        CredentialKey::SwitchNvosAdmin { bmc_mac_address },
+    ] {
+        env.test_credential_manager
+            .set_credentials(
+                &key,
+                &Credentials::UsernamePassword {
+                    username: "admin".into(),
+                    password: "password".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let services = |job_state| {
+        let mut services = services_without_component_manager(&env);
+        services.component_manager = Some(mock_component_manager(std::sync::Arc::new(
+            MockNvSwitchManager::default().with_certificate_job_status(
+                ConfigureSwitchCertificateJobStatus {
+                    state: job_state,
+                    error: Some("injected certificate failure".into()),
+                },
+            ),
+        )));
+        services
+    };
+
+    for (job_state, legacy) in [
+        (ConfigureSwitchCertificateState::Completed, false),
+        (ConfigureSwitchCertificateState::Failed, false),
+        (ConfigureSwitchCertificateState::Completed, true),
+    ] {
+        let mut txn = pool.begin().await.unwrap();
+        set_switch_rack_id(&mut txn, &switch_id, &"rack-id-1".into())
+            .await
+            .unwrap();
+        set_switch_controller_state(&mut txn, &switch_id, SwitchControllerState::Ready)
+            .await
+            .unwrap();
+        db_switch::set_switch_maintenance_requested(
+            &mut txn,
+            switch_id,
+            "certificate-test",
+            SwitchMaintenanceOperation::ReconfigureCertificate,
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+        for _ in 0..2 {
+            run_switch_controller_with_services(
+                pool.clone(),
+                env.api.work_lock_manager_handle(),
+                services(job_state),
+            )
+            .await;
+        }
+        let started = load_switch(&env, &switch_id).await;
+        let original = started.switch_maintenance_requested.unwrap();
+        assert_eq!(
+            started.controller_state.value,
+            SwitchControllerState::Maintenance {
+                operation: SwitchMaintenanceOperation::ReconfigureCertificate,
+                request: Some(original),
+                configure_certificate: Some(ConfigureCertificateState::WaitForComplete {
+                    job_id: "mock-switch-cert-job".into()
+                }),
+            }
+        );
+        if legacy {
+            // This is the persisted representation before requests were saved
+            // with certificate jobs. The current pending request cannot fill it in.
+            sqlx::query(
+                "UPDATE switches SET controller_state = controller_state - 'request' WHERE id = $1",
+            )
+            .bind(switch_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        request_switch_maintenance_via_cm(&env, &switch_id, SwitchMaintenanceOperation::PowerOff)
+            .await;
+        let replacement = load_switch(&env, &switch_id)
+            .await
+            .switch_maintenance_requested
+            .unwrap();
+        run_switch_controller_with_services(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            services(job_state),
+        )
+        .await;
+        let completed = load_switch(&env, &switch_id).await;
+        assert_eq!(
+            completed.switch_maintenance_requested,
+            Some(replacement.clone())
+        );
+        assert!(matches!(
+            (job_state, completed.controller_state.value),
+            (
+                ConfigureSwitchCertificateState::Completed,
+                SwitchControllerState::Ready
+            ) | (
+                ConfigureSwitchCertificateState::Failed,
+                SwitchControllerState::Error { .. }
+            )
+        ));
+
+        run_switch_controller_with_services(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            services(job_state),
+        )
+        .await;
+        assert_eq!(
+            load_switch(&env, &switch_id).await.controller_state.value,
+            SwitchControllerState::maintenance_for_request(replacement)
+        );
+        run_switch_controller_with_services(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            services(job_state),
+        )
+        .await;
+        let completed = load_switch(&env, &switch_id).await;
+        assert_eq!(
+            completed.controller_state.value,
+            SwitchControllerState::Ready
+        );
+        assert!(completed.switch_maintenance_requested.is_none());
+    }
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -2173,7 +2174,11 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 	}
 
 	if dbinst.ControllerInstanceID != nil && dbSite != nil && dbSite.SerialConsoleHostname != nil {
-		serialConsoleURL := fmt.Sprintf("ssh://%s@%s", dbinst.ControllerInstanceID.String(), *dbSite.SerialConsoleHostname)
+		host := *dbSite.SerialConsoleHostname
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+		serialConsoleURL := fmt.Sprintf("ssh://%s@%s", dbinst.ControllerInstanceID.String(), host)
 		apiInstance.SerialConsoleURL = cutil.GetPtr(serialConsoleURL)
 	}
 

@@ -1,6 +1,6 @@
 # `nico-admin-cli component-manager get-firmware-versions`
 
-_[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › **get-firmware-versions**_
+*[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › **get-firmware-versions***
 
 ## NAME
 
@@ -9,9 +9,11 @@ component firmware versions
 
 ## SYNOPSIS
 
-**nico-admin-cli component-manager get-firmware-versions**
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
-\<*subcommands*\>
+```text
+nico-admin-cli component-manager get-firmware-versions
+[--extended] [--sort-by] [-h|--help]
+<subcommands>
+```
 
 ## DESCRIPTION
 
@@ -19,32 +21,36 @@ List available component firmware versions
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ## Examples
 
 ```sh
 nico-admin-cli component-manager get-firmware-versions switch --switch-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli component-manager get-firmware-versions switch --mac-address 00:11:22:33:44:55
 nico-admin-cli component-manager get-firmware-versions compute-tray --mac-address 00:11:22:33:44:55
 nico-admin-cli component-manager get-firmware-versions power-shelf --power-shelf-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli component-manager get-firmware-versions power-shelf --mac-address 00:11:22:33:44:55
 nico-admin-cli component-manager get-firmware-versions rack --rack-id 12345678-1234-5678-90ab-cdef01234567
 ```
 
@@ -59,4 +65,4 @@ nico-admin-cli component-manager get-firmware-versions rack --rack-id 12345678-1
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

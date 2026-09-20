@@ -73,6 +73,7 @@ func TestOperationRunFromDefaults(t *testing.T) {
 	require.Equal(t, "33333333-3333-3333-3333-333333333333", payload.RuleID)
 	require.Equal(t, []string{"bmc"}, payload.SubTargets)
 	require.True(t, payload.OverrideReadinessCheck)
+	require.True(t, payload.OverrideVersionCheck)
 	require.Equal(t, operationrun.OperationRunStatusPending, run.Status)
 	require.Equal(t, operationrun.OperationRunStatusReasonNone, run.StatusReason)
 	require.NotEmpty(t, run.Selector)
@@ -138,6 +139,7 @@ func TestOperationRunToRebuildsConfigurationFromInternalJSON(t *testing.T) {
 			GetRuleId().
 			GetId(),
 	)
+	require.True(t, got.GetConfiguration().GetOperation().GetUpgradeFirmware().GetOverrideVersionCheck())
 }
 
 func TestOperationRunNVLDomainTargetRoundTrip(t *testing.T) {
@@ -622,6 +624,7 @@ func validCreateRequest() *pb.CreateOperationRunRequest {
 						},
 						SubTargets:             []string{"bmc"},
 						OverrideReadinessCheck: true,
+						OverrideVersionCheck:   true,
 					},
 				},
 			},

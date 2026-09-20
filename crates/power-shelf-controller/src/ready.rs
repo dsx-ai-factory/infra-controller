@@ -76,6 +76,7 @@ pub async fn handle_ready(
         return Ok(StateHandlerOutcome::transition(
             PowerShelfControllerState::Maintenance {
                 operation: req.operation,
+                request: Some(req.clone()),
             },
         ));
     }

@@ -184,7 +184,7 @@ func (i *ipamer) AcquireSpecificChildPrefix(ctx context.Context, parentCidr, chi
 	})
 }
 
-// acquireChildPrefixInternal will return a Prefix with a smaller length from the given Prefix.
+// acquireChildPrefixInternal reserves a subnet within an existing prefix.
 func (i *ipamer) acquireChildPrefixInternal(ctx context.Context, parentCidr, childCidr string, length int) (*Prefix, error) {
 	specificChildRequest := childCidr != ""
 	var childprefix netip.Prefix
@@ -201,6 +201,9 @@ func (i *ipamer) acquireChildPrefixInternal(ctx context.Context, parentCidr, chi
 		if err != nil {
 			return nil, err
 		}
+		// The containing prefix tracks reserved subnets by CIDR. Use the network
+		// CIDR so release updates the same entry in `availableChildPrefixes`.
+		childprefix = childprefix.Masked()
 		length = childprefix.Bits()
 	}
 	if ipprefix.Bits() >= length {
@@ -405,7 +408,12 @@ func (i *ipamer) acquireSpecificIPInternal(ctx context.Context, prefixCidr, spec
 	}
 
 	iprange := netipx.RangeOfPrefix(ipnet)
-	for ip := iprange.From(); ipnet.Contains(ip); ip = ip.Next() {
+	startIP := iprange.From()
+	if specificIP != "" {
+		// Start at the validated address instead of walking a potentially huge IPv6 range.
+		startIP = specificIPnet
+	}
+	for ip := startIP; ipnet.Contains(ip); ip = ip.Next() {
 		ipstring := ip.String()
 		_, ok := prefix.ips[ipstring]
 		if ok {

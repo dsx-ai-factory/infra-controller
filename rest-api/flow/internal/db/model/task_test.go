@@ -114,6 +114,47 @@ func TestTask_UpdateTaskStatus(t *testing.T) {
 	})
 }
 
+func TestTask_UpdateScheduledTask(t *testing.T) {
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		wantError    string
+	}{
+		{name: "persists scheduling metadata and applied rule", rowsAffected: 1},
+		{name: "rejects a missing task row", rowsAffected: 0, wantError: "affected 0 rows"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sqlDB, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer sqlDB.Close()
+
+			db := bun.NewDB(sqlDB, pgdialect.New())
+			defer db.Close()
+
+			mock.ExpectExec(
+				`UPDATE "task" AS "t" SET "execution_id" = .*"executor_type" = .*"applied_rule_id" = .*"updated_at" = .* WHERE \(id =`,
+			).WillReturnResult(sqlmock.NewResult(0, test.rowsAffected))
+			ruleID := uuid.New()
+			task := &Task{
+				ID:            uuid.New(),
+				ExecutorType:  taskcommon.ExecutorTypeTemporal,
+				ExecutionID:   "workflow-id",
+				AppliedRuleID: &ruleID,
+			}
+
+			err = task.UpdateScheduledTask(t.Context(), db)
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 // All tests below set TaskType: TaskTypeUnknown explicitly, matching the
 // production caller in server_impl.ListTasks. Leaving TaskType as its zero
 // value triggers a pre-existing branch that appends an empty `type = ''`

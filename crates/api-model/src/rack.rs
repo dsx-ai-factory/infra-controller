@@ -398,6 +398,19 @@ impl<'r> FromRow<'r, PgRow> for Rack {
 // RACK STATES
 // ============================================================================
 
+/// Determines how a rack can leave [`RackState::Error`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RackErrorRecoveryPolicy {
+    /// The rack returns to Ready after all attached components become Ready.
+    /// Also applies when a persisted Error state has no recovery metadata.
+    #[default]
+    ComponentsReady,
+
+    /// The rack remains in Error until an operator requests rack maintenance.
+    MaintenanceRequestRequired,
+}
+
 /// State of a Rack as tracked by the controller.
 ///
 /// The rack progresses through discovery and maintenance phases, then enters
@@ -458,7 +471,14 @@ pub enum RackState {
     },
 
     /// There is error in the Rack; Rack can not be used if it's in error.
-    Error { cause: String },
+    Error {
+        /// Description of the failure that moved the rack to Error.
+        cause: String,
+
+        /// Policy controlling when the rack may leave Error.
+        #[serde(default)]
+        recovery_policy: RackErrorRecoveryPolicy,
+    },
 
     /// Rack is in the process of deleting.
     Deleting,
@@ -713,7 +733,7 @@ impl Display for RackState {
             RackState::Maintenance { maintenance_state } => {
                 write!(f, "Maintenance({})", maintenance_state)
             }
-            RackState::Error { cause } => write!(f, "Error({})", cause),
+            RackState::Error { cause, .. } => write!(f, "Error({})", cause),
             RackState::Deleting => write!(f, "Deleting"),
         }
     }
@@ -1023,6 +1043,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rack_error_recovery_policy_decodes_legacy_and_explicit_states() {
+        scenarios!(
+            run = |encoded| serde_json::from_str::<RackState>(encoded).map_err(|error| error.to_string());
+
+            "legacy error retains automatic component recovery" {
+                r#"{"state":"error","cause":"switch failed"}"# => Yields(RackState::Error {
+                    cause: "switch failed".to_string(),
+                    recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+                }),
+            }
+
+            "maintenance error requires a new request" {
+                r#"{"state":"error","cause":"maintenance failed","recovery_policy":"maintenance_request_required"}"# => Yields(RackState::Error {
+                    cause: "maintenance failed".to_string(),
+                    recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+                }),
+            }
+        );
+    }
+
     // ── MaintenanceScope ────────────────────────────────────────────────
 
     #[test]
@@ -1270,6 +1311,7 @@ mod tests {
                 (
                     RackState::Error {
                         cause: "something broke".into(),
+                        recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
                     },
                     None,
                 ) => Yields(()),

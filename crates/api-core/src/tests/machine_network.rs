@@ -309,6 +309,61 @@ async fn test_record_dpu_network_status_clears_use_admin_network_changed_for_mat
 }
 
 #[crate::sqlx_test]
+async fn test_rejected_network_observation_does_not_acknowledge_admin_network_change(
+    pool: sqlx::PgPool,
+) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+    let dpu_machine_id = mh.dpu().id;
+    record_dpu_network_status(&env, dpu_machine_id, None).await;
+    set_use_admin_network_changed(&env, dpu_machine_id, true).await;
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT network_status_observation FROM machines WHERE id = $1")
+            .bind(dpu_machine_id)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+
+    // The configuration version matches, but this report is older than the
+    // persisted observation. It must not acknowledge the network change.
+    let error = env
+        .api
+        .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
+            dpu_machine_id: Some(dpu_machine_id),
+            network_config_version: Some(response.managed_host_config_version),
+            observed_at: Some(SystemTime::UNIX_EPOCH.into()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert!(
+        error
+            .message()
+            .contains("update machine status observation")
+    );
+    assert_eq!(
+        use_admin_network_changed(&env, dpu_machine_id).await,
+        Some(true)
+    );
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT network_status_observation FROM machines WHERE id = $1")
+            .bind(dpu_machine_id)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+    assert_eq!(after, before);
+}
+
+#[crate::sqlx_test]
 async fn test_record_dpu_network_status_keeps_use_admin_network_changed_without_matching_version(
     pool: sqlx::PgPool,
 ) {
@@ -1256,6 +1311,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
     let extension_service1 = env
         .api
         .create_dpu_extension_service(tonic::Request::new(CreateDpuExtensionServiceRequest {
+            dpu_target: None,
             service_id: None,
             service_name: "test1".to_string(),
             service_type: DpuExtensionServiceType::KubernetesPod as i32,
@@ -1278,6 +1334,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
     let extension_service2 = env
         .api
         .create_dpu_extension_service(tonic::Request::new(CreateDpuExtensionServiceRequest {
+            dpu_target: None,
             service_id: None,
             service_name: "test2".to_string(),
             service_type: DpuExtensionServiceType::KubernetesPod as i32,

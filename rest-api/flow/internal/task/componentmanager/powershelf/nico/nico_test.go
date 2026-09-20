@@ -103,8 +103,8 @@ func TestInjectExpectation(t *testing.T) {
 			m := New(tc.client, nil)
 
 			target := common.Target{
-				Type:         devicetypes.ComponentTypePowerShelf,
-				ComponentIDs: []string{"ps-1"},
+				Type:        devicetypes.ComponentTypePowerShelf,
+				Identifiers: []string{"ps-1"},
 			}
 
 			err := m.InjectExpectation(context.Background(), target, tc.info)
@@ -124,8 +124,8 @@ func TestPowerControl(t *testing.T) {
 	m := New(nicoapi.NewMockClient(), nil)
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"ps-1", "ps-2"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"ps-1", "ps-2"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -134,20 +134,51 @@ func TestPowerControl(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestMACTargetRequests(t *testing.T) {
+	client := nicoapi.NewMockClient()
+	m := New(client, nil)
+	macs := []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}
+	target := common.Target{
+		Type:           devicetypes.ComponentTypePowerShelf,
+		IdentifierType: common.IdentifierTypeMACAddress,
+		Identifiers:    macs,
+	}
+
+	require.NoError(t, m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+		Operation: operations.PowerOperationPowerOn,
+	}))
+	assert.Equal(t, macs, client.LastComponentPowerControlRequest().GetPowerShelfPmcMacs().GetMacAddresses())
+
+	_, err := m.GetPowerStatus(context.Background(), target)
+	require.NoError(t, err)
+	assert.Equal(t, macs, client.LastGetComponentInventoryRequest().GetPowerShelfPmcMacs().GetMacAddresses())
+
+	require.NoError(t, m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
+		TargetVersion: "1.2.3",
+	}))
+	assert.Equal(t, macs, client.LastUpdateComponentFirmwareRequest().GetPowerShelves().GetPmcMacs().GetMacAddresses())
+
+	_, err = m.GetFirmwareStatus(context.Background(), target)
+	require.NoError(t, err)
+	assert.Equal(t, macs, client.LastGetComponentFirmwareStatusRequest().GetPowerShelfPmcMacs().GetMacAddresses())
+}
+
 func TestFirmwareControl(t *testing.T) {
 	client := nicoapi.NewMockClient()
 	m := New(client, nil)
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"ps-1"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"ps-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
-		TargetVersion: "1.2.3",
-		AccessToken:   "powershelf-token",
+		TargetVersion:        "1.2.3",
+		AccessToken:          "powershelf-token",
+		OverrideVersionCheck: true,
 	})
 	assert.NoError(t, err)
+	assert.True(t, client.LastUpdateComponentFirmwareRequest().GetForceUpdate())
 	assert.Equal(
 		t,
 		"powershelf-token",
@@ -159,8 +190,8 @@ func TestGetFirmwareStatus(t *testing.T) {
 	m := New(nicoapi.NewMockClient(), nil)
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"ps-1"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"ps-1"},
 	}
 
 	statuses, err := m.GetFirmwareStatus(context.Background(), target)
@@ -202,8 +233,8 @@ func TestPowerControl_RefusesWhenRackHostInUse(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"ps-1"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"ps-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -225,8 +256,8 @@ func TestPowerControl_AllowsWhenRackHostsReady(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"ps-1"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"ps-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -245,8 +276,8 @@ func TestFirmwareControl_RefusesWhenRackHostInUse(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"ps-1"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"ps-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -273,8 +304,8 @@ func TestFirmwareControl_OverrideBypassesReadinessCheck(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"ps-1"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"ps-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{

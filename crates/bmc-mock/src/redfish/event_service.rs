@@ -26,13 +26,13 @@ use tokio::sync::watch;
 
 use super::event_destination;
 use super::event_destination::SUBSCRIPTIONS;
-use crate::BmcState;
 use crate::combined_server::OutputStallTimeout;
 use crate::http::redfish_error;
 use crate::json::{JsonExt, JsonPatch};
 use crate::redfish::Resource;
 use crate::redfish::session_service::generate_token;
 use crate::sse::{Delivery, StreamStep, Subscriber};
+use crate::{BmcState, Callbacks};
 
 const ROOT: &str = "/redfish/v1/EventService";
 const SSE: &str = "/redfish/v1/EventService/SSE";
@@ -483,23 +483,26 @@ impl IntoResponse for EventServiceError {
     }
 }
 
-pub(crate) fn add_routes(router: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(router: Router<BmcState<C>>) -> Router<BmcState<C>> {
     router
-        .route(&resource().odata_id, get(service))
+        .route(&resource().odata_id, get(service::<C>))
         .route(
             SSE,
             // Axum would otherwise serve HEAD through the GET handler and register a subscriber.
-            get(events).head(|| async { (StatusCode::METHOD_NOT_ALLOWED, [("allow", "GET")]) }),
+            get(events::<C>)
+                .head(|| async { (StatusCode::METHOD_NOT_ALLOWED, [("allow", "GET")]) }),
         )
-        .route(SUBSCRIPTIONS, get(subscriptions))
+        .route(SUBSCRIPTIONS, get(subscriptions::<C>))
         .route(
             &format!("{SUBSCRIPTIONS}/{{id}}"),
-            get(subscription).delete(delete_subscription),
+            get(subscription::<C>).delete(delete_subscription::<C>),
         )
 }
 
 /// The BMC's event service, or the 404 every event route answers without one.
-pub(crate) fn enabled(state: &BmcState) -> Result<Arc<EventServiceState>, EventServiceError> {
+pub(crate) fn enabled<C: Callbacks>(
+    state: &BmcState<C>,
+) -> Result<Arc<EventServiceState>, EventServiceError> {
     state
         .event_service
         .clone()
@@ -515,7 +518,9 @@ pub(crate) fn resource() -> Resource<'static> {
     }
 }
 
-async fn service(State(state): State<BmcState>) -> Result<Response, EventServiceError> {
+async fn service<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+) -> Result<Response, EventServiceError> {
     enabled(&state)?;
     Ok(Json(
         resource()
@@ -594,8 +599,8 @@ fn accepts_sse(headers: &HeaderMap) -> bool {
     selected.is_some_and(|(_, quality)| quality > 0.0)
 }
 
-async fn events(
-    State(state): State<BmcState>,
+async fn events<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, EventServiceError> {
@@ -642,7 +647,9 @@ async fn events(
     Ok(response)
 }
 
-async fn subscriptions(State(state): State<BmcState>) -> Result<Response, EventServiceError> {
+async fn subscriptions<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+) -> Result<Response, EventServiceError> {
     let members: Vec<_> = enabled(&state)?
         .subscription_ids()
         .into_iter()
@@ -658,8 +665,8 @@ fn subscription_id(id: &str) -> Result<u64, EventServiceError> {
         .ok_or(EventServiceError::NotFound)
 }
 
-async fn subscription(
-    State(state): State<BmcState>,
+async fn subscription<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(id): Path<String>,
 ) -> Result<Response, EventServiceError> {
     let state = enabled(&state)?;
@@ -674,8 +681,8 @@ async fn subscription(
     Ok(Json(document).into_response())
 }
 
-async fn delete_subscription(
-    State(state): State<BmcState>,
+async fn delete_subscription<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(id): Path<String>,
 ) -> Result<Response, EventServiceError> {
     let state = enabled(&state)?;
@@ -763,7 +770,7 @@ pub(crate) mod fixtures {
     }
 
     /// A Dell R750 mock with a ten-millisecond outage window on reset.
-    pub(crate) fn router(auth: bool) -> (Router, BmcState) {
+    pub(crate) fn router(auth: bool) -> (Router, BmcState<NoopCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
             Arc::new(NoopCallbacks),
@@ -988,7 +995,7 @@ mod tests {
         );
     }
 
-    fn router_with(limits: EventServiceConfig) -> (Router, BmcState) {
+    fn router_with(limits: EventServiceConfig) -> (Router, BmcState<NoopCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
             Arc::new(NoopCallbacks),

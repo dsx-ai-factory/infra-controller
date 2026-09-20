@@ -290,6 +290,9 @@ type FirmwareControlTaskInfo struct {
 	// maintenance windows and recorded as a warning log on the worker
 	// that executes the task; authorisation lives upstream.
 	OverrideReadinessCheck bool `json:"override_readiness_check,omitempty"`
+	// OverrideVersionCheck asks the component backend to override version-based
+	// skip and downgrade decisions when it supports doing so.
+	OverrideVersionCheck bool `json:"override_version_check,omitempty"`
 	// AuthenticationData remains encrypted while this payload is persisted in
 	// Flow or carried by Temporal. The final FirmwareControl activity decrypts
 	// it and sets AccessToken only on its in-memory copy.

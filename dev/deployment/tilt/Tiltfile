@@ -887,7 +887,7 @@ rest_image(
 rest_image(
     'nico-rest-site-manager',
     'Dockerfile.nico-rest-site-manager',
-    ['site-manager', 'cert-manager'],
+    ['site-manager', 'cert-manager', 'common'],
 )
 rest_image(
     'nico-rest-site-agent',

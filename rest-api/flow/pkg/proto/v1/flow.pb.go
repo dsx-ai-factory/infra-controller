@@ -537,9 +537,7 @@ func (TaskExecutorType) EnumDescriptor() ([]byte, []int) {
 	return file_flow_proto_rawDescGZIP(), []int{8}
 }
 
-// Phase is Flow's coarse operability bucket. Component phases are derived from
-// Core's type-specific state machines; Rack.operation_status aggregates those
-// component phases.
+// Phase is Flow's coarse operability bucket.
 type Phase int32
 
 const (
@@ -1944,12 +1942,11 @@ func (x *RackPosition) GetHostId() int32 {
 	return 0
 }
 
-// ComponentOperationStatus is Flow's view of a component's operability. The
-// inventory loop computes it on every sync from core's controller_state.
+// ComponentOperationStatus is Flow's view of a component's operability.
 type ComponentOperationStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Phase Phase                  `protobuf:"varint,1,opt,name=phase,proto3,enum=v1.Phase" json:"phase,omitempty"`
-	// Human-readable detail (typically the raw core state string).
+	// Human-readable source status detail.
 	Reason string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 	// Operations Flow will reject while the component is in this status.
 	// Empty when phase is READY.
@@ -2218,11 +2215,7 @@ type Rack struct {
 	NvlDomainIds []*UUID                `protobuf:"bytes,4,rep,name=nvl_domain_ids,json=nvlDomainIds,proto3" json:"nvl_domain_ids,omitempty"` // NVLink Domains containing this rack; empty when unassigned
 	TaskStats    *TaskStats             `protobuf:"bytes,5,opt,name=task_stats,json=taskStats,proto3" json:"task_stats,omitempty"`            // All active Tasks on this rack, including component-scoped Tasks.
 	ExternalId   string                 `protobuf:"bytes,6,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
-	// Flow-derived operability summary across active Compute, NVSwitch, and PowerShelf
-	// components in this rack. Unknown or missing component status wins, followed by
-	// Error, Initializing, Deleting, InUse, and Ready. A rack with no supported active
-	// components is Unknown. This is independent of component expansion and is not the
-	// Core rack lifecycle/controller state.
+	// Operability phase aggregated from component phases.
 	OperationStatus Phase `protobuf:"varint,7,opt,name=operation_status,json=operationStatus,proto3,enum=v1.Phase" json:"operation_status,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -4536,8 +4529,13 @@ type UpgradeFirmwareRequest struct {
 	// not supported for DPU-only updates or by the legacy NICo compute
 	// firmware controller.
 	AuthenticationData *FirmwareAuthenticationData `protobuf:"bytes,10,opt,name=authentication_data,json=authenticationData,proto3" json:"authentication_data,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Overrides firmware version-based checks when deciding whether to apply
+	// the update. This allows same-version reapplication and downgrade when
+	// the selected component backend supports those operations. It does not
+	// bypass readiness checks or state-controller routing.
+	OverrideVersionCheck bool `protobuf:"varint,11,opt,name=override_version_check,json=overrideVersionCheck,proto3" json:"override_version_check,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *UpgradeFirmwareRequest) Reset() {
@@ -4638,6 +4636,13 @@ func (x *UpgradeFirmwareRequest) GetAuthenticationData() *FirmwareAuthentication
 		return x.AuthenticationData
 	}
 	return nil
+}
+
+func (x *UpgradeFirmwareRequest) GetOverrideVersionCheck() bool {
+	if x != nil {
+		return x.OverrideVersionCheck
+	}
+	return false
 }
 
 // FirmwareAuthenticationData selects either one value shared by every target
@@ -6906,8 +6911,11 @@ type FirmwareControlTaskOperation struct {
 	SubTargets []string `protobuf:"bytes,5,rep,name=sub_targets,json=subTargets,proto3" json:"sub_targets,omitempty"`
 	// Bypasses the component readiness gate when the task executes.
 	OverrideReadinessCheck bool `protobuf:"varint,6,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Overrides firmware version-based checks when the selected component
+	// backend applies the update.
+	OverrideVersionCheck bool `protobuf:"varint,7,opt,name=override_version_check,json=overrideVersionCheck,proto3" json:"override_version_check,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *FirmwareControlTaskOperation) Reset() {
@@ -6978,6 +6986,13 @@ func (x *FirmwareControlTaskOperation) GetSubTargets() []string {
 func (x *FirmwareControlTaskOperation) GetOverrideReadinessCheck() bool {
 	if x != nil {
 		return x.OverrideReadinessCheck
+	}
+	return false
+}
+
+func (x *FirmwareControlTaskOperation) GetOverrideVersionCheck() bool {
+	if x != nil {
+		return x.OverrideVersionCheck
 	}
 	return false
 }
@@ -13848,7 +13863,7 @@ const file_flow_proto_rawDesc = "" +
 	"\x1bGetRacksForNVLDomainRequest\x12B\n" +
 	"\x15nvl_domain_identifier\x18\x01 \x01(\v2\x0e.v1.IdentifierR\x13nvlDomainIdentifier\">\n" +
 	"\x1cGetRacksForNVLDomainResponse\x12\x1e\n" +
-	"\x05racks\x18\x01 \x03(\v2\b.v1.RackR\x05racks\"\xf9\x04\n" +
+	"\x05racks\x18\x01 \x03(\v2\b.v1.RackR\x05racks\"\xaf\x05\n" +
 	"\x16UpgradeFirmwareRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12*\n" +
@@ -13863,7 +13878,8 @@ const file_flow_proto_rawDesc = "" +
 	"subTargets\x128\n" +
 	"\x18override_readiness_check\x18\t \x01(\bR\x16overrideReadinessCheck\x12O\n" +
 	"\x13authentication_data\x18\n" +
-	" \x01(\v2\x1e.v1.FirmwareAuthenticationDataR\x12authenticationDataB\x11\n" +
+	" \x01(\v2\x1e.v1.FirmwareAuthenticationDataR\x12authenticationData\x124\n" +
+	"\x16override_version_check\x18\v \x01(\bR\x14overrideVersionCheckB\x11\n" +
 	"\x0f_target_versionB\r\n" +
 	"\v_start_timeB\v\n" +
 	"\t_end_timeB\x10\n" +
@@ -14067,7 +14083,7 @@ const file_flow_proto_rawDesc = "" +
 	"\toperation\"\x8e\x01\n" +
 	"\x19PowerControlTaskOperation\x127\n" +
 	"\toperation\x18\x01 \x01(\x0e2\x19.v1.PowerControlOperationR\toperation\x128\n" +
-	"\x18override_readiness_check\x18\x02 \x01(\bR\x16overrideReadinessCheck\"\x8c\x03\n" +
+	"\x18override_readiness_check\x18\x02 \x01(\bR\x16overrideReadinessCheck\"\xc2\x03\n" +
 	"\x1cFirmwareControlTaskOperation\x12:\n" +
 	"\toperation\x18\x01 \x01(\x0e2\x1c.v1.FirmwareControlOperationR\toperation\x12*\n" +
 	"\x0etarget_version\x18\x02 \x01(\tH\x00R\rtargetVersion\x88\x01\x01\x12>\n" +
@@ -14076,7 +14092,8 @@ const file_flow_proto_rawDesc = "" +
 	"\bend_time\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampH\x02R\aendTime\x88\x01\x01\x12\x1f\n" +
 	"\vsub_targets\x18\x05 \x03(\tR\n" +
 	"subTargets\x128\n" +
-	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheckB\x11\n" +
+	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheck\x124\n" +
+	"\x16override_version_check\x18\a \x01(\bR\x14overrideVersionCheckB\x11\n" +
 	"\x0f_target_versionB\r\n" +
 	"\v_start_timeB\v\n" +
 	"\t_end_time\"\x87\x03\n" +

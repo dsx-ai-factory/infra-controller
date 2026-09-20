@@ -56,6 +56,8 @@ const HEALTH_REPORT_ALERT_COUNT_KEY: &str = "health_report.alert_count";
 const HEALTH_REPORT_SUCCESSES_KEY: &str = "health_report.successes";
 const HEALTH_REPORT_SUCCESS_PROBE_ID_KEY: &str = "probe_id";
 const HEALTH_REPORT_SUCCESS_TARGET_KEY: &str = "target";
+const HEALTH_REPORT_POWERSUPPLY_ID_KEY: &str = "powersupply_id";
+const HEALTH_REPORT_PHYSICAL_CONTEXT_KEY: &str = "physical_context";
 
 fn severity_number(severity: LogSeverity) -> i32 {
     match severity {
@@ -195,6 +197,22 @@ fn health_report_success_value(success: &HealthReportSuccess) -> AnyValue {
             AnyValue::from(target.clone()),
         );
     }
+    if let Some(attribution) = &success.attribution {
+        for (key, value) in [
+            (
+                HEALTH_REPORT_POWERSUPPLY_ID_KEY,
+                &attribution.powersupply_id,
+            ),
+            (
+                HEALTH_REPORT_PHYSICAL_CONTEXT_KEY,
+                &attribution.physical_context,
+            ),
+        ] {
+            if let Some(value) = value {
+                entries.insert(Key::from_static_str(key), AnyValue::from(value.clone()));
+            }
+        }
+    }
 
     AnyValue::Map(Box::new(entries))
 }
@@ -270,6 +288,12 @@ struct AlertDetail<'a> {
 
     message: &'a str,
     classifications: Vec<&'static str>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    powersupply_id: Option<&'a str>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    physical_context: Option<&'a str>,
 }
 
 /// Serializes alert detail, truncating to [`MAX_SERIALIZED_ALERTS`].
@@ -289,6 +313,14 @@ fn alert_detail_attributes(alerts: &[HealthReportAlert]) -> Vec<(&'static str, A
                 .iter()
                 .map(|classification| classification.as_str())
                 .collect(),
+            powersupply_id: alert
+                .attribution
+                .as_ref()
+                .and_then(|attribution| attribution.powersupply_id.as_deref()),
+            physical_context: alert
+                .attribution
+                .as_ref()
+                .and_then(|attribution| attribution.physical_context.as_deref()),
         })
         .collect();
 
@@ -513,7 +545,7 @@ mod tests {
     use crate::otlp::common::{AnyValue as OtlpAnyValue, any_value};
     use crate::sink::{
         Classification, HealthReport, HealthReportAlert, HealthReportSuccess, HealthReportTarget,
-        LogRecord, Probe, ReportSource,
+        LogRecord, Probe, ReportSource, SensorAttribution,
     };
 
     fn test_context() -> EventContext {
@@ -920,6 +952,8 @@ mod tests {
             PowerShelfId::from_str("ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg")
                 .expect("valid power shelf id");
         let power_shelf_id_string = power_shelf_id.to_string();
+        let nvlink_domain_uuid = NvLinkDomainId::new();
+        let nvlink_domain_uuid_attr = nvlink_domain_uuid.to_string();
         let context = EventContext {
             endpoint_key: "33:44:55:66:77:88".to_string(),
             addr: BmcAddr {
@@ -932,6 +966,7 @@ mod tests {
             metadata: Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: Some(power_shelf_id),
                 serial: Some("SN-PS-001".to_string()),
+                nvlink_domain_uuid: Some(nvlink_domain_uuid),
             })),
             rack_id: Some(RackId::new("RACK_4")),
         };
@@ -948,6 +983,10 @@ mod tests {
             Some("SN-PS-001")
         );
         assert_eq!(attr_value(&attrs, "rack.id"), Some("RACK_4"));
+        assert_eq!(
+            attr_value(&attrs, "nvlink.domain.uuid"),
+            Some(nvlink_domain_uuid_attr.as_str())
+        );
     }
 
     #[test]
@@ -969,6 +1008,7 @@ mod tests {
                     .expect("valid power shelf id"),
                 ),
                 serial: None,
+                nvlink_domain_uuid: None,
             })),
             rack_id: Some(RackId::new("RACK_4")),
         };
@@ -976,6 +1016,7 @@ mod tests {
         let attrs = otlp_resource_attributes(&context);
 
         assert_eq!(attr_value(&attrs, "power_shelf.serial_number"), None);
+        assert_eq!(attr_value(&attrs, "nvlink.domain.uuid"), None);
     }
 
     #[test]
@@ -1118,6 +1159,7 @@ mod tests {
 
     fn sensor_alert() -> HealthReportAlert {
         HealthReportAlert {
+            attribution: None,
             probe_id: Probe::Sensor,
             target: Some("Temp1".to_string()),
             message: "critical".to_string(),
@@ -1163,6 +1205,56 @@ mod tests {
         assert_eq!(record.severity_text, "WARN");
     }
 
+    /// Sensor placement rides on both the success kvlist and the alert JSON,
+    /// and only the fields the sensor carried appear.
+    #[test]
+    fn sensor_attribution_is_carried_on_successes_and_alerts() {
+        let attribution = Some(SensorAttribution {
+            powersupply_id: Some("PSU0".to_string()),
+            physical_context: None,
+        });
+        let report = CollectorEvent::HealthReport(
+            HealthReport {
+                source: ReportSource::BmcSensors,
+                target: Some(HealthReportTarget::PowerShelf),
+                observed_at: None,
+                successes: vec![HealthReportSuccess {
+                    attribution: attribution.clone(),
+                    probe_id: Probe::Sensor,
+                    target: Some("PSU0_Temp".to_string()),
+                }],
+                alerts: vec![HealthReportAlert {
+                    attribution,
+                    probe_id: Probe::Sensor,
+                    target: Some("PSU0_Power".to_string()),
+                    message: "critical".to_string(),
+                    classifications: vec![Classification::SensorCritical],
+                }],
+            }
+            .into(),
+        );
+
+        let request = build_export_request(&[(test_context(), report)], true);
+        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
+        let attrs = record.attributes.as_slice();
+
+        let successes =
+            attr_array_value(attrs, HEALTH_REPORT_SUCCESSES_KEY).expect("success array");
+        let success = any_kvlist_value(&successes[0]).expect("structured success");
+        assert_eq!(
+            attr_value(success, HEALTH_REPORT_POWERSUPPLY_ID_KEY),
+            Some("PSU0")
+        );
+        assert_eq!(
+            attr_value(success, HEALTH_REPORT_PHYSICAL_CONTEXT_KEY),
+            None
+        );
+
+        let alert = &alert_details(record)[0];
+        assert_eq!(alert["powersupply_id"], "PSU0");
+        assert!(alert.get("physical_context").is_none());
+    }
+
     /// Guards the per-target policy: scalar evidence remains available while
     /// free-form alert detail stays absent when the flag is disabled.
     #[test]
@@ -1192,6 +1284,7 @@ mod tests {
     fn health_report_serializes_alert_details_when_enabled() {
         let alerts = vec![
             HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: Some(
                     "/redfish/v1/Chassis/BMC_0/ThermalSubsystem/LeakDetection/LeakDetectors/1"
@@ -1262,6 +1355,7 @@ mod tests {
     #[test]
     fn health_report_alert_details_omit_absent_target() {
         let alert = HealthReportAlert {
+            attribution: None,
             target: None,
             ..sensor_alert()
         };
@@ -1280,6 +1374,7 @@ mod tests {
     fn health_report_alert_details_are_capped() {
         let alerts = (0..MAX_SERIALIZED_ALERTS + 3)
             .map(|index| HealthReportAlert {
+                attribution: None,
                 target: Some(format!("Temp{index}")),
                 ..sensor_alert()
             })
@@ -1309,10 +1404,12 @@ mod tests {
                 target: Some(HealthReportTarget::Switch),
                 observed_at: Some(observed_at),
                 successes: vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::NvueLeakage,
                     target: Some("LEAK1".to_string()),
                 }],
                 alerts: vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::NvueLeakage,
                     target: Some("LEAK2".to_string()),
                     message: "NVUE leakage sensor LEAK2 reports leak".to_string(),
@@ -1385,6 +1482,8 @@ mod tests {
             alert["classifications"],
             serde_json::json!(["Leak", "SensorFailure"])
         );
+        assert!(alert.get("powersupply_id").is_none());
+        assert_eq!(attr_value(success, HEALTH_REPORT_POWERSUPPLY_ID_KEY), None);
         assert_eq!(attr_int_value(attrs, "health_report.alerts.dropped"), None);
     }
 
@@ -1405,6 +1504,7 @@ mod tests {
                 target: Some(HealthReportTarget::Machine),
                 observed_at,
                 successes: vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::Sensor,
                     target: Some("Temp1".to_string()),
                 }],

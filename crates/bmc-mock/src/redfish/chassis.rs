@@ -26,7 +26,7 @@ use serde_json::json;
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
 use crate::redfish::Builder;
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
 pub(super) fn resource<'a>(chassis_id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!("{}/{chassis_id}", collection().odata_id);
@@ -52,7 +52,7 @@ fn builder(resource: &redfish::Resource) -> ChassisBuilder {
     }
 }
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     const CHASSIS_ID: &str = "{chassis_id}";
     const NET_ADAPTER_ID: &str = "{network_adapter_id}";
     const NET_FUNC_ID: &str = "{function_id}";
@@ -60,20 +60,20 @@ pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
     const SENSOR_ID: &str = "{sensor_id}";
     const POWER_SUPPLY_ID: &str = "{power_supply_id}";
     const LEAK_DETECTOR_ID: &str = "{leak_detector_id}";
-    r.route(&collection().odata_id, get(get_chassis_collection))
-        .route(&resource(CHASSIS_ID).odata_id, get(get_chassis))
+    r.route(&collection().odata_id, get(get_chassis_collection::<C>))
+        .route(&resource(CHASSIS_ID).odata_id, get(get_chassis::<C>))
         .route(
             &redfish::network_adapter::chassis_collection(CHASSIS_ID).odata_id,
-            get(get_chassis_network_adapters),
+            get(get_chassis_network_adapters::<C>),
         )
         .route(
             &redfish::network_adapter::chassis_resource(CHASSIS_ID, NET_ADAPTER_ID).odata_id,
-            get(get_chassis_network_adapter),
+            get(get_chassis_network_adapter::<C>),
         )
         .route(
             &redfish::network_device_function::chassis_collection(CHASSIS_ID, NET_ADAPTER_ID)
                 .odata_id,
-            get(get_chassis_network_adapters_network_device_functions_list),
+            get(get_chassis_network_adapters_network_device_functions_list::<C>),
         )
         .route(
             &redfish::network_device_function::chassis_resource(
@@ -82,55 +82,55 @@ pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
                 NET_FUNC_ID,
             )
             .odata_id,
-            get(get_chassis_network_adapters_network_device_function),
+            get(get_chassis_network_adapters_network_device_function::<C>),
         )
         .route(
             &redfish::pcie_device::chassis_collection(CHASSIS_ID).odata_id,
-            get(get_chassis_pcie_devices),
+            get(get_chassis_pcie_devices::<C>),
         )
         .route(
             &redfish::pcie_device::chassis_resource(CHASSIS_ID, PCIE_DEVICE_ID).odata_id,
-            get(get_pcie_device),
+            get(get_pcie_device::<C>),
         )
         .route(
             &redfish::sensor::chassis_collection(CHASSIS_ID).odata_id,
-            get(get_chassis_sensors),
+            get(get_chassis_sensors::<C>),
         )
         .route(
             &redfish::sensor::chassis_resource(CHASSIS_ID, SENSOR_ID).odata_id,
-            get(get_chassis_sensor),
+            get(get_chassis_sensor::<C>),
         )
         .route(
             &redfish::assembly::chassis_resource(CHASSIS_ID).odata_id,
-            get(get_chassis_assembly),
+            get(get_chassis_assembly::<C>),
         )
         .route(
             &redfish::power_subsystem::resource(CHASSIS_ID).odata_id,
-            get(get_chassis_power_subsystem),
+            get(get_chassis_power_subsystem::<C>),
         )
         .route(
             &redfish::power_supply::collection(CHASSIS_ID).odata_id,
-            get(get_chassis_power_supply_collection),
+            get(get_chassis_power_supply_collection::<C>),
         )
         .route(
             &redfish::power_supply::resource(CHASSIS_ID, POWER_SUPPLY_ID).odata_id,
-            get(get_chassis_power_supply),
+            get(get_chassis_power_supply::<C>),
         )
         .route(
             &redfish::thermal_subsystem::resource(CHASSIS_ID).odata_id,
-            get(get_chassis_thermal_subsystem),
+            get(get_chassis_thermal_subsystem::<C>),
         )
         .route(
             &redfish::thermal_subsystem::leak_detection_resource(CHASSIS_ID).odata_id,
-            get(get_chassis_leak_detection),
+            get(get_chassis_leak_detection::<C>),
         )
         .route(
             &redfish::leak_detector::collection(CHASSIS_ID).odata_id,
-            get(get_chassis_leak_detector_collection),
+            get(get_chassis_leak_detector_collection::<C>),
         )
         .route(
             &redfish::leak_detector::resource(CHASSIS_ID, LEAK_DETECTOR_ID).odata_id,
-            get(get_chassis_leak_detector),
+            get(get_chassis_leak_detector::<C>),
         )
 }
 
@@ -269,7 +269,7 @@ impl SingleChassisState {
     }
 }
 
-async fn get_chassis_collection(State(state): State<BmcState>) -> Response {
+async fn get_chassis_collection<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let members = state
         .chassis_state
         .chassis
@@ -279,7 +279,10 @@ async fn get_chassis_collection(State(state): State<BmcState>) -> Response {
     collection().with_members(&members).into_ok_response()
 }
 
-async fn get_chassis(State(state): State<BmcState>, Path(chassis_id): Path<String>) -> Response {
+async fn get_chassis<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(chassis_id): Path<String>,
+) -> Response {
     let Some(chassis_state) = state.chassis_state.find(&chassis_id) else {
         return http::not_found();
     };
@@ -336,8 +339,8 @@ async fn get_chassis(State(state): State<BmcState>, Path(chassis_id): Path<Strin
     b.build().into_ok_response()
 }
 
-async fn get_chassis_network_adapters(
-    State(state): State<BmcState>,
+async fn get_chassis_network_adapters<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(chassis_id): Path<String>,
 ) -> Response {
     state
@@ -360,8 +363,8 @@ async fn get_chassis_network_adapters(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_network_adapter(
-    State(state): State<BmcState>,
+async fn get_chassis_network_adapter<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((chassis_id, network_adapter_id)): Path<(String, String)>,
 ) -> Response {
     let Some(chassis_state) = state.chassis_state.find(&chassis_id) else {
@@ -373,8 +376,8 @@ async fn get_chassis_network_adapter(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_network_adapters_network_device_functions_list(
-    State(state): State<BmcState>,
+async fn get_chassis_network_adapters_network_device_functions_list<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((chassis_id, network_adapter_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -401,8 +404,8 @@ async fn get_chassis_network_adapters_network_device_functions_list(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_network_adapters_network_device_function(
-    State(state): State<BmcState>,
+async fn get_chassis_network_adapters_network_device_function<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((chassis_id, network_adapter_id, function_id)): Path<(String, String, String)>,
 ) -> Response {
     state
@@ -414,8 +417,8 @@ async fn get_chassis_network_adapters_network_device_function(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_pcie_device(
-    State(state): State<BmcState>,
+async fn get_pcie_device<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((chassis_id, pcie_device_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -426,8 +429,8 @@ async fn get_pcie_device(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_pcie_devices(
-    State(state): State<BmcState>,
+async fn get_chassis_pcie_devices<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(chassis_id): Path<String>,
 ) -> Response {
     state
@@ -448,8 +451,8 @@ async fn get_chassis_pcie_devices(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_sensors(
-    State(state): State<BmcState>,
+async fn get_chassis_sensors<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(chassis_id): Path<String>,
 ) -> Response {
     state
@@ -472,8 +475,8 @@ async fn get_chassis_sensors(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_sensor(
-    State(state): State<BmcState>,
+async fn get_chassis_sensor<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((chassis_id, sensor_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -484,8 +487,8 @@ async fn get_chassis_sensor(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_assembly(
-    State(state): State<BmcState>,
+async fn get_chassis_assembly<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(chassis_id): Path<String>,
 ) -> Response {
     state
@@ -496,8 +499,8 @@ async fn get_chassis_assembly(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_power_subsystem(
-    State(state): State<BmcState>,
+async fn get_chassis_power_subsystem<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(chassis_id): Path<String>,
 ) -> Response {
     state
@@ -514,8 +517,8 @@ async fn get_chassis_power_subsystem(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_power_supply_collection(
-    State(state): State<BmcState>,
+async fn get_chassis_power_supply_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(chassis_id): Path<String>,
 ) -> Response {
     state
@@ -536,8 +539,8 @@ async fn get_chassis_power_supply_collection(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_power_supply(
-    State(state): State<BmcState>,
+async fn get_chassis_power_supply<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((chassis_id, power_supply_id)): Path<(String, String)>,
 ) -> Response {
     let Some(chassis_state) = state.chassis_state.find(&chassis_id) else {
@@ -549,8 +552,8 @@ async fn get_chassis_power_supply(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_thermal_subsystem(
-    State(state): State<BmcState>,
+async fn get_chassis_thermal_subsystem<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(chassis_id): Path<String>,
 ) -> Response {
     state
@@ -567,8 +570,8 @@ async fn get_chassis_thermal_subsystem(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_leak_detection(
-    State(state): State<BmcState>,
+async fn get_chassis_leak_detection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(chassis_id): Path<String>,
 ) -> Response {
     state
@@ -585,8 +588,8 @@ async fn get_chassis_leak_detection(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_leak_detector_collection(
-    State(state): State<BmcState>,
+async fn get_chassis_leak_detector_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(chassis_id): Path<String>,
 ) -> Response {
     state
@@ -609,8 +612,8 @@ async fn get_chassis_leak_detector_collection(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_chassis_leak_detector(
-    State(state): State<BmcState>,
+async fn get_chassis_leak_detector<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((chassis_id, leak_detector_id)): Path<(String, String)>,
 ) -> Response {
     state

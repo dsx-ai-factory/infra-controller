@@ -325,14 +325,19 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 
 func TestNewAPIExpectedMachine(t *testing.T) {
 	tests := []struct {
-		desc            string
-		labels          cdbm.Labels
-		dpuSerials      []string
-		wantLabelsJSON  string
-		wantSerialsJSON string
+		desc                 string
+		isDpfEnabled         *bool
+		hostLifecycleProfile cdbm.HostLifecycleProfile
+		wantDpfJSON          string
+		wantProfile          *APIHostLifecycleProfile
+		labels               cdbm.Labels
+		dpuSerials           []string
+		wantLabelsJSON       string
+		wantSerialsJSON      string
 	}{
 		{
-			desc:            "nil collections serialize as empty",
+			desc:            "nil collections serialize as empty and unset DPF defaults to true",
+			wantDpfJSON:     "true",
 			wantLabelsJSON:  `{}`,
 			wantSerialsJSON: `[]`,
 		},
@@ -350,6 +355,26 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			wantLabelsJSON:  `{"env":"test","zone":"us-west-1"}`,
 			wantSerialsJSON: `["DPU002","DPU001"]`,
 		},
+		{
+			desc:         "stored DPF false is returned",
+			isDpfEnabled: cutil.GetPtr(false),
+			wantDpfJSON:  "false",
+		},
+		{
+			desc:         "stored DPF true is returned",
+			isDpfEnabled: cutil.GetPtr(true),
+			wantDpfJSON:  "true",
+		},
+		{
+			desc:                 "disableLockdown true round-trips",
+			hostLifecycleProfile: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+			wantProfile:          &APIHostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+		},
+		{
+			desc:                 "disableLockdown false round-trips",
+			hostLifecycleProfile: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
+			wantProfile:          &APIHostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
+		},
 	}
 
 	for _, tc := range tests {
@@ -359,6 +384,8 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 				ChassisSerialNumber:      "CHASSIS123",
 				FallbackDpuSerialNumbers: tc.dpuSerials,
 				Labels:                   tc.labels,
+				IsDpfEnabled:             tc.isDpfEnabled,
+				HostLifecycleProfile:     tc.hostLifecycleProfile,
 				Created:                  cdb.GetCurTime(),
 				Updated:                  cdb.GetCurTime(),
 			}
@@ -370,14 +397,20 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			assert.Equal(t, dbEM.ChassisSerialNumber, got.ChassisSerialNumber)
 			assert.Equal(t, dbEM.Created, got.Created)
 			assert.Equal(t, dbEM.Updated, got.Updated)
+			assert.Equal(t, tc.wantProfile, got.HostLifecycleProfile)
 			assert.Equal(t, stored, *dbEM, "response conversion must preserve stored nil values")
 
 			raw, err := json.Marshal(got)
 			require.NoError(t, err)
 			var fields map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(raw, &fields))
-			assert.JSONEq(t, tc.wantLabelsJSON, string(fields["labels"]))
-			assert.JSONEq(t, tc.wantSerialsJSON, string(fields["fallbackDPUSerialNumbers"]))
+			if tc.wantLabelsJSON != "" {
+				assert.JSONEq(t, tc.wantLabelsJSON, string(fields["labels"]))
+				assert.JSONEq(t, tc.wantSerialsJSON, string(fields["fallbackDPUSerialNumbers"]))
+			}
+			if tc.wantDpfJSON != "" {
+				assert.Equal(t, tc.wantDpfJSON, string(fields["isDpfEnabled"]))
+			}
 		})
 	}
 }
@@ -420,40 +453,6 @@ func TestAPIHostLifecycleProfile_Conversions(t *testing.T) {
 	})
 }
 
-func TestNewAPIExpectedMachine_HostLifecycleProfile(t *testing.T) {
-	tests := []struct {
-		desc     string
-		stored   cdbm.HostLifecycleProfile
-		wantNil  bool
-		wantBool *bool
-	}{
-		{desc: "disableLockdown true round-trips", stored: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)}, wantBool: cutil.GetPtr(true)},
-		{desc: "disableLockdown false round-trips", stored: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)}, wantBool: cutil.GetPtr(false)},
-		{desc: "unset profile omitted from response", stored: cdbm.HostLifecycleProfile{}, wantNil: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.desc, func(t *testing.T) {
-			dbEM := &cdbm.ExpectedMachine{
-				BmcMacAddress:        "00:11:22:33:44:55",
-				ChassisSerialNumber:  "CHASSIS123",
-				HostLifecycleProfile: tc.stored,
-				Created:              time.Now(),
-				Updated:              time.Now(),
-			}
-
-			got := NewAPIExpectedMachine(dbEM)
-			if tc.wantNil {
-				assert.Nil(t, got.HostLifecycleProfile)
-				return
-			}
-			if assert.NotNil(t, got.HostLifecycleProfile) {
-				assert.Equal(t, *tc.wantBool, *got.HostLifecycleProfile.DisableLockdown)
-			}
-		})
-	}
-}
-
 func TestAPIExpectedMachine_HostLifecycleProfile_JSONRoundTrip(t *testing.T) {
 	t.Run("disableLockdown true survives marshal/unmarshal", func(t *testing.T) {
 		orig := &APIExpectedMachine{
@@ -480,28 +479,6 @@ func TestAPIExpectedMachine_HostLifecycleProfile_JSONRoundTrip(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		assert.NotContains(t, string(raw), "hostLifecycleProfile")
-	})
-}
-
-func TestNewAPIExpectedMachine_DpfEnabled(t *testing.T) {
-	t.Run("nil stored value defaults to true", func(t *testing.T) {
-		got := NewAPIExpectedMachine(&cdbm.ExpectedMachine{})
-		assert.Nil(t, got.IsDpfEnabled)
-	})
-
-	t.Run("stored false is returned", func(t *testing.T) {
-		got := NewAPIExpectedMachine(&cdbm.ExpectedMachine{
-			IsDpfEnabled: cutil.GetPtr(false),
-		})
-		assert.False(t, *got.IsDpfEnabled)
-	})
-
-	t.Run("stored true is returned", func(t *testing.T) {
-		got := NewAPIExpectedMachine(&cdbm.ExpectedMachine{
-			IsDpfEnabled: cutil.GetPtr(true),
-		})
-		assert.True(t, *got.IsDpfEnabled)
-
 	})
 }
 

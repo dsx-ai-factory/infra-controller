@@ -183,6 +183,7 @@ impl StateControllerIO for SwitchStateControllerIO {
             SwitchControllerState::Maintenance {
                 operation,
                 configure_certificate,
+                ..
             } => {
                 let substate = match operation {
                     SwitchMaintenanceOperation::PowerOn => "power_on",

@@ -17,7 +17,7 @@
 
 use common::api_fixtures::{
     FIXTURE_DHCP_RELAY_ADDRESS, TestEnv, create_managed_host, create_managed_host_with_config,
-    create_test_env, dpu,
+    create_test_env,
 };
 use model::test_support::ManagedHostConfig;
 use rpc::forge::IpType;
@@ -107,20 +107,53 @@ async fn test_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     )
     .await;
 
-    // Loopback IP is assigned at random from pool, so we need to search for the correct one
-    let mut txn = db_pool
-        .clone()
-        .begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-    let loopback_ip = dpu::loopback_ip(&mut txn, &mh.dpu().id).await;
-    test_inner(
-        &loopback_ip.to_string(),
-        IpType::LoopbackIp,
-        &env,
-        "test_loopback_ip",
-    )
-    .await;
+    let dpu_machine_id = mh.dpu().id;
+    let mut txn = db_pool.begin().await?;
+    let (mut network_config, version) =
+        db::machine::get_network_config(txn.as_mut(), &dpu_machine_id)
+            .await?
+            .take();
+    let loopback_ip = network_config
+        .loopback_ip
+        .expect("the DPU should have an IPv4 loopback address");
+    network_config.loopback_ip_v6 = Some("2001:db8:ffff::1".parse()?);
+    assert_eq!(
+        db::machine::try_update_network_config(
+            txn.as_mut(),
+            &dpu_machine_id,
+            version,
+            &network_config,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    // The expanded IPv6 spelling must still match the stored address.
+    for ip in [
+        loopback_ip.to_string(),
+        "2001:0db8:ffff:0:0:0:0:1".to_string(),
+    ] {
+        let response = env
+            .api
+            .find_ip_address(tonic::Request::new(rpc::forge::FindIpAddressRequest {
+                ip: ip.clone(),
+            }))
+            .await?
+            .into_inner();
+        assert!(response.errors.is_empty(), "{ip}: {:?}", response.errors);
+        let loopback_matches = response
+            .matches
+            .iter()
+            .filter(|ip_match| ip_match.ip_type == IpType::LoopbackIp as i32)
+            .collect::<Vec<_>>();
+        assert_eq!(loopback_matches.len(), 1, "{ip}: {:?}", response.matches);
+        assert_eq!(
+            loopback_matches[0].owner_id.as_deref(),
+            Some(dpu_machine_id.to_string().as_str()),
+            "{ip}"
+        );
+    }
 
     Ok(())
 }

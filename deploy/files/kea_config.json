@@ -18,7 +18,7 @@
     "decline-probation-period": 900,
     "hooks-libraries": [
       {
-        "library": "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so",
+        "library": "/usr/lib/kea/hooks/libdhcp.so",
         "parameters": {
           "nico-api-url": "https://nico-api.nico-system.svc.cluster.local:1079",
           "nico-metrics-endpoint": "[::]:1089",

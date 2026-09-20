@@ -270,6 +270,7 @@ func TestIPBlockHandler_Create(t *testing.T) {
 	assert.NotNil(t, site)
 	site2 := testIPBlockBuildSite(t, dbSession, ip2, "testSite2", cdbm.SiteStatusRegistered, true, user)
 	assert.NotNil(t, site2)
+	testIPBlockBuildIPBlock(t, dbSession, "existing-ipv6", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8:1::", 64, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, user)
 
 	prefLen24 := 24
 	prefLen19 := 19
@@ -374,6 +375,25 @@ func TestIPBlockHandler_Create(t *testing.T) {
 		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
 	assert.Nil(t, err)
 
+	okBodyIPv6, err := json.Marshal(&model.APIIPBlockCreateRequest{
+		Name:            "expanded-ipv6",
+		SiteID:          site.ID.String(),
+		RoutingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+		Prefix:          "2001:0DB8:0:0:0:0:0:0",
+		PrefixLength:    64,
+		ProtocolVersion: cdbm.IPBlockProtocolVersionV6,
+	})
+	require.NoError(t, err)
+	errBodyIPv6PrefixClash, err := json.Marshal(&model.APIIPBlockCreateRequest{
+		Name:            "duplicate-ipv6",
+		SiteID:          site.ID.String(),
+		RoutingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+		Prefix:          "2001:0DB8:0001:0:0:0:0:0",
+		PrefixLength:    64,
+		ProtocolVersion: cdbm.IPBlockProtocolVersionV6,
+	})
+	require.NoError(t, err)
+
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
 	ipamStorage := ipam.NewIpamStorage(dbSession.DB, nil)
@@ -393,6 +413,7 @@ func TestIPBlockHandler_Create(t *testing.T) {
 		expectedIpam       bool
 		expectedIpamErrMsg string
 		expectedErrorText  string
+		expectedPrefix     string
 		expectMessage      *string
 		verifyChildSpanner bool
 		holdSiteFabricLock bool
@@ -485,6 +506,25 @@ func TestIPBlockHandler_Create(t *testing.T) {
 			paramCIDR:      ipam.GetCidrForIPBlock(ctx, "192.169.0.1", 24),
 			expectedIpam:   true,
 			expectMessage:  cutil.GetPtr("IP Block is ready for use"),
+		},
+		{
+			name:           "success with expanded uppercase IPv6 prefix",
+			reqOrgName:     ipOrg1,
+			reqBody:        string(okBodyIPv6),
+			user:           user,
+			expectedStatus: http.StatusCreated,
+			paramNamespace: ipam.GetIpamNamespaceForIPBlock(ctx, cdbm.IPBlockRoutingTypeDatacenterOnly, ip.ID.String(), site.ID.String()),
+			paramCIDR:      "2001:db8::/64",
+			expectedPrefix: "2001:db8::",
+		},
+		{
+			name:              "error when equivalent IPv6 prefix already exists",
+			reqOrgName:        ipOrg1,
+			reqBody:           string(errBodyIPv6PrefixClash),
+			user:              user,
+			expectedErr:       true,
+			expectedStatus:    http.StatusConflict,
+			expectedErrorText: "IPBlock with prefix: 2001:db8:1:: and prefix_length: 64",
 		},
 		{
 			name:              "error when ip prefix clashes in same infrastructure provider",
@@ -622,6 +662,16 @@ func TestIPBlockHandler_Create(t *testing.T) {
 				// validate message fields
 				if tc.expectMessage != nil {
 					assert.Equal(t, rsp.StatusHistory[0].Message, tc.expectMessage)
+				}
+				if tc.expectedPrefix != "" {
+					assert.Equal(t, tc.expectedPrefix, rsp.Prefix)
+					ipBlockID, err := uuid.Parse(rsp.ID)
+					require.NoError(t, err)
+					storedIPBlock, err := cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, ipBlockID, nil)
+					require.NoError(t, err)
+					assert.Equal(t, tc.expectedPrefix, storedIPBlock.Prefix)
+					_, err = ipamStorage.ReadPrefix(ctx, tc.paramCIDR, tc.paramNamespace)
+					require.NoError(t, err)
 				}
 				// validate ipam exists
 				if tc.expectedIpam {

@@ -22,13 +22,17 @@ use lazy_static::lazy_static;
 use mac_address::MacAddress;
 use model::expected_machine::{
     BmcIpAllocationType, ExpectedInterface, ExpectedMachine, ExpectedMachineData,
-    ExpectedMachineRequest, LegacyHostBmcOverrides,
+    ExpectedMachineRequest, HostDpuPolicy, LegacyHostBmcOverrides,
 };
 use regex::Regex;
 use uuid::Uuid;
 
 use crate::CarbideError;
-use crate::api::{Api, log_request_data};
+use crate::api::{Api, log_request_data, log_request_data_redacted};
+use crate::handlers::expected_component_patch::{
+    ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
+    validate_bmc_mac,
+};
 use crate::handlers::machine_interface_address::update_preallocated_expected_machine_interface;
 use crate::handlers::static_address_metrics::{
     PreallocationSuccess, StaticAddressPreallocationCompleted,
@@ -79,7 +83,11 @@ pub(crate) async fn add(
     let machine = parse_expected_machine_for_insert(request.into_inner(), None)?;
 
     let mut txn = api.txn_begin().await?;
-    db::expected_machine::create(&mut txn, machine).await?;
+    // Convert through CarbideError so a duplicate BMC MAC becomes AlreadyExists; the direct
+    // DatabaseError to Status conversion reports it as FailedPrecondition.
+    db::expected_machine::create(&mut txn, machine)
+        .await
+        .map_err(CarbideError::from)?;
 
     txn.commit().await?;
 
@@ -315,6 +323,284 @@ pub(crate) async fn update(
     }
 
     Ok(tonic::Response::new(()))
+}
+
+struct ExpectedMachinePatch {
+    expected_machine_id: Uuid,
+    fields: UpdateMask,
+    patch: rpc::ExpectedMachine,
+    bmc_overrides: LegacyHostBmcOverrides,
+    dpu_policy: Option<HostDpuPolicy>,
+}
+
+impl TryFrom<rpc::PatchExpectedMachineRequest> for ExpectedMachinePatch {
+    type Error = CarbideError;
+
+    fn try_from(request: rpc::PatchExpectedMachineRequest) -> Result<Self, Self::Error> {
+        let fields = UpdateMask::parse(
+            request.update_mask.map(|mask| mask.paths),
+            ExpectedComponent::Machine,
+        )?;
+        let mut patch = request.expected_machine.ok_or_else(|| {
+            CarbideError::InvalidArgument("expected_machine is required".to_string())
+        })?;
+        let expected_machine_id = required_id(patch.id.take(), "id")?;
+        fields.validate_bmc_credentials(&patch.bmc_username, &patch.bmc_password)?;
+        if fields.contains(UpdateField::ChassisSerialNumber)
+            && !CHASSIS_SERIAL_REGEX.is_match(&patch.chassis_serial_number)
+        {
+            return Err(CarbideError::InvalidArgument(
+                "chassis serial is not formatted properly".to_string(),
+            ));
+        }
+        if fields.contains(UpdateField::FallbackDpuSerialNumbers)
+            && carbide_utils::has_duplicates(&patch.fallback_dpu_serial_numbers)
+        {
+            return Err(CarbideError::InvalidArgument(
+                "duplicate dpu serial number found".to_string(),
+            ));
+        }
+        for (field, value, path) in [
+            (
+                UpdateField::IsDpfEnabled,
+                patch.is_dpf_enabled,
+                "is_dpf_enabled",
+            ),
+            (
+                UpdateField::DisableLockdown,
+                patch
+                    .host_lifecycle_profile
+                    .as_ref()
+                    .and_then(|profile| profile.disable_lockdown),
+                "host_lifecycle_profile.disable_lockdown",
+            ),
+            (
+                UpdateField::DefaultPauseIngestionAndPoweron,
+                patch.default_pause_ingestion_and_poweron,
+                "default_pause_ingestion_and_poweron",
+            ),
+            (
+                UpdateField::BmcRetainCredentials,
+                patch.bmc_retain_credentials,
+                "bmc_retain_credentials",
+            ),
+        ] {
+            if fields.contains(field) {
+                required_value(value, path)?;
+            }
+        }
+        let bmc_ip_address = if fields.contains(UpdateField::BmcIpAddress) {
+            let address = required_value(patch.bmc_ip_address.as_deref(), "bmc_ip_address")?;
+            Some(parse_bmc_ip(address)?)
+        } else {
+            None
+        };
+        let bmc_ip_allocation = if fields.contains(UpdateField::BmcIpAllocation) {
+            let value = required_value(patch.bmc_ip_allocation, "bmc_ip_allocation")?;
+            Some(BmcIpAllocationType::from(
+                rpc::BmcIpAllocationType::try_from(value).map_err(|_| {
+                    CarbideError::InvalidArgument(format!("invalid bmc_ip_allocation: {value}"))
+                })?,
+            ))
+        } else {
+            None
+        };
+        let dpu_policy = if fields.contains(UpdateField::DpuMode) {
+            let value = required_value(patch.dpu_mode, "dpu_mode")?;
+            Some(HostDpuPolicy::from(rpc::DpuMode::try_from(value).map_err(
+                |_| CarbideError::InvalidArgument(format!("invalid dpu_mode: {value}")),
+            )?))
+        } else {
+            None
+        };
+        let bmc_overrides = LegacyHostBmcOverrides {
+            ip_address: bmc_ip_address,
+            ip_allocation: bmc_ip_allocation,
+            replace_interfaces: fields.contains(UpdateField::HostNics),
+        };
+        Ok(Self {
+            expected_machine_id,
+            fields,
+            patch,
+            bmc_overrides,
+            dpu_policy,
+        })
+    }
+}
+
+pub(crate) async fn patch_expected_machine(
+    api: &Api,
+    request: tonic::Request<rpc::PatchExpectedMachineRequest>,
+) -> Result<tonic::Response<()>, tonic::Status> {
+    let patch = ExpectedMachinePatch::try_from(request.into_inner())?;
+    apply_machine_patches(api, vec![patch]).await?;
+    Ok(tonic::Response::new(()))
+}
+
+pub(crate) async fn patch_expected_machines(
+    api: &Api,
+    request: tonic::Request<rpc::PatchExpectedMachinesRequest>,
+) -> Result<tonic::Response<()>, tonic::Status> {
+    let request = request.into_inner();
+    if request.patches.is_empty() {
+        return Err(CarbideError::InvalidArgument("patches must not be empty".to_string()).into());
+    }
+    let patches = request
+        .patches
+        .into_iter()
+        .map(ExpectedMachinePatch::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    apply_machine_patches(api, patches).await?;
+    Ok(tonic::Response::new(()))
+}
+
+async fn apply_machine_patches(
+    api: &Api,
+    mut patches: Vec<ExpectedMachinePatch>,
+) -> Result<(), CarbideError> {
+    log_request_data_redacted(match patches.as_slice() {
+        [patch] => format!("expected_machine_id: {}", patch.expected_machine_id),
+        _ => format!("expected-machine patches: {}", patches.len()),
+    });
+    // Match the legacy batch lock order so overlapping writers cannot wait
+    // for the same rows in opposite directions.
+    patches.sort_by_key(|patch| patch.expected_machine_id);
+    if patches
+        .windows(2)
+        .any(|pair| pair[0].expected_machine_id == pair[1].expected_machine_id)
+    {
+        return Err(CarbideError::InvalidArgument(
+            "duplicate expected machine id in patch batch".to_string(),
+        ));
+    }
+    let mut txn = api.txn_begin().await?;
+    let mut preallocations = Vec::new();
+    for patch in patches {
+        match apply_machine_patch(
+            &mut txn,
+            patch,
+            api.runtime_config.retained_boot_interface_window,
+        )
+        .await
+        {
+            Ok(applied) => preallocations.extend(applied),
+            Err(error) => {
+                txn.rollback_or_log("expected-machine patch failure").await;
+                return Err(error);
+            }
+        }
+    }
+    txn.commit().await?;
+    for preallocation in preallocations {
+        emit(StaticAddressPreallocationCompleted::from(preallocation));
+    }
+    Ok(())
+}
+
+async fn apply_machine_patch(
+    txn: &mut sqlx::PgConnection,
+    request: ExpectedMachinePatch,
+    retained_window: Option<chrono::Duration>,
+) -> Result<Vec<PreallocationSuccess>, CarbideError> {
+    let ExpectedMachinePatch {
+        expected_machine_id,
+        fields,
+        mut patch,
+        mut bmc_overrides,
+        dpu_policy,
+    } = request;
+    let mut machine = db::expected_machine::find_for_update(
+        &mut *txn,
+        &ExpectedMachineRequest {
+            id: Some(expected_machine_id),
+            bmc_mac_address: None,
+        },
+    )
+    .await?
+    .ok_or_else(|| CarbideError::NotFoundError {
+        kind: "expected_machine",
+        id: expected_machine_id.to_string(),
+    })?;
+    validate_bmc_mac(&patch.bmc_mac_address, machine.bmc_mac_address)?;
+    if fields.is_empty() {
+        return Ok(Vec::new());
+    }
+    if fields.contains(UpdateField::HostNics)
+        || bmc_overrides.ip_address.is_some()
+        || bmc_overrides.ip_allocation.is_some()
+    {
+        let previous = machine.clone();
+        if fields.contains(UpdateField::HostNics) {
+            preserve_omitted_rpc_role_and_allocation(&mut patch, Some(&previous));
+            // Preserve the explicit reset before converting Unspecified to
+            // the model's inferred allocation policy.
+            if bmc_overrides.ip_allocation.is_none()
+                && patch.interfaces().iter().any(|interface| {
+                    interface.role == Some(rpc::ExpectedInterfaceRole::HostBmc as i32)
+                        && interface.ip_allocation
+                            == Some(rpc::ExpectedInterfaceIpAllocation::Unspecified as i32)
+                })
+            {
+                bmc_overrides.ip_allocation = Some(BmcIpAllocationType::Auto);
+            }
+            machine.data.interfaces = std::mem::take(patch.interfaces_mut())
+                .into_iter()
+                .map(ExpectedInterface::try_from)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        validate_host_bmc_declaration(&machine)?;
+        validate_bmc_identity_role(&machine, Some(&previous))?;
+        machine
+            .normalize_host_bmc_patch(&previous, bmc_overrides)
+            .map_err(|message| CarbideError::InvalidArgument(format!("host BMC: {message}")))?;
+    }
+    // Pair validation requires both credential paths, so selecting the username
+    // also selects the password.
+    if fields.contains(UpdateField::BmcUsername) {
+        machine.data.bmc_username = patch.bmc_username;
+        machine.data.bmc_password = patch.bmc_password;
+    }
+    if fields.contains(UpdateField::ChassisSerialNumber) {
+        machine.data.serial_number = patch.chassis_serial_number;
+    }
+    if fields.contains(UpdateField::FallbackDpuSerialNumbers) {
+        machine.data.fallback_dpu_serial_numbers = patch.fallback_dpu_serial_numbers;
+    }
+    if fields.contains(UpdateField::SkuId) {
+        machine.data.sku_id = patch.sku_id;
+    }
+    if fields.contains(UpdateField::RackId) {
+        machine.data.rack_id = patch.rack_id;
+    }
+    if fields.contains(UpdateField::IsDpfEnabled) {
+        machine.data.dpf_enabled = patch.is_dpf_enabled;
+    }
+    if fields.contains(UpdateField::DefaultPauseIngestionAndPoweron) {
+        machine.data.default_pause_ingestion_and_poweron =
+            patch.default_pause_ingestion_and_poweron;
+    }
+    if fields.contains(UpdateField::BmcRetainCredentials) {
+        machine.data.bmc_retain_credentials = patch.bmc_retain_credentials;
+    }
+    if let Some(dpu_policy) = dpu_policy {
+        machine.data.dpu_policy = dpu_policy;
+    }
+    if fields.contains(UpdateField::DisableLockdown) {
+        machine.data.host_lifecycle_profile.disable_lockdown = patch
+            .host_lifecycle_profile
+            .and_then(|profile| profile.disable_lockdown);
+    }
+    fields.update_metadata(patch.metadata, &mut machine.data.metadata)?;
+    // Match the replacement RPC's validation of the complete metadata.
+    machine
+        .data
+        .metadata
+        .validate(false)
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
+    validate_expected_machine_for_insert(&machine)?;
+    let preallocations = update_preallocated_interfaces(txn, &machine, retained_window).await?;
+    db::expected_machine::update(txn, &machine).await?;
+    Ok(preallocations)
 }
 
 /// Replace the complete expected-machine inventory in one transaction.
@@ -1133,9 +1419,133 @@ pub(super) async fn query(
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::{Case, Check, check_cases, check_values};
 
     use super::*;
+
+    #[test]
+    fn patch_selected_optional_fields_require_values() {
+        check_cases(
+            [
+                Case {
+                    scenario: "selected BMC address cannot be absent",
+                    input: ("bmc_ip_address", rpc::ExpectedMachine::default()),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "invalid BMC address cannot silently clear the old one",
+                    input: (
+                        "bmc_ip_address",
+                        rpc::ExpectedMachine {
+                            bmc_ip_address: Some("invalid".to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "explicit empty BMC address is accepted",
+                    input: (
+                        "bmc_ip_address",
+                        rpc::ExpectedMachine {
+                            bmc_ip_address: Some(String::new()),
+                            ..Default::default()
+                        },
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "selected DPF flag cannot be absent",
+                    input: ("is_dpf_enabled", rpc::ExpectedMachine::default()),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "selected ingestion pause cannot be absent",
+                    input: (
+                        "default_pause_ingestion_and_poweron",
+                        rpc::ExpectedMachine::default(),
+                    ),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "selected credential retention cannot be absent",
+                    input: ("bmc_retain_credentials", rpc::ExpectedMachine::default()),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "selected DPU policy cannot be absent",
+                    input: ("dpu_mode", rpc::ExpectedMachine::default()),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "selected BMC allocation cannot be absent",
+                    input: ("bmc_ip_allocation", rpc::ExpectedMachine::default()),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "unknown DPU policy cannot silently reset to the default",
+                    input: (
+                        "dpu_mode",
+                        rpc::ExpectedMachine {
+                            dpu_mode: Some(i32::MAX),
+                            ..Default::default()
+                        },
+                    ),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "unknown BMC allocation cannot silently reset to the default",
+                    input: (
+                        "bmc_ip_allocation",
+                        rpc::ExpectedMachine {
+                            bmc_ip_allocation: Some(i32::MAX),
+                            ..Default::default()
+                        },
+                    ),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "unselected policy values are ignored",
+                    input: (
+                        "metadata.description",
+                        rpc::ExpectedMachine {
+                            dpu_mode: Some(i32::MAX),
+                            bmc_ip_allocation: Some(i32::MAX),
+                            ..Default::default()
+                        },
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "selected lockdown flag cannot be absent",
+                    input: (
+                        "host_lifecycle_profile.disable_lockdown",
+                        rpc::ExpectedMachine {
+                            host_lifecycle_profile: Some(rpc::HostLifecycleProfile::default()),
+                            ..Default::default()
+                        },
+                    ),
+                    expect: Fails,
+                },
+            ],
+            |(path, patch)| {
+                ExpectedMachinePatch::try_from(rpc::PatchExpectedMachineRequest {
+                    expected_machine: Some(rpc::ExpectedMachine {
+                        id: Some(::rpc::common::Uuid {
+                            value: Uuid::nil().to_string(),
+                        }),
+                        ..patch
+                    }),
+                    update_mask: Some(prost_types::FieldMask {
+                        paths: vec![path.to_string()],
+                    }),
+                })
+                .map(drop)
+                .map_err(drop)
+            },
+        );
+    }
 
     #[test]
     fn test_chassis_serial_regex() {

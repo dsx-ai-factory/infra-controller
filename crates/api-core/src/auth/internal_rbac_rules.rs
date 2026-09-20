@@ -45,11 +45,12 @@ enum RulePrincipal {
     Flow,
     MaintenanceJobs,
     DsxExchangeConsumer,
-    Anonymous, // Permitted for everything
+    SiteHealthProbe, // synthetic read-only monitoring (#5360)
+    Anonymous,       // Permitted for everything
 }
 use self::RulePrincipal::{
     Agent, Anonymous, BmcProxy, Dhcp, Dns, DsxExchangeConsumer, Flow, ForgeAdminCLI, Health,
-    Machineatron, MaintenanceJobs, Pxe, Scout, SiteAgent, Ssh, SshRs,
+    Machineatron, MaintenanceJobs, Pxe, Scout, SiteAgent, SiteHealthProbe, Ssh, SshRs,
 };
 
 impl InternalRBACRules {
@@ -243,6 +244,7 @@ impl InternalRBACRules {
                 Ssh,
                 SshRs,
                 Flow,
+                SiteHealthProbe,
             ],
         );
         x.perm(
@@ -255,6 +257,7 @@ impl InternalRBACRules {
                 Ssh,
                 SshRs,
                 Flow,
+                SiteHealthProbe,
             ],
         );
         x.perm("FindConnectedDevicesByDpuMachineIds", vec![ForgeAdminCLI]);
@@ -362,8 +365,10 @@ impl InternalRBACRules {
         );
         x.perm("DeleteExpectedMachine", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateExpectedMachine", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("PatchExpectedMachine", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateExpectedMachines", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateExpectedMachines", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("PatchExpectedMachines", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetExpectedMachine", vec![ForgeAdminCLI, Flow]);
         x.perm(
             "GetAllExpectedMachines",
@@ -541,6 +546,11 @@ impl InternalRBACRules {
         x.perm(
             "GetMachineValidationAttempt",
             vec![ForgeAdminCLI, SiteAgent],
+        );
+        x.perm("AppendMachineValidationAttemptLog", vec![Scout]);
+        x.perm(
+            "GetMachineValidationAttemptLogs",
+            vec![ForgeAdminCLI, Scout],
         );
         x.perm("HeartbeatMachineValidationRun", vec![Scout, SiteAgent]);
         x.perm("AdminBmcReset", vec![ForgeAdminCLI]);
@@ -765,6 +775,10 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(
+            "PatchExpectedPowerShelf",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
             "GetExpectedPowerShelf",
             vec![ForgeAdminCLI, Machineatron, Flow],
         );
@@ -820,6 +834,10 @@ impl InternalRBACRules {
         );
         x.perm(
             "UpdateExpectedSwitch",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "PatchExpectedSwitch",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm("GetExpectedSwitch", vec![ForgeAdminCLI, Machineatron, Flow]);
@@ -1073,6 +1091,11 @@ impl RuleInfo {
                         "nico-dsx-exchange-consumer",
                         "carbide-dsx-exchange-consumer",
                     ),
+                    // New service (no legacy carbide- alias): the synthetic
+                    // monitoring probe, read-only machine queries only (#5360).
+                    RulePrincipal::SiteHealthProbe => vec![Principal::SpiffeServiceIdentifier(
+                        "nico-site-health-probe".to_string(),
+                    )],
                     RulePrincipal::Anonymous => vec![Principal::Anonymous],
                 })
                 .collect(),
@@ -1168,6 +1191,24 @@ mod rbac_rule_tests {
                 );
             }
         }
+    }
+
+    /// The probe's service identity can call exactly its two read RPCs, and a
+    /// write RPC stays denied — so dropping SiteHealthProbe from the read
+    /// vectors or pasting it onto a write RPC fails here.
+    #[test]
+    fn site_health_probe_reads_machines_and_nothing_else() {
+        let probe = Principal::SpiffeServiceIdentifier("nico-site-health-probe".to_string());
+        for method in ["FindMachineIds", "FindMachinesByIds"] {
+            assert!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&probe)),
+                "{method}"
+            );
+        }
+        assert!(!InternalRBACRules::allowed_from_static(
+            "SetMaintenance",
+            std::slice::from_ref(&probe),
+        ));
     }
 
     #[test]

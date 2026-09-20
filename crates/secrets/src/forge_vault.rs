@@ -53,6 +53,14 @@ const DEFAULT_SPIFFE_MACHINE_BASE_PATH: &str = "/forge-system/machine/";
 const VAULT_SPIFFE_TRUST_DOMAIN_ENV_VAR: &str = "VAULT_SPIFFE_TRUST_DOMAIN";
 const VAULT_SPIFFE_MACHINE_BASE_PATH_ENV_VAR: &str = "VAULT_SPIFFE_MACHINE_BASE_PATH";
 
+/// Where `vault_token_refresh` writes its token-validation probe on every
+/// authentication (first login and every renewal), so it exists on every
+/// site from startup on. It is not a `Credentials`-shaped value -- reading it
+/// as one fails deserialization -- and bulk enumeration must never try:
+/// this path, not a real credential path, is excluded unconditionally rather
+/// than through the caller-supplied `CredentialPrefix` exclusions.
+const TOKEN_REFRESH_PROBE_PATH: &str = "machines/token_refresh/current_token";
+
 #[derive(Clone, Debug)]
 enum ForgeVaultAuthenticationType {
     Root(String),
@@ -494,7 +502,7 @@ async fn validate_vault_token_attempt(
     let response = kv2::set(
         vault_client,
         kv_mount_location,
-        "machines/token_refresh/current_token",
+        TOKEN_REFRESH_PROBE_PATH,
         data,
     )
     .await;
@@ -1145,10 +1153,35 @@ enum EnumerationMode {
     Strict,
 }
 
-fn vault_path_is_excluded(path: &str, excluded_prefixes: &[CredentialPrefix]) -> bool {
-    excluded_prefixes
+/// Whether an enumerated path is skipped, and if so, whether the skip
+/// should count toward "something eligible was intentionally skipped"
+/// (the caller's `excluded_prefix_found`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathExclusion {
+    /// Not excluded; read and imported normally.
+    Included,
+    /// Skipped, and reported to the caller as an exclusion. Used for
+    /// caller-requested prefixes such as `CredentialPrefix::UfmAuth`.
+    ExcludedAndCounted,
+    /// Skipped, but never reported as an exclusion. The token-refresh
+    /// probe is not a credential, but it exists on every site that has
+    /// ever authenticated to Vault, so counting it would let a genuinely
+    /// empty or misconfigured import source pass the empty-vault guard in
+    /// `validate_vault_import_selection`.
+    ExcludedAndUncounted,
+}
+
+fn vault_path_exclusion(path: &str, excluded_prefixes: &[CredentialPrefix]) -> PathExclusion {
+    if path == TOKEN_REFRESH_PROBE_PATH {
+        return PathExclusion::ExcludedAndUncounted;
+    }
+    if excluded_prefixes
         .iter()
         .any(|prefix| path.starts_with(prefix.as_str()))
+    {
+        return PathExclusion::ExcludedAndCounted;
+    }
+    PathExclusion::Included
 }
 
 async fn list_vault_path(
@@ -1297,9 +1330,14 @@ impl ForgeVaultClient {
                 } else {
                     format!("{dir}{entry}")
                 };
-                if vault_path_is_excluded(&full, excluded_prefixes) {
-                    excluded_prefix_found = true;
-                    continue;
+
+                match vault_path_exclusion(&full, excluded_prefixes) {
+                    PathExclusion::ExcludedAndCounted => {
+                        excluded_prefix_found = true;
+                        continue;
+                    }
+                    PathExclusion::ExcludedAndUncounted => continue,
+                    PathExclusion::Included => {}
                 }
 
                 if is_directory {
@@ -1696,22 +1734,52 @@ mod tests {
     use vaultrs::{kv2, pki};
 
     use super::{
-        DedicatedVaultConfig, ForgeVaultAuthenticationType, ForgeVaultClientConfig, SpiffeIdentity,
-        VaultConfig, VaultTokenRefreshWindowObserved, create_dedicated_vault_client,
-        create_vault_client_settings, machine_spiffe_uri, service_account_role_name_from_jwt,
-        vault_path_is_excluded,
+        DedicatedVaultConfig, ForgeVaultAuthenticationType, ForgeVaultClientConfig, PathExclusion,
+        SpiffeIdentity, VaultConfig, VaultTokenRefreshWindowObserved,
+        create_dedicated_vault_client, create_vault_client_settings, machine_spiffe_uri,
+        service_account_role_name_from_jwt, vault_path_exclusion,
     };
     use crate::credentials::CredentialPrefix;
 
     #[test]
     fn excluded_vault_prefix_covers_the_directory_and_its_credentials() {
         for (path, expected) in [
-            ("ufm/", true),
-            ("ufm/default/auth", true),
-            ("machines/bmc/site/root", false),
+            ("ufm/", PathExclusion::ExcludedAndCounted),
+            ("ufm/default/auth", PathExclusion::ExcludedAndCounted),
+            ("machines/bmc/site/root", PathExclusion::Included),
         ] {
             assert_eq!(
-                vault_path_is_excluded(path, &[CredentialPrefix::UfmAuth]),
+                vault_path_exclusion(path, &[CredentialPrefix::UfmAuth]),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    // Regression test for nvbugs 6786805: the token-refresh probe is not a
+    // `Credentials`-shaped value, so strict enumeration must always skip it,
+    // even when the caller passes no exclusions at all (the default case for
+    // a site with `ufm_source` unset to `"local"`). It must also never be
+    // counted as a caller-requested exclusion (unlike `UfmAuth`), or an
+    // otherwise-empty Vault would pass the empty-source guard in
+    // `validate_vault_import_selection` and permanently record nothing.
+    #[test]
+    fn token_refresh_probe_is_always_excluded_but_never_counted() {
+        for (path, excluded_prefixes, expected) in [
+            (
+                super::TOKEN_REFRESH_PROBE_PATH,
+                &[][..],
+                PathExclusion::ExcludedAndUncounted,
+            ),
+            (
+                super::TOKEN_REFRESH_PROBE_PATH,
+                &[CredentialPrefix::UfmAuth][..],
+                PathExclusion::ExcludedAndUncounted,
+            ),
+            ("machines/bmc/site/root", &[][..], PathExclusion::Included),
+        ] {
+            assert_eq!(
+                vault_path_exclusion(path, excluded_prefixes),
                 expected,
                 "{path}"
             );

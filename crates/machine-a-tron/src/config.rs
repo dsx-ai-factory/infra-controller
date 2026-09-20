@@ -150,6 +150,11 @@ pub struct MachineConfig {
     #[serde(default)]
     pub dpus_in_nic_mode: bool,
 
+    /// Whether hosts in this section are registered as DPF-enabled expected machines;
+    /// DPUs of a DPF-enabled host start with the DPU agent installed. Defaults to true.
+    #[serde(default = "default_true")]
+    pub dpf_enabled: bool,
+
     /// What firmware versions to report for DPUs in this host
     #[serde(default)]
     pub dpu_firmware_versions: Option<DpuFirmwareVersions>,
@@ -260,6 +265,7 @@ impl WiwynnGb200RackConfig {
             run_interval_idle: self.run_interval_idle,
             network_status_run_interval: self.network_status_run_interval,
             dpus_in_nic_mode: self.dpus_in_nic_mode,
+            dpf_enabled: true,
             dpu_firmware_versions: self.dpu_firmware_versions.clone(),
             host_firmware_versions: None,
             dpu_agent_version: self.dpu_agent_version.clone(),
@@ -354,6 +360,7 @@ impl LenovoGb300RackConfig {
             run_interval_idle: self.run_interval_idle,
             network_status_run_interval: self.network_status_run_interval,
             dpus_in_nic_mode: self.dpus_in_nic_mode,
+            dpf_enabled: true,
             dpu_firmware_versions: self.dpu_firmware_versions.clone(),
             host_firmware_versions: None,
             dpu_agent_version: self.dpu_agent_version.clone(),
@@ -563,6 +570,14 @@ pub struct MachineATronConfig {
         serialize_with = "as_std_duration"
     )]
     pub api_refresh_interval: Duration,
+
+    /// Delay before a simulated Scout reconnects after its stream closes or fails.
+    #[serde(
+        default = "default_scout_stream_reconnect_interval",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub scout_stream_reconnect_interval: Duration,
 
     /// Pool to allocate regular MAC addresses for the machines.
     #[serde(default)]
@@ -988,6 +1003,10 @@ fn default_scout_run_interval() -> Duration {
     Duration::from_secs(60)
 }
 
+fn default_scout_stream_reconnect_interval() -> Duration {
+    Duration::from_secs(10)
+}
+
 fn default_false() -> bool {
     false
 }
@@ -1018,8 +1037,9 @@ pub struct MachineATronContext {
     pub bmc_registry: BmcMockRegistry,
     pub api_throttler: ApiThrottler,
     /// These are the firmware versions the server wants us to be on. If not configured for other
-    /// firmware, DPU's can mock that they already have this installed.
-    pub desired_firmware_versions: Vec<DesiredFirmwareVersionEntry>,
+    /// firmware, DPU's can mock that they already have this installed. Refreshed in the
+    /// background by `spawn_desired_firmware_refresher`.
+    pub desired_firmware_versions: std::sync::RwLock<Vec<DesiredFirmwareVersionEntry>>,
     pub forge_api_client: ForgeApiClient,
     pub dhcp_client: crate::dhcp_wrapper::DhcpClient,
     pub mac_address_pool: Arc<Mutex<MacAddressPool>>,
@@ -1105,6 +1125,19 @@ scout_run_interval = "5s"
     "#,
         )
         .expect("Could not parse config")
+    }
+
+    #[test]
+    fn machine_config_dpf_enabled_defaults_to_true() {
+        assert!(rack_config().machines["config"].dpf_enabled);
+    }
+
+    #[test]
+    fn scout_stream_reconnect_interval_defaults_to_production_value() {
+        assert_eq!(
+            rack_config().scout_stream_reconnect_interval,
+            Duration::from_secs(10)
+        );
     }
 
     fn wiwynn_gb200_rack_from_machine(machine: &MachineConfig) -> WiwynnGb200RackConfig {

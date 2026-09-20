@@ -234,7 +234,7 @@ async fn rejected_machine_network_config_stops_before_transition(pool: sqlx::PgP
 
     for instance_state in [
         InstanceState::SwitchToAdminNetwork,
-        InstanceState::WaitingForDpaToBeReady,
+        InstanceState::WaitingForNetworkSegmentToBeReady,
     ] {
         let state = ManagedHostState::Assigned { instance_state };
         let mut txn = env.db_txn().await;
@@ -3580,10 +3580,12 @@ async fn test_ready_boot_config_waits_for_all_dpu_network_config_versions(pool: 
     env.run_machine_state_controller_iteration().await;
 
     let mut txn = env.db_txn().await;
+    let machine = mh.host().db_machine(&mut txn).await;
     assert_eq!(
-        mh.host().db_machine(&mut txn).await.current_state(),
+        machine.current_state(),
         &ManagedHostState::Maintenance {
             operation: MachineMaintenanceOperation::PowerOff,
+            request: machine.machine_maintenance_requested.clone(),
         },
         "maintenance must remain available while Prepare waits",
     );

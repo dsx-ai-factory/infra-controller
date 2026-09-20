@@ -38,6 +38,7 @@ behavior.
 | `database_pool_acquire_timeout` | `Duration` | `30s` | `server` | How long a caller may wait for a connection from the pool before the attempt fails (sqlx's own default); trips on a stalled database or a saturated pool alike. Must be greater than zero (startup rejects `0`). |
 | `database_pool_idle_timeout` | `Duration` | `10m` | `server` | Idle time after which the pool closes a connection, keeping the pool's own reaping well inside the Postgres server's 60-minute idle-session reaper. Must be greater than zero (startup rejects `0`). |
 | `database_pool_max_lifetime` | `Duration` | `30m` | `server` | Maximum age of a pooled connection before it is recycled, so the pool re-balances onto the current primary after a database failover. Must be greater than zero (startup rejects `0`). |
+| `database_startup_retry_timeout` | `Duration` | `5m` | `server` | How long to keep retrying the initial database connection at startup before giving up, so a transient outage (failover, rolling upgrade, DNS blip) doesn't take the process down. Retries use exponential backoff between attempts, starting at 1s and capped at 30s; each attempt itself is bounded by whatever time remains in this window (independent of `database_pool_acquire_timeout`), so total startup time never exceeds it. The last connection error is reported once the window elapses. `0` disables retrying: fail on the first attempt, bounded only by `database_pool_acquire_timeout` (the old behavior). |
 | `api_admission_control` | `ApiAdmissionControlConfig` | *(see below)* | `server` | Fair per-client admission with global execution and pending-request limits for gRPC and admin HTTP business requests. |
 | `ib_config` | `Option<IBFabricConfig>` | — | `hardware` | InfiniBand fabric configuration (see [IBFabricConfig](#ibfabricconfig)). |
 | `asn` | `u32` | **required** | `networking` | Autonomous System Number, fixed per environment. Used by nico-dpu-agent for `frr.conf` BGP routing. |
@@ -225,6 +226,7 @@ rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
 [rack_profiles.NVL72.firmware_object]
 url = "https://firmware.example.com/objects/nvl72.json"
 fetch_timeout = "30s"
+access_token_credential = "nvl72-artifacts"
 
 [rack_profiles.NVL72.rack_capabilities.compute]
 vendor = "NVIDIA"
@@ -240,16 +242,22 @@ count = 8
 ```
 
 `firmware_object` supplies the SOT JSON for automatic rack firmware and switch
-NVOS image updates. When `firmware_object` is configured for a profile with
-switches, the document must include an NVOS image whose firmware type matches
+NVOS image updates and for automatic compute-tray firmware updates during
+pre-ingestion. When `firmware_object` is configured for a profile with switches,
+the document must include an NVOS image whose firmware type matches
 `rack_hardware_class`. NICo requests `prod` when `rack_hardware_class` is
 omitted. RMS records an asynchronous update failure when the document does not
 contain the required image. If `firmware_object` is omitted, NICo skips both
-automatic update phases. An explicit maintenance request can supply a firmware
-object instead. If no firmware object is available while a switch in the
-maintenance scope is already waiting for an NVOS update, the rack transitions
-to `Error` instead of skipping the NVOS phase.
-`fetch_timeout` defaults to `30s`.
+automatic rack maintenance phases and the compute-tray pre-ingestion update. An
+explicit maintenance request can supply a firmware object instead. If no
+firmware object is available while a switch in the maintenance scope is already
+waiting for an NVOS update, the rack transitions to `Error` instead of skipping
+the NVOS phase. `fetch_timeout` defaults to `30s`.
+
+`access_token_credential` optionally names a credential that contains a
+firmware artifact access token. NICo reads the secret when compute-tray
+pre-ingestion starts. When the field is omitted, NICo sends the RMS no-auth
+sentinel.
 
 Example: GB300 rack with Lenovo compute trays and Delta power shelves:
 
@@ -567,7 +575,7 @@ TOML section: `[rack_state_controller]`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
-| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack `ConfigureNmxCluster` uses fixed `nvue_api` and `scale_up_fabric_manager` bindings. |
+| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack `ConfigureNmxCluster` uses a fixed `nvue_api` binding before RMS V2 selects and configures the primary switch. |
 
 ### `SwitchStateControllerConfig`
 
@@ -1164,8 +1172,21 @@ be propagated there by DPF.
 | `stale_run_timeout` | `Duration` | `24h` | Grace period before an active validation run is considered stale. Values below `90s` are raised to `90s` to avoid marking healthy heartbeat-based runs stale. |
 | `tests` | `Vec<MachineValidationTestConfig>` | `[]` | Per-test enable/disable overrides. |
 | `approved_plugin_registries` | `Vec<String>` | `[]` | Registries allowed for Machine Validation plugin images. Empty denies plugin registration; legacy tests are unaffected. |
+| `allowed_plugin_types` | `Vec<String>` | `["container"]` | Plugin execution types allowed for the site. Empty denies plugin registration; the only accepted value is `container`. |
 | `allow_privileged_plugins` | `bool` | `false` | Allows registration of plugins that request the privileged container profile. |
 | `allow_full_host_plugins` | `bool` | `false` | Allows registration of privileged plugins that request a writable host-root mount. Each revision still needs separate approval before it can be enabled. |
+| `attempt_logs` | `MachineValidationAttemptLogConfig` | enabled, 16 KiB/chunk, 1 MiB/attempt, 30d | Site-wide storage policy for Machine Validation attempt logs. |
+
+### `MachineValidationAttemptLogConfig`
+
+TOML section: `[machine_validation_config.attempt_logs]`.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | `bool` | `true` | Persists plugin stdout/stderr chunks. When false, appended chunks are discarded. |
+| `max_chunk_bytes` | `usize` | `16384` | Maximum stored UTF-8 bytes per chunk; must be greater than zero and no more than `16384` when enabled. |
+| `max_attempt_bytes` | `usize` | `1048576` | Maximum total stored UTF-8 bytes per attempt; must be at least `max_chunk_bytes` and no more than `1048576` when enabled. |
+| `retention` | `Duration` | `30d` | Non-negative retention duration for terminal-attempt logs. Cleanup runs in bounded batches even when Machine Validation is disabled. |
 
 ### `BomValidationConfig`
 

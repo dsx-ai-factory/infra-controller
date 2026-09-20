@@ -106,7 +106,10 @@ if ! grep -Fq -- 'get pods -n flow -l app=flow --ignore-not-found' "${TEST_LOG}"
 fi
 
 preflight_line="$(grep -nF 'source "${SCRIPT_DIR}/preflight.sh"' "${SETUP_SH}" | cut -d: -f1)"
-guard_line="$(grep -nF '_reject_bundled_flow_manager_upgrade' "${SETUP_SH}" | tail -1 | cut -d: -f1)"
+if ! guard_line="$(grep -nxF '_reject_bundled_flow_manager_upgrade' "${SETUP_SH}" | cut -d: -f1)"; then
+    echo "setup.sh must invoke _reject_bundled_flow_manager_upgrade on its own line" >&2
+    exit 1
+fi
 first_install_line="$(grep -nF 'helmfile sync -l name=postgres-operator' "${SETUP_SH}" | cut -d: -f1)"
 if ! (( guard_line < preflight_line && preflight_line < first_install_line )); then
     echo "bundled manager guard must run before preflight and installation phases" >&2

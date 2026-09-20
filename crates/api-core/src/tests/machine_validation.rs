@@ -43,6 +43,35 @@ use rpc::forge::{
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::tests::common;
 
+fn authenticated_machine_request<T>(
+    message: T,
+    machine_id: impl std::fmt::Display,
+) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(message);
+    let mut context = crate::auth::AuthContext::default();
+    context.principals.push(
+        carbide_authn::middleware::Principal::SpiffeMachineIdentifier(machine_id.to_string()),
+    );
+    request.extensions_mut().insert(context);
+    request
+}
+
+fn authenticated_admin_request<T>(message: T) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(message);
+    let mut context = crate::auth::AuthContext::default();
+    context
+        .principals
+        .push(carbide_authn::middleware::Principal::ExternalUser(
+            carbide_authn::middleware::ExternalUserInfo::new(
+                None,
+                "nico-cli-client".to_string(),
+                None,
+            ),
+        ));
+    request.extensions_mut().insert(context);
+    request
+}
+
 #[crate::sqlx_test]
 async fn test_machine_validation_complete_with_error(
     pool: sqlx::PgPool,
@@ -1035,6 +1064,7 @@ async fn plugin_full_host_approval_and_enablement_are_server_managed(
     config.machine_validation_config.allow_full_host_plugins = true;
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
     let plugin = rpc::forge::MachineValidationPlugin {
+        r#type: "container".to_owned(),
         image: "registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
         entrypoint: vec!["/plugin/entrypoint".to_owned()],
         parameters_json: "{}".to_owned(),
@@ -1641,6 +1671,187 @@ async fn test_machine_validation_m1_persists_selected_test_and_idempotent_result
     assert_eq!(running_attempts[0].state.to_string(), "Running");
     assert!(running_attempts[0].last_heartbeat_at.is_some());
 
+    let attempt_id = run_items[0]
+        .current_attempt_id
+        .clone()
+        .expect("run item should have an attempt");
+    let wrong_machine = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 1,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stdout as i32,
+                content: "not allowed\n".to_string(),
+            },
+            "not-the-validation-machine",
+        ))
+        .await;
+    assert_eq!(
+        wrong_machine
+            .expect_err("different machine must not append logs")
+            .code(),
+        tonic::Code::PermissionDenied
+    );
+
+    let unspecified_stream = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 1,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Unspecified as i32,
+                content: "invalid stream\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await;
+    assert_eq!(
+        unspecified_stream
+            .expect_err("unspecified log stream should fail")
+            .code(),
+        tonic::Code::InvalidArgument
+    );
+
+    let first_log_chunk = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 1,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stdout as i32,
+                content: "starting validation\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(first_log_chunk.accepted);
+    assert!(!first_log_chunk.truncated);
+
+    let second_log_chunk = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 2,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stderr as i32,
+                content: "minor warning\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(second_log_chunk.accepted);
+
+    // Retrying the same chunk is safe, but a gap in the ordered stream is not.
+    let retry = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 1,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stdout as i32,
+                content: "starting validation\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(retry.accepted);
+    let gap = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id.clone()),
+                sequence: 4,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stdout as i32,
+                content: "out of order\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await;
+    assert_eq!(
+        gap.expect_err("gapped sequence should fail").code(),
+        tonic::Code::InvalidArgument
+    );
+
+    let wrong_machine_page = env
+        .api
+        .get_machine_validation_attempt_logs(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogGetRequest {
+                attempt_id: Some(attempt_id.clone()),
+                after_sequence: 0,
+                limit: 1,
+            },
+            "not-the-validation-machine",
+        ))
+        .await;
+    assert_eq!(
+        wrong_machine_page
+            .expect_err("different machine must not read logs")
+            .code(),
+        tonic::Code::PermissionDenied
+    );
+
+    let oversized_page = env
+        .api
+        .get_machine_validation_attempt_logs(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogGetRequest {
+                attempt_id: Some(attempt_id.clone()),
+                after_sequence: 0,
+                limit: 101,
+            },
+            mh.host().id,
+        ))
+        .await;
+    assert_eq!(
+        oversized_page
+            .expect_err("an oversized log page should fail")
+            .code(),
+        tonic::Code::InvalidArgument
+    );
+
+    let first_page = env
+        .api
+        .get_machine_validation_attempt_logs(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogGetRequest {
+                attempt_id: Some(attempt_id.clone()),
+                after_sequence: 0,
+                limit: 1,
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(first_page.has_more);
+    assert_eq!(first_page.chunks.len(), 1);
+    assert_eq!(first_page.chunks[0].sequence, 1);
+    assert_eq!(
+        first_page.chunks[0].stream,
+        rpc::forge::MachineValidationAttemptLogStream::Stdout as i32
+    );
+    assert_eq!(first_page.chunks[0].content, "starting validation\n");
+
+    let second_page = env
+        .api
+        .get_machine_validation_attempt_logs(authenticated_admin_request(
+            rpc::forge::MachineValidationAttemptLogGetRequest {
+                attempt_id: Some(attempt_id.clone()),
+                after_sequence: 1,
+                limit: 1,
+            },
+        ))
+        .await?
+        .into_inner();
+    assert!(!second_page.has_more);
+    assert_eq!(second_page.chunks.len(), 1);
+    assert_eq!(second_page.chunks[0].sequence, 2);
+    assert_eq!(
+        second_page.chunks[0].stream,
+        rpc::forge::MachineValidationAttemptLogStream::Stderr as i32
+    );
+
     let terminal_result = rpc::forge::MachineValidationResult {
         validation_id: Some(validation_id),
         name: selected_test.name.clone(),
@@ -1662,6 +1873,44 @@ async fn test_machine_validation_m1_persists_selected_test_and_idempotent_result
             },
         ))
         .await?;
+
+    let late_log_chunk = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(attempt_id),
+                sequence: 3,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stdout as i32,
+                content: "too late\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(!late_log_chunk.accepted);
+    assert!(!late_log_chunk.truncated);
+
+    // A delivery retry can arrive after result persistence; it must not turn a
+    // known, persisted chunk into a failed delivery.
+    let terminal_retry = env
+        .api
+        .append_machine_validation_attempt_log(authenticated_machine_request(
+            rpc::forge::MachineValidationAttemptLogAppendRequest {
+                attempt_id: Some(
+                    run_items[0]
+                        .current_attempt_id
+                        .clone()
+                        .expect("run item should have an attempt"),
+                ),
+                sequence: 2,
+                stream: rpc::forge::MachineValidationAttemptLogStream::Stderr as i32,
+                content: "minor warning\n".to_string(),
+            },
+            mh.host().id,
+        ))
+        .await?
+        .into_inner();
+    assert!(terminal_retry.accepted);
 
     let previous_run_heartbeat =
         db::machine_validation::find_by_id(&env.pool, &validation_id).await?;
@@ -2257,8 +2506,10 @@ async fn test_machine_validation_tests_on_startup_default_mode(
             },
         ],
         approved_plugin_registries: vec![],
+        allowed_plugin_types: vec!["container".to_owned()],
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
+        attempt_logs: Default::default(),
     };
 
     // Apply config
@@ -2336,8 +2587,10 @@ async fn test_machine_validation_tests_enable_all_mode(
             enable: false, // Override first test to be disabled
         }],
         approved_plugin_registries: vec![],
+        allowed_plugin_types: vec!["container".to_owned()],
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
+        attempt_logs: Default::default(),
     };
 
     // Apply config
@@ -2401,8 +2654,10 @@ async fn test_machine_validation_tests_on_startup_disable_all_mode(
             enable: true, // Override first test to be enabled
         }],
         approved_plugin_registries: vec![],
+        allowed_plugin_types: vec!["container".to_owned()],
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
+        attempt_logs: Default::default(),
     };
 
     // Apply config
@@ -2519,8 +2774,10 @@ async fn test_machine_validation_tests_on_startup_missing_tests_config(
         stale_run_timeout: std::time::Duration::from_secs(24 * 60 * 60),
         tests: vec![], // Empty test configuration
         approved_plugin_registries: vec![],
+        allowed_plugin_types: vec!["container".to_owned()],
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
+        attempt_logs: Default::default(),
     };
 
     // Apply config
@@ -2553,8 +2810,10 @@ async fn test_machine_validation_tests_on_startup_missing_tests_config(
         stale_run_timeout: std::time::Duration::from_secs(24 * 60 * 60),
         tests: vec![], // Empty test configuration
         approved_plugin_registries: vec![],
+        allowed_plugin_types: vec!["container".to_owned()],
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
+        attempt_logs: Default::default(),
     };
 
     // Apply config

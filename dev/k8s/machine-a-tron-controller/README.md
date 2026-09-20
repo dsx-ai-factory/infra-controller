@@ -98,7 +98,7 @@ served for the lifetime of the controller and shuts down gracefully with it.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `generation` | uint64 | Increments only when the set of `(name, base_url)` pairs changes (add, remove or URL change). Starts at `0` before the first discovery. |
+| `generation` | uint64 | Increments only when the set of `(name, base_url)` pairs changes (add, remove or URL change). Starts at `0` before the first discovery and restarts from `0` with the controller process; see [Generation semantics](#generation-semantics). |
 | `ready` | bool | `true` once the first successful discovery completed. Stays `true` afterwards, including when the set becomes empty. |
 | `sources[].name` | string | Machine-a-tron identity: the discovered bmc-mock Service name. |
 | `sources[].base_url` | string | `https://<svc>.<ns>.svc.cluster.local:<port>`, the same URL the controller polls for `/machines/status`. |
@@ -128,9 +128,25 @@ the endpoint with the pass that confirms it, at most two intervals after it
 happened with the default debounce. A failed discovery pass leaves the last
 published set in place.
 
+The counter is held in memory. A controller restart publishes
+`generation = 0, ready = false` with an empty list until the first discovery
+completes and then republishes whatever it found as generation `1`, whether or
+not the set changed while the controller was down. The generation is therefore
+a change hint, not an identity of the set: consumers that must react to fleet
+changes compare the `(name, base_url)` set they started with against the
+current list and use the generation for logging only. That is what
+`mat-protocol-gateway` does (see `crates/mat-protocol-gateway/README.md`,
+"Epoch model"); it ignores `ready = false` responses, keeps running when the
+same set reappears under a new generation, and exits only when the set
+differs.
+
 The reference JSON shape is checked in as
-[`pkg/sourcelist/testdata/sources_v1.json`](pkg/sourcelist/testdata/sources_v1.json)
-and is intended to be shared with client-side tests.
+[`pkg/sourcelist/testdata/sources_v1.json`](pkg/sourcelist/testdata/sources_v1.json).
+It is the cross-language contract fixture: `TestHandler_SourcesGolden`
+asserts that the Go handler's response is JSON-equal to it, and the Rust
+gateway's contract tests (`crates/mat-protocol-gateway/tests/integration/source_list_contract.rs`)
+include the same file and check that the gateway types carry exactly its
+fields, so a change to the JSON shape fails on whichever side was not updated.
 
 ## Liveness endpoint
 

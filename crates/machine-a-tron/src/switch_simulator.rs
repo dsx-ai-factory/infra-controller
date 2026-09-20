@@ -20,6 +20,7 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
+use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
@@ -29,7 +30,6 @@ use bmc_mock::{
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRequestInfo, DhcpRequester, DhcpResponseInfo, vendor_class};
@@ -574,6 +574,23 @@ pub(crate) struct SwitchHandle(Arc<SwitchActorHandle>);
 impl SwitchHandle {
     pub(crate) fn mat_id(&self) -> Uuid {
         self.0.mat_id
+    }
+
+    /// Drive power through the guard the BMC mock uses, so an RMS power
+    /// request obeys the same rules as a Redfish one.
+    pub(crate) fn set_system_power(
+        &self,
+        request: SystemPowerControl,
+    ) -> Result<(), SetSystemPowerError> {
+        SwitchCallbacks {
+            state: self.0.live_state.clone(),
+            mailbox: self.0.mailbox.clone(),
+        }
+        .set_power_state(request)
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        self.0.live_state.read().unwrap().power_state
     }
 
     pub(crate) fn pause(&self) -> eyre::Result<()> {

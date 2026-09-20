@@ -35,6 +35,7 @@ use crate::model::instance::status::instance_status_from_config_and_observation;
 #[allow(clippy::too_many_arguments)]
 pub fn instance_snapshot_derive_status(
     snapshot: &InstanceSnapshot,
+    attached_dpus: &[DpuMachineId],
     dpu_id_to_device_map: HashMap<String, Vec<DpuMachineId>>,
     primary_dpu_machine_id: Option<DpuMachineId>,
     managed_host_state: ManagedHostState,
@@ -54,6 +55,7 @@ pub fn instance_snapshot_derive_status(
             &snapshot.config.extension_services,
             snapshot.extension_services_config_version,
         ),
+        attached_dpus,
         Versioned::new(&snapshot.config.nvlink, snapshot.nvlink_config_version),
         Versioned::new(&snapshot.config.spxconfig, snapshot.spx_config_version),
         &snapshot.observations,

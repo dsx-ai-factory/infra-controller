@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Optional overlay for values-kube-prometheus-stack.yaml and chart 59.1.0.
+# Upgrade NICo first so its primary ServiceMonitors carry the metrics label.
+# Merge site-specific scrape, RBAC, and selector lists before applying this file.
+prometheus:
+  additionalRulesForClusterRole:
+    - apiGroups: [discovery.k8s.io]
+      resources: [endpointslices]
+      verbs: [get, list, watch]
+  prometheusSpec:
+    # Only primary NICo monitors carry this label. Optional telemetry and
+    # per-object monitors retain their existing discovery and configuration.
+    serviceMonitorSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/metrics
+          operator: NotIn
+          values:
+            - nico-api
+            - nico-bmc-proxy
+            - nico-dhcp
+            - nico-dsx-exchange-consumer
+            - nico-hardware-health
+            - nico-machine-a-tron
+            - nico-pxe
+            - nico-ssh-console-rs
+            - nico-unbound
+    additionalScrapeConfigs:
+      # Replace the gateway's IPv4 static target with its optional metrics-only Service.
+      # Enable the gateway's wildcard metrics listener and Service before switching this collector.
+      - job_name: otel-collector-gateway
+        kubernetes_sd_configs:
+          - role: endpointslice
+            namespaces:
+              names: [otel]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: otel-collector-gateway-metrics
+          - source_labels: [__meta_kubernetes_endpointslice_port_name]
+            action: keep
+            regex: prometheus
+          - source_labels: [__meta_kubernetes_endpointslice_address_type]
+            action: keep
+            regex: IPv6
+      - job_name: nico-ipv6
+        scrape_interval: 30s
+        scrape_timeout: 25s
+        kubernetes_sd_configs:
+          - role: endpointslice
+        relabel_configs:
+          # Exclude unrelated same-named Services across installation namespaces.
+          - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_metrics]
+            action: keep
+            regex: nico-(api|bmc-proxy|dhcp|dsx-exchange-consumer|hardware-health|machine-a-tron|pxe|ssh-console-rs|unbound)
+          # Restrict discovery to the built-in primary metrics Services. This
+          # excludes the API profiler and optional per-object metrics endpoint.
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: nico-(api-metrics|bmc-proxy-metrics|dhcp6?-metrics|dsx-exchange-consumer|hardware-health|machine-a-tron-metrics|pxe-metrics|ssh-console-rs-metrics|unbound)
+          # Unbound shares its Service with DNS; select only exporter TCP 9167.
+          - source_labels: [__meta_kubernetes_endpointslice_port_name]
+            action: keep
+            regex: http|metrics|unbound-metrics
+          # One address family per target prevents scraping dual-stack pods twice.
+          - source_labels: [__meta_kubernetes_endpointslice_address_type]
+            action: keep
+            regex: IPv6
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_service_name]
+            target_label: service
+          - source_labels: [__meta_kubernetes_service_name]
+            target_label: job
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: container
+          - source_labels: [__meta_kubernetes_endpointslice_port_name]
+            target_label: endpoint

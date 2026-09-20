@@ -39,7 +39,14 @@ tokio = { workspace = true }
 urlencoding = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
+bytes = { workspace = true }
+carbide-test-support = { path = "../test-support" }
 glob = { workspace = true }
+http = { workspace = true }
+tempfile = { workspace = true }
+tokio = { features = ["test-util"], workspace = true }
+url = { workspace = true }
 
 [lints]
 workspace = true

@@ -1363,9 +1363,10 @@ async fn tenant_prefix_reuse_checks_effective_active_policy(
             .await?
             .take();
         network.use_admin_network = Some(use_admin_network);
-        assert!(
+        assert_eq!(
             db::machine::try_update_network_config(&mut txn, &mh.id.into(), version, &network)
-                .await?
+                .await?,
+            db::ConditionalWrite::Applied(())
         );
         db::machine::update_state(&mut txn, &mh.id.into(), &state).await?;
         sqlx::query(
@@ -1681,8 +1682,9 @@ async fn tenant_prefix_reuse_checks_effective_active_policy(
         .await?
         .take();
     network.use_admin_network = Some(true);
-    assert!(
-        db::machine::try_update_network_config(&mut txn, &mh.id.into(), version, &network).await?
+    assert_eq!(
+        db::machine::try_update_network_config(&mut txn, &mh.id.into(), version, &network).await?,
+        db::ConditionalWrite::Applied(())
     );
     db::machine::update_state(
         &mut txn,
