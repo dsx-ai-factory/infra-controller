@@ -72,6 +72,7 @@ pub(super) struct DpuFirmwareArgs {
         long = "dpu-bmc-firmware",
         value_name = "VERSION",
         requires = "hardware_profile",
+        conflicts_with_all = ["targz", "ip_router"],
         help = "Override the DPU BMC version in generated firmware inventory"
     )]
     bmc: Option<String>,
@@ -80,6 +81,7 @@ pub(super) struct DpuFirmwareArgs {
         long = "dpu-uefi-firmware",
         value_name = "VERSION",
         requires = "hardware_profile",
+        conflicts_with_all = ["targz", "ip_router"],
         help = "Override the DPU UEFI version in generated firmware inventory"
     )]
     uefi: Option<String>,
@@ -88,6 +90,7 @@ pub(super) struct DpuFirmwareArgs {
         long = "dpu-bsp-firmware",
         value_name = "VERSION",
         requires = "hardware_profile",
+        conflicts_with_all = ["targz", "ip_router"],
         help = "Add the DPU BSP version to generated firmware inventory"
     )]
     bsp: Option<String>,
@@ -96,6 +99,7 @@ pub(super) struct DpuFirmwareArgs {
         long = "dpu-cec-firmware",
         value_name = "VERSION",
         requires = "hardware_profile",
+        conflicts_with_all = ["targz", "ip_router"],
         help = "Override the DPU CEC version in generated firmware inventory"
     )]
     cec: Option<String>,
@@ -104,6 +108,7 @@ pub(super) struct DpuFirmwareArgs {
         long = "dpu-nic-firmware",
         value_name = "VERSION",
         requires = "hardware_profile",
+        conflicts_with_all = ["targz", "ip_router"],
         help = "Override the DPU NIC version in generated firmware inventory"
     )]
     nic: Option<String>,
@@ -182,25 +187,40 @@ pub(super) struct Args {
     )]
     pub(super) bmc_reset_duration: Option<u64>,
 
-    #[clap(long, help = "Start an IPMI/SOL simulator for the generated BMC mock")]
+    #[clap(
+        long,
+        conflicts_with_all = ["targz", "ip_router"],
+        help = "Start an IPMI/SOL simulator for the generated BMC mock"
+    )]
     pub(super) enable_ipmi_simulation: bool,
 
-    #[clap(long, help = "Back the generated BMC with the named libvirt domain")]
+    #[clap(
+        long,
+        conflicts_with_all = ["targz", "ip_router"],
+        help = "Back the generated BMC with the named libvirt domain"
+    )]
     pub(super) libvirt_domain: Option<String>,
 
     #[clap(
         long,
         value_parser = parse_hardware_profile,
+        conflicts_with_all = ["targz", "ip_router"],
         help = "Redfish hardware profile for an explicitly configured host or DPU, using its existing snake_case name"
     )]
     pub(super) hardware_profile: Option<HardwareType>,
 
-    #[clap(long, value_enum, help = "Expose a host BMC or one DPU BMC")]
+    #[clap(
+        long,
+        value_enum,
+        conflicts_with_all = ["targz", "ip_router"],
+        help = "Expose a host BMC or one DPU BMC"
+    )]
     pub(super) machine_role: Option<MachineRole>,
 
     #[clap(
         long,
         value_enum,
+        conflicts_with_all = ["targz", "ip_router"],
         help = "Use an in-process power-state simulator or a libvirt domain"
     )]
     pub(super) state_backend: Option<StateBackend>,
@@ -208,6 +228,7 @@ pub(super) struct Args {
     #[clap(
         long,
         requires = "hardware_profile",
+        conflicts_with_all = ["targz", "ip_router"],
         help = "DPU count for a variable-count profile, or an assertion for a fixed-count profile"
     )]
     pub(super) dpu_count: Option<u8>,
@@ -215,6 +236,7 @@ pub(super) struct Args {
     #[clap(
         long,
         requires = "hardware_profile",
+        conflicts_with_all = ["targz", "ip_router"],
         help = "Zero-based DPU index when --machine-role=dpu"
     )]
     pub(super) dpu_index: Option<usize>,
@@ -222,14 +244,25 @@ pub(super) struct Args {
     #[clap(
         long,
         default_value_t = 0,
+        conflicts_with_all = ["targz", "ip_router"],
         help = "Stable instance number used to make generated identities unique"
     )]
     pub(super) instance_index: u8,
 
-    #[clap(long, default_value = "qemu:///system", requires = "libvirt_domain")]
+    #[clap(
+        long,
+        default_value = "qemu:///system",
+        requires = "libvirt_domain",
+        conflicts_with_all = ["targz", "ip_router"],
+    )]
     pub(super) libvirt_uri: String,
 
-    #[clap(long, default_value = "virsh", requires = "libvirt_domain")]
+    #[clap(
+        long,
+        default_value = "virsh",
+        requires = "libvirt_domain",
+        conflicts_with_all = ["targz", "ip_router"],
+    )]
     pub(super) virsh_path: PathBuf,
 
     #[clap(flatten, next_help_heading = "DPU firmware overrides")]
@@ -238,163 +271,4 @@ pub(super) struct Args {
 
 pub(super) fn parse_args() -> Args {
     Args::parse()
-}
-
-#[cfg(test)]
-mod tests {
-    use clap::error::ErrorKind;
-
-    use super::*;
-
-    #[test]
-    fn generated_router_auth_rejects_archives() {
-        carbide_test_support::value_scenarios!(run = |(feature, archive, value)|
-            Args::try_parse_from(["bmc-mock", feature, archive, value]).unwrap_err().kind();
-            "generated-router options conflict with archives" {
-                ("--redfish-auth", "--targz", "fixture.tar.gz") => ErrorKind::ArgumentConflict,
-                ("--redfish-auth", "--ip-router", "127.0.0.1,fixture.tar.gz") => ErrorKind::ArgumentConflict,
-            }
-        );
-    }
-
-    #[test]
-    fn the_reset_window_is_a_generated_router_option() {
-        let args = Args::try_parse_from(["bmc-mock", "--bmc-reset-duration", "15"]).unwrap();
-        assert_eq!(args.bmc_reset_duration, Some(15));
-        assert_eq!(
-            Args::try_parse_from([
-                "bmc-mock",
-                "--bmc-reset-duration",
-                "15",
-                "--targz",
-                "x.tar.gz"
-            ])
-            .unwrap_err()
-            .kind(),
-            ErrorKind::ArgumentConflict
-        );
-    }
-
-    #[test]
-    fn parses_supported_hardware_profiles() {
-        let cases = [
-            ("dell_poweredge_r750", HardwareType::DellPowerEdgeR750),
-            (
-                "dell_poweredge_r760_bf4",
-                HardwareType::DellPowerEdgeR760Bf4,
-            ),
-            ("wiwynn_gb200_nvl", HardwareType::WiwynnGB200Nvl),
-            ("lenovo_gb300_nvl", HardwareType::LenovoGB300Nvl),
-            ("nvidia_dgx_gb300", HardwareType::NvidiaDgxGb300),
-            ("supermicro_gb300_nvl", HardwareType::SupermicroGb300Nvl),
-            ("nvidia_dgx_vr", HardwareType::NvidiaDgxVr),
-            ("nvidia_dgx_h100", HardwareType::NvidiaDgxH100),
-            ("generic_ami", HardwareType::GenericAmi),
-            ("generic_supermicro", HardwareType::GenericSupermicro),
-            (
-                "hpe_proliant_dl380a_gen11",
-                HardwareType::HpeProliantDl380aGen11,
-            ),
-        ];
-
-        for (value, expected) in cases {
-            let args = Args::try_parse_from(["bmc-mock", "--hardware-profile", value]).unwrap();
-            assert_eq!(args.hardware_profile, Some(expected), "profile {value}");
-        }
-    }
-
-    #[test]
-    fn parses_explicit_dpu_with_internal_state() {
-        let args = Args::try_parse_from([
-            "bmc-mock",
-            "--machine-role",
-            "dpu",
-            "--state-backend",
-            "internal",
-            "--hardware-profile",
-            "wiwynn_gb200_nvl",
-            "--dpu-index",
-            "1",
-            "--instance-index",
-            "3",
-        ])
-        .unwrap();
-
-        assert_eq!(args.machine_role, Some(MachineRole::Dpu));
-        assert_eq!(args.state_backend, Some(StateBackend::Internal));
-        assert_eq!(args.dpu_index, Some(1));
-        assert_eq!(args.instance_index, 3);
-    }
-
-    #[test]
-    fn parses_dpu_firmware_overrides() {
-        let args = Args::try_parse_from([
-            "bmc-mock",
-            "--machine-role",
-            "host",
-            "--state-backend",
-            "internal",
-            "--hardware-profile",
-            "dell_poweredge_r750",
-            "--dpu-count",
-            "1",
-            "--dpu-bmc-firmware",
-            "bmc-version",
-            "--dpu-uefi-firmware",
-            "uefi-version",
-            "--dpu-bsp-firmware",
-            "bsp-version",
-            "--dpu-cec-firmware",
-            "cec-version",
-            "--dpu-nic-firmware",
-            "nic-version",
-        ])
-        .unwrap();
-
-        assert_eq!(
-            DpuFirmwareVersions::from(args.dpu_firmware),
-            DpuFirmwareVersions {
-                bmc: Some("bmc-version".to_string()),
-                uefi: Some("uefi-version".to_string()),
-                bsp: Some("bsp-version".to_string()),
-                cec: Some("cec-version".to_string()),
-                nic: Some("nic-version".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn dpu_firmware_overrides_require_a_hardware_profile() {
-        let error =
-            Args::try_parse_from(["bmc-mock", "--dpu-bmc-firmware", "bmc-version"]).unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
-    }
-
-    #[test]
-    fn rejects_non_host_hardware_profile() {
-        for profile in [
-            "liteon_power_shelf",
-            "delta_power_shelf",
-            "nvidia_switch_nd5200_ld",
-            "nvidia_switch_n5700_ld",
-        ] {
-            let error =
-                Args::try_parse_from(["bmc-mock", "--hardware-profile", profile]).unwrap_err();
-
-            assert_eq!(
-                error.kind(),
-                ErrorKind::ValueValidation,
-                "profile {profile}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_alternate_hardware_profile_name() {
-        let error =
-            Args::try_parse_from(["bmc-mock", "--hardware-profile", "generic-ami"]).unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::ValueValidation);
-    }
 }

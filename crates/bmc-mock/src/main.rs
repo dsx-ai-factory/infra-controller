@@ -74,25 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tar_router_entries = HashMap::default();
 
     let args = command_line::parse_args();
-    if args.enable_ipmi_simulation && (args.targz.is_some() || args.ip_router.is_some()) {
-        return Err(
-            "--enable-ipmi-simulation cannot be combined with archive-backed routers".into(),
-        );
-    }
-    let has_generated_options = args.libvirt_domain.is_some()
-        || args.hardware_profile.is_some()
-        || args.machine_role.is_some()
-        || args.state_backend.is_some()
-        || args.dpu_count.is_some()
-        || args.dpu_index.is_some()
-        || args.instance_index != 0;
-    if has_generated_options && (args.targz.is_some() || args.ip_router.is_some()) {
-        return Err(
-            "generated-machine options cannot be combined with archive-backed routers".into(),
-        );
-    }
-    let generated_config = generated_mock_config(&args)?;
-    if let Some(ip_routers) = args.ip_router {
+    if let Some(ip_routers) = args.ip_router.as_ref() {
         for ip_router in ip_routers {
             info!(
                 archive_path = %ip_router.targz.to_string_lossy(),
@@ -104,12 +86,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(&mut tar_router_entries),
             )
             .unwrap();
-            routers_by_ip.insert(ip_router.ip_address, r);
+            routers_by_ip.insert(ip_router.ip_address.clone(), r);
         }
     }
 
-    let listen_addr = args.port.map(|p| SocketAddr::from(([0, 0, 0, 0], p)));
-    info!(cert_path = ?args.cert_path, "Using BMC mock certificate path");
     let mut backend_tasks = JoinSet::new();
     let (router, _ipmi_sim_handle) = if let Some(tar_path) = args.targz {
         info!(archive_path = %tar_path.to_string_lossy(), "Using default BMC mock archive");
@@ -119,6 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None,
         )
     } else {
+        let generated_config = generated_mock_config(&args)?;
         info!(
             hardware_type = %generated_config.hardware_type,
             role = ?generated_config.machine_role,
@@ -147,7 +128,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     routers_by_ip.insert("".to_owned(), router);
 
+    info!(cert_path = ?args.cert_path, "Using BMC mock certificate path");
     let server_config = bmc_mock::tls::server_config(args.cert_path)?;
+    let listen_addr = args.port.map(|p| SocketAddr::from(([0, 0, 0, 0], p)));
     let mut handle = bmc_mock::CombinedServer::run(
         "bmc-mock",
         Arc::new(RwLock::new(routers_by_ip)),
