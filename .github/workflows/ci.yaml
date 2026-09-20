@@ -1793,6 +1793,7 @@ jobs:
           registry-password: ${{ secrets.NVCR_TOKEN }}
           charts: >-
             bluefield/charts/nico-dpu-agent
+            bluefield/charts/nico-fmds
             bluefield/charts/nico-otelcol
             helm
             helm/charts/nico-api
