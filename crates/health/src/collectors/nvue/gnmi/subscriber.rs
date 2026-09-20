@@ -28,8 +28,9 @@ use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::client::{
-    GnmiClient, GnmiClientConfig, build_extended_subscribe_request, nvue_subscribe_paths,
-    system_events_prefix, system_events_subscribe_path,
+    GnmiClient, GnmiClientConfig, build_extended_subscribe_request,
+    nvue_leak_sensor_subscribe_path, nvue_subscribe_paths, system_events_prefix,
+    system_events_subscribe_path,
 };
 use super::extended_processor::{EXTENDED_GNMI_STREAM_ID, ExtendedGnmiProcessor};
 use super::on_change_processor::{
@@ -54,6 +55,8 @@ const CONNECTING: i64 = 2;
 const READY: i64 = 3;
 const TRANSIENT_FAILURE: i64 = 4;
 const SHUTDOWN: i64 = 5;
+const LEAK_SENSOR_STREAM_NAME: &str = "leak_sensors";
+const LEAK_SENSOR_METRICS_SUFFIX: &str = "_leak_sensors";
 
 pub(crate) struct GnmiStreamMetrics {
     pub(crate) connection_state: IntGauge,
@@ -213,11 +216,33 @@ struct GnmiStreamConfig {
     sample_interval_nanos: u64,
 }
 
+struct GnmiSampleStreamState {
+    config: GnmiStreamConfig,
+    stream_metrics: GnmiStreamMetrics,
+    processor: GnmiSampleProcessor,
+}
+
+struct GnmiOnChangeStreamState {
+    client_provider: GnmiClientProvider,
+    stream_metrics: GnmiStreamMetrics,
+    processor: GnmiOnChangeProcessor,
+}
+
 struct ExtendedGnmiStreamState {
     client_provider: GnmiClientProvider,
     request: proto::SubscribeRequest,
     stream_metrics: GnmiStreamMetrics,
     processor: ExtendedGnmiProcessor,
+}
+
+struct GnmiCollectorPlan {
+    sample: GnmiSampleStreamState,
+    leak_sensor: Option<GnmiSampleStreamState>,
+    on_change: Option<GnmiOnChangeStreamState>,
+    extended: Vec<ExtendedGnmiStreamState>,
+    sample_event_context: EventContext,
+    on_change_event_context: Option<EventContext>,
+    extended_event_context: Option<EventContext>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -269,6 +294,7 @@ async fn await_stream_synchronization<S, F>(
     client_provider: &GnmiClientProvider,
     credential_generation: u64,
     stream_metrics: &GnmiStreamMetrics,
+    diagnostic_stream: Option<&'static str>,
     mut process_response: F,
 ) -> Option<StreamingConnectionGuard>
 where
@@ -314,6 +340,7 @@ where
 
             tracing::info!(
                 switch_id = %client_provider.switch_id,
+                stream = diagnostic_stream,
                 rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
                 "gNMI stream synchronization cancelled"
             );
@@ -348,6 +375,7 @@ where
             tracing::warn!(
                 error = ?error,
                 switch_id = %client_provider.switch_id,
+                stream = diagnostic_stream,
                 rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
                 "gNMI stream failed before synchronization; backing off"
             );
@@ -622,6 +650,137 @@ async fn fetch_gnmi_username_password(
     }
 }
 
+fn build_gnmi_collector_plan(
+    endpoint: &BmcEndpoint,
+    gnmi_config: &NvueGnmiConfig,
+    client_provider: GnmiClientProvider,
+    collector_registry: &CollectorRegistry,
+    data_sink: Option<Arc<dyn DataSink>>,
+    switch_id: String,
+) -> Result<GnmiCollectorPlan, HealthError> {
+    let registry = collector_registry.registry();
+    let prefix = collector_registry.prefix();
+    let endpoint_key = endpoint.key();
+    let sample_event_context = EventContext::from_endpoint(endpoint, NVUE_GNMI_SAMPLE_STREAM_ID);
+    let extended_context = EventContext::from_endpoint(endpoint, EXTENDED_GNMI_STREAM_ID);
+
+    let extended_event_context =
+        (!gnmi_config.additional_subscriptions.is_empty()).then(|| extended_context.clone());
+
+    let sample_labels =
+        collector_metric_labels(NVUE_GNMI_SAMPLE_STREAM_ID, endpoint_key.clone(), endpoint);
+
+    let sample_stream_metrics = GnmiStreamMetrics::new(registry, prefix, "", sample_labels)?;
+
+    let sample_config = GnmiStreamConfig {
+        client_provider: client_provider.clone(),
+        paths: nvue_subscribe_paths(&gnmi_config.paths),
+        sample_interval_nanos: gnmi_config.sample_interval.as_nanos() as u64,
+    };
+
+    let sample = GnmiSampleStreamState {
+        config: sample_config,
+        stream_metrics: sample_stream_metrics,
+        processor: GnmiSampleProcessor {
+            data_sink: data_sink.clone(),
+            event_context: sample_event_context.clone(),
+            switch_id: switch_id.clone(),
+            diagnostic_stream: None,
+        },
+    };
+
+    let leak_sensor = if gnmi_config.paths.leak_sensors_enabled {
+        let labels =
+            collector_metric_labels(NVUE_GNMI_SAMPLE_STREAM_ID, endpoint_key.clone(), endpoint);
+
+        let stream_metrics =
+            GnmiStreamMetrics::new(registry, prefix, LEAK_SENSOR_METRICS_SUFFIX, labels)?;
+
+        Some(GnmiSampleStreamState {
+            config: GnmiStreamConfig {
+                client_provider: client_provider.clone(),
+                paths: vec![nvue_leak_sensor_subscribe_path()],
+                sample_interval_nanos: gnmi_config.sample_interval.as_nanos() as u64,
+            },
+            stream_metrics,
+            processor: GnmiSampleProcessor {
+                data_sink: data_sink.clone(),
+                event_context: sample_event_context.clone(),
+                switch_id: switch_id.clone(),
+                diagnostic_stream: Some(LEAK_SENSOR_STREAM_NAME),
+            },
+        })
+    } else {
+        None
+    };
+
+    let mut extended = Vec::with_capacity(gnmi_config.additional_subscriptions.len());
+
+    for subscription in &gnmi_config.additional_subscriptions {
+        let mut labels =
+            collector_metric_labels(EXTENDED_GNMI_STREAM_ID, endpoint_key.clone(), endpoint);
+
+        labels.insert("subscription".to_string(), subscription.name.clone());
+
+        extended.push(ExtendedGnmiStreamState {
+            client_provider: client_provider.clone(),
+            request: build_extended_subscribe_request(subscription)?,
+            stream_metrics: GnmiStreamMetrics::new(registry, prefix, "_extended", labels)?,
+            processor: ExtendedGnmiProcessor::new(
+                subscription,
+                data_sink.clone(),
+                extended_context.clone(),
+                switch_id.clone(),
+            ),
+        });
+    }
+
+    let mut on_change_event_context = None;
+
+    let on_change = if gnmi_config.system_events_enabled {
+        let labels =
+            collector_metric_labels(ON_CHANGE_STREAM_ID_SYSTEM_EVENTS, endpoint_key, endpoint);
+
+        let stream_metrics = GnmiStreamMetrics::new(registry, prefix, "_events", labels.clone())?;
+
+        let row_metrics = OnChangeStreamMetrics::new(
+            registry,
+            prefix,
+            ON_CHANGE_STREAM_ID_SYSTEM_EVENTS,
+            labels,
+        )?;
+
+        let event_context =
+            EventContext::from_endpoint(endpoint, ON_CHANGE_STREAM_ID_SYSTEM_EVENTS);
+
+        on_change_event_context = Some(event_context.clone());
+
+        Some(GnmiOnChangeStreamState {
+            client_provider,
+            stream_metrics,
+            processor: GnmiOnChangeProcessor::new(
+                ON_CHANGE_STREAM_ID_SYSTEM_EVENTS.to_string(),
+                row_metrics,
+                data_sink,
+                event_context,
+                switch_id,
+            ),
+        })
+    } else {
+        None
+    };
+
+    Ok(GnmiCollectorPlan {
+        sample,
+        leak_sensor,
+        on_change,
+        extended,
+        sample_event_context,
+        on_change_event_context,
+        extended_event_context,
+    })
+}
+
 pub(crate) fn spawn_gnmi_collector(
     endpoint: &BmcEndpoint,
     gnmi_config: &NvueGnmiConfig,
@@ -637,7 +796,6 @@ pub(crate) fn spawn_gnmi_collector(
         .unwrap_or_else(|| endpoint.addr.mac.to_string());
 
     let switch_connect_host = endpoint.switch_connect_host_for_uri().into_owned();
-    let sample_event_context = EventContext::from_endpoint(endpoint, NVUE_GNMI_SAMPLE_STREAM_ID);
 
     let client_provider = GnmiClientProvider {
         switch_id: switch_id.clone(),
@@ -653,89 +811,28 @@ pub(crate) fn spawn_gnmi_collector(
         )),
     };
 
-    let registry = collector_registry.registry();
-    let prefix = collector_registry.prefix().clone();
-    let endpoint_key = endpoint.key();
-    let collector_removed_sample_context = sample_event_context.clone();
-    let mut collector_removed_on_change_context = None;
-    let extended_event_context = EventContext::from_endpoint(endpoint, EXTENDED_GNMI_STREAM_ID);
+    let plan = build_gnmi_collector_plan(
+        endpoint,
+        gnmi_config,
+        client_provider,
+        &collector_registry,
+        data_sink.clone(),
+        switch_id,
+    )?;
 
-    let collector_removed_extended_context =
-        (!gnmi_config.additional_subscriptions.is_empty()).then(|| extended_event_context.clone());
+    let sample_enabled = !plan.sample.config.paths.is_empty();
+    let sample_collector_enabled = sample_enabled || plan.leak_sensor.is_some();
 
-    let sample_const_labels =
-        collector_metric_labels(NVUE_GNMI_SAMPLE_STREAM_ID, endpoint_key.clone(), endpoint);
+    let GnmiCollectorPlan {
+        sample,
+        leak_sensor,
+        on_change,
+        extended,
+        sample_event_context,
+        on_change_event_context,
+        extended_event_context,
+    } = plan;
 
-    let sample_stream_metrics = GnmiStreamMetrics::new(registry, &prefix, "", sample_const_labels)?;
-
-    let sample_config = GnmiStreamConfig {
-        client_provider: client_provider.clone(),
-        paths: nvue_subscribe_paths(&gnmi_config.paths),
-        sample_interval_nanos: gnmi_config.sample_interval.as_nanos() as u64,
-    };
-
-    let sample_enabled = !sample_config.paths.is_empty();
-
-    let sample_processor = GnmiSampleProcessor {
-        data_sink: data_sink.clone(),
-        event_context: sample_event_context,
-        switch_id: switch_id.clone(),
-    };
-
-    let mut extended_states = Vec::with_capacity(gnmi_config.additional_subscriptions.len());
-
-    for subscription in &gnmi_config.additional_subscriptions {
-        let mut const_labels =
-            collector_metric_labels(EXTENDED_GNMI_STREAM_ID, endpoint_key.clone(), endpoint);
-
-        const_labels.insert("subscription".to_string(), subscription.name.clone());
-
-        let stream_metrics = GnmiStreamMetrics::new(registry, &prefix, "_extended", const_labels)?;
-
-        extended_states.push(ExtendedGnmiStreamState {
-            client_provider: client_provider.clone(),
-            request: build_extended_subscribe_request(subscription)?,
-            stream_metrics,
-            processor: ExtendedGnmiProcessor::new(
-                subscription,
-                data_sink.clone(),
-                extended_event_context.clone(),
-                switch_id.clone(),
-            ),
-        });
-    }
-
-    let on_change_state = if gnmi_config.system_events_enabled {
-        let on_change_const_labels =
-            collector_metric_labels(ON_CHANGE_STREAM_ID_SYSTEM_EVENTS, endpoint_key, endpoint);
-
-        let on_change_stream_metrics =
-            GnmiStreamMetrics::new(registry, &prefix, "_events", on_change_const_labels.clone())?;
-        let on_change_row_metrics = OnChangeStreamMetrics::new(
-            registry,
-            &prefix,
-            ON_CHANGE_STREAM_ID_SYSTEM_EVENTS,
-            on_change_const_labels,
-        )?;
-        let on_change_event_context =
-            EventContext::from_endpoint(endpoint, ON_CHANGE_STREAM_ID_SYSTEM_EVENTS);
-        collector_removed_on_change_context = Some(on_change_event_context.clone());
-        let on_change_processor = GnmiOnChangeProcessor::new(
-            ON_CHANGE_STREAM_ID_SYSTEM_EVENTS.to_string(),
-            on_change_row_metrics,
-            data_sink.clone(),
-            on_change_event_context,
-            switch_id,
-        );
-
-        Some((
-            client_provider,
-            on_change_stream_metrics,
-            on_change_processor,
-        ))
-    } else {
-        None
-    };
     let collector_removed_data_sink = data_sink;
 
     Ok(Collector::spawn_task(move |cancel_token| async move {
@@ -745,28 +842,40 @@ pub(crate) fn spawn_gnmi_collector(
         let sample_handle = sample_enabled.then(|| {
             tokio::spawn(gnmi_sample_task(
                 cancel_token.clone(),
-                sample_config,
-                sample_stream_metrics,
-                sample_processor,
+                sample.config,
+                sample.stream_metrics,
+                sample.processor,
             ))
         });
 
-        let on_change_handle =
-            on_change_state.map(|(client_provider, stream_metrics, on_change_processor)| {
-                tokio::spawn(gnmi_on_change_task(
-                    cancel_token.clone(),
-                    client_provider,
-                    stream_metrics,
-                    on_change_processor,
-                ))
-            });
+        let leak_sensor_handle = leak_sensor.map(|state| {
+            tokio::spawn(gnmi_sample_task(
+                cancel_token.clone(),
+                state.config,
+                state.stream_metrics,
+                state.processor,
+            ))
+        });
 
-        let extended_handles = extended_states
+        let on_change_handle = on_change.map(|state| {
+            tokio::spawn(gnmi_on_change_task(
+                cancel_token.clone(),
+                state.client_provider,
+                state.stream_metrics,
+                state.processor,
+            ))
+        });
+
+        let extended_handles = extended
             .into_iter()
             .map(|state| tokio::spawn(gnmi_extended_task(cancel_token.clone(), state)))
             .collect::<Vec<_>>();
 
         if let Some(handle) = sample_handle {
+            let _ = handle.await;
+        }
+
+        if let Some(handle) = leak_sensor_handle {
             let _ = handle.await;
         }
 
@@ -779,18 +888,15 @@ pub(crate) fn spawn_gnmi_collector(
         }
 
         if let Some(data_sink) = collector_removed_data_sink.as_deref() {
-            if sample_enabled {
-                data_sink.handle_event(
-                    &collector_removed_sample_context,
-                    &CollectorEvent::CollectorRemoved,
-                );
+            if sample_collector_enabled {
+                data_sink.handle_event(&sample_event_context, &CollectorEvent::CollectorRemoved);
             }
 
-            if let Some(event_context) = &collector_removed_on_change_context {
+            if let Some(event_context) = &on_change_event_context {
                 data_sink.handle_event(event_context, &CollectorEvent::CollectorRemoved);
             }
 
-            if let Some(event_context) = &collector_removed_extended_context {
+            if let Some(event_context) = &extended_event_context {
                 data_sink.handle_event(event_context, &CollectorEvent::CollectorRemoved);
             }
         }
@@ -853,6 +959,7 @@ async fn gnmi_extended_task(cancel_token: CancellationToken, mut state: Extended
                     &state.client_provider,
                     credential_generation,
                     &state.stream_metrics,
+                    None,
                     |response| {
                         state
                             .processor
@@ -1041,6 +1148,7 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                 tracing::warn!(
                     error = ?e.error,
                     switch_id = %sample_processor.switch_id,
+                    stream = sample_processor.diagnostic_stream,
                     rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
                     "nvue_gnmi SAMPLE: connection failed, backing off"
                 );
@@ -1060,6 +1168,7 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                     &config.client_provider,
                     credential_generation,
                     stream_metrics,
+                    sample_processor.diagnostic_stream,
                     |response| {
                         sample_processor.process_subscribe_response(response, stream_metrics);
                         Ok(())
@@ -1073,6 +1182,7 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                 backoff.reset();
                 tracing::info!(
                     switch_id = %sample_processor.switch_id,
+                    stream = sample_processor.diagnostic_stream,
                     rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
                     "nvue_gnmi SAMPLE: stream connected"
                 );
@@ -1082,6 +1192,7 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                         stream_metrics.connection_state.set(SHUTDOWN);
                         tracing::info!(
                             switch_id = %sample_processor.switch_id,
+                            stream = sample_processor.diagnostic_stream,
                             rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
                             "nvue_gnmi SAMPLE: cancelled, shutting down"
                         );
@@ -1097,6 +1208,7 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                             stream_metrics.server_initiated_closures_total.inc();
                             tracing::info!(
                                 switch_id = %sample_processor.switch_id,
+                                stream = sample_processor.diagnostic_stream,
                                 rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
                                 "nvue_gnmi SAMPLE: stream closed by server, reconnecting"
                             );
@@ -1114,6 +1226,7 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                             tracing::warn!(
                                 error = ?e,
                                 switch_id = %sample_processor.switch_id,
+                                stream = sample_processor.diagnostic_stream,
                                 rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
                                 "nvue_gnmi SAMPLE: stream error, reconnecting"
                             );
@@ -1195,6 +1308,7 @@ async fn gnmi_on_change_task(
                     &client_provider,
                     credential_generation,
                     &stream_metrics,
+                    None,
                     |response| {
                         on_change_processor.process_subscribe_response(response, &stream_metrics);
                         Ok(())
@@ -1291,6 +1405,30 @@ mod tests {
     use crate::endpoint::test_support::test_endpoint as test_bmc_endpoint;
     use crate::endpoint::{BmcAddr, BmcCredentials};
     use crate::metrics::MetricsManager;
+
+    type TestStream =
+        Pin<Box<dyn Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Send>>;
+
+    #[derive(Default)]
+    struct CollectorRemovalSink(StdMutex<Vec<&'static str>>);
+
+    impl DataSink for CollectorRemovalSink {
+        fn sink_type(&self) -> &'static str {
+            "collector-removal"
+        }
+
+        fn try_handle_event(
+            &self,
+            context: &EventContext,
+            event: &CollectorEvent,
+        ) -> Result<(), HealthError> {
+            if matches!(event, CollectorEvent::CollectorRemoved) {
+                self.0.lock().unwrap().push(context.collector_type);
+            }
+
+            Ok(())
+        }
+    }
 
     enum ProviderResponse {
         Credentials(BmcCredentials),
@@ -1502,6 +1640,22 @@ mod tests {
         }
     }
 
+    fn test_sample_processor(diagnostic_stream: Option<&'static str>) -> GnmiSampleProcessor {
+        GnmiSampleProcessor {
+            data_sink: None,
+            event_context: EventContext {
+                endpoint_key: "test-endpoint".to_string(),
+                addr: test_addr(),
+                collector_type: NVUE_GNMI_SAMPLE_STREAM_ID,
+                metadata: None,
+                rack_id: None,
+                labels: Default::default(),
+            },
+            switch_id: "switch-1".to_string(),
+            diagnostic_stream,
+        }
+    }
+
     fn test_labels() -> HashMap<String, String> {
         HashMap::from([
             ("switch_id".to_string(), "test-switch".to_string()),
@@ -1524,6 +1678,7 @@ mod tests {
             &client_provider,
             0,
             &metrics,
+            None,
             |_| Ok(()),
         )
         .await;
@@ -1551,6 +1706,7 @@ mod tests {
             &client_provider,
             0,
             &metrics,
+            None,
             |_| Ok(()),
         )
         .await;
@@ -1594,6 +1750,7 @@ mod tests {
             &client_provider,
             credential_generation,
             &metrics,
+            None,
             |_| Ok(()),
         )
         .await;
@@ -1640,6 +1797,7 @@ mod tests {
             &client_provider,
             0,
             &metrics,
+            None,
             |_| {
                 processed_updates += 1;
                 Ok(())
@@ -1670,6 +1828,7 @@ mod tests {
             &client_provider,
             0,
             &metrics,
+            None,
             |_| Ok(()),
         )
         .await;
@@ -1683,9 +1842,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn sample_task_retries_when_initial_stream_does_not_synchronize() {
-        type TestStream =
-            Pin<Box<dyn Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Send>>;
-
         let cancel_token = CancellationToken::new();
 
         let client_provider = test_client_provider(RecordingProvider::responding_with(
@@ -1700,18 +1856,7 @@ mod tests {
 
         let metrics = test_gnmi_stream_metrics();
 
-        let processor = GnmiSampleProcessor {
-            data_sink: None,
-            event_context: EventContext {
-                endpoint_key: "test-endpoint".to_string(),
-                addr: test_addr(),
-                collector_type: NVUE_GNMI_SAMPLE_STREAM_ID,
-                metadata: None,
-                rack_id: None,
-                labels: Default::default(),
-            },
-            switch_id: "switch-1".to_string(),
-        };
+        let processor = test_sample_processor(None);
 
         let synchronized = proto::SubscribeResponse {
             response: Some(proto::subscribe_response::Response::SyncResponse(true)),
@@ -1758,6 +1903,91 @@ mod tests {
         assert_eq!(metrics.connection_state.get(), SHUTDOWN);
         assert_eq!(metrics.connected.get(), 0);
         assert_eq!(metrics.synchronized.get(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unsupported_leak_stream_retries_without_interrupting_primary_stream() {
+        let cancel_token = CancellationToken::new();
+
+        let client_provider = test_client_provider(RecordingProvider::responding_with(
+            ProviderResponse::Pending,
+        ));
+
+        let config = GnmiStreamConfig {
+            client_provider,
+            paths: Vec::new(),
+            sample_interval_nanos: 1,
+        };
+
+        let primary_metrics = test_gnmi_stream_metrics();
+        let leak_metrics = test_gnmi_stream_metrics();
+        let processor = test_sample_processor(None);
+
+        let synchronized = proto::SubscribeResponse {
+            response: Some(proto::subscribe_response::Response::SyncResponse(true)),
+            ..Default::default()
+        };
+
+        let primary_stream: TestStream =
+            Box::pin(tokio_stream::once(Ok(synchronized)).chain(tokio_stream::pending()));
+
+        let unsupported_leak_stream: TestStream = Box::pin(tokio_stream::once(Err(
+            tonic::Status::unimplemented("leak sensor path is unsupported"),
+        )));
+
+        let retrying_leak_stream: TestStream = Box::pin(tokio_stream::pending());
+
+        let mut primary_stream = Some(primary_stream);
+        let mut leak_streams = VecDeque::from([unsupported_leak_stream, retrying_leak_stream]);
+        let (leak_attempt_tx, mut leak_attempt_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let run_primary =
+            run_gnmi_sample_task(&cancel_token, &config, &primary_metrics, &processor, || {
+                std::future::ready(Ok((primary_stream.take().expect("primary test stream"), 0)))
+            });
+
+        let run_leak =
+            run_gnmi_sample_task(&cancel_token, &config, &leak_metrics, &processor, || {
+                leak_attempt_tx
+                    .send(())
+                    .expect("leak attempt receiver remains open");
+
+                std::future::ready(Ok((
+                    leak_streams
+                        .pop_front()
+                        .expect("leak test stream is available"),
+                    0,
+                )))
+            });
+
+        let observe = async {
+            leak_attempt_rx
+                .recv()
+                .await
+                .expect("initial leak subscription attempt");
+
+            leak_attempt_rx
+                .recv()
+                .await
+                .expect("retry leak subscription attempt");
+
+            tokio::task::yield_now().await;
+
+            assert_eq!(primary_metrics.connection_state.get(), READY);
+            assert_eq!(primary_metrics.connected.get(), 1);
+            assert_eq!(primary_metrics.synchronized.get(), 1);
+            assert_eq!(primary_metrics.reconnections_total.get(), 0.0);
+            assert_eq!(primary_metrics.stream_errors_total.get(), 0.0);
+            assert_eq!(leak_metrics.reconnections_total.get(), 1.0);
+            assert_eq!(leak_metrics.stream_errors_total.get(), 1.0);
+
+            cancel_token.cancel();
+        };
+
+        tokio::join!(run_primary, run_leak, observe);
+
+        assert_eq!(primary_metrics.connection_state.get(), SHUTDOWN);
+        assert_eq!(leak_metrics.connection_state.get(), SHUTDOWN);
     }
 
     #[test]
@@ -1811,6 +2041,103 @@ mod tests {
         sample.server_initiated_closures_total.inc();
         assert_eq!(sample.server_initiated_closures_total.get(), 1.0);
         assert_eq!(events.server_initiated_closures_total.get(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn leak_sensor_metrics_are_registered_only_when_enabled() {
+        let endpoint = test_bmc_endpoint(
+            "55:66:77:88:99:cc"
+                .parse()
+                .expect("test MAC address should parse"),
+        );
+
+        for (leak_sensors_enabled, registry_id) in [
+            (false, "leak_metrics_disabled"),
+            (true, "leak_metrics_enabled"),
+        ] {
+            let metrics = MetricsManager::new("test")
+                .expect("metrics manager should initialize for leak sensor metrics");
+
+            let collector_registry = Arc::new(
+                metrics
+                    .create_collector_registry(registry_id.to_string(), "test")
+                    .expect("collector registry should initialize"),
+            );
+
+            let mut config = NvueGnmiConfig {
+                system_events_enabled: false,
+                ..NvueGnmiConfig::default()
+            };
+
+            config.paths.leak_sensors_enabled = leak_sensors_enabled;
+
+            let collector = spawn_gnmi_collector(
+                &endpoint,
+                &config,
+                RecordingProvider::responding_with(ProviderResponse::Pending),
+                collector_registry,
+                None,
+                None,
+            )
+            .expect("gNMI collector should initialize for leak sensor metrics");
+
+            let leak_metrics_registered = metrics
+                .global_registry()
+                .gather()
+                .iter()
+                .any(|family| family.name() == "test_nvue_gnmi_leak_sensors_connection_state");
+
+            assert_eq!(leak_metrics_registered, leak_sensors_enabled);
+
+            collector.stop().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn leak_only_collector_emits_sample_removal_once() {
+        let endpoint = test_bmc_endpoint(
+            "55:66:77:88:99:cc"
+                .parse()
+                .expect("test MAC address should parse"),
+        );
+
+        let metrics = MetricsManager::new("test")
+            .expect("metrics manager should initialize for leak-only cleanup");
+
+        let collector_registry = Arc::new(
+            metrics
+                .create_collector_registry("leak_only_cleanup".to_string(), "test")
+                .expect("collector registry should initialize"),
+        );
+
+        let sink = Arc::new(CollectorRemovalSink::default());
+
+        let mut config = NvueGnmiConfig {
+            system_events_enabled: false,
+            ..NvueGnmiConfig::default()
+        };
+
+        config.paths.components_enabled = false;
+        config.paths.interfaces_enabled = false;
+        config.paths.platform_general_enabled = false;
+        config.paths.leak_sensors_enabled = true;
+
+        let collector = spawn_gnmi_collector(
+            &endpoint,
+            &config,
+            RecordingProvider::responding_with(ProviderResponse::Pending),
+            collector_registry,
+            Some(sink.clone()),
+            None,
+        )
+        .expect("leak-only gNMI collector should initialize");
+
+        collector.stop().await;
+
+        assert_eq!(
+            *sink.0.lock().expect("collector removal sink mutex"),
+            [NVUE_GNMI_SAMPLE_STREAM_ID]
+        );
     }
 
     #[tokio::test]
