@@ -301,7 +301,7 @@ impl RestClient {
         self.do_get(url, &[]).await.map(Some)
     }
 
-    async fn get_interfaces(&self) -> Result<Option<InterfacesResponse>, HealthError> {
+    pub(super) async fn get_interfaces(&self) -> Result<Option<InterfacesResponse>, HealthError> {
         if !self.paths.interfaces_enabled {
             return Ok(None);
         }
@@ -311,33 +311,12 @@ impl RestClient {
             &[
                 ("filter_", "type=nvl"),
                 ("include", "/*/type"),
+                ("include", "/*/link/state"),
                 ("include", "/*/link/diagnostics"),
             ],
         )
         .await
         .map(Some)
-    }
-
-    /// Fetch link diagnostics by flattening the interfaces response into
-    /// per-interface per-code diagnostic results.
-    pub(super) async fn get_link_diagnostics(
-        &self,
-    ) -> Result<Vec<LinkDiagnosticResult>, HealthError> {
-        let Some(interfaces) = self.get_interfaces().await? else {
-            return Ok(Vec::new());
-        };
-
-        let mut results = Vec::new();
-        for (iface_name, iface_data) in interfaces {
-            for (code, diag_status) in iface_data.link.diagnostics {
-                results.push(LinkDiagnosticResult {
-                    interface: iface_name.clone(),
-                    code,
-                    status: diag_status.status,
-                });
-            }
-        }
-        Ok(results)
     }
 
     fn join_path(&self, path: &str) -> Result<Url, HealthError> {
@@ -602,36 +581,47 @@ pub(super) struct EnvItem {
     pub(super) state: Option<String>,
 }
 
-type InterfacesResponse = HashMap<String, InterfaceData>;
+pub(super) type InterfacesResponse = HashMap<String, InterfaceData>;
 
 #[derive(Debug, Clone, Deserialize, Default)]
-struct InterfaceData {
+pub(super) struct InterfaceData {
     #[cfg(test)]
     #[serde(rename = "type")]
     iface_type: Option<String>,
     #[serde(default)]
-    link: InterfaceLink,
+    pub(super) link: InterfaceLink,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-struct InterfaceLink {
+pub(super) struct InterfaceLink {
     #[cfg(test)]
     speed: Option<String>,
-    // state: Option<HashMap<String, serde_json::Value>>,
+
+    /// Link state normalized from NVUE's nullable, single-key object encoding.
+    /// Empty objects are omitted so other interface data remains available.
+    #[serde(default, deserialize_with = "deserialize_optional_interface_state")]
+    pub(super) state: Option<String>,
+
     #[serde(default)]
-    diagnostics: HashMap<String, DiagnosticStatus>,
+    pub(super) diagnostics: HashMap<String, DiagnosticStatus>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct DiagnosticStatus {
-    status: String,
+pub(super) struct DiagnosticStatus {
+    pub(super) status: String,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct LinkDiagnosticResult {
-    pub(super) interface: String,
-    pub(super) code: String,
-    pub(super) status: String,
+fn deserialize_optional_interface_state<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<HashMap<String, serde::de::IgnoredAny>>::deserialize(deserializer)? {
+        Some(states) if states.len() <= 1 => Ok(states.into_keys().next()),
+        Some(_) => Err(D::Error::custom(
+            "interface link state object must contain at most one state",
+        )),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -792,6 +782,7 @@ mod tests {
             "sw1p1s1": {
                 "type": "nvl",
                 "link": {
+                    "state": {"up": {}},
                     "diagnostics": {
                         "0": {"status": "No issue observed"}
                     }
@@ -800,6 +791,7 @@ mod tests {
             "sw1p1s2": {
                 "type": "nvl",
                 "link": {
+                    "state": {"down": {}},
                     "diagnostics": {
                         "1024": {"status": "Cable is unplugged"}
                     }
@@ -812,13 +804,26 @@ mod tests {
                         "2": {"status": "Negotiation failure"}
                     }
                 }
+            },
+            "sw1p1s3": {
+                "type": "nvl",
+                "link": {
+                    "state": {},
+                    "diagnostics": {
+                        "4": {"status": "Empty state object"}
+                    }
+                }
             }
         }"#;
 
         let resp: InterfacesResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.len(), 3);
+        assert_eq!(resp.len(), 4);
 
         assert_eq!(resp["sw1p1s1"].iface_type.as_deref(), Some("nvl"));
+        assert_eq!(resp["sw1p1s1"].link.state.as_deref(), Some("up"));
+        assert_eq!(resp["sw1p1s2"].link.state.as_deref(), Some("down"));
+        assert!(resp["sw1p1s3"].link.state.is_none());
+
         assert_eq!(
             resp["sw1p1s1"].link.diagnostics["0"].status,
             "No issue observed"
@@ -831,6 +836,24 @@ mod tests {
             resp["acp1"].link.diagnostics["2"].status,
             "Negotiation failure"
         );
+        assert_eq!(
+            resp["sw1p1s3"].link.diagnostics["4"].status,
+            "Empty state object"
+        );
+    }
+
+    #[test]
+    fn test_parse_interface_rejects_state_outside_openapi_schema() {
+        for (scenario, state) in [
+            ("string state", r#""down""#),
+            ("multiple state keys", r#"{"up": {}, "down": {}}"#),
+        ] {
+            let json = format!(r#"{{"swp1": {{"link": {{"state": {state}}}}}}}"#);
+
+            let result = serde_json::from_str::<InterfacesResponse>(&json);
+
+            assert!(result.is_err(), "{scenario} must be rejected");
+        }
     }
 
     #[test]
@@ -841,7 +864,9 @@ mod tests {
 
         let resp: InterfacesResponse = serde_json::from_str(json).unwrap();
         let eth0 = &resp["eth0"];
+
         assert_eq!(eth0.iface_type.as_deref(), Some("ethernet"));
+        assert!(eth0.link.state.is_none());
         assert!(eth0.link.diagnostics.is_empty());
         assert!(eth0.link.speed.is_none());
     }
