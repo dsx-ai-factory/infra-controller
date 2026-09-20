@@ -1062,24 +1062,26 @@ impl From<MachineObservationNotCurrent> for DatabaseError {
     }
 }
 
-/// Stores a network observation when its timestamp passes the database freshness
-/// check, or no timestamp is stored. Returns `NotApplied` for a missing machine
-/// or rejected timestamp. The JSON and SQLx timestamp conversions can differ
-/// below microsecond precision, so equal instants are not always accepted.
+/// Stores a network observation when its timestamp is at least as recent as the
+/// stored one, or no timestamp is stored. Compares both JSON timestamps at
+/// PostgreSQL's microsecond precision. Returns `NotApplied` for a missing
+/// machine or rejected timestamp.
 pub async fn update_network_status_observation(
     txn: &mut PgConnection,
     machine_id: &DpuMachineId,
     observation: &MachineNetworkStatusObservation,
 ) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
+    // Parse both timestamps from JSON so they round alike. SQLx truncates
+    // separately bound timestamps to microseconds.
     let query = "UPDATE machines SET network_status_observation = $1::json WHERE id = $2 AND
                 (
                     (network_status_observation->>'observed_at' IS NULL)
-                    OR ((network_status_observation->>'observed_at')::timestamp <= $3::timestamp)
+                    OR ((network_status_observation->>'observed_at')::timestamp
+                        <= ($1::json->>'observed_at')::timestamp)
                 ) RETURNING id";
     let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
         .bind(machine_id)
-        .bind(observation.observed_at)
         .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -1106,6 +1108,9 @@ pub struct ExtensionServiceObservationNotCurrent;
 /// is a single JSONB update: PostgreSQL serializes concurrent row updates and
 /// `jsonb_set` retains every other service-type entry.
 ///
+/// Compares the stored and incoming JSON timestamps at PostgreSQL's microsecond
+/// precision, accepting equal timestamps and newer observations.
+///
 /// Returns `Applied(())` when the observation is stored. A conditional miss
 /// returns `NotApplied` if the machine exists when rechecked, or
 /// [`DatabaseError::NotFoundError`] if it is absent. The identity recheck is
@@ -1128,7 +1133,7 @@ pub async fn update_extension_service_status_observation(
           AND (
               extension_service_status_observations -> $2 IS NULL
               OR (extension_service_status_observations -> $2 ->> 'observed_at')::timestamptz
-                    <= $4::timestamptz
+                    <= ($3::jsonb->>'observed_at')::timestamptz
           )
         RETURNING id
     "#;
@@ -1136,7 +1141,6 @@ pub async fn update_extension_service_status_observation(
         .bind(machine_id)
         .bind(service_type.to_string())
         .bind(sqlx::types::Json(observation))
-        .bind(observation.observed_at)
         .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -3863,6 +3867,83 @@ mod test {
     }
 
     #[crate::sqlx_test]
+    async fn network_observations_compare_fractional_timestamps(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::machine::DpuMachineId;
+        use chrono::{DateTime, Duration, Utc};
+        use model::machine::network::MachineNetworkStatusObservation;
+
+        use super::{MachineObservationNotCurrent, update_network_status_observation};
+        use crate::ConditionalWrite::{self, Applied, NotApplied};
+
+        let machine_id: DpuMachineId =
+            "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng".parse()?;
+        let observed_at = DateTime::from_timestamp(1_722_000_000, 123_456_789).unwrap();
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        struct Case {
+            scenario: &'static str,
+            observed_at: DateTime<Utc>,
+            expect: ConditionalWrite<(), MachineObservationNotCurrent>,
+        }
+        let mut expected = None;
+        for case in [
+            Case {
+                scenario: "first observation",
+                observed_at,
+                expect: Applied(()),
+            },
+            Case {
+                scenario: "equal timestamp replaces the payload",
+                observed_at,
+                expect: Applied(()),
+            },
+            Case {
+                scenario: "older observation preserves the payload",
+                observed_at: observed_at - Duration::microseconds(1),
+                expect: NotApplied(MachineObservationNotCurrent),
+            },
+        ] {
+            let observation = MachineNetworkStatusObservation {
+                machine_id,
+                agent_version: Some(case.scenario.to_string()),
+                observed_at: case.observed_at,
+                network_config_version: None,
+                client_certificate_expiry: None,
+                agent_version_superseded_at: None,
+                instance_network_observation: None,
+                fabric_interfaces: Vec::new(),
+            };
+            let mut txn = pool.begin().await?;
+            let result =
+                update_network_status_observation(txn.as_mut(), &machine_id, &observation).await?;
+            txn.commit().await?;
+            assert_eq!(result, case.expect, "{}", case.scenario);
+            if let Applied(()) = case.expect {
+                expected = Some(observation);
+            }
+            let persisted: sqlx::types::Json<MachineNetworkStatusObservation> =
+                sqlx::query_scalar("SELECT network_status_observation FROM machines WHERE id = $1")
+                    .bind(machine_id)
+                    .fetch_one(&pool)
+                    .await?;
+            assert_eq!(Some(persisted.0), expected, "{}", case.scenario);
+        }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     async fn extension_service_observations_preserve_per_service_timestamp_order(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3885,7 +3966,7 @@ mod test {
             config_version: ConfigVersion::initial(),
             instance_config_version: None,
             extension_service_statuses: Vec::new(),
-            observed_at: DateTime::from_timestamp(1_722_000_000, 0).unwrap(),
+            observed_at: DateTime::from_timestamp(1_722_000_000, 123_456_789).unwrap(),
         };
         let mut txn = pool.begin().await?;
         let missing = update_extension_service_status_observation(
