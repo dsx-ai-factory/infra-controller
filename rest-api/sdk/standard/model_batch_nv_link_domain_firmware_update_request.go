@@ -28,7 +28,7 @@ type BatchNVLinkDomainFirmwareUpdateRequest struct {
 	SiteId string `json:"siteId"`
 	// UUIDs of the NVLink Domains to update. IDs must be unique after UUID normalization (case-insensitive).
 	DomainIds []string `json:"domainIds"`
-	// Target firmware version. When empty, null, or omitted, use the default firmware version for each targeted component.
+	// Target firmware input. NVLink Domain targets resolve to their member racks. For rack-scale RMS components, an omitted, null, empty, or whitespace-only value uses the owning rack profile's configured firmware object. Resolution or fetch failures are reported by the asynchronous task.
 	Version NullableString `json:"version,omitempty"`
 	// Optional Operation Rule UUID. When set, pins every task spawned by this operation to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`

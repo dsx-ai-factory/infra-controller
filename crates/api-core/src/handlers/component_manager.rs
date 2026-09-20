@@ -4702,7 +4702,7 @@ async fn update_compute_tray_firmware_by_machine_ids(
             results
                 .extend(submit_rack_firmware_maintenance_requests(api, targets, activities).await?);
         } else {
-            let options = if use_direct_rms_json && resolved_target_version.is_some() {
+            let options = if use_direct_rms_json {
                 require_firmware_object_json_for_direct_rms(
                     "compute tray",
                     access_token,
