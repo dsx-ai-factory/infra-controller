@@ -9,10 +9,11 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-
-# shellcheck source=versions.env
-source "${SCRIPT_DIR}/versions.env"
+DEVSPACE_VERSION="v6.3.21"
+KIND_VERSION="v0.32.0"
+KUBECTL_VERSION="v1.36.3"
+HELM_VERSION="v3.21.3"
+KIND_NODE_IMAGE="kindest/node:v1.36.1"
 
 DEV_USER=""
 REPO_DIR=""
@@ -273,22 +274,33 @@ EOF
 configure_docker() {
   log "Configuring Docker access and registry TLS compatibility"
 
-  install -m 0755 -d \
-    /etc/systemd/system/docker.service.d \
-    /etc/systemd/system/containerd.service.d
-  cat >/etc/systemd/system/docker.service.d/10-tls-compat.conf <<'EOF'
+  local service config
+  local config_changed=0
+  local restart_services=()
+  for service in containerd docker; do
+    config="/etc/systemd/system/${service}.service.d/10-tls-compat.conf"
+    if ! cmp -s "${config}" <(printf '[Service]\nEnvironment="GODEBUG=tlsmlkem=0"\n'); then
+      install -m 0755 -d "$(dirname "${config}")"
+      cat >"${config}" <<'EOF'
 [Service]
 Environment="GODEBUG=tlsmlkem=0"
 EOF
-  cat >/etc/systemd/system/containerd.service.d/10-tls-compat.conf <<'EOF'
-[Service]
-Environment="GODEBUG=tlsmlkem=0"
-EOF
+      config_changed=1
+      if systemctl is-active --quiet "${service}.service"; then
+        restart_services+=("${service}.service")
+      fi
+    fi
+  done
 
   usermod -aG docker "${DEV_USER}"
-  systemctl daemon-reload
+  if [[ "${config_changed}" == 1 ]]; then
+    systemctl daemon-reload
+  fi
   systemctl enable --now containerd.service docker.service
-  systemctl restart containerd.service docker.service
+  # Repeated deploys must not restart kind or discard the development Vault.
+  if ((${#restart_services[@]})); then
+    systemctl restart "${restart_services[@]}"
+  fi
 
   local _attempt
   for _attempt in {1..30}; do
@@ -421,14 +433,17 @@ prepare_checkout() {
 
 configure_kind_node_tls() {
   local node="${CLUSTER_NAME}-control-plane"
+  local config="/etc/systemd/system/containerd.service.d/10-tls-compat.conf"
+  local expected=$'[Service]\nEnvironment="GODEBUG=tlsmlkem=0"'
+  if [[ "$(run_as_user docker exec "${node}" cat "${config}" 2>/dev/null)" == "${expected}" ]]; then
+    return
+  fi
   log "Applying the registry TLS compatibility setting inside ${node}"
   run_as_user docker exec "${node}" \
     mkdir -p /etc/systemd/system/containerd.service.d
-  printf '%s\n' \
-    '[Service]' \
-    'Environment="GODEBUG=tlsmlkem=0"' |
+  printf '%s\n' "${expected}" |
     run_as_user docker exec -i "${node}" \
-      tee /etc/systemd/system/containerd.service.d/10-tls-compat.conf \
+      tee "${config}" \
       >/dev/null
   run_as_user docker exec "${node}" systemctl daemon-reload
   run_as_user docker exec "${node}" systemctl restart containerd
@@ -476,8 +491,8 @@ kind_node_has_image() {
 
 preload_postgres_image() {
   local node="${CLUSTER_NAME}-control-plane"
-  local host_image="${CORE_POSTGRES_IMAGE}"
-  local node_image="docker.io/library/${CORE_POSTGRES_IMAGE}"
+  local host_image="postgres:14.5-alpine"
+  local node_image="docker.io/library/postgres:14.5-alpine"
 
   if kind_node_has_image "${node}" "${node_image}"; then
     log "Reusing ${node_image} inside ${node}"
@@ -509,8 +524,8 @@ preload_postgres_image() {
 
 cache_postgres_wait_image() {
   local node="${CLUSTER_NAME}-control-plane"
-  local source_image="docker.io/library/${CORE_POSTGRES_IMAGE}"
-  local wait_image="docker.io/library/${REST_POSTGRES_IMAGE}"
+  local source_image="docker.io/library/postgres:14.5-alpine"
+  local wait_image="docker.io/library/postgres:14.4-alpine"
 
   if kind_node_has_image "${node}" "${wait_image}"; then
     return

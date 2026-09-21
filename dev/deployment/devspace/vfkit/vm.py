@@ -60,7 +60,7 @@ def check_volume(path):
     return path
 
 
-def cloud_config(public_key, mac, instance_id, data_disk=False):
+def cloud_config(public_key, mac, instance_id, data_disk=False, network_mode="nat"):
     # Socket activation gives SSH a vsock listener without a guest networking
     # dependency. The host exposes it only through a private Unix socket.
     files = {
@@ -115,6 +115,22 @@ net.ipv6.conf.eth0.accept_ra=2
         "match": {"macaddress": mac}, "set-name": "eth0", "dhcp4": True,
         "dhcp6": True, "accept-ra": True,
     }}}
+    if network_mode == "nat":
+        # Larger HTTPS requests retransmit indefinitely on some macOS NAT/VPN
+        # paths. Keep the IPv6 minimum MTU, including after DHCP/RA refreshes.
+        network["ethernets"]["eth0"].update({
+            "mtu": 1280,
+            "dhcp4-overrides": {"use-mtu": False},
+            "dhcp6-overrides": {"use-mtu": False},
+        })
+        user["write_files"].append({
+            "path": "/etc/systemd/network/10-netplan-eth0.network.d/10-nico-mtu.conf",
+            "permissions": "0644",
+            "content": "[IPv6AcceptRA]\nUseMTU=no\n",
+        })
+        # Cloud-init writes the drop-in after the initial network setup.
+        user["runcmd"].extend([["networkctl", "reload"],
+                              ["networkctl", "reconfigure", "eth0"]])
     return {"user-data": "#cloud-config\n" + json.dumps(user, indent=2) + "\n",
             "meta-data": json.dumps({"instance-id": instance_id, "local-hostname": "nico-dev"}),
             "network-config": json.dumps(network)}
@@ -262,7 +278,8 @@ class VM:
             run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key])
         for name, content in cloud_config(key.with_suffix(".pub").read_text().strip(),
                                          self.config["mac"], self.config["instance_id"],
-                                         bool(self.config.get("data_dir"))).items():
+                                         bool(self.config.get("data_dir")),
+                                         self.config["network"]).items():
             (self.directory / name).write_text(content)
 
     def command(self):
@@ -341,8 +358,11 @@ class VM:
             raise ValueError("VM is stopped; run start or up")
         for _ in range(120):
             try:
-                self.ssh("true", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                self.ssh("sudo", "cloud-init", "status", "--wait", "--long", timeout=600)
+                # Readiness probes must not consume stdin intended for exec.
+                self.ssh("true", stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.ssh("sudo", "cloud-init", "status", "--wait", "--long",
+                         stdin=subprocess.DEVNULL, stdout=sys.stderr, timeout=600)
                 return
             except subprocess.CalledProcessError as error:
                 if error.returncode != 255:

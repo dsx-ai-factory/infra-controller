@@ -23,10 +23,8 @@ PROTO_SHA256_X86_64="877408bab02767938d1e5555f11c39dfe05e96f2a9571bc59dd2639f33d
 PROTO_SHA256_AARCH_64="58135d20be2831d9ca5a39675f4499f9cbad8b44f9c3d814287c0b543155a812"
 GRPCURL_VERSION="1.8.7"
 VAULT_VERSION="1.21.4-1"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-
-# shellcheck source=versions.env
-source "${SCRIPT_DIR}/versions.env"
+CORE_POSTGRES_IMAGE="postgres:14.5-alpine"
+REST_POSTGRES_IMAGE="postgres:14.4-alpine"
 CORE_POSTGRES_CONTAINER="nico-core-test-postgres"
 SCRIPT_START_SECONDS="${SECONDS}"
 
@@ -194,8 +192,6 @@ if [[ "${MACHINE_ARCH}" == aarch64 ]]; then
 fi
 
 run_as_user() {
-  # Multiplexed registry requests stalled on the validated vfkit network path;
-  # use HTTP/1.1 for dependency downloads without weakening TLS verification.
   runuser -u "${DEV_USER}" -- env \
     HOME="${USER_HOME}" \
     USER="${DEV_USER}" \
@@ -203,7 +199,6 @@ run_as_user() {
     OPENSSL_CONF="${OPENSSL_COMPAT_CONFIG}" \
     CARGO_HTTP_LOW_SPEED_LIMIT="1" \
     CARGO_HTTP_TIMEOUT="120" \
-    CARGO_HTTP_MULTIPLEXING="false" \
     CARGO_NET_GIT_FETCH_WITH_CLI="true" \
     CARGO_NET_RETRY="5" \
     GODEBUG="tlsmlkem=0" \
@@ -615,7 +610,6 @@ update_shell_file() {
       printf 'setenv OPENSSL_CONF "$HOME/.config/nico/openssl-compat.cnf"\n'
       printf 'setenv CARGO_HTTP_LOW_SPEED_LIMIT 1\n'
       printf 'setenv CARGO_HTTP_TIMEOUT 120\n'
-      printf 'setenv CARGO_HTTP_MULTIPLEXING false\n'
       printf 'setenv CARGO_NET_GIT_FETCH_WITH_CLI true\n'
       printf 'setenv CARGO_NET_RETRY 5\n'
       printf 'setenv GODEBUG tlsmlkem=0\n'
@@ -639,7 +633,6 @@ update_shell_file() {
       printf 'export OPENSSL_CONF="$HOME/.config/nico/openssl-compat.cnf"\n'
       printf 'export CARGO_HTTP_LOW_SPEED_LIMIT=1\n'
       printf 'export CARGO_HTTP_TIMEOUT=120\n'
-      printf 'export CARGO_HTTP_MULTIPLEXING=false\n'
       printf 'export CARGO_NET_GIT_FETCH_WITH_CLI=true\n'
       printf 'export CARGO_NET_RETRY=5\n'
       printf 'export GODEBUG=tlsmlkem=0\n'
@@ -779,11 +772,8 @@ fetch_dependencies() {
   run_as_user cargo fetch --locked --manifest-path "${REPO_DIR}/Cargo.toml"
 
   log "Fetching REST Go dependencies"
-  # The VM's network path also stalls multiplexed Go module downloads. Keep
-  # this workaround scoped to fetching modules, not the REST applications.
   # shellcheck disable=SC2016 # $1 is expanded by the target user's shell.
-  run_as_user env GODEBUG=tlsmlkem=0,http2client=0 \
-    bash -c 'cd "$1/rest-api" && go mod download' _ "${REPO_DIR}"
+  run_as_user bash -c 'cd "$1/rest-api" && go mod download' _ "${REPO_DIR}"
 }
 
 verify_setup() {

@@ -59,6 +59,15 @@ class LifecycleTests(unittest.TestCase):
             reopened.create(self.args("--cpus", "4"))
         self.assertEqual(self.machine.config_path.read_bytes(), original)
 
+    def test_readiness_probes_preserve_exec_streams(self):
+        with patch.object(self.machine, "pid", return_value=123), \
+                patch.object(self.machine, "ssh") as ssh:
+            self.machine.ready()
+        self.assertEqual(len(ssh.call_args_list), 2)
+        for call in ssh.call_args_list:
+            self.assertEqual(call.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(ssh.call_args_list[-1].kwargs["stdout"], vm.sys.stderr)
+
     def test_checksum_failure_never_publishes_root_disk(self):
         image = self.root / "image.raw"
         image.write_bytes(b"not the requested image")
@@ -110,6 +119,28 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn(f"userknownhostsfile {self.machine.directory}/known_hosts\n", result.stdout)
         self.assertLess(len(str(self.machine.runtime / "ssh.sock")), 104)
 
+    def test_nat_mtu_survives_dhcp_and_router_advertisements(self):
+        for mode in ("nat", "bridged", "socket"):
+            with self.subTest(mode=mode):
+                files = vm.cloud_config("ssh-ed25519 fixture", "02:00:00:00:00:01",
+                                        "test", network_mode=mode)
+                network = json.loads(files["network-config"])["ethernets"]["eth0"]
+                user = json.loads(files["user-data"].split("\n", 1)[1])
+                dropins = [entry for entry in user["write_files"]
+                           if entry["path"].endswith("10-nico-mtu.conf")]
+                if mode == "nat":
+                    self.assertEqual(network["mtu"], 1280)
+                    for family in ("dhcp4", "dhcp6"):
+                        self.assertFalse(network[f"{family}-overrides"]["use-mtu"])
+                    self.assertEqual(len(dropins), 1)
+                    self.assertEqual(dropins[0]["content"], "[IPv6AcceptRA]\nUseMTU=no\n")
+                    self.assertEqual(user["runcmd"][-2:],
+                                     [["networkctl", "reload"],
+                                      ["networkctl", "reconfigure", "eth0"]])
+                else:
+                    self.assertNotIn("mtu", network)
+                    self.assertFalse(dropins)
+
     def test_native_build_version_comes_from_host_not_synthetic_guest_head(self):
         version = "v2.3.0-pr-146-g12345678"
         with patch.object(vm, "run", side_effect=[
@@ -138,6 +169,72 @@ class LifecycleTests(unittest.TestCase):
 
 
 class NativePreparationTests(unittest.TestCase):
+    def test_kind_runtime_configuration_is_idempotent(self):
+        script = (vm.SCRIPT_DIR.parent / "setup-devspace-on-host.sh").read_text()
+        function = script.split("configure_kind_node_tls() {", 1)[1].split("\n}\n", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="nico-kind-tls-test-") as temporary:
+            root = Path(temporary)
+            config, calls = root / "config", root / "calls"
+            command = '''set -eu
+log() { :; }
+run_as_user() {
+  printf '%s\\n' "$*" >> "$CALL_LOG"
+  case "$*" in
+    'docker exec fixture-control-plane cat '*) cat "$CONFIG" ;;
+    'docker exec -i fixture-control-plane tee '*) cat > "$CONFIG" ;;
+  esac
+}
+configure_kind_node_tls() {''' + function + '''
+}
+configure_kind_node_tls
+configure_kind_node_tls
+'''
+            subprocess.run(["bash", "-c", command], check=True, capture_output=True,
+                           text=True, env=dict(os.environ, CLUSTER_NAME="fixture",
+                                               CONFIG=str(config), CALL_LOG=str(calls)))
+            self.assertEqual(calls.read_text().count("systemctl restart containerd"), 1)
+
+    def test_docker_configuration_only_restarts_changed_running_services(self):
+        script = (vm.SCRIPT_DIR.parent / "setup-devspace-on-host.sh").read_text()
+        function = script.split("configure_docker() {", 1)[1].split("\n}\n", 1)[0]
+        config = '[Service]\nEnvironment="GODEBUG=tlsmlkem=0"\n'
+        for active, existing, restarted in (
+                ("0", None, []),
+                ("1", None, ["containerd.service", "docker.service"]),
+                ("1", config, [])):
+            with self.subTest(active=active, existing=existing), \
+                    tempfile.TemporaryDirectory(prefix="nico-docker-test-") as temporary:
+                root = Path(temporary)
+                for service in ("containerd", "docker"):
+                    directory = root / f"{service}.service.d"
+                    directory.mkdir()
+                    if existing is not None:
+                        (directory / "10-tls-compat.conf").write_text(existing)
+                calls = root / "calls"
+                command = '''set -eu
+log() { :; }
+die() { exit 1; }
+usermod() { :; }
+docker() { :; }
+run_as_user() { "$@"; }
+systemctl() {
+  printf '%s\\n' "$*" >> "$CALL_LOG"
+  if [ "$1" = is-active ]; then [ "$ACTIVE" = 1 ]; fi
+}
+configure_docker() {''' + function.replace("/etc/systemd/system", str(root)) + '''
+}
+configure_docker
+'''
+                subprocess.run(["bash", "-c", command], check=True, capture_output=True,
+                               text=True, env=dict(os.environ, DEV_USER="fixture",
+                                                   ACTIVE=active, CALL_LOG=str(calls)))
+                actions = calls.read_text().splitlines()
+                expected = ["restart " + " ".join(restarted)] if restarted else []
+                self.assertEqual([line for line in actions if line.startswith("restart ")], expected)
+                self.assertEqual("daemon-reload" in actions, existing != config)
+                for service in ("containerd", "docker"):
+                    self.assertEqual((root / f"{service}.service.d/10-tls-compat.conf").read_text(), config)
+
     def test_postgres_connection_budget_for_new_and_existing_containers(self):
         script = (vm.SCRIPT_DIR.parent / "prepare-ubuntu-host-for-dev.sh").read_text()
         function = script.split("start_core_postgres() {", 1)[1].split("\n}\n", 1)[0]

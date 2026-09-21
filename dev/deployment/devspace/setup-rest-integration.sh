@@ -27,12 +27,15 @@ dsx_gateway_forward_pid=""
 cleanup() {
   if [[ -n "${api_forward_pid}" ]]; then
     kill "${api_forward_pid}" >/dev/null 2>&1 || true
+    wait "${api_forward_pid}" 2>/dev/null || true
   fi
   if [[ -n "${keycloak_forward_pid}" ]]; then
     kill "${keycloak_forward_pid}" >/dev/null 2>&1 || true
+    wait "${keycloak_forward_pid}" 2>/dev/null || true
   fi
   if [[ -n "${dsx_gateway_forward_pid}" ]]; then
     kill "${dsx_gateway_forward_pid}" >/dev/null 2>&1 || true
+    wait "${dsx_gateway_forward_pid}" 2>/dev/null || true
   fi
 }
 
@@ -43,7 +46,9 @@ require_bin() {
   }
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 require_bin curl
 require_bin jq
@@ -143,21 +148,18 @@ mapfile -t machine_a_tron_bmc_endpoints < <(jq -r '
 # their reports. Subsequent cycles read the updated proxy from shared runtime
 # state.
 sleep 6
+if ((${#machine_a_tron_bmc_endpoints[@]})); then
+  # Fail on broken admin credentials instead of mistaking a 403 for no report.
+  bash "${SCRIPT_DIR}/core-admin.sh" -f json machine show >/dev/null
+fi
 for endpoint in "${machine_a_tron_bmc_endpoints[@]}"; do
-  if ! kubectl exec deployment/nico-api -n "${CORE_NAMESPACE}" -- \
-    /opt/carbide/nico-admin-cli \
-    -f json \
-    --api-url "https://nico-api.${CORE_NAMESPACE}.svc.cluster.local:1079" \
+  if ! bash "${SCRIPT_DIR}/core-admin.sh" -f json \
     site-explorer get-report endpoint "${endpoint}" >/dev/null 2>&1; then
     continue
   fi
-  kubectl exec deployment/nico-api -n "${CORE_NAMESPACE}" -- \
-    /opt/carbide/nico-admin-cli \
-    --api-url "https://nico-api.${CORE_NAMESPACE}.svc.cluster.local:1079" \
+  bash "${SCRIPT_DIR}/core-admin.sh" \
     site-explorer clear-error "${endpoint}"
-  kubectl exec deployment/nico-api -n "${CORE_NAMESPACE}" -- \
-    /opt/carbide/nico-admin-cli \
-    --api-url "https://nico-api.${CORE_NAMESPACE}.svc.cluster.local:1079" \
+  bash "${SCRIPT_DIR}/core-admin.sh" \
     site-explorer refresh "${endpoint}" >/dev/null
 done
 
@@ -321,7 +323,7 @@ for ((attempt = 1; attempt <= verify_attempts; attempt++)); do
     machines_ready="$(jq -r --arg site_id "${site_id}" \
       --argjson expected_host_count "${expected_host_count}" \
       'type == "array" and length == $expected_host_count and
-       all(.[]; .siteId == $site_id)' \
+       all(.[]; .siteId == $site_id and .isUsableByTenant == true)' \
       <<<"${machines}" 2>/dev/null || printf 'false')"
     machine_count="$(jq -r 'if type == "array" then length else 0 end' \
       <<<"${machines}" 2>/dev/null || printf '0')"
@@ -347,17 +349,45 @@ for ((attempt = 1; attempt <= verify_attempts; attempt++)); do
     ) | .complete
   ' <<<"${site_worker_logs}" 2>/dev/null || printf 'false')"
 
+  core_ready=false
+  scouts_ready=false
+  if [[ "${machines_ready}" == true && "${fresh_cycle}" == true ]]; then
+    core_machines="$(bash "${SCRIPT_DIR}/core-admin.sh" -f json machine show 2>/dev/null || true)"
+    core_ready="$(jq -r --argjson rest_machines "${machines}" '
+      [.machines[] | select(.machine_type == 2) |
+       select(.state == "Ready" or .state == "Assigned/Ready")] as $hosts |
+      ([$hosts[].id] | sort) == ([$rest_machines[].controllerMachineId] | sort)
+    ' <<<"${core_machines}" 2>/dev/null || printf 'false')"
+    if [[ "${core_ready}" == true ]]; then
+      # Ping checks both connection presence and responsiveness. Assigned hosts
+      # run a tenant OS and need not have Scout connected.
+      scouts_ready=true
+      while IFS= read -r machine_id; do
+        if ! bash "${SCRIPT_DIR}/core-admin.sh" scout-stream ping "${machine_id}" >/dev/null 2>&1; then
+          scouts_ready=false
+          break
+        fi
+      done < <(jq -r '.machines[] | select(.machine_type == 2 and .state == "Ready") | .id' \
+        <<<"${core_machines}")
+    fi
+  fi
+
   if [[ "${site_ready}" == "true" && "${machines_ready}" == "true" && \
-    "${fresh_cycle}" == "true" ]]; then
-    printf 'REST API reports site %s online with all %s hosts synced from a current inventory\n' \
+    "${fresh_cycle}" == "true" && "${core_ready}" == true && "${scouts_ready}" == true ]]; then
+    printf 'Site %s online: all %s hosts ready in Core, usable in REST, and synced; Ready host Scout pings passed\n' \
       "${site_id}" "${expected_host_count}"
     break
   fi
   if [[ "${attempt}" == "${verify_attempts}" ]]; then
-    printf 'REST integration verification failed: site_ready=%s machines_ready=%s rest_machines=%s expected_hosts=%s fresh_cycle=%s\n' \
+    printf 'REST integration verification failed: site_ready=%s machines_ready=%s rest_machines=%s expected_hosts=%s fresh_cycle=%s core_ready=%s scouts_ready=%s\n' \
       "${site_ready}" "${machines_ready}" "${machine_count}" \
-      "${expected_host_count}" "${fresh_cycle}" >&2
+      "${expected_host_count}" "${fresh_cycle}" "${core_ready}" "${scouts_ready}" >&2
     exit 1
+  fi
+  if ((attempt == 1 || attempt % 12 == 0)); then
+    printf 'Waiting for E2E readiness: site_ready=%s hosts=%s/%s machines_ready=%s fresh_cycle=%s core_ready=%s scouts_ready=%s (attempt %s/%s)\n' \
+      "${site_ready}" "${machine_count}" "${expected_host_count}" \
+      "${machines_ready}" "${fresh_cycle}" "${core_ready}" "${scouts_ready}" "${attempt}" "${verify_attempts}"
   fi
   sleep "${verify_sleep_seconds}"
 done

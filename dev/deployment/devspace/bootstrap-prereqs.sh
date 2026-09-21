@@ -19,9 +19,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 
-# shellcheck source=versions.env
-source "${SCRIPT_DIR}/versions.env"
-
 NAMESPACE="${LOCAL_DEV_NAMESPACE:-nico-system}"
 CERT_MANAGER_NAMESPACE="${LOCAL_DEV_CERT_MANAGER_NAMESPACE:-cert-manager}"
 VALUES_FILE="${LOCAL_DEV_VALUES_FILE:-${REPO_ROOT}/dev/deployment/devspace/values.generated.yaml}"
@@ -261,7 +258,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: ${CORE_POSTGRES_IMAGE}
+          image: postgres:14.5-alpine
           imagePullPolicy: IfNotPresent
           env:
             - name: POSTGRES_PASSWORD
