@@ -24,7 +24,7 @@ use crate::bmc_state::BmcState;
 use crate::injection::InjectionStore;
 use crate::redfish::manager::ManagerState;
 use crate::{
-    Callbacks, EventServiceConfig, HardwareType, MachineInfo, SystemPowerControl,
+    Callbacks, EventServiceConfig, HardwareType, MachineInfo, ResourceResetType,
     VirtualMediaDeviceConfig, auth_router, middleware_router, redfish,
 };
 
@@ -61,7 +61,7 @@ pub struct MachineRouterOptions {
 #[derive(Debug)]
 pub enum BmcCommand {
     SetSystemPower {
-        request: SystemPowerControl,
+        request: ResourceResetType,
         reply: Option<oneshot::Sender<SetSystemPowerResult>>,
     },
     StateRefreshIndication,

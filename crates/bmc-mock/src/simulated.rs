@@ -19,9 +19,7 @@ use std::sync::Mutex;
 
 use tokio::time::Instant;
 
-use crate::{
-    Callbacks, MockPowerState, POWER_CYCLE_DELAY, SetSystemPowerError, SystemPowerControl,
-};
+use crate::{Callbacks, MockPowerState, POWER_CYCLE_DELAY, ResourceResetType, SetSystemPowerError};
 
 /// Stateful callbacks for a generated BMC that is not connected to a real or
 /// virtual machine. This is useful for modeling independently addressable
@@ -49,22 +47,24 @@ impl Callbacks for SimulatedCallbacks {
         *state
     }
 
-    fn send_power_command(
-        &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
-        use SystemPowerControl::*;
+    fn send_power_command(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError> {
+        use ResourceResetType::*;
 
         let new_state = match reset_type {
             On | ForceOn | GracefulRestart | ForceRestart | PushPowerButton | Pause | Resume => {
-                MockPowerState::On
+                Some(MockPowerState::On)
             }
-            GracefulShutdown | ForceOff | Nmi | Suspend => MockPowerState::Off,
-            PowerCycle => MockPowerState::PowerCycling {
+            GracefulShutdown | ForceOff | Nmi | Suspend | Sleep | Hibernate => {
+                Some(MockPowerState::Off)
+            }
+            PowerCycle | FullPowerCycle => Some(MockPowerState::PowerCycling {
                 since: Instant::now(),
-            },
+            }),
+            UnsupportedValue => None,
         };
-        *self.power_state.lock().unwrap() = new_state;
+        if let Some(new_state) = new_state {
+            *self.power_state.lock().unwrap() = new_state;
+        }
         Ok(())
     }
 
@@ -81,11 +81,11 @@ mod tests {
         assert!(matches!(callbacks.get_power_state(), MockPowerState::On));
 
         callbacks
-            .set_power_state(SystemPowerControl::ForceOff)
+            .set_power_state(ResourceResetType::ForceOff)
             .unwrap();
         assert!(matches!(callbacks.get_power_state(), MockPowerState::Off));
 
-        callbacks.set_power_state(SystemPowerControl::On).unwrap();
+        callbacks.set_power_state(ResourceResetType::On).unwrap();
         assert!(matches!(callbacks.get_power_state(), MockPowerState::On));
     }
 
@@ -96,7 +96,7 @@ mod tests {
         for state in [MockPowerState::PoweringOn, MockPowerState::PoweringOff] {
             let callbacks = SimulatedCallbacks::new();
             *callbacks.power_state.lock().unwrap() = state;
-            for control in [SystemPowerControl::On, SystemPowerControl::ForceOn] {
+            for control in [ResourceResetType::On, ResourceResetType::ForceOn] {
                 assert!(
                     matches!(
                         callbacks.set_power_state(control),
@@ -116,7 +116,7 @@ mod tests {
     fn completes_a_power_cycle_after_the_delay() {
         let callbacks = SimulatedCallbacks::new();
         callbacks
-            .set_power_state(SystemPowerControl::PowerCycle)
+            .set_power_state(ResourceResetType::PowerCycle)
             .unwrap();
         assert!(matches!(
             callbacks.get_power_state(),

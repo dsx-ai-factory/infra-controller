@@ -23,7 +23,7 @@ use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
     BmcCommand, Callbacks, HostFirmwareVersions, HostMachineInfo, MachineInfo, MockPowerState,
-    SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
+    ResourceResetType, SetSystemPowerError, SetSystemPowerResult,
 };
 use carbide_utils::test_support::certs::create_random_self_signed_cert;
 use carbide_uuid::machine::MachineId;
@@ -494,16 +494,16 @@ impl HostMachine {
         }
     }
 
-    fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
+    fn set_system_power(&mut self, request: ResourceResetType) -> SetSystemPowerResult {
         tracing::debug!(?request, "Received host system-power request",);
 
         match request {
             // Force-restart does not restart DPUs
-            SystemPowerControl::ForceRestart => {}
+            ResourceResetType::ForceRestart => {}
             // Other power actions happen on the DPUs too (power cycle, force-off, etc.)
             _ => {
                 // Graceful restart might not restart DPUs if an OS is running (let's emulate that)
-                if matches!(request, SystemPowerControl::GracefulRestart)
+                if matches!(request, ResourceResetType::GracefulRestart)
                     && self.live_state.read().unwrap().booted_os.0.is_some()
                 {
                     tracing::debug!(
@@ -590,7 +590,7 @@ impl MachineHandle {
     /// request obeys the same rules as a Redfish one.
     pub(crate) fn set_system_power(
         &self,
-        request: SystemPowerControl,
+        request: ResourceResetType,
     ) -> Result<(), SetSystemPowerError> {
         LiveStateCallbacks::new(self.0.live_state.clone(), self.0.bmc_control_tx.clone())
             .set_power_state(request)
