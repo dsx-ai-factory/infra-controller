@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -17,17 +18,14 @@ import (
 	"logur.dev/logur"
 
 	tsdkClient "go.temporal.io/sdk/client"
-	tsdkConverter "go.temporal.io/sdk/converter"
 	tsdkWorker "go.temporal.io/sdk/worker"
-
-	"go.opentelemetry.io/otel"
-	"go.temporal.io/sdk/contrib/opentelemetry"
-	"go.temporal.io/sdk/interceptor"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
@@ -105,8 +103,6 @@ import (
 
 	nvLinkLogicalPartitionActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/nvlinklogicalpartition"
 	nvLinkLogicalPartitionWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/nvlinklogicalpartition"
-
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/tracing"
 )
 
 const (
@@ -117,30 +113,42 @@ const (
 )
 
 func main() {
-	// First: interceptors and handlers below capture the global propagator.
-	tracing.InstallPropagator()
-	// No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
-	defer tracing.InstallExporter("nico-rest-workflow")()
-	// Initialize context
-	ctx := context.Background()
-
 	// Initialize logger
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	zerolog.LevelFieldName = ZerologLevelFieldName
 	zerolog.MessageFieldName = ZerologMessageFieldName
 
+	if err := run(context.Background()); err != nil {
+		log.Error().Err(err).Msg("workflow worker stopped with an error")
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context) error {
 	cfg := config.NewConfig()
 	defer cfg.Close()
+
+	otelShutdown, err := cotel.Bootstrap(ctx, cfg.GetTracingEnabled(), cfg.GetTracingServiceName())
+	if err != nil {
+		return fmt.Errorf("failed to initialize tracing: %w", err)
+	}
+
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := otelShutdown(shutdownCtx); err != nil {
+			log.Error().Err(err).Msg("failed to shut down tracing")
+		}
+	}()
 
 	dbConfig := cfg.GetDBConfig()
 
 	// Initialize DB connection
 	dbSession, err := cdb.NewSession(ctx, dbConfig.Host, dbConfig.Port, dbConfig.Name, dbConfig.User, dbConfig.Password, "")
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to initialize DB session")
-	} else {
-		defer dbSession.Close()
+		return fmt.Errorf("failed to initialize DB session: %w", err)
 	}
+	defer dbSession.Close()
 
 	// Initializer Temporal client
 	// Create the client object just once per process
@@ -191,51 +199,30 @@ func main() {
 
 	tcfg, err := cfg.GetTemporalConfig()
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to get Temporal config")
+		return fmt.Errorf("failed to get Temporal config: %w", err)
 	}
 
-	var tInterceptors []interceptor.ClientInterceptor
-	var wInterceptors []interceptor.WorkerInterceptor
-
-	if cfg.GetTracingEnabled() {
-		otelInterceptor, err := opentelemetry.NewTracingInterceptor(opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
-		if err != nil {
-			log.Panic().Err(err).Msg("unable to get otelInterceptor")
-		}
-		tInterceptors = append(tInterceptors, otelInterceptor)
-		wInterceptors = append(wInterceptors, otelInterceptor)
+	// Shared options carry the payload converter every binary agrees on and,
+	// when transport tracing is configured, the OpenTelemetry interceptor.
+	// The SDK applies a client interceptor that also implements the worker
+	// interface to every worker built from that client, so the worker must
+	// not register it again.
+	tOptions, err := ctemporal.ClientOptions(tcfg.GetHostPort(), tcfg.Namespace, tcfg.ClientTLSCfg, tLogger)
+	if err != nil {
+		return fmt.Errorf("failed to build Temporal client options: %w", err)
 	}
 
-	tc, err = tsdkClient.NewLazyClient(tsdkClient.Options{
-		HostPort:  tcfg.GetHostPort(),
-		Namespace: tcfg.Namespace,
-		ConnectionOptions: tsdkClient.ConnectionOptions{
-			TLS: tcfg.ClientTLSCfg,
-		},
-		DataConverter: tsdkConverter.NewCompositeDataConverter(
-			tsdkConverter.NewNilPayloadConverter(),
-			tsdkConverter.NewByteSlicePayloadConverter(),
-			tsdkConverter.NewProtoJSONPayloadConverterWithOptions(tsdkConverter.ProtoJSONPayloadConverterOptions{
-				AllowUnknownFields: true,
-			}),
-			tsdkConverter.NewProtoPayloadConverter(),
-			tsdkConverter.NewJSONPayloadConverter(),
-		),
-		Interceptors: tInterceptors,
-		Logger:       tLogger,
-	})
+	tc, err = tsdkClient.NewLazyClient(tOptions)
 
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to create Temporal client")
-	} else {
-		defer tc.Close()
+		return fmt.Errorf("failed to create Temporal client: %w", err)
 	}
+	defer tc.Close()
 
 	w := tsdkWorker.New(tc, tcfg.Queue, tsdkWorker.Options{
 		WorkflowPanicPolicy:              tsdkWorker.FailWorkflow,
 		MaxConcurrentActivityTaskPollers: cfg.GetMaxConcurrentActivityPollers(),
 		MaxConcurrentWorkflowTaskPollers: 10,
-		Interceptors:                     wInterceptors,
 	})
 
 	siteClientPool := sc.NewClientPool(tcfg)
@@ -465,41 +452,50 @@ func main() {
 		w.RegisterActivity(&userManager)
 	}
 
-	// Serve health endpoint
-	hconfig := cfg.GetHealthzConfig()
-	if hconfig.Enabled {
+	// A failing health or metrics server stops the worker so the failure
+	// leaves through run instead of a panic in a goroutine.
+	serveErrs := make(chan error, 2)
+	serve := func(name, addr string) {
 		go func() {
-			log.Info().Msg("starting health check API server")
-			http.HandleFunc("/healthz", cwfh.StatusHandler)
-			http.HandleFunc("/readyz", cwfh.StatusHandler)
-
-			serr := http.ListenAndServe(hconfig.GetListenAddr(), nil)
-			if serr != nil {
-				log.Panic().Err(serr).Msg("failed to start health check server")
+			log.Info().Msgf("starting %s server", name)
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				serveErrs <- fmt.Errorf("%s server on %s: %w", name, addr, err)
 			}
 		}()
+	}
+
+	hconfig := cfg.GetHealthzConfig()
+	if hconfig.Enabled {
+		http.HandleFunc("/healthz", cwfh.StatusHandler)
+		http.HandleFunc("/readyz", cwfh.StatusHandler)
+		serve("health check API", hconfig.GetListenAddr())
 	}
 
 	if mconfig.Enabled {
-		// Serve Prometheus metrics
-		go func() {
-			log.Info().Msg("starting Prometheus metrics server")
-
-			promHandler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg})
-
-			http.Handle("/metrics", promHandler)
-			serr := http.ListenAndServe(mconfig.GetListenAddr(), nil)
-			if serr != nil {
-				log.Panic().Err(serr).Msg("failed to start Prometheus metrics server")
-			}
-		}()
+		http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
+		serve("Prometheus metrics", mconfig.GetListenAddr())
 	}
+
+	interrupt := make(chan interface{}, 1)
+	go func() {
+		select {
+		case <-tsdkWorker.InterruptCh():
+		case err := <-serveErrs:
+			serveErrs <- err
+		}
+		interrupt <- struct{}{}
+	}()
 
 	// Start listening to the Task Queue
 	log.Info().Str("Temporal Namespace", tcfg.Namespace).Msg("starting Temporal worker")
-	err = w.Run(tsdkWorker.InterruptCh())
+	err = w.Run(interrupt)
 	if err != nil {
-		log.Panic().Err(err).Str("Temporal Namespace", tcfg.Namespace).Msg("failed to start worker")
+		return fmt.Errorf("failed to run worker for Temporal namespace %s: %w", tcfg.Namespace, err)
+	}
+	select {
+	case err := <-serveErrs:
+		return err
+	default:
 	}
 
 	// Trigger cron workflow
@@ -523,4 +519,5 @@ func main() {
 	}
 
 	// NOTE: Log messages past this point do not show up in the log output
+	return nil
 }

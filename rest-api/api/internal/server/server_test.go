@@ -29,11 +29,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 // Test_ProxyTimeoutsFitWriteTimeout guards the ceiling that the gRPC proxy
@@ -92,6 +98,93 @@ func Test_InitAPIServer(t *testing.T) {
 	}
 }
 
+// Test_InitAPIServerTracingMiddleware proves the startup gate the tracing
+// bootstrap promises: the OpenTelemetry Echo middleware is installed exactly
+// when transport instrumentation is on, and a routed request then records a
+// server span against the global tracer provider that the rest of the request
+// nests under.
+func Test_InitAPIServerTracingMiddleware(t *testing.T) {
+	tests := []struct {
+		descr          string
+		propagators    string
+		wantServerSpan bool
+	}{
+		{descr: "transport enabled installs the middleware", wantServerSpan: true},
+		{descr: "propagation disabled skips the middleware", propagators: "none"},
+	}
+
+	cfg := common.GetTestConfig()
+	dbSession := cdbu.GetTestDBSession(t, true)
+	defer dbSession.Close()
+	tcfg, _ := cfg.GetTemporalConfig()
+
+	for _, tc := range tests {
+		t.Run(tc.descr, func(t *testing.T) {
+			previousProvider := otel.GetTracerProvider()
+			previousPropagator := otel.GetTextMapPropagator()
+			t.Cleanup(func() {
+				otel.SetTracerProvider(previousProvider)
+				otel.SetTextMapPropagator(previousPropagator)
+			})
+			exporter := tracetest.NewInMemoryExporter()
+			otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter)))
+
+			// Export stays disabled so the provider above remains global; the
+			// bootstrap still decides transport instrumentation from the
+			// propagator configuration.
+			t.Setenv("OTEL_PROPAGATORS", tc.propagators)
+			shutdown, err := cotel.Bootstrap(context.Background(), false, "")
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, shutdown(context.Background())) })
+
+			srv := InitAPIServer(cfg, dbSession, &tmocks.Client{}, &tmocks.NamespaceClient{}, sc.NewClientPool(tcfg), nil)
+			// Startup work such as the JWKS fetch records its own root spans.
+			// Capture only what the request below produces.
+			exporter.Reset()
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/%s/org/test-org/%s/metadata", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), nil)
+			req.Header.Set("traceparent", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01")
+			srv.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+			spans := exporter.GetSpans()
+			var serverSpans tracetest.SpanStubs
+			for _, span := range spans {
+				if span.SpanKind == trace.SpanKindServer {
+					serverSpans = append(serverSpans, span)
+				}
+			}
+			if !tc.wantServerSpan {
+				assert.Empty(t, serverSpans, "no middleware means no server span")
+				return
+			}
+			require.Len(t, serverSpans, 1, "the middleware records one server span per request")
+
+			wantTraceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+			require.NoError(t, err)
+			wantParentID, err := trace.SpanIDFromHex("0123456789abcdef")
+			require.NoError(t, err)
+			serverSpan := serverSpans[0]
+			assert.Equal(t, wantTraceID, serverSpan.SpanContext.TraceID(), "the server span joins the upstream trace")
+			assert.Equal(t, wantParentID, serverSpan.Parent.SpanID())
+			assert.True(t, serverSpan.Parent.IsRemote())
+
+			authSpans := 0
+			for _, span := range spans {
+				assert.Equal(t, wantTraceID, span.SpanContext.TraceID(),
+					"spans started during the request must join the upstream trace")
+				if span.Name == "AuthMiddleware" {
+					authSpans++
+					assert.Equal(t, serverSpan.SpanContext.SpanID(), span.Parent.SpanID(),
+						"the auth span nests under the server span")
+				}
+			}
+			assert.Equal(t, 1, authSpans)
+		})
+	}
+}
+
 func Test_InitTemporalClients(t *testing.T) {
 	tests := []struct {
 		name string
@@ -122,7 +215,7 @@ func Test_InitTemporalClients(t *testing.T) {
 				Port:      listener.Addr().(*net.TCPAddr).Port,
 				Namespace: "cloud",
 			}
-			client, namespaceClient, err := InitTemporalClients(tcfg, true)
+			client, namespaceClient, err := InitTemporalClients(tcfg)
 			require.NoError(t, err)
 			t.Cleanup(client.Close)
 			t.Cleanup(namespaceClient.Close)

@@ -8,12 +8,15 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
 )
@@ -637,19 +640,15 @@ type VpcDAO interface {
 
 // VpcSQLDAO is an implementation of the VpcDAO interface
 type VpcSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // GetByID returns a Vpc by ID
-func (vsd VpcSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Vpc, error) {
+func (vsd VpcSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.GetByID")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", id.String())
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.GetByID")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
+	cotel.SetAttribute(vpcDAOSpan, attribute.String("id", id.String()))
 
 	v := &Vpc{}
 
@@ -673,12 +672,10 @@ func (vsd VpcSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, inclu
 // GetCountByStatus returns count of VPCs for given status
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned map is 0
-func (vsd VpcSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, tenantID *uuid.UUID, siteID *uuid.UUID) (map[string]int, error) {
+func (vsd VpcSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, tenantID *uuid.UUID, siteID *uuid.UUID) (_ map[string]int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.GetCountByStatus")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.GetCountByStatus")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
 
 	v := &Vpc{}
 	var statusQueryResults []map[string]interface{}
@@ -686,15 +683,15 @@ func (vsd VpcSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastruc
 	query := db.GetIDB(tx, vsd.dbSession).NewSelect().Model(v)
 	if infrastructureProviderID != nil {
 		query = query.Where("v.infrastructure_provider_id = ?", *infrastructureProviderID)
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "infrastructure_provider_id", infrastructureProviderID.String())
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("infrastructure_provider_id", infrastructureProviderID.String()))
 	}
 	if tenantID != nil {
 		query = query.Where("v.tenant_id = ?", *tenantID)
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "tenant_id", tenantID.String())
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("tenant_id", tenantID.String()))
 	}
 	if siteID != nil {
 		query = query.Where("v.site_id = ?", *siteID)
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "site_id", siteID.String())
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("site_id", siteID.String()))
 	}
 
 	err := query.Column("v.status").ColumnExpr("COUNT(*) AS total_count").GroupExpr("v.status").Scan(ctx, &statusQueryResults)
@@ -721,29 +718,20 @@ func (vsd VpcSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastruc
 	return results, nil
 }
 
-func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.SelectQuery, vpcDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.SelectQuery, vpcDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.Name != nil {
 		query = query.Where("v.name = ?", *filter.Name)
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "name", *filter.Name)
-		}
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("name", *filter.Name))
 	}
 
 	if filter.Org != nil {
 		query = query.Where("v.org = ?", *filter.Org)
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "org", *filter.Org)
-		}
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("org", *filter.Org))
 	}
 
 	if filter.InfrastructureProviderID != nil {
 		query = query.Where("v.infrastructure_provider_id = ?", *filter.InfrastructureProviderID)
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "infrastructure_provider_id", filter.InfrastructureProviderID.String())
-		}
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("infrastructure_provider_id", filter.InfrastructureProviderID.String()))
 	}
 
 	if filter.TenantIDs != nil {
@@ -751,10 +739,6 @@ func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.Select
 			query = query.Where("v.tenant_id = ?", filter.TenantIDs[0])
 		} else {
 			query = query.Where("v.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		}
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "tenant_ids", filter.TenantIDs)
 		}
 	}
 
@@ -764,26 +748,15 @@ func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.Select
 		} else {
 			query = query.Where("v.site_id IN (?)", bun.In(filter.SiteIDs))
 		}
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 
 	if filter.NVLinkLogicalPartitionIDs != nil {
 		query = query.Where("v.nvlink_logical_partition_id IN (?)", bun.In(filter.NVLinkLogicalPartitionIDs))
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "nvlink_logical_partition_ids", filter.NVLinkLogicalPartitionIDs)
-		}
 	}
 
 	if filter.NetworkVirtualizationType != nil {
 		query = query.Where("v.network_virtualization_type = ?", filter.NetworkVirtualizationType)
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "network_virtualization_type", *filter.NetworkVirtualizationType)
-		}
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("network_virtualization_type", *filter.NetworkVirtualizationType))
 	}
 
 	if filter.Statuses != nil {
@@ -792,35 +765,19 @@ func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.Select
 		} else {
 			query = query.Where("v.status IN (?)", bun.In(filter.Statuses))
 		}
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "statuses", filter.Statuses)
-		}
 	}
 
 	if filter.NetworkSecurityGroupIDs != nil {
 		// Single-item IN queries are optimized by the query planner to =
 		query = query.Where("v.network_security_group_id IN (?)", bun.In(filter.NetworkSecurityGroupIDs))
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "network_security_group_ids", filter.NetworkSecurityGroupIDs)
-		}
 	}
 
 	if filter.VpcIDs != nil {
 		query = query.Where("v.id IN (?)", bun.In(filter.VpcIDs))
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "vpc_ids", filter.VpcIDs)
-		}
 	}
 
 	if filter.ControllerVpcIDs != nil {
 		query = query.Where("v.controller_vpc_id IN (?)", bun.In(filter.ControllerVpcIDs))
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "controller_vpc_ids", filter.ControllerVpcIDs)
-		}
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -834,9 +791,7 @@ func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.Select
 				WhereOr("v.status ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("v.labels::text ILIKE ?", "%"+searchQuery+"%")
 		})
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "search_query", searchQuery)
-		}
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("search_query", searchQuery))
 	}
 	return query, nil
 }
@@ -845,12 +800,10 @@ func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.Select
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in VpcOrderByDefault in ascending order
-func (vsd VpcSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcFilterInput, page paginator.PageInput, includeRelations []string) ([]Vpc, int, error) {
+func (vsd VpcSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcFilterInput, page paginator.PageInput, includeRelations []string) (_ []Vpc, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.GetAll")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.GetAll")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
 
 	vpcs := []Vpc{}
 	query := db.GetIDB(tx, vsd.dbSession).NewSelect().Model(&vpcs)
@@ -887,14 +840,11 @@ func (vsd VpcSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcFilterInpu
 }
 
 // Create a new Vpc from the given parameters
-func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput) (*Vpc, error) {
+func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.Create")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "name", input.Name)
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.Create")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
+	cotel.SetAttribute(vpcDAOSpan, attribute.String("name", input.Name))
 
 	id := uuid.New()
 	if input.ID != nil {
@@ -941,14 +891,11 @@ func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput
 }
 
 // Update updates an existing Vpc from the given parameters
-func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput) (*Vpc, error) {
+func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.Update")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", input.VpcID.String())
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.Update")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
+	cotel.SetAttribute(vpcDAOSpan, attribute.String("id", input.VpcID.String()))
 
 	v := &Vpc{
 		ID: input.VpcID,
@@ -959,49 +906,48 @@ func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput
 	if input.Name != nil {
 		v.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("name", *input.Name))
 	}
 
 	if input.Description != nil {
 		v.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "description", *input.Description)
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("description", *input.Description))
 	}
 
 	if input.NVLinkLogicalPartitionID != nil {
 		v.NVLinkLogicalPartitionID = input.NVLinkLogicalPartitionID
 		updatedFields = append(updatedFields, "nvlink_logical_partition_id")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "nvlink_logical_partition_id", input.NVLinkLogicalPartitionID.String())
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("nvlink_logical_partition_id", input.NVLinkLogicalPartitionID.String()))
 	}
 
 	if input.NetworkVirtualizationType != nil {
 		v.NetworkVirtualizationType = input.NetworkVirtualizationType
 		updatedFields = append(updatedFields, "network_virtualization_type")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "network_virtualization_type", *input.NetworkVirtualizationType)
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("network_virtualization_type", *input.NetworkVirtualizationType))
 	}
 
 	if input.SlaacEnabled != nil {
 		v.SlaacEnabled = *input.SlaacEnabled
 		updatedFields = append(updatedFields, "slaac_enabled")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "slaac_enabled", *input.SlaacEnabled)
 	}
 
 	if input.ControllerVpcID != nil {
 		v.ControllerVpcID = input.ControllerVpcID
 		updatedFields = append(updatedFields, "controller_vpc_id")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "controller_vpc_id", input.ControllerVpcID.String())
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("controller_vpc_id", input.ControllerVpcID.String()))
 	}
 
 	if input.RoutingProfile != nil {
 		v.RoutingProfile = input.RoutingProfile
 		updatedFields = append(updatedFields, "routing_profile")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "routing_profile", *input.RoutingProfile)
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("routing_profile", *input.RoutingProfile))
 	}
 
 	if input.PowerResourceGroup != nil {
 		v.PowerResourceGroup = input.PowerResourceGroup
 		updatedFields = append(updatedFields, "power_resource_group")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "power_resource_group", *input.PowerResourceGroup)
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("power_resource_group", *input.PowerResourceGroup))
 	}
 
 	if input.RoutingProfileOverrides != nil {
@@ -1017,13 +963,11 @@ func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput
 	if input.ActiveVni != nil {
 		v.ActiveVni = input.ActiveVni
 		updatedFields = append(updatedFields, "active_vni")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "active_vni", *input.ActiveVni)
 	}
 
 	if input.Vni != nil {
 		v.Vni = input.Vni
 		updatedFields = append(updatedFields, "vni")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "vni", *input.Vni)
 	}
 
 	if input.Labels != nil {
@@ -1034,31 +978,22 @@ func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput
 	if input.Status != nil {
 		v.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(vpcDAOSpan, attribute.String("status", *input.Status))
 	}
 
 	if input.IsMissingOnSite != nil {
 		v.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
 	}
 
 	if input.NetworkSecurityGroupID != nil {
 		v.NetworkSecurityGroupID = input.NetworkSecurityGroupID
 		updatedFields = append(updatedFields, "network_security_group_id")
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "network_security_group_id", input.NetworkSecurityGroupID)
-		}
 	}
 
 	if input.NetworkSecurityGroupPropagationDetails != nil {
 		v.NetworkSecurityGroupPropagationDetails = input.NetworkSecurityGroupPropagationDetails
 		updatedFields = append(updatedFields, "network_security_group_propagation_details")
-
-		if vpcDAOSpan != nil {
-			vsd.tracerSpan.SetAttribute(vpcDAOSpan, "network_security_group_propagation_details", input.NetworkSecurityGroupPropagationDetails)
-		}
 	}
 
 	if len(updatedFields) > 0 {
@@ -1079,14 +1014,11 @@ func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput
 }
 
 // Clear clears VPC attributes based on provided arguments
-func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) (*Vpc, error) {
+func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.ClearFromParams")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", input.VpcID.String())
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.ClearFromParams")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
+	cotel.SetAttribute(vpcDAOSpan, attribute.String("id", input.VpcID.String()))
 
 	v := &Vpc{
 		ID: input.VpcID,
@@ -1172,14 +1104,11 @@ func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) 
 }
 
 // DeleteByID deletes a Vpc by ID
-func (vsd VpcSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (vsd VpcSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.DeleteByID")
-	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
-
-		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", id.String())
-	}
+	ctx, vpcDAOSpan := cotel.StartSpan(ctx, "VpcDAO.DeleteByID")
+	defer func() { cotel.EndSpan(vpcDAOSpan, retErr) }()
+	cotel.SetAttribute(vpcDAOSpan, attribute.String("id", id.String()))
 
 	v := &Vpc{
 		ID: id,
@@ -1196,7 +1125,6 @@ func (vsd VpcSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) er
 // NewVpcDAO returns a new VpcDAO
 func NewVpcDAO(dbSession *db.Session) VpcDAO {
 	return &VpcSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

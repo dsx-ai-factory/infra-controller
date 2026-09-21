@@ -40,3 +40,8 @@ resources:
   limits:
     memory: "256Mi"
     cpu: "250m"
+
+# -- Extra container environment, name->value. Mainly for OTEL_* variables:
+# the binary exports traces when OTEL_EXPORTER_OTLP_ENDPOINT (or the traces
+# specific endpoint) is set and otherwise only forwards trace context.
+extraEnv: {}

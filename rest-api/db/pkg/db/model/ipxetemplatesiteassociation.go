@@ -8,12 +8,13 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
 
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 const (
@@ -103,20 +104,17 @@ type IpxeTemplateSiteAssociationDAO interface {
 type IpxeTemplateSiteAssociationSQLDAO struct {
 	dbSession *db.Session
 	IpxeTemplateSiteAssociationDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new IpxeTemplateSiteAssociation
 func (itsasd IpxeTemplateSiteAssociationSQLDAO) Create(
 	ctx context.Context, tx *db.Tx,
 	input IpxeTemplateSiteAssociationCreateInput,
-) (*IpxeTemplateSiteAssociation, error) {
-	ctx, span := itsasd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateSiteAssociationDAO.Create")
-	if span != nil {
-		defer span.End()
-		itsasd.tracerSpan.SetAttribute(span, "ipxe_template_id", input.IpxeTemplateID.String())
-		itsasd.tracerSpan.SetAttribute(span, "site_id", input.SiteID.String())
-	}
+) (_ *IpxeTemplateSiteAssociation, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "IpxeTemplateSiteAssociationDAO.Create")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.String("ipxe_template_id", input.IpxeTemplateID.String()))
+	cotel.SetAttribute(span, attribute.String("site_id", input.SiteID.String()))
 
 	itsa := &IpxeTemplateSiteAssociation{
 		ID:             uuid.New(),
@@ -134,12 +132,10 @@ func (itsasd IpxeTemplateSiteAssociationSQLDAO) Create(
 
 // GetByID returns an IpxeTemplateSiteAssociation by ID
 // Returns db.ErrDoesNotExist if the record is not found
-func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*IpxeTemplateSiteAssociation, error) {
-	ctx, span := itsasd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateSiteAssociationDAO.GetByID")
-	if span != nil {
-		defer span.End()
-		itsasd.tracerSpan.SetAttribute(span, "id", id.String())
-	}
+func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *IpxeTemplateSiteAssociation, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "IpxeTemplateSiteAssociationDAO.GetByID")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.String("id", id.String()))
 
 	itsa := &IpxeTemplateSiteAssociation{}
 
@@ -161,13 +157,11 @@ func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByID(ctx context.Context, tx 
 
 // GetByIpxeTemplateIDAndSiteID returns an IpxeTemplateSiteAssociation by (template, site).
 // Returns db.ErrDoesNotExist if the record is not found.
-func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByIpxeTemplateIDAndSiteID(ctx context.Context, tx *db.Tx, ipxeTemplateID uuid.UUID, siteID uuid.UUID, includeRelations []string) (*IpxeTemplateSiteAssociation, error) {
-	ctx, span := itsasd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateSiteAssociationDAO.GetByIpxeTemplateIDAndSiteID")
-	if span != nil {
-		defer span.End()
-		itsasd.tracerSpan.SetAttribute(span, "ipxe_template_id", ipxeTemplateID.String())
-		itsasd.tracerSpan.SetAttribute(span, "site_id", siteID.String())
-	}
+func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByIpxeTemplateIDAndSiteID(ctx context.Context, tx *db.Tx, ipxeTemplateID uuid.UUID, siteID uuid.UUID, includeRelations []string) (_ *IpxeTemplateSiteAssociation, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "IpxeTemplateSiteAssociationDAO.GetByIpxeTemplateIDAndSiteID")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.String("ipxe_template_id", ipxeTemplateID.String()))
+	cotel.SetAttribute(span, attribute.String("site_id", siteID.String()))
 
 	itsa := &IpxeTemplateSiteAssociation{}
 
@@ -190,11 +184,9 @@ func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByIpxeTemplateIDAndSiteID(ctx
 }
 
 // GetAll returns all IpxeTemplateSiteAssociation rows with optional filters
-func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IpxeTemplateSiteAssociationFilterInput, page paginator.PageInput, includeRelations []string) ([]IpxeTemplateSiteAssociation, int, error) {
-	ctx, span := itsasd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateSiteAssociationDAO.GetAll")
-	if span != nil {
-		defer span.End()
-	}
+func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IpxeTemplateSiteAssociationFilterInput, page paginator.PageInput, includeRelations []string) (_ []IpxeTemplateSiteAssociation, _ int, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "IpxeTemplateSiteAssociationDAO.GetAll")
+	defer func() { cotel.EndSpan(span, retErr) }()
 
 	itsas := []IpxeTemplateSiteAssociation{}
 
@@ -209,15 +201,9 @@ func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetAll(ctx context.Context, tx *
 	query := db.GetIDB(tx, itsasd.dbSession).NewSelect().Model(&itsas)
 	if len(filter.IpxeTemplateIDs) > 0 {
 		query = query.Where("itsa.ipxe_template_id IN (?)", bun.In(filter.IpxeTemplateIDs))
-		if span != nil {
-			itsasd.tracerSpan.SetAttribute(span, "ipxe_template_ids", filter.IpxeTemplateIDs)
-		}
 	}
 	if len(filter.SiteIDs) > 0 {
 		query = query.Where("itsa.site_id IN (?)", bun.In(filter.SiteIDs))
-		if span != nil {
-			itsasd.tracerSpan.SetAttribute(span, "site_ids", filter.SiteIDs)
-		}
 	}
 
 	for _, relation := range includeRelations {
@@ -242,12 +228,10 @@ func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetAll(ctx context.Context, tx *
 }
 
 // Delete removes an IpxeTemplateSiteAssociation by ID
-func (itsasd IpxeTemplateSiteAssociationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
-	ctx, span := itsasd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateSiteAssociationDAO.Delete")
-	if span != nil {
-		defer span.End()
-		itsasd.tracerSpan.SetAttribute(span, "id", id.String())
-	}
+func (itsasd IpxeTemplateSiteAssociationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "IpxeTemplateSiteAssociationDAO.Delete")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.String("id", id.String()))
 
 	itsa := &IpxeTemplateSiteAssociation{ID: id}
 
@@ -258,7 +242,6 @@ func (itsasd IpxeTemplateSiteAssociationSQLDAO) Delete(ctx context.Context, tx *
 // NewIpxeTemplateSiteAssociationDAO returns a new IpxeTemplateSiteAssociationDAO
 func NewIpxeTemplateSiteAssociationDAO(dbSession *db.Session) IpxeTemplateSiteAssociationDAO {
 	return &IpxeTemplateSiteAssociationSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

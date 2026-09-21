@@ -14,12 +14,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -379,19 +380,15 @@ type InfiniBandPartitionDAO interface {
 
 // InfiniBandPartitionSQLDAO is an implementation of the InfiniBandPartitionDAO interface
 type InfiniBandPartitionSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // GetByID returns a InfiniBandPartition by ID
-func (ibpsd InfiniBandPartitionSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*InfiniBandPartition, error) {
+func (ibpsd InfiniBandPartitionSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *InfiniBandPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, PartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "PartitionDAO.GetByID")
-	if PartitionDAOSpan != nil {
-		defer PartitionDAOSpan.End()
-
-		ibpsd.tracerSpan.SetAttribute(PartitionDAOSpan, "id", id.String())
-	}
+	ctx, PartitionDAOSpan := cotel.StartSpan(ctx, "PartitionDAO.GetByID")
+	defer func() { cotel.EndSpan(PartitionDAOSpan, retErr) }()
+	cotel.SetAttribute(PartitionDAOSpan, attribute.String("id", id.String()))
 
 	p := &InfiniBandPartition{}
 
@@ -416,52 +413,41 @@ func (ibpsd InfiniBandPartitionSQLDAO) GetByID(ctx context.Context, tx *db.Tx, i
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in InfiniBandPartitionOrderByDefault in ascending order
-func (ibpsd InfiniBandPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InfiniBandPartitionFilterInput, page paginator.PageInput, includeRelations []string) ([]InfiniBandPartition, int, error) {
+func (ibpsd InfiniBandPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InfiniBandPartitionFilterInput, page paginator.PageInput, includeRelations []string) (_ []InfiniBandPartition, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandPartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "PartitionDAO.GetAll")
-	if InfiniBandPartitionDAOSpan != nil {
-		defer InfiniBandPartitionDAOSpan.End()
-	}
+	ctx, InfiniBandPartitionDAOSpan := cotel.StartSpan(ctx, "PartitionDAO.GetAll")
+	defer func() { cotel.EndSpan(InfiniBandPartitionDAOSpan, retErr) }()
 
 	ibps := []InfiniBandPartition{}
 
 	query := db.GetIDB(tx, ibpsd.dbSession).NewSelect().Model(&ibps)
 	if filter.Names != nil {
 		query = query.Where("ibp.name IN (?)", bun.In(filter.Names))
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "name", filter.Names)
 	}
 	if filter.SharpEnabled != nil {
 		query = query.Where("ibp.enable_sharp = ?", filter.SharpEnabled)
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "enable_sharp", filter.SharpEnabled)
 	}
 	if filter.SiteIDs != nil {
 		query = query.Where("ibp.site_id IN (?)", bun.In(filter.SiteIDs))
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "site_id", filter.SiteIDs)
 	}
 	if filter.TenantIDs != nil {
 		query = query.Where("ibp.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "tenant_id", filter.TenantIDs)
 	}
 	if filter.TenantOrgs != nil {
 		query = query.Where("ibp.org IN (?)", bun.In(filter.TenantOrgs))
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "org", filter.TenantOrgs)
 	}
 	if filter.Statuses != nil {
 		query = query.Where("ibp.status IN (?)", bun.In(filter.Statuses))
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "status", filter.Statuses)
 	}
 	if filter.InfiniBandPartitionIDs != nil {
 		query = query.Where("ibp.id IN (?)", bun.In(filter.InfiniBandPartitionIDs))
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "id", filter.InfiniBandPartitionIDs)
 	}
 
 	if filter.PartitionKeys != nil {
 		query = query.Where("ibp.partition_key IN (?)", bun.In(filter.PartitionKeys))
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "partition_key", filter.PartitionKeys)
 	}
 	if filter.PartitionNames != nil {
 		query = query.Where("ibp.partition_name IN (?)", bun.In(filter.PartitionNames))
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "partition_name", filter.PartitionNames)
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -476,7 +462,7 @@ func (ibpsd InfiniBandPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 				WhereOr("ibp.status ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("ibp.labels::text ILIKE ?", "%"+searchQuery+"%")
 		})
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(InfiniBandPartitionDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -502,14 +488,11 @@ func (ibpsd InfiniBandPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 }
 
 // Create creates a new InfiniBandPartition from the given parameters
-func (ibpsd InfiniBandPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, input InfiniBandPartitionCreateInput) (*InfiniBandPartition, error) {
+func (ibpsd InfiniBandPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, input InfiniBandPartitionCreateInput) (_ *InfiniBandPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandPartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandPartitionDAO.Create")
-	if InfiniBandPartitionDAOSpan != nil {
-		defer InfiniBandPartitionDAOSpan.End()
-
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "name", input.Name)
-	}
+	ctx, InfiniBandPartitionDAOSpan := cotel.StartSpan(ctx, "InfiniBandPartitionDAO.Create")
+	defer func() { cotel.EndSpan(InfiniBandPartitionDAOSpan, retErr) }()
+	cotel.SetAttribute(InfiniBandPartitionDAOSpan, attribute.String("name", input.Name))
 
 	id := uuid.New()
 
@@ -555,14 +538,10 @@ func (ibpsd InfiniBandPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 }
 
 // Update updates an existing InfiniBandPartition from the given parameters
-func (ibpsd InfiniBandPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, input InfiniBandPartitionUpdateInput) (*InfiniBandPartition, error) {
+func (ibpsd InfiniBandPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, input InfiniBandPartitionUpdateInput) (_ *InfiniBandPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandPartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandPartitionDAO.Update")
-	if InfiniBandPartitionDAOSpan != nil {
-		defer InfiniBandPartitionDAOSpan.End()
-
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "id", input.InfiniBandPartitionID)
-	}
+	ctx, InfiniBandPartitionDAOSpan := cotel.StartSpan(ctx, "InfiniBandPartitionDAO.Update")
+	defer func() { cotel.EndSpan(InfiniBandPartitionDAOSpan, retErr) }()
 
 	ibp := &InfiniBandPartition{
 		ID: input.InfiniBandPartitionID,
@@ -579,52 +558,46 @@ func (ibpsd InfiniBandPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 		}
 		ibp.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(InfiniBandPartitionDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.Description != nil {
 		ibp.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "description", *input.Description)
+		cotel.SetAttribute(InfiniBandPartitionDAOSpan, attribute.String("description", *input.Description))
 	}
 	if input.ControllerIBPartitionID != nil {
 		ibp.ControllerIBPartitionID = input.ControllerIBPartitionID
 		updatedFields = append(updatedFields, "controller_ib_partition_id")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "controller_ib_partition_id", input.ControllerIBPartitionID)
 	}
 	if input.PartitionKey != nil {
 		ibp.PartitionKey = input.PartitionKey
 		updatedFields = append(updatedFields, "partition_key")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "partition_key", *input.PartitionKey)
+		cotel.SetAttribute(InfiniBandPartitionDAOSpan, attribute.String("partition_key", *input.PartitionKey))
 	}
 	if input.PartitionName != nil {
 		ibp.PartitionName = input.PartitionName
 		updatedFields = append(updatedFields, "partition_name")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "partition_name", *input.PartitionName)
+		cotel.SetAttribute(InfiniBandPartitionDAOSpan, attribute.String("partition_name", *input.PartitionName))
 	}
 	if input.ServiceLevel != nil {
 		ibp.ServiceLevel = input.ServiceLevel
 		updatedFields = append(updatedFields, "service_level")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "service_level", *input.ServiceLevel)
 	}
 	if input.RateLimit != nil {
 		ibp.RateLimit = input.RateLimit
 		updatedFields = append(updatedFields, "rate_limit")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "rate_limit", *input.RateLimit)
 	}
 	if input.Mtu != nil {
 		ibp.Mtu = input.Mtu
 		updatedFields = append(updatedFields, "mtu")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "mtu", *input.Mtu)
 	}
 	if input.EnableSharp != nil {
 		ibp.EnableSharp = input.EnableSharp
 		updatedFields = append(updatedFields, "enable_sharp")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "enable_sharp", *input.EnableSharp)
 	}
 	if input.Labels != nil {
 		ibp.Labels = input.Labels
 		updatedFields = append(updatedFields, "labels")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "labels", input.Labels)
 	}
 	if input.Status != nil {
 		if !InfiniBandPartitionStatusMap[*input.Status] {
@@ -632,12 +605,10 @@ func (ibpsd InfiniBandPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 		}
 		ibp.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "status", *input.Status)
 	}
 	if input.IsMissingOnSite != nil {
 		ibp.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
 	}
 
 	if len(updatedFields) > 0 {
@@ -657,14 +628,10 @@ func (ibpsd InfiniBandPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 }
 
 // Clear clears InfiniBandPartition attributes based on provided arguments
-func (ibpsd InfiniBandPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InfiniBandPartitionClearInput) (*InfiniBandPartition, error) {
+func (ibpsd InfiniBandPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InfiniBandPartitionClearInput) (_ *InfiniBandPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandPartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandPartitionDAO.Clear")
-	if InfiniBandPartitionDAOSpan != nil {
-		defer InfiniBandPartitionDAOSpan.End()
-
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "id", input.InfiniBandPartitionID)
-	}
+	ctx, InfiniBandPartitionDAOSpan := cotel.StartSpan(ctx, "InfiniBandPartitionDAO.Clear")
+	defer func() { cotel.EndSpan(InfiniBandPartitionDAOSpan, retErr) }()
 
 	ibp := &InfiniBandPartition{
 		ID: input.InfiniBandPartitionID,
@@ -728,14 +695,11 @@ func (ibpsd InfiniBandPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, inp
 }
 
 // Delete deletes a InfiniBandPartition by ID
-func (ibpsd InfiniBandPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ibpsd InfiniBandPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandPartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandPartitionDAO.Delete")
-	if InfiniBandPartitionDAOSpan != nil {
-		defer InfiniBandPartitionDAOSpan.End()
-
-		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "id", id.String())
-	}
+	ctx, InfiniBandPartitionDAOSpan := cotel.StartSpan(ctx, "InfiniBandPartitionDAO.Delete")
+	defer func() { cotel.EndSpan(InfiniBandPartitionDAOSpan, retErr) }()
+	cotel.SetAttribute(InfiniBandPartitionDAOSpan, attribute.String("id", id.String()))
 
 	ibp := &InfiniBandPartition{
 		ID: id,
@@ -752,7 +716,6 @@ func (ibpsd InfiniBandPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id
 // NewInfiniBandPartitionDAO returns a new InfiniBandPartitionDAO
 func NewInfiniBandPartitionDAO(dbSession *db.Session) InfiniBandPartitionDAO {
 	return &InfiniBandPartitionSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

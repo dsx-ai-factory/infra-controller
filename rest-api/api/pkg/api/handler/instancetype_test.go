@@ -2832,11 +2832,10 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	scp := sc.NewClientPool(tcfg)
 
 	cith := CreateInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		scp:        scp,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
+		scp:       scp,
 	}
 
 	if got := NewCreateInstanceTypeHandler(dbSession, tc, scp, cfg); !reflect.DeepEqual(got, cith) {
@@ -2844,10 +2843,9 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	gaith := GetAllInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 
 	if got := NewGetAllInstanceTypeHandler(dbSession, tc, cfg); !reflect.DeepEqual(got, gaith) {
@@ -2855,10 +2853,9 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	gith := GetInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 
 	if got := NewGetInstanceTypeHandler(dbSession, tc, cfg); !reflect.DeepEqual(got, gith) {
@@ -2866,11 +2863,10 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	uith := UpdateInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		scp:        scp,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
+		scp:       scp,
 	}
 
 	if got := NewUpdateInstanceTypeHandler(dbSession, tc, scp, cfg); !reflect.DeepEqual(got, uith) {
@@ -2878,11 +2874,10 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	dith := DeleteInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		scp:        scp,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
+		scp:       scp,
 	}
 
 	if got := NewDeleteInstanceTypeHandler(dbSession, tc, scp, cfg); !reflect.DeepEqual(got, dith) {

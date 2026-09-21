@@ -9,13 +9,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	"github.com/uptrace/bun"
 
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -606,21 +607,17 @@ type OperatingSystemDAO interface {
 type OperatingSystemSQLDAO struct {
 	dbSession *db.Session
 	OperatingSystemDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new OperatingSystem from the given parameters
 // The returned OperatingSystem will not have any related structs (InfrastructureProvider/Site) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ossd OperatingSystemSQLDAO) Create(ctx context.Context, tx *db.Tx, input OperatingSystemCreateInput) (*OperatingSystem, error) {
+func (ossd OperatingSystemSQLDAO) Create(ctx context.Context, tx *db.Tx, input OperatingSystemCreateInput) (_ *OperatingSystem, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.Create")
-	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
-
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "name", input.Name)
-	}
+	ctx, operatingSystemSQLDAOSpan := cotel.StartSpan(ctx, "OperatingSystemDAO.Create")
+	defer func() { cotel.EndSpan(operatingSystemSQLDAOSpan, retErr) }()
+	cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("name", input.Name))
 
 	id := input.ID
 	if id == uuid.Nil {
@@ -675,14 +672,11 @@ func (ossd OperatingSystemSQLDAO) Create(ctx context.Context, tx *db.Tx, input O
 // GetByID returns a OperatingSystem by ID
 // Included relations can be a subset of the following: "InfrastructureProvider", "Tenant"
 // returns db.ErrDoesNotExist error if the record is not found
-func (ossd OperatingSystemSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*OperatingSystem, error) {
+func (ossd OperatingSystemSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *OperatingSystem, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.GetByID")
-	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
-
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "id", id.String())
-	}
+	ctx, operatingSystemSQLDAOSpan := cotel.StartSpan(ctx, "OperatingSystemDAO.GetByID")
+	defer func() { cotel.EndSpan(operatingSystemSQLDAOSpan, retErr) }()
+	cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("id", id.String()))
 
 	it := &OperatingSystem{}
 
@@ -708,12 +702,10 @@ func (ossd OperatingSystemSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uui
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in OperatingSystemOrderByDefault in ascending order
-func (ossd OperatingSystemSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter OperatingSystemFilterInput, page paginator.PageInput, includeRelations []string) ([]OperatingSystem, int, error) {
+func (ossd OperatingSystemSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter OperatingSystemFilterInput, page paginator.PageInput, includeRelations []string) (_ []OperatingSystem, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.GetAll")
-	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
-	}
+	ctx, operatingSystemSQLDAOSpan := cotel.StartSpan(ctx, "OperatingSystemDAO.GetAll")
+	defer func() { cotel.EndSpan(operatingSystemSQLDAOSpan, retErr) }()
 
 	oss := []OperatingSystem{}
 
@@ -723,11 +715,9 @@ func (ossd OperatingSystemSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 	query := db.GetIDB(tx, ossd.dbSession).NewSelect().Model(&oss)
 	if filter.Names != nil {
 		query = query.Where("os.name IN (?)", bun.In(filter.Names))
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "name", filter.Names)
 	}
 	if filter.Orgs != nil {
 		query = query.Where("os.org IN (?)", bun.In(filter.Orgs))
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "filter.org", filter.Orgs)
 	}
 	hasTenants := len(filter.TenantIDs) > 0
 	hasProvider := filter.InfrastructureProviderID != nil
@@ -740,29 +730,26 @@ func (ossd OperatingSystemSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 				Where("os.tenant_id IN (?)", bun.In(filter.TenantIDs)).
 				WhereOr("os.infrastructure_provider_id = ?", *filter.InfrastructureProviderID)
 		})
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "tenant_or_provider", filter.TenantIDs)
+
 	case hasTenants:
 		query = query.Where("os.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "tenant_id", filter.TenantIDs)
+
 	case hasProvider:
 		// Provider-only view: only provider-owned entries.
 		query = query.Where("os.infrastructure_provider_id = ?", *filter.InfrastructureProviderID)
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "infrastructure_provider_id", filter.InfrastructureProviderID.String())
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("infrastructure_provider_id", filter.InfrastructureProviderID.String()))
 	}
 	if filter.OsTypes != nil {
 		query = query.Where("os.type IN (?)", bun.In(filter.OsTypes))
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "type", filter.OsTypes)
 	}
 	if filter.SiteIDs != nil {
 		query = query.Join("LEFT JOIN operating_system_site_association as ossa").
 			JoinOn("ossa.operating_system_id = os.id").
 			JoinOn("ossa.deleted IS NULL").
 			Where("ossa.site_id IS NULL OR ossa.site_id IN (?)", bun.In(filter.SiteIDs)).Distinct()
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "site_ids", filter.SiteIDs)
 	}
 	if filter.OperatingSystemIds != nil {
 		query = query.Where("os.id IN (?)", bun.In(filter.OperatingSystemIds))
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "ids", filter.OperatingSystemIds)
 	}
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
 	if ok {
@@ -773,15 +760,13 @@ func (ossd OperatingSystemSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 				WhereOr("os.description ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("os.status ILIKE ?", "%"+searchQuery+"%")
 		})
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("search_query", searchQuery))
 	}
 	if filter.Statuses != nil {
 		query = query.Where("os.status IN (?)", bun.In(filter.Statuses))
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "statuses", filter.Statuses)
 	}
 	if filter.IsActive != nil {
 		query = query.Where("os.is_active = ?", *filter.IsActive)
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "is_active", *filter.IsActive)
 	}
 	if filter.IncludeDeleted {
 		query = query.WhereAllWithDeleted()
@@ -814,12 +799,10 @@ func (ossd OperatingSystemSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ossd OperatingSystemSQLDAO) Update(ctx context.Context, tx *db.Tx, input OperatingSystemUpdateInput) (*OperatingSystem, error) {
+func (ossd OperatingSystemSQLDAO) Update(ctx context.Context, tx *db.Tx, input OperatingSystemUpdateInput) (_ *OperatingSystem, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.Update")
-	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
-	}
+	ctx, operatingSystemSQLDAOSpan := cotel.StartSpan(ctx, "OperatingSystemDAO.Update")
+	defer func() { cotel.EndSpan(operatingSystemSQLDAOSpan, retErr) }()
 
 	it := &OperatingSystem{
 		ID: input.OperatingSystemId,
@@ -830,117 +813,113 @@ func (ossd OperatingSystemSQLDAO) Update(ctx context.Context, tx *db.Tx, input O
 	if input.Name != nil {
 		it.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.Description != nil {
 		it.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "description", *input.Description)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("description", *input.Description))
 	}
 	if input.Org != nil {
 		it.Org = *input.Org
 		updatedFields = append(updatedFields, "org")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "org", *input.Org)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("org", *input.Org))
 	}
 	if input.InfrastructureProviderID != nil {
 		it.InfrastructureProviderID = input.InfrastructureProviderID
 		updatedFields = append(updatedFields, "infrastructure_provider_id")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "infrastructure_provider_id", input.InfrastructureProviderID.String())
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("infrastructure_provider_id", input.InfrastructureProviderID.String()))
 	}
 	if input.TenantID != nil {
 		it.TenantID = input.TenantID
 		updatedFields = append(updatedFields, "tenant_id")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "tenant_id", input.TenantID.String())
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("tenant_id", input.TenantID.String()))
 	}
 	if input.ControllerOperatingSystemID != nil {
 		it.ControllerOperatingSystemID = input.ControllerOperatingSystemID
 		updatedFields = append(updatedFields, "controller_operating_system_id")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "controller_operating_system_id", input.ControllerOperatingSystemID.String())
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("controller_operating_system_id", input.ControllerOperatingSystemID.String()))
 	}
 	if input.Version != nil {
 		it.Version = input.Version
 		updatedFields = append(updatedFields, "version")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "version", *input.Version)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("version", *input.Version))
 	}
 	if input.OsType != nil {
 		it.Type = *input.OsType
 		updatedFields = append(updatedFields, "type")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "type", *input.OsType)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("type", *input.OsType))
 	}
 	if input.ImageURL != nil {
 		it.ImageURL = input.ImageURL
 		updatedFields = append(updatedFields, "image_url")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "image_url", *input.ImageURL)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("image_url", *input.ImageURL))
 	}
 	if input.ImageSHA != nil {
 		it.ImageSHA = input.ImageSHA
 		updatedFields = append(updatedFields, "image_sha")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "image_sha", *input.ImageSHA)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("image_sha", *input.ImageSHA))
 	}
 	if input.ImageAuthType != nil {
 		it.ImageAuthType = input.ImageAuthType
 		updatedFields = append(updatedFields, "image_auth_type")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "image_auth_type", *input.ImageAuthType)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("image_auth_type", *input.ImageAuthType))
 	}
 	if input.ImageAuthToken != nil {
 		it.ImageAuthToken = input.ImageAuthToken
+		// never put the token value on the span - spans are exported in plaintext
 		updatedFields = append(updatedFields, "image_auth_token")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "image_auth_token", *input.ImageAuthToken)
 	}
 	if input.ImageDisk != nil {
 		it.ImageDisk = input.ImageDisk
 		updatedFields = append(updatedFields, "image_disk")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "image_disk", *input.ImageDisk)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("image_disk", *input.ImageDisk))
 	}
 	if input.RootFsId != nil {
 		it.RootFsID = input.RootFsId
 		updatedFields = append(updatedFields, "root_fs_id")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "root_fs_id", *input.RootFsId)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("root_fs_id", *input.RootFsId))
 	}
 	if input.RootFsLabel != nil {
 		it.RootFsLabel = input.RootFsLabel
 		updatedFields = append(updatedFields, "root_fs_label")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "root_fs_label", *input.RootFsLabel)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("root_fs_label", *input.RootFsLabel))
 	}
 	if input.IpxeScript != nil {
 		it.IpxeScript = input.IpxeScript
 		updatedFields = append(updatedFields, "ipxe_script")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "ipxe_script", *input.IpxeScript)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("ipxe_script", *input.IpxeScript))
 	}
 	if input.UserData != nil {
 		it.UserData = input.UserData
 		updatedFields = append(updatedFields, "user_data")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "user_data", *input.UserData)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("user_data", *input.UserData))
 	}
 	if input.AllowOverride != nil {
 		it.AllowOverride = *input.AllowOverride
 		updatedFields = append(updatedFields, "allow_override")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "allow_override", *input.AllowOverride)
 	}
 	if input.EnableBlockStorage != nil {
 		it.EnableBlockStorage = *input.EnableBlockStorage
 		updatedFields = append(updatedFields, "enable_block_storage")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "enable_block_storage", *input.EnableBlockStorage)
 	}
 	if input.PhoneHomeEnabled != nil {
 		it.PhoneHomeEnabled = *input.PhoneHomeEnabled
 		updatedFields = append(updatedFields, "phone_home_enabled")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "phone_home_enabled", *input.PhoneHomeEnabled)
 	}
 	if input.IsActive != nil {
 		it.IsActive = *input.IsActive
 		updatedFields = append(updatedFields, "is_active")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "is_active", *input.IsActive)
 	}
 	if input.DeactivationNote != nil {
 		it.DeactivationNote = input.DeactivationNote
 		updatedFields = append(updatedFields, "deactivation_note")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "deactivation_note", *input.DeactivationNote)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("deactivation_note", *input.DeactivationNote))
 	}
 	if input.Status != nil {
 		it.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("status", *input.Status))
 	}
 	if input.IpxeTemplateId != nil {
 		it.IpxeTemplateId = input.IpxeTemplateId
@@ -980,13 +959,11 @@ func (ossd OperatingSystemSQLDAO) Update(ctx context.Context, tx *db.Tx, input O
 // parameters when true, the are set to null in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (ossd OperatingSystemSQLDAO) Clear(ctx context.Context, tx *db.Tx, input OperatingSystemClearInput) (*OperatingSystem, error) {
+func (ossd OperatingSystemSQLDAO) Clear(ctx context.Context, tx *db.Tx, input OperatingSystemClearInput) (_ *OperatingSystem, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.Clear")
-	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "id", input.OperatingSystemId.String())
-	}
+	ctx, operatingSystemSQLDAOSpan := cotel.StartSpan(ctx, "OperatingSystemDAO.Clear")
+	defer func() { cotel.EndSpan(operatingSystemSQLDAOSpan, retErr) }()
+	cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("id", input.OperatingSystemId.String()))
 
 	it := &OperatingSystem{
 		ID: input.OperatingSystemId,
@@ -1090,13 +1067,11 @@ func (ossd OperatingSystemSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Op
 // Delete deletes an OperatingSystem by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (ossd OperatingSystemSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ossd OperatingSystemSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, operatingSystemSQLDAOSpan := ossd.tracerSpan.CreateChildInCurrentContext(ctx, "OperatingSystemDAO.Delete")
-	if operatingSystemSQLDAOSpan != nil {
-		defer operatingSystemSQLDAOSpan.End()
-		ossd.tracerSpan.SetAttribute(operatingSystemSQLDAOSpan, "id", id.String())
-	}
+	ctx, operatingSystemSQLDAOSpan := cotel.StartSpan(ctx, "OperatingSystemDAO.Delete")
+	defer func() { cotel.EndSpan(operatingSystemSQLDAOSpan, retErr) }()
+	cotel.SetAttribute(operatingSystemSQLDAOSpan, attribute.String("id", id.String()))
 
 	it := &OperatingSystem{
 		ID: id,
@@ -1113,7 +1088,6 @@ func (ossd OperatingSystemSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid
 // NewOperatingSystemDAO returns a new OperatingSystemDAO
 func NewOperatingSystemDAO(dbSession *db.Session) OperatingSystemDAO {
 	return &OperatingSystemSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

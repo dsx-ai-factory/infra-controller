@@ -18,7 +18,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -419,9 +418,7 @@ func testCommonTraceProviderSetup(t *testing.T, ctx context.Context) (trace.Trac
 
 	ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
 
-	tracer := provider.Tracer(stracer.TracerName)
-	tracer.Start(ctx, "Test-DB-Spanner")
-	ctx = context.WithValue(ctx, stracer.TracerKey, tracer)
+	tracer := provider.Tracer("test-db-model")
 
 	return tracer, sc, ctx
 }

@@ -10,15 +10,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
-
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 )
 
 const (
@@ -185,8 +187,7 @@ type ExpectedRackDAO interface {
 
 // ExpectedRackSQLDAO is an implementation of the ExpectedRackDAO interface
 type ExpectedRackSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 
 	ExpectedRackDAO
 }
@@ -195,12 +196,10 @@ type ExpectedRackSQLDAO struct {
 // The returned ExpectedRack will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (erd ExpectedRackSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedRackCreateInput) (*ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedRackCreateInput) (_ *ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.Create")
-	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
-	}
+	ctx, expectedRackDAOSpan := cotel.StartSpan(ctx, "ExpectedRackDAO.Create")
+	defer func() { cotel.EndSpan(expectedRackDAOSpan, retErr) }()
 
 	results, err := erd.CreateMultiple(ctx, tx, []ExpectedRackCreateInput{input})
 	if err != nil {
@@ -213,13 +212,10 @@ func (erd ExpectedRackSQLDAO) Create(ctx context.Context, tx *db.Tx, input Expec
 // The returned ExpectedRacks will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (erd ExpectedRackSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackCreateInput) ([]ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackCreateInput) (_ []ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.CreateMultiple")
-	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
-		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, expectedRackDAOSpan := cotel.StartSpan(ctx, "ExpectedRackDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(expectedRackDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []ExpectedRack{}, nil
@@ -248,10 +244,10 @@ func (erd ExpectedRackSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inp
 	}
 
 	// Add summary tracing attributes
-	if expectedRackDAOSpan != nil && len(inputs) > 0 {
-		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "first_id", ids[0].String())
+	if len(inputs) > 0 {
+		cotel.SetAttribute(expectedRackDAOSpan, attribute.String("first_id", ids[0].String()))
 		if len(ids) > 1 {
-			erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "last_id", ids[len(ids)-1].String())
+			cotel.SetAttribute(expectedRackDAOSpan, attribute.String("last_id", ids[len(ids)-1].String()))
 		}
 	}
 
@@ -285,14 +281,11 @@ func (erd ExpectedRackSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inp
 
 // Get returns an ExpectedRack by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (erd ExpectedRackSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedRackID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedRackID uuid.UUID, includeRelations []string, forUpdate bool) (_ *ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.Get")
-	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
-
-		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "id", expectedRackID.String())
-	}
+	ctx, expectedRackDAOSpan := cotel.StartSpan(ctx, "ExpectedRackDAO.Get")
+	defer func() { cotel.EndSpan(expectedRackDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedRackDAOSpan, attribute.String("id", expectedRackID.String()))
 
 	er := &ExpectedRack{}
 
@@ -318,33 +311,21 @@ func (erd ExpectedRackSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedRackID
 }
 
 // setQueryWithFilter populates the lookup query based on specified filter
-func (erd ExpectedRackSQLDAO) setQueryWithFilter(filter ExpectedRackFilterInput, query *bun.SelectQuery, expectedRackDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (erd ExpectedRackSQLDAO) setQueryWithFilter(filter ExpectedRackFilterInput, query *bun.SelectQuery, expectedRackDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.SiteIDs != nil {
 		query = query.Where("er.site_id IN (?)", bun.In(filter.SiteIDs))
-		if expectedRackDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 
 	if filter.ExpectedRackIDs != nil {
 		query = query.Where("er.id IN (?)", bun.In(filter.ExpectedRackIDs))
-		if expectedRackDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "expected_rack_ids", filter.ExpectedRackIDs)
-		}
 	}
 
 	if filter.RackIDs != nil {
 		query = query.Where("er.rack_id IN (?)", bun.In(filter.RackIDs))
-		if expectedRackDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "rack_ids", filter.RackIDs)
-		}
 	}
 
 	if filter.RackProfileIDs != nil {
 		query = query.Where("er.rack_profile_id IN (?)", bun.In(filter.RackProfileIDs))
-		if expectedRackDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "rack_profile_ids", filter.RackProfileIDs)
-		}
 	}
 
 	if filter.SearchQuery != nil {
@@ -360,9 +341,7 @@ func (erd ExpectedRackSQLDAO) setQueryWithFilter(filter ExpectedRackFilterInput,
 				WhereOr("er.id::text ILIKE ?", "%"+*filter.SearchQuery+"%").
 				WhereOr("er.site_id::text ILIKE ?", "%"+*filter.SearchQuery+"%")
 		})
-		if expectedRackDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "search_query", *filter.SearchQuery)
-		}
+		cotel.SetAttribute(expectedRackDAOSpan, attribute.String("search_query", *filter.SearchQuery))
 	}
 
 	return query, nil
@@ -372,12 +351,10 @@ func (erd ExpectedRackSQLDAO) setQueryWithFilter(filter ExpectedRackFilterInput,
 // Errors are returned only when there is a db related error
 // If records not found, then error is nil, but length of returned slice is 0
 // If orderBy is nil, then records are ordered by column specified in ExpectedRackOrderByDefault in ascending order
-func (erd ExpectedRackSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedRack, int, error) {
+func (erd ExpectedRackSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput, page paginator.PageInput, includeRelations []string) (_ []ExpectedRack, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.GetAll")
-	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
-	}
+	ctx, expectedRackDAOSpan := cotel.StartSpan(ctx, "ExpectedRackDAO.GetAll")
+	defer func() { cotel.EndSpan(expectedRackDAOSpan, retErr) }()
 
 	var expectedRacks []ExpectedRack
 
@@ -422,13 +399,11 @@ func (erd ExpectedRackSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Expe
 // The updated fields are assumed to be set to non-null values
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (erd ExpectedRackSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedRackUpdateInput) (*ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedRackUpdateInput) (_ *ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.Update")
-	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
-		// Detailed per-field tracing is recorded in the UpdateMultiple child span.
-	}
+	ctx, expectedRackDAOSpan := cotel.StartSpan(ctx, "ExpectedRackDAO.Update")
+	defer func() { cotel.EndSpan(expectedRackDAOSpan, retErr) }()
+	// Detailed per-field tracing is recorded in the UpdateMultiple child span.
 
 	results, err := erd.UpdateMultiple(ctx, tx, []ExpectedRackUpdateInput{input})
 	if err != nil {
@@ -441,13 +416,10 @@ func (erd ExpectedRackSQLDAO) Update(ctx context.Context, tx *db.Tx, input Expec
 // All inputs should update the same set of fields for optimal performance.
 // Since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (erd ExpectedRackSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackUpdateInput) ([]ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackUpdateInput) (_ []ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.UpdateMultiple")
-	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
-		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, expectedRackDAOSpan := cotel.StartSpan(ctx, "ExpectedRackDAO.UpdateMultiple")
+	defer func() { cotel.EndSpan(expectedRackDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []ExpectedRack{}, nil
@@ -495,11 +467,11 @@ func (erd ExpectedRackSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inp
 	columns = append(columns, "updated")
 
 	// Add summary tracing attributes
-	if expectedRackDAOSpan != nil && len(inputs) > 0 {
-		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "columns_updated", strings.Join(columns, ","))
-		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "first_id", ids[0].String())
+	if len(inputs) > 0 {
+		cotel.SetAttribute(expectedRackDAOSpan, attribute.String("columns_updated", strings.Join(columns, ",")))
+		cotel.SetAttribute(expectedRackDAOSpan, attribute.String("first_id", ids[0].String()))
 		if len(ids) > 1 {
-			erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "last_id", ids[len(ids)-1].String())
+			cotel.SetAttribute(expectedRackDAOSpan, attribute.String("last_id", ids[len(ids)-1].String()))
 		}
 	}
 
@@ -538,14 +510,11 @@ func (erd ExpectedRackSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inp
 
 // Delete deletes an ExpectedRack by ID
 // Error is returned only if there is a db error
-func (erd ExpectedRackSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedRackID uuid.UUID) error {
+func (erd ExpectedRackSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedRackID uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.Delete")
-	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
-
-		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "id", expectedRackID.String())
-	}
+	ctx, expectedRackDAOSpan := cotel.StartSpan(ctx, "ExpectedRackDAO.Delete")
+	defer func() { cotel.EndSpan(expectedRackDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedRackDAOSpan, attribute.String("id", expectedRackID.String()))
 
 	er := &ExpectedRack{
 		ID: expectedRackID,
@@ -563,12 +532,10 @@ func (erd ExpectedRackSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedRac
 // scoped by site). Callers must supply at least one filter; an empty filter
 // is rejected with db.ErrInvalidParams to prevent wiping the entire table.
 // Error is returned only if there is a db error or no filter was supplied.
-func (erd ExpectedRackSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput) error {
+func (erd ExpectedRackSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.DeleteAll")
-	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
-	}
+	ctx, expectedRackDAOSpan := cotel.StartSpan(ctx, "ExpectedRackDAO.DeleteAll")
+	defer func() { cotel.EndSpan(expectedRackDAOSpan, retErr) }()
 
 	query := db.GetIDB(tx, erd.dbSession).NewDelete().Model((*ExpectedRack)(nil))
 
@@ -576,30 +543,18 @@ func (erd ExpectedRackSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter E
 	if filter.SiteIDs != nil {
 		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
 		hasFilter = true
-		if expectedRackDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 	if filter.ExpectedRackIDs != nil {
 		query = query.Where("id IN (?)", bun.In(filter.ExpectedRackIDs))
 		hasFilter = true
-		if expectedRackDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "expected_rack_ids", filter.ExpectedRackIDs)
-		}
 	}
 	if filter.RackIDs != nil {
 		query = query.Where("rack_id IN (?)", bun.In(filter.RackIDs))
 		hasFilter = true
-		if expectedRackDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "rack_ids", filter.RackIDs)
-		}
 	}
 	if filter.RackProfileIDs != nil {
 		query = query.Where("rack_profile_id IN (?)", bun.In(filter.RackProfileIDs))
 		hasFilter = true
-		if expectedRackDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "rack_profile_ids", filter.RackProfileIDs)
-		}
 	}
 
 	// Make sure at least one filter was provided; don't allow someone
@@ -618,13 +573,10 @@ func (erd ExpectedRackSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter E
 
 // ReplaceAll deletes all ExpectedRacks matching the given filter and replaces them with the provided inputs.
 // Both operations occur in the same transaction so callers must provide a transaction.
-func (erd ExpectedRackSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput, inputs []ExpectedRackCreateInput) ([]ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput, inputs []ExpectedRackCreateInput) (_ []ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.ReplaceAll")
-	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
-		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, expectedRackDAOSpan := cotel.StartSpan(ctx, "ExpectedRackDAO.ReplaceAll")
+	defer func() { cotel.EndSpan(expectedRackDAOSpan, retErr) }()
 
 	if err := erd.DeleteAll(ctx, tx, filter); err != nil {
 		return nil, err
@@ -640,7 +592,6 @@ func (erd ExpectedRackSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter 
 // NewExpectedRackDAO returns a new ExpectedRackDAO
 func NewExpectedRackDAO(dbSession *db.Session) ExpectedRackDAO {
 	return &ExpectedRackSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

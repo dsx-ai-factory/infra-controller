@@ -11,10 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
 )
@@ -162,21 +164,17 @@ type AllocationConstraintDAO interface {
 type AllocationConstraintSQLDAO struct {
 	dbSession *db.Session
 	AllocationConstraintDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new AllocationConstraint from the given input.
 // The returned AllocationConstraint will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), this call must happen within a transaction.
 func (acd AllocationConstraintSQLDAO) Create(
-	ctx context.Context, tx *db.Tx, input AllocationConstraintCreateInput) (*AllocationConstraint, error) {
+	ctx context.Context, tx *db.Tx, input AllocationConstraintCreateInput) (_ *AllocationConstraint, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.Create")
-	if aDAOSpan != nil {
-		defer aDAOSpan.End()
-
-		acd.tracerSpan.SetAttribute(aDAOSpan, "allocation_id", input.AllocationID.String())
-	}
+	ctx, aDAOSpan := cotel.StartSpan(ctx, "AllocationConstraintDAO.Create")
+	defer func() { cotel.EndSpan(aDAOSpan, retErr) }()
+	cotel.SetAttribute(aDAOSpan, attribute.String("allocation_id", input.AllocationID.String()))
 
 	if len(strings.TrimSpace(input.ResourceType)) == 0 {
 		return nil, errors.New("resourceType is empty")
@@ -210,14 +208,11 @@ func (acd AllocationConstraintSQLDAO) Create(
 // GetByID returns a AllocationConstraint by ID
 // returns db.ErrDoesNotExist error if the record is not found
 func (acd AllocationConstraintSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID,
-	includeRelations []string) (*AllocationConstraint, error) {
+	includeRelations []string) (_ *AllocationConstraint, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.GetByID")
-	if aDAOSpan != nil {
-		defer aDAOSpan.End()
-
-		acd.tracerSpan.SetAttribute(aDAOSpan, "id", id.String())
-	}
+	ctx, aDAOSpan := cotel.StartSpan(ctx, "AllocationConstraintDAO.GetByID")
+	defer func() { cotel.EndSpan(aDAOSpan, retErr) }()
+	cotel.SetAttribute(aDAOSpan, attribute.String("id", id.String()))
 
 	a := &AllocationConstraint{}
 
@@ -243,13 +238,11 @@ func (acd AllocationConstraintSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id
 // If records not found, then error is nil, but length of returned slice is 0.
 // If orderBy is nil, then records are ordered by column specified in AllocationConstraintOrderByDefault in ascending order.
 func (acd AllocationConstraintSQLDAO) GetAll(ctx context.Context, tx *db.Tx,
-	filter AllocationConstraintFilterInput, page paginator.PageInput, includeRelations []string) ([]AllocationConstraint, int, error) {
+	filter AllocationConstraintFilterInput, page paginator.PageInput, includeRelations []string) (_ []AllocationConstraint, _ int, retErr error) {
 	acs := []AllocationConstraint{}
 	// Create a child span and set the attributes for current request
-	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.GetAll")
-	if aDAOSpan != nil {
-		defer aDAOSpan.End()
-	}
+	ctx, aDAOSpan := cotel.StartSpan(ctx, "AllocationConstraintDAO.GetAll")
+	defer func() { cotel.EndSpan(aDAOSpan, retErr) }()
 
 	query := db.GetIDB(tx, acd.dbSession).NewSelect().Model(&acs)
 
@@ -259,18 +252,11 @@ func (acd AllocationConstraintSQLDAO) GetAll(ctx context.Context, tx *db.Tx,
 		} else {
 			query = query.Where("ac.allocation_id IN (?)", bun.In(filter.AllocationIDs))
 		}
-
-		if aDAOSpan != nil {
-			acd.tracerSpan.SetAttribute(aDAOSpan, "allocation_ids", filter.AllocationIDs)
-		}
 	}
 
 	if filter.ResourceType != nil {
 		query = query.Where("ac.resource_type = ?", *filter.ResourceType)
-
-		if aDAOSpan != nil {
-			acd.tracerSpan.SetAttribute(aDAOSpan, "resource_type", *filter.ResourceType)
-		}
+		cotel.SetAttribute(aDAOSpan, attribute.String("resource_type", *filter.ResourceType))
 	}
 
 	if len(filter.ResourceTypeIDs) > 0 {
@@ -279,26 +265,16 @@ func (acd AllocationConstraintSQLDAO) GetAll(ctx context.Context, tx *db.Tx,
 		} else {
 			query = query.Where("ac.resource_type_id IN (?)", bun.In(filter.ResourceTypeIDs))
 		}
-
-		if aDAOSpan != nil {
-			acd.tracerSpan.SetAttribute(aDAOSpan, "resource_type_ids", filter.ResourceTypeIDs)
-		}
 	}
 
 	if filter.ConstraintType != nil {
 		query = query.Where("ac.constraint_type = ?", *filter.ConstraintType)
-
-		if aDAOSpan != nil {
-			acd.tracerSpan.SetAttribute(aDAOSpan, "constraint_type", *filter.ConstraintType)
-		}
+		cotel.SetAttribute(aDAOSpan, attribute.String("constraint_type", *filter.ConstraintType))
 	}
 
 	if filter.DerivedResourceID != nil {
 		query = query.Where("ac.derived_resource_id = ?", *filter.DerivedResourceID)
-
-		if aDAOSpan != nil {
-			acd.tracerSpan.SetAttribute(aDAOSpan, "derived_resource_id", filter.DerivedResourceID.String())
-		}
+		cotel.SetAttribute(aDAOSpan, attribute.String("derived_resource_id", filter.DerivedResourceID.String()))
 	}
 
 	for _, relation := range includeRelations {
@@ -326,14 +302,11 @@ func (acd AllocationConstraintSQLDAO) GetAll(ctx context.Context, tx *db.Tx,
 // Update updates specified fields of an existing AllocationConstraint.
 // The updated fields are assumed to be set to non-null values.
 // Since there are 2 operations (UPDATE, SELECT), this call must happen within a transaction.
-func (acd AllocationConstraintSQLDAO) Update(ctx context.Context, tx *db.Tx, input AllocationConstraintUpdateInput) (*AllocationConstraint, error) {
+func (acd AllocationConstraintSQLDAO) Update(ctx context.Context, tx *db.Tx, input AllocationConstraintUpdateInput) (_ *AllocationConstraint, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.Update")
-	if aDAOSpan != nil {
-		defer aDAOSpan.End()
-
-		acd.tracerSpan.SetAttribute(aDAOSpan, "id", input.AllocationConstraintID.String())
-	}
+	ctx, aDAOSpan := cotel.StartSpan(ctx, "AllocationConstraintDAO.Update")
+	defer func() { cotel.EndSpan(aDAOSpan, retErr) }()
+	cotel.SetAttribute(aDAOSpan, attribute.String("id", input.AllocationConstraintID.String()))
 
 	a := &AllocationConstraint{
 		ID: input.AllocationConstraintID,
@@ -344,10 +317,7 @@ func (acd AllocationConstraintSQLDAO) Update(ctx context.Context, tx *db.Tx, inp
 	if input.AllocationID != nil {
 		a.AllocationID = *input.AllocationID
 		updatedFields = append(updatedFields, "allocation_id")
-
-		if aDAOSpan != nil {
-			acd.tracerSpan.SetAttribute(aDAOSpan, "allocation_id", input.AllocationID.String())
-		}
+		cotel.SetAttribute(aDAOSpan, attribute.String("allocation_id", input.AllocationID.String()))
 	}
 	if input.ResourceType != nil {
 		if len(strings.TrimSpace(*input.ResourceType)) == 0 {
@@ -355,18 +325,12 @@ func (acd AllocationConstraintSQLDAO) Update(ctx context.Context, tx *db.Tx, inp
 		}
 		a.ResourceType = *input.ResourceType
 		updatedFields = append(updatedFields, "resource_type")
-
-		if aDAOSpan != nil {
-			acd.tracerSpan.SetAttribute(aDAOSpan, "resource_type", *input.ResourceType)
-		}
+		cotel.SetAttribute(aDAOSpan, attribute.String("resource_type", *input.ResourceType))
 	}
 	if input.ResourceTypeID != nil {
 		a.ResourceTypeID = *input.ResourceTypeID
 		updatedFields = append(updatedFields, "resource_type_id")
-
-		if aDAOSpan != nil {
-			acd.tracerSpan.SetAttribute(aDAOSpan, "resource_type_id", input.ResourceTypeID.String())
-		}
+		cotel.SetAttribute(aDAOSpan, attribute.String("resource_type_id", input.ResourceTypeID.String()))
 	}
 	if input.ConstraintType != nil {
 		if len(strings.TrimSpace(*input.ConstraintType)) == 0 {
@@ -374,26 +338,16 @@ func (acd AllocationConstraintSQLDAO) Update(ctx context.Context, tx *db.Tx, inp
 		}
 		a.ConstraintType = *input.ConstraintType
 		updatedFields = append(updatedFields, "constraint_type")
-
-		if aDAOSpan != nil {
-			acd.tracerSpan.SetAttribute(aDAOSpan, "constraint_type", *input.ConstraintType)
-		}
+		cotel.SetAttribute(aDAOSpan, attribute.String("constraint_type", *input.ConstraintType))
 	}
 	if input.ConstraintValue != nil {
 		a.ConstraintValue = *input.ConstraintValue
 		updatedFields = append(updatedFields, "constraint_value")
-
-		if aDAOSpan != nil {
-			acd.tracerSpan.SetAttribute(aDAOSpan, "constraint_value", *input.ConstraintValue)
-		}
 	}
 	if input.DerivedResourceID != nil {
 		a.DerivedResourceID = input.DerivedResourceID
 		updatedFields = append(updatedFields, "derived_resource_id")
-
-		if aDAOSpan != nil {
-			acd.tracerSpan.SetAttribute(aDAOSpan, "derived_resource_id", input.DerivedResourceID.String())
-		}
+		cotel.SetAttribute(aDAOSpan, attribute.String("derived_resource_id", input.DerivedResourceID.String()))
 	}
 
 	if len(updatedFields) > 0 {
@@ -415,14 +369,11 @@ func (acd AllocationConstraintSQLDAO) Update(ctx context.Context, tx *db.Tx, inp
 
 // Clear sets parameters of an existing AllocationConstraint to null values in db.
 // Since there are 2 operations (UPDATE, SELECT), this must be within a transaction.
-func (acd AllocationConstraintSQLDAO) Clear(ctx context.Context, tx *db.Tx, input AllocationConstraintClearInput) (*AllocationConstraint, error) {
+func (acd AllocationConstraintSQLDAO) Clear(ctx context.Context, tx *db.Tx, input AllocationConstraintClearInput) (_ *AllocationConstraint, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.Clear")
-	if aDAOSpan != nil {
-		defer aDAOSpan.End()
-
-		acd.tracerSpan.SetAttribute(aDAOSpan, "id", input.AllocationConstraintID.String())
-	}
+	ctx, aDAOSpan := cotel.StartSpan(ctx, "AllocationConstraintDAO.Clear")
+	defer func() { cotel.EndSpan(aDAOSpan, retErr) }()
+	cotel.SetAttribute(aDAOSpan, attribute.String("id", input.AllocationConstraintID.String()))
 
 	a := &AllocationConstraint{
 		ID: input.AllocationConstraintID,
@@ -453,14 +404,11 @@ func (acd AllocationConstraintSQLDAO) Clear(ctx context.Context, tx *db.Tx, inpu
 // DeleteByID deletes an AllocationConstraint by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (acd AllocationConstraintSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (acd AllocationConstraintSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.DeleteByID")
-	if aDAOSpan != nil {
-		defer aDAOSpan.End()
-
-		acd.tracerSpan.SetAttribute(aDAOSpan, "id", id.String())
-	}
+	ctx, aDAOSpan := cotel.StartSpan(ctx, "AllocationConstraintDAO.DeleteByID")
+	defer func() { cotel.EndSpan(aDAOSpan, retErr) }()
+	cotel.SetAttribute(aDAOSpan, attribute.String("id", id.String()))
 
 	a := &AllocationConstraint{
 		ID: id,

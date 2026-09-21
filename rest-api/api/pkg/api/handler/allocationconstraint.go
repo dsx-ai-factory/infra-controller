@@ -15,6 +15,8 @@ import (
 
 	"github.com/labstack/echo/v4"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -31,19 +33,17 @@ import (
 
 // UpdateAllocationConstraintHandler is the API Handler for updating a Allocation Constraint
 type UpdateAllocationConstraintHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateAllocationConstraintHandler initializes and returns a new handler for updating Allocation Constraint
 func NewUpdateAllocationConstraintHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateAllocationConstraintHandler {
 	return UpdateAllocationConstraintHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -61,7 +61,7 @@ func NewUpdateAllocationConstraintHandler(dbSession *cdb.Session, tc temporalCli
 // @Success 200 {object} model.APIAllocationConstraint
 // @Router /v2/org/{org}/nico/allocation/{allocation_id}/constraint/{id} [patch]
 func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("AllocationConstraint", "Update", c, uach.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("AllocationConstraint", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -103,7 +103,7 @@ func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Allocation Constraint ID in URL", nil)
 	}
 
-	uach.tracerSpan.SetAttribute(handlerSpan, attribute.String("allocation_constraint_id", acStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("allocation_constraint_id", acStrID))
 
 	// Validate request
 	// Bind request data to API model

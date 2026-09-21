@@ -10,12 +10,14 @@ import (
 	"encoding/hex"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	"github.com/google/uuid"
-	"github.com/uptrace/bun"
 )
 
 const (
@@ -150,18 +152,14 @@ type SSHKeyGroupDAO interface {
 type SSHKeyGroupSQLDAO struct {
 	dbSession *db.Session
 	SSHKeyGroupDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new SSHKeyGroup from the given parameters
-func (skgsd SSHKeyGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input SSHKeyGroupCreateInput) (*SSHKeyGroup, error) {
+func (skgsd SSHKeyGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input SSHKeyGroupCreateInput) (_ *SSHKeyGroup, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SSHKeyGroupDAOSpan := skgsd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupDAO.Create")
-	if SSHKeyGroupDAOSpan != nil {
-		defer SSHKeyGroupDAOSpan.End()
-
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "name", input.Name)
-	}
+	ctx, SSHKeyGroupDAOSpan := cotel.StartSpan(ctx, "SSHKeyGroupDAO.Create")
+	defer func() { cotel.EndSpan(SSHKeyGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(SSHKeyGroupDAOSpan, attribute.String("name", input.Name))
 
 	id := uuid.New()
 	if input.SSHKeyGroupID != nil {
@@ -194,14 +192,11 @@ func (skgsd SSHKeyGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input SSHK
 
 // GetByID returns a SSHKeyGroup by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (skgsd SSHKeyGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*SSHKeyGroup, error) {
+func (skgsd SSHKeyGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *SSHKeyGroup, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SSHKeyGroupDAOSpan := skgsd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupDAO.GetByID")
-	if SSHKeyGroupDAOSpan != nil {
-		defer SSHKeyGroupDAOSpan.End()
-
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "id", id.String())
-	}
+	ctx, SSHKeyGroupDAOSpan := cotel.StartSpan(ctx, "SSHKeyGroupDAO.GetByID")
+	defer func() { cotel.EndSpan(SSHKeyGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(SSHKeyGroupDAOSpan, attribute.String("id", id.String()))
 
 	skg := &SSHKeyGroup{}
 
@@ -226,12 +221,10 @@ func (skgsd SSHKeyGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.U
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in SSHKeyGroupOrderByDefault in ascending order
-func (skgsd SSHKeyGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyGroupFilterInput, page paginator.PageInput, includeRelations []string) ([]SSHKeyGroup, int, error) {
+func (skgsd SSHKeyGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyGroupFilterInput, page paginator.PageInput, includeRelations []string) (_ []SSHKeyGroup, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SSHKeyGroupDAOSpan := skgsd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupDAO.GetAll")
-	if SSHKeyGroupDAOSpan != nil {
-		defer SSHKeyGroupDAOSpan.End()
-	}
+	ctx, SSHKeyGroupDAOSpan := cotel.StartSpan(ctx, "SSHKeyGroupDAO.GetAll")
+	defer func() { cotel.EndSpan(SSHKeyGroupDAOSpan, retErr) }()
 
 	skgs := []SSHKeyGroup{}
 
@@ -239,27 +232,21 @@ func (skgsd SSHKeyGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSH
 
 	if filter.Names != nil {
 		query = query.Where("skg.name IN (?)", bun.In(filter.Names))
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "name", filter.Names)
 	}
 	if filter.TenantOrgs != nil {
 		query = query.Where("skg.org IN (?)", bun.In(filter.TenantOrgs))
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "org", filter.TenantOrgs)
 	}
 	if filter.TenantIDs != nil {
 		query = query.Where("skg.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "tenant_id", filter.TenantIDs)
 	}
 	if filter.SSHKeyGroupIDs != nil {
 		query = query.Where("skg.id IN (?)", bun.In(filter.SSHKeyGroupIDs))
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "id", filter.SSHKeyGroupIDs)
 	}
 	if filter.Versions != nil {
 		query = query.Where("skg.version IN (?)", bun.In(filter.Versions))
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "version", filter.Versions)
 	}
 	if filter.Statuses != nil {
 		query = query.Where("skg.status IN (?)", bun.In(filter.Statuses))
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "status", filter.Statuses)
 	}
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
 	if ok {
@@ -268,7 +255,7 @@ func (skgsd SSHKeyGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSH
 				Where("to_tsvector('english', skg.name) @@ to_tsquery('english', ?)", *searchTokens).
 				WhereOr("skg.name ILIKE ?", "%"+searchQuery+"%")
 		})
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(SSHKeyGroupDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -372,14 +359,11 @@ func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx 
 
 // Update updates specified fields of an existing SSHKeyGroup
 // The updated fields are assumed to be set to non-null values
-func (skgsd SSHKeyGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyGroupUpdateInput) (*SSHKeyGroup, error) {
+func (skgsd SSHKeyGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyGroupUpdateInput) (_ *SSHKeyGroup, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SSHKeyGroupDAOSpan := skgsd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupDAO.Update")
-	if SSHKeyGroupDAOSpan != nil {
-		defer SSHKeyGroupDAOSpan.End()
-
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "id", input.SSHKeyGroupID.String())
-	}
+	ctx, SSHKeyGroupDAOSpan := cotel.StartSpan(ctx, "SSHKeyGroupDAO.Update")
+	defer func() { cotel.EndSpan(SSHKeyGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(SSHKeyGroupDAOSpan, attribute.String("id", input.SSHKeyGroupID.String()))
 
 	skg := &SSHKeyGroup{
 		ID: input.SSHKeyGroupID,
@@ -390,32 +374,32 @@ func (skgsd SSHKeyGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHK
 	if input.Name != nil {
 		skg.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(SSHKeyGroupDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.Description != nil {
 		skg.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "description", *input.Description)
+		cotel.SetAttribute(SSHKeyGroupDAOSpan, attribute.String("description", *input.Description))
 	}
 	if input.TenantOrg != nil {
 		skg.Org = *input.TenantOrg
 		updatedFields = append(updatedFields, "org")
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "org", *input.TenantOrg)
+		cotel.SetAttribute(SSHKeyGroupDAOSpan, attribute.String("org", *input.TenantOrg))
 	}
 	if input.TenantID != nil {
 		skg.TenantID = *input.TenantID
 		updatedFields = append(updatedFields, "tenant_id")
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "tenant_id", input.TenantID.String())
+		cotel.SetAttribute(SSHKeyGroupDAOSpan, attribute.String("tenant_id", input.TenantID.String()))
 	}
 	if input.Version != nil {
 		skg.Version = input.Version
 		updatedFields = append(updatedFields, "version")
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "version", *input.Version)
+		cotel.SetAttribute(SSHKeyGroupDAOSpan, attribute.String("version", *input.Version))
 	}
 	if input.Status != nil {
 		skg.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(SSHKeyGroupDAOSpan, attribute.String("status", *input.Status))
 	}
 
 	if len(updatedFields) > 0 {
@@ -438,14 +422,12 @@ func (skgsd SSHKeyGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHK
 // Delete deletes an SSHKeyGroup by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (skgsd SSHKeyGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (skgsd SSHKeyGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SSHKeyGroupDAOSpan := skgsd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupSQLDAO.Delete")
-	if SSHKeyGroupDAOSpan != nil {
-		defer SSHKeyGroupDAOSpan.End()
+	ctx, SSHKeyGroupDAOSpan := cotel.StartSpan(ctx, "SSHKeyGroupSQLDAO.Delete")
+	defer func() { cotel.EndSpan(SSHKeyGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(SSHKeyGroupDAOSpan, attribute.String("id", id.String()))
 
-		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "id", id.String())
-	}
 	skg := &SSHKeyGroup{
 		ID: id,
 	}
@@ -461,7 +443,6 @@ func (skgsd SSHKeyGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UU
 // NewSSHKeyGroupDAO returns a new SSHKeyGroupDAO
 func NewSSHKeyGroupDAO(dbSession *db.Session) SSHKeyGroupDAO {
 	return &SSHKeyGroupSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

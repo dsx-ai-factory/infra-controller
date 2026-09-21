@@ -12,16 +12,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/mitchellh/mapstructure"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/encoding/protojson"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/google/uuid"
-	"github.com/mitchellh/mapstructure"
-	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/uptrace/bun"
-
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 )
 
 // Represents status of the machine
@@ -404,19 +406,16 @@ type MachineDAO interface {
 type MachineSQLDAO struct {
 	dbSession *db.Session
 	MachineDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new Machine from the given parameters
 // The returned Machine will not have any related structs filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (msd MachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineCreateInput) (*Machine, error) {
+func (msd MachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineCreateInput) (_ *Machine, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.Create")
-	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
-	}
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.Create")
+	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
 
 	m := &Machine{
 		ID:                       input.MachineID,
@@ -459,14 +458,11 @@ func (msd MachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineCre
 
 // GetByID returns a Machine by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (msd MachineSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, includeRelations []string, forUpdate bool) (*Machine, error) {
+func (msd MachineSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, includeRelations []string, forUpdate bool) (_ *Machine, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetByID")
-	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
-
-		msd.tracerSpan.SetAttribute(machineDAOSpan, "id", id)
-	}
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.GetByID")
+	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
+	cotel.SetAttribute(machineDAOSpan, attribute.String("id", id))
 
 	m := &Machine{}
 
@@ -494,12 +490,10 @@ func (msd MachineSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, incl
 // GetCountByStatus returns count of Machines for given status
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned map is 0
-func (msd MachineSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, siteID *uuid.UUID, instanceTypeID *uuid.UUID) (map[string]int, error) {
+func (msd MachineSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, siteID *uuid.UUID, instanceTypeID *uuid.UUID) (_ map[string]int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetCountByStatus")
-	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
-	}
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.GetCountByStatus")
+	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
 
 	m := &Machine{}
 	var statusQueryResults []map[string]interface{}
@@ -507,24 +501,15 @@ func (msd MachineSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infras
 	query := db.GetIDB(tx, msd.dbSession).NewSelect().Model(m)
 	if infrastructureProviderID != nil {
 		query = query.Where("m.infrastructure_provider_id = ?", *infrastructureProviderID)
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "infrastructure_provider_id", infrastructureProviderID.String())
-		}
+		cotel.SetAttribute(machineDAOSpan, attribute.String("infrastructure_provider_id", infrastructureProviderID.String()))
 	}
 	if siteID != nil {
 		query = query.Where("m.site_id = ?", *siteID)
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "site_id", siteID.String())
-		}
+		cotel.SetAttribute(machineDAOSpan, attribute.String("site_id", siteID.String()))
 	}
 	if instanceTypeID != nil {
 		query = query.Where("m.instance_type_id = ?", *instanceTypeID)
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "instance_type_id", instanceTypeID.String())
-		}
+		cotel.SetAttribute(machineDAOSpan, attribute.String("instance_type_id", instanceTypeID.String()))
 	}
 
 	err := query.Column("m.status").ColumnExpr("COUNT(*) AS total_count").GroupExpr("m.status").Scan(ctx, &statusQueryResults)
@@ -554,21 +539,13 @@ func (msd MachineSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infras
 	return results, nil
 }
 
-func (msd MachineSQLDAO) setQueryWithFilter(filter MachineFilterInput, query *bun.SelectQuery, machineDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (msd MachineSQLDAO) setQueryWithFilter(filter MachineFilterInput, query *bun.SelectQuery, machineDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.InfrastructureProviderIDs != nil {
 		query = query.Where("m.infrastructure_provider_id IN (?)", bun.In(filter.InfrastructureProviderIDs))
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "infrastructure_provider_ids", filter.InfrastructureProviderIDs)
-		}
 	}
 
 	if filter.SiteIDs != nil {
 		query = query.Where("m.site_id IN (?)", bun.In(filter.SiteIDs))
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 
 	if filter.HasInstanceType != nil {
@@ -580,9 +557,6 @@ func (msd MachineSQLDAO) setQueryWithFilter(filter MachineFilterInput, query *bu
 			query = query.Where("m.instance_type_id IS NULL")
 		}
 
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "has_instancetype", *filter.HasInstanceType)
-		}
 	}
 
 	if filter.InstanceTypeIDs != nil {
@@ -591,50 +565,28 @@ func (msd MachineSQLDAO) setQueryWithFilter(filter MachineFilterInput, query *bu
 		} else {
 			query = query.Where("m.instance_type_id IN (?)", bun.In(filter.InstanceTypeIDs))
 		}
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "instance_type_ids", filter.InstanceTypeIDs)
-		}
 	}
 
 	if filter.ControllerMachineID != nil {
 		query = query.Where("m.controller_machine_id = ?", *filter.ControllerMachineID)
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "controller_machine_id", *filter.ControllerMachineID)
-		}
+		cotel.SetAttribute(machineDAOSpan, attribute.String("controller_machine_id", *filter.ControllerMachineID))
 	}
 
 	if filter.HwSkuDeviceTypes != nil {
 		query = query.Where("m.hw_sku_device_type IN (?)", bun.In(filter.HwSkuDeviceTypes))
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "hw_sku_device_types", filter.HwSkuDeviceTypes)
-		}
 	}
 
 	if filter.Hostname != nil {
 		query = query.Where("m.hostname = ?", *filter.Hostname)
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "hostname", *filter.Hostname)
-		}
+		cotel.SetAttribute(machineDAOSpan, attribute.String("hostname", *filter.Hostname))
 	}
 
 	if filter.IsAssigned != nil {
 		query = query.Where("m.is_assigned = ?", *filter.IsAssigned)
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "is_assigned", *filter.IsAssigned)
-		}
 	}
 
 	if filter.IsMissingOnSite != nil {
 		query = query.Where("m.is_missing_on_site = ?", *filter.IsMissingOnSite)
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "is_missing_on_site", *filter.IsMissingOnSite)
-		}
 	}
 
 	if filter.CapabilityType != nil || filter.CapabilityNames != nil {
@@ -644,18 +596,13 @@ func (msd MachineSQLDAO) setQueryWithFilter(filter MachineFilterInput, query *bu
 
 		if filter.CapabilityType != nil {
 			query = query.Where("mc.type = ?", *filter.CapabilityType)
-			if machineDAOSpan != nil {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, "capability_type", *filter.CapabilityType)
-			}
+			cotel.SetAttribute(machineDAOSpan, attribute.String("capability_type", *filter.CapabilityType))
 		}
 		if filter.CapabilityNames != nil {
 			if len(filter.CapabilityNames) == 1 {
 				query = query.Where("mc.name = ?", filter.CapabilityNames[0])
 			} else {
 				query = query.Where("mc.name IN (?)", bun.In(filter.CapabilityNames))
-			}
-			if machineDAOSpan != nil {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, "capability_names", filter.CapabilityNames)
 			}
 		}
 	}
@@ -665,10 +612,6 @@ func (msd MachineSQLDAO) setQueryWithFilter(filter MachineFilterInput, query *bu
 			query = query.Where("m.status = ?", filter.Statuses[0])
 		} else {
 			query = query.Where("m.status IN (?)", bun.In(filter.Statuses))
-		}
-
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "statuses", filter.Statuses)
 		}
 	}
 
@@ -684,9 +627,7 @@ func (msd MachineSQLDAO) setQueryWithFilter(filter MachineFilterInput, query *bu
 				WhereOr("m.status ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("m.labels::text ILIKE ?", "%"+searchQuery+"%")
 		})
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "search_query", searchQuery)
-		}
+		cotel.SetAttribute(machineDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	if filter.MachineIDs != nil {
@@ -701,9 +642,7 @@ func (msd MachineSQLDAO) setQueryWithFilter(filter MachineFilterInput, query *bu
 			return nil, fmt.Errorf("failed to encode Machine label selector: %w", err)
 		}
 		query = query.Where("m.labels @> ?::jsonb", string(labelsJSON))
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "machine_label_selector", string(labelsJSON))
-		}
+		cotel.SetAttribute(machineDAOSpan, attribute.String("machine_label_selector", string(labelsJSON)))
 	}
 
 	if filter.ExcludeMetadata {
@@ -731,12 +670,10 @@ func (m *Machine) MatchesLabelSelector(selector map[string]string) bool {
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in MachineOrderByDefault in ascending order
-func (msd MachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput, includeRelations []string) ([]Machine, int, error) {
+func (msd MachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput, includeRelations []string) (_ []Machine, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetAll")
-	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
-	}
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.GetAll")
+	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
 
 	var machines []Machine
 
@@ -781,11 +718,9 @@ func (msd MachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineFi
 }
 
 // GetDistinctLabelKeys returns paginated, distinct Machine label keys.
-func (msd MachineSQLDAO) GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error) {
-	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetDistinctLabelKeys")
-	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
-	}
+func (msd MachineSQLDAO) GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput) (_ []string, _ int, retErr error) {
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.GetDistinctLabelKeys")
+	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
 
 	keys := []string{}
 	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
@@ -823,12 +758,10 @@ func (msd MachineSQLDAO) GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, fi
 }
 
 // GetDistinctLabelValues returns paginated, distinct Machine label values for a label key.
-func (msd MachineSQLDAO) GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error) {
-	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetDistinctLabelValues")
-	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
-		msd.tracerSpan.SetAttribute(machineDAOSpan, "label_key", labelKey)
-	}
+func (msd MachineSQLDAO) GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter MachineFilterInput, page paginator.PageInput) (_ []string, _ int, retErr error) {
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.GetDistinctLabelValues")
+	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
+	cotel.SetAttribute(machineDAOSpan, attribute.String("label_key", labelKey))
 
 	values := []string{}
 	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
@@ -870,12 +803,10 @@ func (msd MachineSQLDAO) GetDistinctLabelValues(ctx context.Context, tx *db.Tx, 
 // The updated fields are assumed to be set to non-null values
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (msd MachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input MachineUpdateInput) (*Machine, error) {
+func (msd MachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input MachineUpdateInput) (_ *Machine, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.Update")
-	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
-	}
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.Update")
+	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
 
 	results, err := msd.UpdateMultiple(ctx, tx, []MachineUpdateInput{input})
 	if err != nil {
@@ -887,12 +818,10 @@ func (msd MachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input MachineUpd
 // Clear sets parameters of an existing Machine to null values in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (msd MachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineClearInput) (*Machine, error) {
+func (msd MachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineClearInput) (_ *Machine, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.Clear")
-	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
-	}
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.Clear")
+	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
 
 	m := &Machine{
 		ID: input.MachineID,
@@ -976,14 +905,11 @@ func (msd MachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineClea
 // Delete deletes an Machine by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (msd MachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, machineID string, purge bool) error {
+func (msd MachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, machineID string, purge bool) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.Delete")
-	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
-
-		msd.tracerSpan.SetAttribute(machineDAOSpan, "id", machineID)
-	}
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.Delete")
+	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
+	cotel.SetAttribute(machineDAOSpan, attribute.String("id", machineID))
 
 	m := &Machine{
 		ID: machineID,
@@ -1005,10 +931,8 @@ func (msd MachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, machineID string
 
 func (msd MachineSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter MachineFilterInput) (count int, err error) {
 	// Create a child span and set the attributes for current request
-	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetCount")
-	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
-	}
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.GetCount")
+	defer func() { cotel.EndSpan(machineDAOSpan, err) }()
 
 	query := db.GetIDB(tx, msd.dbSession).NewSelect().Model((*Machine)(nil))
 	query, err = msd.setQueryWithFilter(filter, query, machineDAOSpan)
@@ -1024,17 +948,14 @@ func (msd MachineSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter Machine
 // The updated fields are assumed to be set to non-null values
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []MachineUpdateInput) ([]Machine, error) {
+func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []MachineUpdateInput) (_ []Machine, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
 
 	// Create a child span and set the attributes for current request
-	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.UpdateMultiple")
-	if machineDAOSpan != nil {
-		defer machineDAOSpan.End()
-		msd.tracerSpan.SetAttribute(machineDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.UpdateMultiple")
+	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []Machine{}, nil
@@ -1049,9 +970,7 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 	traceItems := len(inputs)
 	if traceItems > db.MaxBatchItemsToTrace {
 		traceItems = db.MaxBatchItemsToTrace
-		if machineDAOSpan != nil {
-			msd.tracerSpan.SetAttribute(machineDAOSpan, "items_truncated", "true")
-		}
+		cotel.SetAttribute(machineDAOSpan, attribute.String("items_truncated", "true"))
 	}
 
 	for idx, input := range inputs {
@@ -1059,7 +978,7 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 			ID: input.MachineID,
 		}
 		columns := []string{}
-		addTrace := machineDAOSpan != nil && idx < traceItems
+		addTrace := idx < traceItems
 		prefix := fmt.Sprintf("items.%d.", idx)
 
 		// Field-level tracing: only trace fields that are actually being updated for this item
@@ -1068,154 +987,151 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 			m.InfrastructureProviderID = *input.InfrastructureProviderID
 			columns = append(columns, "infrastructure_provider_id")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"infrastructure_provider_id", input.InfrastructureProviderID.String())
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"infrastructure_provider_id", input.InfrastructureProviderID.String()))
 			}
 		}
 		if input.SiteID != nil {
 			m.SiteID = *input.SiteID
 			columns = append(columns, "site_id")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"site_id", input.SiteID.String())
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"site_id", input.SiteID.String()))
 			}
 		}
 		if input.InstanceTypeID != nil {
 			m.InstanceTypeID = input.InstanceTypeID
 			columns = append(columns, "instance_type_id")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"instance_type_id", input.InstanceTypeID.String())
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"instance_type_id", input.InstanceTypeID.String()))
 			}
 		}
 		if input.ControllerMachineID != nil {
 			m.ControllerMachineID = *input.ControllerMachineID
 			columns = append(columns, "controller_machine_id")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"controller_machine_id", *input.ControllerMachineID)
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"controller_machine_id", *input.ControllerMachineID))
 			}
 		}
 		if input.ControllerMachineType != nil {
 			m.ControllerMachineType = input.ControllerMachineType
 			columns = append(columns, "controller_machine_type")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"controller_machine_type", *input.ControllerMachineType)
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"controller_machine_type", *input.ControllerMachineType))
 			}
 		}
 		if input.HwSkuDeviceType != nil {
 			m.HwSkuDeviceType = input.HwSkuDeviceType
 			columns = append(columns, "hw_sku_device_type")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"hw_sku_device_type", *input.HwSkuDeviceType)
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"hw_sku_device_type", *input.HwSkuDeviceType))
 			}
 		}
 		if input.Vendor != nil {
 			m.Vendor = input.Vendor
 			columns = append(columns, "vendor")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"vendor", *input.Vendor)
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"vendor", *input.Vendor))
 			}
 		}
 		if input.ProductName != nil {
 			m.ProductName = input.ProductName
 			columns = append(columns, "product_name")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"product_name", *input.ProductName)
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"product_name", *input.ProductName))
 			}
 		}
 		if input.SerialNumber != nil {
 			m.SerialNumber = input.SerialNumber
 			columns = append(columns, "serial_number")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"serial_number", *input.SerialNumber)
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"serial_number", *input.SerialNumber))
 			}
 		}
 		if input.Metadata != nil {
 			m.Metadata = input.Metadata
 			columns = append(columns, "metadata")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"metadata", "set")
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"metadata", "set"))
 			}
 		}
 		if input.IsUsableByTenant != nil {
 			m.IsUsableByTenant = *input.IsUsableByTenant
 			columns = append(columns, "is_usable_by_tenant")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"is_usable_by_tenant", fmt.Sprintf("%t", *input.IsUsableByTenant))
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_usable_by_tenant", fmt.Sprintf("%t", *input.IsUsableByTenant)))
 			}
 		}
 		if input.IsInMaintenance != nil {
 			m.IsInMaintenance = *input.IsInMaintenance
 			columns = append(columns, "is_in_maintenance")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"is_in_maintenance", fmt.Sprintf("%t", *input.IsInMaintenance))
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_in_maintenance", fmt.Sprintf("%t", *input.IsInMaintenance)))
 			}
 		}
 		if input.MaintenanceMessage != nil {
 			m.MaintenanceMessage = input.MaintenanceMessage
 			columns = append(columns, "maintenance_message")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"maintenance_message", *input.MaintenanceMessage)
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"maintenance_message", *input.MaintenanceMessage))
 			}
 		}
 		if input.IsNetworkDegraded != nil {
 			m.IsNetworkDegraded = *input.IsNetworkDegraded
 			columns = append(columns, "is_network_degraded")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"is_network_degraded", fmt.Sprintf("%t", *input.IsNetworkDegraded))
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_network_degraded", fmt.Sprintf("%t", *input.IsNetworkDegraded)))
 			}
 		}
 		if input.NetworkHealthMessage != nil {
 			m.NetworkHealthMessage = input.NetworkHealthMessage
 			columns = append(columns, "network_health_message")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"network_health_message", *input.NetworkHealthMessage)
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"network_health_message", *input.NetworkHealthMessage))
 			}
 		}
 		if input.Health != nil {
 			m.Health = input.Health
 			columns = append(columns, "health")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"health", "set")
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"health", "set"))
 			}
 		}
 		if input.DefaultMacAddress != nil {
 			m.DefaultMacAddress = input.DefaultMacAddress
 			columns = append(columns, "default_mac_address")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"default_mac_address", *input.DefaultMacAddress)
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"default_mac_address", *input.DefaultMacAddress))
 			}
 		}
 		if input.Hostname != nil {
 			m.Hostname = input.Hostname
 			columns = append(columns, "hostname")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"hostname", *input.Hostname)
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"hostname", *input.Hostname))
 			}
 		}
 		if input.IsAssigned != nil {
 			m.IsAssigned = *input.IsAssigned
 			columns = append(columns, "is_assigned")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"is_assigned", fmt.Sprintf("%t", *input.IsAssigned))
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_assigned", fmt.Sprintf("%t", *input.IsAssigned)))
 			}
 		}
 		if input.Status != nil {
 			m.Status = *input.Status
 			columns = append(columns, "status")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"status", *input.Status)
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"status", *input.Status))
 			}
 		}
 		if input.Labels != nil {
 			m.Labels = input.Labels
 			columns = append(columns, "labels")
-			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"labels", input.Labels)
-			}
 		}
 		if input.IsMissingOnSite != nil {
 			m.IsMissingOnSite = *input.IsMissingOnSite
 			columns = append(columns, "is_missing_on_site")
 			if addTrace {
-				msd.tracerSpan.SetAttribute(machineDAOSpan, prefix+"is_missing_on_site", fmt.Sprintf("%t", *input.IsMissingOnSite))
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_missing_on_site", fmt.Sprintf("%t", *input.IsMissingOnSite)))
 			}
 		}
 
@@ -1224,7 +1140,6 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 		for _, col := range columns {
 			columnsSet[col] = true
 		}
-
 	}
 
 	// Build column list
@@ -1271,7 +1186,6 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 // NewMachineDAO returns a new MachineDAO
 func NewMachineDAO(dbSession *db.Session) MachineDAO {
 	return &MachineSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

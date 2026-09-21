@@ -32,19 +32,17 @@ import (
 
 // CreateTenantHandler is the API Handler for creating new Tenant
 type CreateTenantHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewCreateTenantHandler initializes and returns a new handler for creating Tenant
 func NewCreateTenantHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) CreateTenantHandler {
 	return CreateTenantHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -60,7 +58,7 @@ func NewCreateTenantHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 201 {object} model.APITenant
 // @Router /v2/org/{org}/nico/tenant [post]
 func (cth CreateTenantHandler) Handle(c echo.Context) error {
-	org, dbUser, _, logger, handlerSpan := common.SetupHandler("Tenant", "Create", c, cth.tracerSpan)
+	org, dbUser, _, logger, handlerSpan := common.SetupHandler("Tenant", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -93,19 +91,17 @@ func (cth CreateTenantHandler) Handle(c echo.Context) error {
 
 // GetCurrentTenantHandler is the API Handler for retrieving Tenant associated with the org
 type GetCurrentTenantHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetCurrentTenantHandler initializes and returns a new handler to retrieve Tenant associate with the org
 func NewGetCurrentTenantHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetCurrentTenantHandler {
 	return GetCurrentTenantHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -120,7 +116,7 @@ func NewGetCurrentTenantHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Success 200 {object} model.APITenant
 // @Router /v2/org/{org}/nico/tenant/current [get]
 func (gcth GetCurrentTenantHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tenant", "GetCurrent", c, gcth.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tenant", "GetCurrent", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -227,17 +223,15 @@ func (gcth GetCurrentTenantHandler) Handle(c echo.Context) error {
 // GetCurrentTenantRoutingProfileHandler retrieves the routing profiles the
 // current Tenant may use at one Site.
 type GetCurrentTenantRoutingProfileHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetCurrentTenantRoutingProfileHandler initializes the routing-profile handler.
 func NewGetCurrentTenantRoutingProfileHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetCurrentTenantRoutingProfileHandler {
 	return GetCurrentTenantRoutingProfileHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -252,7 +246,7 @@ func NewGetCurrentTenantRoutingProfileHandler(dbSession *cdb.Session, scp *sc.Cl
 // @Success 200 {object} model.APITenantRoutingProfile
 // @Router /v2/org/{org}/nico/tenant/current/routing-profile [get]
 func (gctrph GetCurrentTenantRoutingProfileHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantRoutingProfile", "GetCurrent", c, gctrph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantRoutingProfile", "GetCurrent", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -345,19 +339,17 @@ func (gctrph GetCurrentTenantRoutingProfileHandler) Handle(c echo.Context) error
 
 // GetCurrentTenantStatsHandler is the API Handler for retrieving Tenant stats associated with the org
 type GetCurrentTenantStatsHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetCurrentTenantStatsHandler initializes and returns a new handler to retrieve Tenant stats associate with the org
 func NewGetCurrentTenantStatsHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetCurrentTenantStatsHandler {
 	return GetCurrentTenantStatsHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -372,7 +364,7 @@ func NewGetCurrentTenantStatsHandler(dbSession *cdb.Session, tc temporalClient.C
 // @Success 200 {object} model.APITenantStats
 // @Router /v2/org/{org}/nico/tenant/current/stats [get]
 func (gcth GetCurrentTenantStatsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tenant", "GetCurrentStats", c, gcth.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Tenant", "GetCurrentStats", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -454,19 +446,17 @@ func (gcth GetCurrentTenantStatsHandler) Handle(c echo.Context) error {
 
 // UpdateCurrentTenantHandler is the API Handler for updating the current Tenant
 type UpdateCurrentTenantHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateCurrentTenantHandler initializes and returns a new handler for updating the current Tenant
 func NewUpdateCurrentTenantHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateCurrentTenantHandler {
 	return UpdateCurrentTenantHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -482,7 +472,7 @@ func NewUpdateCurrentTenantHandler(dbSession *cdb.Session, tc temporalClient.Cli
 // @Success 200 {object} model.APITenant
 // @Router /v2/org/{org}/nico/tenant/current [patch]
 func (ucth UpdateCurrentTenantHandler) Handle(c echo.Context) error {
-	org, dbUser, _, logger, handlerSpan := common.SetupHandler("Tenant", "UpdateCurrent", c, ucth.tracerSpan)
+	org, dbUser, _, logger, handlerSpan := common.SetupHandler("Tenant", "UpdateCurrent", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

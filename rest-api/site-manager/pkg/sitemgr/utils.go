@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	csmtypes "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/types"
 )
 
@@ -30,10 +32,10 @@ var (
 
 	csmClient = &http.Client{
 		Timeout: siteManagerTimeout,
-		Transport: &http.Transport{
+		Transport: otelhttp.NewTransport(&http.Transport{
 			// Disable certificate verification since CSM is an in-cluster server.
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
+		}, otelhttp.WithPropagators(cotel.Propagator())),
 	}
 )
 

@@ -26,6 +26,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
 	sshKeyGroupWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/sshkeygroup"
@@ -35,19 +36,17 @@ import (
 
 // CreateSSHKeyGroupHandler is the API Handler for creating new SSH Key Group
 type CreateSSHKeyGroupHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewCreateSSHKeyGroupHandler initializes and returns a new handler for creating SSH Key Group
 func NewCreateSSHKeyGroupHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) CreateSSHKeyGroupHandler {
 	return CreateSSHKeyGroupHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -63,7 +62,7 @@ func NewCreateSSHKeyGroupHandler(dbSession *cdb.Session, tc temporalClient.Clien
 // @Success 201 {object} model.APISSHKeyGroup
 // @Router /v2/org/{org}/nico/sshkeygroup [post]
 func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKeyGroup", "Create", c, cskgh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKeyGroup", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -109,7 +108,7 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
 	}
 
-	cskgh.tracerSpan.SetAttribute(handlerSpan, attribute.String("name", apiRequest.Name), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("name", apiRequest.Name))
 
 	// Validate request attributes
 	verr := apiRequest.Validate()
@@ -389,19 +388,17 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 
 // UpdateSSHKeyGroupHandler is the API Handler for updating an SSH Key Group
 type UpdateSSHKeyGroupHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateSSHKeyGroupHandler initializes and returns a new handler for updating SSH Key Group
 func NewUpdateSSHKeyGroupHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateSSHKeyGroupHandler {
 	return UpdateSSHKeyGroupHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -418,7 +415,7 @@ func NewUpdateSSHKeyGroupHandler(dbSession *cdb.Session, tc temporalClient.Clien
 // @Success 200 {object} model.SSHKeyGroup
 // @Router /v2/org/{org}/nico/sshkeygroup/{id} [patch]
 func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKeyGroup", "Update", c, uskgh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKeyGroup", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -458,7 +455,7 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 	// Get SSH Key Group ID from URL param
 	sshKeyGroupStrID := c.Param("id")
 
-	uskgh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sshkeygroup_id", sshKeyGroupStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sshkeygroup_id", sshKeyGroupStrID))
 
 	// Check or valdiate SSH Key Group exists
 	skg, err := common.GetSSHKeyGroupFromIDString(ctx, nil, sshKeyGroupStrID, uskgh.dbSession, nil)
@@ -955,19 +952,17 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 
 // GetSSHKeyGroupHandler is the API Handler for getting an SSH Key Group
 type GetSSHKeyGroupHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetSSHKeyGroupHandler initializes and returns a new handler for getting SSH Key Group
 func NewGetSSHKeyGroupHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetSSHKeyGroupHandler {
 	return GetSSHKeyGroupHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -984,7 +979,7 @@ func NewGetSSHKeyGroupHandler(dbSession *cdb.Session, tc temporalClient.Client, 
 // @Success 200 {object} model.APISSHKeyGroup
 // @Router /v2/org/{org}/nico/sshkeygroup/{id} [get]
 func (gskgh GetSSHKeyGroupHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKeyGroup", "Get", c, gskgh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKeyGroup", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1024,7 +1019,7 @@ func (gskgh GetSSHKeyGroupHandler) Handle(c echo.Context) error {
 	// Get SSH Key Group ID from URL param
 	sshKeyGroupStrID := c.Param("id")
 
-	gskgh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sshkeygroup_id", sshKeyGroupStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sshkeygroup_id", sshKeyGroupStrID))
 
 	// Get and validate includeRelation params
 	qParams := c.QueryParams()
@@ -1150,19 +1145,17 @@ func (gskgh GetSSHKeyGroupHandler) Handle(c echo.Context) error {
 
 // GetAllSSHKeyGroupHandler is the API Handler for retrieving all SSH Key Groups
 type GetAllSSHKeyGroupHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllSSHKeyGroupHandler initializes and returns a new handler for retreiving all SSH Key Groups
 func NewGetAllSSHKeyGroupHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllSSHKeyGroupHandler {
 	return GetAllSSHKeyGroupHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1185,7 +1178,7 @@ func NewGetAllSSHKeyGroupHandler(dbSession *cdb.Session, tc temporalClient.Clien
 // @Success 200 {array} []model.APISSHKeyGroup
 // @Router /v2/org/{org}/nico/sshkeygroup [get]
 func (gaskgh GetAllSSHKeyGroupHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKeyGroup", "GetAll", c, gaskgh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKeyGroup", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1293,7 +1286,7 @@ func (gaskgh GetAllSSHKeyGroupHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gaskgh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get all SSH Key Group by Tenant
@@ -1364,7 +1357,7 @@ func (gaskgh GetAllSSHKeyGroupHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		statuses = append(statuses, statusQuery)
-		gaskgh.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 	}
 
 	// Prepare response for SSH Key Groups
@@ -1529,19 +1522,17 @@ func (gaskgh GetAllSSHKeyGroupHandler) Handle(c echo.Context) error {
 
 // DeleteSSHKeyGroupHandler is the API Handler for deleting an SSH Key Group
 type DeleteSSHKeyGroupHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewDeleteSSHKeyGroupHandler initializes and returns a new handler for deleting an SSH Key Group
 func NewDeleteSSHKeyGroupHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) DeleteSSHKeyGroupHandler {
 	return DeleteSSHKeyGroupHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1557,7 +1548,7 @@ func NewDeleteSSHKeyGroupHandler(dbSession *cdb.Session, tc temporalClient.Clien
 // @Success 202
 // @Router /v2/org/{org}/nico/sshkeygroup/{id} [delete]
 func (dskgh DeleteSSHKeyGroupHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKeyGroup", "Delete", c, dskgh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SSHKeyGroup", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1597,7 +1588,7 @@ func (dskgh DeleteSSHKeyGroupHandler) Handle(c echo.Context) error {
 	// Get ID from URL param
 	sshKeyGroupStrID := c.Param("id")
 
-	dskgh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sshkeygroup_id", sshKeyGroupStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sshkeygroup_id", sshKeyGroupStrID))
 
 	// Check or valdiate SSH Key Group exists
 	skg, err := common.GetSSHKeyGroupFromIDString(ctx, nil, sshKeyGroupStrID, dskgh.dbSession, nil)
