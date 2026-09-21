@@ -82,7 +82,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
-		// A fully populated supported object proves the REST-facing shape decodes through request validation.
+		// A fully populated object proves REST accepts DPF's integer resource form alongside string quantities.
 		{
 			desc: "ok when DPF Helm chart has a typed daemon set",
 			obj: APIDpuExtensionServiceCreateRequest{
@@ -90,7 +90,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
 				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
 				SiteID:      validUUID,
-				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}}}`,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":1,"memory":"500Mi"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}}}`,
 			},
 			expectErr: false,
 		},

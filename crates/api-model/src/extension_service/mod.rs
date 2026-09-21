@@ -437,7 +437,7 @@ pub struct DpfHelmChartServiceDaemonSet {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<BTreeMap<String, String>>,
+    pub resources: Option<BTreeMap<String, DpfHelmChartIntOrString>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -459,24 +459,23 @@ pub struct DpfHelmChartDaemonSetUpdateStrategy {
     pub rolling_update: Option<DpfHelmChartDaemonSetRollingUpdate>,
 }
 
-// DPF accepts the Kubernetes IntOrString wire shape and leaves its semantics
-// to the rendered DaemonSet's Kubernetes admission.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DpfHelmChartDaemonSetRollingUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxSurge")]
-    pub max_surge: Option<DpfHelmChartIntOrPercent>,
+    pub max_surge: Option<DpfHelmChartIntOrString>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         rename = "maxUnavailable"
     )]
-    pub max_unavailable: Option<DpfHelmChartIntOrPercent>,
+    pub max_unavailable: Option<DpfHelmChartIntOrString>,
 }
 
+/// Preserves the integer-or-string wire representation used by DPF fields
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub enum DpfHelmChartIntOrPercent {
+pub enum DpfHelmChartIntOrString {
     Int(i32),
     String(String),
 }
@@ -657,7 +656,7 @@ mod tests {
             "serviceDaemonSet":{
                 "labels":{"app.kubernetes.io/name":"storage-client","svc.dpu.nvidia.com/custom-flows":"enabled"},
                 "annotations":{"example.com/owner":"storage"},
-                "resources":{"nvidia.com/bf_sf":"1","memory":"500Mi"},
+                "resources":{"nvidia.com/bf_sf":1,"memory":"500Mi"},
                 "updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}
             }
         }"#;
@@ -666,7 +665,11 @@ mod tests {
         let daemon_set = parsed.service_daemon_set.as_ref().unwrap();
         assert_eq!(
             daemon_set.resources.as_ref().unwrap()["nvidia.com/bf_sf"],
-            "1"
+            DpfHelmChartIntOrString::Int(1)
+        );
+        assert_eq!(
+            daemon_set.resources.as_ref().unwrap()["memory"],
+            DpfHelmChartIntOrString::String("500Mi".to_owned())
         );
         assert_eq!(
             daemon_set

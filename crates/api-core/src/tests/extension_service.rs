@@ -62,7 +62,7 @@ const TEST_DPF_HELM_CHART_SERVICE_DATA: &str = r#"{
   "serviceDaemonSet": {
     "labels": {"app.kubernetes.io/name": "tenant-service"},
     "annotations": {"example.com/owner": "tenant"},
-    "resources": {"nvidia.com/bf_sf": "1"},
+    "resources": {"nvidia.com/bf_sf": 1},
     "updateStrategy": {"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 1}}
   }
 }"#;
@@ -495,7 +495,7 @@ async fn test_dpf_helm_chart_create_persists_normalized_creating_state_without_d
         "chartName": "tenant-service",
         "serviceDaemonSet": {
             "updateStrategy": {"rollingUpdate": {"maxUnavailable": 1}, "type": "RollingUpdate"},
-            "resources": {"nvidia.com/bf_sf": "1"},
+            "resources": {"nvidia.com/bf_sf": 1},
             "annotations": {},
             "labels": {"app.kubernetes.io/name": "tenant-service"}
         }

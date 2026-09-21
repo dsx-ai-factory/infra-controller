@@ -85,10 +85,10 @@ type dpfHelmChartData struct {
 // dpfHelmChartServiceDaemonSet defines the supported DaemonSet settings while
 // excluding placement fields such as nodeSelector, which NICo owns in Core.
 type dpfHelmChartServiceDaemonSet struct {
-	Labels         *map[string]string          `json:"labels,omitempty"`
-	Annotations    *map[string]string          `json:"annotations,omitempty"`
-	Resources      *map[string]string          `json:"resources,omitempty"`
-	UpdateStrategy *dpfDaemonSetUpdateStrategy `json:"updateStrategy,omitempty"`
+	Labels         *map[string]string             `json:"labels,omitempty"`
+	Annotations    *map[string]string             `json:"annotations,omitempty"`
+	Resources      *map[string]intstr.IntOrString `json:"resources,omitempty"`
+	UpdateStrategy *dpfDaemonSetUpdateStrategy    `json:"updateStrategy,omitempty"`
 }
 
 type dpfDaemonSetUpdateStrategy struct {

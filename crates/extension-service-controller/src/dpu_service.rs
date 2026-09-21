@@ -27,7 +27,7 @@ use carbide_dpf::{
 use carbide_uuid::extension_service::ExtensionServiceId;
 use model::extension_service::{
     DPF_HELM_CHART_OWNER_LABEL, DPF_HELM_CHART_PLACEMENT_LABEL_VALUE, DpfHelmChartIdentity,
-    DpfHelmChartIntOrPercent, DpfHelmChartServiceData,
+    DpfHelmChartIntOrString, DpfHelmChartServiceData,
 };
 use serde_json::{Map, Value, json};
 
@@ -314,7 +314,7 @@ fn projected_service_daemon_set(
             .map(|resources| {
                 resources
                     .iter()
-                    .map(|(name, quantity)| (name.clone(), IntOrString::String(quantity.clone())))
+                    .map(|(name, quantity)| (name.clone(), projected_int_or_string(quantity)))
                     .collect()
             }),
         update_strategy: service_daemon_set
@@ -323,24 +323,22 @@ fn projected_service_daemon_set(
                 strategy_type: strategy.strategy_type.clone(),
                 rolling_update: strategy.rolling_update.as_ref().map(|rolling| {
                     DetachedServiceDaemonSetRollingUpdate {
-                        max_surge: rolling.max_surge.as_ref().map(projected_int_or_percent),
+                        max_surge: rolling.max_surge.as_ref().map(projected_int_or_string),
                         max_unavailable: rolling
                             .max_unavailable
                             .as_ref()
-                            .map(projected_int_or_percent),
+                            .map(projected_int_or_string),
                     }
                 }),
             }),
     }
 }
 
-/// Preserves the integer-or-string representation expected by DPF so integer
-/// limits and percentage strings reach Kubernetes without reinterpretation.
-fn projected_int_or_percent(value: &DpfHelmChartIntOrPercent) -> IntOrString {
-    // Keep the source variant intact across the API-model and DPF boundary.
+/// Preserves the integer-or-string representation expected by DPF.
+fn projected_int_or_string(value: &DpfHelmChartIntOrString) -> IntOrString {
     match value {
-        DpfHelmChartIntOrPercent::Int(value) => IntOrString::Int(*value),
-        DpfHelmChartIntOrPercent::String(value) => IntOrString::String(value.clone()),
+        DpfHelmChartIntOrString::Int(value) => IntOrString::Int(*value),
+        DpfHelmChartIntOrString::String(value) => IntOrString::String(value.clone()),
     }
 }
 
@@ -538,7 +536,7 @@ mod tests {
                 "serviceDaemonSet":{
                     "labels":{"app":"old","remove-me":"value"},
                     "annotations":{"example.com/owner":"old"},
-                    "resources":{"nvidia.com/bf_sf":"1"},
+                    "resources":{"nvidia.com/bf_sf":1},
                     "updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}
                 }
             }"#,
@@ -546,7 +544,7 @@ mod tests {
         .unwrap();
         let initial_projection = project_dpu_service(service_id(), NAMESPACE, &initial);
 
-        // Confirm projection preserves string quantities and integer limits.
+        // Confirm projection preserves integer quantities and limits.
         assert_eq!(
             initial_projection
                 .service_daemon_set
@@ -555,7 +553,7 @@ mod tests {
                 .resources
                 .as_ref()
                 .unwrap()["nvidia.com/bf_sf"],
-            IntOrString::String("1".to_owned())
+            IntOrString::Int(1)
         );
         assert_eq!(
             initial_projection
