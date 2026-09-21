@@ -511,22 +511,22 @@ NICo's DNS layer has two distinct pieces:
 
 | Piece | Backed by | Serves |
 |---|---|---|
-| `nico-dns` | A standalone DNS server (the `carbide-dns` binary) that answers every query from `nico-api` record data (see [section 3.1](#31-nico-dns-zones-and-what-they-serve)) | The site's authoritative zones — generated from machine, instance, and tenant records in the `nico-api` database |
+| `nico-dns` | A standalone DNS server (the `carbide-dns` binary) backed by `nico-api` (see [section 3.1](#31-nico-dns-zones-and-what-they-serve)) | Authoritative forward zones and separately derived PTR answers from inventory |
 | `unbound` (recursive resolver) | Unbound | The resolver that managed machines (host BMCs, host OS, DPU OS, DPU BMCs) use for *all* DNS lookups |
 
 These two roles are independent. Managed machines never query `nico-dns` directly — they query the recursive resolver, which forwards or recurses as needed.
 
 ### 3.1 `nico-dns` Zones and What They Serve
 
-`nico-dns` serves the site's authoritative zones from `nico-api`'s database. It is a standalone DNS server: the binary listens on UDP and TCP 53 (`--listen`, default `[::]:53`) and answers each query by calling `nico-api` over gRPC for record data. It serves A, AAAA, and PTR records only, and it does not recurse; clients reach it through the recursive resolver ([section 3.2](#32-unbound-recursive-resolver-for-managed-machines)), not directly.
+`nico-dns` serves authoritative forward zones and separately derives PTR answers from `nico-api`'s inventory; it does not serve reverse zones. The standalone binary listens on UDP and TCP (`--listen`, default `[::]:53`) and calls `nico-api` over gRPC for supported queries that are not satisfied by its negative cache. It publishes A, AAAA, and PTR records and answers SOA at forward zone apexes. It does not recurse; configure clients to use the recursive resolver ([section 3.2](#32-unbound-recursive-resolver-for-managed-machines)).
 
-The zones served are seeded by the `initial_domain_name` field in `siteConfig` (for example, `mysite.example.com`). On first start, `nico-api` creates the corresponding domain record; `nico-dns` then exposes whatever records exist in that zone in `nico-api`'s database.
+The site's initial forward zone is seeded by the `initial_domain_name` field in `siteConfig` (for example, `mysite.example.com`). During startup, `nico-api` creates that domain only if no domain exists yet; `nico-dns` exposes the published records associated with it.
 
 UFM endpoints under `default.ufm.<initial_domain_name>` are one example of records served this way when InfiniBand is configured (see [InfiniBand Setup](../playbooks/ib_runbook.md)).
 
 Operators do not edit `nico-dns` zone files directly. Zone content is a function of `nico-api`'s database state.
 
-For the record catalog these zones serve - machine, BMC, and instance names, plus the automatically derived reverse zones and their lifecycle - refer to [DNS](../configuration/dns.md).
+For the record catalog these zones serve - machine, BMC, and instance names, plus inventory-derived PTR resolution - refer to [DNS](../configuration/dns.md).
 
 To configure `nico-dns`:
 
