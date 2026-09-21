@@ -42,7 +42,7 @@ use itertools::Itertools;
 use model::ConfigValidationError;
 use model::dpa_interface::{DpaInterface, DpaSearchConfig};
 use model::extension_service::{
-    ExtensionService, ExtensionServiceLifecycleState, ExtensionServiceType,
+    DpuTarget, ExtensionService, ExtensionServiceLifecycleState, ExtensionServiceType,
 };
 use model::hardware_info::InfinibandInterface;
 use model::ib::{DEFAULT_IB_FABRIC_NAME, IbMembership};
@@ -1583,6 +1583,7 @@ pub(crate) async fn load_extension_services(
 pub(crate) fn validate_instance_extension_services(
     machine_id: HostMachineId,
     is_dpf_managed_host: bool,
+    has_resolvable_primary_dpu: bool,
     extension_services: &InstanceExtensionServicesConfig,
     services: &HashMap<ExtensionServiceId, ExtensionService>,
     versions: &HashMap<ExtensionServiceId, Vec<ConfigVersion>>,
@@ -1625,6 +1626,17 @@ pub(crate) fn validate_instance_extension_services(
                 )));
             }
             _ => {}
+        }
+
+        if service.service_type == ExtensionServiceType::DpfHelmChart
+            && config.dpu_target == Some(DpuTarget::Primary)
+            && !existing_active_service_ids.contains(&config.service_id)
+            && !has_resolvable_primary_dpu
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DPF helm chart extension service {} with PRIMARY target requires host {machine_id} to have a primary attached DPU",
+                config.service_id,
+            )));
         }
 
         // A DPF Helm chart service is only reconcilable while its DPUService
@@ -1745,6 +1757,14 @@ pub(crate) async fn batch_allocate_instances(
 
     // Start a single transaction for all allocations
     let mut txn = api.txn_begin().await?;
+    if requests
+        .iter()
+        .any(|request| request.config.network.auto_config.is_none())
+    {
+        // Take the overlap lock before Machine, NSG, or prefix locks so a
+        // waiting allocation reads the policy committed by the prior writer.
+        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    }
 
     // ==== Phase 2: Check against allocations for tenants in requests ====
 
@@ -1959,13 +1979,27 @@ pub(crate) async fn batch_allocate_instances(
     if !service_ids.is_empty() {
         let (services, versions) = load_extension_services(&mut txn, &service_ids).await?;
 
-        for request in &requests {
+        for request in &mut requests {
+            for config in &mut request.config.extension_services.service_configs {
+                if let Some(service) = services.get(&config.service_id) {
+                    config.dpu_target = service.dpu_target;
+                }
+            }
             let mh_snapshot = snapshot_map
                 .get(&request.machine_id)
                 .expect("requested managed-host snapshot was validated above");
             validate_instance_extension_services(
                 request.machine_id,
                 mh_snapshot.host_snapshot.config.dpf.used_for_ingestion,
+                mh_snapshot
+                    .host_snapshot
+                    .primary_attached_dpu_machine_id()
+                    .is_some_and(|primary_dpu| {
+                        mh_snapshot
+                            .dpu_snapshots
+                            .iter()
+                            .any(|dpu| dpu.id == primary_dpu)
+                    }),
                 &request.config.extension_services,
                 &services,
                 &versions,
@@ -2235,6 +2269,15 @@ pub(crate) async fn batch_allocate_instances(
             }
         }
 
+        if mh_snapshot.has_managed_dpus() {
+            crate::handlers::tenant_prefix_overlap::validate_instance_network(
+                api,
+                txn.as_mut(),
+                &request.config,
+                None,
+            )
+            .await?;
+        }
         processed_requests.push((request, mh_snapshot));
     }
 
@@ -2557,15 +2600,20 @@ pub(crate) fn sort_spx_by_slot(
     sorted_spx_hw_info_vec.sort_by(|a, b| a.pci_name.cmp(&b.pci_name));
 
     for spx in sorted_spx_hw_info_vec {
-        if let Some(device) = &spx.device_description.clone() {
-            let entry: &mut Vec<DpaInterface> = spx_hw_map.entry(device.clone()).or_default();
-            entry.push(spx);
-        } else {
-            tracing::info!(
+        let Some(device) = spx
+            .device_description
+            .clone()
+            .filter(|device| !device.is_empty())
+        else {
+            tracing::debug!(
                 spx = ?spx,
-                "SPX device description is missing",
+                "SpectrumX device description is missing or empty",
             );
-        }
+            continue;
+        };
+
+        let entry: &mut Vec<DpaInterface> = spx_hw_map.entry(device).or_default();
+        entry.push(spx);
     }
 
     spx_hw_map

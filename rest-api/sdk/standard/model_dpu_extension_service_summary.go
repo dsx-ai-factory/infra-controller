@@ -28,6 +28,8 @@ type DpuExtensionServiceSummary struct {
 	Name *string `json:"name,omitempty"`
 	// Type of the DPU Extension Service
 	ServiceType *string `json:"serviceType,omitempty"`
+	// Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
+	DpuTarget NullableDpuExtensionServiceDpuTarget `json:"dpuTarget,omitempty"`
 	// Latest version of the DPU Extension Service
 	LatestVersion NullableString `json:"latestVersion,omitempty"`
 	// Status of the DPU Extension Service
@@ -147,6 +149,49 @@ func (o *DpuExtensionServiceSummary) SetServiceType(v string) {
 	o.ServiceType = &v
 }
 
+// GetDpuTarget returns the DpuTarget field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *DpuExtensionServiceSummary) GetDpuTarget() DpuExtensionServiceDpuTarget {
+	if o == nil || IsNil(o.DpuTarget.Get()) {
+		var ret DpuExtensionServiceDpuTarget
+		return ret
+	}
+	return *o.DpuTarget.Get()
+}
+
+// GetDpuTargetOk returns a tuple with the DpuTarget field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *DpuExtensionServiceSummary) GetDpuTargetOk() (*DpuExtensionServiceDpuTarget, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DpuTarget.Get(), o.DpuTarget.IsSet()
+}
+
+// HasDpuTarget returns a boolean if a field has been set.
+func (o *DpuExtensionServiceSummary) HasDpuTarget() bool {
+	if o != nil && o.DpuTarget.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDpuTarget gets a reference to the given NullableDpuExtensionServiceDpuTarget and assigns it to the DpuTarget field.
+func (o *DpuExtensionServiceSummary) SetDpuTarget(v DpuExtensionServiceDpuTarget) {
+	o.DpuTarget.Set(&v)
+}
+
+// SetDpuTargetNil sets the value for DpuTarget to be an explicit nil
+func (o *DpuExtensionServiceSummary) SetDpuTargetNil() {
+	o.DpuTarget.Set(nil)
+}
+
+// UnsetDpuTarget ensures that no value is present for DpuTarget, not even an explicit nil
+func (o *DpuExtensionServiceSummary) UnsetDpuTarget() {
+	o.DpuTarget.Unset()
+}
+
 // GetLatestVersion returns the LatestVersion field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuExtensionServiceSummary) GetLatestVersion() string {
 	if o == nil || IsNil(o.LatestVersion.Get()) {
@@ -240,6 +285,9 @@ func (o DpuExtensionServiceSummary) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.ServiceType) {
 		toSerialize["serviceType"] = o.ServiceType
+	}
+	if o.DpuTarget.IsSet() {
+		toSerialize["dpuTarget"] = o.DpuTarget.Get()
 	}
 	if o.LatestVersion.IsSet() {
 		toSerialize["latestVersion"] = o.LatestVersion.Get()

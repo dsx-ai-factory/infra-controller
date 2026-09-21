@@ -113,8 +113,8 @@ func copyMap(m map[string]bool) map[string]bool {
 
 // Usage of ips and child Prefixes of a Prefix
 type Usage struct {
-	// AvailableIPs the number of available IPs if this is not a parent prefix
-	// No more than 2^31 available IPs are reported
+	// AvailableIPs is the total address count, including acquired and reserved IPs.
+	// Counts above 2,147,483,647 are capped at that value.
 	AvailableIPs uint64
 	// AcquiredIPs the number of acquired IPs if this is not a parent prefix
 	AcquiredIPs uint64
@@ -184,7 +184,7 @@ func (i *ipamer) AcquireSpecificChildPrefix(ctx context.Context, parentCidr, chi
 	})
 }
 
-// acquireChildPrefixInternal will return a Prefix with a smaller length from the given Prefix.
+// acquireChildPrefixInternal reserves a subnet within an existing prefix.
 func (i *ipamer) acquireChildPrefixInternal(ctx context.Context, parentCidr, childCidr string, length int) (*Prefix, error) {
 	specificChildRequest := childCidr != ""
 	var childprefix netip.Prefix
@@ -201,6 +201,9 @@ func (i *ipamer) acquireChildPrefixInternal(ctx context.Context, parentCidr, chi
 		if err != nil {
 			return nil, err
 		}
+		// The containing prefix tracks reserved subnets by CIDR. Use the network
+		// CIDR so release updates the same entry in `availableChildPrefixes`.
+		childprefix = childprefix.Masked()
 		length = childprefix.Bits()
 	}
 	if ipprefix.Bits() >= length {
@@ -405,7 +408,12 @@ func (i *ipamer) acquireSpecificIPInternal(ctx context.Context, prefixCidr, spec
 	}
 
 	iprange := netipx.RangeOfPrefix(ipnet)
-	for ip := iprange.From(); ipnet.Contains(ip); ip = ip.Next() {
+	startIP := iprange.From()
+	if specificIP != "" {
+		// Start at the validated address instead of walking a potentially huge IPv6 range.
+		startIP = specificIPnet
+	}
+	for ip := startIP; ipnet.Contains(ip); ip = ip.Next() {
 		ipstring := ip.String()
 		_, ok := prefix.ips[ipstring]
 		if ok {
@@ -595,14 +603,13 @@ func (p *Prefix) hasIPs() bool {
 	return false
 }
 
-// availableips return the number of ips available in this Prefix
+// availableips returns the total address count, capped at 2,147,483,647.
 func (p *Prefix) availableips() uint64 {
 	ipprefix, err := netip.ParsePrefix(p.Cidr)
 	if err != nil {
 		return 0
 	}
-	// We don't report more than 2^31 available IPs by design
-	if (ipprefix.Addr().BitLen() - ipprefix.Bits()) > 31 {
+	if (ipprefix.Addr().BitLen() - ipprefix.Bits()) >= 31 {
 		return math.MaxInt32
 	}
 	return 1 << (ipprefix.Addr().BitLen() - ipprefix.Bits())
@@ -647,13 +654,13 @@ func (p *Prefix) availablePrefixes() (uint64, []string) {
 		if bits < 0 {
 			continue
 		}
-		// same as: totalAvailable += uint64(math.Pow(float64(2), float64(maxBits-pfx.Bits)))
-		totalAvailable += 1 << bits
+		// Apply the reporting cap before a large IPv6 count can shift to zero.
+		if bits >= 31 {
+			totalAvailable = math.MaxInt32
+		} else {
+			totalAvailable = min(totalAvailable+(1<<bits), math.MaxInt32)
+		}
 		availablePrefixes = append(availablePrefixes, pfx.String())
-	}
-	// we are not reporting more that 2^31 available prefixes
-	if totalAvailable > math.MaxInt32 {
-		totalAvailable = math.MaxInt32
 	}
 	return totalAvailable, availablePrefixes
 }

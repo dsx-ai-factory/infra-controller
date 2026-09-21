@@ -209,7 +209,8 @@ impl ForgeApiClient {
     }
 
     /// Applies the named `ExpectedSwitch` fields without replacing omitted fields.
-    pub async fn patch_expected_switch(
+    /// Uses the legacy update RPC and metadata header for CLI compatibility.
+    pub async fn update_expected_switch_with_mask(
         &self,
         switch: crate::protos::forge::ExpectedSwitch,
         update_mask: &[ExpectedSwitchUpdateField],

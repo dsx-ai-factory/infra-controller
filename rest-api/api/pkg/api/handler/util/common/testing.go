@@ -167,6 +167,12 @@ func TestSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create InfiniBandPartition table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.InfiniBandInterface)(nil))
 	assert.Nil(t, err)
+	// create SpectrumXPartition table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SpectrumXPartition)(nil))
+	assert.Nil(t, err)
+	// create SpectrumXAttachment table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SpectrumXAttachment)(nil))
+	assert.Nil(t, err)
 	// create NVLinkInterface table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NVLinkInterface)(nil))
 	assert.Nil(t, err)
@@ -815,11 +821,16 @@ func TestBuildVPCPrefix(t *testing.T, dbSession *cdb.Session, name string, st *c
 
 func TestBuildDpuExtensionService(t *testing.T, dbSession *cdb.Session, name string, serviceType string, tenant *cdbm.Tenant, site *cdbm.Site, version string, status string, user *cdbm.User) *cdbm.DpuExtensionService {
 	desDAO := cdbm.NewDpuExtensionServiceDAO(dbSession)
+	var dpuTarget *string
+	if serviceType == cdbm.DpuExtensionServiceServiceTypeDpfHelmChart {
+		dpuTarget = cutil.GetPtr(cdbm.DpuExtensionServiceDpuTargetAllActive)
+	}
 
 	des, err := desDAO.Create(context.Background(), nil, cdbm.DpuExtensionServiceCreateInput{
 		Name:        name,
 		Description: cutil.GetPtr("Test DPU Extension Service"),
 		ServiceType: serviceType,
+		DpuTarget:   dpuTarget,
 		SiteID:      site.ID,
 		TenantID:    tenant.ID,
 		Version:     cutil.GetPtr(version),

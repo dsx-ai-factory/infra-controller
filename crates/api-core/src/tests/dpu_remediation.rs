@@ -16,11 +16,13 @@
  */
 use model::dpu_remediation::{
     ApproveRemediation, EnableRemediation, NewRemediation, RemediationApplicationStatus, Reviewer,
+    RevokeRemediation,
 };
 use rpc::forge::CreateRemediationRequest;
 use rpc::model::RpcTryFrom;
 
 use crate::tests::common::api_fixtures::{create_managed_host_multi_dpu, create_test_env};
+use crate::tests::common::postgres::wait_for_blocked_query;
 
 #[test]
 fn test_try_from_rpc() -> Result<(), Box<dyn std::error::Error>> {
@@ -317,6 +319,159 @@ async fn test_dpu_remediations(pool: sqlx::PgPool) -> Result<(), Box<dyn std::er
         &mut txn,
     )
     .await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_enable_rechecks_approval_after_concurrent_revoke(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut setup = pool.begin().await?;
+    let remediation = db::dpu_remediation::persist_remediation(
+        NewRemediation {
+            script: "echo remediation".to_string(),
+            metadata: None,
+            retries: 0,
+            author: "author".to_string().into(),
+        },
+        &mut setup,
+    )
+    .await?;
+    db::dpu_remediation::persist_approve_remediation(
+        ApproveRemediation {
+            id: remediation.id,
+            reviewer: "reviewer".to_string().into(),
+        },
+        &mut setup,
+    )
+    .await?;
+    db::dpu_remediation::persist_enable_remediation(
+        EnableRemediation { id: remediation.id },
+        &mut setup,
+    )
+    .await?;
+    setup.commit().await?;
+
+    let mut revoke_txn = pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(revoke_txn.as_mut())
+        .await?;
+    db::dpu_remediation::persist_revoke_remediation(
+        RevokeRemediation { id: remediation.id },
+        &mut revoke_txn,
+    )
+    .await?;
+
+    let mut enable_txn = pool.begin().await?;
+    let enable = db::dpu_remediation::persist_enable_remediation(
+        EnableRemediation { id: remediation.id },
+        &mut enable_txn,
+    );
+    let release_revoke = async {
+        wait_for_blocked_query(&pool, blocker_pid, "dpu_remediations").await;
+        revoke_txn.commit().await
+    };
+    let (result, released) = tokio::join!(enable, release_revoke);
+    released?;
+    // Commit successes just like the API, so an incorrect enablement remains
+    // visible when we reload the row below.
+    if result.is_ok() {
+        enable_txn.commit().await?;
+    } else {
+        enable_txn.rollback().await?;
+    }
+
+    let mut read = pool.begin().await?;
+    let persisted = db::dpu_remediation::find_remediations_by_ids(&mut read, &[remediation.id])
+        .await?
+        .pop()
+        .expect("revoked remediation should remain stored");
+    assert!(persisted.reviewer.is_none());
+    assert!(!persisted.enabled);
+    assert!(
+        matches!(
+            &result,
+            Err(db::DatabaseError::InvalidArgument(message))
+                if message.contains("has not been approved")
+        ),
+        "{result:?}"
+    );
+    read.rollback().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_competing_approval_preserves_first_reviewer(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut setup = pool.begin().await?;
+    let remediation = db::dpu_remediation::persist_remediation(
+        NewRemediation {
+            script: "echo remediation".to_string(),
+            metadata: None,
+            retries: 0,
+            author: "author".to_string().into(),
+        },
+        &mut setup,
+    )
+    .await?;
+    setup.commit().await?;
+
+    let mut first_approval_txn = pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(first_approval_txn.as_mut())
+        .await?;
+    db::dpu_remediation::persist_approve_remediation(
+        ApproveRemediation {
+            id: remediation.id,
+            reviewer: "first-reviewer".to_string().into(),
+        },
+        &mut first_approval_txn,
+    )
+    .await?;
+
+    let mut second_approval_txn = pool.begin().await?;
+    let second_approval = db::dpu_remediation::persist_approve_remediation(
+        ApproveRemediation {
+            id: remediation.id,
+            reviewer: "second-reviewer".to_string().into(),
+        },
+        &mut second_approval_txn,
+    );
+    let release_first_approval = async {
+        wait_for_blocked_query(&pool, blocker_pid, "dpu_remediations").await;
+        first_approval_txn.commit().await
+    };
+    let (result, released) = tokio::join!(second_approval, release_first_approval);
+    released?;
+    // Commit successes just like the API, so an overwritten reviewer remains
+    // visible when we reload the row below.
+    if result.is_ok() {
+        second_approval_txn.commit().await?;
+    } else {
+        second_approval_txn.rollback().await?;
+    }
+
+    let mut read = pool.begin().await?;
+    let persisted = db::dpu_remediation::find_remediations_by_ids(&mut read, &[remediation.id])
+        .await?
+        .pop()
+        .expect("approved remediation should remain stored");
+    assert_eq!(
+        persisted.reviewer.as_ref().map(ToString::to_string),
+        Some("first-reviewer".to_string())
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(db::DatabaseError::InvalidArgument(message))
+                if message.contains("is already set to 'first-reviewer'")
+        ),
+        "{result:?}"
+    );
+    read.rollback().await?;
 
     Ok(())
 }

@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use mac_address::MacAddress;
 
-use crate::redfish;
+use crate::{Callbacks, redfish};
 
 pub(crate) struct NvidiaSwitchNd5200Ld<'a> {
     pub(crate) bmc_mac_address_eth0: MacAddress,
@@ -66,7 +66,7 @@ impl NvidiaSwitchNd5200Ld<'_> {
         }
     }
 
-    pub(crate) fn system_config(&self) -> redfish::computer_system::Config {
+    pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
         let system_id = "System_0";
 
         redfish::computer_system::Config {

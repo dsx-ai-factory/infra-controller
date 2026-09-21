@@ -32,9 +32,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use nv_redfish::ServiceRoot;
 use nv_redfish::core::Bmc;
 use nv_redfish::telemetry_service::MetricReport;
-use nv_redfish::{Resource, ServiceRoot};
 
 use crate::HealthError;
 use crate::collectors::runtime::{IterationResult, PeriodicCollector};
@@ -238,7 +238,7 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
                 .filter_map(|definition| {
                     let raw = definition.raw();
                     let units = raw.units.clone().flatten()?;
-                    Some((raw.base.id.clone(), sanitize_unit(&units)))
+                    Some((raw.id.clone(), sanitize_unit(&units)))
                 })
                 .collect(),
         )
@@ -248,7 +248,7 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
     /// many were published.
     fn publish_report(&self, report: &MetricReport<B>) -> usize {
         let raw = report.raw();
-        let report_id = &raw.base.id;
+        let report_id = &raw.id;
 
         // A stale report is republishing the previous interval's
         // numbers. Emitting them would flatten real gaps into a held
@@ -310,7 +310,7 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             let property = value.metric_property.clone().flatten();
             let key = match &property {
                 Some(property) => format!("{property}/{metric_id}"),
-                None => format!("{}/{metric_id}", report.odata_id()),
+                None => format!("{}/{metric_id}", report.raw().odata_id),
             };
             if let Some(property) = property {
                 labels.push((Cow::Borrowed("metric_property"), property));

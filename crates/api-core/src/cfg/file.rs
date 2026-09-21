@@ -36,6 +36,7 @@ use carbide_machine_controller::config::{
     BomValidationConfig, FirmwareGlobal, MachineStateControllerConfig,
     MachineStateHandlerSiteConfig, MachineValidationConfig, PowerManagerOptions, TimePeriod,
 };
+use carbide_network::ip::prefix::{IpNet, aggregate};
 use carbide_nvlink_manager::config::NvLinkConfig;
 use carbide_preingestion_manager::PreingestionManagerConfig;
 use carbide_rack_controller::config::{RackValidationConfig, RmsConfig};
@@ -187,6 +188,18 @@ pub struct CarbideConfig {
     )]
     pub database_pool_max_lifetime: std::time::Duration,
 
+    /// How long to keep retrying the initial database connection at
+    /// startup before giving up. A transient outage (failover, rolling
+    /// upgrade, brief DNS blip) shorter than this window no longer takes
+    /// the process down. Set to `0` to fail on the first attempt, matching
+    /// the old behavior. Default is 5m.
+    #[serde(
+        default = "default_database_startup_retry_timeout",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub database_startup_retry_timeout: std::time::Duration,
+
     /// Bounds the number of API requests that may execute or wait for
     /// execution. The limits are shared by gRPC and admin HTTP traffic.
     #[serde(default)]
@@ -226,10 +239,26 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub deny_prefixes: Vec<IpNetwork>,
 
-    /// List of IP prefixes (in CIDR notation) that are assigned for tenant
-    /// use within this site. Supports both IPv4 and IPv6 prefixes.
+    /// List of IP prefixes (in CIDR notation) assigned for tenant use within this site.
+    ///
+    /// With mutual isolation, ETV enforces the IPv4 prefixes with an isolation ACL only when the
+    /// rendered DPU configuration has no NSG; an NSG replaces that ACL. Open isolation does not
+    /// install that ACL.
     #[serde(default)]
     pub site_fabric_prefixes: Vec<IpNetwork>,
+
+    /// FNN prefixes installed as floating blackhole routes in every VPC VRF.
+    ///
+    /// When omitted, this inherits `site_fabric_prefixes` and retains removed operator-managed
+    /// roots until their VpcPrefixes and VPC-attached direct NetworkPrefixes are hard-deleted. An
+    /// explicit list is authoritative; an empty list disables these routes. With mutual isolation,
+    /// inherited roots are reduced to their minimal exact union, while an explicit list preserves
+    /// each distinct prefix boundary. Routes use administrative distance 250. An effective `/0`
+    /// must not be combined with default-route leakage for the same address family because the
+    /// imported default wins the equal-prefix distance comparison. Open isolation does not install
+    /// the routes.
+    #[serde(default)]
+    pub site_fabric_null_routes: Option<Vec<IpNetwork>>,
 
     /// Opts this site into exact tenant VpcPrefix reuse checks.
     ///
@@ -425,10 +454,17 @@ pub struct CarbideConfig {
     pub deprecated_force_dpu_nic_mode: Option<bool>,
 
     /// The policy to decide whether two VPCs are allowed to peer with each other based on their
-    /// network virtualization type during creation
+    /// network virtualization type during creation.
+    ///
+    /// `mixed` is deprecated; it behaves as `exclusive`.
     pub vpc_peering_policy: Option<VpcPeeringPolicy>,
 
-    /// The policy to decide whether a VPC peering should be active
+    /// The policy to decide whether a VPC peering should be active.
+    ///
+    /// `none` disables both prefix and VNI imports from stored peerings. When omitted, this falls
+    /// back to `vpc_peering_policy`.
+    ///
+    /// `mixed` is deprecated; it behaves as `exclusive`.
     pub vpc_peering_policy_on_existing: Option<VpcPeeringPolicy>,
 
     /// Controls whether or not machine attestion is required before a machine
@@ -756,8 +792,8 @@ pub struct CarbideConfig {
 
     /// Due to limitations in Cumulus Linux route-leaking,
     /// some sites may require all VRFs to use the same VNI.
-    /// Isolation is still possible via ACLs, and route-imports
-    /// will still use the dynamically allocated VNI for deriving
+    /// FNN isolation still uses per-VRF site-fabric null routes, and
+    /// route-imports still use the dynamically allocated VNI for deriving
     /// route-targets.
     /// This will limit the number of VRFs supported on the
     /// DPU to a single VRF.
@@ -1242,6 +1278,55 @@ impl Default for TracingConfig {
 }
 
 impl CarbideConfig {
+    /// Returns the configured FNN site-fabric null routes, including the legacy fallback.
+    pub fn effective_site_fabric_null_routes(&self) -> &[IpNetwork] {
+        self.site_fabric_null_routes
+            .as_deref()
+            .unwrap_or(&self.site_fabric_prefixes)
+    }
+
+    /// Resolves FNN null routes while retaining operator roots until their VPC
+    /// address space is hard-deleted during configured-root retirement.
+    ///
+    /// Inherited operator roots are reduced to their minimal exact union so a
+    /// redundant child route cannot mask an authorized parent import. An
+    /// explicit `site_fabric_null_routes` value remains authoritative: CIDRs
+    /// are canonicalized and exactly deduplicated without aggregating distinct
+    /// prefix boundaries. An explicit empty list remains empty.
+    pub fn resolved_site_fabric_null_routes(
+        &self,
+        retained_operator_roots: &[IpNetwork],
+    ) -> Vec<IpNetwork> {
+        let mut prefixes: Vec<IpNetwork> = match self.site_fabric_null_routes.as_ref() {
+            Some(configured) => configured
+                .iter()
+                .map(|prefix| {
+                    IpNetwork::new(prefix.network(), prefix.prefix())
+                        .expect("IpNetwork guarantees a valid address-family prefix length")
+                })
+                .collect(),
+            None => aggregate(
+                self.site_fabric_prefixes
+                    .iter()
+                    .chain(retained_operator_roots)
+                    .map(|prefix| {
+                        IpNet::new(prefix.network(), prefix.prefix())
+                            .expect("IpNetwork guarantees a valid address-family prefix length")
+                    }),
+            )
+            .into_iter()
+            .map(|prefix| {
+                let prefix: IpNet = prefix.into();
+                IpNetwork::new(prefix.network(), prefix.prefix_len())
+                    .expect("IpNet guarantees a valid address-family prefix length")
+            })
+            .collect(),
+        };
+        prefixes.sort_by_cached_key(ToString::to_string);
+        prefixes.dedup();
+        prefixes
+    }
+
     pub fn machine_state_handler_site_config(&self) -> MachineStateHandlerSiteConfig {
         MachineStateHandlerSiteConfig {
             pxe_public_base_url: self.pxe_public_base_url.clone(),
@@ -2849,8 +2934,11 @@ pub struct FnnRoutingProfileConfig {
     #[serde(default)]
     pub tenant_prefix_overlap_eligible: bool,
 
-    /// Should DPUs leak the default route from the
-    /// underlay into the tenant VRF?
+    /// Should DPUs leak the default route from the underlay into the tenant VRF?
+    ///
+    /// This must not be enabled for an address family whose effective
+    /// `site_fabric_null_routes` contains `/0`: the imported default has a
+    /// better administrative distance than the equal-prefix blackhole.
     #[serde(default)]
     pub leak_default_route_from_underlay: Option<bool>,
 
@@ -2897,19 +2985,21 @@ impl FnnRoutingProfileConfig {
     ///
     /// Evaluate the profile returned by [`FnnConfig::resolve_vpc_routing_profile`],
     /// not the raw base profile, so VPC overrides participate in the decision.
-    /// The caller adds the site-wide conditions for these prefix writers.
-    /// Peering and VPC policy changes are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5114>, and retained
-    /// Instance paths are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5115>. Startup and
-    /// complete writer coverage are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5116>. All three must
-    /// land before the database cutover in
-    /// <https://github.com/NVIDIA/infra-controller/issues/3892>.
+    /// Admission callers add the site-wide conditions and retained-network
+    /// checks. See peering and policy admission in
+    /// <https://github.com/NVIDIA/infra-controller/issues/5114> and Instance
+    /// admission in <https://github.com/NVIDIA/infra-controller/issues/5115>.
     pub(crate) fn is_eligible_for_tenant_prefix_overlap(&self) -> bool {
+        self.tenant_prefix_overlap_eligible && self.is_isolated_for_tenant_prefixes()
+    }
+
+    /// `is_isolated_for_tenant_prefixes` checks routing safety independently
+    /// of the admission opt-in. Turning that opt-in off must still let safe
+    /// retained networks serve traffic while their prefixes drain.
+    pub(crate) fn is_isolated_for_tenant_prefixes(&self) -> bool {
         // Keep this exhaustive so new profile fields require an explicit eligibility decision.
         let Self {
-            tenant_prefix_overlap_eligible,
+            tenant_prefix_overlap_eligible: _,
             route_target_imports,
             route_targets_on_exports,
             // External profiles cannot participate in exact prefix reuse.
@@ -2923,8 +3013,7 @@ impl FnnRoutingProfileConfig {
             access_tier: _,
         } = self;
 
-        *tenant_prefix_overlap_eligible
-            && *internal == Some(true)
+        *internal == Some(true)
             && route_target_imports.as_ref().is_none_or(Vec::is_empty)
             && route_targets_on_exports.as_ref().is_none_or(Vec::is_empty)
             && !leak_default_route_from_underlay.unwrap_or_default()
@@ -3158,6 +3247,10 @@ impl CarbideConfig {
     }
 
     pub(crate) fn validate_service_vpc_slots(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            !self.tenant_prefix_overlap_enabled || self.dpu_config.service_vpc_slot_count == 0,
+            "dpu_config.service_vpc_slot_count must be zero when tenant_prefix_overlap_enabled is true"
+        );
         eyre::ensure!(
             self.dpu_config.service_vpc_slot_count == 0 || self.site_global_vpc_vni.is_none(),
             "dpu_config.service_vpc_slot_count requires site_global_vpc_vni to be unset because service VPCs require distinct HBN VRFs"
@@ -3487,9 +3580,9 @@ pub struct RackStateControllerConfig {
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
 
-    /// Switch mTLS services for NMX cluster setup. Accepted and ignored: rack
-    /// maintenance does not configure switch certificates. Per-switch
-    /// certificate configuration uses
+    /// Deprecated. Accepted and ignored. Rack `ConfigureNmxCluster` uses a fixed
+    /// `nvue_api` binding before RMS V2 selects and configures the primary switch.
+    /// Per-switch certificate configuration uses
     /// `[switch_state_controller].switch_mtls_services`.
     #[serde(default)]
     pub nmx_cluster_switch_mtls_services: Vec<component_manager::config::SwitchMtlsService>,
@@ -3641,6 +3734,10 @@ pub const fn default_database_pool_idle_timeout() -> std::time::Duration {
 
 pub const fn default_database_pool_max_lifetime() -> std::time::Duration {
     std::time::Duration::from_secs(30 * 60)
+}
+
+pub const fn default_database_startup_retry_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(5 * 60)
 }
 
 const fn default_api_admission_max_work_in_flight() -> usize {
@@ -4238,6 +4335,14 @@ impl From<VpcIsolationBehaviorType> for rpc::forge::VpcIsolationBehaviorType {
 #[allow(deprecated)] // nvue_enabled proto field is deprecated but still set for backwards compat
 impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
     fn from(value: CarbideConfig) -> Self {
+        let site_fabric_null_routes = Some(rpc::common::StringList {
+            items: value
+                .effective_site_fabric_null_routes()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        });
+
         Self {
             listen: value.listen.to_string(),
             metrics_endpoint: value
@@ -4269,6 +4374,7 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
                 .into_iter()
                 .map(|x| x.to_string())
                 .collect(),
+            site_fabric_null_routes,
             max_site_prefixes_per_tenant: value.max_site_prefixes_per_tenant,
             vpc_isolation_behavior: value.vpc_isolation_behavior.to_string(),
             networks: value
@@ -4575,10 +4681,10 @@ pub struct AutoMachineRepairPluginConfig {
 #[derive(Debug, Copy, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VpcPeeringPolicy {
-    /// Only VPCs with the same network virtualization type can peer.
+    /// Only VPCs with compatible network virtualization capabilities can peer.
     Exclusive,
 
-    /// VPCs with any network virtualization type can peer with each other.
+    /// Deprecated compatibility value. Behaves as `exclusive`.
     Mixed,
 
     /// VPC peering is not allowed.
@@ -5642,6 +5748,16 @@ path = "credentials.yaml"
         config.dpu_config.service_vpc_slot_count = 1;
         assert!(config.validate_service_vpc_slots().is_ok());
 
+        config.tenant_prefix_overlap_enabled = true;
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("must be zero when tenant_prefix_overlap_enabled is true")
+        );
+        config.tenant_prefix_overlap_enabled = false;
+
         config.site_global_vpc_vni = Some(6_000);
         assert!(
             config
@@ -5873,6 +5989,10 @@ path = "credentials.yaml"
         assert_eq!(
             config.database_pool_max_lifetime,
             std::time::Duration::from_secs(30 * 60)
+        );
+        assert_eq!(
+            config.database_startup_retry_timeout,
+            std::time::Duration::from_secs(5 * 60)
         );
         assert_eq!(
             config.api_admission_control,
@@ -6432,6 +6552,60 @@ path = "credentials.yaml"
 
         let runtime_config: rpc::forge::RuntimeConfig = config.into();
         assert!(runtime_config.restart_ovs_on_use_admin_network_change);
+    }
+
+    /// The inherited SitePrefix set is structural inventory, so redundant
+    /// children collapse. Explicit null routes are operator policy: a child
+    /// route must remain available as a stronger deny beneath an importable
+    /// parent route.
+    #[test]
+    fn resolved_null_routes_preserve_explicit_prefix_boundaries() {
+        // Use a retired root outside the configured parent to make retention observable.
+        let parent = "10.0.0.0/8".parse().unwrap();
+        let equivalent_noncanonical_parent = "10.1.2.3/8".parse().unwrap();
+        let child = "10.2.0.0/24".parse().unwrap();
+        let retained = "192.0.2.0/24".parse().unwrap();
+
+        value_scenarios!(
+            run = |configured| {
+                let mut config = crate::test_support::default_config::get();
+                config.site_fabric_prefixes = vec![parent, child];
+                config.site_fabric_null_routes = configured;
+                config.resolved_site_fabric_null_routes(&[retained])
+            };
+            "resolved null-route boundaries" {
+                // Inherited inventory collapses redundant children and retains retiring space.
+                None => vec![parent, retained],
+                // Explicit policy preserves distinct boundaries and excludes inherited space.
+                Some(vec![parent, equivalent_noncanonical_parent, child, child]) => vec![parent, child],
+                // Explicit emptiness disables both configured and retained coverage.
+                Some(vec![]) => vec![],
+            }
+        );
+    }
+
+    /// Exposes the effective list with presence even when it is empty, so the CLI
+    /// can distinguish disabled null routes from an older Core lacking the field.
+    #[test]
+    fn runtime_config_reports_effective_site_fabric_null_routes() {
+        value_scenarios!(
+            run = |configured| {
+                // Convert through the runtime RPC representation used by Version.
+                let mut config = crate::test_support::default_config::get();
+                config.site_fabric_prefixes = vec!["10.0.0.0/8".parse().unwrap()];
+                config.site_fabric_null_routes = configured;
+                let runtime_config: rpc::forge::RuntimeConfig = config.into();
+                runtime_config.site_fabric_null_routes.map(|prefixes| prefixes.items)
+            };
+            "runtime null-route presence" {
+                // Omission reports the inherited route instead of an unsupported field.
+                None => Some(vec!["10.0.0.0/8".to_string()]),
+                // An empty override stays present, distinguishing disabled from unsupported.
+                Some(vec![]) => Some(vec![]),
+                // A configured override replaces the legacy list in operator output.
+                Some(vec!["192.0.2.0/24".parse().unwrap()]) => Some(vec!["192.0.2.0/24".to_string()]),
+            }
+        );
     }
 
     /// Real-world site TOMLs may still carry the now-removed

@@ -60,6 +60,7 @@ func (c *Cache) InvalidateFiltered() {
 		"vpc-prefix", "rack", "expected-machine",
 		"expected-rack", "expected-switch", "expected-power-shelf", "tray", "sku",
 		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
+		"dpu-machine", "machine-label-key", "expected-machine-label-key", "spectrumx-partition",
 		"ipxe-template", "rule", "task-run", "vpc-peering", "tray-component"} {
 		delete(c.items, rt)
 		delete(c.fetched, rt)

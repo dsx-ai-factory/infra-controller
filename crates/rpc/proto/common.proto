@@ -20,6 +20,7 @@ message MachineIdList {
 // allows to express a nullable/optional list
 message StringList {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   repeated string items = 1;
 }
 

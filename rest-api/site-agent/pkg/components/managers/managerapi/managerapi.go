@@ -32,6 +32,7 @@ type ManagerAPI struct {
 	VPC                    VPCInterface
 	VpcPrefix              VpcPrefixInterface
 	VpcPeering             VpcPeeringInterface
+	SpectrumXPartition     SpectrumXPartitionInterface
 	Subnet                 SubnetInterface
 	Instance               InstanceInterface
 	Machine                MachineInterface

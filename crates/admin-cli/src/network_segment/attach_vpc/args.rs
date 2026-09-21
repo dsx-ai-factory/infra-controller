@@ -24,19 +24,19 @@ use clap::Parser;
 EXAMPLES:
 
 Attach a network segment to a VPC:
-    $ carbide-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 \
+    $ nico-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 \
     --vpc-id abcdef01-2345-6789-abcd-ef0123456789
 
 Reassign a network segment from its current VPC:
-    $ carbide-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 \
+    $ nico-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 \
     --vpc-id abcdef01-2345-6789-abcd-ef0123456789 --force
 
 ")]
 pub(crate) struct Args {
-    #[clap(long, help = "Id of the network segment")]
+    #[clap(long, help = "ID of the network segment")]
     id: NetworkSegmentId,
 
-    #[clap(long, help = "Id of the VPC")]
+    #[clap(long, help = "ID of the VPC")]
     vpc_id: VpcId,
 
     #[clap(

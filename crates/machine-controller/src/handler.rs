@@ -43,8 +43,10 @@ use carbide_uuid::machine::{
 use carbide_uuid::vpc::VpcId;
 use chrono::{DateTime, Duration, Utc};
 use config_version::{ConfigVersion, Versioned};
-use db::DatabaseError;
+use db::ConditionalWrite::{Applied, NotApplied};
 use db::db_read::PgPoolReader;
+use db::explored_endpoints::EndpointReportNotCurrent;
+use db::{ConditionalWrite, DatabaseError};
 use eyre::eyre;
 use futures::TryFutureExt;
 use futures_util::FutureExt;
@@ -56,7 +58,6 @@ use libredfish::model::oem::nvidia_dpu::HostPrivilegeLevel;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
 use libredfish::{Boot, EnabledDisabled, Redfish, RedfishError, SystemPowerControl};
-use mac_address::MacAddress;
 use machine_validation::{handle_machine_validation_requested, handle_machine_validation_state};
 use measured_boot::records::MeasurementMachineState;
 use model::DpuModel;
@@ -1228,6 +1229,7 @@ impl MachineStateHandler {
                             machine_state: MachineState::UefiSetup {
                                 uefi_setup_info: UefiSetupInfo {
                                     uefi_password_jid: None,
+                                    credential_version: None,
                                     uefi_setup_state: UefiSetupState::UnlockHost,
                                 },
                             },
@@ -1258,6 +1260,7 @@ impl MachineStateHandler {
                         ManagedHostState::RotatingHostUefi {
                             uefi_setup_info: UefiSetupInfo {
                                 uefi_password_jid: None,
+                                credential_version: None,
                                 uefi_setup_state: UefiSetupState::UnlockHost,
                             },
                         },
@@ -1400,7 +1403,7 @@ impl MachineStateHandler {
                     site_explorer_pause::gate_before_credential_change(
                         &ctx.services.db_pool,
                         &bmc_macs,
-                        site_explorer_pause::ROTATION_SUPPRESSION_REASON,
+                        model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation,
                     )
                     .await?,
                     GateDecision::Wait
@@ -1452,7 +1455,7 @@ impl MachineStateHandler {
                         site_explorer_pause::resume_after_credential_change(
                             &mut txn,
                             &bmc_macs,
-                            site_explorer_pause::ROTATION_SUPPRESSION_REASON,
+                            model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation,
                         )
                         .await?;
                         Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
@@ -2180,8 +2183,7 @@ impl MachineStateHandler {
 
                 if !ctx.services.site_config.ewethers_enabled {
                     // If DPA is not enabled, we don't need to do any DPA provisioning.
-                    // So go directly to WaitingForDpaToBeReady state, where we will change
-                    // the network status of our DPUs.
+                    // Go directly to WaitingForDpaToBeReady.
                     next_state = ManagedHostState::Assigned {
                         instance_state: InstanceState::WaitingForDpaToBeReady,
                     };
@@ -2235,40 +2237,10 @@ impl MachineStateHandler {
             .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
             .await?;
 
-        // Get the MAC address of the NIC at the given index and see if it matches
-        // the mac address in the passed in expected interface.
-        let mac_address = redfish_client
-            .get_spx_nic_mac_address(nic_index)
-            .await
-            .map_err(|e| redfish_error("get_spx_nic_mac_address", e))?
-            .ok_or_else(|| StateHandlerError::MissingData {
-                object_id: mh_snapshot.host_snapshot.id.to_string(),
-                missing: "spx_nic_mac_address",
-            })?;
-        let mac_address = MacAddress::from_str(&mac_address).map_err(|e| {
-            tracing::error!(
-                machine_id = %mh_snapshot.host_snapshot.id,
-                "Invalid SPX NIC MAC address {mac_address}: {e}"
-            );
-            StateHandlerError::GenericError(eyre!("invalid SPX NIC MAC address {mac_address}: {e}"))
-        })?;
-
-        // Find the expected CX9 NIC whose MAC matches what Redfish reported for
-        // this card. If none matches, this card is not one we were told to
-        // enable, so error out.
-        let expected_nic = cx9_nics
-            .iter()
-            .copied()
-            .find(|nic| nic.mac_address == mac_address)
-            .ok_or_else(|| {
-                tracing::error!(
-                    machine_id = %mh_snapshot.host_snapshot.id,
-                    "No expected CX9 NIC matches Redfish MAC address {mac_address} for NIC {nic_index}"
-                );
-                StateHandlerError::GenericError(eyre!(
-                    "no expected CX9 NIC matches MAC address {mac_address} for NIC {nic_index}"
-                ))
-            })?;
+        // The caller enumerates the declared CX9 NICs by index, so the expected
+        // NIC for this card is simply the one at `nic_index`.
+        let expected_nic = cx9_nics[nic_index as usize];
+        let mac_address = expected_nic.mac_address;
 
         // Now enable EastWestControlEnabled on this card.
         redfish_client
@@ -2282,17 +2254,6 @@ impl MachineStateHandler {
         // change the predicted host machine id to an actual machine id, we will have
         // to fix up the dpa_interfaces table.
 
-        // Get the model and name of the NIC also, and we will use that information to create
-        // the dpa_interface object.
-        let nic_model_and_name = redfish_client
-            .get_spx_nic_model_and_name(nic_index)
-            .await
-            .map_err(|e| redfish_error("get_spx_nic_model_and_name", e))?
-            .ok_or_else(|| StateHandlerError::MissingData {
-                object_id: mh_snapshot.host_snapshot.id.to_string(),
-                missing: "spx_nic_model_and_name",
-            })?;
-
         // Note that we are creating this dpa_interface object with a machine_id which is a predicted machine id.
         // When we change the predicted machine id to an actual machine id, we will have to fix up the dpa_interfaces table.
         let mut txn = ctx.services.db_pool.begin().await?;
@@ -2301,8 +2262,8 @@ impl MachineStateHandler {
                 machine_id: mh_snapshot.host_snapshot.id,
                 mac_address,
                 device_type: "Network Adapter Ethernet Interface".to_string(),
-                pci_name: nic_model_and_name.name,
-                device_description: Some(nic_model_and_name.model),
+                pci_name: format!("CX_{nic_index}"),
+                device_description: Some("NVIDIA Dual ConnectX-9 SuperNIC C9280V for Vera Rubin NVL 144 systems, Crypto Enabled, Secure Boot Enabled, Liquid Cooled".to_string()),
                 interface_type: DpaInterfaceType::Astra,
             },
             &mut txn,
@@ -5070,10 +5031,15 @@ impl DpuMachineStateHandler {
                     }
                 }
 
-                let dpu_uefi_credentials = resolve_site_uefi_credentials(
+                let dpu_uefi_version = current_site_uefi_target(
                     &ctx.services.db_pool,
+                    db::credential_rotation::CredentialRotationType::DpuUefi,
+                )
+                .await?;
+                let dpu_uefi_credentials = read_site_uefi_credentials(
                     ctx.services.bmc_credential_ops.credential_reader(),
                     db::credential_rotation::CredentialRotationType::DpuUefi,
+                    dpu_uefi_version,
                 )
                 .await?;
                 let credentials_updated = match ctx
@@ -5130,17 +5096,14 @@ impl DpuMachineStateHandler {
                 .next_state(&state.managed_state, dpu_machine_id)?;
 
                 if credentials_updated {
-                    // The DPU's UEFI password is now the site-wide value (just set via
-                    // uefi_setup above): record dpu_uefi convergence so the rotation
-                    // engine tracks this DPU from ingestion onward (mirrors the
-                    // backfill, which keys DPU UEFI by the DPU BMC MAC). The MAC was
-                    // validated as a precondition at the top of this state. Committed
-                    // with the state transition below.
+                    // Record the version sent to `uefi_setup`, not a target
+                    // published while the DPU was restarting.
                     let mut txn = ctx.services.db_pool.begin().await?;
-                    db::credential_rotation::record_device_converged(
+                    db::credential_rotation::record_device_enrolled(
                         &mut txn,
                         dpu_bmc_mac,
                         db::credential_rotation::CredentialRotationType::DpuUefi,
+                        Some(dpu_uefi_version as i32),
                     )
                     .await
                     .map_err(|e| {
@@ -7201,26 +7164,35 @@ async fn handle_ready_boot_config(
             }
 
             let mut txn = ctx.services.db_pool.begin().await?;
-            let verified = db::machine_desired_boot_interface::mark_verified(
+            let verification = db::machine_desired_boot_interface::mark_verified(
                 txn.as_mut(),
                 &mh_snapshot.host_snapshot.id,
                 desired.version,
                 Utc::now(),
             )
             .await?;
-            let next_state = if verified {
-                ManagedHostState::Ready
-            } else {
-                match db::machine_desired_boot_interface::get(
-                    txn.as_mut(),
-                    &mh_snapshot.host_snapshot.id,
-                )
-                .await?
-                {
-                    Some(current_desired) => {
-                        ready_boot_configuring(current_desired, 0, ReadyBootConfigState::Prepare)
+            let next_state = match verification {
+                ConditionalWrite::Applied(()) => ManagedHostState::Ready,
+                ConditionalWrite::NotApplied(reason) => {
+                    tracing::debug!(
+                        machine_id = %mh_snapshot.host_snapshot.id,
+                        desired_version = %desired.version,
+                        ?reason,
+                        "Discarded Ready boot configuration observation",
+                    );
+                    let current_desired = db::machine_desired_boot_interface::get(
+                        txn.as_mut(),
+                        &mh_snapshot.host_snapshot.id,
+                    )
+                    .await?;
+                    match current_desired {
+                        Some(current_desired) => ready_boot_configuring(
+                            current_desired,
+                            0,
+                            ReadyBootConfigState::Prepare,
+                        ),
+                        None => ManagedHostState::Ready,
                     }
-                    None => ManagedHostState::Ready,
                 }
             };
 
@@ -7381,18 +7353,19 @@ async fn complete_host_init_lockdown(
     }
 
     let mut txn = ctx.services.db_pool.begin().await?;
-    let verified = db::machine_desired_boot_interface::mark_verified(
+    let verification = db::machine_desired_boot_interface::mark_verified(
         txn.as_mut(),
         &mh_snapshot.host_snapshot.id,
         desired.version,
         Utc::now(),
     )
     .await?;
-    if !verified {
+    if let ConditionalWrite::NotApplied(reason) = verification {
         tracing::info!(
             machine_id = %mh_snapshot.host_snapshot.id,
             desired_version = %desired.version,
-            "Desired boot interface changed during HostInit verification; leaving it pending",
+            ?reason,
+            "Discarded HostInit boot configuration observation",
         );
     }
     Ok(outcome.with_txn(txn))
@@ -7431,20 +7404,13 @@ async fn current_site_uefi_target(
     })
 }
 
-/// Resolve the site-wide UEFI credential to set on a device during ingestion:
-/// the secret at the current `host_uefi`/`dpu_uefi` target version. The
-/// low-level `redfish` `uefi_setup` no longer reads the credential store itself,
-/// so we resolve the version (table-driven) and read the credential here.
-///
-/// Takes `db_pool` and `reader` rather than the whole `StateHandlerContext`
-/// because the context is not `Send`/`Sync` and must not be held across an await
-/// in a handler future (`&PgPool` and `&dyn CredentialReader` both are).
-async fn resolve_site_uefi_credentials(
-    db_pool: &sqlx::PgPool,
+/// Read the credential at the caller's selected version. Enrollment and rotation
+/// keep that same version for bookkeeping instead of rereading a newer target.
+async fn read_site_uefi_credentials(
     reader: &dyn CredentialReader,
     credential_type: db::credential_rotation::CredentialRotationType,
+    version: u32,
 ) -> Result<Credentials, StateHandlerError> {
-    let version = current_site_uefi_target(db_pool, credential_type).await?;
     let key = match credential_type {
         db::credential_rotation::CredentialRotationType::HostUefi => {
             CredentialKey::host_uefi_site_default(version)
@@ -7454,7 +7420,7 @@ async fn resolve_site_uefi_credentials(
         }
         other => {
             return Err(StateHandlerError::GenericError(eyre!(
-                "resolve_site_uefi_credentials called with non-UEFI credential type {other:?}"
+                "read_site_uefi_credentials called with non-UEFI credential type {other:?}"
             )));
         }
     };
@@ -7512,6 +7478,7 @@ async fn handle_host_uefi_setup(
                     machine_state: MachineState::UefiSetup {
                         uefi_setup_info: UefiSetupInfo {
                             uefi_password_jid: None,
+                            credential_version: None,
                             uefi_setup_state: UefiSetupState::SetUefiPassword,
                         },
                     },
@@ -7519,10 +7486,15 @@ async fn handle_host_uefi_setup(
             ))
         }
         UefiSetupState::SetUefiPassword => {
-            let host_uefi_credentials = resolve_site_uefi_credentials(
+            let host_uefi_version = current_site_uefi_target(
                 &ctx.services.db_pool,
+                db::credential_rotation::CredentialRotationType::HostUefi,
+            )
+            .await?;
+            let host_uefi_credentials = read_site_uefi_credentials(
                 ctx.services.bmc_credential_ops.credential_reader(),
                 db::credential_rotation::CredentialRotationType::HostUefi,
+                host_uefi_version,
             )
             .await?;
             let host_bmc_access = ctx
@@ -7540,6 +7512,7 @@ async fn handle_host_uefi_setup(
                         machine_state: MachineState::UefiSetup {
                             uefi_setup_info: UefiSetupInfo {
                                 uefi_password_jid: job_id,
+                                credential_version: Some(host_uefi_version),
                                 uefi_setup_state: UefiSetupState::WaitForPasswordJobScheduled,
                             },
                         },
@@ -7609,6 +7582,7 @@ async fn handle_host_uefi_setup(
                     machine_state: MachineState::UefiSetup {
                         uefi_setup_info: UefiSetupInfo {
                             uefi_password_jid: uefi_setup_info.uefi_password_jid.clone(),
+                            credential_version: uefi_setup_info.credential_version,
                             uefi_setup_state: UefiSetupState::PowercycleHost,
                         },
                     },
@@ -7622,6 +7596,7 @@ async fn handle_host_uefi_setup(
                     machine_state: MachineState::UefiSetup {
                         uefi_setup_info: UefiSetupInfo {
                             uefi_password_jid: uefi_setup_info.uefi_password_jid.clone(),
+                            credential_version: uefi_setup_info.credential_version,
                             uefi_setup_state: UefiSetupState::WaitForPasswordJobCompletion,
                         },
                     },
@@ -7659,15 +7634,16 @@ async fn handle_host_uefi_setup(
                     ))
                 })?;
 
-            // The host's UEFI password is now the site-wide value: record it as
-            // converged to the current host_uefi target so the rotation engine
-            // tracks this host from ingestion onward (mirrors the backfill, which
-            // keys host UEFI by the host BMC MAC). The MAC was validated as a
-            // precondition at the top of this handler.
-            db::credential_rotation::record_device_converged(
+            // Completion proves the password was set, but older saved jobs did
+            // not record its version. Keep that version unknown rather than
+            // claiming today's target or replaying setup with the wrong password.
+            db::credential_rotation::record_device_enrolled(
                 &mut txn,
                 host_bmc_mac,
                 db::credential_rotation::CredentialRotationType::HostUefi,
+                uefi_setup_info
+                    .credential_version
+                    .map(|version| version as i32),
             )
             .await
             .map_err(|e| {
@@ -8010,6 +7986,7 @@ impl StateHandler for HostMachineStateHandler {
                             machine_state: MachineState::UefiSetup {
                                 uefi_setup_info: UefiSetupInfo {
                                     uefi_password_jid: None,
+                                    credential_version: None,
                                     uefi_setup_state: UefiSetupState::SetUefiPassword,
                                 },
                             },
@@ -8388,23 +8365,44 @@ impl StateHandler for InstanceStateHandler {
                         .filter_map(InstanceInterfaceConfig::generated_network_segment_id)
                         .collect_vec();
 
-                    // No generated VPC-prefix segment needs readiness tracking.
-                    if network_segment_ids_with_vpc.is_empty() {
-                        return Ok(StateHandlerOutcome::transition(next_state));
-                    }
-
-                    let network_segments_are_ready =
-                        db::network_segment::are_network_segments_ready(
+                    // Only generated segments need this readiness check.
+                    if !network_segment_ids_with_vpc.is_empty()
+                        && !db::network_segment::are_network_segments_ready(
                             &mut ctx.services.db_reader,
                             &network_segment_ids_with_vpc,
                         )
-                        .await?;
-                    if !network_segments_are_ready {
+                        .await?
+                    {
                         return Ok(StateHandlerOutcome::wait(
                             "Waiting for all segments to come in ready state.".to_string(),
                         ));
                     }
-                    Ok(StateHandlerOutcome::transition(next_state))
+
+                    // Switch to tenant networking after the initial network check.
+                    // Always use a fresh version: an older Core may have stored tenant
+                    // mode before this wait, but its Admin acknowledgement must not
+                    // satisfy the tenant configuration or consume its OVS restart.
+                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let host_version = mh_snapshot.host_snapshot.network_config.version;
+                    let mut host_netconf = mh_snapshot.host_snapshot.network_config.value.clone();
+                    host_netconf.use_admin_network = Some(false);
+                    db::machine::try_update_network_config(
+                        &mut txn,
+                        &mh_snapshot.host_snapshot.id,
+                        host_version,
+                        &host_netconf,
+                    )
+                    .await?
+                    .check_applied()?;
+
+                    if ctx
+                        .services
+                        .site_config
+                        .restart_ovs_on_use_admin_network_change
+                    {
+                        process_dpu_use_admin_network_state_change(&mut txn, mh_snapshot).await?;
+                    }
+                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
                 }
                 InstanceState::WaitingForNetworkConfig => {
                     // It should be first state to process here.
@@ -9124,18 +9122,18 @@ impl StateHandler for InstanceStateHandler {
                     let mut host_netconf = mh_snapshot.host_snapshot.network_config.value.clone();
                     let old_use_admin_network = host_netconf.use_admin_network;
                     host_netconf.use_admin_network = Some(true);
-                    let updated = db::machine::try_update_network_config(
+                    db::machine::try_update_network_config(
                         &mut txn,
                         &mh_snapshot.host_snapshot.id,
                         host_version,
                         &host_netconf,
                     )
-                    .await?;
+                    .await?
+                    .check_applied()?;
 
                     // Set use_admin_network_changed if we want to reboot
                     // ovs on admin network change.
-                    if updated
-                        && old_use_admin_network != host_netconf.use_admin_network
+                    if old_use_admin_network != host_netconf.use_admin_network
                         && ctx
                             .services
                             .site_config
@@ -9416,17 +9414,8 @@ impl StateHandler for InstanceStateHandler {
                     .await
                 }
                 InstanceState::DpaProvisioning => {
-                    // An instance is being created. The host was already flipped
-                    // to tenant network in the Ready -> Assigned transition; here
-                    // we just bump each DPA interface's config version so the
-                    // DPA state controller re-evaluates with the new host value
-                    // (READY -> WaitingForSetVNI, triggering SetVNI).
-
-                    // Note that we have to defer setting use_admin_network for the DPUs
-                    // till after DPA provisioning is complete. This is due to the fact
-                    // that we have to interact with scout to unlock/apply firmware/lock
-                    // the card. If we switch the DPUs also out of admin network, we will
-                    // no longer be able to interact with scout.
+                    // Configure the DPAs before moving the host off Admin: provisioning
+                    // needs Scout access to unlock, update and lock the cards.
 
                     let mut txn = ctx.services.db_pool.begin().await?;
                     if ctx.services.site_config.ewethers_enabled {
@@ -9469,39 +9458,10 @@ impl StateHandler for InstanceStateHandler {
                         }
                     }
 
-                    let mut txn = ctx.services.db_pool.begin().await?;
-                    let host_version = mh_snapshot.host_snapshot.network_config.version;
-                    let mut host_netconf = mh_snapshot.host_snapshot.network_config.value.clone();
-                    let old_use_admin_network = host_netconf.use_admin_network;
-                    host_netconf.use_admin_network = Some(false);
-                    let updated = db::machine::try_update_network_config(
-                        &mut txn,
-                        &mh_snapshot.host_snapshot.id,
-                        host_version,
-                        &host_netconf,
-                    )
-                    .await?;
-
-                    // Set use_admin_network_changed if we want to reboot
-                    // ovs on admin network change.
-                    if updated
-                        && old_use_admin_network != host_netconf.use_admin_network
-                        && ctx
-                            .services
-                            .site_config
-                            .restart_ovs_on_use_admin_network_change
-                    {
-                        process_dpu_use_admin_network_state_change(&mut txn, mh_snapshot).await?;
-                    }
-
-                    // The host was already flipped to tenant network in the
-                    // Ready -> Assigned transition; that write fanned out via
-                    // `try_update_network_config`'s group sync to bump every
-                    // DPU's version too, so no DPU bumps are needed here.
                     let next_state = ManagedHostState::Assigned {
                         instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
                     };
-                    return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn));
+                    Ok(StateHandlerOutcome::transition(next_state))
                 }
             }
         } else {
@@ -9524,7 +9484,7 @@ async fn process_dpu_use_admin_network_state_change(
 ) -> Result<(), StateHandlerError> {
     tracing::info!(
         machine_id = %mh_snapshot.host_snapshot.id,
-        "Set use_admin_network_changed flag as host has changed use_admin_network state and site-restart-ovs is set"
+        "Request an OVS restart for DPUs switching between Admin and tenant networking"
     );
 
     // Determine which DPUs have tenant interface configs. A DPU matches if:
@@ -9659,11 +9619,6 @@ async fn handle_instance_network_config_update_request(
         }
         NetworkConfigUpdateState::ReleaseOldResources => {
             let mut txn = ctx.services.db_pool.begin().await?;
-            // Identify all the resources which have to be released.
-            // Release Ips.
-            // Release segments.
-            // Release VpcDpuLoopbackIps.
-            // Free the update_network_config_request field.
             let Some(update_request) = &instance.update_network_config_request else {
                 return Err(StateHandlerError::GenericError(eyre::eyre!(
                     "network config update request is missing from db. instance: {}",
@@ -9684,13 +9639,6 @@ async fn handle_instance_network_config_update_request(
                 .collect_vec();
 
             if !resources_to_be_released.is_empty() {
-                // Resolve VPC membership before old VPC-prefix segments are marked deleted.
-                let old_vpc_ids =
-                    vpc_ids_for_interfaces(&update_request.old_config.interfaces, &mut txn).await?;
-                let new_vpc_ids =
-                    vpc_ids_for_interfaces(&update_request.new_config.interfaces, &mut txn).await?;
-                let released_vpc_ids = old_vpc_ids.difference(&new_vpc_ids).copied().collect_vec();
-
                 let addresses = resources_to_be_released
                     .iter()
                     .flat_map(|interface| {
@@ -9723,6 +9671,21 @@ async fn handle_instance_network_config_update_request(
                     &addresses,
                 )
                 .await?;
+            }
+
+            // The cleanup transaction in `force_delete_instance` locks addresses,
+            // then the Instance, then its segments. Clearing the request here avoids
+            // a deadlock even when SLAAC has no stored addresses to lock.
+            db::instance::delete_update_network_config_request(&instance.id, &mut txn).await?;
+
+            if !resources_to_be_released.is_empty() {
+                // Resolve VPC membership before old VPC-prefix segments are marked deleted.
+                let old_vpc_ids =
+                    vpc_ids_for_interfaces(&update_request.old_config.interfaces, &mut txn).await?;
+                let new_vpc_ids =
+                    vpc_ids_for_interfaces(&update_request.new_config.interfaces, &mut txn).await?;
+                let released_vpc_ids = old_vpc_ids.difference(&new_vpc_ids).copied().collect_vec();
+
                 release_network_segments_with_vpc_prefix(&resources_to_be_released, &mut txn)
                     .await?;
                 release_vpc_dpu_loopback_for_vpcs(
@@ -9733,7 +9696,6 @@ async fn handle_instance_network_config_update_request(
                 )
                 .await?;
             }
-            db::instance::delete_update_network_config_request(&instance.id, &mut txn).await?;
             let next_state = ManagedHostState::Assigned {
                 instance_state: InstanceState::Ready,
             };
@@ -11992,12 +11954,17 @@ impl HostUpgradeState {
             );
 
             let mut txn = ctx.services.db_pool.begin().await?;
-            db::explored_endpoints::re_explore_if_version_matches(
+            // A rejected request does not finish the firmware wait. The next
+            // controller pass reads the endpoint again.
+            match db::explored_endpoints::re_explore_if_version_matches(
                 endpoint.address,
                 endpoint.report_version,
                 &mut txn,
             )
-            .await?;
+            .await?
+            {
+                Applied(()) | NotApplied(EndpointReportNotCurrent) => {}
+            }
             Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
         }
     }
@@ -12823,7 +12790,7 @@ async fn restart_dpu(
         tracing::warn!(
             machine_id = %machine.id,
             %power_state,
-            "DPU is not running; powering it on instead of restarting it"
+            "DPU is powered off; powering it on instead of restarting it"
         );
     }
 
@@ -12839,10 +12806,11 @@ fn dpu_restart_power_action(
     power_state: libredfish::PowerState,
 ) -> Result<SystemPowerControl, StateHandlerError> {
     match power_state {
-        // BlueField-3 reports its stable StandbyOffline state as Paused after
-        // the Arm OS shuts down, so it needs the same recovery as Off.
-        libredfish::PowerState::Off | libredfish::PowerState::Paused => Ok(SystemPowerControl::On),
-        libredfish::PowerState::On => Ok(SystemPowerControl::ForceRestart),
+        libredfish::PowerState::Off => Ok(SystemPowerControl::On),
+        // A Paused system requires an explicit restart to begin a new boot sequence.
+        libredfish::PowerState::On | libredfish::PowerState::Paused => {
+            Ok(SystemPowerControl::ForceRestart)
+        }
         libredfish::PowerState::PoweringOff
         | libredfish::PowerState::PoweringOn
         | libredfish::PowerState::Reset
@@ -14394,9 +14362,9 @@ mod tests {
                     expect: Err(()),
                 },
                 Check {
-                    scenario: "paused DPU is powered on",
+                    scenario: "paused DPU is restarted",
                     input: libredfish::PowerState::Paused,
-                    expect: Ok(SystemPowerControl::On),
+                    expect: Ok(SystemPowerControl::ForceRestart),
                 },
                 Check {
                     scenario: "resetting DPU is retried",

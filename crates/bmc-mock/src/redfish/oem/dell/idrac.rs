@@ -30,33 +30,33 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch, json_patch};
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     r.route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Attributes",
-        get(get_managers_oem_dell_attributes).patch(patch_managers_oem_dell_attributes),
+        get(get_managers_oem_dell_attributes::<C>).patch(patch_managers_oem_dell_attributes::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellAttributes/iDRAC.Embedded.1",
-        get(get_managers_oem_dell_attributes).patch(patch_managers_oem_dell_attributes),
+        get(get_managers_oem_dell_attributes::<C>).patch(patch_managers_oem_dell_attributes::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Jobs",
-        post(post_dell_create_bios_job),
+        post(post_dell_create_bios_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs",
-        post(post_dell_create_bios_job),
+        post(post_dell_create_bios_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Jobs/{job_id}",
-        get(get_dell_job),
+        get(get_dell_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs/{job_id}",
-        get(get_dell_job),
+        get(get_dell_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellJobService/Actions/DellJobService.DeleteJobQueue",
         post(post_delete_job_queue)
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Actions/Oem/EID_674_Manager.ImportSystemConfiguration",
-        post(post_import_sys_configuration)
+        post(post_import_sys_configuration::<C>)
     )
 }
 
@@ -71,7 +71,9 @@ fn attributes_resource() -> redfish::Resource<'static> {
     }
 }
 
-async fn get_managers_oem_dell_attributes(State(state): State<BmcState>) -> Response {
+async fn get_managers_oem_dell_attributes<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
         return http::not_found();
     };
@@ -95,8 +97,8 @@ async fn get_managers_oem_dell_attributes(State(state): State<BmcState>) -> Resp
     state.get_attrs(base.clone()).into_ok_response()
 }
 
-async fn patch_managers_oem_dell_attributes(
-    State(state): State<BmcState>,
+async fn patch_managers_oem_dell_attributes<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Json(attrs): Json<serde_json::Value>,
 ) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
@@ -112,7 +114,10 @@ pub(crate) enum JobState {
     Completed,
 }
 
-async fn get_dell_job(State(state): State<BmcState>, Path(job_id): Path<String>) -> Response {
+async fn get_dell_job<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(job_id): Path<String>,
+) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
         return http::not_found();
     };
@@ -150,7 +155,7 @@ async fn get_dell_job(State(state): State<BmcState>, Path(job_id): Path<String>)
     .into_ok_response()
 }
 
-pub(in crate::redfish) fn create_job_with_location(state: BmcState) -> Response {
+pub(in crate::redfish) fn create_job_with_location<C: Callbacks>(state: BmcState<C>) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
         return http::not_found();
     };
@@ -165,7 +170,7 @@ pub(in crate::redfish) fn create_job_with_location(state: BmcState) -> Response 
     }
 }
 
-async fn post_dell_create_bios_job(State(state): State<BmcState>) -> Response {
+async fn post_dell_create_bios_job<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     create_job_with_location(state)
 }
 
@@ -173,7 +178,7 @@ async fn post_delete_job_queue() -> Response {
     json!({}).into_ok_response()
 }
 
-async fn post_import_sys_configuration(State(state): State<BmcState>) -> Response {
+async fn post_import_sys_configuration<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     create_job_with_location(state)
 }
 

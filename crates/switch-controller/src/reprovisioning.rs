@@ -191,6 +191,15 @@ pub async fn handle_reprovisioning(
 
             match &firmware_upgrade_status.status {
                 model::rack::RackFirmwareUpgradeState::Completed => {
+                    tracing::info!(
+                        switch_id = %switch_id,
+                        rack_id = ?state.rack_id,
+                        backend_job_id = %firmware_upgrade_status.task_id,
+                        next_reprovisioning_state = ?next_after_firmware,
+                        returning_to_ready = next_after_firmware.is_none(),
+                        "Switch rack firmware update completed"
+                    );
+
                     if let Some(reprovisioning_state) = next_after_firmware {
                         return Ok(StateHandlerOutcome::transition(
                             SwitchControllerState::ReProvisioning {
@@ -205,6 +214,14 @@ pub async fn handle_reprovisioning(
                     Ok(StateHandlerOutcome::transition(SwitchControllerState::Ready).with_txn(txn))
                 }
                 model::rack::RackFirmwareUpgradeState::Failed { cause } => {
+                    tracing::warn!(
+                        switch_id = %switch_id,
+                        rack_id = ?state.rack_id,
+                        backend_job_id = %firmware_upgrade_status.task_id,
+                        %cause,
+                        "Switch rack firmware update failed; transitioning to Error"
+                    );
+
                     let mut txn = ctx.services.db_pool.begin().await?;
                     db_switch::clear_switch_reprovisioning_requested(txn.as_mut(), *switch_id)
                         .await?;

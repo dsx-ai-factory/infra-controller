@@ -137,7 +137,10 @@ message SiteExplorerLastRun {
 }
 
 message ExploredEndpointSearchFilter {
-    // empty now, but maybe in the future we add a way to filter
+  // Match only endpoints whose exploration report has this machine ID.
+  // Omission returns all endpoints, including reports without a machine ID.
+  // Empty or malformed IDs return INVALID_ARGUMENT.
+  optional string machine_id = 1;
 }
 
 message ExploredEndpointIdList {

@@ -33,7 +33,7 @@ use std::borrow::Cow;
 
 use mac_address::MacAddress;
 
-use crate::redfish;
+use crate::{Callbacks, redfish};
 
 /// Chassis id reported by a Delta power shelf (matches the scrape).
 const CHASSIS_ID: &str = "chassis";
@@ -78,7 +78,7 @@ impl DeltaPowerShelf<'_> {
     /// Delta power shelves expose no `ComputerSystem`; the collection is empty
     /// and (via the `exposes_computer_systems` gate) is not advertised or
     /// served. Site-explorer synthesizes a system from the chassis instead.
-    pub(crate) fn system_config(&self) -> redfish::computer_system::Config {
+    pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
         redfish::computer_system::Config { systems: vec![] }
     }
 

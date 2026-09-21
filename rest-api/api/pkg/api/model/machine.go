@@ -349,10 +349,12 @@ type APIMachine struct {
 	// Health contains health information about the machine
 	Health *APIMachineHealth `json:"health"`
 	// Labels is VPC labels specified by user
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// Status represents the status of the machine
 	Status string `json:"status"`
-	// IsUsableByTenant indicates whether the machine is usable by or currently in use by a tenant.
+	// IsUsableByTenant indicates whether the machine is usable by or currently in use
+	// by a tenant. It does not indicate that a Machine is available for Instance
+	// creation.
 	IsUsableByTenant bool `json:"isUsableByTenant"`
 	// StatusHistory is the history of statuses for the Machine
 	StatusHistory []APIStatusDetail `json:"statusHistory"`
@@ -577,7 +579,7 @@ func NewAPIMachine(dbm *cdbm.Machine, dbmcs []cdbm.MachineCapability, dbmis []cd
 		ProductName:              dbm.ProductName,
 		Hostname:                 dbm.Hostname,
 		MaintenanceMessage:       dbm.MaintenanceMessage,
-		Labels:                   dbm.Labels,
+		Labels:                   APILabels(dbm.Labels),
 		Status:                   dbm.Status,
 		IsUsableByTenant:         dbm.IsUsableByTenant,
 		Created:                  dbm.Created,

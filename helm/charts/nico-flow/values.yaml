@@ -146,8 +146,23 @@ dataEncryption:
     existingSecret: ""
     value: ""
 
-## Optional flowconfig.yaml — when set, becomes the flow-config-files ConfigMap.
-flowConfig: ""
+## Runtime settings rendered into the flow-config-files ConfigMap and mounted
+## at /etc/flow/flowconfig.yaml. Defaults match the built-in defaults in
+## rest-api/flow/internal/config/config.go, so an unchanged block behaves the
+## same as running without a config file.
+##
+## Intervals are Go duration strings such as "30s", "1m", or "1h30m" and must
+## be greater than zero; the toggles must be YAML booleans. The chart rejects
+## other values at render time. Changing any value rolls the Flow Deployment.
+flowConfig:
+  ## Interval between inventory synchronisation runs. Duration, default 1m.
+  inventoryRunFrequency: 1m
+  ## Skip the periodic inventory synchronisation job. Boolean, default false.
+  disableInventory: false
+  ## Interval between leak detection runs. Duration, default 1m.
+  leakDetectionInterval: 1m
+  ## Skip the periodic leak detection job. Boolean, default false.
+  disableLeakDetection: false
 
 extraEnv:
   flow: []

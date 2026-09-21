@@ -315,7 +315,7 @@ func TestNewAPIExpectedPowerShelf(t *testing.T) {
 			assert.Equal(t, tc.dbObj.BmcMacAddress, got.BmcMacAddress)
 			assert.Equal(t, tc.dbObj.ShelfSerialNumber, got.ShelfSerialNumber)
 			assert.Equal(t, tc.dbObj.BmcIpAddress, got.BmcIpAddress)
-			assert.Equal(t, map[string]string(tc.dbObj.Labels), got.Labels)
+			assert.Equal(t, APILabels(tc.dbObj.Labels), got.Labels)
 			assert.Equal(t, tc.dbObj.Created, got.Created)
 			assert.Equal(t, tc.dbObj.Updated, got.Updated)
 		})
@@ -572,7 +572,7 @@ func TestNewAPIExpectedPowerShelfEdgeCases(t *testing.T) {
 
 		got := NewAPIExpectedPowerShelf(dbEPS)
 		assert.NotNil(t, got)
-		assert.Equal(t, map[string]string(dbEPS.Labels), got.Labels)
+		assert.Equal(t, APILabels(dbEPS.Labels), got.Labels)
 		assert.Equal(t, "cloud-api", got.Labels["app.kubernetes.io/name"])
 	})
 

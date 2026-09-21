@@ -44,7 +44,7 @@ use crate::crds::dpudeployments_generated::{
 };
 #[cfg(test)]
 use crate::crds::dpudevices_generated::DpuDeviceCluster;
-use crate::crds::dpudevices_generated::{DPUDevice, DpuDeviceSpec};
+use crate::crds::dpudevices_generated::{DPUDevice, DpuDeviceBmcFactoryResetPolicy, DpuDeviceSpec};
 use crate::crds::dpunodes_generated::{
     DPUNode, DpuNodeDpus, DpuNodeNodeRebootMethod, DpuNodeNodeRebootMethodExternal, DpuNodeSpec,
 };
@@ -2584,7 +2584,10 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
                 cluster: None,
                 nic_device_count: None,
                 values,
-                bmc_factory_reset_policy: None,
+                // NICo owns BMC initialization and decommissioning. Resetting
+                // again here can discard NICo-managed network and credential
+                // state and trip the BMC authentication lockout protection.
+                bmc_factory_reset_policy: Some(DpuDeviceBmcFactoryResetPolicy::Never),
             },
             status: None,
         };
@@ -5404,6 +5407,10 @@ mod tests {
             .unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].spec.serial_number, "SN123456");
+        assert!(matches!(
+            devices[0].spec.bmc_factory_reset_policy.as_ref(),
+            Some(DpuDeviceBmcFactoryResetPolicy::Never)
+        ));
     }
 
     #[test]

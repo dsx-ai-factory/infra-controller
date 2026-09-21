@@ -30,6 +30,8 @@ type DpuExtensionServiceCreateRequest struct {
 	Description NullableString `json:"description,omitempty"`
 	// Type of the DPU Extension Service
 	ServiceType string `json:"serviceType"`
+	// Required for DpfHelmChart services and unsupported for KubernetesPod services
+	DpuTarget NullableDpuExtensionServiceDpuTarget `json:"dpuTarget,omitempty"`
 	// ID for the Site the DPU Extension Service belongs to
 	SiteId string `json:"siteId"`
 	// Deployment spec, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. KubernetesPod requires a parseable Pod manifest declaring at least one container, whose kind, when present, is Pod. DpfHelmChart requires a strict JSON object with repoURL, chartName, chartVersion, security.privileged, and optional values; repoURL must use https:// or oci://, and serviceDaemonSet.nodeSelector is unsupported.
@@ -152,6 +154,49 @@ func (o *DpuExtensionServiceCreateRequest) GetServiceTypeOk() (*string, bool) {
 // SetServiceType sets field value
 func (o *DpuExtensionServiceCreateRequest) SetServiceType(v string) {
 	o.ServiceType = v
+}
+
+// GetDpuTarget returns the DpuTarget field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *DpuExtensionServiceCreateRequest) GetDpuTarget() DpuExtensionServiceDpuTarget {
+	if o == nil || IsNil(o.DpuTarget.Get()) {
+		var ret DpuExtensionServiceDpuTarget
+		return ret
+	}
+	return *o.DpuTarget.Get()
+}
+
+// GetDpuTargetOk returns a tuple with the DpuTarget field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *DpuExtensionServiceCreateRequest) GetDpuTargetOk() (*DpuExtensionServiceDpuTarget, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DpuTarget.Get(), o.DpuTarget.IsSet()
+}
+
+// HasDpuTarget returns a boolean if a field has been set.
+func (o *DpuExtensionServiceCreateRequest) HasDpuTarget() bool {
+	if o != nil && o.DpuTarget.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDpuTarget gets a reference to the given NullableDpuExtensionServiceDpuTarget and assigns it to the DpuTarget field.
+func (o *DpuExtensionServiceCreateRequest) SetDpuTarget(v DpuExtensionServiceDpuTarget) {
+	o.DpuTarget.Set(&v)
+}
+
+// SetDpuTargetNil sets the value for DpuTarget to be an explicit nil
+func (o *DpuExtensionServiceCreateRequest) SetDpuTargetNil() {
+	o.DpuTarget.Set(nil)
+}
+
+// UnsetDpuTarget ensures that no value is present for DpuTarget, not even an explicit nil
+func (o *DpuExtensionServiceCreateRequest) UnsetDpuTarget() {
+	o.DpuTarget.Unset()
 }
 
 // GetSiteId returns the SiteId field value
@@ -281,6 +326,9 @@ func (o DpuExtensionServiceCreateRequest) ToMap() (map[string]interface{}, error
 		toSerialize["description"] = o.Description.Get()
 	}
 	toSerialize["serviceType"] = o.ServiceType
+	if o.DpuTarget.IsSet() {
+		toSerialize["dpuTarget"] = o.DpuTarget.Get()
+	}
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["data"] = o.Data
 	if !IsNil(o.Credentials) {

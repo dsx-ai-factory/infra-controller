@@ -236,7 +236,7 @@ mod tests {
             BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: Some(443),
-                mac,
+                mac: Some(mac),
             },
             BmcCredentials::UsernamePassword {
                 username: "user".to_string(),
@@ -263,7 +263,7 @@ mod tests {
             BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: Some(443),
-                mac,
+                mac: Some(mac),
             },
             BmcCredentials::UsernamePassword {
                 username: "user".to_string(),

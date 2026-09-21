@@ -66,6 +66,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+pub mod actor;
 mod ipmi;
 pub mod ipmi_sim;
 pub mod libvirt;
@@ -106,6 +107,9 @@ pub use mock_machine_router::{
     SetSystemPowerResult, machine_router, machine_router_with_injection_store,
 };
 pub use rack_info::RackInfo;
+/// BMC account state and the credential snapshot type used to persist and
+/// restore rotated passwords across a mock rebuild.
+pub use redfish::account_service::{AccountServiceState, BmcAccountCredential};
 pub use redfish::event_service::{
     EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
 };
@@ -232,6 +236,10 @@ pub enum MockPowerState {
     #[default]
     On,
     Off,
+    /// Power-on accepted; the host is not yet `On` (POST has not begun).
+    PoweringOn,
+    /// Graceful shutdown accepted; the OS is going down but power is still applied.
+    PoweringOff,
     PowerCycling {
         since: Instant,
     },
@@ -242,6 +250,8 @@ impl fmt::Display for MockPowerState {
         match self {
             Self::On => "On".fmt(f),
             Self::Off => "Off".fmt(f),
+            Self::PoweringOn => "PoweringOn".fmt(f),
+            Self::PoweringOff => "PoweringOff".fmt(f),
             Self::PowerCycling { since } => write!(f, "PowerCycling {:?}", since.elapsed()),
         }
     }
@@ -250,7 +260,8 @@ impl fmt::Display for MockPowerState {
 // Simulate a 5-second power cycle
 pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 
-pub trait Callbacks: std::fmt::Debug + Send + Sync {
+/// Backend operations for one BMC, selected by the router's concrete callback type.
+pub trait Callbacks: std::fmt::Debug + Send + Sync + 'static {
     fn get_power_state(&self) -> MockPowerState;
     fn send_power_command(&self, reset_type: SystemPowerControl)
     -> Result<(), SetSystemPowerError>;
@@ -263,9 +274,16 @@ pub trait Callbacks: std::fmt::Debug + Send + Sync {
             ) => Err(SetSystemPowerError::BadRequest(
                 "bmc-mock: cannot power off machine, it is already off".to_string(),
             )),
-            (C::On | C::ForceOn, MockPowerState::On) => Err(SetSystemPowerError::BadRequest(
-                "bmc-mock: cannot power on machine, it is already on".to_string(),
-            )),
+            (C::On | C::ForceOn, MockPowerState::On | MockPowerState::PoweringOn) => {
+                Err(SetSystemPowerError::BadRequest(
+                    "bmc-mock: cannot power on machine, it is already on".to_string(),
+                ))
+            }
+            (C::On | C::ForceOn, MockPowerState::PoweringOff) => {
+                Err(SetSystemPowerError::BadRequest(
+                    "bmc-mock: cannot power on machine, it is shutting down".to_string(),
+                ))
+            }
             (_, MockPowerState::PowerCycling { since }) if since.elapsed() < POWER_CYCLE_DELAY => {
                 Err(SetSystemPowerError::BadRequest(format!(
                     "bmc-mock: cannot reset machine, it is in the middle of power cycling since {:?} ago",

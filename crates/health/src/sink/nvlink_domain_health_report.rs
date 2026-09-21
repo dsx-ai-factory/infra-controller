@@ -199,7 +199,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::from_str("10.0.0.1").expect("valid IP address"),
                 port: Some(443),
-                mac: MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC address"),
+                mac: Some(MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC address")),
             },
             collector_type: "nmxc",
             metadata: Some(EndpointMetadata::Switch(SwitchData {
@@ -223,6 +223,7 @@ mod tests {
             observed_at: None,
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::NmxControllerHealth,
                 target: None,
                 message: "NMX-C controller health is degraded".to_string(),
@@ -235,6 +236,7 @@ mod tests {
             target: Some(HealthReportTarget::NvLinkDomain),
             observed_at: None,
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::NmxControllerHealth,
                 target: None,
             }],

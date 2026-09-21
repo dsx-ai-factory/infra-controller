@@ -15,9 +15,12 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use nv_redfish::core::ODataId;
 
 use super::context::{CollectorKind, DiscoveryLoopContext};
 use crate::HealthError;
@@ -27,11 +30,12 @@ use crate::collectors::{
     EntityDiscoveryCollector, EntityDiscoveryCollectorConfig, FailureKind, FirmwareCollector,
     FirmwareCollectorConfig, GpuInventoryCollector, GpuInventoryCollectorConfig,
     LeakDetectorCollector, LeakDetectorCollectorConfig, LogsCollector, LogsCollectorConfig,
-    MetricsCollector, MetricsCollectorConfig, NmxcCollector, NmxcCollectorConfig,
-    NmxcSchemaOverrideCollector, NmxcSchemaOverrideCollectorConfig, NmxtCollector,
-    NmxtCollectorConfig, NvueRestCollector, NvueRestCollectorConfig, SensorCollector,
-    SensorCollectorConfig, SseLogCollector, SseLogCollectorConfig, StreamingCollectorStartContext,
-    TelemetryCollector, TelemetryCollectorConfig, spawn_gnmi_collector,
+    ManagerCollector, ManagerCollectorConfig, MetricsCollector, MetricsCollectorConfig,
+    NmxcCollector, NmxcCollectorConfig, NmxcSchemaOverrideCollector,
+    NmxcSchemaOverrideCollectorConfig, NmxtCollector, NmxtCollectorConfig, NvueRestCollector,
+    NvueRestCollectorConfig, SensorCollector, SensorCollectorConfig, SseCursorSink,
+    SseLogCollector, SseLogCollectorConfig, StreamingCollectorStartContext, TelemetryCollector,
+    TelemetryCollectorConfig, spawn_gnmi_collector,
 };
 use crate::config::{
     Configurable, LogCollectionMode, NmxcCollectorConfig as NmxcCollectorOptions, PeriodicLogConfig,
@@ -39,6 +43,9 @@ use crate::config::{
 use crate::endpoint::{BmcEndpoint, EndpointMetadata, SwitchEndpointRole};
 use crate::metrics::CollectorRegistry;
 use crate::sink::DataSink;
+
+// Auto mode stays in periodic fallback long enough to avoid rapid mode flapping.
+const SSE_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 fn logs_state_file_path(template: &str, endpoint_id: &str) -> PathBuf {
     PathBuf::from(template.replace("{machine_id}", endpoint_id))
@@ -48,12 +55,14 @@ fn build_periodic_logs_collector_config(
     config: &PeriodicLogConfig,
     state_file_path: PathBuf,
     data_sink: Option<Arc<dyn DataSink>>,
+    initial_last_seen_ids: Option<HashMap<ODataId, i32>>,
     include_diagnostics: bool,
 ) -> LogsCollectorConfig {
     LogsCollectorConfig {
         state_file_path,
         service_refresh_interval: config.state_refresh_interval,
         data_sink,
+        initial_last_seen_ids,
         include_diagnostics,
         exclude_services: config.exclude_services.clone(),
         skip_initial_history: config.skip_initial_history,
@@ -140,6 +149,8 @@ pub(super) fn collector_eligibility(
                 || ctx.telemetry_config.is_enabled()
                 || logs
                 || ctx.firmware_config.is_enabled()
+                || (ctx.manager_config.is_enabled()
+                    && matches!(endpoint.metadata, Some(EndpointMetadata::PowerShelf(_))))
                 || ctx.leak_detector_config.is_enabled()
                 || gpu_inventory,
             ..Default::default()
@@ -188,6 +199,7 @@ fn spawn_generic_redfish_collectors(
     metrics_prefix: &str,
 ) -> Result<(), HealthError> {
     let key = endpoint.key();
+    let registry_key = endpoint.addr.registry_key();
     let endpoint_arc = endpoint.clone();
     let bmc = endpoint.bmc().clone();
 
@@ -201,6 +213,9 @@ fn spawn_generic_redfish_collectors(
     let gpu_inventory_enabled = matches!(ctx.gpu_inventory_config, Configurable::Enabled(_))
         && ctx.api_client.is_some()
         && matches!(endpoint.metadata, Some(EndpointMetadata::Machine(_)));
+    // Chassis power evidence and Manager (PMC) status are collected for
+    // power-shelf endpoints only.
+    let power_shelf = matches!(endpoint.metadata, Some(EndpointMetadata::PowerShelf(_)));
     // GPU identity attributes on log records are resolved against the shared
     // entity inventory, so discovery must also run for a logs-only deployment.
     let gpu_identity_enabled = ctx.attributes.gpu_identity;
@@ -210,7 +225,7 @@ fn spawn_generic_redfish_collectors(
     {
         let shared = ctx.collectors.inventory_for(&key);
         let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
-            format!("entity_discovery_collector_{key}"),
+            format!("entity_discovery_collector_{registry_key}"),
             metrics_prefix,
         )?);
         match Collector::start::<EntityDiscoveryCollector<BmcClient>>(
@@ -219,6 +234,7 @@ fn spawn_generic_redfish_collectors(
             EntityDiscoveryCollectorConfig {
                 shared,
                 request_concurrency: ctx.bmc_request_concurrency,
+                collect_shelf_power: power_shelf,
                 gpu_identity: gpu_identity_enabled,
             },
             CollectorStartContext {
@@ -253,10 +269,10 @@ fn spawn_generic_redfish_collectors(
         && !ctx.collectors.contains(CollectorKind::Sensor, &key)
     {
         let shared = ctx.collectors.inventory_for(&key);
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("sensor_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("sensor_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<SensorCollector<BmcClient>>(
             endpoint_arc.clone(),
             bmc.clone(),
@@ -298,10 +314,10 @@ fn spawn_generic_redfish_collectors(
         && !ctx.collectors.contains(CollectorKind::Metrics, &key)
     {
         let shared = ctx.collectors.inventory_for(&key);
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("metrics_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("metrics_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<MetricsCollector<BmcClient>>(
             endpoint_arc.clone(),
             bmc.clone(),
@@ -341,10 +357,10 @@ fn spawn_generic_redfish_collectors(
     if let Configurable::Enabled(telemetry_cfg) = &ctx.telemetry_config
         && !ctx.collectors.contains(CollectorKind::Telemetry, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("telemetry_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("telemetry_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<TelemetryCollector<BmcClient>>(
             endpoint_arc.clone(),
             bmc.clone(),
@@ -382,10 +398,11 @@ fn spawn_generic_redfish_collectors(
     if let Configurable::Enabled(logs_cfg) = &ctx.logs_config
         && !ctx.collectors.contains(CollectorKind::Logs, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("log_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry =
+            Arc::new(ctx.metrics_manager.create_collector_registry(
+                format!("log_collector_{registry_key}"),
+                metrics_prefix,
+            )?);
 
         // Resolved once here because both SSE spawn paths below share the
         // endpoint's inventory handle.
@@ -403,6 +420,7 @@ fn spawn_generic_redfish_collectors(
 
         let spawn_periodic_logs = |pcfg: PeriodicLogConfig,
                                    data_sink: Option<Arc<dyn DataSink>>,
+                                   initial_last_seen_ids: Option<HashMap<ODataId, i32>>,
                                    collector_registry: Arc<_>|
          -> Option<Result<Collector, HealthError>> {
             let endpoint_id = endpoint.log_identity().into_owned();
@@ -411,6 +429,7 @@ fn spawn_generic_redfish_collectors(
                 &pcfg,
                 state_file_path,
                 data_sink,
+                initial_last_seen_ids,
                 ctx.logs_include_diagnostics,
             );
 
@@ -458,21 +477,60 @@ fn spawn_generic_redfish_collectors(
             LogCollectionMode::Periodic => spawn_periodic_logs(
                 logs_cfg.periodic_or_default(),
                 data_sink.clone(),
+                None,
                 collector_registry,
             ),
             LogCollectionMode::Auto => {
                 if ctx.log_downgrade_registry.is_downgraded(&key) {
-                    spawn_periodic_logs(
+                    let retry_sse_after_downgrade = logs_cfg
+                        .auto
+                        .as_ref()
+                        .is_some_and(|auto| auto.retry_sse_after_downgrade);
+
+                    let initial_last_seen_ids =
+                        ctx.log_downgrade_registry.pending_last_seen_ids(&key);
+
+                    match spawn_periodic_logs(
                         logs_cfg.auto_periodic_or_default(),
                         data_sink.clone(),
+                        initial_last_seen_ids,
                         collector_registry,
-                    )
+                    ) {
+                        Some(Ok(mut periodic)) => {
+                            ctx.log_downgrade_registry.take_last_seen_ids(&key);
+
+                            if retry_sse_after_downgrade {
+                                let registry = ctx.log_downgrade_registry.clone();
+                                let transition_notify = ctx.collector_transition_notify.clone();
+                                let endpoint_key = key.clone();
+
+                                Some(Ok(Collector::spawn_task(move |cancel| async move {
+                                    tokio::select! {
+                                        () = cancel.cancelled() => periodic.stop().await,
+                                        () = periodic.finished() => {}
+                                        () = tokio::time::sleep(SSE_RETRY_INTERVAL) => {
+                                            periodic.stop().await;
+                                        }
+                                    }
+
+                                    registry.clear_downgraded(&endpoint_key);
+                                    transition_notify.notify_one();
+                                })))
+                            } else {
+                                Some(Ok(periodic))
+                            }
+                        }
+                        result => result,
+                    }
                 } else if let Some(data_sink) = data_sink.clone() {
                     let auto_cfg = logs_cfg.auto.clone().unwrap_or_default();
                     let registry = ctx.log_downgrade_registry.clone();
+                    let transition_notify = ctx.collector_transition_notify.clone();
                     let endpoint_key: std::borrow::Cow<'static, str> = key.clone().into();
                     let endpoint_rack_id = endpoint.rack_id.clone();
-                    let mut budget = AutoFailureBudget::new(auto_cfg, Instant::now());
+                    let mut budget = AutoFailureBudget::new(auto_cfg);
+                    let cursor_sink = Arc::new(SseCursorSink::new(data_sink));
+                    let tracked_data_sink: Arc<dyn DataSink> = cursor_sink.clone();
 
                     Some(Collector::start_streaming::<SseLogCollector<BmcClient>, _>(
                         endpoint_arc.clone(),
@@ -482,28 +540,34 @@ fn spawn_generic_redfish_collectors(
                             request_concurrency: ctx.bmc_request_concurrency,
                             gpu_inventory: sse_gpu_inventory,
                         },
-                        data_sink,
+                        tracked_data_sink,
                         StreamingCollectorStartContext {
                             backoff_config: sse_backoff_config(),
                             collector_registry,
                         },
-                        move |result| match result {
-                            Ok(()) => {
-                                budget.reset_transient(Instant::now());
-                                true
-                            }
-                            Err(e) => {
-                                match budget.record(FailureKind::classify(e), Instant::now()) {
-                                    BudgetDecision::Continue => true,
-                                    BudgetDecision::Downgrade(reason) => {
-                                        registry.mark_downgraded(
-                                            endpoint_key.clone(),
-                                            endpoint_rack_id.as_ref(),
-                                            reason,
-                                        );
+                        move |result| {
+                            let decision = match result {
+                                Ok(connected_for) => {
+                                    budget.record_stream_end(connected_for, Instant::now())
+                                }
+                                Err(error) => {
+                                    budget.record(FailureKind::classify(error), Instant::now())
+                                }
+                            };
 
-                                        false
-                                    }
+                            match decision {
+                                BudgetDecision::Continue => true,
+                                BudgetDecision::Downgrade(reason) => {
+                                    registry.mark_downgraded(
+                                        endpoint_key.clone(),
+                                        endpoint_rack_id.as_ref(),
+                                        reason,
+                                        cursor_sink.snapshot(),
+                                    );
+
+                                    transition_notify.notify_one();
+
+                                    false
                                 }
                             }
                         },
@@ -548,10 +612,10 @@ fn spawn_generic_redfish_collectors(
     if let Configurable::Enabled(firmware_cfg) = &ctx.firmware_config
         && !ctx.collectors.contains(CollectorKind::Firmware, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("firmware_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("firmware_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<FirmwareCollector<BmcClient>>(
             endpoint_arc.clone(),
             bmc.clone(),
@@ -594,10 +658,11 @@ fn spawn_generic_redfish_collectors(
         && matches!(endpoint.metadata, Some(EndpointMetadata::Machine(_)))
         && !ctx.collectors.contains(CollectorKind::GpuInventory, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("gpu_inventory_{key}"), metrics_prefix)?,
-        );
+        let collector_registry =
+            Arc::new(ctx.metrics_manager.create_collector_registry(
+                format!("gpu_inventory_{registry_key}"),
+                metrics_prefix,
+            )?);
         // Reuse the entity-discovery collector's inventory for this endpoint so GPU
         // counting shares its Redfish enumeration instead of re-querying the BMC.
         let shared = ctx.collectors.inventory_for(&key);
@@ -631,14 +696,55 @@ fn spawn_generic_redfish_collectors(
         }
     }
 
+    if let Configurable::Enabled(manager_cfg) = &ctx.manager_config
+        && power_shelf
+        && !ctx.collectors.contains(CollectorKind::Manager, &key)
+    {
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("manager_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
+        match Collector::start::<ManagerCollector<BmcClient>>(
+            endpoint_arc.clone(),
+            bmc.clone(),
+            ManagerCollectorConfig {
+                data_sink: data_sink.clone(),
+            },
+            CollectorStartContext {
+                limiter: ctx.limiter.clone(),
+                iteration_interval: manager_cfg.poll_interval,
+                collector_registry,
+                metrics_manager: ctx.metrics_manager.clone(),
+            },
+        ) {
+            Ok(monitor) => {
+                ctx.collectors
+                    .insert(CollectorKind::Manager, key.clone().into(), monitor);
+                tracing::info!(
+                    endpoint_key = %key,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                    manager_collector_count = ctx.collectors.len(CollectorKind::Manager),
+                    "Started manager collection for power-shelf endpoint"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    endpoint = ?endpoint.addr,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                    "Could not start manager collector"
+                );
+            }
+        }
+    }
+
     if let Configurable::Enabled(leak_detector_cfg) = &ctx.leak_detector_config
         && !ctx.collectors.contains(CollectorKind::LeakDetector, &key)
     {
-        let collector_registry =
-            Arc::new(ctx.metrics_manager.create_collector_registry(
-                format!("leak_detector_collector_{key}"),
-                metrics_prefix,
-            )?);
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("leak_detector_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<LeakDetectorCollector<BmcClient>>(
             endpoint_arc,
             bmc,
@@ -729,6 +835,7 @@ fn spawn_switch_host_collectors(
     metrics_prefix: &str,
 ) -> Result<(), HealthError> {
     let key = endpoint.key();
+    let registry_key = endpoint.addr.registry_key();
     let endpoint_arc = endpoint.clone();
     let bmc = endpoint.bmc().clone();
     let eligibility = collector_eligibility(ctx, endpoint, data_sink.is_some());
@@ -737,10 +844,11 @@ fn spawn_switch_host_collectors(
         && let Configurable::Enabled(nmxt_cfg) = &ctx.nmxt_config
         && !ctx.collectors.contains(CollectorKind::Nmxt, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("nmxt_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry =
+            Arc::new(ctx.metrics_manager.create_collector_registry(
+                format!("nmxt_collector_{registry_key}"),
+                metrics_prefix,
+            )?);
         match Collector::start::<NmxtCollector>(
             endpoint_arc.clone(),
             bmc.clone(),
@@ -788,10 +896,10 @@ fn spawn_switch_host_collectors(
                 "NMX-C streaming collector requires an enabled log or NVLink domain health report sink, skipping"
             );
         } else if let Some(data_sink) = data_sink.clone() {
-            let collector_registry = Arc::new(
-                ctx.metrics_manager
-                    .create_collector_registry(format!("nmxc_collector_{key}"), metrics_prefix)?,
-            );
+            let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+                format!("nmxc_collector_{registry_key}"),
+                metrics_prefix,
+            )?);
 
             match start_nmxc_collector(
                 ctx,
@@ -837,10 +945,10 @@ fn spawn_switch_host_collectors(
         && !ctx.collectors.contains(CollectorKind::NvueRest, &key)
     {
         let credential_provider = bmc.credential_provider();
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("nvue_rest_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("nvue_rest_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         match Collector::start::<NvueRestCollector>(
             endpoint_arc,
             bmc.clone(),
@@ -884,10 +992,10 @@ fn spawn_switch_host_collectors(
         && let Configurable::Enabled(gnmi_cfg) = &nvue_cfg.gnmi
         && !ctx.collectors.contains(CollectorKind::NvueGnmi, &key)
     {
-        let collector_registry = Arc::new(
-            ctx.metrics_manager
-                .create_collector_registry(format!("nvue_gnmi_collector_{key}"), metrics_prefix)?,
-        );
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("nvue_gnmi_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
         let credential_provider = bmc.credential_provider();
         match spawn_gnmi_collector(
             endpoint,
@@ -978,7 +1086,7 @@ mod tests {
             BmcAddr {
                 ip: IpAddr::V4(ip),
                 port: Some(443),
-                mac: MacAddress::from_str(mac).expect("valid mac address"),
+                mac: Some(MacAddress::from_str(mac).expect("valid mac address")),
             },
             BmcCredentials::UsernamePassword {
                 username: "user".to_string(),
@@ -1087,6 +1195,7 @@ mod tests {
                     },
                     PathBuf::from("/tmp/logs_endpoint-42.json"),
                     None,
+                    None,
                     false,
                 )
                 .exclude_services
@@ -1110,6 +1219,37 @@ mod tests {
         );
 
         assert_eq!(endpoint.log_identity().as_ref(), "switch-serial-1");
+    }
+
+    #[tokio::test]
+    async fn ipv6_registry_identities_remain_distinct() {
+        let mut ctx = context_with_config(Config::default(), "test_ipv6_registry");
+
+        // These distinct addresses collide if ':' and '.' both become '_'.
+        for ip in ["::ffff:192.0.2.1", "::ffff:192:0:2:1"] {
+            let endpoint = Arc::new(endpoint_with_creds(
+                BmcAddr {
+                    ip: ip.parse().expect("valid IPv6 address"),
+                    port: None,
+                    mac: None,
+                },
+                BmcCredentials::UsernamePassword {
+                    username: "user".to_string(),
+                    password: Some("pass".to_string()),
+                },
+                None,
+                None,
+            ));
+            spawn_collectors_for_endpoint(&mut ctx, &endpoint, None, "test_ipv6_registry")
+                .expect("distinct IPv6 endpoints must both register collectors");
+            assert!(
+                ctx.collectors
+                    .contains(CollectorKind::Sensor, &endpoint.key())
+            );
+        }
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Discovery), 2);
+        assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 2);
     }
 
     #[tokio::test]
@@ -1142,6 +1282,84 @@ mod tests {
         assert_eq!(ctx.collectors.len(CollectorKind::Logs), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::Firmware), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::LeakDetector), 0);
+    }
+
+    #[tokio::test]
+    async fn test_manager_collector_starts_for_power_shelf_endpoints_only() {
+        let mut config = Config::default();
+        config.collectors.sensors = Configurable::Disabled;
+        config.collectors.manager = Configurable::Enabled(Default::default());
+        config.collectors.logs = Configurable::Disabled;
+        config.collectors.firmware = Configurable::Disabled;
+        config.collectors.leak_detector = Configurable::Disabled;
+
+        let mut ctx = context_with_config(config, "test_manager_power_shelf_gate");
+        let power_shelf = test_endpoint(
+            Ipv4Addr::new(10, 0, 0, 9),
+            "55:66:77:88:99:cc",
+            Some(EndpointMetadata::PowerShelf(
+                crate::endpoint::PowerShelfData {
+                    id: None,
+                    serial: Some("614MP1RXX03X6510035".to_string()),
+                    nvlink_domain_uuid: None,
+                },
+            )),
+        );
+        let machine = test_endpoint(
+            Ipv4Addr::new(10, 0, 0, 10),
+            "55:66:77:88:99:dd",
+            Some(machine_metadata()),
+        );
+
+        for endpoint in [&power_shelf, &machine] {
+            spawn_collectors_for_endpoint(
+                &mut ctx,
+                endpoint,
+                None,
+                "test_manager_power_shelf_gate",
+            )
+            .expect("spawn should succeed");
+        }
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 0);
+        assert_eq!(ctx.collectors.len(CollectorKind::Manager), 1);
+        assert!(
+            ctx.collectors
+                .contains(CollectorKind::Manager, &power_shelf.key())
+        );
+        assert!(
+            !ctx.collectors
+                .contains(CollectorKind::Manager, &machine.key())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manager_collector_disabled_skips_power_shelf_endpoints() {
+        let mut config = Config::default();
+        config.collectors.sensors = Configurable::Enabled(Default::default());
+        config.collectors.manager = Configurable::Disabled;
+        config.collectors.logs = Configurable::Disabled;
+        config.collectors.firmware = Configurable::Disabled;
+        config.collectors.leak_detector = Configurable::Disabled;
+
+        let mut ctx = context_with_config(config, "test_manager_disabled_gate");
+        let power_shelf = test_endpoint(
+            Ipv4Addr::new(10, 0, 0, 11),
+            "55:66:77:88:99:ee",
+            Some(EndpointMetadata::PowerShelf(
+                crate::endpoint::PowerShelfData {
+                    id: None,
+                    serial: Some("614MP1RXX03X6510036".to_string()),
+                    nvlink_domain_uuid: None,
+                },
+            )),
+        );
+
+        spawn_collectors_for_endpoint(&mut ctx, &power_shelf, None, "test_manager_disabled_gate")
+            .expect("spawn should succeed");
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 1);
+        assert_eq!(ctx.collectors.len(CollectorKind::Manager), 0);
     }
 
     #[tokio::test]
@@ -1508,7 +1726,7 @@ mod tests {
         let addr = BmcAddr {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
             port: Some(443),
-            mac: MacAddress::from_str("99:88:77:66:55:44").expect("valid mac"),
+            mac: Some(MacAddress::from_str("99:88:77:66:55:44").expect("valid mac")),
         };
         let bmc = Arc::new(
             BmcClient::new(
@@ -1773,7 +1991,7 @@ mod tests {
         assert_eq!(ctx.collectors.len(CollectorKind::Metrics), 1);
     }
 
-    fn auto_mode_config() -> Config {
+    fn auto_mode_config(retry_sse_after_downgrade: bool) -> Config {
         let mut config = Config::default();
         config.collectors.sensors = Configurable::Disabled;
         config.collectors.firmware = Configurable::Disabled;
@@ -1784,19 +2002,24 @@ mod tests {
             mode: LogCollectionMode::Auto,
             sse: None,
             periodic: Some(PeriodicLogConfig::default()),
-            auto: Some(AutoModeConfig::default()),
+            auto: Some(AutoModeConfig {
+                retry_sse_after_downgrade,
+                ..AutoModeConfig::default()
+            }),
         });
         config
     }
 
-    #[tokio::test]
-    async fn test_auto_mode_with_downgraded_endpoint_spawns_periodic() {
+    #[tokio::test(start_paused = true)]
+    async fn auto_mode_periodic_fallback_expires_without_restart() {
         let limiter: Arc<dyn RateLimiter> = Arc::new(NoopLimiter);
+
         let metrics_manager = Arc::new(
             MetricsManager::new("test_auto_downgraded").expect("metrics manager should initialize"),
         );
+
         let mut ctx =
-            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config()))
+            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config(true)))
                 .expect("context should initialize");
 
         let endpoint = test_endpoint(Ipv4Addr::new(10, 0, 0, 1), "aa:bb:cc:dd:ee:01", None);
@@ -1805,22 +2028,88 @@ mod tests {
             endpoint.key().into(),
             endpoint.rack_id.as_ref(),
             DowngradeReason::SseNotAvailable,
+            HashMap::new(),
         );
 
-        spawn_collectors_for_endpoint(&mut ctx, &endpoint, None, "test_auto_downgraded")
+        let data_sink: Arc<dyn DataSink> = Arc::new(NoopSink);
+
+        spawn_collectors_for_endpoint(
+            &mut ctx,
+            &endpoint,
+            Some(data_sink.clone()),
+            "test_auto_downgraded",
+        )
+        .expect("spawn should succeed for downgraded auto endpoint");
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Logs), 1);
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(SSE_RETRY_INTERVAL).await;
+        tokio::task::yield_now().await;
+
+        assert!(!ctx.log_downgrade_registry.is_downgraded(&endpoint.key()));
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            ctx.collector_transition_notify.notified(),
+        )
+        .await
+        .expect("periodic fallback expiry should request immediate reconciliation");
+
+        ctx.collectors.prune_finished_logs();
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Logs), 0);
+
+        spawn_collectors_for_endpoint(&mut ctx, &endpoint, Some(data_sink), "test_auto_recovered")
+            .expect("spawn should retry SSE after periodic fallback expires");
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Logs), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auto_mode_periodic_fallback_is_sticky_without_opt_in() {
+        let limiter: Arc<dyn RateLimiter> = Arc::new(NoopLimiter);
+
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test_auto_sticky").expect("metrics manager should initialize"),
+        );
+
+        let mut ctx =
+            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config(false)))
+                .expect("context should initialize");
+
+        let endpoint = test_endpoint(Ipv4Addr::new(10, 0, 0, 2), "aa:bb:cc:dd:ee:02", None);
+
+        ctx.log_downgrade_registry.mark_downgraded(
+            endpoint.key().into(),
+            endpoint.rack_id.as_ref(),
+            DowngradeReason::SseNotAvailable,
+            HashMap::new(),
+        );
+
+        let data_sink: Arc<dyn DataSink> = Arc::new(NoopSink);
+
+        spawn_collectors_for_endpoint(&mut ctx, &endpoint, Some(data_sink), "test_auto_sticky")
             .expect("spawn should succeed for downgraded auto endpoint");
 
+        tokio::task::yield_now().await;
+        tokio::time::advance(SSE_RETRY_INTERVAL).await;
+        tokio::task::yield_now().await;
+
+        assert!(ctx.log_downgrade_registry.is_downgraded(&endpoint.key()));
         assert_eq!(ctx.collectors.len(CollectorKind::Logs), 1);
     }
 
     #[tokio::test]
     async fn test_auto_mode_without_downgrade_and_no_data_sink_skips_spawn() {
         let limiter: Arc<dyn RateLimiter> = Arc::new(NoopLimiter);
+
         let metrics_manager = Arc::new(
             MetricsManager::new("test_auto_no_sink").expect("metrics manager should initialize"),
         );
+
         let mut ctx =
-            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config()))
+            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config(false)))
                 .expect("context should initialize");
 
         let endpoint = test_endpoint(Ipv4Addr::new(10, 0, 0, 2), "aa:bb:cc:dd:ee:02", None);

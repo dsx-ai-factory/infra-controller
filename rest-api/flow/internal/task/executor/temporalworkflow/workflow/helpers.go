@@ -160,24 +160,30 @@ func buildTargets(
 		return map[devicetypes.ComponentType]common.Target{}
 	}
 
-	// Group component IDs by type
-	mapOnType := make(map[devicetypes.ComponentType][]string)
+	// Choose one identifier type per component type before building the batches.
+	// A mixed ingestion batch uses MACs for every member, without splitting RPCs.
+	mapOnType := make(map[devicetypes.ComponentType]common.Target)
 	for _, c := range info.Components {
-		// NOTE: we skip checking if the component ID is empty, because it's
-		// possible that the component ID is not set up for local testing.
-		mapOnType[c.Type] = append(mapOnType[c.Type], c.ComponentID)
-	}
-
-	// Build Target for each type with component IDs only
-	results := make(map[devicetypes.ComponentType]common.Target)
-	for t, componentIDs := range mapOnType {
-		results[t] = common.Target{
-			Type:         t,
-			ComponentIDs: componentIDs,
+		target := mapOnType[c.Type]
+		target.Type = c.Type
+		if c.ComponentID == "" {
+			target.IdentifierType = common.IdentifierTypeMACAddress
+		} else if target.IdentifierType == common.IdentifierTypeLegacy {
+			target.IdentifierType = common.IdentifierTypeManagerID
 		}
+		mapOnType[c.Type] = target
+	}
+	for _, c := range info.Components {
+		target := mapOnType[c.Type]
+		if target.UsesMACAddresses() {
+			target.Identifiers = append(target.Identifiers, c.MACAddress)
+		} else {
+			target.Identifiers = append(target.Identifiers, c.ComponentID)
+		}
+		mapOnType[c.Type] = target
 	}
 
-	return results
+	return mapOnType
 }
 
 // componentTotalsByType returns a per-ComponentType count of targeted
@@ -189,7 +195,7 @@ func componentTotalsByType(
 ) map[devicetypes.ComponentType]int {
 	out := make(map[devicetypes.ComponentType]int, len(typeToTargets))
 	for ct, target := range typeToTargets {
-		out[ct] = len(target.ComponentIDs)
+		out[ct] = target.Len()
 	}
 	return out
 }
@@ -300,7 +306,7 @@ func executeGenericStageParallel(
 
 	for _, step := range steps {
 		target, exists := typeToTargets[step.ComponentType]
-		if !exists || len(target.ComponentIDs) == 0 {
+		if !exists || target.Len() == 0 {
 			log.Info().
 				Str("component_type", devicetypes.ComponentTypeToString(step.ComponentType)).
 				Msg("Skipping step, no components of this type")
@@ -309,7 +315,7 @@ func executeGenericStageParallel(
 
 		log.Info().
 			Str("component_type", devicetypes.ComponentTypeToString(step.ComponentType)).
-			Int("component_count", len(target.ComponentIDs)).
+			Int("component_count", target.Len()).
 			Int("max_parallel", step.MaxParallel).
 			Msg("Starting component step as child workflow")
 

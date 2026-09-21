@@ -180,7 +180,7 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
 
     // Now we simulate site explorer coming through and reading the new updated version
     endpoint.report.service[0].inventories[0].version = Some("6.00.30.00".to_string());
-    assert!(
+    assert_eq!(
         db::explored_endpoints::try_update(
             endpoint.address,
             endpoint.report_version,
@@ -188,7 +188,8 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
             false,
             &mut txn
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
 
     txn.commit().await?;
@@ -496,7 +497,7 @@ async fn test_preingestion_preupdate_powercycling(
 
     // Now we simulate site explorer coming through and reading the new updated version
     endpoint.report.service[0].inventories[0].version = Some("6.00.30.00".to_string());
-    assert!(
+    assert_eq!(
         db::explored_endpoints::try_update(
             endpoint.address,
             endpoint.report_version,
@@ -504,7 +505,8 @@ async fn test_preingestion_preupdate_powercycling(
             false,
             &mut txn
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
 
     txn.commit().await?;
@@ -544,7 +546,7 @@ async fn test_preingestion_preupdate_powercycling(
 
         // At some point in here we would have picked up the new version
         endpoint.report.service[0].inventories[1].version = Some("1.13.2".to_string());
-        assert!(
+        assert_eq!(
             db::explored_endpoints::try_update(
                 endpoint.address,
                 endpoint.report_version,
@@ -552,7 +554,8 @@ async fn test_preingestion_preupdate_powercycling(
                 false,
                 &mut txn
             )
-            .await?
+            .await?,
+            db::ConditionalWrite::Applied(())
         );
 
         txn.commit().await?;

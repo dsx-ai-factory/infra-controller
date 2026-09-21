@@ -180,6 +180,8 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 	ifcDAO := cdbm.NewInterfaceDAO(mst.dbSession)
 	nvliDAO := cdbm.NewNVLinkInterfaceDAO(mst.dbSession)
 	ibiDAO := cdbm.NewInfiniBandInterfaceDAO(mst.dbSession)
+	sxpDAO := cdbm.NewSpectrumXPartitionDAO(mst.dbSession)
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(mst.dbSession)
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(mst.dbSession)
 	skgiaDAO := cdbm.NewSSHKeyGroupInstanceAssociationDAO(mst.dbSession)
 	nsgDAO := cdbm.NewNetworkSecurityGroupDAO(mst.dbSession)
@@ -309,6 +311,13 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 	err = ibiDAO.DeleteAllBySiteID(ctx, nil, siteID)
 	if err != nil {
 		logger.Error().Err(err).Msg("error deleting InfiniBand Interfaces for Site from DB")
+		return err
+	}
+
+	// Delete SpectrumX attachments for site
+	err = sxaDAO.DeleteAllBySiteID(ctx, nil, siteID)
+	if err != nil {
+		logger.Error().Err(err).Msg("error deleting SpectrumX Attachments for Site from DB")
 		return err
 	}
 
@@ -462,6 +471,13 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 			logger.Error().Err(serr).Str("IB Partition ID", ibp.ID.String()).Msg("error deleting IB Partition record in DB")
 			return serr
 		}
+	}
+
+	// Delete SpectrumX Partitions for site
+	err = sxpDAO.DeleteAllBySiteID(ctx, nil, siteID)
+	if err != nil {
+		logger.Error().Err(err).Msg("error deleting SpectrumX Partition records in DB for Site")
+		return err
 	}
 
 	// Delete NVLink Logical Partitions

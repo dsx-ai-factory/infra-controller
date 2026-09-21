@@ -165,15 +165,18 @@ async fn test_postingestion_bmc_upgrade_uefi(
         .report
         .versions
         .insert(FirmwareComponentType::Uefi, "1.13.2".to_string());
-    db::explored_endpoints::try_update(
-        host.status.bmc_info.ip_addr().unwrap(),
-        endpoint.report_version,
-        &endpoint.report,
-        false,
-        &mut txn,
-    )
-    .await
-    .unwrap();
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            host.status.bmc_info.ip_addr().unwrap(),
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
     txn.commit().await.unwrap();
 
     // Another state machine pass
@@ -294,14 +297,17 @@ async fn test_postingestion_bmc_upgrade_bmc(
         .report
         .versions
         .insert(FirmwareComponentType::Bmc, "6.00.30.00".to_string());
-    db::explored_endpoints::try_update(
-        host.status.bmc_info.ip_addr().unwrap(),
-        endpoint.report_version,
-        &endpoint.report,
-        false,
-        &mut txn,
-    )
-    .await?;
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            host.status.bmc_info.ip_addr().unwrap(),
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
     db::machine_topology::update_firmware_version_by_machine_id(
         &mut txn,
         &host.id,
@@ -708,6 +714,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -750,6 +757,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -802,6 +810,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -851,6 +860,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -890,6 +900,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -936,15 +947,18 @@ async fn test_instance_upgrading_actual_part_2(
         .report
         .versions
         .insert(FirmwareComponentType::Uefi, "1.13.2".to_string());
-    db::explored_endpoints::try_update(
-        host.status.bmc_info.ip_addr().unwrap(),
-        endpoint.report_version,
-        &endpoint.report,
-        false,
-        &mut txn,
-    )
-    .await
-    .unwrap();
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            host.status.bmc_info.ip_addr().unwrap(),
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
 
     // Check that the TenantState is what we expect based on the instance/machine state.
     let host = mh.host().db_machine(&mut txn).await;
@@ -953,6 +967,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -992,6 +1007,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1059,6 +1075,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1130,6 +1147,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1159,15 +1177,18 @@ async fn test_instance_upgrading_actual_part_3(
         .report
         .versions
         .insert(FirmwareComponentType::Bmc, "6.00.30.00".to_string());
-    db::explored_endpoints::try_update(
-        host.status.bmc_info.ip_addr().unwrap(),
-        endpoint.report_version,
-        &endpoint.report,
-        false,
-        &mut txn,
-    )
-    .await
-    .unwrap();
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            host.status.bmc_info.ip_addr().unwrap(),
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
     db::machine_topology::update_firmware_version_by_machine_id(
         &mut txn,
         &host.id,
@@ -1199,6 +1220,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1238,6 +1260,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1275,6 +1298,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1307,6 +1331,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1850,15 +1875,18 @@ async fn test_manual_firmware_upgrade_workflow(pool: sqlx::PgPool) -> CarbideRes
         .report
         .versions
         .insert(FirmwareComponentType::Bmc, "6.00.30.00".to_string());
-    db::explored_endpoints::try_update(
-        host.status.bmc_info.ip_addr().unwrap(),
-        endpoint.report_version,
-        &endpoint.report,
-        false,
-        &mut txn,
-    )
-    .await
-    .unwrap();
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            host.status.bmc_info.ip_addr().unwrap(),
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
     txn.commit().await.unwrap();
 
     // NewFirmwareReportedWait -> CheckingFirmwareRepeat

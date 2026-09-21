@@ -3,9 +3,11 @@
 
 suite: Flow deployment contract
 templates:
+  - configmap.yaml
   - deployment.yaml
 tests:
   - it: deploys only the Flow container
+    template: deployment.yaml
     asserts:
       - lengthEqual:
           path: spec.template.spec.containers
@@ -40,3 +42,22 @@ tests:
           path: spec.template.spec.volumes
           content:
             name: nsm-scratch
+
+  - it: mounts flowconfig.yaml from the config ConfigMap and rolls on change
+    template: deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: flow-config-files
+            mountPath: /etc/flow
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: flow-config-files
+            configMap:
+              name: flow-config-files
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: ^[0-9a-f]{64}$

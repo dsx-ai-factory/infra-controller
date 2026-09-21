@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Optional metrics-only Service for the bundled gateway release and chart 0.106.0.
+# That chart cannot set Service IP families; keep its mixed OTLP LoadBalancer separate.
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector-gateway-metrics
+  namespace: otel
+spec:
+  type: ClusterIP
+  ipFamilyPolicy: PreferDualStack
+  selector:
+    app.kubernetes.io/name: opentelemetry-collector
+    app.kubernetes.io/instance: otel-collector-gateway
+    component: standalone-collector
+  ports:
+    - name: prometheus
+      port: 9999
+      # The named pod port follows ports.prometheus.containerPort in the gateway values.
+      targetPort: prometheus
+      protocol: TCP

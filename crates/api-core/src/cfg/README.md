@@ -38,6 +38,7 @@ behavior.
 | `database_pool_acquire_timeout` | `Duration` | `30s` | `server` | How long a caller may wait for a connection from the pool before the attempt fails (sqlx's own default); trips on a stalled database or a saturated pool alike. Must be greater than zero (startup rejects `0`). |
 | `database_pool_idle_timeout` | `Duration` | `10m` | `server` | Idle time after which the pool closes a connection, keeping the pool's own reaping well inside the Postgres server's 60-minute idle-session reaper. Must be greater than zero (startup rejects `0`). |
 | `database_pool_max_lifetime` | `Duration` | `30m` | `server` | Maximum age of a pooled connection before it is recycled, so the pool re-balances onto the current primary after a database failover. Must be greater than zero (startup rejects `0`). |
+| `database_startup_retry_timeout` | `Duration` | `5m` | `server` | How long to keep retrying the initial database connection at startup before giving up, so a transient outage (failover, rolling upgrade, DNS blip) doesn't take the process down. Retries use exponential backoff between attempts, starting at 1s and capped at 30s; each attempt itself is bounded by whatever time remains in this window (independent of `database_pool_acquire_timeout`), so total startup time never exceeds it. The last connection error is reported once the window elapses. `0` disables retrying: fail on the first attempt, bounded only by `database_pool_acquire_timeout` (the old behavior). |
 | `api_admission_control` | `ApiAdmissionControlConfig` | *(see below)* | `server` | Fair per-client admission with global execution and pending-request limits for gRPC and admin HTTP business requests. |
 | `ib_config` | `Option<IBFabricConfig>` | — | `hardware` | InfiniBand fabric configuration (see [IBFabricConfig](#ibfabricconfig)). |
 | `asn` | `u32` | **required** | `networking` | Autonomous System Number, fixed per environment. Used by nico-dpu-agent for `frr.conf` BGP routing. |
@@ -46,7 +47,8 @@ behavior.
 | `route_servers` | `Vec<String>` | `[]` | `networking` | Route server IPs for L2VPN Ethernet Virtual network support. |
 | `enable_route_servers` | `bool` | `false` | `networking` | Enables route server injection into DPU FRR configs for L2VPN. |
 | `deny_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 CIDR prefixes that tenant instances are blocked from reaching. FNN generates family-specific NVUE ACL policies; all non-FNN virtualizers apply the IPv4 prefixes only. |
-| `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IP prefixes (v4/v6) assigned for tenant use within this site. |
+| `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 prefixes assigned for tenant use within this site. With `mutual_isolation`, ETV enforces the IPv4 prefixes with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL. With `open`, that ACL is not installed. On upgrade, authoritative Core scans persisted Ready and Deleting operator-managed SitePrefixes even when this list is empty. It assigns an unparented legacy VpcPrefix when exactly one operator root contains it; ambiguous parentage blocks startup. With a nonempty list, missing parentage also blocks startup. Listen-only replicas require an authoritative Core to assign unresolved lineage first. |
+| `site_fabric_null_routes` | `Option<Vec<IpNetwork>>` | `site_fabric_prefixes` | `networking` | IPv4 and IPv6 prefixes installed by FNN as blackhole routes under `mutual_isolation`. Omission inherits `site_fabric_prefixes`, retains removed operator-managed roots while they contain a VpcPrefix or VPC-attached direct NetworkPrefix, and reduces those inherited roots to their minimal exact union. Soft-deleted children retain coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative: each CIDR is canonicalized to its network boundary and exact duplicates are removed, but parent, child, and adjacent entries are not aggregated. An empty list (`[]`) installs no null routes. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. An effective `/0` null route and `leak_default_route_from_underlay = true` for the same address family are unsupported because the imported default wins the equal-prefix distance comparison. With `open`, the routes are not installed. Tenant prefix reuse follows the [overlap checks](#tenant-prefix-overlap-checks). |
 | `tenant_prefix_overlap_enabled` | `bool` | `false` | `networking` | Site opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). The existing `VpcPrefix` exclusion continues to prevent overlapping `VpcPrefix` persistence until the cutover tracked by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892). |
 | `max_site_prefixes_per_tenant` | `u32` | `8` | `networking` | Maximum tenant-managed SitePrefixes retained for one tenant at this site. Prefixes awaiting removal still count against this limit and keep their CIDR reserved. |
 | `anycast_site_prefixes` | `Vec<Ipv4Network>` | `[]` | `networking` | Aggregate IPv4 prefixes containing tenant-announced prefixes (e.g., BYOIP). **Deprecated.** Use [`routing_profiles.allowed_anycast_prefixes`](#fnnroutingprofileconfig) instead. |
@@ -71,8 +73,8 @@ behavior.
 | `machine_update_run_interval` | `Option<u64>` | — | `machines` | Interval (seconds) at which the machine update manager checks for updates. |
 | `retained_boot_interface_window` | `Option<Duration>` | — | `machines` | How long a retained boot interface pair (`retained_boot_interfaces` table) stays applicable after its `machine_interfaces` row was deleted. Unset retains forever; set a window (e.g. `30d`) so a MAC reappearing on different hardware doesn't inherit an obsolete Redfish interface id. |
 | `site_explorer` | `SiteExplorerConfig` | *(see below)* | `hardware` | SiteExplorer hardware discovery settings (see [SiteExplorerConfig](#siteexplorerconfig)). |
-| `vpc_peering_policy` | `Option<VpcPeeringPolicy>` | — | `networking` | Policy for VPC peering based on network virtualization type at creation time. |
-| `vpc_peering_policy_on_existing` | `Option<VpcPeeringPolicy>` | — | `networking` | Policy for whether existing VPC peerings should be active. |
+| `vpc_peering_policy` | `Option<VpcPeeringPolicy>` | — | `networking` | VPC peering creation policy. `exclusive` admits capability-compatible pairs, while `none` or omission disables creation. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. ETV/FNN requests always return `InvalidArgument`. |
+| `vpc_peering_policy_on_existing` | `Option<VpcPeeringPolicy>` | — | `networking` | Activation policy for stored VPC peerings. Omission falls back to `vpc_peering_policy`. `exclusive` enables the virtualization-specific mechanism only for compatible pairs: ETV emits peer-prefix ACL permits, while FNN imports peer-VNI route targets. `none` disables both mechanisms. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. |
 | `attestation_enabled` | `bool` | `false` | `security` | Enables TPM-based machine attestation (adds `Measuring` state before `Ready`). |
 | `bmc_rotation_enabled` | `bool` | `false` | `security` | Site-wide kill-switch for passive BMC credential rotation. When `false` (default), a Ready host never auto-enters `RotatingBmc`; the force-converge escape hatch bypasses it. |
 | `uefi_rotation_enabled` | `bool` | `false` | `security` | Site-wide kill-switch for passive UEFI credential rotation (host and DPU). When `false` (default), a Ready host never auto-enters `RotatingHostUefi` nor drives its DPUs into `RotatingDpuUefi`; the per-machine force-converge escape hatch bypasses it. |
@@ -225,6 +227,7 @@ rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
 [rack_profiles.NVL72.firmware_object]
 url = "https://firmware.example.com/objects/nvl72.json"
 fetch_timeout = "30s"
+access_token_credential = "nvl72-artifacts"
 
 [rack_profiles.NVL72.rack_capabilities.compute]
 vendor = "NVIDIA"
@@ -240,16 +243,22 @@ count = 8
 ```
 
 `firmware_object` supplies the SOT JSON for automatic rack firmware and switch
-NVOS image updates. When `firmware_object` is configured for a profile with
-switches, the document must include an NVOS image whose firmware type matches
+NVOS image updates and for automatic compute-tray firmware updates during
+pre-ingestion. When `firmware_object` is configured for a profile with switches,
+the document must include an NVOS image whose firmware type matches
 `rack_hardware_class`. NICo requests `prod` when `rack_hardware_class` is
 omitted. RMS records an asynchronous update failure when the document does not
 contain the required image. If `firmware_object` is omitted, NICo skips both
-automatic update phases. An explicit maintenance request can supply a firmware
-object instead. If no firmware object is available while a switch in the
-maintenance scope is already waiting for an NVOS update, the rack transitions
-to `Error` instead of skipping the NVOS phase.
-`fetch_timeout` defaults to `30s`.
+automatic rack maintenance phases and the compute-tray pre-ingestion update. An
+explicit maintenance request can supply a firmware object instead. If no
+firmware object is available while a switch in the maintenance scope is already
+waiting for an NVOS update, the rack transitions to `Error` instead of skipping
+the NVOS phase. `fetch_timeout` defaults to `30s`.
+
+`access_token_credential` optionally names a credential that contains a
+firmware artifact access token. NICo reads the secret when compute-tray
+pre-ingestion starts. When the field is omitted, NICo sends the RMS no-auth
+sentinel.
 
 Example: GB300 rack with Lenovo compute trays and Delta power shelves:
 
@@ -567,7 +576,7 @@ TOML section: `[rack_state_controller]`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
-| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack maintenance does not configure switch certificates. |
+| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack `ConfigureNmxCluster` uses a fixed `nvue_api` binding before RMS V2 selects and configures the primary switch. |
 
 ### `SwitchStateControllerConfig`
 
@@ -757,7 +766,7 @@ Without configured DPF intercept topology, NICo deliberately preserves the estab
 | `dpu_nic_firmware_update_versions` | `Vec<String>` | *(BF2+BF3 NIC versions)* | DPU NIC firmware version strings. |
 | `dpu_enable_secure_boot` | `bool` | `false` | Enable secure boot flow for DPU provisioning via Redfish. |
 | `num_of_vfs` | `u32` | `16` | Number of hardware VFs configured per DPU PF during BlueField provisioning. Max `126`. Under DPF, changing this value changes the immutable BF3/generic-BF4 flavor and requires a carbide-api restart and DPU reprovisioning. Reducing it below the static inventory's previous effective VF count also removes desired VF ServiceInterfaces; because NICo does not prune them, operators must stop NICo, remove the omitted NICo ServiceInterfaces, re-ingest the DPUs, and restart. Configured intercept inventories remain valid only while every selected `vf_id` is both lower than this value and no greater than 15. |
-| `service_vpc_slot_count` | `u32` | `0` | Number of HBN interfaces reserved for externally coordinated service-VPC attachments on BF3 and generic BF4. NICo generates stable names from `iface_svc_0` through `iface_svc_{N-1}`. The generated interfaces count toward HBN's 32-interface limit and increase its `nvidia.com/bf_sf` request. BF4 Astra ignores this field. |
+| `service_vpc_slot_count` | `u32` | `0` | Number of HBN interfaces reserved for externally coordinated service-VPC attachments on BF3 and generic BF4. Must be zero when `tenant_prefix_overlap_enabled = true`; otherwise startup fails. NICo generates stable names from `iface_svc_0` through `iface_svc_{N-1}`. The generated interfaces count toward HBN's 32-interface limit and increase its `nvidia.com/bf_sf` request. BF4 Astra ignores this field when generating interfaces, but the startup restriction still applies. |
 | `additional_managed_sf` | `u32` | `0` | Additional BF3/generic-BF4 SF capacity without a generated HBN interface. This value and `service_vpc_slot_count` are added to the managed SF count used to size or validate `PF_TOTAL_SF`. BF4 Astra ignores this field. |
 | `restart_ovs_on_use_admin_network_change` | `bool` | `false` | Restart OVS on DPU-OS agents when host `use_admin_network` changes. Containerized agents skip the local service restart and still ACK the network config. |
 
@@ -807,7 +816,7 @@ client-certificate authentication is not used.
 | `route_targets_on_exports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets added to routes exported by the DPU. |
 | `internal` | `Option<bool>` | — (effective `false`) | Whether the profile uses internal VNI allocation. This property cannot be overridden on a VPC. |
 | `tenant_prefix_overlap_eligible` | `bool` | `false` | Base routing profile opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). This setting cannot be overridden on a VPC. |
-| `leak_default_route_from_underlay` | `Option<bool>` | — (effective `false`) | Leak the default route from the underlay/default VRF into tenant VRFs. |
+| `leak_default_route_from_underlay` | `Option<bool>` | — (effective `false`) | Leak the default route from the underlay/default VRF into tenant VRFs. Do not enable this for an address family whose effective `site_fabric_null_routes` contains `/0`; the imported default has a better administrative distance than the equal-prefix blackhole. |
 | `leak_tenant_host_routes_to_underlay` | `Option<bool>` | — (effective `false`) | Leak tenant host routes into the underlay/default VRF. |
 | `tenant_leak_communities_accepted` | `Option<bool>` | — (effective `false`) | Honor route-leak communities sent by the tenant host OS. |
 | `accepted_leaks_from_underlay` | `Option<Vec<PrefixFilterPolicyEntry>>` | — (effective `[]`) | Specific underlay/default VRF prefixes allowed to leak into tenant VRFs. Routing only; does not affect ACLs. |
@@ -841,14 +850,18 @@ are true:
 - `site_global_vpc_vni` and `common_internal_route_target` are unset, and
   `additional_route_target_imports` is empty, so they cannot bridge the VPCs.
 - The deprecated site-wide `anycast_site_prefixes` list is empty.
+- `dpu_config.service_vpc_slot_count` is zero. Service-VPC attachments have not
+  been qualified for overlapping prefixes; enabling overlap with reserved
+  service-VPC slots fails startup.
 - Each resolved FNN profile, after applying its VPC overrides, has
   `tenant_prefix_overlap_eligible = true` and `internal = true`; has no import
   or export route targets; disables default-route leakage, tenant-host-route
   leakage, and tenant leak communities; and has no accepted underlay leaks or
   allowed anycast prefixes.
 
-The FNN renderer falls back to `anycast_site_prefixes` when the profile's
-`allowed_anycast_prefixes` is empty. The [chart's default configuration](../../../../helm/charts/nico-api/files/carbide-api-config.toml)
+The FNN renderer falls back to `anycast_site_prefixes` for IPv4 when the profile
+has no IPv4 `allowed_anycast_prefixes`. The IPv6 list has no such fallback.
+The [chart's default configuration](../../../../helm/charts/nico-api/files/carbide-api-config.toml)
 sets `anycast_site_prefixes = ["0.0.0.0/0"]`; a site using that default must
 override it with `[]` to meet the overlap requirements.
 
@@ -867,30 +880,49 @@ not run these checks, but a later attachment does.
 With `tenant_prefix_overlap_enabled = true`, peering creation, `VpcPrefix`
 creation, and VPC virtualization changes that add imports also check each
 affected receiver's local and imported prefixes. Core returns `InvalidArgument`
-if a change would make one VPC receive
-overlapping address space from different VPCs. Direct peer imports follow the
-renderer, including its independent VNI imports; there are no transitive peer
-imports. Prefixes awaiting removal still count.
+if a change would make one VPC receive overlapping address space from different
+VPCs. Direct peer imports follow the renderer, including its independent VNI
+imports; there are no transitive peer imports. Prefixes awaiting removal still
+count. These writers also check the combined networks of each affected Instance,
+including Instances waiting for their network segments and pending replacements.
 
-VPC routing-profile changes, VPC NSG assignments, and NSG rule changes check
-the affected tenant-serving FNN interfaces. An Instance's explicit NSG replaces
-its VPC's NSG. Discovery boot suppresses NSGs but still uses the routing profile.
-Pending network configurations and deleting Instances remain relevant while
-their DPUs serve tenant traffic. Core rejects unsafe policy changes on these
-paths with `FailedPrecondition`, even before duplicate CIDRs exist. Unused
-definitions remain editable. Metadata updates, unchanged stored policy,
-and proven restrictions do not take the overlap transaction lock. `UpdateVpc`
-and `UpdateNetworkSecurityGroup` return `FailedPrecondition` if a VPC or NSG
-used in a policy check changes or is deleted between the initial read and the
-row lock. Both cases invalidate the earlier check.
+VPC routing-profile changes check the affected tenant-serving FNN interfaces. Allocated Instances remain relevant even before their controllers leave Admin networking, including while waiting for network segments. Pending networks and deleting Instances not yet in the controller's return-to-Admin state also count. Core rejects unsafe routing-profile changes on these paths with `FailedPrecondition`, even before duplicate CIDRs exist. Unused definitions remain editable. Metadata updates, unchanged stored routing policy, and proven restrictions do not take the overlap transaction lock unless a concurrent update changes the policy they replace. With overlap enabled, `UpdateVpc` can return `FailedPrecondition` if the VPC changes while the request waits for its row lock. With overlap disabled, requests without `if_version_match` instead use the latest locked record and repeat any needed routing-policy checks. Explicit version conditions still apply in either mode.
 
-The [peering and policy checks](https://github.com/dsx-ai-factory/infra-controller/issues/5114)
-do not replace admission for Instance changes
-([#5115](https://github.com/dsx-ai-factory/infra-controller/issues/5115)), startup
-checks, or the complete writer audit
-([#5116](https://github.com/dsx-ai-factory/infra-controller/issues/5116)). Those
-checks must land before the database cutover in
-[#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892).
+Instance allocation and network expansion check all VPCs used by the requested, current, and pending networks together, including their direct peer imports. An Instance must not connect to overlapping address space from different VPCs, even when those VPCs are otherwise isolated. Core returns `InvalidArgument` for that conflict. With overlap enabled, allocation and network expansion also check the effective FNN routing policy before duplicate CIDRs exist. Network expansion requires an eligible resolved routing profile and safe site-wide policy. NSG permits and stateful egress do not participate in overlap admission: FNN isolation is enforced by routing blackholes, which ACL policy cannot bypass.
+
+New prefix reuse requires coverage from the current `site_fabric_null_routes` configuration, or current `site_fabric_prefixes` when the override is omitted. Retained-state validation also uses retiring operator roots when the override is omitted, matching the routes sent to FNN. Retiring roots do not authorize new reuse. An explicit empty list disables tenant prefix reuse.
+
+When `tenant_prefix_overlap_enabled = false` but another VPC still uses the same addresses, Instance allocation and network expansion return `InvalidArgument`. Prefixes being deleted still count. Metadata edits and removal of unchanged interfaces remain available. A request cannot replace a pending network update. Requests that need admission take the overlap transaction lock before resource locks, including when the gate is off. A waiting Instance update reloads its dependencies but keeps its original configuration version. If that version changed, the request returns `FailedPrecondition`.
+
+With the gate off, peering and VPC virtualization changes also reject new imports of overlapping address space involving a tenant-managed `VpcPrefix`. Existing imports and nonexpanding changes remain available. Unsafe routing-profile changes are rejected where an affected Instance can reach that duplicate address space.
+
+Core checks retained prefixes, peer imports, Instance networks, and effective
+FNN policy before starting controllers or the API listener, including with
+`listen_only = true`. Startup network seeding and Admin VPC attachment check
+their changes before committing. An unsafe retained configuration fails startup.
+Tenant DPU configuration requests also check their retained networks before
+returning tenant interfaces; Admin-only responses remain available for cleanup.
+With overlap enabled, the policy checks apply to every retained FNN network on
+a DPU Instance, even before duplicate prefixes exist.
+These checks coordinate with admission writers through the same transaction
+lock. DPU configuration requests share the read lock with each other.
+A routing writer holding the exclusive lock blocks configuration requests
+across the site until its transaction ends.
+
+With overlap disabled, these startup and tenant DPU checks apply only to
+overlaps involving a tenant-managed `VpcPrefix`. Overlaps between existing
+operator-managed or rootless prefixes do not activate them. This preserves
+existing configurations, including Admin networks, without weakening the
+checks on tenant-managed prefixes retained after disabling overlap.
+
+Turning off the site or profile admission opt-in does not invalidate safely
+isolated existing networks. Prefixes and their tenant-managed SitePrefixes may
+be deleting while routes drain, but routing isolation, VNI ownership, and
+effective policy must remain safe. See
+[#5116](https://github.com/dsx-ai-factory/infra-controller/issues/5116) for the
+startup and writer checks, following the
+[peering and policy checks](https://github.com/dsx-ai-factory/infra-controller/issues/5114)
+and [Instance admission](https://github.com/dsx-ai-factory/infra-controller/issues/5115).
 
 Even when the application accepts an eligible pair, the existing `VpcPrefix`
 exclusion rejects overlapping `VpcPrefix` persistence until the cutover tracked
@@ -1103,8 +1135,21 @@ be propagated there by DPF.
 | `stale_run_timeout` | `Duration` | `24h` | Grace period before an active validation run is considered stale. Values below `90s` are raised to `90s` to avoid marking healthy heartbeat-based runs stale. |
 | `tests` | `Vec<MachineValidationTestConfig>` | `[]` | Per-test enable/disable overrides. |
 | `approved_plugin_registries` | `Vec<String>` | `[]` | Registries allowed for Machine Validation plugin images. Empty denies plugin registration; legacy tests are unaffected. |
+| `allowed_plugin_types` | `Vec<String>` | `["container"]` | Plugin execution types allowed for the site. Empty denies plugin registration; the only accepted value is `container`. |
 | `allow_privileged_plugins` | `bool` | `false` | Allows registration of plugins that request the privileged container profile. |
 | `allow_full_host_plugins` | `bool` | `false` | Allows registration of privileged plugins that request a writable host-root mount. Each revision still needs separate approval before it can be enabled. |
+| `attempt_logs` | `MachineValidationAttemptLogConfig` | enabled, 16 KiB/chunk, 1 MiB/attempt, 30d | Site-wide storage policy for Machine Validation attempt logs. |
+
+### `MachineValidationAttemptLogConfig`
+
+TOML section: `[machine_validation_config.attempt_logs]`.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | `bool` | `true` | Persists plugin stdout/stderr chunks. When false, appended chunks are discarded. |
+| `max_chunk_bytes` | `usize` | `16384` | Maximum stored UTF-8 bytes per chunk; must be greater than zero and no more than `16384` when enabled. |
+| `max_attempt_bytes` | `usize` | `1048576` | Maximum total stored UTF-8 bytes per attempt; must be at least `max_chunk_bytes` and no more than `1048576` when enabled. |
+| `retention` | `Duration` | `30d` | Non-negative retention duration for terminal-attempt logs. Cleanup runs in bounded batches even when Machine Validation is disabled. |
 
 ### `BomValidationConfig`
 

@@ -387,7 +387,8 @@ update_discovery_parameters(Pkt4Ptr query4_ptr, DiscoveryBuilderFFI *discovery,
     LOG_INFO(logger, isc::log::LOG_CARBIDE_GENERIC).arg(option_val->toText());
     return update_discovery_parameters(discovery, option, option_val);
   } else {
-    if (option != DHO_DHCP_AGENT_OPTIONS) {
+    if (option != DHO_DHCP_AGENT_OPTIONS &&
+        option != DHO_VENDOR_CLASS_IDENTIFIER) {
       // TODO: Does this mean we rather should return an error here?
       LOG_ERROR(logger,
                 "LOG_CARBIDE_PKT4_RECEIVE: Missing option [%1] in packet")

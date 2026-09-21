@@ -16,6 +16,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
@@ -255,8 +256,10 @@ func TestGetAllSkuHandler_Handle(t *testing.T) {
 	tests := []struct {
 		name                 string
 		siteId               string
+		orderBy              string
 		setupContext         func(c echo.Context)
 		expectedStatus       int
+		expectedPagination   string
 		checkResponseContent func(t *testing.T, body []byte)
 	}{
 		{
@@ -293,6 +296,46 @@ func TestGetAllSkuHandler_Handle(t *testing.T) {
 					assert.NotEqual(t, unmanagedSku.ID, sku.ID, "Unmanaged SKU should not be in response")
 					assert.NotEmpty(t, sku.Description)
 				}
+			},
+		},
+		{
+			name:    "successful GetAll ordered by ID ascending",
+			siteId:  site.ID.String(),
+			orderBy: "ID_ASC",
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:     http.StatusOK,
+			expectedPagination: `{"pageNumber":1,"pageSize":20,"total":2,"orderBy":"ID_ASC"}`,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response []model.APISku
+				err := json.Unmarshal(body, &response)
+				assert.Nil(t, err)
+				assert.Len(t, response, 2)
+				assert.Equal(t, sku1.ID, response[0].ID)
+				assert.Equal(t, sku2.ID, response[1].ID)
+			},
+		},
+		{
+			name:    "successful GetAll ordered by ID descending",
+			siteId:  site.ID.String(),
+			orderBy: "ID_DESC",
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:     http.StatusOK,
+			expectedPagination: `{"pageNumber":1,"pageSize":20,"total":2,"orderBy":"ID_DESC"}`,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response []model.APISku
+				err := json.Unmarshal(body, &response)
+				assert.Nil(t, err)
+				assert.Len(t, response, 2)
+				assert.Equal(t, sku2.ID, response[0].ID)
+				assert.Equal(t, sku1.ID, response[1].ID)
 			},
 		},
 		{
@@ -381,6 +424,9 @@ func TestGetAllSkuHandler_Handle(t *testing.T) {
 			if tt.siteId != "" {
 				url += "?siteId=" + tt.siteId
 			}
+			if tt.orderBy != "" {
+				url += "&orderBy=" + tt.orderBy
+			}
 			req := httptest.NewRequest(http.MethodGet, url, nil)
 			req = req.WithContext(context.Background())
 
@@ -398,6 +444,9 @@ func TestGetAllSkuHandler_Handle(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())
+			}
+			if tt.expectedPagination != "" {
+				assert.JSONEq(t, tt.expectedPagination, rec.Header().Get(pagination.ResponseHeaderName))
 			}
 
 			// Check response content if provided
@@ -709,7 +758,7 @@ func TestCreateSkuHandler(t *testing.T) {
 		assert.Zero(t, coreReq.Skus[0].Components.Storage[0].CapacityMb)
 		assert.Equal(t, uint32(3_600_000), coreReq.Skus[0].Components.Storage[0].GetMinSizeMb())
 		assert.Equal(t, uint32(3_900_000), coreReq.Skus[0].Components.Storage[0].GetMaxSizeMb())
-		assert.Equal(t, []string{`^/devices/pci.*nvme[0-1]$`}, coreReq.Skus[0].Components.Storage[0].PciPatterns)
+		assert.Equal(t, []string{`^/devices/pci.*/nvme$`}, coreReq.Skus[0].Components.Storage[0].PciPatterns)
 
 		var response model.APISku
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
@@ -1457,7 +1506,7 @@ func validSkuCreateRequest(siteID string) model.APISkuCreateRequest {
 				Count:       2,
 				MinSizeMiB:  cutil.GetPtr(uint32(3_600_000)),
 				MaxSizeMiB:  cutil.GetPtr(uint32(3_900_000)),
-				PciPatterns: []string{`^/devices/pci.*nvme[0-1]$`},
+				PciPatterns: []string{`^/devices/pci.*/nvme$`},
 			}},
 		},
 	}

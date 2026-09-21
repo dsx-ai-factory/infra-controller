@@ -25,8 +25,8 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
-use crate::redfish;
 use crate::redfish::Builder;
+use crate::{Callbacks, redfish};
 
 pub(crate) fn resource<'a>() -> redfish::Resource<'a> {
     redfish::Resource {
@@ -37,8 +37,8 @@ pub(crate) fn resource<'a>() -> redfish::Resource<'a> {
     }
 }
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
-    r.route(&resource().odata_id, get(get_service_root))
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
+    r.route(&resource().odata_id, get(get_service_root::<C>))
 }
 
 fn builder(resource: &redfish::Resource) -> ServiceRootBuilder {
@@ -53,9 +53,10 @@ fn builder(resource: &redfish::Resource) -> ServiceRootBuilder {
     }
 }
 
-async fn get_service_root(State(state): State<BmcState>) -> Response {
+async fn get_service_root<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let builder = builder(&resource())
         .redfish_version(state.bmc_redfish_version)
+        .protocol_features()
         .maybe_with(
             ServiceRootBuilder::vendor,
             &state.bmc_vendor.service_root_value(),
@@ -102,6 +103,15 @@ impl ServiceRootBuilder {
 
     fn redfish_version(self, v: &str) -> Self {
         self.add_str_field("RedfishVersion", v)
+    }
+
+    /// The query options a client may rely on. `$filter` is served on every
+    /// collection by `query_router`; `$expand` is left unadvertised, since
+    /// nv-redfish reads the advertisement literally and the expander's
+    /// `$levels` grammar has been served to clients that ask for it on their
+    /// own terms.
+    fn protocol_features(self) -> Self {
+        self.apply_patch(json!({"ProtocolFeaturesSupported": {"FilterQuery": true}}))
     }
 
     fn vendor(self, v: &str) -> Self {

@@ -25,8 +25,8 @@ use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
     Backend as NvSwitchBackend, ConfigureSwitchCertificateJobStatus, NvSwitchManager,
     ScaleUpFabricManagerJobStatus, ScaleUpFabricServiceStatuses, ScaleUpFabricStatus,
-    SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFactoryResetState,
-    SwitchPasswordRotationState,
+    SwitchCertificateEndpoint, SwitchEndpoint, SwitchFactoryResetJobStatus,
+    SwitchFactoryResetState, SwitchPasswordRotationState,
 };
 use crate::power_shelf_manager::{Backend as PowerShelfBackend, PowerShelfManager};
 use crate::rms::{RmsSwitchSystemImageStatusApi, validate_rms_backend_rack_profiles};
@@ -430,7 +430,7 @@ impl ComponentManager {
                             txn,
                             *machine_id,
                             &initiator,
-                            operation,
+                            operation.clone(),
                         )
                         .await
                         .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
@@ -459,6 +459,31 @@ impl ComponentManager {
             .await
     }
 
+    /// Delegates asynchronous certificate configuration for all switches to
+    /// [`NvSwitchManager::batch_configure_switch_certificate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected backend's error unchanged.
+    pub async fn batch_configure_switch_certificate(
+        &self,
+        endpoints: &[SwitchCertificateEndpoint],
+        domain_name: Option<&str>,
+        services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        self.nv_switch
+            .batch_configure_switch_certificate(endpoints, domain_name, services)
+            .await
+    }
+
+    /// Delegates certificate batch status reads to
+    /// [`NvSwitchManager::get_configure_switch_certificate_job_status`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected backend's error unchanged. A
+    /// [`ComponentManagerError::NotFound`] result means the submitted job can no
+    /// longer be observed.
     pub async fn get_configure_switch_certificate_job_status(
         &self,
         job_id: &str,
@@ -789,7 +814,8 @@ mod tests {
     use carbide_uuid::rack::RackId;
     use db::ObjectColumnFilter;
     use model::rack::{
-        FirmwareUpgradeJob, MaintenanceActivity, MaintenanceScope, RackConfig, RackState,
+        FirmwareUpgradeJob, MaintenanceActivity, MaintenanceScope, RackConfig,
+        RackErrorRecoveryPolicy, RackState,
     };
     use model::rack_type::{
         RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -1050,7 +1076,7 @@ mod tests {
             .await
             .unwrap();
         if state != RackState::Created {
-            assert!(
+            assert_eq!(
                 db::rack::try_update_controller_state(
                     txn.as_mut(),
                     &rack_id,
@@ -1059,7 +1085,8 @@ mod tests {
                     &state,
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+                db::ConditionalWrite::Applied(())
             );
         }
         txn.commit().await.unwrap();
@@ -1122,7 +1149,7 @@ mod tests {
         // moved on. A different request is busy and cannot replace it.
         let rack = load_rack(&pool, &ready_rack).await;
         let mut txn = pool.begin().await.unwrap();
-        assert!(
+        assert_eq!(
             db::rack::try_update_controller_state(
                 txn.as_mut(),
                 &ready_rack,
@@ -1131,7 +1158,8 @@ mod tests {
                 &RackState::Discovering,
             )
             .await
-            .unwrap()
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
         );
         txn.commit().await.unwrap();
         assert_eq!(
@@ -1179,6 +1207,7 @@ mod tests {
         // explicitly opt into recovering a rack from Error.
         let error_state = RackState::Error {
             cause: "test".into(),
+            recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         };
         let error_rack = create_rack_in_state(&pool, error_state.clone()).await;
         assert_eq!(

@@ -1489,7 +1489,7 @@ mod tests {
         BmcAddr {
             ip: "10.0.0.1".parse().unwrap(),
             port: Some(443),
-            mac: MacAddress::from_str("00:11:22:33:44:55").unwrap(),
+            mac: Some(MacAddress::from_str("00:11:22:33:44:55").unwrap()),
         }
     }
 
@@ -1499,7 +1499,7 @@ mod tests {
             let addr = BmcAddr {
                 ip: ip.parse().unwrap(),
                 port: Some(443),
-                mac: MacAddress::from_str("00:11:22:33:44:55").unwrap(),
+                mac: Some(MacAddress::from_str("00:11:22:33:44:55").unwrap()),
             };
             let proxy_url = Url::parse("https://proxy.example.com").unwrap();
 
@@ -1611,7 +1611,7 @@ mod tests {
         let addr = BmcAddr {
             ip: "127.0.0.1".parse().expect("loopback ip"),
             port: Some(port),
-            mac: MacAddress::from_str("00:11:22:33:44:55").expect("mac"),
+            mac: Some(MacAddress::from_str("00:11:22:33:44:55").expect("mac")),
         };
         let client =
             Arc::new(test_bmc(reqwest(), addr, provider, None, 10, None).expect("constructor ok"));

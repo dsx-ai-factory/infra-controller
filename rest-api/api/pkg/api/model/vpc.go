@@ -533,7 +533,7 @@ type APIVpc struct {
 	// ControllerVpcID is the ID of the corresponding VPC in Site Controller
 	ControllerVpcID *string `json:"controllerVpcId"`
 	// Labels is VPC labels specified by user
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// NVLinkLogicalPartitionID is the ID of the NVLinkLogicalPartition
 	NVLinkLogicalPartitionID *string `json:"nvLinkLogicalPartitionId"`
 	// NVLinkLogicalPartitionSummary is the summary of the NVLinkLogicalPartition
@@ -579,7 +579,7 @@ func NewAPIVpc(dbVpc cdbm.Vpc, dbsds []cdbm.StatusDetail, includeEffectiveRoutin
 		InfrastructureProviderID:               util.GetUUIDPtrToStrPtr(&dbVpc.InfrastructureProviderID),
 		TenantID:                               util.GetUUIDPtrToStrPtr(&dbVpc.TenantID),
 		SiteID:                                 util.GetUUIDPtrToStrPtr(&dbVpc.SiteID),
-		Labels:                                 dbVpc.Labels,
+		Labels:                                 APILabels(dbVpc.Labels),
 		Status:                                 dbVpc.Status,
 		NetworkSecurityGroupID:                 dbVpc.NetworkSecurityGroupID,
 		NetworkSecurityGroupPropagationDetails: NewAPINetworkSecurityGroupPropagationDetails(dbVpc.NetworkSecurityGroupPropagationDetails),

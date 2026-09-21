@@ -8,6 +8,7 @@ metadata:
     {{- include "nico-machine-a-tron.labels" . | nindent 4 }}
     app.kubernetes.io/metrics: {{ include "nico-machine-a-tron.name" . }}
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "nico-machine-a-tron.selectorLabels" . | nindent 4 }}
   ports:

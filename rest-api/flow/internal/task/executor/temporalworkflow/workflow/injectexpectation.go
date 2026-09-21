@@ -103,7 +103,7 @@ func injectExpectationForAll(
 
 		log.Info().
 			Str("component_type", devicetypes.ComponentTypeToString(compType)).
-			Int("count", len(target.ComponentIDs)).
+			Int("count", target.Len()).
 			Msg("Injecting expectations for component type")
 
 		err := workflow.ExecuteActivity(

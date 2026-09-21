@@ -15,29 +15,16 @@
  * limitations under the License.
  */
 
-//! Direct-invocation tests for the PowerShelf `Maintenance` state handler.
-//!
-//! These tests construct a `PowerShelfStateHandler` and a real
-//! `StateHandlerContext`, then drive
-//! `handle_object_state` against a power shelf that has been parked in
-//! `Maintenance { PowerOn | PowerOff }`. The tests assert on:
-//!
-//! - the resulting controller state (Ready / Error after the txn commits),
-//! - whether `power_shelf_maintenance_requested` was cleared,
-//! - and the requests actually sent to RMS via the queue/inspect helpers
-//!   on `RmsSim`.
-//!
-//! Successful round-trips against real RMS require a fully populated
-//! `machine_interfaces` row for the power shelf so the BMC IP lookup
-//! returns. Setting that up from this layer is non-trivial; instead we
-//! exercise the handler's many *precondition* failure paths, which still
-//! cover the full PowerOn / PowerOff dispatch matrix and assert on
-//! initiator / cleared-request behavior the user can observe.
+//! Power-shelf maintenance admission, completion, and request replacement.
+//! Controller iterations prove persistence and RMS dispatch; direct handler
+//! tests cover the endpoint and credential preconditions.
 
 use std::sync::Arc;
 
 use carbide_power_shelf_controller::context::PowerShelfStateHandlerServices;
-use carbide_secrets::credentials::Credentials;
+use carbide_secrets::credentials::{
+    BmcCredentialType, CredentialKey, CredentialWriter, Credentials,
+};
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::prelude::*;
 use carbide_uuid::power_shelf::PowerShelfId;
@@ -62,12 +49,212 @@ use state_controller::state_handler::StateHandlerOutcome;
 use tonic::Request;
 
 use crate::common::{
-    ControllerEnv, extract_transition, load_power_shelf, run_handler,
+    ControllerEnv, extract_transition, load_power_shelf, run_handler, seed_pmc_endpoint,
     set_power_shelf_controller_state,
 };
 
 const TEST_BMC_USER: &str = "root";
 const TEST_BMC_PASSWORD: &str = "password";
+
+#[sqlx_test]
+async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let shelf_id = env
+        .harness
+        .create_power_shelf(power_shelf_config("replacement maintenance"))
+        .await
+        .id;
+    let rack = env
+        .harness
+        .create_rack(RackProfileId::new(TEST_RMS_RACK_PROFILE_ID))
+        .await;
+    let bmc_mac = seed_pmc_endpoint(&pool, shelf_id).await.unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    set_power_shelf_rack_and_bmc(&mut txn, &shelf_id, Some(&rack.id), Some(bmc_mac)).await;
+    set_power_shelf_controller_state(&mut txn, &shelf_id, PowerShelfControllerState::Ready)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    env.credential_manager
+        .set_credentials(
+            &CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::BmcRoot {
+                    bmc_mac_address: bmc_mac,
+                },
+            },
+            &Credentials::UsernamePassword {
+                username: TEST_BMC_USER.into(),
+                password: TEST_BMC_PASSWORD.into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    for succeeds in [true, false] {
+        request_power_shelf_maintenance_via_cm(
+            &env,
+            &shelf_id,
+            PowerShelfMaintenanceOperation::PowerOn,
+        )
+        .await;
+        env.run_controller_iteration().await;
+        let original = load_power_shelf(&pool, &shelf_id)
+            .await
+            .power_shelf_maintenance_requested
+            .unwrap();
+        assert_eq!(
+            load_power_shelf(&pool, &shelf_id)
+                .await
+                .controller_state
+                .value,
+            PowerShelfControllerState::Maintenance {
+                operation: original.operation,
+                request: Some(original.clone())
+            }
+        );
+        env.rms_sim
+            .queue_batch_set_power_state_response(Ok(rms::BatchSetPowerStateResponse {
+                response: Some(rms::NodeBatchResponse {
+                    status: if succeeds {
+                        rms::ReturnCode::Success
+                    } else {
+                        rms::ReturnCode::Failure
+                    } as i32,
+                    message: "injected power response".into(),
+                    ..Default::default()
+                }),
+            }))
+            .await;
+        let (arrival, release) = env.rms_sim.block_next_batch_set_power_state().await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(env.run_controller_iteration(), async {
+                arrival.await.unwrap();
+                request_power_shelf_maintenance_via_cm(
+                    &env,
+                    &shelf_id,
+                    PowerShelfMaintenanceOperation::PowerOff,
+                )
+                .await;
+                release.send(()).unwrap();
+            });
+        })
+        .await
+        .expect("blocked power call and replacement request should finish");
+
+        let completed = load_power_shelf(&pool, &shelf_id).await;
+        assert!(matches!(
+            (succeeds, completed.controller_state.value),
+            (true, PowerShelfControllerState::Ready)
+                | (false, PowerShelfControllerState::Error { .. })
+        ));
+        let replacement = completed.power_shelf_maintenance_requested.unwrap();
+        assert_ne!(original, replacement);
+        assert_eq!(
+            replacement.operation,
+            PowerShelfMaintenanceOperation::PowerOff
+        );
+
+        env.run_controller_iteration().await;
+        assert_eq!(
+            load_power_shelf(&pool, &shelf_id)
+                .await
+                .controller_state
+                .value,
+            PowerShelfControllerState::Maintenance {
+                operation: replacement.operation,
+                request: Some(replacement)
+            }
+        );
+        env.rms_sim
+            .queue_batch_set_power_state_response(Ok(rms::BatchSetPowerStateResponse {
+                response: Some(rms::NodeBatchResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    ..Default::default()
+                }),
+            }))
+            .await;
+        env.run_controller_iteration().await;
+        let completed = load_power_shelf(&pool, &shelf_id).await;
+        assert_eq!(
+            completed.controller_state.value,
+            PowerShelfControllerState::Ready
+        );
+        assert!(completed.power_shelf_maintenance_requested.is_none());
+        let calls = env.rms_sim.submitted_batch_set_power_state_requests().await;
+        assert_eq!(
+            calls.last().unwrap().operation,
+            rms::PowerOperation::Off as i32
+        );
+    }
+}
+
+#[sqlx_test]
+async fn legacy_maintenance_failure_repeats_pending_request_only_once(pool: PgPool) {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let shelf_id = env
+        .harness
+        .create_power_shelf(power_shelf_config("legacy maintenance"))
+        .await
+        .id;
+    request_power_shelf_maintenance_via_cm(
+        &env,
+        &shelf_id,
+        PowerShelfMaintenanceOperation::PowerOn,
+    )
+    .await;
+    let pending = load_power_shelf(&pool, &shelf_id)
+        .await
+        .power_shelf_maintenance_requested
+        .unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    set_power_shelf_controller_state(
+        &mut txn,
+        &shelf_id,
+        PowerShelfControllerState::Maintenance {
+            operation: PowerShelfMaintenanceOperation::PowerOn,
+            request: None,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    env.run_controller_iteration().await;
+    let failed = load_power_shelf(&pool, &shelf_id).await;
+    assert!(matches!(
+        failed.controller_state.value,
+        PowerShelfControllerState::Error { .. }
+    ));
+    assert_eq!(
+        failed.power_shelf_maintenance_requested,
+        Some(pending.clone())
+    );
+    env.run_controller_iteration().await;
+    assert_eq!(
+        load_power_shelf(&pool, &shelf_id)
+            .await
+            .controller_state
+            .value,
+        PowerShelfControllerState::Maintenance {
+            operation: pending.operation,
+            request: Some(pending)
+        }
+    );
+    env.run_controller_iteration().await;
+    let repeated = load_power_shelf(&pool, &shelf_id).await;
+    assert!(matches!(
+        repeated.controller_state.value,
+        PowerShelfControllerState::Error { .. }
+    ));
+    assert!(repeated.power_shelf_maintenance_requested.is_none());
+
+    env.run_controller_iteration().await;
+    let settled = load_power_shelf(&pool, &shelf_id).await;
+    assert_eq!(
+        settled.controller_state.value,
+        repeated.controller_state.value
+    );
+    assert!(settled.power_shelf_maintenance_requested.is_none());
+}
 
 fn cm_power_action(operation: PowerShelfMaintenanceOperation) -> SystemPowerControl {
     match operation {
@@ -90,7 +277,8 @@ async fn request_power_shelf_maintenance_via_cm(
     power_shelf_id: &PowerShelfId,
     operation: PowerShelfMaintenanceOperation,
 ) {
-    env.harness
+    let response = env
+        .harness
         .api()
         .component_power_control(Request::new(ComponentPowerControlRequest {
             target: Some(Target::PowerShelfIds(PowerShelfIdList {
@@ -100,7 +288,15 @@ async fn request_power_shelf_maintenance_via_cm(
             bypass_state_controller: false,
         }))
         .await
-        .expect("component_power_control should succeed");
+        .expect("component_power_control should succeed")
+        .into_inner();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(
+        response.results[0].status(),
+        rpc::forge::ComponentManagerStatusCode::Success,
+        "{:?}",
+        response.results
+    );
 }
 
 /// Build a `PowerShelfStateHandlerServices` whose `component_manager` may be
@@ -175,10 +371,15 @@ async fn enter_maintenance(
     )
     .await
     .unwrap();
+    let request = db_power_shelf::find_by_id(&mut *txn, power_shelf_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .power_shelf_maintenance_requested;
     set_power_shelf_controller_state(
         txn,
         power_shelf_id,
-        PowerShelfControllerState::Maintenance { operation },
+        PowerShelfControllerState::Maintenance { operation, request },
     )
     .await
     .unwrap();
@@ -284,6 +485,7 @@ async fn ready_transitions_to_maintenance_when_request_is_set_via_component_powe
         StateHandlerOutcome::Transition {
             next_state: PowerShelfControllerState::Maintenance {
                 operation: PowerShelfMaintenanceOperation::PowerOff,
+                ..
             },
             ..
         }

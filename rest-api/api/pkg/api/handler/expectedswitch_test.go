@@ -304,7 +304,7 @@ func TestCreateExpectedSwitchHandler_Handle(t *testing.T) {
 				assert.Nil(t, err)
 				if tt.requestBody.Labels != nil {
 					assert.NotNil(t, response.Labels, "Labels should not be nil in response")
-					assert.Equal(t, tt.requestBody.Labels, response.Labels, "Labels in response should match request")
+					assert.Equal(t, tt.requestBody.Labels, map[string]string(response.Labels), "Labels in response should match request")
 				}
 				if tt.requestBody.BmcIpAddress != nil {
 					if assert.NotNil(t, response.BmcIpAddress, "BmcIpAddress should not be nil in response") {

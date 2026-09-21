@@ -145,9 +145,9 @@ sections and which page in this guide owns the deep dive.
 
 ### Site identity
 
-`sitename`, `initial_domain_name`, `asn`, `datacenter_asn`,
-`vpc_isolation_behavior`, `vpc_peering_policy`,
-`max_concurrent_machine_updates`. Set once at install time.
+`sitename`, `initial_domain_name`, `asn`, `datacenter_asn`, `vpc_isolation_behavior`, `vpc_peering_policy`, `vpc_peering_policy_on_existing`, `max_concurrent_machine_updates`. Set once at install time.
+
+The `mixed` value for either VPC peering policy is deprecated. NICo logs a startup warning and treats it as `exclusive`. ETV and FNN VPCs are not compatible peers. Creation requests for that pair return `InvalidArgument` under every policy. Stored ETV/FNN peering rows remain discoverable and removable but contribute neither ETV peer-prefix ACL permits nor FNN peer-VNI route-target imports. `vpc_peering_policy_on_existing = "none"` disables both mechanisms for every stored peering.
 
 ### IP and VNI pools
 
@@ -168,10 +168,11 @@ for `prefix_v6`, `dhcpv6_link_address`, examples, and compatibility requirements
 
 ### Tenant traffic policy
 
-`site_fabric_prefixes` (CIDRs allowed for tenant-to-tenant traffic) and
-`deny_prefixes` (CIDRs tenant instances must not reach — typically OOB,
-management, control-plane). `deny_prefixes` generates iptables DROP rules
-and NVUE ACL policies on DPUs.
+`site_fabric_prefixes` defines the tenant address space within the site. With mutual isolation, ETV enforces its IPv4 entries with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL.
+
+`site_fabric_null_routes` controls the FNN isolation routes. When omitted, it inherits `site_fabric_prefixes` and retains removed operator-managed roots while they contain a VpcPrefix or VPC-attached direct NetworkPrefix. Soft-deleted children retain coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative. An empty list disables the routes. Inherited roots are reduced to their minimal exact union. Explicit CIDRs are canonicalized and exact duplicates are removed, but parent, child, and adjacent entries remain distinct so a child blackhole can remain beneath an importable parent route. FNN installs the routes with administrative distance 250 in each VPC VRF, so an authorized route wins only when it is at least as specific as the applicable blackhole. Do not combine an effective `/0` null route with `leak_default_route_from_underlay = true` for the same address family; the imported default has a better administrative distance than the equal-prefix blackhole.
+
+`deny_prefixes` identifies CIDRs tenant instances must not reach—typically OOB, management, or control-plane networks—and generates iptables DROP rules and NVUE ACL policies on DPUs. Open isolation installs neither the FNN blackhole routes nor the ETV isolation ACLs.
 
 ### DHCP, route servers, and BGP
 
@@ -1052,20 +1053,24 @@ images when a machine in the model joins. See
 
 A rack profile can define a `firmware_object` block that references one
 firmware-object JSON document. NICo uses the document as the default input for
-rack firmware and switch NVOS image updates during rack maintenance. For a
-profile with switches, the document must include an NVOS image whose firmware
-type matches `rack_hardware_class`. NICo requests `prod` when
-`rack_hardware_class` is omitted. RMS records an asynchronous update failure
-when the document does not contain the required image.
+rack compute-tray pre-ingestion and for rack firmware and switch NVOS image
+updates during rack maintenance. For a profile with switches, the document must
+include an NVOS image whose firmware type matches `rack_hardware_class`. NICo
+requests `prod` when `rack_hardware_class` is omitted. RMS records an
+asynchronous update failure when the document does not contain the required
+image.
 
 The block contains a `url` and an optional `fetch_timeout`, which accepts
 duration strings such as `30s` and `60s` and defaults to `30s`. Use seconds for
 this request timeout, although the parser accepts other duration units such as
 milliseconds (`ms`), minutes (`m`), and hours (`h`). Without the block, NICo
-skips both automatic update phases. An explicit maintenance request can supply
-a firmware object instead. If no firmware object is available while a switch in
-the maintenance scope is already waiting for an NVOS update, the rack
-transitions to `Error` instead of skipping the NVOS phase.
+skips compute-tray pre-ingestion updates and both automatic rack maintenance
+update phases. An explicit maintenance request can supply a firmware object
+instead. If no firmware object is available while a switch in the maintenance
+scope is already waiting for an NVOS update, the rack transitions to `Error`
+instead of skipping the NVOS phase. The optional `access_token_credential`
+names a stored firmware artifact access token used by compute-tray
+pre-ingestion. When omitted, NICo sends the RMS no-auth sentinel.
 
 ---
 
@@ -1145,6 +1150,15 @@ override:
 | `envConfig.NICO_SEC_OPT` | `"2"` | Security mode: `0` insecure, `1` TLS, `2` mTLS. Production requires `2`. |
 | `CLUSTER_ID` | — (set by `setup.sh`) | Site UUID (`NICO_SITE_UUID`). |
 | `TEMPORAL_SUBSCRIBE_NAMESPACE` | — (set by `setup.sh`) | Temporal namespace; must match `CLUSTER_ID`. |
+
+### Flow runtime settings - `flowConfig`
+
+Flow reads `/etc/flow/flowconfig.yaml`, which the `nico-flow` chart renders
+from its `flowConfig` values (inventory sync interval, leak detection
+interval, and the two job toggles). Defaults equal Flow's built-in
+defaults, and changing a value rolls the Flow pod. See the
+[chart README](https://github.com/dsx-ai-factory/infra-controller/tree/main/helm/charts/nico-flow)
+for the value table and an override example.
 
 ### REST-side PostgreSQL
 

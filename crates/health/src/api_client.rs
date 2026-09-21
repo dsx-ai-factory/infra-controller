@@ -245,18 +245,19 @@ impl ApiCredentialKind {
 struct ApiCredentialProvider {
     client: ForgeApiClient,
     kind: ApiCredentialKind,
+    mac: MacAddress,
 }
 
 impl CredentialProvider for ApiCredentialProvider {
     fn fetch_credentials<'a>(
         &'a self,
-        endpoint: &'a BmcAddr,
+        _endpoint: &'a BmcAddr,
     ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
         Box::pin(async move {
             let response = match &self.kind {
                 ApiCredentialKind::Bmc => {
                     let request = rpc::forge::GetBmcCredentialsRequest {
-                        mac_addr: endpoint.mac.to_string(),
+                        mac_addr: self.mac.to_string(),
                     };
                     self.client
                         .get_bmc_credentials(request)
@@ -374,8 +375,8 @@ impl ApiEndpointSource {
 
     pub async fn fetch_bmc_hosts(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
         let mut endpoints = self.fetch_machine_endpoints().await?;
-        endpoints.extend(self.fetch_power_shelf_endpoints().await);
         endpoints.extend(self.fetch_switch_endpoints().await);
+        endpoints.extend(self.fetch_power_shelf_endpoints().await);
 
         self.prune_bmc_client_cache(&endpoints);
 
@@ -385,7 +386,10 @@ impl ApiEndpointSource {
     }
 
     fn prune_bmc_client_cache(&self, live_endpoints: &[Arc<BmcEndpoint>]) {
-        let live_macs: HashSet<MacAddress> = live_endpoints.iter().map(|ep| ep.addr.mac).collect();
+        let live_macs = live_endpoints
+            .iter()
+            .filter_map(|endpoint| endpoint.addr.mac)
+            .collect::<HashSet<_>>();
         let mut cache = self.bmc_client_cache.lock().expect("cache mutex poisoned");
         let before = cache.len();
         cache.retain(|mac, _| live_macs.contains(mac));
@@ -638,6 +642,9 @@ impl ApiEndpointSource {
             Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: power_shelf.id,
                 serial: None,
+                nvlink_domain_uuid: power_shelf
+                    .nvlink_domain_uuid
+                    .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
             })),
             power_shelf.rack_id.clone(),
             ApiCredentialKind::Bmc,
@@ -651,6 +658,9 @@ impl ApiEndpointSource {
         rack_id: Option<RackId>,
         credential_kind: ApiCredentialKind,
     ) -> Result<Arc<BmcEndpoint>, HealthError> {
+        let mac = addr.mac.ok_or_else(|| {
+            HealthError::GenericError(format!("API endpoint {} has no BMC MAC address", addr.ip))
+        })?;
         let bmc_latency_instrumentation = self.bmc_latency_metrics.clone().map(|metrics| {
             BmcLatencyInstrumentation::new(
                 metrics,
@@ -659,10 +669,11 @@ impl ApiEndpointSource {
         });
         let cached = {
             let mut cache = self.bmc_client_cache.lock().expect("cache mutex poisoned");
-            cache_or_create_bmc_client(&mut cache, addr.mac, credential_kind, |kind| {
+            cache_or_create_bmc_client(&mut cache, mac, credential_kind, |kind| {
                 let provider: Arc<dyn CredentialProvider> = Arc::new(ApiCredentialProvider {
                     client: self.api.client.clone(),
                     kind,
+                    mac,
                 });
                 Ok(Arc::new(BmcClient::new(
                     self.reqwest.clone(),
@@ -767,7 +778,11 @@ impl TryFrom<&rpc::forge::BmcInfo> for BmcAddr {
             })?;
         let port = bmc_info.port.map(|port| port.try_into().unwrap_or(443));
 
-        Ok(Self { ip, port, mac })
+        Ok(Self {
+            ip,
+            port,
+            mac: Some(mac),
+        })
     }
 }
 
@@ -791,7 +806,11 @@ impl TryFrom<&rpc::forge::SwitchNvosInfo> for BmcAddr {
             })?;
         let port = nvos_info.port.map(|port| port.try_into().unwrap_or(443));
 
-        Ok(Self { ip, port, mac })
+        Ok(Self {
+            ip,
+            port,
+            mac: Some(mac),
+        })
     }
 }
 
@@ -839,7 +858,7 @@ mod tests {
         BmcAddr {
             ip: "10.0.0.1".parse().expect("valid ip"),
             port: Some(443),
-            mac: test_mac(),
+            mac: Some(test_mac()),
         }
     }
 
@@ -989,9 +1008,8 @@ mod tests {
     }
 
     #[test]
-    fn power_shelf_endpoint_preserves_api_rack_id()
-    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let api_url = Url::parse("https://127.0.0.1:1079")?;
+    fn power_shelf_endpoint_uses_api_rack_id_and_non_nil_domain() {
+        let api_url = Url::parse("https://127.0.0.1:1079").expect("valid URL");
 
         let source = ApiEndpointSource::new(
             Arc::new(ApiClientWrapper::new(
@@ -1007,29 +1025,54 @@ mod tests {
         );
 
         let rack_id = RackId::new("RACK_1");
+        let domain = NvLinkDomainId::new();
 
-        let endpoint = source.extract_power_shelf_endpoint(&rpc::forge::PowerShelf {
-            config: Some(rpc::forge::PowerShelfConfig {
-                name: "power-shelf-a".to_string(),
-                ..Default::default()
-            }),
-            bmc_info: Some(rpc::forge::BmcInfo {
-                ip: Some("10.0.0.1".to_string()),
-                mac: Some(test_mac().to_string()),
-                port: Some(443),
-                ..Default::default()
-            }),
-            rack_id: Some(rack_id.clone()),
-            ..Default::default()
-        })?;
+        check_values(
+            [
+                Check {
+                    scenario: "domain is missing",
+                    input: None,
+                    expect: None,
+                },
+                Check {
+                    scenario: "nil domain is absent",
+                    input: Some(NvLinkDomainId::nil()),
+                    expect: None,
+                },
+                Check {
+                    scenario: "non-nil API power shelf field",
+                    input: Some(domain),
+                    expect: Some(domain),
+                },
+            ],
+            |nvlink_domain_uuid| {
+                let endpoint = source
+                    .extract_power_shelf_endpoint(&rpc::forge::PowerShelf {
+                        config: Some(rpc::forge::PowerShelfConfig {
+                            name: "power-shelf-a".to_string(),
+                            ..Default::default()
+                        }),
+                        bmc_info: Some(rpc::forge::BmcInfo {
+                            ip: Some("10.0.0.1".to_string()),
+                            mac: Some(test_mac().to_string()),
+                            port: Some(443),
+                            ..Default::default()
+                        }),
+                        rack_id: Some(rack_id.clone()),
+                        nvlink_domain_uuid,
+                        ..Default::default()
+                    })
+                    .expect("power shelf endpoint");
 
-        assert_eq!(endpoint.rack_id.as_ref(), Some(&rack_id));
-        let Some(EndpointMetadata::PowerShelf(power_shelf)) = endpoint.metadata.as_ref() else {
-            panic!("expected power shelf metadata");
-        };
-        assert_eq!(power_shelf.serial, None);
-
-        Ok(())
+                assert_eq!(endpoint.rack_id.as_ref(), Some(&rack_id));
+                let Some(EndpointMetadata::PowerShelf(power_shelf)) = endpoint.metadata.as_ref()
+                else {
+                    panic!("expected power shelf metadata");
+                };
+                assert_eq!(power_shelf.serial, None);
+                power_shelf.nvlink_domain_uuid
+            },
+        );
     }
 
     #[tokio::test]
@@ -1071,6 +1114,47 @@ mod tests {
             factory_calls.load(Ordering::SeqCst),
             1,
             "factory must only be called on cache miss"
+        );
+    }
+
+    #[test]
+    fn api_endpoint_requires_mac_before_caching_client() {
+        let source = ApiEndpointSource::new(
+            Arc::new(ApiClientWrapper::new(
+                "test-ca.pem".to_string(),
+                "test-client.pem".to_string(),
+                "test-client-key.pem".to_string(),
+                &Url::parse("https://127.0.0.1:1079").expect("valid API URL"),
+            )),
+            reqwest(),
+            None,
+            10,
+            None,
+        );
+        let error = source
+            .endpoint_for(
+                BmcAddr {
+                    ip: "2001:db8::1".parse().expect("valid IPv6 address"),
+                    port: None,
+                    mac: None,
+                },
+                None,
+                None,
+                ApiCredentialKind::Bmc,
+            )
+            .err()
+            .expect("missing API MAC is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "generic error: API endpoint 2001:db8::1 has no BMC MAC address"
+        );
+        assert!(
+            source
+                .bmc_client_cache
+                .lock()
+                .expect("cache lock")
+                .is_empty()
         );
     }
 

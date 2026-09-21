@@ -110,14 +110,19 @@ impl RpcTryFrom<ManagedHostStateSnapshot> for Option<rpc::Instance> {
         let (_, dpu_id_to_device_map) = snapshot
             .host_snapshot
             .get_dpu_device_and_id_mappings()
-            .map_err(|e| {
+            .map_err(|error| {
                 RpcDataConversionError::InvalidValue(
-                    "dpu_id_to_device_map".to_string(),
-                    e.to_string(),
+                    "dpu_id_to_device_map".into(),
+                    error.to_string(),
                 )
             })?;
         let status = instance_snapshot_derive_status(
             &instance,
+            &snapshot
+                .dpu_snapshots
+                .iter()
+                .map(|dpu| dpu.id)
+                .collect::<Vec<_>>(),
             dpu_id_to_device_map,
             snapshot.host_snapshot.primary_attached_dpu_machine_id(),
             snapshot.managed_state.clone(),
