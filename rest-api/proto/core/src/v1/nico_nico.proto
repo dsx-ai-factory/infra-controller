@@ -1708,11 +1708,14 @@ message RuntimeConfig {
   bool astra_enabled = 56;
   bool ewethers_enabled = 57;
 
-  // Effective FNN null-route set. When site_fabric_null_routes is omitted from
-  // site configuration, this includes site_fabric_prefixes and removed
-  // operator-managed roots while they contain a VpcPrefix or VPC-attached
-  // direct NetworkPrefix. Older Core versions omit this field; an empty items
-  // list is authoritative.
+  // Operator FNN null routes reported by the anonymous Version RPC. When
+  // site_fabric_null_routes is omitted from site configuration, this includes
+  // site_fabric_prefixes and removed operator-managed roots while they contain
+  // a VpcPrefix or VPC-attached direct NetworkPrefix. Tenant-managed roots are
+  // not added here; this is not a complete audit of DPU isolation routes. Use
+  // GetManagedHostNetworkConfig for the tenant-inclusive FNN response, with RBAC
+  // enforced. An explicit list is returned without checking tenant coverage.
+  // Older Core versions omit this field; an empty items list is authoritative.
   optional common.StringList site_fabric_null_routes = 58;
 }
 
@@ -4849,10 +4852,10 @@ message ManagedHostNetworkConfigResponse {
   // IP prefixes to be denied in the DPU ACL rules.
   repeated string deny_prefixes = 18;
 
-  // Legacy site-prefix field. Core continues to send the configured
-  // site_fabric_prefixes here unchanged so older agents retain their existing
-  // behavior during a rolling upgrade. New FNN agents prefer the
-  // presence-bearing site_fabric_null_routes field below. When that field is
+  // Minimal exact union of configured site_fabric_prefixes and every retained
+  // tenant-managed SitePrefix. Retiring operator roots and explicit null-route
+  // overrides do not change this legacy input. New FNN agents prefer the
+  // optional site_fabric_null_routes field below. When that field is
   // absent in a response from an older Core, a new FNN agent reduces this list
   // to its minimal exact union before rendering fallback blackhole routes.
   // Other virtualizers consume this field directly. With mutual isolation,
@@ -4883,6 +4886,11 @@ message ManagedHostNetworkConfigResponse {
   // including a present empty list, and each distinct prefix boundary must be
   // rendered. New agents fall back to site_fabric_prefixes only when this is
   // absent in a response from an older Core. Non-FNN responses omit it.
+  // Unlike RuntimeConfig, inherited routes include all retained tenant-managed
+  // SitePrefixes. An explicit override keeps its distinct boundaries. Under
+  // mutual isolation, Core rejects every FNN response, including Admin-only
+  // responses, if that override leaves a retained tenant root without a covering
+  // route. Unused roots and roots in Deleting still require coverage in that mode.
   optional common.StringList site_fabric_null_routes = 24;
 
   // Enable nico DHCP on HBN.

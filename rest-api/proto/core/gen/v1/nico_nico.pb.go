@@ -9384,11 +9384,14 @@ type RuntimeConfig struct {
 	SvpcEnabled                                     bool     `protobuf:"varint,55,opt,name=svpc_enabled,json=svpcEnabled,proto3" json:"svpc_enabled,omitempty"`
 	AstraEnabled                                    bool     `protobuf:"varint,56,opt,name=astra_enabled,json=astraEnabled,proto3" json:"astra_enabled,omitempty"`
 	EwethersEnabled                                 bool     `protobuf:"varint,57,opt,name=ewethers_enabled,json=ewethersEnabled,proto3" json:"ewethers_enabled,omitempty"`
-	// Effective FNN null-route set. When site_fabric_null_routes is omitted from
-	// site configuration, this includes site_fabric_prefixes and removed
-	// operator-managed roots while they contain a VpcPrefix or VPC-attached
-	// direct NetworkPrefix. Older Core versions omit this field; an empty items
-	// list is authoritative.
+	// Operator FNN null routes reported by the anonymous Version RPC. When
+	// site_fabric_null_routes is omitted from site configuration, this includes
+	// site_fabric_prefixes and removed operator-managed roots while they contain
+	// a VpcPrefix or VPC-attached direct NetworkPrefix. Tenant-managed roots are
+	// not added here; this is not a complete audit of DPU isolation routes. Use
+	// GetManagedHostNetworkConfig for the tenant-inclusive FNN response, with RBAC
+	// enforced. An explicit list is returned without checking tenant coverage.
+	// Older Core versions omit this field; an empty items list is authoritative.
 	SiteFabricNullRoutes *StringList `protobuf:"bytes,58,opt,name=site_fabric_null_routes,json=siteFabricNullRoutes,proto3,oneof" json:"site_fabric_null_routes,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
@@ -26740,10 +26743,10 @@ type ManagedHostNetworkConfigResponse struct {
 	DpuNetworkPingerType *string `protobuf:"bytes,17,opt,name=dpu_network_pinger_type,json=dpuNetworkPingerType,proto3,oneof" json:"dpu_network_pinger_type,omitempty"`
 	// IP prefixes to be denied in the DPU ACL rules.
 	DenyPrefixes []string `protobuf:"bytes,18,rep,name=deny_prefixes,json=denyPrefixes,proto3" json:"deny_prefixes,omitempty"`
-	// Legacy site-prefix field. Core continues to send the configured
-	// site_fabric_prefixes here unchanged so older agents retain their existing
-	// behavior during a rolling upgrade. New FNN agents prefer the
-	// presence-bearing site_fabric_null_routes field below. When that field is
+	// Minimal exact union of configured site_fabric_prefixes and every retained
+	// tenant-managed SitePrefix. Retiring operator roots and explicit null-route
+	// overrides do not change this legacy input. New FNN agents prefer the
+	// optional site_fabric_null_routes field below. When that field is
 	// absent in a response from an older Core, a new FNN agent reduces this list
 	// to its minimal exact union before rendering fallback blackhole routes.
 	// Other virtualizers consume this field directly. With mutual isolation,
@@ -26769,6 +26772,11 @@ type ManagedHostNetworkConfigResponse struct {
 	// including a present empty list, and each distinct prefix boundary must be
 	// rendered. New agents fall back to site_fabric_prefixes only when this is
 	// absent in a response from an older Core. Non-FNN responses omit it.
+	// Unlike RuntimeConfig, inherited routes include all retained tenant-managed
+	// SitePrefixes. An explicit override keeps its distinct boundaries. Under
+	// mutual isolation, Core rejects every FNN response, including Admin-only
+	// responses, if that override leaves a retained tenant root without a covering
+	// route. Unused roots and roots in Deleting still require coverage in that mode.
 	SiteFabricNullRoutes *StringList `protobuf:"bytes,24,opt,name=site_fabric_null_routes,json=siteFabricNullRoutes,proto3,oneof" json:"site_fabric_null_routes,omitempty"`
 	// Enable nico DHCP on HBN.
 	// Deprecated: It is always enabled now.

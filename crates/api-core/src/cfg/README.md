@@ -48,9 +48,10 @@ behavior.
 | `enable_route_servers` | `bool` | `false` | `networking` | Enables route server injection into DPU FRR configs for L2VPN. |
 | `deny_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 CIDR prefixes that tenant instances are blocked from reaching. FNN generates family-specific NVUE ACL policies; all non-FNN virtualizers apply the IPv4 prefixes only. |
 | `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 prefixes assigned for tenant use within this site. With `mutual_isolation`, ETV enforces the IPv4 prefixes with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL. With `open`, that ACL is not installed. On upgrade, authoritative Core scans persisted Ready and Deleting operator-managed SitePrefixes even when this list is empty. It assigns an unparented legacy VpcPrefix when exactly one operator root contains it; ambiguous parentage blocks startup. With a nonempty list, missing parentage also blocks startup. Listen-only replicas require an authoritative Core to assign unresolved lineage first. |
-| `site_fabric_null_routes` | `Option<Vec<IpNetwork>>` | `site_fabric_prefixes` | `networking` | IPv4 and IPv6 prefixes installed by FNN as blackhole routes under `mutual_isolation`. Omission inherits `site_fabric_prefixes`, retains removed operator-managed roots while they contain a VpcPrefix or VPC-attached direct NetworkPrefix, and reduces those inherited roots to their minimal exact union. Soft-deleted children retain coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative: each CIDR is canonicalized to its network boundary and exact duplicates are removed, but parent, child, and adjacent entries are not aggregated. An empty list (`[]`) installs no null routes. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. An effective `/0` null route and `leak_default_route_from_underlay = true` for the same address family are unsupported because the imported default wins the equal-prefix distance comparison. With `open`, the routes are not installed. Tenant prefix reuse follows the [overlap checks](#tenant-prefix-overlap-checks). |
+| `site_fabric_null_routes` | `Option<Vec<IpNetwork>>` | Inherited roots | `networking` | IPv4 and IPv6 prefixes installed by FNN as blackhole routes under `mutual_isolation`. Omission combines `site_fabric_prefixes`, every retained tenant-managed SitePrefix, and removed operator-managed roots that still contain a VpcPrefix or VPC-attached direct NetworkPrefix, reducing them to their minimal exact union. Soft-deleted children retain operator coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative: each CIDR uses its network address and exact duplicates are removed, but parent, child, and adjacent entries are not aggregated. Under mutual isolation, new tenant roots require an equal or broader explicit route; startup rejects an override that leaves any retained tenant root uncovered. An empty list (`[]`) installs no null routes and cannot support tenant roots under mutual isolation. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. An effective `/0` null route and `leak_default_route_from_underlay = true` for the same address family are unsupported because the imported default wins the equal-prefix distance comparison. With `open`, the routes are not installed and tenant coverage is not required. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules) and [overlap checks](#tenant-prefix-overlap-checks). |
 | `tenant_prefix_overlap_enabled` | `bool` | `false` | `networking` | Site opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). The existing `VpcPrefix` exclusion continues to prevent overlapping `VpcPrefix` persistence until the cutover tracked by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892). |
 | `max_site_prefixes_per_tenant` | `u32` | `8` | `networking` | Maximum tenant-managed SitePrefixes retained for one tenant at this site. Prefixes awaiting removal still count against this limit and keep their CIDR reserved. |
+| `max_site_prefix_isolation_rules` | `u32` | `64` | `networking` | Maximum compacted legacy DPU site-prefix input for new tenant-root admission under mutual isolation; accepts `0` through `64`. Open isolation does not enforce this limit. This is not an FNN route-capacity limit. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules). |
 | `anycast_site_prefixes` | `Vec<Ipv4Network>` | `[]` | `networking` | Aggregate IPv4 prefixes containing tenant-announced prefixes (e.g., BYOIP). **Deprecated.** Use [`routing_profiles.allowed_anycast_prefixes`](#fnnroutingprofileconfig) instead. |
 | `common_tenant_host_asn` | `Option<u32>` | — | `networking` | ASN that tenants use to peer with the DPU. If unset, any ASN is accepted. |
 | `vpc_isolation_behavior` | `VpcIsolationBehaviorType` | `MutualIsolation` | `networking` | VPC isolation policy: `mutual_isolation` or `open`. |
@@ -827,6 +828,102 @@ Unset properties retain presence information so a VPC's inline
 `routing_profile_overrides` can inherit them. After the named profile and VPC
 override are combined, properties still unset use the effective defaults above.
 
+### SitePrefix isolation rules
+
+Core includes current configured `site_fabric_prefixes` and retained tenant-managed
+SitePrefixes in the legacy DPU `site_fabric_prefixes` input. Duplicate, contained,
+and adjacent prefixes are combined only when the resulting list covers exactly
+the same addresses. This legacy list is sorted by address family, address, and
+prefix length. Logical SitePrefix records and their ownership are unchanged.
+
+An empty configured `site_fabric_prefixes` list contributes no operator roots;
+it does not remove retained tenant-managed SitePrefixes from the legacy list.
+A site with neither configured nor tenant roots sends an empty legacy list.
+Including a root in this field alone does not prove isolation on an older agent.
+
+FNN uses the separate `site_fabric_null_routes` response field. When the setting
+is omitted, Core includes configured roots, every retained tenant root, and
+retiring operator roots while their VpcPrefixes or VPC-attached direct
+NetworkPrefixes remain. Soft deletion does not end operator-root retention.
+These routes are reduced to their minimal exact union and sorted by CIDR string.
+The anonymous `Version` RPC keeps its existing operator-route output: configured
+and retained operator roots, without tenant-managed SitePrefixes. Its
+`RuntimeConfig.site_fabric_null_routes` field is not a complete audit of DPU
+isolation routes. Use `GetManagedHostNetworkConfig` to inspect the tenant-inclusive
+FNN response; built-in RBAC restricts that RPC when `bypass_rbac` is false.
+
+An explicit `site_fabric_null_routes` list is not augmented with either kind of
+retained root. Its distinct boundaries are preserved, including nested and
+adjacent entries. Under mutual isolation, new tenant roots must be covered by one equal or broader
+explicit route; several narrower routes do not qualify. Uncovered creation
+returns `FailedPrecondition` without persisting the root or its history.
+Startup applies the same coverage check to every retained tenant root, including
+unused roots and roots in `Deleting`, even when `tenant_prefix_overlap_enabled`
+is false and no VpcPrefixes overlap.
+An explicit empty list therefore blocks new tenant roots and prevents startup
+while any tenant roots remain. Every FNN DPU response, including an Admin-only
+response, repeats this check against retained roots, so a root admitted by
+another Core replica cannot silently lose coverage under a different explicit
+override. ETV responses do not apply this FNN coverage check. Version still
+reports the explicit override without checking tenant coverage, so operators
+can inspect it. Existing create retries still return their root.
+
+With `vpc_isolation_behavior = "open"`, DPUs install no isolation routes. Tenant
+creation, startup, and DPU responses therefore do not require explicit-route
+coverage in this mode; an explicit empty list remains valid with retained roots.
+
+To recover startup or FNN configuration serving after an override loses coverage,
+restore an explicit list that covers every retained tenant root, or omit
+`site_fabric_null_routes` to inherit them, then restart the affected Core replicas.
+Requesting deletion does not remove a retained root from the check. Recovery
+does not require manual database edits.
+
+Older Core versions can create tenant roots without checking an explicit
+null-route override. If old and new API processes overlap during an upgrade,
+an old process can create an uncovered root after the new process passes its
+startup check. New FNN responses then fail the coverage check.
+
+For mutual-isolation sites using an explicit override, prevent that sequence
+with the existing tenant quota:
+
+1. Set `max_site_prefixes_per_tenant = 0` on every API process and finish restarting
+   or draining the processes and requests using the previous setting. This
+   blocks new tenant roots while preserving unchanged creation retries.
+2. Check that every explicit override covers all retained tenant roots, or omit
+   `site_fabric_null_routes` to inherit them.
+3. Upgrade every API process before restoring the tenant quota. If returning to
+   an older version, keep creation blocked while versions overlap.
+
+This creation freeze is unnecessary when the old API and its requests are fully
+stopped before the new API starts, or when null routes are inherited. Setting
+`tenant_prefix_overlap_enabled = false` does not block SitePrefix creation.
+
+`max_site_prefix_isolation_rules` limits the compacted legacy list when creating a
+tenant-managed root. It defaults to `64` and accepts integers from `0` through
+`64`; configuration loading rejects other values. Changes require restarting
+Core. Under mutual isolation, zero blocks new roots. Open isolation does not
+enforce this limit. The initial ceiling is an operational restriction,
+not an FNN null-route count or a hardware-capacity guarantee. Retiring operator
+roots and explicit null-route overrides are excluded from the count. Raising
+the ceiling requires the qualification tracked
+by [#3902](https://github.com/dsx-ai-factory/infra-controller/issues/3902).
+The separate `max_site_prefixes_per_tenant` quota still counts logical tenant roots.
+
+If existing use exceeds a lowered limit, new roots are rejected even when adding
+one would compact the list below that limit. Existing roots continue to render,
+and a retry using an existing ID and unchanged immutable fields still returns
+that root. Core reports `ResourceExhausted` with the current, proposed, and maximum
+legacy input counts for rejected creation. Exceeding the limit does not itself
+block startup or truncate either DPU input. New tenant roots intersecting a configured
+`deny_prefixes` entry are rejected with `InvalidArgument`.
+
+Tenant roots remain included in every retained lifecycle state, including
+`Deleting`, even when `tenant_prefix_overlap_enabled` is false. New tenant roots remain
+`Provisioning` and cannot be used for new VpcPrefixes until the DPU readiness
+work in [#6314](https://github.com/dsx-ai-factory/infra-controller/issues/6314).
+Retiring operator roots are excluded from the legacy input but remain in inherited
+FNN null routes until their children are hard-deleted.
+
 ### Tenant prefix overlap checks
 
 `tenant_prefix_overlap_enabled` defaults to `false`. When set to `true`, NICo
@@ -890,7 +987,12 @@ VPC routing-profile changes check the affected tenant-serving FNN interfaces. Al
 
 Instance allocation and network expansion check all VPCs used by the requested, current, and pending networks together, including their direct peer imports. An Instance must not connect to overlapping address space from different VPCs, even when those VPCs are otherwise isolated. Core returns `InvalidArgument` for that conflict. With overlap enabled, allocation and network expansion also check the effective FNN routing policy before duplicate CIDRs exist. Network expansion requires an eligible resolved routing profile and safe site-wide policy. NSG permits and stateful egress do not participate in overlap admission: FNN isolation is enforced by routing blackholes, which ACL policy cannot bypass.
 
-New prefix reuse requires coverage from the current `site_fabric_null_routes` configuration, or current `site_fabric_prefixes` when the override is omitted. Retained-state validation also uses retiring operator roots when the override is omitted, matching the routes sent to FNN. Retiring roots do not authorize new reuse. An explicit empty list disables tenant prefix reuse.
+New prefix reuse requires coverage from the explicit `site_fabric_null_routes`
+configuration when present. When omitted, the participant tenant-managed
+SitePrefixes supply inherited coverage even outside configured operator ranges.
+Retained-state validation uses all retained tenant roots and retiring operator
+roots, matching the routes sent to FNN. Retiring operator roots do not authorize
+new reuse. An explicit empty list disables tenant prefix reuse.
 
 When `tenant_prefix_overlap_enabled = false` but another VPC still uses the same addresses, Instance allocation and network expansion return `InvalidArgument`. Prefixes being deleted still count. Metadata edits and removal of unchanged interfaces remain available. A request cannot replace a pending network update. Requests that need admission take the overlap transaction lock before resource locks, including when the gate is off. A waiting Instance update reloads its dependencies but keeps its original configuration version. If that version changed, the request returns `FailedPrecondition`.
 
@@ -901,7 +1003,9 @@ FNN policy before starting controllers or the API listener, including with
 `listen_only = true`. Startup network seeding and Admin VPC attachment check
 their changes before committing. An unsafe retained configuration fails startup.
 Tenant DPU configuration requests also check their retained networks before
-returning tenant interfaces; Admin-only responses remain available for cleanup.
+returning tenant interfaces. Admin-only responses skip the per-Instance network
+checks; under mutual isolation, every FNN response still checks explicit
+null-route coverage for all retained tenant roots.
 With overlap enabled, the policy checks apply to every retained FNN network on
 a DPU Instance, even before duplicate prefixes exist.
 These checks coordinate with admission writers through the same transaction
@@ -909,11 +1013,13 @@ lock. DPU configuration requests share the read lock with each other.
 A routing writer holding the exclusive lock blocks configuration requests
 across the site until its transaction ends.
 
-With overlap disabled, these startup and tenant DPU checks apply only to
+With overlap disabled, the retained VPC routing checks apply only to
 overlaps involving a tenant-managed `VpcPrefix`. Overlaps between existing
 operator-managed or rootless prefixes do not activate them. This preserves
 existing configurations, including Admin networks, without weakening the
-checks on tenant-managed prefixes retained after disabling overlap.
+checks on tenant-managed prefixes retained after disabling overlap. Explicit
+null-route coverage for retained tenant roots is required under mutual
+isolation, even without duplicate VPC prefixes.
 
 Turning off the site or profile admission opt-in does not invalidate safely
 isolated existing networks. Prefixes and their tenant-managed SitePrefixes may

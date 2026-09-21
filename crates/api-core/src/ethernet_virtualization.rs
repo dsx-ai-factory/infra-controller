@@ -67,11 +67,8 @@ pub(crate) struct SiteFabricPrefixList {
 
 impl SiteFabricPrefixList {
     pub(crate) fn from_ipnetwork_vec(prefixes: Vec<IpNetwork>) -> Option<Self> {
-        // Under the current configuration semantics, an empty
-        // site_fabric_prefixes list in the site config means we are not using
-        // the VPC isolation feature built on top of it, and it is better not
-        // to construct one of these at all (and thus the Option-wrapped return
-        // type).
+        // Return `None` for an empty configured list so callers skip containment
+        // checks against operator ranges.
         prefixes.none_if_empty().map(|prefixes| Self { prefixes })
     }
 

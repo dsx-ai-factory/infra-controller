@@ -17,6 +17,9 @@
 
 use ::rpc::forge as rpc;
 use carbide_instrument::{DynamicLog, Event, LabelValue, LogAt, emit};
+use carbide_network::ip::ipset::aggregate_prefixes;
+use carbide_network::ip::prefix::IpPrefix;
+use ipnetwork::IpNetwork;
 use model::site_prefix::{
     NewTenantManagedSitePrefix, RetireTenantManagedSitePrefix, SitePrefix, SitePrefixAuthority,
     SitePrefixLifecycleState, UpdateSitePrefixMetadata,
@@ -24,8 +27,9 @@ use model::site_prefix::{
 use model::tenant::TenantOrganizationId;
 use tonic::{Request, Response, Status};
 
-use crate::CarbideError;
 use crate::api::{Api, log_request_data};
+use crate::cfg::file::{CarbideConfig, VpcIsolationBehaviorType};
+use crate::{CarbideError, CarbideResult};
 
 #[derive(Clone, Copy, Debug, Eq, LabelValue, PartialEq)]
 enum SitePrefixAdmissionResult {
@@ -70,20 +74,160 @@ impl DynamicLog for SitePrefixAdmission {
     }
 }
 
-fn admission_result_for_database_error(error: &db::DatabaseError) -> SitePrefixAdmissionResult {
+fn admission_result_for_error(error: &CarbideError) -> SitePrefixAdmissionResult {
     match error {
-        db::DatabaseError::AlreadyFoundError { .. }
-        | db::DatabaseError::FailedPrecondition(_)
-        | db::DatabaseError::InvalidArgument(_)
-        | db::DatabaseError::InvalidConfiguration(_)
-        | db::DatabaseError::MissingArgument(_)
-        | db::DatabaseError::NotFoundError { .. }
-        | db::DatabaseError::ResourceExhausted(_)
-        | db::DatabaseError::TenantSitePrefixQuotaExceeded { .. } => {
+        CarbideError::AlreadyFoundError { .. }
+        | CarbideError::FailedPrecondition(_)
+        | CarbideError::InvalidArgument(_)
+        | CarbideError::InvalidConfiguration(_)
+        | CarbideError::MissingArgument(_)
+        | CarbideError::NotFoundError { .. }
+        | CarbideError::ResourceExhausted(_)
+        | CarbideError::TenantSitePrefixQuotaExceeded { .. }
+        | CarbideError::SitePrefixIsolationLimitExceeded { .. } => {
             SitePrefixAdmissionResult::Rejected
         }
         _ => SitePrefixAdmissionResult::Failed,
     }
+}
+
+fn compact_prefixes(prefixes: impl IntoIterator<Item = IpNetwork>) -> Vec<IpNetwork> {
+    let prefixes = prefixes.into_iter().map(|prefix| {
+        // Configured prefixes can include host bits; `IpPrefix` requires the network address.
+        IpPrefix::try_from((prefix.network(), prefix.prefix()))
+            .expect("an existing IP network has a valid prefix length and network address")
+    });
+    aggregate_prefixes(prefixes)
+        .into_iter()
+        .map(|prefix| match prefix {
+            IpPrefix::V4(prefix) => IpNetwork::V4(prefix.into()),
+            IpPrefix::V6(prefix) => IpNetwork::V6(prefix.into()),
+        })
+        .collect()
+}
+
+/// `protected_prefixes` builds the legacy DPU input used by the admission budget.
+/// Retiring operator roots are handled separately by the FNN null-route resolver.
+pub(super) fn protected_prefixes(
+    config: &CarbideConfig,
+    tenant_roots: &[IpNetwork],
+) -> Vec<IpNetwork> {
+    compact_prefixes(
+        config
+            .site_fabric_prefixes
+            .iter()
+            .chain(tenant_roots)
+            .copied(),
+    )
+}
+
+/// `retained_null_routes` resolves the FNN routes used by DPU responses
+/// and retained-state validation. Under mutual isolation, explicit overrides
+/// must cover the tenant snapshot, including roots admitted by another Core replica.
+/// The caller holds the overlap configuration or checks lock while fetching
+/// the raw tenant roots and resolving routes.
+pub(super) async fn retained_null_routes(
+    api: &Api,
+    txn: &mut sqlx::PgConnection,
+    tenant_roots: &[IpNetwork],
+) -> CarbideResult<Vec<IpNetwork>> {
+    validate_explicit_null_route_coverage(&api.runtime_config, tenant_roots)?;
+    if api.runtime_config.site_fabric_null_routes.is_some() {
+        return Ok(api
+            .runtime_config
+            .resolved_site_fabric_null_routes(&[], &[]));
+    }
+    let operator_roots =
+        db::site_prefix::find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn)
+            .await?;
+    Ok(api
+        .runtime_config
+        .resolved_site_fabric_null_routes(&operator_roots, tenant_roots))
+}
+
+fn validate_explicit_null_route_coverage(
+    config: &CarbideConfig,
+    tenant_roots: &[IpNetwork],
+) -> CarbideResult<()> {
+    if matches!(
+        config.vpc_isolation_behavior,
+        VpcIsolationBehaviorType::Open
+    ) {
+        return Ok(());
+    }
+    let Some(routes) = config.site_fabric_null_routes.as_deref() else {
+        return Ok(());
+    };
+    if let Some(prefix) = tenant_roots
+        .iter()
+        .find(|prefix| !super::tenant_prefix_overlap::prefix_has_isolation_route(routes, **prefix))
+    {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "tenant SitePrefix {prefix} is not covered by configured site_fabric_null_routes"
+        )));
+    }
+    Ok(())
+}
+
+/// `validate_retained_isolation` prevents an explicit override from removing
+/// tenant coverage at startup, including roots not yet used by a VpcPrefix.
+/// The caller holds the overlap configuration or checks lock.
+pub(super) async fn validate_retained_isolation(
+    api: &Api,
+    txn: &mut sqlx::PgConnection,
+) -> CarbideResult<()> {
+    if api.runtime_config.site_fabric_null_routes.is_none()
+        || matches!(
+            api.runtime_config.vpc_isolation_behavior,
+            VpcIsolationBehaviorType::Open
+        )
+    {
+        return Ok(());
+    }
+    let tenant_roots = db::site_prefix::find_tenant_prefixes(txn).await?;
+    validate_explicit_null_route_coverage(&api.runtime_config, &tenant_roots)
+}
+
+fn validate_isolation_admission(
+    config: &CarbideConfig,
+    current_prefixes: &[IpNetwork],
+    candidate: IpNetwork,
+) -> CarbideResult<()> {
+    use super::tenant_prefix_overlap::contains_prefix;
+
+    validate_explicit_null_route_coverage(config, &[candidate])?;
+
+    if let Some(denied) = config
+        .deny_prefixes
+        .iter()
+        .find(|denied| contains_prefix(**denied, candidate) || contains_prefix(candidate, **denied))
+    {
+        return Err(CarbideError::InvalidArgument(format!(
+            "tenant SitePrefix {candidate} overlaps configured deny prefix {denied}"
+        )));
+    }
+
+    if matches!(
+        config.vpc_isolation_behavior,
+        VpcIsolationBehaviorType::Open
+    ) {
+        return Ok(());
+    }
+
+    let used = current_prefixes.len();
+    let requested = compact_prefixes(current_prefixes.iter().copied().chain([candidate])).len();
+    let limit = config.max_site_prefix_isolation_rules;
+    // A lowered limit freezes new roots, even if adding a sibling would
+    // compact the rendered set back below the limit. Existing retries bypass
+    // this check because they do not introduce another resource.
+    if used > limit as usize || requested > limit as usize {
+        return Err(CarbideError::SitePrefixIsolationLimitExceeded {
+            used,
+            requested,
+            limit,
+        });
+    }
+    Ok(())
 }
 
 fn emit_admission(
@@ -223,23 +367,34 @@ pub(crate) async fn create(
             return Err(CarbideError::from(error).into());
         }
     };
-    let result = match db::site_prefix::create_tenant_managed(
-        new_site_prefix,
-        quota_limit,
-        &mut txn,
-    )
-    .await
-    {
+    let result: CarbideResult<_> = async {
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        let tenant_roots = db::site_prefix::find_tenant_prefixes(&mut txn).await?;
+        let current_prefixes = protected_prefixes(&api.runtime_config, &tenant_roots);
+        let result =
+            db::site_prefix::create_tenant_managed(new_site_prefix, quota_limit, &mut txn).await?;
+        // Resolve retries first so later policy changes do not reject an existing root.
+        if result.disposition == db::site_prefix::CreateDisposition::Created {
+            validate_isolation_admission(
+                &api.runtime_config,
+                &current_prefixes,
+                result.site_prefix.config.prefix,
+            )?;
+        }
+        Ok(result)
+    }
+    .await;
+    let result = match result {
         Ok(result) => result,
         Err(error) => {
             emit_admission(
-                admission_result_for_database_error(&error),
+                admission_result_for_error(&error),
                 &site_prefix_id,
                 &tenant_organization_id,
                 &prefix,
                 &error,
             );
-            return Err(CarbideError::from(error).into());
+            return Err(error.into());
         }
     };
     let used = match db::site_prefix::count_tenant_managed(&mut txn, &quota_tenant_organization_id)
