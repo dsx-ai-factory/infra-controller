@@ -3602,7 +3602,7 @@ func cmdInstanceCreate(s *Session, _ []string) error {
 		return err
 	}
 	var infiniBandInterfaces []map[string]interface{}
-	if networkCapability.hasInfiniBand() {
+	if networkCapability.hasActiveInfiniBand() {
 		infiniBandInterfaces, err = promptInstanceInfiniBandInterfaces(s, networkCapability.infiniBand)
 		if err != nil {
 			return err
@@ -3712,17 +3712,35 @@ type instanceInfiniBandCapability struct {
 	inactiveDevices []int
 }
 
+func (c *instanceInfiniBandCapability) hasActiveDevice() bool {
+	inactiveDevices := make(map[int]bool, len(c.inactiveDevices))
+	for _, deviceInstance := range c.inactiveDevices {
+		inactiveDevices[deviceInstance] = true
+	}
+	for deviceInstance := range c.count {
+		if !inactiveDevices[deviceInstance] {
+			return true
+		}
+	}
+	return false
+}
+
 type instanceNetworkCapability struct {
 	multiDPU   *instanceDPUDeviceNetworkCapability
-	infiniBand *instanceInfiniBandCapability
+	infiniBand []instanceInfiniBandCapability
 }
 
 func (c *instanceNetworkCapability) hasMultiDPU() bool {
 	return c.multiDPU != nil
 }
 
-func (c *instanceNetworkCapability) hasInfiniBand() bool {
-	return c.infiniBand != nil
+func (c *instanceNetworkCapability) hasActiveInfiniBand() bool {
+	for i := range c.infiniBand {
+		if c.infiniBand[i].hasActiveDevice() {
+			return true
+		}
+	}
+	return false
 }
 
 func fetchInstanceNetworkCapabilities(s *Session, machineID string) (*instanceNetworkCapability, error) {
@@ -3774,11 +3792,15 @@ func fetchInstanceNetworkCapabilities(s *Session, machineID string) (*instanceNe
 				}
 			}
 		} else if strings.EqualFold(capability.Type, "InfiniBand") {
-			networkCapability.infiniBand = &instanceInfiniBandCapability{
+			infiniBandCapability := instanceInfiniBandCapability{
 				name:            name,
 				count:           *count,
 				inactiveDevices: capability.InactiveDevices,
 			}
+			if !infiniBandCapability.hasActiveDevice() {
+				continue
+			}
+			networkCapability.infiniBand = append(networkCapability.infiniBand, infiniBandCapability)
 		}
 	}
 	return networkCapability, nil
@@ -3892,18 +3914,33 @@ type activeInfiniBandDevice struct {
 	deviceInstance int
 }
 
+// promptInstanceInterfaces builds the infinibandInterfaces[] array for an instance
+// users are able to configure one interface for each active InfiniBand device, as
+// as determined by machine capabilities.
 func promptInstanceInfiniBandInterfaces(
 	s *Session,
-	capability *instanceInfiniBandCapability,
+	capabilities []instanceInfiniBandCapability,
 ) ([]map[string]interface{}, error) {
-	readyPartitions, err := fetchReadyInstanceInfiniBandPartitions(s)
-	if err != nil {
-		return nil, fmt.Errorf("listing Ready InfiniBand partitions for selected site: %w", err)
+	activeDevices := make([]activeInfiniBandDevice, 0)
+	for _, capability := range capabilities {
+		inactiveDevices := make(map[int]bool, len(capability.inactiveDevices))
+		for _, deviceInstance := range capability.inactiveDevices {
+			inactiveDevices[deviceInstance] = true
+		}
+		for deviceInstance := range capability.count {
+			if inactiveDevices[deviceInstance] {
+				continue
+			}
+			activeDevices = append(activeDevices, activeInfiniBandDevice{
+				capabilityName: capability.name,
+				deviceInstance: deviceInstance,
+			})
+		}
 	}
-	if len(readyPartitions) == 0 {
+	if len(activeDevices) == 0 {
 		fmt.Fprintf(
 			os.Stderr,
-			"%s no InfiniBand interfaces can be configured because no Ready InfiniBand partitions are available for this site\n",
+			"%s no active InfiniBand interfaces are available on the selected machine\n",
 			Dim("note:"),
 		)
 		return nil, nil
@@ -3917,24 +3954,14 @@ func promptInstanceInfiniBandInterfaces(
 		return nil, nil
 	}
 
-	activeDevices := make([]activeInfiniBandDevice, 0)
-	inactiveDevices := make(map[int]bool, len(capability.inactiveDevices))
-	for _, deviceInstance := range capability.inactiveDevices {
-		inactiveDevices[deviceInstance] = true
+	readyPartitions, err := fetchReadyInstanceInfiniBandPartitions(s)
+	if err != nil {
+		return nil, fmt.Errorf("listing Ready InfiniBand partitions for selected site: %w", err)
 	}
-	for deviceInstance := range capability.count {
-		if inactiveDevices[deviceInstance] {
-			continue
-		}
-		activeDevices = append(activeDevices, activeInfiniBandDevice{
-			capabilityName: capability.name,
-			deviceInstance: deviceInstance,
-		})
-	}
-	if len(activeDevices) == 0 {
+	if len(readyPartitions) == 0 {
 		fmt.Fprintf(
 			os.Stderr,
-			"%s no active InfiniBand interfaces are available on the selected machine\n",
+			"%s no InfiniBand interfaces can be configured because no Ready InfiniBand partitions are available for this site\n",
 			Dim("note:"),
 		)
 		return nil, nil
@@ -3971,6 +3998,7 @@ func promptInstanceInfiniBandInterfaces(
 	return interfaces, nil
 }
 
+// only IB partitions in Ready state are suitable for interface configuration
 func fetchReadyInstanceInfiniBandPartitions(s *Session) ([]NamedItem, error) {
 	query := map[string]string{
 		"orderBy": "NAME_ASC",

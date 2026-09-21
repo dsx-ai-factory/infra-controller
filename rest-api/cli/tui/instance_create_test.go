@@ -139,27 +139,36 @@ func TestFetchInstanceNetworkCapabilities(t *testing.T) {
 					name:  "BlueField-3",
 					count: 2,
 				},
-				infiniBand: &instanceInfiniBandCapability{
-					name:            "ConnectX-7",
-					count:           3,
-					inactiveDevices: []int{1},
+				infiniBand: []instanceInfiniBandCapability{
+					{
+						name:            "ConnectX-7",
+						count:           3,
+						inactiveDevices: []int{1},
+					},
 				},
 			},
 		},
 		{
-			name: "keeps the last InfiniBand capability",
+			name: "keeps every InfiniBand capability with an active device",
 			responseBody: `{
 				"machineCapabilities":[
 					{"type":"InfiniBand","name":"ConnectX-6","count":1},
-					{"type":"InfiniBand","name":"ConnectX-7","count":2,"inactiveDevices":[0]}
+					{"type":"InfiniBand","name":"ConnectX-7","count":2,"inactiveDevices":[0]},
+					{"type":"InfiniBand","name":"ConnectX-8","count":2,"inactiveDevices":[0,1]}
 				]
 			}`,
 			status: http.StatusOK,
 			want: &instanceNetworkCapability{
-				infiniBand: &instanceInfiniBandCapability{
-					name:            "ConnectX-7",
-					count:           2,
-					inactiveDevices: []int{0},
+				infiniBand: []instanceInfiniBandCapability{
+					{
+						name:  "ConnectX-6",
+						count: 1,
+					},
+					{
+						name:            "ConnectX-7",
+						count:           2,
+						inactiveDevices: []int{0},
+					},
 				},
 			},
 		},
@@ -169,7 +178,8 @@ func TestFetchInstanceNetworkCapabilities(t *testing.T) {
 				"machineCapabilities":[
 					{"type":"Network","name":"BlueField-3","deviceType":"DPU","count":1},
 					{"type":"InfiniBand","name":"","count":2},
-					{"type":"InfiniBand","name":"ConnectX-7","count":0}
+					{"type":"InfiniBand","name":"ConnectX-7","count":0},
+					{"type":"InfiniBand","name":"ConnectX-8","count":2,"inactiveDevices":[0,1]}
 				]
 			}`,
 			status: http.StatusOK,
@@ -223,6 +233,64 @@ func TestFetchInstanceNetworkCapabilities(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestInstanceNetworkCapabilityHasActiveInfiniBand(t *testing.T) {
+	tests := []struct {
+		name         string
+		capabilities []instanceInfiniBandCapability
+		want         bool
+	}{
+		{
+			name: "no InfiniBand capabilities",
+		},
+		{
+			name: "all devices inactive",
+			capabilities: []instanceInfiniBandCapability{
+				{
+					name:            "ConnectX-7",
+					count:           2,
+					inactiveDevices: []int{0, 1},
+				},
+			},
+		},
+		{
+			name: "duplicate inactive indexes do not hide an active device",
+			capabilities: []instanceInfiniBandCapability{
+				{
+					name:            "ConnectX-7",
+					count:           2,
+					inactiveDevices: []int{0, 0},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "active device on a later capability",
+			capabilities: []instanceInfiniBandCapability{
+				{
+					name:            "ConnectX-7",
+					count:           1,
+					inactiveDevices: []int{0},
+				},
+				{
+					name:  "ConnectX-6",
+					count: 1,
+				},
+			},
+			want: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capability := &instanceNetworkCapability{
+				infiniBand: test.capabilities,
+			}
+
+			assert.Equal(t, test.want, capability.hasActiveInfiniBand())
 		})
 	}
 }
@@ -756,42 +824,56 @@ func TestFetchReadyInstanceNetworkResourcesOmitsStatusFromPickerItems(t *testing
 
 func TestPromptInstanceInfiniBandInterfaces(t *testing.T) {
 	tests := []struct {
-		name         string
-		capability   *instanceInfiniBandCapability
-		responseBody string
-		status       int
-		input        string
-		want         []map[string]interface{}
-		wantErr      string
-		wantNote     string
+		name          string
+		capabilities  []instanceInfiniBandCapability
+		responseBody  string
+		status        int
+		input         string
+		want          []map[string]interface{}
+		wantErr       string
+		wantNote      string
+		wantNoRequest bool
 	}{
 		{
 			name: "reports when no Ready partitions are available",
-			capability: &instanceInfiniBandCapability{
-				name:  "ConnectX-7",
-				count: 1,
+			capabilities: []instanceInfiniBandCapability{
+				{
+					name:  "ConnectX-7",
+					count: 1,
+				},
 			},
 			responseBody: `[]`,
+			input:        "y\n",
 			wantNote:     "no InfiniBand interfaces can be configured because no Ready InfiniBand partitions are available for this site",
 		},
 		{
 			name: "declining configuration returns no interfaces",
-			capability: &instanceInfiniBandCapability{
-				name:  "ConnectX-7",
-				count: 1,
+			capabilities: []instanceInfiniBandCapability{
+				{
+					name:  "ConnectX-7",
+					count: 1,
+				},
 			},
-			responseBody: `[{"id":"partition-1","name":"training","status":"Ready"}]`,
-			input:        "n\n",
+			responseBody:  `[{"id":"partition-1","name":"training","status":"Ready"}]`,
+			input:         "n\n",
+			wantNoRequest: true,
 		},
 		{
-			name: "configures active devices in index order",
-			capability: &instanceInfiniBandCapability{
-				name:            "ConnectX-7",
-				count:           3,
-				inactiveDevices: []int{1},
+			name: "configures active devices in capability and index order",
+			capabilities: []instanceInfiniBandCapability{
+				{
+					name:            "ConnectX-7",
+					count:           3,
+					inactiveDevices: []int{1},
+				},
+				{
+					name:            "ConnectX-6",
+					count:           2,
+					inactiveDevices: []int{0},
+				},
 			},
 			responseBody: `[{"id":"partition-1","name":"training","status":"Ready"}]`,
-			input:        "y\ny\n",
+			input:        "y\ny\ny\n",
 			want: []map[string]interface{}{
 				{
 					"partitionId":    "partition-1",
@@ -805,14 +887,22 @@ func TestPromptInstanceInfiniBandInterfaces(t *testing.T) {
 					"deviceInstance": 2,
 					"isPhysical":     true,
 				},
+				{
+					"partitionId":    "partition-1",
+					"device":         "ConnectX-6",
+					"deviceInstance": 1,
+					"isPhysical":     true,
+				},
 			},
 		},
 		{
 			name: "stops before the next active device when declined",
-			capability: &instanceInfiniBandCapability{
-				name:            "ConnectX-7",
-				count:           3,
-				inactiveDevices: []int{1},
+			capabilities: []instanceInfiniBandCapability{
+				{
+					name:            "ConnectX-7",
+					count:           3,
+					inactiveDevices: []int{1},
+				},
 			},
 			responseBody: `[{"id":"partition-1","name":"training","status":"Ready"}]`,
 			input:        "y\nn\n",
@@ -827,23 +917,28 @@ func TestPromptInstanceInfiniBandInterfaces(t *testing.T) {
 		},
 		{
 			name: "reports when every device is inactive",
-			capability: &instanceInfiniBandCapability{
-				name:            "ConnectX-7",
-				count:           2,
-				inactiveDevices: []int{0, 1},
+			capabilities: []instanceInfiniBandCapability{
+				{
+					name:            "ConnectX-7",
+					count:           2,
+					inactiveDevices: []int{0, 1},
+				},
 			},
-			responseBody: `[{"id":"partition-1","name":"training","status":"Ready"}]`,
-			input:        "y\n",
-			wantNote:     "no active InfiniBand interfaces are available on the selected machine",
+			responseBody:  `[{"id":"partition-1","name":"training","status":"Ready"}]`,
+			wantNote:      "no active InfiniBand interfaces are available on the selected machine",
+			wantNoRequest: true,
 		},
 		{
 			name: "returns partition lookup errors",
-			capability: &instanceInfiniBandCapability{
-				name:  "ConnectX-7",
-				count: 1,
+			capabilities: []instanceInfiniBandCapability{
+				{
+					name:  "ConnectX-7",
+					count: 1,
+				},
 			},
 			responseBody: `{"message":"unavailable"}`,
 			status:       http.StatusServiceUnavailable,
+			input:        "y\n",
 			wantErr:      "listing Ready InfiniBand partitions for selected site",
 		},
 	}
@@ -880,7 +975,7 @@ func TestPromptInstanceInfiniBandInterfaces(t *testing.T) {
 			var got []map[string]interface{}
 			_, err := withStdin(t, test.input, func() (string, error) {
 				var promptErr error
-				got, promptErr = promptInstanceInfiniBandInterfaces(session, test.capability)
+				got, promptErr = promptInstanceInfiniBandInterfaces(session, test.capabilities)
 				return "", promptErr
 			})
 
@@ -898,7 +993,11 @@ func TestPromptInstanceInfiniBandInterfaces(t *testing.T) {
 				assert.Equal(t, test.want, got)
 			}
 			assert.Contains(t, string(stderrOutput), test.wantNote)
-			assert.Equal(t, 1, requestCount)
+			wantRequestCount := 1
+			if test.wantNoRequest {
+				wantRequestCount = 0
+			}
+			assert.Equal(t, wantRequestCount, requestCount)
 		})
 	}
 }
