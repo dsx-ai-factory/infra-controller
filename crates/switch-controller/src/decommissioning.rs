@@ -111,32 +111,13 @@ pub(super) async fn handle_decommissioning(
             handle_factory_reset_nvos(switch_id, ctx).await
         }
         SwitchDecommissioningState::WaitingForNvosFactoryReset { job_id } => {
-            let component_manager = ctx.services.component_manager.as_ref().ok_or_else(|| {
-                StateHandlerError::InvalidState("missing RMS component manager".to_string())
-            })?;
-            let status = component_manager
-                .nv_switch
-                .get_switch_factory_reset_job_status(job_id)
-                .await
-                .map_err(|error| external_error("failed to poll NVOS factory reset", error))?;
-            match status.state {
-                SwitchFactoryResetState::Pending => Ok(StateHandlerOutcome::wait(
-                    "waiting for NVOS factory reset completion".to_string(),
-                )),
-                SwitchFactoryResetState::Completed => Ok(StateHandlerOutcome::transition(
-                    decommissioning(SwitchDecommissioningState::SuppressingNvosDhcp),
-                )),
-                SwitchFactoryResetState::Failed => Err(external_error(
-                    "NVOS factory reset failed",
-                    status.error.unwrap_or_default(),
-                )),
-            }
+            handle_waiting_for_nvos_factory_reset(job_id, ctx).await
         }
         SwitchDecommissioningState::NvosFactoryResetOutcomeUnknown { error } => Err(
             external_error("NVOS factory reset requires operator recovery", error),
         ),
         SwitchDecommissioningState::RebootingSwitch => {
-            handle_bmc_operation(switch_id, switch, ctx, true).await
+            handle_rebooting_switch(switch_id, switch, ctx).await
         }
         SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => {
             handle_waiting_for_nvos_dhcp_acknowledgement(switch_id, ctx).await
@@ -145,7 +126,7 @@ pub(super) async fn handle_decommissioning(
             handle_suppressing_bmc_dhcp(switch_id, switch, ctx).await
         }
         SwitchDecommissioningState::FactoryResetBmc => {
-            handle_bmc_operation(switch_id, switch, ctx, false).await
+            handle_factory_reset_bmc(switch_id, switch, ctx).await
         }
         SwitchDecommissioningState::WaitingForBmcDhcpAcknowledgement => {
             handle_waiting_for_bmc_dhcp_acknowledgement(switch_id, switch, ctx).await
@@ -243,6 +224,67 @@ async fn handle_factory_reset_nvos(
     )))
 }
 
+async fn handle_waiting_for_nvos_factory_reset(
+    job_id: &str,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    let component_manager = ctx.services.component_manager.as_ref().ok_or_else(|| {
+        StateHandlerError::InvalidState("missing RMS component manager".to_string())
+    })?;
+    let status = component_manager
+        .nv_switch
+        .get_switch_factory_reset_job_status(job_id)
+        .await
+        .map_err(|error| external_error("failed to poll NVOS factory reset", error))?;
+    match status.state {
+        SwitchFactoryResetState::Pending => Ok(StateHandlerOutcome::wait(
+            "waiting for NVOS factory reset completion".to_string(),
+        )),
+        SwitchFactoryResetState::Completed => Ok(StateHandlerOutcome::transition(decommissioning(
+            SwitchDecommissioningState::SuppressingNvosDhcp,
+        ))),
+        SwitchFactoryResetState::Failed => Err(external_error(
+            "NVOS factory reset failed",
+            status.error.unwrap_or_default(),
+        )),
+    }
+}
+
+async fn handle_rebooting_switch(
+    switch_id: &SwitchId,
+    switch: &Switch,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    let bmc_info = switch
+        .bmc_info
+        .as_ref()
+        .ok_or_else(|| missing_data(switch_id, "bmc_info"))?;
+    let bmc_ip_address = bmc_info
+        .ip
+        .ok_or_else(|| missing_data(switch_id, "bmc_ip"))?;
+    let bmc_mac_address = bmc_info
+        .mac
+        .ok_or_else(|| missing_data(switch_id, "bmc_mac"))?;
+    let redfish_client = ctx
+        .services
+        .redfish_client_pool
+        .create_client(
+            &bmc_ip_address.to_string(),
+            bmc_info.port,
+            RedfishAuth::for_bmc_mac(bmc_mac_address),
+            Some(RedfishVendor::NvidiaGBSwitch),
+        )
+        .await
+        .map_err(|error| external_error("failed to create switch BMC Redfish client", error))?;
+    redfish_client
+        .power(libredfish::SystemPowerControl::ForceRestart)
+        .await
+        .map_err(|error| external_error("failed to reboot switch", error))?;
+    Ok(StateHandlerOutcome::transition(decommissioning(
+        SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement,
+    )))
+}
+
 async fn handle_waiting_for_nvos_dhcp_acknowledgement(
     switch_id: &SwitchId,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
@@ -286,11 +328,10 @@ async fn handle_suppressing_bmc_dhcp(
     .with_txn(txn))
 }
 
-async fn handle_bmc_operation(
+async fn handle_factory_reset_bmc(
     switch_id: &SwitchId,
     switch: &Switch,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
-    reboot: bool,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
     let bmc_info = switch
         .bmc_info
@@ -314,15 +355,6 @@ async fn handle_bmc_operation(
         )
         .await
         .map_err(|error| external_error("failed to create switch BMC Redfish client", error))?;
-    if reboot {
-        redfish_client
-            .power(libredfish::SystemPowerControl::ForceRestart)
-            .await
-            .map_err(|error| external_error("failed to reboot switch", error))?;
-        return Ok(StateHandlerOutcome::transition(decommissioning(
-            SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement,
-        )));
-    }
     redfish_client
         .bmc_reset_to_defaults()
         .await
