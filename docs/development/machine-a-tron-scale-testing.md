@@ -38,7 +38,10 @@ The `mat-k8s-controller` dynamically creates one Service per BMC:
 - The BMC network must lie outside the Kubernetes ServiceCIDR, pod CIDR,
   node network, and networks that nodes or pods must otherwise reach
   (BMC IPs are Service externalIPs, for which kube-proxy programs forwarding
-  rules on every node)
+  rules on every node). `setup-machine-a-tron.sh` checks every BMC network in
+  the values file against the ServiceCIDR and stops when it cannot determine
+  the ServiceCIDR (`SCALE_SERVICE_CIDRS`, `SCALE_BMC_PREFIXES`, and
+  `SCALE_ALLOW_UNKNOWN_SERVICE_CIDR` in the script header)
 - NICo siteConfig needs `allow_insecure_discovery = true` and a network
   covering the BMC IP range
 - Leave `site_explorer.bmc_proxy` unset - NICo dials each BMC IP directly

@@ -138,6 +138,14 @@
 #   SCALE_STATE_MAX_CONCURRENCY
 #                          Tuning override: [machine_state_controller.controller]
 #                          max_concurrency (parallel state-machine tasks).
+#   SCALE_SERVICE_CIDRS    Cluster Service CIDR(s), space-separated, when the
+#                          preflight cannot read them from the cluster.
+#   SCALE_BMC_PREFIXES     Extra BMC network prefixes to validate against the
+#                          ServiceCIDR, space-separated, for a values file whose
+#                          bmcDhcpRelayAddress networks it cannot resolve.
+#   SCALE_ALLOW_UNKNOWN_SERVICE_CIDR
+#                          Set to 1 to deploy when the ServiceCIDR cannot be
+#                          determined. Default: stop.
 #   INGEST_RATE_CSV        Where the Phase 10 loop writes its per-sample
 #                          ingestion counters (CSV). Default: a file under /tmp.
 #   DPF_SIM_IMAGE          dpf-sim-controller image ref for Phase 4b. Default:
@@ -376,36 +384,104 @@ phase "Phase 0 — preflight"
 for t in kubectl helm jq; do command -v "$t" >/dev/null || die "$t not found in PATH"; done
 kubectl version -o json >/dev/null 2>&1 || kubectl cluster-info >/dev/null 2>&1 || die "cannot reach the cluster (check KUBECONFIG)"
 ok "tools present, cluster reachable"
-if [[ "$MAT_MODE" == "scale" ]]; then
-    # Controller Mode publishes BMC IPs as Service externalIPs, which the
-    # apiserver does not validate, so an OOB range inside the ServiceCIDR
-    # collides silently with allocated clusterIPs. ServiceCIDR objects first
-    # (k8s 1.33+), then kubeadm's ClusterConfiguration, then the apiserver flag.
-    _SVC_CIDRS="$(kubectl get servicecidrs -o jsonpath='{.items[*].spec.cidrs[*]}' 2>/dev/null || true)"
-    [[ -n "$_SVC_CIDRS" ]] || _SVC_CIDRS="$(kubectl get cm kubeadm-config -n kube-system -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null \
-        | awk '/serviceSubnet:/ {print $2}' | tr ',' ' ' || true)"
-    [[ -n "$_SVC_CIDRS" ]] || _SVC_CIDRS="$(kubectl cluster-info dump 2>/dev/null \
-        | grep -oE 'service-cluster-ip-range=[^" ]+' | head -1 | cut -d= -f2 | tr ',' ' ' || true)"
-    if [[ -z "$_SVC_CIDRS" ]]; then
-        warn "could not determine the cluster ServiceCIDR; SCALE_OOB_PREFIX ${SCALE_OOB_PREFIX} must lie outside it"
-    else
-        # shellcheck disable=SC2086
-        _OVERLAP="$(python3 - "$SCALE_OOB_PREFIX" $_SVC_CIDRS <<'PY'
-import ipaddress, sys
-oob = ipaddress.ip_network(sys.argv[1])
-print(" ".join(c for c in sys.argv[2:] if oob.overlaps(ipaddress.ip_network(c))))
-PY
-)"
-        [[ -z "$_OVERLAP" ]] || die "SCALE_OOB_PREFIX ${SCALE_OOB_PREFIX} overlaps the cluster ServiceCIDR ${_OVERLAP}; Controller Mode publishes BMC IPs as Service externalIPs, so the OOB range must lie outside it (helm/charts/nico-machine-a-tron/README.md, Requirements)"
-        ok "SCALE_OOB_PREFIX ${SCALE_OOB_PREFIX} is outside the ServiceCIDR (${_SVC_CIDRS})"
-    fi
-fi
 [[ -d "$CHART_DIR" ]] || die "chart dir not found: $CHART_DIR"
 [[ -f "$VALUES_FILE" ]] || die "values file not found: $VALUES_FILE"
 kubectl get deploy nico-api -n "$NICO_SYSTEM_NS" >/dev/null 2>&1 || die "nico-api not found in $NICO_SYSTEM_NS — deploy NICo Core (setup.sh) first"
 [[ -n "$(_pg_primary)" ]] || die "no Postgres primary in $POSTGRES_NS"
 kubectl get pod vault-0 -n "$VAULT_NS" >/dev/null 2>&1 || die "vault-0 not found in $VAULT_NS"
 ok "NICo Core present: nico-api, postgres primary $(_pg_primary), vault-0"
+if [[ "$MAT_MODE" == "scale" ]]; then
+    # Controller Mode publishes BMC IPs as Service externalIPs, which the
+    # apiserver does not validate, so a BMC network inside the ServiceCIDR
+    # collides silently with allocated clusterIPs. Every BMC network this run
+    # deploys is checked: the SCALE_OOB_PREFIX segment plus the network of each
+    # bmcDhcpRelayAddress in the values file, resolved from the prefixes the
+    # file documents, the live site config, or SCALE_BMC_PREFIXES. ServiceCIDR
+    # sources: SCALE_SERVICE_CIDRS, else ServiceCIDR objects (k8s 1.33+),
+    # kubeadm's ClusterConfiguration, then the apiserver flag. Unknown means
+    # stop, unless SCALE_ALLOW_UNKNOWN_SERVICE_CIDR=1 accepts the risk.
+    _SVC_CIDRS="${SCALE_SERVICE_CIDRS:-}"
+    [[ -n "$_SVC_CIDRS" ]] || _SVC_CIDRS="$(kubectl get servicecidrs -o jsonpath='{.items[*].spec.cidrs[*]}' 2>/dev/null || true)"
+    [[ -n "$_SVC_CIDRS" ]] || _SVC_CIDRS="$(kubectl get cm kubeadm-config -n kube-system -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null \
+        | awk '/serviceSubnet:/ {print $2}' | tr ',' ' ' || true)"
+    [[ -n "$_SVC_CIDRS" ]] || _SVC_CIDRS="$(kubectl cluster-info dump 2>/dev/null \
+        | grep -oE 'service-cluster-ip-range=[^" ]+' | head -1 | cut -d= -f2 | tr ',' ' ' || true)"
+    if [[ -z "$_SVC_CIDRS" ]]; then
+        if [[ "${SCALE_ALLOW_UNKNOWN_SERVICE_CIDR:-0}" == "1" ]]; then
+            warn "could not determine the cluster ServiceCIDR; continuing because SCALE_ALLOW_UNKNOWN_SERVICE_CIDR=1 (the BMC networks must lie outside it)"
+        else
+            die "could not determine the cluster ServiceCIDR (no ServiceCIDR object, kubeadm-config or apiserver flag readable); set SCALE_SERVICE_CIDRS=\"<cidr> ...\" to the cluster's Service CIDR(s), or SCALE_ALLOW_UNKNOWN_SERVICE_CIDR=1 to deploy without the check"
+        fi
+    fi
+    _SITE_NETS="$(mktemp)"
+    kubectl get cm nico-api-site-config-files -n "$NICO_SYSTEM_NS" -o go-template='{{range $k, $v := .data}}{{$v}}{{"\n"}}{{end}}' > "$_SITE_NETS" 2>/dev/null || true
+    _NETCHK="$(python3 - "$VALUES_FILE" "$SCALE_OOB_PREFIX" "${SCALE_BMC_PREFIXES:-}" "$_SVC_CIDRS" "$_SITE_NETS" <<'PY'
+import ipaddress, re, sys
+values_file, oob_prefix, extra, svc, site_path = sys.argv[1:6]
+text = open(values_file).read()
+site = open(site_path).read()
+
+def nets(cands):
+    out = []
+    for c in cands:
+        try:
+            out.append(ipaddress.ip_network(c, strict=False))
+        except ValueError:
+            pass
+    return out
+
+oob = ipaddress.ip_network(oob_prefix, strict=False)
+documented = nets(re.findall(r'[0-9]+(?:\.[0-9]+){3}/[0-9]+', text))
+site_nets = nets(re.findall(r'^\s*prefix\s*=\s*"([^"]+)"', site, re.M))
+extra_nets = nets(extra.split())
+# Relay addresses of every machine group (camelCase and rack-group snake_case
+# keys); commented-out lines are ignored, as in the pool-fit check.
+relays = []
+for raw in text.splitlines():
+    if not raw.strip() or raw.lstrip().startswith("#"):
+        continue
+    m = re.match(r'\s*(bmcDhcpRelayAddress|oobDhcpRelayAddress|bmc_dhcp_relay_address|oob_dhcp_relay_address)\s*:\s*(\S.*)$', raw)
+    if not m:
+        continue
+    try:
+        relays.append(ipaddress.ip_address(re.sub(r"\s+#.*$", "", m.group(2)).strip().strip('"\'')))
+    except ValueError:
+        pass
+
+def resolve(addr):
+    # Most specific containing prefix wins: a relay sits inside its own
+    # segment and inside any wider range the file documents.
+    best = None
+    for net in [oob] + documented + site_nets + extra_nets:
+        if addr in net and (best is None or net.prefixlen > best.prefixlen):
+            best = net
+    return best
+
+prefixes, unresolved = {oob}, []
+for r in relays:
+    n = resolve(r)
+    if n is None:
+        unresolved.append(str(r))
+    else:
+        prefixes.add(n)
+prefixes |= set(extra_nets)
+order = sorted(prefixes, key=lambda n: (int(n.network_address), n.prefixlen))
+overlaps = [f"{p} overlaps {c}" for p in order for c in nets(svc.split()) if p.overlaps(c)]
+print("PREFIXES " + " ".join(str(p) for p in order))
+if unresolved:
+    print("UNRESOLVED " + " ".join(sorted(set(unresolved))))
+if overlaps:
+    print("OVERLAP " + ", ".join(overlaps))
+PY
+)"
+    rm -f "$_SITE_NETS"
+    _NET_PFX="$(sed -n 's/^PREFIXES //p' <<<"$_NETCHK")"
+    _NET_UNRES="$(sed -n 's/^UNRESOLVED //p' <<<"$_NETCHK")"
+    _NET_OVL="$(sed -n 's/^OVERLAP //p' <<<"$_NETCHK")"
+    [[ -z "$_NET_UNRES" ]] || die "cannot determine the BMC network of bmcDhcpRelayAddress ${_NET_UNRES} in ${VALUES_FILE}; document its prefix in the values file, create its [networks.*] stanza in the site config first, or set SCALE_BMC_PREFIXES=\"<cidr> ...\""
+    [[ -z "$_NET_OVL" ]] || die "BMC network overlaps the cluster ServiceCIDR: ${_NET_OVL}; Controller Mode publishes BMC IPs as Service externalIPs, so every BMC network must lie outside it (helm/charts/nico-machine-a-tron/README.md, Requirements)"
+    [[ -z "$_SVC_CIDRS" ]] || ok "BMC networks ${_NET_PFX} are outside the ServiceCIDR (${_SVC_CIDRS})"
+fi
 
 # portable extraction (macOS BSD sed/grep lack \s): [[:space:]] + awk on quotes
 MAT_IMAGE_TAG="${MAT_IMAGE_TAG:-$(grep -E '^[[:space:]]*tag:' "$VALUES_FILE" | head -1 | awk -F'"' '{print $2}')}"

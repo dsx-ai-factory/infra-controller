@@ -264,10 +264,14 @@ adds a dynamic target UDP port for IPMI access.
   neither allocates nor validates and for which kube-proxy programs
   forwarding rules on every node, so an overlap silently collides with a
   dynamically allocated clusterIP or hides the real destination. This is a
-  hard requirement: `helm-prereqs/setup-machine-a-tron.sh` refuses a
-  `SCALE_OOB_PREFIX` inside the ServiceCIDR, and a direct Helm install must
-  verify it before deploying because neither the chart nor the controller
-  checks it.
+  hard requirement: `helm-prereqs/setup-machine-a-tron.sh` checks every BMC
+  network it deploys (the `SCALE_OOB_PREFIX` segment and the network of each
+  `bmcDhcpRelayAddress` in the selected values file) against the ServiceCIDR
+  and refuses an overlap, and it stops when it cannot determine the
+  ServiceCIDR unless `SCALE_SERVICE_CIDRS` names it or
+  `SCALE_ALLOW_UNKNOWN_SERVICE_CIDR=1` accepts the risk. A direct Helm
+  install must verify it before deploying because neither the chart nor the
+  controller checks it.
 - DHCP relay mode (see DHCP Relay Mode) is the exception: NICo resolves the
   BMC network from the DHCP relay address, which in that mode is each pod's
   relay Service clusterIP, so the BMC network must contain the relay
