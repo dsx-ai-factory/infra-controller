@@ -87,10 +87,13 @@ Stage 2 must:
    extension-service DPUService resources in `dpf-operator-system`. Revisit
    this when DPF provides per-DPUService namespace support.
 
-2. **Additional DPUService contract overrides.** NICo exposes the placement
-   selector plus the narrowly scoped DaemonSet fields documented in Section
-   3.3.1. Other DPF contract fields remain unset. A future NICo API may expose
-   more fields when a use case establishes their ownership and update rules.
+2. **Additional DPUService contract overrides.** Stage 1 exposes only the
+   DPUService fields NICo owns for the extension-service contract, including
+   the generated placement selector. Other DPF contract fields, such as
+   labels, annotations, and `updateStrategy`, remain unset so a
+   contract-compliant Helm chart uses its own defaults. A future NICo API may
+   expose narrowly scoped overrides for those fields when a use case
+   establishes their ownership and update.
 
 ## 3. Design
 
@@ -101,10 +104,10 @@ A Helm chart supplied for `DPF_HELM_CHART` must satisfy the
 It must expose every applicable DPF contract parameter as a Helm value and
 render each value as required by that contract.
 
-NICo always sets the `serviceDaemonSet.nodeSelector` DPF contract parameter.
-It deterministically generates this field on the detached `DPUService` to
-select the DPUs to which an extension service is attached. Tenant-provided
-chart-specific `data.values` must not set
+NICo will use only one of those DPF contract parameters:
+`serviceDaemonSet.nodeSelector`. NICo deterministically sets this field on the
+detached `DPUService` to select the DPUs to which an extension service is
+attached. Tenant-provided chart-specific `data.values` must not set
 `serviceDaemonSet.nodeSelector`; NICo rejects that input because allowing it
 would let a tenant bypass the placement contract.
 
@@ -123,10 +126,10 @@ spec:
       {{- end }}
 ```
 
-When the typed `data.serviceDaemonSet` object is present, NICo also sets its
-labels, annotations, resources, and update strategy on the DPUService. The
-Helm chart must provide appropriate defaults for every other DPF contract
-parameter it relies on.
+NICo does **NOT** set any other DPF contract parameters, such as `labels`, `annotations`,
+or `updateStrategy` etc, when it creates the Stage 1 `DPUService`. The Helm chart
+must therefore provide appropriate defaults for every such parameter it relies
+on.
 
 The optional `data.values` object remains available for tenant chart-specific
 configuration. It cannot override NICo's node-selector value. Other values,
@@ -342,21 +345,6 @@ Example input `data`:
   "chartName": "tenant-service",
   "chartVersion": "1.2.3",
   "security.privileged": true,
-  "serviceDaemonSet": {
-    "labels": {
-      "app.kubernetes.io/name": "tenant-service"
-    },
-    "annotations": {},
-    "resources": {
-      "nvidia.com/bf_sf": "1"
-    },
-    "updateStrategy": {
-      "type": "RollingUpdate",
-      "rollingUpdate": {
-        "maxUnavailable": 1
-      }
-    }
-  },
   "values": {
     "image": {
       "repository": "registry.example.com/tenant/service",
@@ -375,39 +363,13 @@ Example input `data`:
 | `chartName`           | `string`  | Yes      | Qualified chart name; maps to `spec.helmChart.source.chart`.         |
 | `chartVersion`        | `string`  | Yes      | Exact pinned chart version; maps to `spec.helmChart.source.version`. |
 | `security.privileged` | `boolean` | Yes      | Service privilege policy; maps to `spec.security.privileged`.        |
-| `serviceDaemonSet`    | `object`  | No       | Typed DaemonSet configuration; maps to `spec.serviceDaemonSet` alongside NICo's generated placement selector. |
 | `values`              | `object`  | No       | Chart-specific Helm values; maps to `spec.helmChart.values` when present and is omitted from the projected CR when absent. |
 
 The create API rejects a request when DPF is disabled for the site, `data` is
 invalid, or required chart fields are missing. The JSON contract rejects
-unknown fields. `serviceDaemonSet` supports only `labels`, `annotations`,
-`resources`, and `updateStrategy`. Labels and annotations use Kubernetes
-metadata syntax; annotations also retain Kubernetes' aggregate 256 KiB
-key/value size limit. Resources are a Kubernetes
-`ResourceList`: resource names map directly to quantity strings rather than to
-container `requests` and `limits`. The update strategy accepts `RollingUpdate`
-or `OnDelete`; rolling updates support `maxSurge` and `maxUnavailable` as
-non-negative integers or percentage strings from `0%` through `100%`. After
-Kubernetes defaults are applied, exactly one of the two values must be non-zero.
-The legacy design spelling `upgradeStrategy`, all other fields, and an
-explicit `serviceDaemonSet.nodeSelector` are rejected.
-
-Validation is split by ownership. The REST layer checks the JSON wire shape,
-required top-level request fields, unsupported fields, and NICo-owned
-`nodeSelector` paths. Core is the canonical semantic boundary for both create
-and update: it validates Kubernetes metadata, `ResourceList` quantities, and
-DaemonSet update-strategy rules before normalized desired state is persisted.
-The DPF SDK only converts that validated model into the DPUService type. NICo
-does not currently apply DPUServiceConfiguration's 50-entry metadata cap or
-reserved-key policy to direct DPUService metadata; the Core validator retains
-a TODO for the reserved-key policy if DPF adds it to that contract.
-
-Tenant-provided `values` must also not set
-`serviceDaemonSet.nodeSelector`, which remains reserved for NICo's placement
-contract. The typed `serviceDaemonSet` object and `values.serviceDaemonSet`
-remain independent: compatible charts may continue consuming labels,
-annotations, resources, and update strategy from chart values. Other chart
-values, including `imagePullSecrets`, are passed through.
+unknown fields. Tenant-provided `values` must not set
+`serviceDaemonSet.nodeSelector`, which is reserved for NICo's placement
+contract. Other chart values, including `imagePullSecrets`, are passed through.
 The launch/admin workflow, not this API, verifies that any referenced,
 pre-provisioned Secrets exist before the service is created. The API also
 rejects the legacy `credential` field and Stage 2 `observability` configuration
@@ -476,7 +438,6 @@ The controller maps persisted and generated values as follows:
 | `data.chartVersion`                           | `spec.helmChart.source.version`                                                          |
 | `data.values`                                 | `spec.helmChart.values` when present; otherwise omitted                                 |
 | `data.security.privileged`                    | `spec.security.privileged`                                                               |
-| `data.serviceDaemonSet`                       | The supplied labels, annotations, resources, and update strategy in `spec.serviceDaemonSet` |
 | Generated node selector based on ext-svc UUID | `spec.serviceDaemonSet.nodeSelector`                                                     |
 | Stage 1 deployment model                      | `spec.deployInCluster = false` and no `serviceID`, interfaces, or config ports           |
 | Stage 1 DPUCluster model                      | `spec.dpuClusterSelector` is unset; DPF creates an Application in every known DPUCluster |
@@ -518,15 +479,6 @@ spec:
       service:
         logLevel: info
   serviceDaemonSet:
-    labels:
-      app.kubernetes.io/name: tenant-service
-    annotations: {}
-    resources:
-      nvidia.com/bf_sf: "1"
-    updateStrategy:
-      type: RollingUpdate
-      rollingUpdate:
-        maxUnavailable: 1
     nodeSelector:
       nodeSelectorTerms:
         - matchExpressions:
