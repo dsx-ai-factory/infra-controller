@@ -1139,6 +1139,39 @@ mod tests {
         assert_eq!(response["error"]["message"], "credential REDACTED rejected");
     }
 
+    /// Verifies libredfish's local non-response masker removes the bare Basic
+    /// payload even when the authentication scheme is normalized or omitted.
+    #[test]
+    fn password_redaction_masks_basic_payload_variants_in_local_errors() {
+        // Derive the same complete redaction context retained by the direct
+        // client, then echo its payload through a non-response error variant.
+        let (authorization, sensitive_values) =
+            carbide_utils::redfish::redfish_basic_authorization_context("root", Some("secret"));
+        let payload = &sensitive_values[1];
+        let error = libredfish::RedfishError::GenericError {
+            error: format!(
+                "exact {authorization}; lower basic {payload}; upper BASIC {payload}; bare {payload}"
+            ),
+        };
+        let sensitive_values = sensitive_values
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        // Run the local variant-aware sanitizer rather than the JSON response
+        // path so both masking implementations protect the same credential.
+        let redacted = redact_passwords(error, &sensitive_values);
+        let libredfish::RedfishError::GenericError { error } = redacted else {
+            panic!("generic error remains a generic error after redaction");
+        };
+
+        // The scheme is not itself secret, but no reusable Base64 payload may survive.
+        assert_eq!(
+            error,
+            "exact REDACTED; lower basic REDACTED; upper BASIC REDACTED; bare REDACTED"
+        );
+    }
+
     /// Rotate a BMC root password against the sim and report the vendor each
     /// `create_client` call was made with, in order. The contract:
     /// the FIRST client (which makes the `/AccountService` PATCH) must be

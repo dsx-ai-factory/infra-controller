@@ -24,7 +24,9 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use carbide_secrets::credentials::{CredentialReader, Credentials};
 use carbide_utils::HostPortPair;
-use carbide_utils::redfish::{format_forwarded_host_parameter, redfish_basic_authorization_value};
+use carbide_utils::redfish::{
+    format_forwarded_host_parameter, redfish_basic_authorization_context,
+};
 use libredfish::model::service_root::RedfishVendor;
 use libredfish::{Endpoint, Redfish};
 
@@ -112,16 +114,18 @@ impl RedfishClientPool for RedfishClientPoolImpl {
         };
         // Keep every secret representation libredfish places on the wire as
         // redaction context for initialization and later operation failures.
-        let mut authentication_sensitive_values = Vec::with_capacity(2);
-        if let Some(password) = password.as_deref().filter(|password| !password.is_empty()) {
-            authentication_sensitive_values.push(password.to_string());
-        }
-        if let Some(username) = username.as_deref() {
-            authentication_sensitive_values.push(redfish_basic_authorization_value(
-                username,
-                password.as_deref(),
-            ));
-        }
+        let authentication_sensitive_values = if let Some(username) = username.as_deref() {
+            let (_, sensitive_values) =
+                redfish_basic_authorization_context(username, password.as_deref());
+            sensitive_values
+        } else {
+            password
+                .as_deref()
+                .filter(|password| !password.is_empty())
+                .map(str::to_string)
+                .into_iter()
+                .collect()
+        };
 
         let endpoint = Endpoint {
             host: libredfish_endpoint_host(host).into_owned(),

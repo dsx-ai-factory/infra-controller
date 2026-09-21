@@ -481,7 +481,7 @@ impl Redfish for InstrumentedRedfish {
 mod tests {
     use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture};
     use carbide_secrets::credentials::{CredentialKey, CredentialType};
-    use carbide_utils::redfish::redfish_basic_authorization_value;
+    use carbide_utils::redfish::redfish_basic_authorization_context;
 
     use super::*;
     use crate::libredfish::test_support::RedfishSim;
@@ -677,8 +677,8 @@ mod tests {
         );
     }
 
-    /// Verifies ordinary client failures remove both plaintext and derived
-    /// Basic authentication values before the error crosses the client boundary.
+    /// Verifies ordinary client failures remove plaintext, complete Basic
+    /// header, and bare payload forms before crossing the client boundary.
     #[test]
     fn ordinary_failure_redacts_authentication_secrets_before_logging_and_returning() {
         // Build a decorated client with the same redaction context retained by
@@ -695,13 +695,13 @@ mod tests {
                 None,
             ))
             .expect("sim client");
-        let basic_authorization = redfish_basic_authorization_value("root", Some("secret"));
-        let client = InstrumentedRedfish::new(
-            inner,
-            vec!["secret".to_string(), basic_authorization.clone()],
-        );
+        let (basic_authorization, sensitive_values) =
+            redfish_basic_authorization_context("root", Some("secret"));
+        let basic_payload = sensitive_values[1].clone();
+        let client = InstrumentedRedfish::new(inner, sensitive_values);
 
-        // Return an untrusted BMC body that echoes both credential forms.
+        // Return an untrusted BMC body that echoes each credential form,
+        // including case-normalized schemes and a bare payload.
         let mut result: Option<Result<(), RedfishError>> = None;
         let logs = carbide_instrument::testing::capture_logs(|| {
             result = Some(rt.block_on(client.instrumented_redfish(
@@ -711,7 +711,7 @@ mod tests {
                     url: "https://bmc.example/redfish/v1/Systems/1".to_string(),
                     status_code: http::StatusCode::INTERNAL_SERVER_ERROR,
                     response_body: format!(
-                        r#"{{"error":{{"message":"credential s\u0065cret or {basic_authorization} rejected"}}}}"#,
+                        r#"{{"error":{{"message":"credential s\u0065cret or {basic_authorization} or basic {basic_payload} or BASIC {basic_payload} or {basic_payload} rejected"}}}}"#,
                     ),
                 })),
             )));
@@ -728,7 +728,7 @@ mod tests {
             serde_json::from_str(&response_body).expect("redacted body remains valid JSON");
         assert_eq!(
             response["error"]["message"],
-            "credential REDACTED or REDACTED rejected"
+            "credential REDACTED or REDACTED or basic REDACTED or BASIC REDACTED or REDACTED rejected"
         );
 
         let log = logs.first().expect("one ordinary failure log");
@@ -736,7 +736,9 @@ mod tests {
         assert_eq!(log.field("operation"), Some("get_system"));
         assert_eq!(
             log.field("error"),
-            Some("credential REDACTED or REDACTED rejected")
+            Some(
+                "credential REDACTED or REDACTED or basic REDACTED or BASIC REDACTED or REDACTED rejected"
+            )
         );
     }
 }

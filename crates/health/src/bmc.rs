@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use carbide_utils::redfish::{
     format_forwarded_host_parameter, log_redfish_http_error, redact_redfish_response_body,
-    redfish_basic_authorization_value,
+    redfish_basic_authorization_context,
 };
 use carbide_uuid::rack::RackId;
 use futures::TryStreamExt;
@@ -917,24 +917,19 @@ fn redact_request_credential<T>(
     result: Result<T, BmcError>,
     credentials: &NvBmcCredentials,
 ) -> Result<T, BmcError> {
-    // Retain both the plaintext password and the exact Basic value generated
-    // inside nv-redfish; tokens are already sent verbatim.
-    let mut sensitive_values = Vec::with_capacity(2);
-    match credentials {
+    // Retain every directly reusable Basic representation generated inside
+    // nv-redfish; tokens are already sent verbatim.
+    let sensitive_values = match credentials {
         NvBmcCredentials::UsernamePassword { username, password } => {
-            if let Some(password) = password.as_deref().filter(|password| !password.is_empty()) {
-                sensitive_values.push(password.to_string());
-            }
-            sensitive_values.push(redfish_basic_authorization_value(
-                username,
-                password.as_deref(),
-            ));
+            let (_, sensitive_values) =
+                redfish_basic_authorization_context(username, password.as_deref());
+            sensitive_values
         }
         NvBmcCredentials::Token { token } if !token.is_empty() => {
-            sensitive_values.push(token.clone());
+            vec![token.clone()]
         }
-        NvBmcCredentials::Token { .. } => {}
-    }
+        NvBmcCredentials::Token { .. } => Vec::new(),
+    };
 
     if sensitive_values.is_empty() {
         return result;
@@ -1755,14 +1750,16 @@ mod tests {
         }
     }
 
-    /// Verifies the health client's final diagnostic removes both plaintext
-    /// and derived Basic credentials before the failure reaches shared logging.
+    /// Verifies the health client's final diagnostic removes plaintext, full
+    /// Basic header, and bare payload forms before reaching shared logging.
     #[test]
     fn final_http_failure_logs_request_redacted_context() {
-        // Build a representative error that echoes both credential forms used
-        // by one exact nv-redfish request.
+        // Build a representative error that echoes the reusable credential
+        // forms derived for one exact nv-redfish request.
         let client = test_client();
-        let basic_authorization = redfish_basic_authorization_value("root", Some("secret"));
+        let (basic_authorization, sensitive_values) =
+            redfish_basic_authorization_context("root", Some("secret"));
+        let basic_payload = &sensitive_values[1];
         let credentials = NvBmcCredentials::new("root".to_string(), "secret".to_string());
         let error = redact_request_credential::<()>(
             Err(BmcError::InvalidResponse {
@@ -1771,7 +1768,9 @@ mod tests {
                 text: format!(
                     r#"{{
                     "error": {{
-                        "@Message.ExtendedInfo": [{{"Message": "s\u0065cret or {basic_authorization} rejected"}}]
+                        "@Message.ExtendedInfo": [{{
+                            "Message": "s\u0065cret or {basic_authorization} or basic {basic_payload} rejected"
+                        }}]
                     }}
                 }}"#,
                 ),
@@ -1802,7 +1801,10 @@ mod tests {
         );
         assert_eq!(log.field("http_status"), Some("500"));
         assert_eq!(log.field_kind("http_status"), Some(CapturedFieldKind::U64));
-        assert_eq!(log.field("error"), Some("REDACTED or REDACTED rejected"));
+        assert_eq!(
+            log.field("error"),
+            Some("REDACTED or REDACTED or basic REDACTED rejected")
+        );
     }
 
     #[tokio::test]

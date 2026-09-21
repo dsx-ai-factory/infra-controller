@@ -33,7 +33,7 @@ use carbide_authn::middleware::{
 };
 use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
 use carbide_utils::HostPortPair;
-use carbide_utils::redfish::{redact_redfish_response_body, redfish_basic_authorization_value};
+use carbide_utils::redfish::{redact_redfish_response_body, redfish_basic_authorization_context};
 use forge_tls::client_config::ClientCert;
 use http::{HeaderMap, Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -1294,16 +1294,13 @@ impl BmcCredentials {
             Self::UsernamePassword { username, password } => {
                 // Generate the header once so the transmitted and retained
                 // representations cannot drift apart.
-                let authorization = redfish_basic_authorization_value(&username, Some(&password));
+                let (authorization, sensitive_values) =
+                    redfish_basic_authorization_context(&username, Some(&password));
                 let mut header = http::HeaderValue::from_str(&authorization)?;
                 header.set_sensitive(true);
 
-                // The body may echo either the password or the complete header.
-                let mut sensitive_values = Vec::with_capacity(2);
-                if !password.is_empty() {
-                    sensitive_values.push(password);
-                }
-                sensitive_values.push(authorization);
+                // The shared context also covers the bare Base64 payload if a
+                // peer normalizes or omits the authentication scheme.
                 Ok((
                     request.header(http::header::AUTHORIZATION, header),
                     sensitive_values,
@@ -1503,7 +1500,7 @@ mod tests {
         Case, Check, check_cases_async, check_values, scenarios, value_scenarios,
     };
     use carbide_utils::HostPortPair;
-    use carbide_utils::redfish::redfish_basic_authorization_value;
+    use carbide_utils::redfish::redfish_basic_authorization_context;
     use http_body_util::BodyExt;
     use mac_address::MacAddress;
     use rpc::forge;
@@ -2519,14 +2516,18 @@ mod tests {
     fn bmc_credentials_retain_wire_secrets_for_response_redaction() {
         check_values(
             [
-                // Basic auth has both a plaintext password and a derived header value.
+                // Basic auth retains plaintext, payload, and complete-header forms.
                 Check {
                     scenario: "username and password",
                     input: BmcCredentials::UsernamePassword {
                         username: "admin".to_string(),
                         password: "secret".to_string(),
                     },
-                    expect: vec!["secret".to_string(), "Basic YWRtaW46c2VjcmV0".to_string()],
+                    expect: vec![
+                        "secret".to_string(),
+                        "YWRtaW46c2VjcmV0".to_string(),
+                        "Basic YWRtaW46c2VjcmV0".to_string(),
+                    ],
                 },
                 // A session token is already the exact value sent on the wire.
                 Check {
@@ -2536,14 +2537,14 @@ mod tests {
                     },
                     expect: vec!["token-123".to_string()],
                 },
-                // Empty passwords still produce a potentially reusable Basic header.
+                // Empty passwords still produce reusable payload and header forms.
                 Check {
                     scenario: "empty password",
                     input: BmcCredentials::UsernamePassword {
                         username: "admin".to_string(),
                         password: String::new(),
                     },
-                    expect: vec!["Basic YWRtaW46".to_string()],
+                    expect: vec!["YWRtaW46".to_string(), "Basic YWRtaW46".to_string()],
                 },
                 // An empty token sends no credential material worth retaining.
                 Check {
@@ -2586,7 +2587,8 @@ mod tests {
             .get(http::header::AUTHORIZATION)
             .expect("authorization header should be present");
         assert_eq!(auth, "Basic YWRtaW46c2VjcmV0");
-        assert_eq!(sensitive_values[1], auth.to_str().unwrap());
+        assert_eq!(sensitive_values[1], "YWRtaW46c2VjcmV0");
+        assert_eq!(sensitive_values[2], auth.to_str().unwrap());
     }
 
     #[test]
@@ -2865,8 +2867,8 @@ mod tests {
             HeaderValue::from_static("identity"),
         );
         headers.insert(reqwest::header::ETAG, HeaderValue::from_static("error-v1"));
-        let basic_authorization = redfish_basic_authorization_value("admin", Some("secret"));
-        let sensitive_values = vec!["secret".to_string(), basic_authorization.clone()];
+        let (basic_authorization, sensitive_values) =
+            redfish_basic_authorization_context("admin", Some("secret"));
         let body = Body::from(format!(
             r#"{{"error":{{"@Message.ExtendedInfo":[{{"Message":"credential s\u0065cret or {basic_authorization} rejected"}}]}}}}"#,
         ));

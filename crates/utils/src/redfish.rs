@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 
 use base64::Engine as _;
@@ -25,18 +26,33 @@ const REDFISH_ERROR_MESSAGE_LIMIT: usize = 1024;
 const REDACTED: &str = "REDACTED";
 const UNRECOGNIZED_REDFISH_ERROR_RESPONSE: &str = "<unrecognized Redfish error response>";
 
-/// Builds the exact HTTP Basic authorization value emitted for Redfish credentials.
+/// Builds the HTTP Basic authorization value and every credential representation
+/// that an untrusted Redfish peer could echo directly from that wire value.
 ///
-/// Redfish error sanitizers retain this derived wire value because a BMC can
-/// echo the complete `Authorization` header without repeating the plaintext
-/// password. The encoding intentionally matches `reqwest::RequestBuilder::basic_auth`.
-pub fn redfish_basic_authorization_value(username: &str, password: Option<&str>) -> String {
+/// The returned redaction context contains a non-empty plaintext password, the
+/// bare Base64 payload, and the complete `Basic` header. Keeping these values
+/// together prevents Redfish callers from defining different
+/// sanitization boundaries. The encoding intentionally matches
+/// `reqwest::RequestBuilder::basic_auth`.
+pub fn redfish_basic_authorization_context(
+    username: &str,
+    password: Option<&str>,
+) -> (String, Vec<String>) {
     // RFC 7617 encodes the UTF-8 username, a colon, and the optional password.
     let credentials = format!("{username}:{}", password.unwrap_or_default());
     let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+    let authorization = format!("Basic {encoded}");
 
-    // Retain the authentication scheme because the full header is the wire secret.
-    format!("Basic {encoded}")
+    // Retain both components of the wire value. Matching the payload separately
+    // also covers a case-normalized scheme or a peer that echoes only token68.
+    let mut sensitive_values = Vec::with_capacity(3);
+    if let Some(password) = password.filter(|password| !password.is_empty()) {
+        sensitive_values.push(password.to_string());
+    }
+    sensitive_values.push(encoded);
+    sensitive_values.push(authorization.clone());
+
+    (authorization, sensitive_values)
 }
 
 /// Logs the diagnostic fields shared by HTTP failures from both Redfish clients.
@@ -287,11 +303,12 @@ fn redact_json_values(
         serde_json::Value::Object(values) => {
             let mut changed = false;
             let original = std::mem::take(values);
+            let mut next_suffixes = HashMap::new();
             for (key, mut value) in original {
                 let redacted_key = mask_all(&key, sensitive_values.iter().copied());
                 changed |= redacted_key != key;
                 changed |= redact_json_values(&mut value, sensitive_values, sensitive_scalars);
-                insert_json_object_entry(values, redacted_key, value);
+                insert_json_object_entry(values, &mut next_suffixes, redacted_key, value);
             }
             changed
         }
@@ -309,25 +326,29 @@ fn redact_json_values(
 }
 
 /// Keeps every diagnostic value if distinct sensitive keys collapse to the
-/// same redacted spelling.
+/// same redacted spelling without restarting suffix searches for each entry.
 fn insert_json_object_entry(
     values: &mut serde_json::Map<String, serde_json::Value>,
+    next_suffixes: &mut HashMap<String, usize>,
     key: String,
     value: serde_json::Value,
 ) {
+    // Preserve the first spelling exactly; only collisions need a suffix.
     if !values.contains_key(&key) {
         values.insert(key, value);
         return;
     }
 
-    let mut suffix = 2;
+    // Resume after the last candidate considered for this base key. Each
+    // possible suffix is probed at most once even for a very wide object.
+    let next_suffix = next_suffixes.entry(key.clone()).or_insert(2);
     loop {
-        let candidate = format!("{key}_{suffix}");
+        let candidate = format!("{key}_{next_suffix}");
+        *next_suffix += 1;
         if !values.contains_key(&candidate) {
             values.insert(candidate, value);
             return;
         }
-        suffix += 1;
     }
 }
 
@@ -476,18 +497,56 @@ mod tests {
 
     use super::*;
 
-    /// Verifies the shared helper matches reqwest's HTTP Basic wire format so
-    /// every Redfish layer redacts the exact authorization value it emits.
+    /// Verifies the shared Basic context matches reqwest's wire format and
+    /// retains every directly reusable credential representation for redaction.
     #[test]
-    fn redfish_basic_authorization_value_matches_the_wire_format() {
+    fn redfish_basic_authorization_context_covers_wire_representations() {
         // Exercise both a normal password and the empty-password form that
         // reqwest represents by retaining the separator after the username.
-        let with_password = redfish_basic_authorization_value("admin", Some("secret"));
-        let without_password = redfish_basic_authorization_value("admin", None);
+        let (with_password, with_password_context) =
+            redfish_basic_authorization_context("admin", Some("secret"));
+        let (without_password, without_password_context) =
+            redfish_basic_authorization_context("admin", None);
 
-        // These fixed RFC 4648 encodings protect compatibility with reqwest.
+        // These fixed RFC 4648 encodings protect compatibility with reqwest
+        // and prove that empty plaintext values are not retained unnecessarily.
         assert_eq!(with_password, "Basic YWRtaW46c2VjcmV0");
+        assert_eq!(
+            with_password_context,
+            ["secret", "YWRtaW46c2VjcmV0", "Basic YWRtaW46c2VjcmV0"]
+        );
         assert_eq!(without_password, "Basic YWRtaW46");
+        assert_eq!(without_password_context, ["YWRtaW46", "Basic YWRtaW46"]);
+    }
+
+    /// Verifies the shared JSON-aware masker removes the Basic payload even
+    /// when a peer changes the scheme's case or omits the scheme entirely.
+    #[test]
+    fn redfish_response_body_redacts_basic_payload_variants() {
+        // Build all directly reusable representations from the production
+        // helper, then echo the payload through several plausible peer forms.
+        let (authorization, sensitive_values) =
+            redfish_basic_authorization_context("admin", Some("secret"));
+        let payload = &sensitive_values[1];
+        let response = serde_json::json!({
+            "error": {
+                "message": format!(
+                    "exact {authorization}; lower basic {payload}; upper BASIC {payload}; bare {payload}"
+                )
+            }
+        })
+        .to_string();
+
+        // Sanitization must remove the reusable payload in every form while
+        // leaving the non-secret, case-varied scheme text intact.
+        let redacted =
+            redact_redfish_response_body(&response, sensitive_values.iter().map(String::as_str));
+        let redacted: serde_json::Value =
+            serde_json::from_str(&redacted).expect("redacted response remains valid JSON");
+        assert_eq!(
+            redacted["error"]["message"],
+            "exact REDACTED; lower basic REDACTED; upper BASIC REDACTED; bare REDACTED"
+        );
     }
 
     #[test]
@@ -589,6 +648,30 @@ mod tests {
             redacted["error"]["@Message.ExtendedInfo"][0]["REDACTED_2"],
             "second key"
         );
+    }
+
+    /// Verifies colliding redacted keys resume from a remembered suffix so a
+    /// wide untrusted object cannot force repeated scans from the first suffix.
+    #[test]
+    fn redacted_json_key_collisions_resume_from_the_saved_suffix() {
+        // Seed a prior collision and a high next suffix, modeling progress
+        // accumulated while rebuilding one wide JSON object.
+        let mut values = serde_json::Map::new();
+        values.insert("REDACTED".to_string(), serde_json::json!("first"));
+        let mut next_suffixes = HashMap::from([("REDACTED".to_string(), 4_096)]);
+
+        // Insert one more colliding value through the production helper.
+        insert_json_object_entry(
+            &mut values,
+            &mut next_suffixes,
+            "REDACTED".to_string(),
+            serde_json::json!("next"),
+        );
+
+        // The helper must use and advance the saved cursor instead of probing
+        // every suffix from two through 4,095 again.
+        assert_eq!(values["REDACTED_4096"], "next");
+        assert_eq!(next_suffixes["REDACTED"], 4_097);
     }
 
     #[test]
