@@ -34,7 +34,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::pipe;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::redfish::account_service::PasswordUpdater;
 use crate::redfish::manager::ManagerState;
@@ -62,6 +62,9 @@ pub struct IpmiSimConfig {
     pub console_prompt: String,
 }
 
+/// Owns an IPMI simulator and its SOL console.
+///
+/// Dropping the handle stops the simulator and cancels accepted SOL connections and their output.
 pub struct IpmiSimHandle {
     child: tokio::process::Child,
     _chassis_control: ChassisControl,
@@ -531,14 +534,31 @@ impl MockConsole {
         let listener = TokioTcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
         let bmc_mock_console_port = listener.local_addr()?.port();
         let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let prompt = prompt.clone();
-                let output = output_factory.as_ref().map(|factory| factory());
-                tokio::spawn(async move {
-                    if let Err(error) = serve_console(stream, &prompt, output).await {
-                        tracing::debug!(%error, "mock SOL console connection closed with error");
+            let mut connections = JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (stream, _) = match accepted {
+                            Ok(connection) => connection,
+                            Err(error) => {
+                                tracing::warn!(%error, "mock SOL console accept failed");
+                                break;
+                            }
+                        };
+                        let prompt = prompt.clone();
+                        let output = output_factory.as_ref().map(|factory| factory());
+                        connections.spawn(async move {
+                            if let Err(error) = serve_console(stream, &prompt, output).await {
+                                tracing::debug!(%error, "mock SOL console connection closed with error");
+                            }
+                        });
                     }
-                });
+                    result = connections.join_next(), if !connections.is_empty() => {
+                        if let Some(Err(error)) = result {
+                            tracing::warn!(%error, "mock SOL console connection task failed");
+                        }
+                    }
+                }
             }
         });
         Ok(Self {
