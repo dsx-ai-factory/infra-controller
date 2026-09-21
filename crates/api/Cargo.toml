@@ -104,7 +104,10 @@ trace-propagation = { path = "../trace-propagation" }
 
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
 http = { workspace = true }
+opentelemetry-proto = { workspace = true, features = ["gen-tonic", "trace"] }
 tempfile = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
 
 [lints]
 workspace = true

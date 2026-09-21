@@ -1045,6 +1045,9 @@ jobs:
               /etc/init.d/postgresql start
               sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;"
               createdb root
+              # Test IPv6 with a separate login without changing the SQLx build database.
+              sudo -u postgres psql -c "CREATE ROLE nico_ipv6_test LOGIN PASSWORD \$\$nico_ipv6_test\$\$;"
+              export NICO_TEST_POSTGRES_URL="postgresql://nico_ipv6_test:nico_ipv6_test@[::1]:5432/postgres?sslmode=disable"
               cargo make test-release-container-services
               sccache --show-stats || true
               echo "sccache directory holds $(du -sh /sccache | cut -f1)"
