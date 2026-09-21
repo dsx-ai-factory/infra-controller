@@ -48,6 +48,13 @@ Update an expected switch's NVOS credentials:
 "nvos_mac_addresses",
 "nvos_username",
 "nvos_password",
+"meta_name",
+"meta_description",
+"labels",
+"rack_id",
+"bmc_ip_address",
+"nvos_ip_address",
+"bmc_retain_credentials",
 ])))]
 pub(crate) struct Args {
     #[clap(short = 'a', long, help = "BMC MAC Address of the expected switch")]
@@ -198,5 +205,54 @@ impl From<Args> for rpc::forge::ExpectedSwitch {
             nvos_ip_address: args.nvos_ip_address.map(|ip| ip.to_string()),
             bmc_retain_credentials: args.bmc_retain_credentials,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::scenarios;
+    use rpc::forge_api_client::{ExpectedSwitchUpdateField as Field, expected_switch_update_mask};
+
+    use super::*;
+    use crate::cfg::cli_options::{CliCommand, CliOptions};
+    use crate::expected_switch::Cmd;
+
+    #[test]
+    fn standalone_fields_select_only_the_requested_update() {
+        let parse_update = |fields: &[&str]| {
+            let options = CliOptions::try_parse_from(
+                [
+                    "nico-admin-cli",
+                    "expected-switch",
+                    "update",
+                    "--id",
+                    "12345678-1234-5678-90ab-cdef01234567",
+                ]
+                .into_iter()
+                .chain(fields.iter().copied()),
+            )
+            .map_err(|error| error.kind())?;
+            let Some(CliCommand::ExpectedSwitch(Cmd::Update(args))) = options.commands else {
+                panic!("expected switch update command");
+            };
+            Ok(expected_switch_update_mask(&args.into()))
+        };
+
+        scenarios!(parse_update:
+            "standalone update fields" {
+                ["--bmc-ip-address", "192.0.2.10"].as_slice() => Yields(vec![Field::BmcIpAddress]),
+                ["--nvos-ip-address", "192.0.2.20"].as_slice() => Yields(vec![Field::NvosIpAddress]),
+                ["--rack_id", "12345678-1234-5678-90ab-cdef01234567"].as_slice() => Yields(vec![Field::RackId]),
+                ["--bmc-retain-credentials", "false"].as_slice() => Yields(vec![Field::BmcRetainCredentials]),
+                ["--meta-name", "switch-1"].as_slice() => Yields(vec![Field::MetadataName]),
+                ["--meta-description", "rack switch"].as_slice() => Yields(vec![Field::MetadataDescription]),
+                ["--label", "rack:r1"].as_slice() => Yields(vec![Field::MetadataLabels]),
+            }
+
+            "an update field is required" {
+                [].as_slice() => FailsWith(ErrorKind::MissingRequiredArgument),
+            }
+        );
     }
 }
