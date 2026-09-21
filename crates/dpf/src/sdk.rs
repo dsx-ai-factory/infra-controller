@@ -6609,6 +6609,8 @@ mod tests {
         );
     }
 
+    /// Provides a detached service with explicit placement so lifecycle tests
+    /// verify that caller-owned DaemonSet settings reach the DPF resource.
     fn test_dpu_service(name: &str) -> DetachedDpuServiceDefinition {
         DetachedDpuServiceDefinition {
             name: name.to_owned(),
@@ -6623,7 +6625,13 @@ mod tests {
             },
             deploy_in_cluster: false,
             security_privileged: false,
-            service_daemon_set: None,
+            service_daemon_set: Some(crate::types::DetachedServiceDaemonSet {
+                node_selector_labels: Some(BTreeMap::from([(
+                    "nico/extension-service".to_owned(),
+                    "enabled".to_owned(),
+                )])),
+                ..Default::default()
+            }),
         }
     }
 

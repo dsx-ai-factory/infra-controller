@@ -30377,6 +30377,7 @@ components:
         - name: storage-client
           description: DPF-managed storage client
           serviceType: DpfHelmChart
+          dpuTarget: AllActive
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security.privileged":true,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
       properties:

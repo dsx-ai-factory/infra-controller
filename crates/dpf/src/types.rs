@@ -750,9 +750,13 @@ pub struct DpuServiceDaemonSetObservation {
     /// Serialized Kubernetes NodeSelector, retained for immutable ownership
     /// validation.
     pub node_selector: Option<serde_json::Value>,
+    /// DaemonSet annotations observed on the DPUService
     pub annotations: Option<BTreeMap<String, String>>,
+    /// DaemonSet labels observed on the DPUService
     pub labels: Option<BTreeMap<String, String>>,
+    /// Resource quantities observed on the DPUService's DaemonSet settings
     pub resources: Option<BTreeMap<String, IntOrString>>,
+    /// Serialized update strategy observed on the DPUService
     pub update_strategy: Option<serde_json::Value>,
 }
 
