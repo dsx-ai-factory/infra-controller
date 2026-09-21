@@ -6,7 +6,10 @@ package util
 import (
 	"bytes"
 	"crypto/sha256"
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestCreateHash(t *testing.T) {
@@ -56,4 +59,59 @@ func TestEncryptAndDecryptWithWrongPassphrase(t *testing.T) {
 
 	// Attempt to decrypt with wrong passphrase (should cause a panic)
 	DecryptData(encryptedData, wrongPassphrase)
+}
+
+func TestRedactSecret(t *testing.T) {
+	// pemBody stands in for the base64 of a certificate, where the prefix has to
+	// reach past the BEGIN line to carry anything identifying.
+	pemBody := strings.Repeat("A", 100)
+
+	tcs := []struct {
+		descr     string
+		secret    string
+		prefixLen int
+		want      string
+	}{
+		{
+			descr:     "registration OTP keeps an identifying prefix",
+			secret:    "8Nn5Qk0mVQqHqk2hXwfXQz1Yk5A=",
+			prefixLen: SecretLogPrefixLen,
+			want:      "8Nn5[REDACTED] len=28",
+		},
+		{
+			descr:     "certificate keeps its BEGIN line and part of the body",
+			secret:    "-----BEGIN CERTIFICATE-----\n" + pemBody,
+			prefixLen: CertLogPrefixLen,
+			want:      "-----BEGIN CERTIFICATE-----\n" + strings.Repeat("A", 36) + "[REDACTED] len=128",
+		},
+		{
+			descr:     "value no longer than the prefix keeps nothing",
+			secret:    "8Nn5",
+			prefixLen: SecretLogPrefixLen,
+			want:      "[REDACTED] len=4",
+		},
+		{
+			descr:     "certificate prefix on a short value keeps nothing",
+			secret:    "8Nn5Qk0mVQqHqk2hXwfXQz1Yk5A=",
+			prefixLen: CertLogPrefixLen,
+			want:      "[REDACTED] len=28",
+		},
+		{
+			descr:     "negative prefix keeps nothing",
+			secret:    "8Nn5Qk0mVQqHqk2hXwfXQz1Yk5A=",
+			prefixLen: -1,
+			want:      "[REDACTED] len=28",
+		},
+		{
+			descr:     "absent secret reports its length",
+			secret:    "",
+			prefixLen: SecretLogPrefixLen,
+			want:      "[REDACTED] len=0",
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.descr, func(t *testing.T) {
+			assert.Equal(t, tc.want, RedactSecret(tc.secret, tc.prefixLen))
+		})
+	}
 }
