@@ -22,7 +22,7 @@ jobs:
   security-suite:
     name: Security Suite
     # Forks have no nv-gha-runners grant, so Pulse cannot reach Vault or nvcr.io there.
-    if: github.repository == 'NVIDIA/infra-controller'
+    if: github.repository == 'dsx-ai-factory/infra-controller'
     permissions:
       actions: read
       contents: read
