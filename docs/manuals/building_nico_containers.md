@@ -198,13 +198,19 @@ intermediate image.
 ### Building the X86 build container
 
 ```sh
-docker build --file dev/docker/Dockerfile.build-container-x86_64 -t nico-buildcontainer-x86_64 .
+KEA_VERSION=$(cat dev/docker/kea.version)
+docker build --build-arg KEA_VERSION="${KEA_VERSION}" \
+  --file dev/docker/Dockerfile.build-container-x86_64 \
+  -t nico-buildcontainer-x86_64 .
 ```
 
 ### Building the X86 runtime container
 
 ```sh
-docker build --file dev/docker/Dockerfile.runtime-container-x86_64 -t nico-runtime-container-x86_64 .
+KEA_VERSION=$(cat dev/docker/kea.version)
+docker build --build-arg KEA_VERSION="${KEA_VERSION}" \
+  --file dev/docker/Dockerfile.runtime-container-x86_64 \
+  -t nico-runtime-container-x86_64 .
 ```
 
 ### Building the boot artifact containers

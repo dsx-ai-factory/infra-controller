@@ -68,20 +68,20 @@ contains all dev tools. The container can either run locally (if you work on a L
 or on a remote Linux machine.
 
 To work inside the remote container, the following steps are performed:
-- Inside the NICo directory on the Linux host you are working on, place a
-    `.devcontainer/devcontainer.json` file with the following details
+
+1. Build the repository's pinned development image from the NICo directory:
+
+    ```bash
+    cargo make build-cargo-docker-image
+    ```
+
+1. Inside the NICo directory on the Linux host, create `.devcontainer/devcontainer.json` with the following contents:
+
     ```json
-    // For format details, see https://aka.ms/devcontainer.json. For config options, see the README at:
-    // https://github.com/microsoft/vscode-dev-containers/tree/v0.245.2/containers/docker-existing-dockerfile
+    // For format details, see https://aka.ms/devcontainer.json.
     {
-        "name": "Existing Dockerfile",
-
-        // Sets the run context to one level up instead of the .devcontainer folder.
-        "context": "../dev/docker/",
-
-        // Update the 'dockerFile' property if you aren't using the standard 'Dockerfile' filename.
-        // "dockerFile": "../Dockerfile",
-        "dockerFile": "../dev/docker/Dockerfile.build-container-x86_64",
+        "name": "NICo development",
+        "image": "carbide-build-x86_64",
 
         // Use 'forwardPorts' to make a list of ports inside the container available locally.
         // "forwardPorts": [],
@@ -99,18 +99,20 @@ To work inside the remote container, the following steps are performed:
         //"remoteUser": "youralias"
     }
     ```
-    This will automatically instruct the remote container extension to pick the specified container image.
-    The build container image is picked here, because it contains all necessary tools.
-2. Click the remote button on the lower left of the IDE window:
-![](../static/remote_button.png). Select "Reopen in Container". Since a container configuration
-    file for the project exists, Visual Studio Code should automatically build the specified
-    `Dockerfile`, launch it as a container, install a VsCode remote server in it,
-    and launch your editor window in it.
-3. The new editor window runs inside the container, and should show something along
-    "Dev Container: Existing Dockerfile" on the lower left.
-4. You can again open an integrated terminal here, and build the project.
-5. The dev container again has a separate set of installed extensions. You will
-    need to reinstall all extensions you need there - e.g. Rust Analyzer.
+
+    This configuration instructs the remote container extension to use the repository's development image, which contains the required tools.
+
+1. Click the remote button in the lower-left corner of the IDE window.
+
+    ![Visual Studio Code remote connection button](../static/remote_button.png)
+
+    Select **Reopen in Container**. Visual Studio Code uses the specified image, launches the container, installs the remote server, and opens the editor in the container.
+
+1. Confirm that the lower-left corner shows **Dev Container: NICo development**.
+
+1. Open an integrated terminal and build the project.
+
+1. Reinstall the extensions you need in the development container, such as Rust Analyzer.
 
 ### Enabling postgres inside the dev container
 
