@@ -709,7 +709,7 @@ func TestCreateSkuHandler(t *testing.T) {
 		assert.Zero(t, coreReq.Skus[0].Components.Storage[0].CapacityMb)
 		assert.Equal(t, uint32(3_600_000), coreReq.Skus[0].Components.Storage[0].GetMinSizeMb())
 		assert.Equal(t, uint32(3_900_000), coreReq.Skus[0].Components.Storage[0].GetMaxSizeMb())
-		assert.Equal(t, []string{`^/devices/pci.*nvme[0-1]$`}, coreReq.Skus[0].Components.Storage[0].PciPatterns)
+		assert.Equal(t, []string{`^/devices/pci.*/nvme$`}, coreReq.Skus[0].Components.Storage[0].PciPatterns)
 
 		var response model.APISku
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
@@ -1457,7 +1457,7 @@ func validSkuCreateRequest(siteID string) model.APISkuCreateRequest {
 				Count:       2,
 				MinSizeMiB:  cutil.GetPtr(uint32(3_600_000)),
 				MaxSizeMiB:  cutil.GetPtr(uint32(3_900_000)),
-				PciPatterns: []string{`^/devices/pci.*nvme[0-1]$`},
+				PciPatterns: []string{`^/devices/pci.*/nvme$`},
 			}},
 		},
 	}
