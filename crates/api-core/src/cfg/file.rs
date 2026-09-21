@@ -2284,6 +2284,9 @@ pub struct DpfDeploymentConfig {
     /// DPUs.
     #[serde(default)]
     pub extra_bfcfg_parameters: Vec<String>,
+    /// Delays host initialization until DPF reports the DPU operationally ready.
+    #[serde(default = "default_to_true")]
+    pub enable_delay_host_init: bool,
 }
 
 impl Default for DpfDeploymentConfig {
@@ -2297,6 +2300,7 @@ impl Default for DpfDeploymentConfig {
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
+            enable_delay_host_init: true,
         }
     }
 }
@@ -7906,7 +7910,23 @@ helm_repo_url = "oci://registry.example.test/doca"
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
+            enable_delay_host_init: true,
         }
+    }
+
+    #[test]
+    fn dpf_deployment_delay_host_init_defaults_to_true_and_accepts_false() {
+        let base = r#"
+            flavor_name = "flavor"
+            deployment_name = "deployment"
+            node_label_key = "example.com/dpu"
+        "#;
+        let defaulted: DpfDeploymentConfig = toml::from_str(base).unwrap();
+        let disabled: DpfDeploymentConfig =
+            toml::from_str(&format!("{base}\nenable_delay_host_init = false")).unwrap();
+
+        assert!(defaulted.enable_delay_host_init);
+        assert!(!disabled.enable_delay_host_init);
     }
 
     /// Verifies deployment selectors remain distinct from each other and NICo-owned labels.

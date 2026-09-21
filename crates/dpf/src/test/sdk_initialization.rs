@@ -1327,6 +1327,21 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .any(|parameter| parameter == &expected_astra_pf_total_sf_parameter)
     );
     assert!(
+        astra_flavor.spec.nvconfig.as_ref().unwrap()[0]
+            .parameters
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|parameter| parameter == "DELAY_HOST_OS_INIT=0x3")
+    );
+    assert!(matches!(
+        astra_flavor
+            .spec
+            .service_readiness
+            .and_then(|readiness| readiness.gate),
+        Some(crate::crds::dpuflavors_generated::DpuFlavorServiceReadinessGate::OperationalReady)
+    ));
+    assert!(
         !astra_flavor
             .spec
             .ovs

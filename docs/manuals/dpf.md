@@ -834,6 +834,7 @@ Per-deployment field reference:
 | `node_label_key` | yes | `carbide.nvidia.com/controlled.node.v2` | Node-selector label key applied to this deployment's DPUNodes. |
 | `services` | no | inherit `[dpf.services]` | Optional per-deployment mandatory-services override (see below). |
 | `extra_services` | no | none | Optional deployment-local field overrides for extra services. Only extras supported by this deployment type are used. |
+| `enable_delay_host_init` | no | `true` | Delay host initialization until DPF reports the DPU operationally ready. |
 
 ##### Service VPC and additional SF capacity
 

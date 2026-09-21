@@ -149,6 +149,8 @@ pub struct InitDpfResourcesConfig {
     /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning the deployment's
     /// DPUs.
     pub(crate) extra_bfcfg_parameters: Vec<String>,
+    /// Delays host initialization until the DPU is operationally ready.
+    pub(crate) enable_delay_host_init: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
     pub(crate) deployment_type: DpuDeploymentType,
 }
@@ -182,6 +184,7 @@ impl Default for InitDpfResourcesConfig {
             interfaces: Vec::new(),
             proxy: None,
             extra_bfcfg_parameters: Vec::new(),
+            enable_delay_host_init: true,
             deployment_type: DpuDeploymentType::Bf3,
         }
     }
@@ -1431,6 +1434,12 @@ mod tests {
         value_scenarios!(
             run = |()| InitDpfResourcesConfig::default().proxy.is_none();
             "proxy is none" {
+                () => true,
+            }
+        );
+        value_scenarios!(
+            run = |()| InitDpfResourcesConfig::default().enable_delay_host_init;
+            "host initialization delay is enabled" {
                 () => true,
             }
         );
