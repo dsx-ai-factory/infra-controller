@@ -17,10 +17,9 @@
 
 //! Delta Energy Systems power shelf.
 //!
-//! Modeled on a live Delta 810 shelf (`10.84.204.223`, rack D09, site
-//! pdx-qa6), inspected 2026-09-18 — see `ps_analyzer_documentation.md`.
-//! Two traits distinguish it from the Lite-On shelf and drive the
-//! site-explorer Delta code path:
+//! Modeled on a live Delta 810 shelf's Redfish responses, observed during
+//! development. Two traits distinguish it from the Lite-On shelf and drive
+//! the site-explorer Delta code path:
 //!
 //! * There is **no `/redfish/v1/Systems` collection** — the service root does
 //!   not advertise `Systems` and the collection endpoint 404s (see
