@@ -90,6 +90,29 @@ mod tests {
     }
 
     #[test]
+    fn power_on_is_rejected_while_a_transition_is_in_flight() {
+        // `set_power_state` guards every backend: while the host is coming up or
+        // going down, a further power-on is a 400, never a silently dropped request.
+        for state in [MockPowerState::PoweringOn, MockPowerState::PoweringOff] {
+            let callbacks = SimulatedCallbacks::new();
+            *callbacks.power_state.lock().unwrap() = state;
+            for control in [SystemPowerControl::On, SystemPowerControl::ForceOn] {
+                assert!(
+                    matches!(
+                        callbacks.set_power_state(control),
+                        Err(SetSystemPowerError::BadRequest(_))
+                    ),
+                    "{control:?} during {state:?} must be rejected"
+                );
+            }
+            assert!(
+                matches!(callbacks.get_power_state(), s if std::mem::discriminant(&s) == std::mem::discriminant(&state)),
+                "a rejected request must not change the state"
+            );
+        }
+    }
+
+    #[test]
     fn completes_a_power_cycle_after_the_delay() {
         let callbacks = SimulatedCallbacks::new();
         callbacks

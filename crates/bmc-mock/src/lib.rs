@@ -279,6 +279,11 @@ pub trait Callbacks: std::fmt::Debug + Send + Sync + 'static {
                     "bmc-mock: cannot power on machine, it is already on".to_string(),
                 ))
             }
+            (C::On | C::ForceOn, MockPowerState::PoweringOff) => {
+                Err(SetSystemPowerError::BadRequest(
+                    "bmc-mock: cannot power on machine, it is shutting down".to_string(),
+                ))
+            }
             (_, MockPowerState::PowerCycling { since }) if since.elapsed() < POWER_CYCLE_DELAY => {
                 Err(SetSystemPowerError::BadRequest(format!(
                     "bmc-mock: cannot reset machine, it is in the middle of power cycling since {:?} ago",
