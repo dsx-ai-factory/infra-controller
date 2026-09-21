@@ -1215,6 +1215,17 @@ func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Operating System does not belong to the tenant or infrastructure provider in org", nil)
 	}
 
+	// Tenant-only callers may see the OS without having access to every site
+	// associated with it. Apply the same site scope to visibility and output.
+	var tenantSiteIDs []uuid.UUID
+	if tenant != nil && ip == nil {
+		tenantSiteIDs, err = getTenantSiteIDs(ctx, gsh.dbSession, tenant.ID)
+		if err != nil {
+			logger.Error().Err(err).Msg("error retrieving tenant site IDs for visibility check")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine site access for tenant", nil)
+		}
+	}
+
 	// If caller has dual role (Tenant+Provider) we already know we can go forward.
 	// Otherwise we need additional checks:
 	if !(tenant != nil && ip != nil) {
@@ -1235,11 +1246,6 @@ func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to verify site access for Operating System", nil)
 			}
 
-			tenantSiteIDs, tsErr := getTenantSiteIDs(ctx, gsh.dbSession, tenant.ID)
-			if tsErr != nil {
-				logger.Error().Err(tsErr).Msg("error retrieving tenant site IDs for visibility check")
-				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine site access for tenant", nil)
-			}
 			tsSet := make(map[uuid.UUID]struct{}, len(tenantSiteIDs))
 			for _, sid := range tenantSiteIDs {
 				tsSet[sid] = struct{}{}
@@ -1276,6 +1282,7 @@ func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
 			nil,
 			cdbm.OperatingSystemSiteAssociationFilterInput{
 				OperatingSystemIDs: []uuid.UUID{os.ID},
+				SiteIDs:            tenantSiteIDs,
 			},
 			cdbp.PageInput{
 				Limit: cutil.GetPtr(cdbp.TotalLimit),

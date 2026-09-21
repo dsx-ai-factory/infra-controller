@@ -2688,13 +2688,6 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 	tempClient := &tmocks.Client{}
 	osDAO := cdbm.NewOperatingSystemDAO(dbSession)
 
-	provOrg := "vis-provider-org"
-	provUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{provOrg}, []string{authz.ProviderAdminRole})
-	ip := testMachineBuildInfrastructureProvider(t, dbSession, provOrg, "vis-ip")
-	siteA := testMachineBuildSite(t, dbSession, ip, "vis-site-a", cdbm.SiteStatusRegistered)
-	provOSA := buildProviderOS(t, ctx, osDAO, provOrg, ip.ID, "prov-os-a", provUser.ID)
-	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provOSA.ID, siteA.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, provUser)
-
 	tenantOrg := "vis-tenant-org"
 	servingProviderOrg := "vis-serving-provider-org"
 	tnUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{tenantOrg}, []string{authz.TenantAdminRole})
@@ -2708,8 +2701,25 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 	tnOS := buildTenantOS(t, ctx, osDAO, tenantOrg, tn.ID, "tenant-os-1", tnUser.ID)
 	provC := buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-c", tnUser.ID)
 	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provC.ID, siteC.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provC.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
 	provD := buildProviderOS(t, ctx, osDAO, servingProviderOrg, ip2.ID, "prov-os-d", tnUser.ID)
 	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, provD.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, tnUser)
+	noSitesOrg := "vis-no-sites-org"
+	noSitesUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{noSitesOrg}, []string{authz.TenantAdminRole})
+	noSitesTenant := testMachineBuildTenant(t, dbSession, noSitesOrg, "vis-no-sites-tenant")
+	noSitesOS := buildTenantOS(t, ctx, osDAO, noSitesOrg, noSitesTenant.ID, "tenant-os-no-sites", noSitesUser.ID)
+	common.TestBuildOperatingSystemSiteAssociation(t, dbSession, noSitesOS.ID, siteD.ID, cutil.GetPtr("test"), cdbm.OperatingSystemSiteAssociationStatusSynced, noSitesUser)
+	for _, os := range []*cdbm.OperatingSystem{provC, provD, noSitesOS} {
+		// Exercise the site-associated template-based definitions.
+		_, err := osDAO.Update(ctx, nil, cdbm.OperatingSystemUpdateInput{
+			OperatingSystemId: os.ID,
+			OsType:            cutil.GetPtr(cdbm.OperatingSystemTypeTemplatedIPXE),
+		})
+		require.NoError(t, err)
+	}
+	dualUser := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{servingProviderOrg}, []string{authz.ProviderAdminRole, authz.TenantAdminRole})
+	dualTenant := testMachineBuildTenant(t, dbSession, servingProviderOrg, "vis-dual-tenant")
+	testBuildTenantSiteAssociation(t, dbSession, servingProviderOrg, dualTenant.ID, siteC.ID, dualUser.ID)
 
 	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
 
@@ -2719,23 +2729,31 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 		user           *cdbm.User
 		os             *cdbm.OperatingSystem
 		expectedStatus int
-		expectedSite   *cdbm.Site
+		expectedSites  []string
 	}{
 		{
-			name:           "provider admin can read provider-owned OS",
-			reqOrgName:     provOrg,
-			user:           provUser,
-			os:             provOSA,
+			name:           "provider admin sees all associations of provider-owned OS",
+			reqOrgName:     servingProviderOrg,
+			user:           servingProviderUser,
+			os:             provC,
 			expectedStatus: http.StatusOK,
-			expectedSite:   siteA,
+			expectedSites:  []string{siteC.ID.String(), siteD.ID.String()},
 		},
 		{
-			name:           "tenant admin can read provider OS at accessible site",
+			name:           "tenant admin sees only accessible associations of provider OS",
 			reqOrgName:     tenantOrg,
 			user:           tnUser,
 			os:             provC,
 			expectedStatus: http.StatusOK,
-			expectedSite:   siteC,
+			expectedSites:  []string{siteC.ID.String()},
+		},
+		{
+			name:           "dual-role admin retains provider access to all associations",
+			reqOrgName:     servingProviderOrg,
+			user:           dualUser,
+			os:             provC,
+			expectedStatus: http.StatusOK,
+			expectedSites:  []string{siteC.ID.String(), siteD.ID.String()},
 		},
 		{
 			name:           "tenant admin cannot read provider OS at inaccessible site",
@@ -2749,6 +2767,13 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 			reqOrgName:     tenantOrg,
 			user:           tnUser,
 			os:             tnOS,
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "tenant with no authorized sites sees no associations on own OS",
+			reqOrgName:     noSitesOrg,
+			user:           noSitesUser,
+			os:             noSitesOS,
 			expectedStatus: http.StatusOK,
 		},
 		{
@@ -2775,28 +2800,19 @@ func TestOperatingSystemHandler_GetByID_Visibility(t *testing.T) {
 			ec.SetRequest(ec.Request().WithContext(reqCtx))
 
 			gh := GetOperatingSystemHandler{dbSession: dbSession, tc: tempClient, cfg: cfg}
-			if tc.expectedSite != nil {
-				// Provider definitions created by the API are template-based.
-				_, updateErr := osDAO.Update(ctx, nil, cdbm.OperatingSystemUpdateInput{
-					OperatingSystemId: tc.os.ID,
-					OsType:            cutil.GetPtr(cdbm.OperatingSystemTypeTemplatedIPXE),
-				})
-				require.NoError(t, updateErr)
-			}
 			err := gh.Handle(ec)
 			assert.Nil(t, err)
 			require.Equal(t, tc.expectedStatus, rec.Code)
 			if tc.expectedStatus == http.StatusOK {
 				var response model.APIOperatingSystem
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
-				if tc.expectedSite == nil {
-					assert.Empty(t, response.SiteAssociations)
-				} else {
-					require.Len(t, response.SiteAssociations, 1)
-					require.NotNil(t, response.SiteAssociations[0].Site)
-					assert.Equal(t, tc.expectedSite.ID.String(), response.SiteAssociations[0].Site.ID)
-					assert.Equal(t, cdbm.OperatingSystemSiteAssociationStatusSynced, response.SiteAssociations[0].Status)
+				gotSites := make([]string, 0, len(response.SiteAssociations))
+				for _, association := range response.SiteAssociations {
+					require.NotNil(t, association.Site)
+					gotSites = append(gotSites, association.Site.ID)
+					assert.Equal(t, cdbm.OperatingSystemSiteAssociationStatusSynced, association.Status)
 				}
+				assert.ElementsMatch(t, tc.expectedSites, gotSites)
 			}
 		})
 	}
