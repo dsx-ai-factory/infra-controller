@@ -411,7 +411,7 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 Ok(None) => (None, None),
                 Err(error) => {
                     tracing::debug!(
-                        ?error,
+                        error = %error,
                         power_supply = %entity.raw().odata_id,
                         bmc_address = ?self.endpoint.addr,
                         rack_id = self.endpoint.rack_id.as_ref().map(tracing::field::display),

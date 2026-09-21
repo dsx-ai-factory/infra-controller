@@ -494,6 +494,11 @@ mod classify_tests {
                     expect: SensorHealth::SensorFailure,
                 },
                 Check {
+                    scenario: "an inverted range does not fail a reading",
+                    input: (Some(100.0), Some(0.0), 24.0),
+                    expect: SensorHealth::Ok,
+                },
+                Check {
                     scenario: "a genuine range still catches a reading below min",
                     input: (Some(0.0), Some(100.0), -5.0),
                     expect: SensorHealth::SensorFailure,
