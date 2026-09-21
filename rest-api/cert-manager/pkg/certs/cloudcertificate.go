@@ -26,7 +26,7 @@ func (h *pkiCloudCertificateHandler) reply(ctx context.Context, cert, key string
 
 	respBytes, marshalErr := json.Marshal(resp)
 	if marshalErr != nil {
-		log.WithField("err", ErrorMarshalJSON.String()).Errorf("Failed to json.Marshal ClientCertificateResponse %+v, err: %s", resp, marshalErr.Error())
+		log.WithField("err", ErrorMarshalJSON.String()).WithError(marshalErr).Error("failed to marshal certificate response")
 		http.Error(w, ErrorMarshalJSON.Error(), ErrorMarshalJSON.Code())
 		return
 	}
