@@ -37,19 +37,32 @@ const DEFAULT_BMC_REQUEST_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturati
 const ENDPOINT_SOURCES_CONFIG_KEY: &str = "endpoint_sources";
 const NICO_API_CONFIG_KEY: &str = "nico_api";
 const CARBIDE_API_CONFIG_ALIAS: &str = "carbide_api";
+/// Label names the Prometheus and OTLP sinks emit themselves; a custom label
+/// with one of these names would collide with the sink-owned value.
 const RESERVED_ENDPOINT_LABELS: &[&str] = &[
+    "bmc_endpoint",
+    "bmc_ip",
     "collector_type",
+    "component_type",
+    "driver_version",
     "endpoint_ip",
     "endpoint_key",
     "endpoint_mac",
     "machine_id",
+    "machine_serial",
     "machine_slot_number",
     "machine_tray_index",
     "nvlink_domain_uuid",
     "power_shelf_id",
+    "power_shelf_serial_number",
     "rack_id",
     "serial_number",
+    "switch_endpoint",
+    "switch_endpoint_role",
     "switch_id",
+    "switch_ip",
+    "switch_is_primary",
+    "switch_serial_number",
     "switch_slot_number",
     "switch_tray_index",
     "system_uuid",
