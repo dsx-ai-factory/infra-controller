@@ -15,16 +15,14 @@
  * limitations under the License.
  */
 
-//! Wire-level tests for the firmware RPCs, driven through a real gRPC client
-//! like `wire_grpc.rs`: the shape of what comes back is what NICo's rack
+//! The firmware RPCs: the shape of what comes back is what NICo's rack
 //! firmware upgrade reads.
 
-mod common;
-
-use common::{a_switch, a_tray, failing_nodes, node_info, serve_with, serve_with_config};
 use librms::protos::rack_manager as rms;
 use librms::protos::rack_manager::rack_manager_client::RackManagerClient;
 use rms_mock::RmsMockConfig;
+
+use super::common::{a_switch, a_tray, failing_nodes, node_info, serve_with, serve_with_config};
 
 type Client = RackManagerClient<tonic::transport::Channel>;
 

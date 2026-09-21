@@ -21,7 +21,7 @@
 //! learns a switch's outcome from its job alone, so an unmatched switch gets
 //! a child that fails. Nothing is downloaded or pushed.
 
-use crate::envelope::{job_not_found, matched_or_not, node_batch, require_job_id};
+use crate::envelope::{job_not_found, matched_or_not, node_batch, requested_job};
 use crate::jobs::{JobState, JobStatus};
 use crate::{RmsMock, rms};
 
@@ -41,13 +41,13 @@ pub(crate) async fn apply_switch_system_image(
         .into_iter()
         .map(|(node_id, job_id)| rms::SwitchSystemImageUpdateJobInfo {
             node_id: node_id.to_owned(),
-            job_id,
+            job_id: job_id.into(),
         })
         .collect();
     let object_id = crate::firmware::object_id(&mock.config.firmware_object_ids, &document);
 
     Ok(tonic::Response::new(rms::ApplySwitchSystemImageResponse {
-        response: Some(node_batch(&matched_or_not(&refs), &batch.parent)),
+        response: Some(node_batch(&matched_or_not(&refs), Some(batch.parent))),
         // Nothing is downloaded, so the name only has to be traceable.
         image_filename: format!("{object_id}-nvos.bin"),
         object_id,
@@ -61,29 +61,28 @@ pub(crate) async fn get_switch_system_image_job_status(
     mock: &RmsMock,
     request: tonic::Request<rms::GetSwitchSystemImageJobStatusRequest>,
 ) -> Result<tonic::Response<rms::GetSwitchSystemImageJobStatusResponse>, tonic::Status> {
-    let job_id = &request.get_ref().job_id;
-    require_job_id(job_id)?;
-    if !mock.jobs.issued(job_id) {
+    let job_id = requested_job(&request.get_ref().job_id)?;
+    if !mock.jobs.issued(&job_id) {
         return Ok(tonic::Response::new(
             rms::GetSwitchSystemImageJobStatusResponse {
                 status: rms::ReturnCode::Failure as i32,
-                job_id: job_id.clone(),
-                error_message: job_not_found(job_id),
+                error_message: job_not_found(&job_id),
+                job_id: job_id.into(),
                 ..Default::default()
             },
         ));
     }
-    let status = mock.observe_job(job_id);
+    let status = mock.observe_job(&job_id);
 
     Ok(tonic::Response::new(
         rms::GetSwitchSystemImageJobStatusResponse {
             status: rms::ReturnCode::Success as i32,
-            job_id: job_id.clone(),
+            job_id: job_id.into(),
             state: status.state.as_wire_str().to_owned(),
             message: progress(&status),
-            rack_id: status.rack_id,
-            node_id: status.node_id,
-            error_message: status.error_message,
+            rack_id: status.rack_id.unwrap_or_default(),
+            node_id: status.node_id.unwrap_or_default(),
+            error_message: status.error_message.unwrap_or_default(),
             result_json: String::new(),
             created_at: None,
             updated_at: None,

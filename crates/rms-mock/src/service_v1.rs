@@ -27,8 +27,7 @@
 use librms::protos::rack_manager::rack_manager_server::RackManager;
 
 use crate::envelope::{
-    BatchOutcome, NodeResult, UNMATCHED_NODE, job_states, matched_or_not, node_batch,
-    require_job_id,
+    BatchOutcome, NodeResult, UNMATCHED_NODE, job_states, matched_or_not, node_batch, requested_job,
 };
 use crate::fabric::Candidate;
 use crate::resolve::NodeRef;
@@ -187,7 +186,7 @@ rack_manager_impl! {
                 .collect();
 
             Ok(tonic::Response::new(rms::BatchGetPowerStateResponse {
-                response: Some(node_batch(&results, "")),
+                response: Some(node_batch(&results, None)),
                 node_power_states,
             }))
         }
@@ -223,7 +222,7 @@ rack_manager_impl! {
                 .collect();
 
             Ok(tonic::Response::new(rms::BatchSetPowerStateResponse {
-                response: Some(node_batch(&results, "")),
+                response: Some(node_batch(&results, None)),
             }))
         }
 
@@ -236,8 +235,7 @@ rack_manager_impl! {
             request: tonic::Request<rms::GetJobStatusRequest>,
         ) -> std::result::Result<tonic::Response<rms::GetJobStatusResponse>, tonic::Status> {
             let req = request.get_ref();
-            require_job_id(&req.job_id)?;
-            let status = self.observe_job(&req.job_id);
+            let status = self.observe_job(&requested_job(&req.job_id)?);
 
             Ok(tonic::Response::new(rms::GetJobStatusResponse {
                 job_states: job_states(&status, req.include_child_job_states),
@@ -365,12 +363,12 @@ rack_manager_impl! {
                 .into_iter()
                 .map(|(node_id, job_id)| rms::ConfigureSwitchCertificateJobInfo {
                     node_id: node_id.to_owned(),
-                    job_id,
+                    job_id: job_id.into(),
                 })
                 .collect();
 
             Ok(tonic::Response::new(rms::ConfigureSwitchCertificateResponse {
-                response: Some(node_batch(&matched_or_not(&refs), &batch.parent)),
+                response: Some(node_batch(&matched_or_not(&refs), Some(batch.parent))),
                 jobs,
             }))
         }
@@ -386,20 +384,19 @@ rack_manager_impl! {
             tonic::Response<rms::GetConfigureSwitchCertificateJobStatusResponse>,
             tonic::Status,
         > {
-            let job_id = &request.get_ref().job_id;
-            require_job_id(job_id)?;
-            let status = self.observe_job(job_id);
+            let job_id = requested_job(&request.get_ref().job_id)?;
+            let status = self.observe_job(&job_id);
 
             Ok(tonic::Response::new(
                 rms::GetConfigureSwitchCertificateJobStatusResponse {
                     // The RPC succeeded; `state` reports the job.
                     status: rms::ReturnCode::Success as i32,
-                    job_id: job_id.clone(),
+                    job_id: job_id.into(),
                     state: status.state.as_wire_str().to_owned(),
                     message: String::new(),
-                    rack_id: status.rack_id,
-                    node_id: status.node_id,
-                    error_message: status.error_message,
+                    rack_id: status.rack_id.unwrap_or_default(),
+                    node_id: status.node_id.unwrap_or_default(),
+                    error_message: status.error_message.unwrap_or_default(),
                     result_json: String::new(),
                     created_at: None,
                     updated_at: None,

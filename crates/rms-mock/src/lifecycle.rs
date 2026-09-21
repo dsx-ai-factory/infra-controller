@@ -47,7 +47,7 @@ pub(crate) async fn update_switch_system_password(
 
     Ok(tonic::Response::new(
         rms::UpdateSwitchSystemPasswordResponse {
-            response: Some(node_batch(&matched_or_not(&refs), &batch.parent)),
+            response: Some(node_batch(&matched_or_not(&refs), Some(batch.parent))),
         },
     ))
 }
@@ -64,7 +64,7 @@ pub(crate) async fn batch_reset_switch_factory_default(
 
     Ok(tonic::Response::new(
         rms::BatchResetSwitchFactoryDefaultResponse {
-            response: Some(node_batch(&matched_or_not(&refs), &batch.parent)),
+            response: Some(node_batch(&matched_or_not(&refs), Some(batch.parent))),
         },
     ))
 }

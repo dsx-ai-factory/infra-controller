@@ -81,14 +81,17 @@ impl RmsMock {
     }
 
     /// Poll a job and apply what its completion does to the mock.
-    pub(crate) fn observe_job(&self, job_id: &str) -> jobs::JobStatus {
+    pub(crate) fn observe_job(&self, job_id: &jobs::JobId) -> jobs::JobStatus {
         let status = self.jobs.observe(job_id);
         for job in std::iter::once(&status).chain(&status.children) {
-            match job.effect {
-                Some(jobs::Effect::ResetFabricRole) => {
-                    self.fabric.reset(&job.rack_id, &job.node_id);
-                }
-                None => {}
+            // Only a node's job carries an effect, and it names its node.
+            let (Some(effect), Some(rack_id), Some(node_id)) =
+                (job.effect, &job.rack_id, &job.node_id)
+            else {
+                continue;
+            };
+            match effect {
+                jobs::Effect::ResetFabricRole => self.fabric.reset(rack_id, node_id),
             }
         }
         status

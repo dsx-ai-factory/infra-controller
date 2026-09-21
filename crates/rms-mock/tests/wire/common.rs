@@ -15,10 +15,7 @@
  * limitations under the License.
  */
 
-//! Fixtures shared by the wire tests. Each test binary compiles these on its
-//! own and uses the subset it needs.
-
-#![allow(dead_code)]
+//! Fixtures shared by the wire test modules.
 
 use std::net::IpAddr;
 use std::sync::Arc;

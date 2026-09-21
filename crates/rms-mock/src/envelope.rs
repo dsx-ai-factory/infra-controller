@@ -21,7 +21,7 @@
 //! the host refuses, is a per-node failure: its result says why, it counts
 //! towards `failed_nodes`, and the batch fails.
 
-use crate::jobs::{JobState, JobStatus};
+use crate::jobs::{BlankJobId, JobId, JobState, JobStatus};
 use crate::resolve::NodeRef;
 use crate::rms;
 
@@ -88,8 +88,12 @@ impl BatchOutcome {
     }
 }
 
-/// A batch with the given per-node results.
-pub(crate) fn node_batch(results: &[NodeResult<'_>], job_id: &str) -> rms::NodeBatchResponse {
+/// A batch with the given per-node results and, when one was started for
+/// it, its job.
+pub(crate) fn node_batch(
+    results: &[NodeResult<'_>],
+    job_id: Option<JobId>,
+) -> rms::NodeBatchResponse {
     let node_results = results
         .iter()
         .map(|(node_id, outcome)| rms::NodeOperationResult {
@@ -107,7 +111,7 @@ pub(crate) fn node_batch(results: &[NodeResult<'_>], job_id: &str) -> rms::NodeB
         status: outcome.status as i32,
         message: outcome.message,
         node_results,
-        job_id: job_id.to_owned(),
+        job_id: job_id.map(String::from).unwrap_or_default(),
         stats: Some(outcome.stats),
     }
 }
@@ -130,36 +134,35 @@ fn job_status(status: &JobStatus) -> rms::JobStatus {
         JobState::Running | JobState::Completed => rms::JobError::Unspecified,
     };
     rms::JobStatus {
-        job_id: status.job_id.clone(),
-        parent_job_id: status.parent_job_id.clone(),
-        child_job_ids: status.children.iter().map(|c| c.job_id.clone()).collect(),
+        job_id: status.job_id.to_string(),
+        parent_job_id: status.parent_job_id.as_ref().map(JobId::to_string),
+        child_job_ids: status
+            .children
+            .iter()
+            .map(|c| c.job_id.to_string())
+            .collect(),
         execution_state: status.state.as_execution_state(),
-        error_message: status.error_message.clone(),
+        error_message: status.error_message.clone().unwrap_or_default(),
         error_code: error_code as i32,
         result_json: String::new(),
         state_description: status.state.as_wire_str().to_owned(),
-        rack_id: non_empty(&status.rack_id),
-        node_id: non_empty(&status.node_id),
+        rack_id: status.rack_id.clone(),
+        node_id: status.node_id.clone(),
         created_at: None,
         updated_at: None,
     }
 }
 
-/// Reject a status poll that names no job, which would otherwise read as a
-/// completed one.
-pub(crate) fn require_job_id(job_id: &str) -> Result<(), tonic::Status> {
-    if job_id.trim().is_empty() {
-        return Err(tonic::Status::invalid_argument("job_id is required"));
-    }
-    Ok(())
+/// The job a status poll names, or `INVALID_ARGUMENT` when it names none,
+/// which would otherwise read as a completed job.
+pub(crate) fn requested_job(job_id: &str) -> Result<JobId, tonic::Status> {
+    job_id
+        .parse()
+        .map_err(|BlankJobId| tonic::Status::invalid_argument("job_id is required"))
 }
 
 /// The `error_message` of a status RPC answering `RETURN_CODE_FAILURE` for a
 /// job this process never issued.
-pub(crate) fn job_not_found(job_id: &str) -> String {
+pub(crate) fn job_not_found(job_id: &JobId) -> String {
     format!("job {job_id} not found")
-}
-
-fn non_empty(s: &str) -> Option<String> {
-    (!s.is_empty()).then(|| s.to_owned())
 }

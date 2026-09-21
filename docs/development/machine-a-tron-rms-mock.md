@@ -40,8 +40,8 @@ machine, switch, or power shelf id, once the device is ingested, and the
 device's BMC MAC before that. A node that matches no simulated device is a
 per-node failure that names the node, and the rest of the batch proceeds.
 Jobs advance each time they are polled rather than with time, and every job
-completes: the fault table that fails chosen jobs is set from Rust by the
-crate's tests and is not configurable.
+reaches a terminal state. Jobs complete by default; the crate's tests can set
+an internal fault table that makes selected jobs fail.
 
 ## Pointing NICo at It
 
@@ -77,6 +77,10 @@ to the mock. Use it only on simulation-only sites.
   `GetConfigureSwitchCertificateJobStatus`, and answers `RETURN_CODE_FAILURE`
   on `GetFirmwareJobStatus` and `GetSwitchSystemImageJobStatus`, as the RMS
   API specifies.
+- Job retention differs from RMS, which keeps completed and failed jobs for
+  24 hours by default and caps its job tracker at 10,000 records. The mock
+  forgets a job once it has reported completed, keeps the most recent 4,096
+  failed node jobs, and reports a failed job it has forgotten as completed.
 - Firmware, NVOS images, passwords, and factory resets change nothing on the
   simulated devices: a device's Redfish firmware inventory reads the same
   after an apply, and a factory reset only clears the switch's fabric primary

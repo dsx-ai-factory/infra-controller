@@ -24,7 +24,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::envelope::{job_not_found, matched_or_not, node_batch, require_job_id};
+use crate::envelope::{job_not_found, matched_or_not, node_batch, requested_job};
 use crate::jobs::JobState;
 use crate::{RmsMock, rms};
 
@@ -74,12 +74,12 @@ pub(crate) async fn apply_firmware_object(
         .into_iter()
         .map(|(node_id, job_id)| rms::NodeFirmwareJobInfo {
             node_id: node_id.to_owned(),
-            job_id,
+            job_id: job_id.into(),
         })
         .collect();
 
     Ok(tonic::Response::new(rms::ApplyFirmwareObjectResponse {
-        response: Some(node_batch(&matched_or_not(&refs), &batch.parent)),
+        response: Some(node_batch(&matched_or_not(&refs), Some(batch.parent))),
         object_id: object_id(&mock.config.firmware_object_ids, &document),
         jobs,
     }))
@@ -91,27 +91,26 @@ pub(crate) async fn get_firmware_job_status(
     mock: &RmsMock,
     request: tonic::Request<rms::GetFirmwareJobStatusRequest>,
 ) -> Result<tonic::Response<rms::GetFirmwareJobStatusResponse>, tonic::Status> {
-    let job_id = &request.get_ref().job_id;
-    require_job_id(job_id)?;
-    if !mock.jobs.issued(job_id) {
+    let job_id = requested_job(&request.get_ref().job_id)?;
+    if !mock.jobs.issued(&job_id) {
         return Ok(tonic::Response::new(rms::GetFirmwareJobStatusResponse {
             status: rms::ReturnCode::Failure as i32,
-            job_id: job_id.clone(),
-            error_message: job_not_found(job_id),
+            error_message: job_not_found(&job_id),
+            job_id: job_id.into(),
             ..Default::default()
         }));
     }
-    let status = mock.observe_job(job_id);
+    let status = mock.observe_job(&job_id);
 
     Ok(tonic::Response::new(rms::GetFirmwareJobStatusResponse {
         status: rms::ReturnCode::Success as i32,
-        job_id: job_id.clone(),
+        job_id: job_id.into(),
         job_state: job_state(status.state) as i32,
         state_description: describe(status.state).to_owned(),
-        rack_id: status.rack_id,
-        node_id: status.node_id,
+        rack_id: status.rack_id.unwrap_or_default(),
+        node_id: status.node_id.unwrap_or_default(),
         error_code: error_code(status.state) as i32,
-        error_message: status.error_message,
+        error_message: status.error_message.unwrap_or_default(),
         result_json: String::new(),
         created_at: None,
         updated_at: None,

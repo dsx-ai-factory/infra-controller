@@ -15,23 +15,17 @@
  * limitations under the License.
  */
 
-//! Wire-level tests.
-//!
-//! These drive the mock through a real gRPC client over a real socket,
-//! rather than calling the trait methods directly, because the thing most
-//! likely to break is the transport: codec, HTTP/2 framing, and the router
-//! paths the services are mounted on. A test that called the impl directly
-//! would pass even if nothing were reachable.
+//! Transport, inventory, power, scale-up fabric, and switch certificate
+//! RPCs, and the `GetJobStatus` they share.
 
-mod common;
-
-use common::{
-    a_switch, a_tray, failing_nodes, node_info, node_info_in_rack, serve_with, serve_with_config,
-};
 use librms::protos::rack_manager::rack_manager_client::RackManagerClient;
 use librms::protos::rack_manager_v2::rack_manager_v2_client::RackManagerV2Client;
 use mac_address::MacAddress;
 use rms_mock::SimNode;
+
+use super::common::{
+    a_switch, a_tray, failing_nodes, node_info, node_info_in_rack, serve_with, serve_with_config,
+};
 
 /// A second switch tray in the same rack as [`a_switch`], lower in it.
 fn a_second_switch() -> SimNode {

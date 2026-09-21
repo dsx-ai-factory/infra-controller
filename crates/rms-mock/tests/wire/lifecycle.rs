@@ -15,22 +15,20 @@
  * limitations under the License.
  */
 
-//! Wire-level tests for the switch lifecycle RPCs, password rotation and
-//! factory reset, driven through a real gRPC client like `wire_grpc.rs`.
-//! They assert the shapes NICo reads: a parent job id in the batch, one child
-//! per switch when the parent is polled with children, a failed child that
-//! names its switch, and per-node results aligned with the request.
-
-mod common;
+//! The switch lifecycle RPCs, password rotation and factory reset. They
+//! assert the shapes NICo reads: a parent job id in the batch, one child per
+//! switch when the parent is polled with children, a failed child that names
+//! its switch, and per-node results aligned with the request.
 
 use std::net::IpAddr;
 
-use common::{a_switch, failing_nodes, node_info, serve_with, serve_with_config};
 use librms::protos::rack_manager::rack_manager_client::RackManagerClient;
 use librms::protos::rack_manager_v2::rack_manager_v2_client::RackManagerV2Client;
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use mac_address::MacAddress;
 use rms_mock::SimNode;
+
+use super::common::{a_switch, failing_nodes, node_info, serve_with, serve_with_config};
 
 type Client = RackManagerClient<tonic::transport::Channel>;
 

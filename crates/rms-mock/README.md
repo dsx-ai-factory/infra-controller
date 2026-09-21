@@ -64,8 +64,10 @@ nanoseconds and `n` counts up from 1, so a restart never re-issues an id NICo
 still polls. Treat them as opaque. A job seen complete is forgotten, and so is
 a parent once it has reported a terminal state or has no child left, while a
 failed node-level job keeps reading failed. The mock keeps the most recent
-4,096 failed node jobs and forgets older ones. A poll for a job this process
-has no record of reports it completed on `GetJobStatus` and
+4,096 failed node jobs and forgets older ones, which then read as completed.
+RMS instead keeps completed and failed jobs for 24 hours by default and caps
+its job tracker at 10,000 records. A poll for a job this process has no record
+of reports it completed on `GetJobStatus` and
 `GetConfigureSwitchCertificateJobStatus`, with one completed child listed
 under it for the callers that accept a completed parent only with children.
 `GetFirmwareJobStatus` and `GetSwitchSystemImageJobStatus` answer

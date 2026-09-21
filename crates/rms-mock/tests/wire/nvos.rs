@@ -15,18 +15,16 @@
  * limitations under the License.
  */
 
-//! Wire-level tests for the switch system image (NVOS) RPCs, driven through
-//! a real gRPC client like `wire_grpc.rs`: the parent and per-switch child
+//! The switch system image (NVOS) RPCs: the parent and per-switch child
 //! jobs an apply returns, the state vocabulary a poll reports, and the
 //! failure path NICo's NVOS update reads.
 
-mod common;
-
-use common::{a_switch, failing_nodes, node_info, serve_with, serve_with_config};
 use librms::protos::rack_manager as rms;
 use librms::protos::rack_manager::rack_manager_client::RackManagerClient;
 use mac_address::MacAddress;
 use rms_mock::SimNode;
+
+use super::common::{a_switch, failing_nodes, node_info, serve_with, serve_with_config};
 
 type Client = RackManagerClient<tonic::transport::Channel>;
 
