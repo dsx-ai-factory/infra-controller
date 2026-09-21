@@ -392,6 +392,41 @@ async fn switch_nvos_update_does_not_replay_bmc_credentials_or_select_empty_meta
 }
 
 #[tokio::test]
+async fn switch_nvos_mac_only_update_selects_only_the_supplied_addresses() {
+    let (result, requests) = dispatch(
+        &[
+            "expected-switch",
+            "update",
+            "--bmc-mac-address",
+            MAC,
+            "--nvos-mac-address",
+            "00:11:22:33:44:66",
+            "--nvos-mac-address",
+            "00:11:22:33:44:88",
+        ],
+        Code::Ok,
+    )
+    .await;
+    result.expect("NVOS MAC addresses can be updated without credentials or a serial number");
+    assert_methods(&requests, &["GetExpectedSwitch", "PatchExpectedSwitch"]);
+    let request: forge::PatchExpectedSwitchRequest = requests[1].decode();
+    assert_paths(request.update_mask.unwrap().paths, &["nvos_mac_addresses"]);
+    assert_eq!(
+        request.expected_switch,
+        Some(forge::ExpectedSwitch {
+            expected_switch_id: Some(rpc_id()),
+            bmc_mac_address: MAC.to_string(),
+            nvos_mac_addresses: vec![
+                "00:11:22:33:44:66".to_string(),
+                "00:11:22:33:44:88".to_string(),
+            ],
+            metadata: Some(forge::Metadata::default()),
+            ..Default::default()
+        })
+    );
+}
+
+#[tokio::test]
 async fn unsupported_machine_patches_use_the_original_read_merge_update() {
     struct Case {
         scenario: &'static str,
