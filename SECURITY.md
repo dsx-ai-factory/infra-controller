@@ -7,19 +7,15 @@ officially published release artifacts.
 ## Reporting a Vulnerability
 
 If you discover a potential security vulnerability, do not submit it through
-public GitHub Issues, pull requests, Discussions, or other public channels.
-Report the vulnerability privately through one of these channels, in order of
-preference:
+GitHub Issues, pull requests, Discussions, GitHub Security Advisories, GitHub
+private vulnerability reporting, or other public channels. Report it directly
+to NVIDIA PSIRT through one of these channels:
 
 - **Web (preferred):**
-  [NVIDIA Vulnerability Disclosure Program](https://www.nvidia.com/en-us/product-security/report-vulnerability/)
+  [NVIDIA Vulnerability Disclosure Program](https://www.nvidia.com/en-us/security/report-vulnerability/)
 - **Email:** [psirt@nvidia.com](mailto:psirt@nvidia.com). Encrypt sensitive
   information using the
-  [NVIDIA public PGP key](https://www.nvidia.com/en-us/security/pgp-key/).
-- **GitHub:** Use the repository's
-  [private vulnerability reporting](https://github.com/dsx-ai-factory/infra-controller/security/advisories/new)
-  form (Security tab → **Report a vulnerability**). Project security responders
-  will route the report to NVIDIA PSIRT for coordinated handling.
+  [NVIDIA public PGP key](https://www.nvidia.com/en-us/security/pgp-key).
 
 Please include the following information:
 
@@ -36,7 +32,7 @@ Please include the following information:
 NVIDIA PSIRT manages vulnerability intake, validation, remediation
 coordination, and disclosure. Response timing, coordinated disclosure,
 and reporter acknowledgement are governed by the
-[NVIDIA PSIRT policies](https://www.nvidia.com/en-us/product-security/psirt-policies/).
+[NVIDIA PSIRT policies](https://www.nvidia.com/en-us/security/psirt-policies/).
 
 ## Security Architecture & Context
 
