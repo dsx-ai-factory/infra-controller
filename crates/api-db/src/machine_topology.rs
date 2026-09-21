@@ -15,7 +15,8 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 
 use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait};
 use chrono::{TimeDelta, Utc};
@@ -253,6 +254,32 @@ pub async fn find_machine_id_by_bmc_ip(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// Returns every BMC IP address that already belongs to an ingested machine.
+///
+/// Same predicate as [`find_machine_id_by_bmc_ip`] without the address filter, so
+/// membership here is equivalent to that lookup returning `Some`. Callers that
+/// need the answer for many addresses use this to avoid one round trip each.
+///
+/// The result is a snapshot: it does not track machines ingested after the read.
+pub async fn find_all_ingested_bmc_ips(
+    txn: impl DbReader<'_>,
+) -> Result<HashSet<IpAddr>, DatabaseError> {
+    // `machine_interface_addresses.address` is UNIQUE and constrained to a bare
+    // host address, so no DISTINCT is needed and each row decodes into `IpAddr`.
+    let query = r#"
+        SELECT mia.address
+        FROM machine_interfaces mi
+        JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
+        WHERE mi.interface_type = 'Bmc'
+            AND mi.machine_id IS NOT NULL
+    "#;
+    let rows: Vec<(IpAddr,)> = sqlx::query_as(query)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(rows.into_iter().map(|(addr,)| addr).collect())
+}
+
 pub async fn find_machine_id_by_bmc_mac<ID>(
     txn: &mut PgConnection,
     mac_address: mac_address::MacAddress,
@@ -425,4 +452,105 @@ pub async fn set_topology_update_needed(
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use carbide_uuid::machine::{MachineIdSource, MachineInterfaceId, MachineType};
+    use carbide_uuid::network::NetworkSegmentId;
+    use model::machine::ManagedHostState;
+
+    use super::*;
+
+    /// The batch read has to select exactly the addresses for which the
+    /// single-address lookup returns `Some`, because callers substitute set
+    /// membership for that lookup. Covers each way a row can miss the predicate:
+    /// a BMC with no machine, and a non-BMC interface that does have one.
+    #[crate::sqlx_test]
+    async fn ingested_bmc_ips_match_the_single_address_lookup(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version) VALUES ('ingested-bmc', 'V1-T0')
+             RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await?;
+
+        // (interface_type, owned by a machine, address)
+        let rows = [
+            ("Bmc", true, "192.0.2.1"),
+            ("Bmc", true, "192.0.2.2"),
+            // Discovered but not yet ingested.
+            ("Bmc", false, "192.0.2.3"),
+            // An ingested machine's data interface is not a BMC endpoint.
+            ("Data", true, "192.0.2.4"),
+        ];
+
+        for (index, (interface_type, owned, address)) in rows.iter().enumerate() {
+            let machine_id = if *owned {
+                let mut hash = [0u8; 32];
+                hash[..8].copy_from_slice(&(index as u64).to_be_bytes());
+                let id = MachineId::new(
+                    MachineIdSource::ProductBoardChassisSerial,
+                    hash,
+                    MachineType::Host,
+                );
+                // Use the production helper: `machines` has NOT NULL columns
+                // without defaults, so a hand-rolled INSERT drifts from the schema.
+                crate::machine::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 1)
+                    .await?;
+                Some(id)
+            } else {
+                None
+            };
+
+            let interface_id: MachineInterfaceId = sqlx::query_scalar(
+                "INSERT INTO machine_interfaces
+                     (segment_id, mac_address, primary_interface, hostname, interface_type,
+                      machine_id, association_type)
+                 VALUES ($1, $2::macaddr, false, $3, $4::interface_type, $5,
+                         CASE WHEN $5 IS NULL THEN 'None' ELSE 'Machine' END::association_type)
+                 RETURNING id",
+            )
+            .bind(segment_id)
+            .bind(format!("02:00:00:00:00:0{index}"))
+            .bind(format!("ingested-bmc-{index}"))
+            .bind(interface_type)
+            .bind(machine_id)
+            .fetch_one(txn.as_mut())
+            .await?;
+
+            sqlx::query(
+                "INSERT INTO machine_interface_addresses (interface_id, address)
+                 VALUES ($1, $2::inet)",
+            )
+            .bind(interface_id)
+            .bind(address)
+            .execute(txn.as_mut())
+            .await?;
+        }
+
+        let batch = find_all_ingested_bmc_ips(txn.as_mut()).await?;
+
+        for (_, _, address) in rows {
+            let single = find_machine_id_by_bmc_ip(txn.as_mut(), address).await?;
+            let ip: IpAddr = address.parse()?;
+            assert_eq!(
+                batch.contains(&ip),
+                single.is_some(),
+                "batch and single-address lookup disagree for {address}"
+            );
+        }
+
+        // Guard against both sides agreeing only because both are empty.
+        assert_eq!(batch.len(), 2);
+
+        txn.rollback().await?;
+        Ok(())
+    }
 }

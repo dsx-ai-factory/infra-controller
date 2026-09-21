@@ -19,6 +19,7 @@
 #
 # Tool requirements:
 #   helmfile, helm, kubectl, jq, ssh-keygen, envsubst (gettext)
+#   Core VIP preflight also requires python3 with PyYAML (unless --skip-core).
 #
 # Required environment:
 #   KUBECONFIG            Optional only if the current kubectl context already

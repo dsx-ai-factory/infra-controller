@@ -47,6 +47,7 @@ use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::spx::SpxPartitionId;
 use carbide_uuid::switch::SwitchId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
+use eyre::WrapErr;
 use futures::{StreamExt, TryStreamExt, stream};
 use mac_address::MacAddress;
 
@@ -63,16 +64,16 @@ use crate::machine::MachineAutoupdate;
 pub(crate) struct ApiClient(pub(crate) ForgeApiClient);
 
 /// Returns `True` when `status` *can* mean the server does not implement
-/// the requested RPC, telling the caller to retry through the deprecated alias.
+/// the requested RPC, telling the caller to retry through the legacy operation.
 ///
-/// API servers that predate a renamed RPC answer it in one of two ways:
+/// API servers that predate an RPC answer it in one of two ways:
 ///
 /// - `Unimplemented`, when the request reaches the gRPC router.
 /// - A bare HTTP 403 with no `grpc-status` trailer, when `carbide-api` RBAC
 ///   rules reject a method name missing from its permission table (which
 ///   happens before the gRPC router is even consulted). tonic maps that 403 to
 ///   `PermissionDenied` on the client.
-fn maybe_unimplemented(status: &tonic::Status) -> bool {
+pub(crate) fn maybe_unimplemented(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::Unimplemented | tonic::Code::PermissionDenied
@@ -92,7 +93,7 @@ fn cap_chunk_size(page_size: usize, cap: usize) -> usize {
 
 /// Legacy BMC fields sent with a full `ExpectedMachine` update.
 ///
-/// `patch_expected_machine` still fetches the current record so it can merge
+/// `patch_expected_machine_legacy` fetches the current record so it can merge
 /// ordinary patch fields. These two fields need their own rules because the API
 /// uses their presence to distinguish a legacy `--bmc-*` override from the
 /// canonical `HostBmc` entry in `interfaces`.
@@ -925,7 +926,13 @@ impl ApiClient {
     ) -> CarbideCliResult<::rpc::site_explorer::SiteExplorationReport> {
         let last_run = self.get_site_explorer_last_run().await?;
         // grab endpoints
-        let endpoint_ids = match self.0.find_explored_endpoint_ids().await {
+        let endpoint_ids = match self
+            .0
+            .find_explored_endpoint_ids(
+                ::rpc::site_explorer::ExploredEndpointSearchFilter::default(),
+            )
+            .await
+        {
             Ok(endpoint_ids) => endpoint_ids,
             Err(status) => {
                 return if maybe_unimplemented(&status) {
@@ -1066,11 +1073,164 @@ impl ApiClient {
         Ok(self.0.set_dynamic_config(request).await?)
     }
 
-    /// Partially updates an expected machine: merges CLI-provided fields with the current API
-    /// record, then calls `update_expected_machine`. When `bmc_ip_address` is supplied, the server
-    /// runs the same static-interface reconciliation as a full RPC update.
+    /// Sends only the supplied fields through `PatchExpectedMachine`.
+    /// MAC selection reads the current record only to resolve its immutable ID.
+    /// Older servers use the legacy read/merge/update path instead.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn patch_expected_machine(
+        &self,
+        bmc_mac_address: Option<MacAddress>,
+        id: Option<String>,
+        bmc_username: Option<String>,
+        bmc_password: Option<String>,
+        chassis_serial_number: Option<String>,
+        fallback_dpu_serial_numbers: Option<Vec<String>>,
+        meta_name: Option<String>,
+        meta_description: Option<String>,
+        labels: Option<Vec<String>>,
+        sku_id: Option<String>,
+        rack_id: Option<RackId>,
+        default_pause_ingestion_and_poweron: Option<bool>,
+        dpf_enabled: Option<bool>,
+        bmc_ip_address: Option<String>,
+        bmc_retain_credentials: Option<bool>,
+        dpu_policy: Option<HostDpuPolicy>,
+        bmc_ip_allocation: Option<::rpc::forge::BmcIpAllocationType>,
+        host_lifecycle_profile: Option<::rpc::forge::HostLifecycleProfile>,
+        interfaces: Option<String>,
+    ) -> Result<(), CarbideCliError> {
+        let parsed_interfaces = interfaces
+            .as_deref()
+            .map(serde_json::from_str::<Vec<rpc::ExpectedInterface>>)
+            .transpose()?;
+        let paths = [
+            (bmc_username.is_some(), "bmc_username"),
+            (bmc_password.is_some(), "bmc_password"),
+            (chassis_serial_number.is_some(), "chassis_serial_number"),
+            (
+                fallback_dpu_serial_numbers.is_some(),
+                "fallback_dpu_serial_numbers",
+            ),
+            (meta_name.is_some(), "metadata.name"),
+            (meta_description.is_some(), "metadata.description"),
+            (labels.is_some(), "metadata.labels"),
+            (sku_id.is_some(), "sku_id"),
+            (rack_id.is_some(), "rack_id"),
+            (
+                default_pause_ingestion_and_poweron.is_some(),
+                "default_pause_ingestion_and_poweron",
+            ),
+            (dpf_enabled.is_some(), "is_dpf_enabled"),
+            (bmc_ip_address.is_some(), "bmc_ip_address"),
+            (bmc_retain_credentials.is_some(), "bmc_retain_credentials"),
+            (dpu_policy.is_some(), "dpu_mode"),
+            (bmc_ip_allocation.is_some(), "bmc_ip_allocation"),
+            (
+                host_lifecycle_profile
+                    .as_ref()
+                    .and_then(|profile| profile.disable_lockdown)
+                    .is_some(),
+                "host_lifecycle_profile.disable_lockdown",
+            ),
+            (parsed_interfaces.is_some(), "host_nics"),
+        ]
+        .into_iter()
+        .filter(|(selected, _)| *selected)
+        .map(|(_, path)| path.to_string())
+        .collect();
+        let resolved_id = match (bmc_mac_address, id.as_ref()) {
+            (Some(_), Some(_)) => {
+                return Err(CarbideCliError::ChooseOneError("--bmc-mac-address", "--id"));
+            }
+            (None, None) => {
+                return Err(CarbideCliError::RequireOneError(
+                    "--bmc-mac-address",
+                    "--id",
+                ));
+            }
+            (_, Some(id)) => Some(::rpc::common::Uuid { value: id.clone() }),
+            (Some(mac), None) => {
+                self.0
+                    .get_expected_machine(rpc::ExpectedMachineRequest {
+                        bmc_mac_address: mac.to_string(),
+                        id: None,
+                    })
+                    .await
+                    .wrap_err("failed to resolve expected machine by BMC MAC address")?
+                    .id
+            }
+        };
+        // Legacy records can be selected by MAC even when they have no ID.
+        if let Some(resolved_id) = resolved_id {
+            let metadata = (meta_name.is_some() || meta_description.is_some() || labels.is_some())
+                .then(|| rpc::Metadata {
+                    name: meta_name.clone().unwrap_or_default(),
+                    description: meta_description.clone().unwrap_or_default(),
+                    labels: crate::metadata::parse_rpc_labels(labels.clone().unwrap_or_default()),
+                });
+            let mut request = rpc::PatchExpectedMachineRequest {
+                expected_machine: Some(rpc::ExpectedMachine {
+                    id: Some(resolved_id),
+                    bmc_username: bmc_username.clone().unwrap_or_default(),
+                    bmc_password: bmc_password.clone().unwrap_or_default(),
+                    chassis_serial_number: chassis_serial_number.clone().unwrap_or_default(),
+                    fallback_dpu_serial_numbers: fallback_dpu_serial_numbers
+                        .clone()
+                        .unwrap_or_default(),
+                    metadata,
+                    sku_id: sku_id.clone(),
+                    rack_id: rack_id.clone(),
+                    default_pause_ingestion_and_poweron,
+                    is_dpf_enabled: dpf_enabled,
+                    bmc_ip_address: bmc_ip_address.clone(),
+                    bmc_retain_credentials,
+                    dpu_mode: dpu_policy.map(|policy| rpc::DpuMode::from(policy) as i32),
+                    bmc_ip_allocation: bmc_ip_allocation.map(|allocation| allocation as i32),
+                    host_lifecycle_profile,
+                    host_nics: parsed_interfaces.unwrap_or_default(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            request.update_mask.get_or_insert_default().paths = paths;
+            match self.0.patch_expected_machine(request).await {
+                Ok(()) => return Ok(()),
+                Err(status) if maybe_unimplemented(&status) => {}
+                Err(status) => {
+                    return Err(eyre::Report::from(status)
+                        .wrap_err("failed to patch expected machine")
+                        .into());
+                }
+            }
+        }
+
+        self.patch_expected_machine_legacy(
+            bmc_mac_address,
+            id,
+            bmc_username,
+            bmc_password,
+            chassis_serial_number,
+            fallback_dpu_serial_numbers,
+            meta_name,
+            meta_description,
+            labels,
+            sku_id,
+            rack_id,
+            default_pause_ingestion_and_poweron,
+            dpf_enabled,
+            bmc_ip_address,
+            bmc_retain_credentials,
+            dpu_policy,
+            bmc_ip_allocation,
+            host_lifecycle_profile,
+            interfaces,
+        )
+        .await
+    }
+
+    /// Uses the original read/merge/update operation for compatibility.
+    #[allow(clippy::too_many_arguments)]
+    async fn patch_expected_machine_legacy(
         &self,
         bmc_mac_address: Option<MacAddress>,
         id: Option<String>,
@@ -1111,7 +1271,11 @@ impl ApiClient {
                 id: None,
             },
         };
-        let expected_machine = self.0.get_expected_machine(get_req).await?;
+        let expected_machine = self
+            .0
+            .get_expected_machine(get_req)
+            .await
+            .wrap_err("failed to get expected machine for legacy update")?;
         let mac_str = bmc_mac_address
             .map(|m| m.to_string())
             .unwrap_or(expected_machine.bmc_mac_address.clone());
@@ -1131,26 +1295,9 @@ impl ApiClient {
             if meta_name.is_some() || meta_description.is_some() || labels.is_some() {
                 let existing = expected_machine.metadata.unwrap_or_default();
 
-                // Convert labels to the proto format
-                let merged_labels = if let Some(label_list) = labels {
-                    let mut proto_labels = Vec::new();
-                    for label in label_list {
-                        let proto_label = match label.split_once(':') {
-                            Some((k, v)) => ::rpc::forge::Label {
-                                key: k.trim().to_string(),
-                                value: Some(v.trim().to_string()),
-                            },
-                            None => ::rpc::forge::Label {
-                                key: label.trim().to_string(),
-                                value: None,
-                            },
-                        };
-                        proto_labels.push(proto_label);
-                    }
-                    proto_labels
-                } else {
-                    existing.labels
-                };
+                let merged_labels = labels
+                    .map(crate::metadata::parse_rpc_labels)
+                    .unwrap_or(existing.labels);
 
                 Some(::rpc::forge::Metadata {
                     name: meta_name.unwrap_or(existing.name),
@@ -1191,7 +1338,11 @@ impl ApiClient {
                 .or(expected_machine.host_lifecycle_profile),
         };
 
-        Ok(self.0.update_expected_machine(request).await?)
+        self.0
+            .update_expected_machine(request)
+            .await
+            .wrap_err("failed to update expected machine through the legacy RPC")?;
+        Ok(())
     }
 
     /// Replaces the entire expected-machine table from JSON.

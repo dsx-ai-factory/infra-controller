@@ -13,6 +13,8 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 // CreateTenant is a workflow to create a Tenant using CreateTenantOnSite activity
@@ -21,16 +23,15 @@ func CreateTenant(ctx workflow.Context, request *corev1.CreateTenantRequest) err
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

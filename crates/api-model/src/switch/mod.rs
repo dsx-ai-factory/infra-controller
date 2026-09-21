@@ -429,6 +429,10 @@ pub enum SwitchControllerState {
     /// The Switch is executing an operator-requested maintenance operation.
     Maintenance {
         operation: SwitchMaintenanceOperation,
+        /// The request admitted before external work began. Older saved states
+        /// omit this, so their completion must leave pending requests alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<SwitchMaintenanceRequest>,
         /// Sub-states for async maintenance operations such as certificate reconfiguration.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         configure_certificate: Option<ConfigureCertificateState>,
@@ -445,15 +449,18 @@ pub enum SwitchControllerState {
 }
 
 impl SwitchControllerState {
-    /// Builds the controller state for a requested maintenance operation.
-    pub fn maintenance_for_operation(operation: SwitchMaintenanceOperation) -> Self {
+    /// Starts `Maintenance` and saves the full request for the completion check.
+    /// `ReconfigureCertificate` starts at `ConfigureCertificateState::Start`;
+    /// other operations have no certificate job state.
+    pub fn maintenance_for_request(request: SwitchMaintenanceRequest) -> Self {
         Self::Maintenance {
-            operation,
+            operation: request.operation,
             configure_certificate: matches!(
-                operation,
+                request.operation,
                 SwitchMaintenanceOperation::ReconfigureCertificate
             )
             .then_some(ConfigureCertificateState::Start),
+            request: Some(request),
         }
     }
 }
@@ -722,6 +729,7 @@ mod tests {
             "maintenance: power on" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::PowerOn,
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"poweron"}}"#.to_string(),
@@ -731,6 +739,7 @@ mod tests {
             "maintenance: power off" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::PowerOff,
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"#
@@ -741,6 +750,7 @@ mod tests {
             "maintenance: reset" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::Reset,
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"reset"}}"#.to_string(),
@@ -750,6 +760,7 @@ mod tests {
             "maintenance: reconfigure certificate" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::ReconfigureCertificate,
+                    request: None,
                     configure_certificate: Some(ConfigureCertificateState::Start),
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"reconfigurecertificate"},"configure_certificate":"Start"}"#
@@ -866,6 +877,7 @@ mod tests {
             "maintenance: reset" {
                 r#"{"state":"maintenance","operation":{"operation":"reset"}}"# => Yields(SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::Reset,
+                    request: None,
                     configure_certificate: None,
                 }),
             }

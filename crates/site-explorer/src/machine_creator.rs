@@ -633,6 +633,13 @@ impl MachineCreator {
 
         txn.commit().await?;
 
+        tracing::info!(
+            host_bmc_ip_address = %explored_host.host_bmc_ip,
+            %host_machine_id,
+            dpu_count = managed_host.explored_host.dpus.len(),
+            "Created managed host from explored endpoint"
+        );
+
         Ok(true)
     }
 

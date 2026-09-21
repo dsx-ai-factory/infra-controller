@@ -437,7 +437,7 @@ func newDescriptorOnlyActivities(
 
 func newActivityTestTarget() common.Target {
 	return common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 }

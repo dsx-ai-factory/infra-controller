@@ -29,12 +29,16 @@ use carbide_rack::test_support::RmsSim;
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::TestHarness;
+use carbide_uuid::machine::MachineInterfaceId;
+use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use component_manager::compute_tray_manager::Backend as ComputeBackend;
 use component_manager::config::ComponentManagerConfig;
 use component_manager::nv_switch_manager::Backend as NvSwitchBackend;
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
 use db::power_shelf as db_power_shelf;
+use mac_address::MacAddress;
+use model::allocation_type::AllocationType;
 use model::power_shelf::{PowerShelf, PowerShelfControllerState};
 use model::rack_type::RackProfileConfig;
 use model::test_support::rms_rack_profiles;
@@ -115,7 +119,7 @@ impl ControllerEnv {
                 PowerShelfStateHandlerServices {
                     db_pool: pool.clone(),
                     component_manager: Some(component_manager),
-                    credential_manager: Arc::new(TestCredentialManager::default()),
+                    credential_manager: credential_manager.clone(),
                     per_object_metrics_registry: per_object_metrics_registry.clone(),
                     rack_firmware_reprovisioning_enabled: false,
                     redfish_client_pool: redfish_sim.clone(),
@@ -171,6 +175,49 @@ pub(super) fn services_without_component_manager(
         ),
         bmc_rotation_enabled: false,
     }
+}
+
+/// Link a `Bmc` machine interface to the power shelf so its load query resolves
+/// `bmc_info` with an addressable PMC endpoint. Returns the PMC MAC.
+pub(super) async fn seed_pmc_endpoint(
+    pool: &PgPool,
+    power_shelf_id: PowerShelfId,
+) -> Result<MacAddress, Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+
+    let segment_id: NetworkSegmentId = sqlx::query_scalar(
+        "INSERT INTO network_segments (name, version, network_segment_type)
+         VALUES ($1, 'V1-T0', 'tenant') RETURNING id",
+    )
+    .bind(format!("pmc-{power_shelf_id}"))
+    .fetch_one(txn.as_mut())
+    .await?;
+
+    let pmc_mac = "02:00:00:00:0b:01";
+    let bmc_interface_id: MachineInterfaceId = sqlx::query_scalar(
+        "INSERT INTO machine_interfaces
+             (power_shelf_id, association_type, segment_id, mac_address,
+              primary_interface, hostname, interface_type)
+         VALUES ($1, 'PowerShelf', $2, $3::macaddr, false, 'pmc', 'Bmc')
+         RETURNING id",
+    )
+    .bind(power_shelf_id)
+    .bind(segment_id)
+    .bind(pmc_mac)
+    .fetch_one(txn.as_mut())
+    .await?;
+
+    db::machine_interface_address::insert(
+        txn.as_mut(),
+        bmc_interface_id,
+        "10.30.40.50".parse()?,
+        AllocationType::Dhcp,
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    Ok(pmc_mac.parse()?)
 }
 
 pub(super) async fn load_power_shelf(pool: &PgPool, id: &PowerShelfId) -> PowerShelf {

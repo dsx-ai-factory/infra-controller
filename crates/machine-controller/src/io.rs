@@ -350,7 +350,7 @@ impl StateControllerIO for MachineStateControllerIO {
                 "bootconfiguring",
                 ready_boot_config_state_name(boot_config_state),
             ),
-            ManagedHostState::Maintenance { operation } => {
+            ManagedHostState::Maintenance { operation, .. } => {
                 let op = match operation {
                     MachineMaintenanceOperation::PowerOn => "power_on",
                     MachineMaintenanceOperation::PowerOff => "power_off",

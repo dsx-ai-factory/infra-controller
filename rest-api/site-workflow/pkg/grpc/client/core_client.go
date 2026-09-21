@@ -269,16 +269,21 @@ func (cac *CoreGrpcAtomicClient) SwapClient(newClient *CoreGrpcClient) *CoreGrpc
 	// Atomically replace the current client with the new one and return the old client.
 	oldClientInterface := cac.value.Swap(newClient)
 
+	// Increment the version number. Every successful swap advances it, including the
+	// initial creation, where there is no previous client to hand back.
+	cac.version.Add(1)
+
+	if oldClientInterface == nil {
+		return nil
+	}
+
 	// Type assert the returned value to *CoreGrpcClient.
-	// This should always succeed if the correct type was stored initially.
+	// This should always succeed once a client has been stored.
 	oldClient, ok := oldClientInterface.(*CoreGrpcClient)
 	if !ok {
 		log.Error().Msg("SwapClient: Type assertion failed for the old client")
 		return nil
 	}
-
-	// Increment the version number
-	cac.version.Add(1)
 
 	return oldClient
 }

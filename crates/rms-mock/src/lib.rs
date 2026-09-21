@@ -40,11 +40,13 @@ mod service_v1;
 mod service_v2;
 
 pub use config::RmsMockConfig;
-pub use inventory::{RmsInventory, SimNode, SimNodeKind};
+pub use inventory::{RmsInventory, SimNode, SimNodeKind, SimPowerState};
 /// The V1 protobuf module. Aliased because both service impls refer to it
 /// constantly, and because `rack_manager_v2` defines same-named messages that
 /// must not be confused with these.
 pub(crate) use librms::protos::rack_manager as rms;
+/// The power operation an RMS request names, handed to the host as is.
+pub use librms::protos::rack_manager::PowerOperation;
 /// The V2 protobuf module.
 pub(crate) use librms::protos::rack_manager_v2 as rms_v2;
 pub use router::router;
@@ -79,19 +81,76 @@ impl RmsMock {
 /// An [`RmsInventory`] whose node set is fixed at construction.
 ///
 /// Every `nodes()` call returns the same shared snapshot; nothing is rebuilt
-/// or observed after construction. Tests and hosts with nothing to report use
-/// this in place of a live inventory.
-pub struct StaticInventory(std::sync::Arc<[SimNode]>);
+/// or observed after construction. Power is the one thing that moves: every
+/// device starts on, an operation the simulated BMC would refuse is refused
+/// here too, and a restart has completed by the time it is read because
+/// nothing here keeps time. Tests and hosts with nothing to report use this in
+/// place of a live inventory.
+pub struct StaticInventory {
+    nodes: std::sync::Arc<[SimNode]>,
+    power: std::sync::Mutex<std::collections::HashMap<mac_address::MacAddress, SimPowerState>>,
+}
 
 impl StaticInventory {
     /// Wraps a fixed set of nodes; the snapshot is shared, never rebuilt.
     pub fn new(nodes: std::sync::Arc<[SimNode]>) -> Self {
-        Self(nodes)
+        Self {
+            nodes,
+            power: std::sync::Mutex::default(),
+        }
+    }
+
+    fn has_bmc(&self, bmc_mac: mac_address::MacAddress) -> eyre::Result<()> {
+        eyre::ensure!(
+            self.nodes.iter().any(|n| n.bmc_mac == Some(bmc_mac)),
+            "no simulated device has BMC MAC {bmc_mac}"
+        );
+        Ok(())
     }
 }
 
 impl RmsInventory for StaticInventory {
     fn nodes(&self) -> std::sync::Arc<[SimNode]> {
-        std::sync::Arc::clone(&self.0)
+        std::sync::Arc::clone(&self.nodes)
+    }
+
+    fn power_state(&self, bmc_mac: mac_address::MacAddress) -> eyre::Result<SimPowerState> {
+        self.has_bmc(bmc_mac)?;
+        Ok(lock(&self.power)
+            .get(&bmc_mac)
+            .copied()
+            .unwrap_or(SimPowerState::On))
+    }
+
+    fn set_power(&self, bmc_mac: mac_address::MacAddress, op: PowerOperation) -> eyre::Result<()> {
+        let power = match (op, self.power_state(bmc_mac)?) {
+            (PowerOperation::Unspecified, _) => eyre::bail!("power operation is unspecified"),
+            (PowerOperation::On | PowerOperation::ForceOn, SimPowerState::On) => {
+                eyre::bail!("cannot power on machine, it is already on")
+            }
+            (
+                PowerOperation::Off
+                | PowerOperation::ForceOff
+                | PowerOperation::GracefulShutdown
+                | PowerOperation::GracefulRestart
+                | PowerOperation::ForceRestart,
+                SimPowerState::Off,
+            ) => eyre::bail!("cannot power off machine, it is already off"),
+            (PowerOperation::On | PowerOperation::ForceOn, SimPowerState::Off) => SimPowerState::On,
+            (
+                PowerOperation::Off | PowerOperation::ForceOff | PowerOperation::GracefulShutdown,
+                SimPowerState::On,
+            ) => SimPowerState::Off,
+            // Nothing here keeps time, so a restart has completed by the time
+            // it is read; a power cycle is the one restart allowed from off.
+            (
+                PowerOperation::Reset
+                | PowerOperation::GracefulRestart
+                | PowerOperation::ForceRestart,
+                _,
+            ) => SimPowerState::On,
+        };
+        lock(&self.power).insert(bmc_mac, power);
+        Ok(())
     }
 }

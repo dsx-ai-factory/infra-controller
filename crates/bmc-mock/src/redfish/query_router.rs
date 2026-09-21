@@ -397,7 +397,7 @@ mod tests {
     /// `Created` of the Dell profile's seeded entry.
     const SEED: &str = "2026-02-12T02:06:58Z";
 
-    fn dell_router() -> (Router, BmcState) {
+    fn dell_router() -> (Router, BmcState<NoopCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
             Arc::new(NoopCallbacks),

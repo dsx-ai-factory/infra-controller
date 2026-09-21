@@ -5,6 +5,7 @@ package component
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -36,6 +37,28 @@ type Component struct {
 	LeakStatus types.LeakStatus `json:"leak_status,omitempty"`
 
 	bmcMacToID map[string]bmcID
+}
+
+// ManagementMAC returns the component's deterministic host-controller MAC.
+// Flow models the compute BMC, switch BMC, and power-shelf PMC as Host BMCs;
+// DPU controller MACs are intentionally excluded from component operations.
+func (c *Component) ManagementMAC() string {
+	if c == nil {
+		return ""
+	}
+
+	macs := make([]string, 0, len(c.BmcsByType[devicetypes.BMCTypeHost]))
+	for _, controller := range c.BmcsByType[devicetypes.BMCTypeHost] {
+		if mac := controller.MAC.String(); mac != "" {
+			macs = append(macs, mac)
+		}
+	}
+	if len(macs) == 0 {
+		return ""
+	}
+
+	slices.Sort(macs)
+	return macs[0]
 }
 
 type bmcID struct {

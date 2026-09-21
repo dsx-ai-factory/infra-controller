@@ -109,7 +109,9 @@ pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
 
-pub use conditional_write::{ConditionalWrite, ControllerStateNotCurrent};
+pub use conditional_write::{
+    ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

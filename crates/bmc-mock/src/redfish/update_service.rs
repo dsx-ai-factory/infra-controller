@@ -86,7 +86,7 @@ use serde_json::json;
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
 use crate::redfish::Builder;
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
 pub(crate) fn resource<'a>() -> redfish::Resource<'a> {
     redfish::Resource {
@@ -111,18 +111,21 @@ pub(crate) fn simple_update_target() -> String {
 /// Also serves as the `MultipartHttpPushUri` advertised to GB200/GB300/Lenovo.
 pub(crate) const MULTIPART_UPLOAD_PATH: &str = "/redfish/v1/UpdateService/upload";
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     const FW_INVENTORY_ID: &str = "{fw_inventory_id}";
-    r.route(&resource().odata_id, get(get_update_service))
-        .route(&simple_update_target(), post(update_firmware_simple_update))
-        .route(MULTIPART_UPLOAD_PATH, post(update_firmware_multipart))
+    r.route(&resource().odata_id, get(get_update_service::<C>))
+        .route(
+            &simple_update_target(),
+            post(update_firmware_simple_update::<C>),
+        )
+        .route(MULTIPART_UPLOAD_PATH, post(update_firmware_multipart::<C>))
         .route(
             &redfish::software_inventory::firmware_inventory_collection().odata_id,
-            get(get_firmware_inventory_collection),
+            get(get_firmware_inventory_collection::<C>),
         )
         .route(
             &redfish::software_inventory::firmware_inventory_resource(FW_INVENTORY_ID).odata_id,
-            get(get_firmware_inventory_resource),
+            get(get_firmware_inventory_resource::<C>),
         )
 }
 
@@ -550,7 +553,7 @@ struct SimpleUpdateRequest {
 }
 
 /// Advertise only the push URI(s) that this platform's BMC actually supports.
-async fn get_update_service(State(state): State<BmcState>) -> Response {
+async fn get_update_service<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let us = &state.update_service_state;
     let mut b = builder(&resource())
         .firmware_inventory(&redfish::software_inventory::firmware_inventory_collection());
@@ -561,8 +564,8 @@ async fn get_update_service(State(state): State<BmcState>) -> Response {
 }
 
 /// Redfish SimpleUpdate (Dell iDRAC, BFB/DPU path).
-async fn update_firmware_simple_update(
-    State(state): State<BmcState>,
+async fn update_firmware_simple_update<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     body: Option<axum::Json<SimpleUpdateRequest>>,
 ) -> Response {
     let targets = body.map(|b| b.0.targets).unwrap_or_default();
@@ -591,8 +594,8 @@ async fn update_firmware_simple_update(
 }
 
 /// Multipart upload (AMI `UpdateService/upload`, GB200/GB300 `MultipartHttpPushUri`).
-async fn update_firmware_multipart(
-    State(state): State<BmcState>,
+async fn update_firmware_multipart<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     body: axum::extract::Request,
 ) -> Response {
     discard_body(body.into_body()).await;
@@ -626,7 +629,9 @@ fn upload_response(
     response
 }
 
-async fn get_firmware_inventory_collection(State(state): State<BmcState>) -> Response {
+async fn get_firmware_inventory_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+) -> Response {
     let ids = state.update_service_state.all_firmware_inventory_ids();
     let members = ids
         .iter()
@@ -637,8 +642,8 @@ async fn get_firmware_inventory_collection(State(state): State<BmcState>) -> Res
         .into_ok_response()
 }
 
-async fn get_firmware_inventory_resource(
-    State(state): State<BmcState>,
+async fn get_firmware_inventory_resource<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(fw_inventory_id): Path<String>,
 ) -> Response {
     state
@@ -1026,7 +1031,10 @@ mod tests {
     fn make_router(
         bmc_current: &str,
         bmc_desired: &str,
-    ) -> (axum::Router, crate::bmc_state::BmcState) {
+    ) -> (
+        axum::Router,
+        crate::bmc_state::BmcState<crate::test_support::NoopCallbacks>,
+    ) {
         make_router_with_uefi(bmc_current, bmc_desired, None, None)
     }
 
@@ -1035,7 +1043,10 @@ mod tests {
         bmc_desired: &str,
         uefi_current: Option<&str>,
         uefi_desired: Option<&str>,
-    ) -> (axum::Router, crate::bmc_state::BmcState) {
+    ) -> (
+        axum::Router,
+        crate::bmc_state::BmcState<crate::test_support::NoopCallbacks>,
+    ) {
         let info = host_info(HardwareType::GenericAmi);
         let info = if let crate::MachineInfo::Host(mut h) = info {
             h.initial_host_firmware = Some(HostFirmwareVersions {

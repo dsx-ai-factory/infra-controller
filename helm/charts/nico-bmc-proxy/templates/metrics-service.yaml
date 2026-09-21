@@ -8,6 +8,7 @@ metadata:
     app: {{ include "nico-bmc-proxy.name" . }}
     app.kubernetes.io/metrics: {{ include "nico-bmc-proxy.name" . }}
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "nico-bmc-proxy.selectorLabels" . | nindent 4 }}
   ports:

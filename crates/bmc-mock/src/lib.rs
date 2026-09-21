@@ -66,6 +66,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+pub mod actor;
 mod ipmi;
 pub mod ipmi_sim;
 pub mod libvirt;
@@ -253,7 +254,8 @@ impl fmt::Display for MockPowerState {
 // Simulate a 5-second power cycle
 pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 
-pub trait Callbacks: std::fmt::Debug + Send + Sync {
+/// Backend operations for one BMC, selected by the router's concrete callback type.
+pub trait Callbacks: std::fmt::Debug + Send + Sync + 'static {
     fn get_power_state(&self) -> MockPowerState;
     fn send_power_command(&self, reset_type: SystemPowerControl)
     -> Result<(), SetSystemPowerError>;

@@ -17,6 +17,8 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+namespace: nico-system
+
 generatorOptions:
   disableNameSuffixHash: true
 
@@ -138,21 +140,30 @@ patches:
       version: v1
 
 configMapGenerator:
+  - name: nico-dhcp6-config
+    namespace: nico-system
+    files:
+      - kea_config6.json=files/kea-dhcp6-carbide.conf
   - name: nico-dhcp-config
+    namespace: nico-system
     files:
       - files/kea_config.json
   - name: nico-api-site-config-files
+    namespace: nico-system
     behavior: merge
     files:
       - files/nico-api/nico-api-site-config.toml
       - files/nico-api/admin_root_cert_pem
   - name: nico-dns-config
+    namespace: nico-system
     literals:
       - "NICO_API=https://nico-api.nico-system.svc.cluster.local:1079"
   - name: nico-pxe-env-config
+    namespace: nico-system
     literals:
       - "NICO_STATIC_PXE_URL=http://nico-static-pxe.nico"
   - name: unbound-local-config
+    namespace: nico-system
     behavior: merge
     files:
       # Set up DNS records
@@ -160,5 +171,6 @@ configMapGenerator:
       # Set up forwarders
       - forwarders.conf=files/unbound/forwarders.conf
   - name: nico-web-api-hostname
+    namespace: nico-system
     literals:
       - "hostname=api-ENVIORNMENT_NAME.SITE_DOMAIN_NAME"

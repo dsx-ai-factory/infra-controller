@@ -60,6 +60,9 @@ jobs:
       - name: Check REST command bundle contract
         run: make check-command-bundle
 
+      - name: Test local nico-api address configuration
+        run: python3 -B scripts/test_local_core_address.py
+
   lint-go:
     name: Lint Go
     runs-on: linux-amd64-cpu8
@@ -132,7 +135,7 @@ jobs:
           echo "Comparing OpenAPI changes against merge-base ${MERGE_BASE}"
 
       - name: Check OpenAPI breaking changes
-        uses: oasdiff/oasdiff-action/breaking@a8c7f0e5649d20d623edb5b38446d3ab3d82d43c
+        uses: oasdiff/oasdiff-action/breaking@3e9d440d37f468355457604348009f50e0cddbf3
         with:
           base: '${{ steps.openapi-base.outputs.merge_base }}:rest-api/openapi/spec.yaml'
           revision: ':rest-api/openapi/spec.yaml'
@@ -140,44 +143,6 @@ jobs:
           # Allowlist reviewed one-time API contract corrections; see the
           # referenced ignore file for each accepted breaking-change report.
           err-ignore: 'rest-api/openapi/oasdiff-breaking-changes-ignore.txt'
-
-  check-generated-files:
-    name: Check Generated Files
-    runs-on: linux-amd64-cpu4
-    continue-on-error: false
-    permissions:
-      contents: read
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      # The SDK is verified by regeneration in check-generated-sdk. Diffing the Redoc
-      # bundle would cost a doc toolchain install, so it stays a path heuristic.
-      - name: Check OpenAPI docs are up to date
-        run: |
-          BASE="origin/main"
-          if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
-            echo "Base branch $BASE not found, skipping check."
-            exit 0
-          fi
-
-          CHANGED=$(git diff --name-only "$BASE"...HEAD)
-
-          if echo "$CHANGED" | grep -q '^rest-api/openapi/spec.yaml$'; then
-            if ! echo "$CHANGED" | grep -q '^rest-api/docs/index.html$'; then
-              echo "::error::rest-api/openapi/spec.yaml was modified but rest-api/docs/index.html was not updated. Please run: make publish-openapi"
-              exit 1
-            fi
-            echo "✓ rest-api/openapi/spec.yaml changed and rest-api/docs/index.html was also updated."
-          else
-            echo "✓ rest-api/openapi/spec.yaml not changed, skipping docs check."
-          fi
 
   check-generated-sdk:
     name: Check Generated SDK

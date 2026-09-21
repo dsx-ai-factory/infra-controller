@@ -18,7 +18,8 @@
 use std::net::IpAddr;
 
 use carbide_uuid::rack::RackId;
-use clap::{ArgGroup, Parser};
+use clap::error::ErrorKind;
+use clap::{ArgGroup, CommandFactory, Parser};
 use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -132,22 +133,63 @@ pub(crate) struct Args {
     bmc_retain_credentials: Option<bool>,
 }
 
-impl TryFrom<Args> for rpc::forge::ExpectedPowerShelf {
-    type Error = CarbideCliError;
-
-    fn try_from(args: Args) -> Result<Self, Self::Error> {
-        match (&args.bmc_mac_address, &args.id) {
+impl Args {
+    pub(super) fn validate(&self) -> Result<(), clap::Error> {
+        let error = |kind, message: &str| {
+            Self::command()
+                .bin_name("nico-admin-cli expected-power-shelf update")
+                .error(kind, message)
+        };
+        match (&self.bmc_mac_address, &self.id) {
             (Some(_), Some(_)) => {
-                return Err(CarbideCliError::ChooseOneError("--bmc-mac-address", "--id"));
+                return Err(error(
+                    ErrorKind::ArgumentConflict,
+                    "cannot specify both --bmc-mac-address and --id; provide only one",
+                ));
             }
             (None, None) => {
-                return Err(CarbideCliError::RequireOneError(
-                    "--bmc-mac-address",
-                    "--id",
+                return Err(error(
+                    ErrorKind::MissingRequiredArgument,
+                    "must specify either --bmc-mac-address or --id",
                 ));
             }
             _ => {}
         }
+        if self.host_name.is_some() {
+            return Err(error(
+                ErrorKind::ValueValidation,
+                "--host_name is not supported for expected power shelf updates; remove it from the command",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn update_mask(&self) -> Vec<String> {
+        [
+            (self.bmc_username.is_some(), "bmc_username"),
+            (self.bmc_password.is_some(), "bmc_password"),
+            (self.shelf_serial_number.is_some(), "shelf_serial_number"),
+            (self.bmc_ip_address.is_some(), "bmc_ip_address"),
+            (
+                self.bmc_retain_credentials.is_some(),
+                "bmc_retain_credentials",
+            ),
+            (self.rack_id.is_some(), "rack_id"),
+            (self.meta_name.is_some(), "metadata.name"),
+            (self.meta_description.is_some(), "metadata.description"),
+            (self.labels.is_some(), "metadata.labels"),
+        ]
+        .into_iter()
+        .filter(|(provided, _)| *provided)
+        .map(|(_, path)| path.to_string())
+        .collect()
+    }
+}
+
+impl TryFrom<Args> for rpc::forge::ExpectedPowerShelf {
+    type Error = CarbideCliError;
+
+    fn try_from(args: Args) -> Result<Self, Self::Error> {
         if args.bmc_username.is_none()
             && args.bmc_password.is_none()
             && args.shelf_serial_number.is_none()

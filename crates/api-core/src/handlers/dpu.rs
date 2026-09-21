@@ -238,18 +238,18 @@ async fn get_managed_host_network_config_inner(
                     })
             });
 
-    // If there is an instance, the state machine sets the host to tenant
-    // network. But if no interfaces are configured for this DPU, override
-    // and keep it on admin. This prevents the host from using the DPU at all.
-    let use_admin_network = snapshot.use_admin_network() || !dpu_has_tenant_interface_config;
-    let serves_tenant_network = !use_admin_network
-        && !matches!(
+    // Keep the initial network wait on Admin, including hosts whose stored mode
+    // was already changed by an older Core. DPUs without tenant interfaces
+    // also remain on Admin.
+    let use_admin_network = snapshot.use_admin_network()
+        || !dpu_has_tenant_interface_config
+        || matches!(
             snapshot.managed_state,
             ManagedHostState::Assigned {
                 instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
             }
         );
-    if serves_tenant_network {
+    if !use_admin_network {
         // Validate before rendering either network: rendering can allocate
         // loopbacks, which must follow the VPC/VNI locks taken by this check.
         super::tenant_prefix_overlap::validate_retained_host(api, &mut txn, &snapshot).await?;
@@ -318,15 +318,7 @@ async fn get_managed_host_network_config_inner(
 
     let tenant_interfaces = match &snapshot.instance {
         None => vec![],
-        // We don't support secondary DPU yet.
-        // If admin network is to be used for this managedhost, why to send old tenant data, which
-        // is just to be deleted.
-        // Waiting Instances also stay on Admin until their segments are ready.
-        Some(_instance) if !serves_tenant_network => {
-            // Should/Can we still query and return the NSG of the VPC so that
-            // policies can be configured on the DPU while interfaces are still coming up?
-            vec![]
-        }
+        Some(_) if use_admin_network => vec![],
         Some(instance) => {
             let interfaces = &instance.config.network.interfaces;
             let Some(network_segment_id) = interfaces[0].network_segment_id else {

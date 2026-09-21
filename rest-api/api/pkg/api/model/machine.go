@@ -352,7 +352,9 @@ type APIMachine struct {
 	Labels APILabels `json:"labels"`
 	// Status represents the status of the machine
 	Status string `json:"status"`
-	// IsUsableByTenant indicates whether the machine is usable by or currently in use by a tenant.
+	// IsUsableByTenant indicates whether the machine is usable by or currently in use
+	// by a tenant. It does not indicate that a Machine is available for Instance
+	// creation.
 	IsUsableByTenant bool `json:"isUsableByTenant"`
 	// StatusHistory is the history of statuses for the Machine
 	StatusHistory []APIStatusDetail `json:"statusHistory"`

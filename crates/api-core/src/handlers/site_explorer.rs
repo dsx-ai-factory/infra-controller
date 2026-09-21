@@ -36,7 +36,8 @@ pub(crate) async fn find_explored_endpoint_ids(
 ) -> Result<Response<::rpc::site_explorer::ExploredEndpointIdList>, Status> {
     log_request_data(&request);
 
-    let filter: model::site_explorer::ExploredEndpointSearchFilter = request.into_inner().into();
+    let filter: model::site_explorer::ExploredEndpointSearchFilter =
+        request.into_inner().try_into()?;
 
     let endpoint_ips = db::explored_endpoints::find_ips(&api.database_connection, filter).await?;
 
@@ -258,7 +259,8 @@ pub(crate) async fn clear_site_exploration_error(
     // report cleared above. Reset it to `Initial` here so clearing the error
     // actually retries preingestion instead of requiring a force-delete of the
     // endpoint. Non-failed states are left untouched.
-    if db::explored_endpoints::reset_failed_preingestion(bmc_ip, &mut txn).await? {
+    if let Applied(()) = db::explored_endpoints::reset_failed_preingestion(bmc_ip, &mut txn).await?
+    {
         tracing::info!(
             bmc_ip_address = %bmc_ip,
             "Reset failed preingestion to initial after clearing the site exploration error",

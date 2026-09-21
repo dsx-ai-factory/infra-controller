@@ -106,6 +106,50 @@ func TestFlowGrpcAtomicClient_GrpcServiceClient_ReturnsFlowAfterSwap(t *testing.
 	assert.Equal(t, expected, grpcServiceClient)
 }
 
+func TestFlowGrpcAtomicClient_SwapClient(t *testing.T) {
+	first := &FlowGrpcClient{}
+	second := &FlowGrpcClient{}
+
+	tests := []struct {
+		name string
+		// seed holds the clients swapped in before the call under test, so each
+		// case reaches its starting state without depending on another case.
+		seed        []*FlowGrpcClient
+		newClient   *FlowGrpcClient
+		wantOld     *FlowGrpcClient
+		wantVersion int64
+	}{
+		{
+			name: "test that the initial swap reports no previous client and still advances the version",
+			// Initial creation is the normal path rather than a failure, even though
+			// there is nothing to hand back.
+			newClient:   first,
+			wantOld:     nil,
+			wantVersion: 1,
+		},
+		{
+			name:        "test that a later swap returns the client it replaced",
+			seed:        []*FlowGrpcClient{first},
+			newClient:   second,
+			wantOld:     first,
+			wantVersion: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fgac := &FlowGrpcAtomicClient{
+				value: &atomic.Value{},
+			}
+			for _, seeded := range tt.seed {
+				fgac.SwapClient(seeded)
+			}
+			assert.Equal(t, tt.wantOld, fgac.SwapClient(tt.newClient))
+			assert.Equal(t, tt.wantVersion, fgac.Version())
+			assert.Equal(t, tt.newClient, fgac.GetClient())
+		})
+	}
+}
+
 func TestFlowAtomicClient_CheckCertificates(t *testing.T) {
 	// Generate files for MD5 hash testing
 	clientCertPath := "/tmp/flow_tls.crt"

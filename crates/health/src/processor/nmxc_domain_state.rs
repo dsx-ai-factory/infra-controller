@@ -77,6 +77,7 @@ impl NmxcDomainStateProcessor {
         let (successes, alerts) = match health {
             NmxControllerHealth::Healthy => (
                 vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::NmxControllerHealth,
                     target: None,
                 }],
@@ -85,6 +86,7 @@ impl NmxcDomainStateProcessor {
             NmxControllerHealth::Unhealthy | NmxControllerHealth::UnhealthyDbCorrupted => (
                 Vec::new(),
                 vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::NmxControllerHealth,
                     target: None,
                     message: format!("NMX-C controller health is {}", health.as_str_name()),

@@ -28,7 +28,10 @@ use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
-use db::{DatabaseError, ObjectColumnFilter, WithTransaction, network_security_group};
+use db::instance::InstanceExtensionServicesNotCurrent;
+use db::{
+    ConditionalWrite, DatabaseError, ObjectColumnFilter, WithTransaction, network_security_group,
+};
 use futures_util::FutureExt;
 use health_report::{
     HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode,
@@ -2053,7 +2056,7 @@ async fn update_instance_extension_services_config(
     // A service being detached remains durably represented with `removed:
     // true`, so the merged config references every service the instance is
     // attached to before and after this update.
-    let new_extension_services_config =
+    let mut new_extension_services_config =
         current.calculate_new_extension_services_config(extension_services);
     let service_ids = new_extension_services_config
         .service_configs
@@ -2064,6 +2067,11 @@ async fn update_instance_extension_services_config(
 
     // Resolve the services while holding the service and version row locks.
     let (services, versions) = load_extension_services(txn, &service_ids).await?;
+    for config in &mut new_extension_services_config.service_configs {
+        if let Some(service) = services.get(&config.service_id) {
+            config.dpu_target = service.dpu_target;
+        }
+    }
     let existing_active_service_ids = current
         .active_services()
         .into_iter()
@@ -2073,22 +2081,39 @@ async fn update_instance_extension_services_config(
     validate_instance_extension_services(
         mh_snapshot.host_snapshot.id,
         mh_snapshot.host_snapshot.config.dpf.used_for_ingestion,
+        mh_snapshot
+            .host_snapshot
+            .primary_attached_dpu_machine_id()
+            .is_some_and(|primary_dpu| {
+                mh_snapshot
+                    .dpu_snapshots
+                    .iter()
+                    .any(|dpu| dpu.id == primary_dpu)
+            }),
         &new_extension_services_config,
         &services,
         &versions,
         &existing_active_service_ids,
     )?;
 
-    db::instance::update_extension_services_config(
+    match db::instance::update_extension_services_config(
         txn,
         instance.id,
         instance.extension_services_config_version,
+        current,
         &new_extension_services_config,
         true,
     )
-    .await?;
-
-    Ok(())
+    .await?
+    {
+        ConditionalWrite::Applied(()) => Ok(()),
+        ConditionalWrite::NotApplied(InstanceExtensionServicesNotCurrent) => {
+            Err(CarbideError::FailedPrecondition(format!(
+                "extension-service attachments for instance {} changed or the instance no longer exists; read the instance again before updating",
+                instance.id,
+            )))
+        }
+    }
 }
 
 /// Extracts the RPC representation of Instances from a ManagedHost snapshot

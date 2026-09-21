@@ -42,8 +42,8 @@ use sqlx::types::Json;
 use crate::db_read::DbReader;
 use crate::operating_system::{self, OperatingSystem as OsRow};
 use crate::{
-    BIND_LIMIT, ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder,
-    ObjectColumnFilter, instance_address,
+    BIND_LIMIT, ColumnInfo, ConditionalWrite, DatabaseError, DatabaseResult,
+    FilterableQueryBuilder, ObjectColumnFilter, instance_address,
 };
 
 #[derive(Copy, Clone)]
@@ -975,34 +975,54 @@ pub async fn delete_update_network_config_request(
     Ok(())
 }
 
+/// `InstanceExtensionServicesNotCurrent` means the instance is missing, its
+/// extension-service generation changed, or its attachment content changed.
+/// The conditional write does not distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstanceExtensionServicesNotCurrent;
+
+/// `update_extension_services_config` replaces attachments only when both
+/// their generation and content match the caller's snapshot.
+///
+/// `increment_version` advances the generation for a requested configuration
+/// change. Controller cleanup leaves it unchanged because it only removes
+/// attachments whose termination was already observed. Comparing
+/// `expected_config` also rejects snapshots taken before cleanup, without
+/// requesting another configuration generation.
+///
+/// Missing or changed snapshots return `NotApplied`; database failures return
+/// `Err`. The caller owns the surrounding transaction.
 pub async fn update_extension_services_config(
     txn: &mut PgConnection,
     instance_id: InstanceId,
     expected_version: ConfigVersion,
+    expected_config: &InstanceExtensionServicesConfig,
     new_config: &InstanceExtensionServicesConfig,
     increment_version: bool,
-) -> Result<(), DatabaseError> {
+) -> Result<ConditionalWrite<(), InstanceExtensionServicesNotCurrent>, DatabaseError> {
     let next_version = if increment_version {
         expected_version.increment()
     } else {
         expected_version
     };
 
-    let query = "UPDATE instances SET extension_services_config_version=$1, extension_services_config=$2::json
-        WHERE id=$3 AND extension_services_config_version=$4
+    let query = "UPDATE instances SET extension_services_config_version=$1, extension_services_config=$2::jsonb
+        WHERE id=$3 AND extension_services_config_version=$4 AND extension_services_config=$5::jsonb
         RETURNING id";
-    let query_result: Result<(InstanceId,), _> = sqlx::query_as(query)
+    let updated_id: Option<InstanceId> = sqlx::query_scalar(query)
         .bind(next_version)
         .bind(sqlx::types::Json(new_config))
         .bind(instance_id)
         .bind(expected_version)
-        .fetch_one(txn)
-        .await;
+        .bind(sqlx::types::Json(expected_config))
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
 
-    match query_result {
-        Ok((_instance_id,)) => Ok(()),
-        Err(e) => Err(DatabaseError::query(query, e)),
-    }
+    Ok(match updated_id {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(InstanceExtensionServicesNotCurrent),
+    })
 }
 
 /// Each `batch_persist` VALUES row binds this many parameters. Postgres caps

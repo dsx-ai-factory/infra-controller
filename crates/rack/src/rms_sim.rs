@@ -22,10 +22,17 @@ use std::time::Duration;
 
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use librms::{RackManagerError, RmsApi};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
+
+#[derive(Debug)]
+struct BlockedPowerStateCall {
+    entered: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
 
 /// RMS simulation for testing, similar to RedfishSim
 pub struct RmsSim {
+    blocked_power_state_call: Arc<Mutex<Option<BlockedPowerStateCall>>>,
     batch_get_node_device_info_delay: Arc<Mutex<Duration>>,
     fail_create_nodes: Arc<AtomicBool>,
     fail_inventory_get: Arc<AtomicBool>,
@@ -97,6 +104,7 @@ pub struct RmsSim {
 impl Default for RmsSim {
     fn default() -> Self {
         Self {
+            blocked_power_state_call: Arc::new(Mutex::new(None)),
             batch_get_node_device_info_delay: Arc::new(Mutex::new(Duration::ZERO)),
             fail_create_nodes: Arc::new(AtomicBool::new(false)),
             fail_inventory_get: Arc::new(AtomicBool::new(false)),
@@ -166,6 +174,7 @@ impl RmsSim {
 
     fn build_mock_client(&self) -> MockRmsClient {
         MockRmsClient {
+            blocked_power_state_call: self.blocked_power_state_call.clone(),
             batch_get_node_device_info_delay: self.batch_get_node_device_info_delay.clone(),
             fail_create_nodes: self.fail_create_nodes.clone(),
             fail_inventory_get: self.fail_inventory_get.clone(),
@@ -594,6 +603,19 @@ impl RmsSim {
             .push_back(response);
     }
 
+    /// Pauses the next power request after recording it. The receiver signals
+    /// arrival; sending or dropping the sender lets the request finish.
+    pub async fn block_next_batch_set_power_state(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, arrival) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut blocked = self.blocked_power_state_call.lock().await;
+        assert!(blocked.is_none(), "a power-state blocker is already armed");
+        *blocked = Some(BlockedPowerStateCall { entered, resume });
+        (arrival, release)
+    }
+
     /// Snapshot the recorded `BatchSetPowerState` requests, in
     /// the order they were received.
     pub async fn submitted_batch_set_power_state_requests(
@@ -608,6 +630,7 @@ impl RmsSim {
 
 #[derive(Debug, Clone)]
 pub struct MockRmsClient {
+    blocked_power_state_call: Arc<Mutex<Option<BlockedPowerStateCall>>>,
     batch_get_node_device_info_delay: Arc<Mutex<Duration>>,
     fail_create_nodes: Arc<AtomicBool>,
     fail_inventory_get: Arc<AtomicBool>,
@@ -793,6 +816,12 @@ impl RmsApi for MockRmsClient {
             .lock()
             .await
             .push(cmd);
+
+        let blocked = self.blocked_power_state_call.lock().await.take();
+        if let Some(blocked) = blocked {
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
 
         self.queued_batch_set_power_state_responses
             .lock()

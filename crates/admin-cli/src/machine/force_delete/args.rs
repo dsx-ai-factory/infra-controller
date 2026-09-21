@@ -39,7 +39,7 @@ suppressions, and retained boot targets):
 pub(crate) struct Args {
     #[clap(
         long,
-        help = "UUID, IPv4, MAC or hostnmame of the host or DPU machine to delete"
+        help = "UUID, IPv4, MAC or hostname of the host or DPU machine to delete"
     )]
     pub(super) machine: String,
 

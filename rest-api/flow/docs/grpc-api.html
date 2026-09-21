@@ -3330,6 +3330,14 @@ every firmware sub-part supported by that component. </p></td>
                   <td><p>Bypasses the component readiness gate when the task executes. </p></td>
                 </tr>
 
+                <tr>
+                  <td>override_version_check</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p>Overrides firmware version-based checks when the selected component
+backend applies the update. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -7884,6 +7892,16 @@ hardware. The bypass is recorded in the server log. </p></td>
                   <td><p>Optional, write-only authentication data for firmware downloads. It is
 not supported for DPU-only updates or by the legacy NICo compute
 firmware controller. </p></td>
+                </tr>
+
+                <tr>
+                  <td>override_version_check</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p>Overrides firmware version-based checks when deciding whether to apply
+the update. This allows same-version reapplication and downgrade when
+the selected component backend supports those operations. It does not
+bypass readiness checks or state-controller routing. </p></td>
                 </tr>
 
             </tbody>

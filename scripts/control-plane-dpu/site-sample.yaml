@@ -25,13 +25,16 @@ fnn:
   commonSiteControllerRouteTarget: 50100
   commonAdminNetworkTarget: 50400
 
-
-# Optional: additional EVPN route-targets to import in the DPU startup config.
-# Use this for any site-specific targets (e.g. infra egress, jumphosts, UFM, tenants).
-# These are appended after the 3 mandatory targets above, before 'auto'.
-#routeTargetsToImport:
-#   datacenterAsn:xxx: {}   # Jumphosts
-#   datacenterAsn:xxx: {}   # BMCs for site controllers
+  # Optional: additional EVPN route-targets to import in the DPU startup config.
+  # Use this for any site-specific targets (e.g. infra egress, jumphosts, UFM, tenants).
+  # These are appended after the 3 mandatory targets above, before 'auto'.
+  # KEEP THIS KEY INSIDE THE fnn BLOCK, indented like the keys above. At the top
+  # level of the file the build rejects it ("Unsupported field in site config
+  # (top level)") and it would not be rendered into startup.yaml.
+  # Write each key as the full numeric target <asn>:<n>; nothing is substituted.
+  #routeTargetsToImport:
+  #  65034:101: {}    # Jumphosts
+  #  65034:1003: {}   # Power shelves
 
 # If you do not know the mac address of the site controller nodes, use aa:aa:aa:aa:aa:aa.
 # post-power-cycle.sh will detect the actual value and use it in netplan.

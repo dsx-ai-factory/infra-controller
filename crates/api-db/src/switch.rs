@@ -500,18 +500,24 @@ pub async fn set_switch_maintenance_requested(
     Ok(())
 }
 
+/// Clears only the maintenance request that the controller completed.
+/// A missing switch or a different pending request returns `NotApplied`.
 pub async fn clear_switch_maintenance_requested(
     txn: &mut PgConnection,
     switch_id: SwitchId,
-) -> DatabaseResult<()> {
-    let query =
-        "UPDATE switches SET switch_maintenance_requested = NULL WHERE id = $1 RETURNING id";
-    sqlx::query_as::<_, SwitchId>(query)
+    request: &SwitchMaintenanceRequest,
+) -> DatabaseResult<crate::ConditionalWrite<(), crate::MaintenanceRequestNotCurrent>> {
+    let query = "UPDATE switches SET switch_maintenance_requested = NULL WHERE id = $1 AND switch_maintenance_requested = $2 RETURNING id";
+    let cleared = sqlx::query_as::<_, SwitchId>(query)
         .bind(switch_id)
-        .fetch_one(txn)
+        .bind(sqlx::types::Json(request))
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::new("clear_switch_maintenance_requested", e))?;
-    Ok(())
+    Ok(match cleared {
+        Some(_) => crate::ConditionalWrite::Applied(()),
+        None => crate::ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent),
+    })
 }
 
 /// Sets firmware_upgrade_status on the switch. Call from any state machine or service to report

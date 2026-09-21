@@ -1311,6 +1311,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
     let extension_service1 = env
         .api
         .create_dpu_extension_service(tonic::Request::new(CreateDpuExtensionServiceRequest {
+            dpu_target: None,
             service_id: None,
             service_name: "test1".to_string(),
             service_type: DpuExtensionServiceType::KubernetesPod as i32,
@@ -1333,6 +1334,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
     let extension_service2 = env
         .api
         .create_dpu_extension_service(tonic::Request::new(CreateDpuExtensionServiceRequest {
+            dpu_target: None,
             service_id: None,
             service_name: "test2".to_string(),
             service_type: DpuExtensionServiceType::KubernetesPod as i32,

@@ -184,7 +184,7 @@ func (i *ipamer) AcquireSpecificChildPrefix(ctx context.Context, parentCidr, chi
 	})
 }
 
-// acquireChildPrefixInternal will return a Prefix with a smaller length from the given Prefix.
+// acquireChildPrefixInternal reserves a subnet within an existing prefix.
 func (i *ipamer) acquireChildPrefixInternal(ctx context.Context, parentCidr, childCidr string, length int) (*Prefix, error) {
 	specificChildRequest := childCidr != ""
 	var childprefix netip.Prefix
@@ -201,6 +201,9 @@ func (i *ipamer) acquireChildPrefixInternal(ctx context.Context, parentCidr, chi
 		if err != nil {
 			return nil, err
 		}
+		// The containing prefix tracks reserved subnets by CIDR. Use the network
+		// CIDR so release updates the same entry in `availableChildPrefixes`.
+		childprefix = childprefix.Masked()
 		length = childprefix.Bits()
 	}
 	if ipprefix.Bits() >= length {

@@ -17,9 +17,9 @@
 
 //! Response builders.
 //!
-//! A node the request names but no simulated device answers for is a per-node
-//! failure: its result says why, it counts towards `failed_nodes`, and the
-//! batch fails.
+//! A node the request names but no simulated device answers for, or that
+//! the host refuses, is a per-node failure: its result says why, it counts
+//! towards `failed_nodes`, and the batch fails.
 
 use crate::resolve::NodeRef;
 use crate::rms;
@@ -27,34 +27,51 @@ use crate::rms;
 /// The per-node error for a node no simulated device answers for.
 pub(crate) const UNMATCHED_NODE: &str = "no simulated device matches this node";
 
-/// How a batch over resolved nodes went: every matched node succeeded and
-/// every unmatched one failed.
+/// How each node in a batch fared: the echoed node id and, on failure, why.
+pub(crate) type NodeResult<'a> = (&'a str, Result<(), String>);
+
+/// Every matched node succeeded and every unmatched one failed.
+pub(crate) fn matched_or_not<'a>(refs: &[NodeRef<'a>]) -> Vec<NodeResult<'a>> {
+    refs.iter()
+        .map(|r| {
+            let outcome = if r.matched() {
+                Ok(())
+            } else {
+                Err(UNMATCHED_NODE.to_owned())
+            };
+            (r.node_id, outcome)
+        })
+        .collect()
+}
+
+/// How a batch went, derived from its per-node results.
 pub(crate) struct BatchOutcome {
     pub(crate) status: rms::ReturnCode,
-    /// Names the nodes that were not found; empty on success.
+    /// Names each failed node and its reason; empty on success.
     pub(crate) message: String,
     pub(crate) stats: rms::NodeOperationStats,
 }
 
 impl BatchOutcome {
-    pub(crate) fn of(refs: &[NodeRef<'_>]) -> Self {
-        let unmatched: Vec<&str> = refs
+    pub(crate) fn of(results: &[NodeResult<'_>]) -> Self {
+        let failures: Vec<String> = results
             .iter()
-            .filter(|r| !r.matched())
-            .map(|r| r.node_id)
+            .filter_map(|(node_id, outcome)| {
+                outcome
+                    .as_ref()
+                    .err()
+                    .map(|reason| format!("{node_id}: {reason}"))
+            })
             .collect();
-        let total = refs.len() as u32;
-        let failed = unmatched.len() as u32;
+        let total = results.len() as u32;
+        let failed = failures.len() as u32;
 
-        let (status, message) = if unmatched.is_empty() {
+        let (status, message) = if failures.is_empty() {
             (rms::ReturnCode::Success, String::new())
         } else {
             (
                 rms::ReturnCode::Failure,
-                format!(
-                    "{failed} of {total} nodes did not match any simulated device: {}",
-                    unmatched.join(", ")
-                ),
+                format!("{failed} of {total} nodes failed: {}", failures.join("; ")),
             )
         };
 
@@ -70,25 +87,21 @@ impl BatchOutcome {
     }
 }
 
-/// A batch over the given nodes.
-pub(crate) fn node_batch(refs: &[NodeRef<'_>], job_id: &str) -> rms::NodeBatchResponse {
-    let node_results = refs
+/// A batch with the given per-node results.
+pub(crate) fn node_batch(results: &[NodeResult<'_>], job_id: &str) -> rms::NodeBatchResponse {
+    let node_results = results
         .iter()
-        .map(|r| {
-            let (status, error_message) = if r.matched() {
-                (rms::ReturnCode::Success, String::new())
-            } else {
-                (rms::ReturnCode::Failure, UNMATCHED_NODE.to_owned())
-            };
-            rms::NodeOperationResult {
-                node_id: r.node_id.to_owned(),
-                status: status as i32,
-                error_message,
-            }
+        .map(|(node_id, outcome)| rms::NodeOperationResult {
+            node_id: (*node_id).to_owned(),
+            status: match outcome {
+                Ok(()) => rms::ReturnCode::Success as i32,
+                Err(_) => rms::ReturnCode::Failure as i32,
+            },
+            error_message: outcome.as_ref().err().cloned().unwrap_or_default(),
         })
         .collect();
 
-    let outcome = BatchOutcome::of(refs);
+    let outcome = BatchOutcome::of(results);
     rms::NodeBatchResponse {
         status: outcome.status as i32,
         message: outcome.message,

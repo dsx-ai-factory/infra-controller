@@ -25,6 +25,8 @@ use crate::machine::{HealthReportTemplates, get_health_report};
 use crate::rpc::ApiClient;
 
 pub(super) async fn reset_set(data: ResetSet, api_client: &ApiClient) -> CarbideCliResult<()> {
+    let mut alert_added_here = false;
+
     if let Some(update_message) = data.update_message.clone() {
         // A reset may be re-requested on a host that is already resetting, and
         // that host still carries the alert from the earlier attempt. Only add
@@ -49,11 +51,28 @@ pub(super) async fn reset_set(data: ResetSet, api_client: &ApiClient) -> Carbide
             api_client
                 .machine_insert_health_report_override(&data.machine, report.into(), false)
                 .await?;
+            alert_added_here = true;
         }
     }
 
     let req: ManagedHostResetRequest = (&data).into();
-    api_client.0.trigger_managed_host_reset(req).await?;
+    // The alert blocks allocation, so a refused reset must not leave behind one we added.
+    if let Err(error) = api_client.0.trigger_managed_host_reset(req).await {
+        if alert_added_here
+            && let Err(cleanup) = api_client
+                .machine_remove_health_report(
+                    data.machine,
+                    HOST_UPDATE_HEALTH_REPORT_SOURCE.to_string(),
+                )
+                .await
+        {
+            tracing::warn!(
+                machine_id = %data.machine, error = %cleanup,
+                "could not remove the HostUpdateInProgress alert added for this reset",
+            );
+        }
+        return Err(error.into());
+    }
 
     Ok(())
 }

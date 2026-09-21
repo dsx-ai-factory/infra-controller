@@ -1,0 +1,113 @@
+# IPv6 exposure is opt-in and must preserve operator-owned DNS startup and configuration.
+suite: Unbound IPv6 exposure
+templates: [service.yaml, service-monitor.yaml, deployment.yaml, configmap.yaml]
+set:
+  image.repository: example.invalid/unbound
+  image.tag: operator-selected
+  exporterImage.repository: example.invalid/exporter
+  exporterImage.tag: operator-selected
+tests:
+  # The existing combined Service keeps both DNS protocols and IPv4 metrics available.
+  - it: keeps the default DNS and metrics Service IPv4-only
+    template: service.yaml
+    asserts: &ipv4Service
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: SingleStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv4]
+      - equal: &combinedPorts
+          path: spec.ports
+          value:
+            - {name: dns-udp, port: 53, targetPort: dns-udp, protocol: UDP}
+            - {name: dns-tcp, port: 53, targetPort: dns-tcp, protocol: TCP}
+            - {name: unbound-metrics, port: 9167, targetPort: metrics, protocol: TCP}
+
+  # Old stored values need the same behavior without the new opt-in map.
+  - it: accepts absent IPv6 values without changing the Service
+    template: service.yaml
+    set:
+      ipv6: null
+    asserts: *ipv4Service
+
+  # Opting in changes Service exposure; the supplied images retain control of their listeners.
+  - it: adds dual-stack exposure without injecting startup commands or environment variables
+    template: service.yaml
+    set:
+      ipv6.enabled: true
+      serviceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: PreferDualStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv4]
+      - equal: *combinedPorts
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-unbound
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-unbound
+        template: service-monitor.yaml
+      - notExists:
+          path: spec.template.spec.containers[0].command
+        template: deployment.yaml
+      - notExists:
+          path: spec.template.spec.containers[0].args
+        template: deployment.yaml
+      - equal:
+          path: data
+          value:
+            LOCAL_CONFIG_DIR: /etc/unbound/local.conf.d
+            BROKEN_DNSSEC: "1"
+            UNBOUND_CONTROL_DIR: /etc/unbound/keys
+        template: configmap.yaml
+        documentIndex: 0
+
+  # Operator overrides must survive IPv6 enablement instead of being replaced by a generated config.
+  - it: preserves the supplied command and access-control configuration
+    set:
+      ipv6.enabled: true
+      command: [unbound]
+      args: [-d, -c, /site/unbound.conf]
+      localConfig:
+        access_control.conf: "server:\n    access-control: 2001:db8::/64 allow\n"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: [unbound]
+        template: deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: [-d, -c, /site/unbound.conf]
+        template: deployment.yaml
+      - equal:
+          path: data["access_control.conf"]
+          value: "server:\n    access-control: 2001:db8::/64 allow\n"
+        template: configmap.yaml
+        documentIndex: 1
+
+  # DNS-only installations must not advertise an exporter they do not run.
+  - it: omits the metrics port and discovery label when the exporter is disabled
+    template: service.yaml
+    set:
+      exporter.enabled: false
+    asserts:
+      - lengthEqual:
+          path: spec.ports
+          count: 2
+      - notExists:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+
+  # Quoted false must not accidentally enable dual-stack exposure.
+  - it: rejects string IPv6 enablement values
+    set:
+      ipv6.enabled: "false"
+    asserts:
+      - failedTemplate:
+          errorPattern: 'ipv6.enabled'

@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, HostFirmwareVersions, HostMachineInfo, MachineInfo, SetSystemPowerResult,
-    SystemPowerControl,
+    BmcCommand, Callbacks, HostFirmwareVersions, HostMachineInfo, MachineInfo, MockPowerState,
+    SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
 };
 use carbide_utils::test_support::certs::create_random_self_signed_cert;
 use carbide_uuid::machine::MachineId;
@@ -38,7 +38,9 @@ use crate::api_client::ApiClient;
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRelayResult, DhcpResponseInfo, DpuDhcpRelay};
 use crate::dpu_machine::{DpuMachine, DpuMachineHandle};
-use crate::machine_state_machine::{LiveState, MachineStateMachine, PersistedMachine};
+use crate::machine_state_machine::{
+    LiveState, LiveStateCallbacks, MachineStateMachine, PersistedMachine,
+};
 use crate::status::{
     BmcStatus, DeviceKind, DeviceStatus, DeviceStatusConfig, EndpointStatus, InfinibandPortStatus,
 };
@@ -56,6 +58,8 @@ pub(super) struct HostMachine {
     dpus: Vec<DpuMachineHandle>,
 
     bmc_control_rx: mpsc::UnboundedReceiver<BmcCommand>,
+    /// Kept so the handle can drive power the way the BMC mock does.
+    bmc_control_tx: mpsc::UnboundedSender<BmcCommand>,
     // This will be populated with callers waiting for the host to be MachineUp/Ready
     state_waiters: HashMap<String, Vec<oneshot::Sender<()>>>,
     paused: bool,
@@ -187,7 +191,7 @@ impl HostMachine {
             MachineInfo::Host(host_info.clone()),
             config,
             app_context.clone(),
-            bmc_control_tx,
+            bmc_control_tx.clone(),
             if !dpus.is_empty() && !dpus_in_nic_mode {
                 Some(DpuDhcpRelay::HostEnd(dpu_dhcp_tx))
             } else {
@@ -206,6 +210,7 @@ impl HostMachine {
             api_state: "Unknown".to_owned(),
 
             bmc_control_rx,
+            bmc_control_tx,
             state_waiters: HashMap::new(),
             paused: true,
             sleep_until: Instant::now(),
@@ -268,7 +273,7 @@ impl HostMachine {
             MachineInfo::Host(host_info.clone()),
             config,
             app_context.clone(),
-            bmc_control_tx,
+            bmc_control_tx.clone(),
             Some(create_random_self_signed_cert()),
             if !dpus.is_empty() && !dpus_in_nic_mode {
                 Some(DpuDhcpRelay::HostEnd(dpu_dhcp_tx))
@@ -288,6 +293,7 @@ impl HostMachine {
             api_state: "Unknown".to_owned(),
 
             bmc_control_rx,
+            bmc_control_tx,
             state_waiters: HashMap::new(),
             paused: true,
             sleep_until: Instant::now(),
@@ -308,6 +314,7 @@ impl HostMachine {
         let dpus = self.dpus.clone();
         let machine_config_section = self.machine_config_section.clone();
         let bmc_injection = self.state_machine.bmc_injection_store();
+        let bmc_control_tx = self.bmc_control_tx.clone();
 
         if !paused {
             self.resume_dpus();
@@ -335,6 +342,7 @@ impl HostMachine {
             dpus,
             machine_config_section,
             bmc_injection,
+            bmc_control_tx,
 
             join_handle: Mutex::new(Some(join_handle)),
         }))
@@ -571,12 +579,27 @@ struct HostMachineActor {
     dpus: Vec<DpuMachineHandle>,
     machine_config_section: String,
     bmc_injection: Arc<InjectionStore>,
+    bmc_control_tx: mpsc::UnboundedSender<BmcCommand>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct MachineHandle(Arc<HostMachineActor>);
 
 impl MachineHandle {
+    /// Drive power through the guard the BMC mock uses, so an RMS power
+    /// request obeys the same rules as a Redfish one.
+    pub(crate) fn set_system_power(
+        &self,
+        request: SystemPowerControl,
+    ) -> Result<(), SetSystemPowerError> {
+        LiveStateCallbacks::new(self.0.live_state.clone(), self.0.bmc_control_tx.clone())
+            .set_power_state(request)
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        self.0.live_state.read().unwrap().power_state
+    }
+
     #[cfg(test)]
     pub(crate) fn for_control_test(dpus: Vec<DpuMachineHandle>, ipmi_port: Option<u16>) -> Self {
         Self::for_control_test_in_section(dpus, ipmi_port, "test")
@@ -616,6 +639,7 @@ impl MachineHandle {
             dpus,
             machine_config_section: machine_config_section.to_string(),
             bmc_injection: Arc::new(InjectionStore::new()),
+            bmc_control_tx: mpsc::unbounded_channel().0,
         }))
     }
 

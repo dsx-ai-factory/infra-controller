@@ -210,6 +210,8 @@ The tables below summarize the keys that must be set per site.
 
 ### `values/nico-core.yaml`
 
+VIP requirements below apply to enabled external `LoadBalancer` Services.
+
 | Key | Default | Must change? | Description |
 |-----|---------|-------------|-------------|
 | `nico-api.hostname` | `"api-examplesite.example.com"` | **Yes** | External DNS name for the NICo Core API |
@@ -264,6 +266,8 @@ The tables below summarize the keys that must be set per site.
 ## Setup options
 
 `setup.sh` runs preflight validation automatically before making cluster changes.
+Core VIP validation requires Python 3 with PyYAML installed in the `python3` environment. It parses `--core-values` as YAML, so indentation and Boolean capitalization do not affect VIP validation for enabled external `LoadBalancer` Services. Existing `externalService` configurations may omit VIP annotations for automatic allocation; explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs; the DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`.
+
 It supports these common deployment modes:
 
 | Option | Description |

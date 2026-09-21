@@ -26,7 +26,7 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
 /// Id of the aggregated report the mock publishes.
 const REPORT_ID: &str = "PlatformEnvironmentMetrics";
@@ -90,7 +90,7 @@ fn metric_definition_resource<'a>(definition_id: &'a str) -> redfish::Resource<'
     }
 }
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     const REPORT_ID_PARAM: &str = "{report_id}";
     const DEFINITION_ID_PARAM: &str = "{definition_id}";
     r.route(&resource().odata_id, get(get_telemetry_service))
@@ -100,15 +100,15 @@ pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
         )
         .route(
             &metric_report_resource(REPORT_ID_PARAM).odata_id,
-            get(get_metric_report),
+            get(get_metric_report::<C>),
         )
         .route(
             &metric_definitions_collection().odata_id,
-            get(get_metric_definitions),
+            get(get_metric_definitions::<C>),
         )
         .route(
             &metric_definition_resource(DEFINITION_ID_PARAM).odata_id,
-            get(get_metric_definition),
+            get(get_metric_definition::<C>),
         )
 }
 
@@ -134,8 +134,8 @@ async fn get_metric_reports() -> Response {
         .into_ok_response()
 }
 
-async fn get_metric_report(
-    State(state): State<BmcState>,
+async fn get_metric_report<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(report_id): Path<String>,
 ) -> Response {
     let stale = match report_id.as_str() {
@@ -164,7 +164,7 @@ async fn get_metric_report(
         .into_ok_response()
 }
 
-async fn get_metric_definitions(State(state): State<BmcState>) -> Response {
+async fn get_metric_definitions<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let paths: Vec<_> = metric_definition_units(&state)
         .into_keys()
         .map(|id| metric_definition_resource(&id).entity_ref())
@@ -174,8 +174,8 @@ async fn get_metric_definitions(State(state): State<BmcState>) -> Response {
         .into_ok_response()
 }
 
-async fn get_metric_definition(
-    State(state): State<BmcState>,
+async fn get_metric_definition<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(definition_id): Path<String>,
 ) -> Response {
     let Some(units) = metric_definition_units(&state).remove(&definition_id) else {
@@ -201,7 +201,7 @@ async fn get_metric_definition(
 /// still producing one `MetricValue` per chassis in the report. That is
 /// the shape real platforms publish, and the reason `MetricProperty`
 /// rather than `MetricId` is what identifies a reading.
-fn metric_definition_units(state: &BmcState) -> BTreeMap<String, String> {
+fn metric_definition_units<C: Callbacks>(state: &BmcState<C>) -> BTreeMap<String, String> {
     sensors(state)
         .filter_map(|(_, sensor)| {
             let units = sensor
@@ -214,7 +214,9 @@ fn metric_definition_units(state: &BmcState) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn sensors(state: &BmcState) -> impl Iterator<Item = (&str, &redfish::sensor::Sensor)> {
+fn sensors<C: Callbacks>(
+    state: &BmcState<C>,
+) -> impl Iterator<Item = (&str, &redfish::sensor::Sensor)> {
     state.chassis_state.iter().flat_map(|chassis| {
         let id = chassis.config.id.as_ref();
         chassis
@@ -226,8 +228,8 @@ fn sensors(state: &BmcState) -> impl Iterator<Item = (&str, &redfish::sensor::Se
     })
 }
 
-fn sensor_metric_values<'a>(
-    state: &'a BmcState,
+fn sensor_metric_values<'a, C: Callbacks>(
+    state: &'a BmcState<C>,
     timestamp: &'a str,
 ) -> impl Iterator<Item = serde_json::Value> + 'a {
     sensors(state).filter_map(move |(chassis_id, sensor)| {

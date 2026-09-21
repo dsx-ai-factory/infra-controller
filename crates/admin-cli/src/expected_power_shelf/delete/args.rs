@@ -15,11 +15,10 @@
  * limitations under the License.
  */
 
-use clap::Parser;
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser};
 use mac_address::MacAddress;
 use uuid::Uuid;
-
-use crate::errors::CarbideCliError;
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
@@ -41,13 +40,22 @@ pub(crate) struct Args {
 }
 
 impl TryFrom<Args> for ::rpc::forge::ExpectedPowerShelfRequest {
-    type Error = CarbideCliError;
+    type Error = clap::Error;
+
     fn try_from(args: Args) -> Result<Self, Self::Error> {
+        let error = |kind, message: &str| {
+            Args::command()
+                .bin_name("nico-admin-cli expected-power-shelf delete")
+                .error(kind, message)
+        };
         match (args.bmc_mac_address, args.id) {
-            (Some(_), Some(_)) => Err(CarbideCliError::ChooseOneError("--bmc-mac-address", "--id")),
-            (None, None) => Err(CarbideCliError::RequireOneError(
-                "--bmc-mac-address",
-                "--id",
+            (Some(_), Some(_)) => Err(error(
+                ErrorKind::ArgumentConflict,
+                "cannot specify both a BMC MAC address and --id; provide only one",
+            )),
+            (None, None) => Err(error(
+                ErrorKind::MissingRequiredArgument,
+                "must specify either a BMC MAC address or --id",
             )),
             (None, Some(id)) => Ok(Self {
                 bmc_mac_address: String::new(),

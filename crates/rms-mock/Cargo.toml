@@ -27,6 +27,7 @@ name = "rms_mock"
 
 [dependencies]
 axum = { workspace = true }
+eyre = { workspace = true }
 librms = { workspace = true }
 mac_address = { workspace = true }
 serde = { features = ["derive"], workspace = true }

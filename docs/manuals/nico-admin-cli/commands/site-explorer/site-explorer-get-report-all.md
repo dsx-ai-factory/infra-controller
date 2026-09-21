@@ -1,6 +1,6 @@
 # `nico-admin-cli site-explorer get-report all`
 
-_[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › [get-report](./site-explorer-get-report.md) › **all**_
+*[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › [get-report](./site-explorer-get-report.md) › **all***
 
 ## NAME
 
@@ -8,8 +8,10 @@ nico-admin-cli-site-explorer-get-report-all - Get everything in Json
 
 ## SYNOPSIS
 
-**nico-admin-cli site-explorer get-report all** \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli site-explorer get-report all [--extended]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -17,26 +19,28 @@ Get everything in Json
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**Related:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)

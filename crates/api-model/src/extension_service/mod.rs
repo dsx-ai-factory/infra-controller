@@ -66,10 +66,70 @@ impl std::str::FromStr for ExtensionServiceType {
     }
 }
 
+/// Immutable placement policy for a Helm registration.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum DpuTarget {
+    /// The authoritative primary physical DPU attached to the host.
+    Primary,
+    /// DPUs used by the instance network configuration, including legacy fallbacks.
+    AllActive,
+    /// Every physical attached DPU, irrespective of networking and health.
+    All,
+}
+
+impl DpuTarget {
+    /// Resolves a deterministic target set, rejecting incomplete primary inventory.
+    pub fn resolve(
+        self,
+        attached: &[carbide_uuid::machine::DpuMachineId],
+        primary: Option<carbide_uuid::machine::DpuMachineId>,
+        used: &[carbide_uuid::machine::DpuMachineId],
+    ) -> Result<Vec<carbide_uuid::machine::DpuMachineId>, &'static str> {
+        let mut targets = match self {
+            Self::All => attached.to_vec(),
+            Self::AllActive => {
+                if used.iter().any(|id| !attached.contains(id)) {
+                    return Err("used DPU is absent from attached inventory");
+                }
+                used.to_vec()
+            }
+            Self::Primary => vec![
+                primary
+                    .filter(|id| attached.contains(id))
+                    .ok_or("primary DPU is missing or absent from attached inventory")?,
+            ],
+        };
+        targets.sort_unstable();
+        targets.dedup();
+        if targets.is_empty() {
+            return Err("active Helm service has no resolved DPU targets");
+        }
+        Ok(targets)
+    }
+}
+
+fn read_dpu_target(
+    row: &PgRow,
+    service_type: &ExtensionServiceType,
+) -> Result<Option<DpuTarget>, sqlx::Error> {
+    let target = row.try_get("dpu_target")?;
+    match (service_type, target) {
+        (ExtensionServiceType::DpfHelmChart, Some(_))
+        | (ExtensionServiceType::KubernetesPod, None) => Ok(target),
+        _ => Err(sqlx::Error::Protocol(
+            "inconsistent extension service DPU target; resolve registration migration".into(),
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionService {
     pub id: ExtensionServiceId,
     pub service_type: ExtensionServiceType,
+    /// Immutable Helm placement policy; absent only for Kubernetes Pod services.
+    pub dpu_target: Option<DpuTarget>,
     pub name: String,
     pub tenant_organization_id: TenantOrganizationId,
     pub description: String,
@@ -121,9 +181,12 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionService {
         let controller_state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
             row.try_get("controller_state_outcome")?;
 
+        let dpu_target = read_dpu_target(row, &service_type)?;
+
         Ok(ExtensionService {
             id: row.try_get("id")?,
             service_type,
+            dpu_target,
             name: row.try_get("name")?,
             tenant_organization_id: tenant_organization_id
                 .parse::<TenantOrganizationId>()
@@ -177,6 +240,8 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionServiceVersionInfo {
 pub struct ExtensionServiceSnapshot {
     pub service_id: ExtensionServiceId,
     pub service_type: ExtensionServiceType,
+    /// Immutable Helm placement policy; absent only for Kubernetes Pod services.
+    pub dpu_target: Option<DpuTarget>,
     pub service_name: String,
     pub tenant_organization_id: TenantOrganizationId,
     pub version_ctr: i32,
@@ -255,9 +320,12 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
             .map(|state| state.0)
             .ok_or_else(|| sqlx::Error::ColumnNotFound("controller_state".to_string()))?;
 
+        let dpu_target = read_dpu_target(row, &service_type)?;
+
         Ok(ExtensionServiceSnapshot {
             service_id,
             service_type,
+            dpu_target,
             service_name,
             tenant_organization_id,
             version_ctr,

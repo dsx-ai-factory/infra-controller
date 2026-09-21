@@ -437,17 +437,23 @@ impl Collector {
         })
     }
 
+    /// Starts a streaming collector and reports failures to the caller.
+    ///
+    /// The callback receives `Err` when connection establishment fails and
+    /// `Ok(connected_for)` when an accepted stream ends or returns an error.
+    /// Cancellation does not invoke the callback. Returning `false` stops the
+    /// collector.
     pub fn start_streaming<S, F>(
         endpoint: Arc<BmcEndpoint>,
         bmc: Arc<BmcClient>,
         config: S::Config,
         data_sink: Arc<dyn DataSink>,
         start_context: StreamingCollectorStartContext,
-        mut on_connect_result: F,
+        mut on_stream_failure: F,
     ) -> Result<Self, HealthError>
     where
         S: StreamingCollector<BmcClient>,
-        F: FnMut(Result<(), &HealthError>) -> bool + Send + 'static,
+        F: FnMut(Result<Duration, &HealthError>) -> bool + Send + 'static,
     {
         let StreamingCollectorStartContext {
             backoff_config,
@@ -495,7 +501,8 @@ impl Collector {
                             rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                             "streaming collector connection failed"
                         );
-                        if !on_connect_result(Err(&e)) {
+
+                        if !on_stream_failure(Err(&e)) {
                             return;
                         }
                     }
@@ -515,7 +522,7 @@ impl Collector {
                             "streaming collector connection failed"
                         );
 
-                        if !on_connect_result(Err(&error)) {
+                        if !on_stream_failure(Err(&error)) {
                             return;
                         }
                     }
@@ -523,8 +530,9 @@ impl Collector {
                         // the guard lives exactly as long as we hold an open stream; Drop
                         // handles dec for every exit path (shutdown, error, stream end).
                         let _conn_guard = StreamingConnectionGuard::inc(metrics.connected.clone());
+                        let connected_at = Instant::now();
+
                         backoff.reset();
-                        on_connect_result(Ok(()));
                         tracing::info!(
                             collector_type,
                             endpoint = ?endpoint.addr,
@@ -559,6 +567,11 @@ impl Collector {
                                         rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                                         "streaming collector stream error, reconnecting"
                                     );
+
+                                    if !on_stream_failure(Ok(connected_at.elapsed())) {
+                                        return;
+                                    }
+
                                     break;
                                 }
                                 None => {
@@ -568,6 +581,11 @@ impl Collector {
                                         rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                                         "streaming collector stream ended, reconnecting"
                                     );
+
+                                    if !on_stream_failure(Ok(connected_at.elapsed())) {
+                                        return;
+                                    }
+
                                     break;
                                 }
                             }
@@ -609,6 +627,10 @@ impl Collector {
         }
     }
 
+    pub(crate) async fn finished(&mut self) {
+        let _ = (&mut self.handle).await;
+    }
+
     pub async fn stop(self) {
         self.cancel_token.cancel();
         let _ = self.handle.await;
@@ -621,6 +643,7 @@ impl Collector {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -726,6 +749,53 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum StreamBehavior {
+        End,
+        Error,
+        Pending,
+    }
+
+    struct SessionStreamingCollector {
+        behaviors: VecDeque<StreamBehavior>,
+    }
+
+    #[async_trait]
+    impl StreamingCollector<BmcClient> for SessionStreamingCollector {
+        type Config = Vec<StreamBehavior>;
+
+        fn new_runner(
+            _bmc: Arc<BmcClient>,
+            _endpoint: Arc<BmcEndpoint>,
+            config: Self::Config,
+        ) -> Result<Self, HealthError> {
+            Ok(Self {
+                behaviors: config.into(),
+            })
+        }
+
+        async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError> {
+            let behavior = self
+                .behaviors
+                .pop_front()
+                .unwrap_or(StreamBehavior::Pending);
+
+            let stream: EventStream<'_> = match behavior {
+                StreamBehavior::End => Box::pin(futures::stream::empty()),
+                StreamBehavior::Error => Box::pin(futures::stream::once(async {
+                    Err(HealthError::GenericError("stream failed".to_string()))
+                })),
+                StreamBehavior::Pending => Box::pin(futures::stream::pending()),
+            };
+
+            Ok(StreamingConnectResult::Connected(stream))
+        }
+
+        fn collector_type(&self) -> &'static str {
+            "session_streaming_collector"
+        }
+    }
+
     #[tokio::test]
     async fn streaming_collector_emits_pre_connected_failure_events_without_connected_callback()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -768,6 +838,53 @@ mod tests {
 
         assert!(!connected_callback);
         assert_eq!(sink.log_count(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_collector_reports_stream_end_and_error_but_not_cancellation()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:77")));
+        let bmc = Arc::clone(endpoint.bmc());
+        let metrics_manager = MetricsManager::new("test_streaming_runtime_stream_lifetime")?;
+
+        let collector_registry = Arc::new(metrics_manager.create_collector_registry(
+            "streaming_collector_stream_lifetime_test".to_string(),
+            "test_streaming_runtime_stream_lifetime",
+        )?);
+
+        let data_sink: Arc<dyn DataSink> = Arc::new(CountingSink::default());
+        let (callback_tx, mut callback_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let collector = Collector::start_streaming::<SessionStreamingCollector, _>(
+            endpoint,
+            bmc,
+            vec![
+                StreamBehavior::End,
+                StreamBehavior::Error,
+                StreamBehavior::Pending,
+            ],
+            data_sink,
+            StreamingCollectorStartContext {
+                backoff_config: BackoffConfig {
+                    initial: Duration::ZERO,
+                    max: Duration::ZERO,
+                },
+                collector_registry,
+            },
+            move |result| callback_tx.send(result.is_ok()).is_ok(),
+        )?;
+
+        let callbacks = tokio::time::timeout(Duration::from_secs(1), async {
+            [callback_rx.recv().await, callback_rx.recv().await]
+        })
+        .await?;
+
+        collector.stop().await;
+
+        assert_eq!(callbacks, [Some(true), Some(true)]);
+        assert!(callback_rx.try_recv().is_err());
 
         Ok(())
     }

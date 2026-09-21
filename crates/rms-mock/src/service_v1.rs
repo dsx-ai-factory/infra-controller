@@ -25,9 +25,20 @@
 
 use librms::protos::rack_manager::rack_manager_server::RackManager;
 
-use crate::envelope::{BatchOutcome, UNMATCHED_NODE};
+use crate::envelope::{BatchOutcome, NodeResult, UNMATCHED_NODE, matched_or_not, node_batch};
 use crate::fabric::Candidate;
-use crate::{RmsMock, rms};
+use crate::resolve::NodeRef;
+use crate::{RmsMock, SimPowerState, rms};
+
+/// The BMC MAC a power request reaches a node by.
+///
+/// A node no device matches, or one whose device has no BMC, is a per-node
+/// failure with a reason.
+fn bmc_mac_of(r: &NodeRef<'_>) -> eyre::Result<mac_address::MacAddress> {
+    let node = r.node.ok_or_else(|| eyre::eyre!(UNMATCHED_NODE))?;
+    node.bmc_mac
+        .ok_or_else(|| eyre::eyre!("the simulated device has no BMC"))
+}
 
 /// Builds the whole `RackManager` impl.
 ///
@@ -114,7 +125,7 @@ rack_manager_impl! {
                 })
                 .collect();
 
-            let outcome = BatchOutcome::of(&refs);
+            let outcome = BatchOutcome::of(&matched_or_not(&refs));
             Ok(tonic::Response::new(rms::BatchGetNodeDeviceInfoResponse {
                 // Proto3 leaves this at UNSPECIFIED, which callers read as a
                 // failure, so it must be set explicitly on every path.
@@ -122,6 +133,82 @@ rack_manager_impl! {
                 message: outcome.message,
                 node_device_details,
                 stats: Some(outcome.stats),
+            }))
+        }
+
+        /// Report each node's power, as its simulated BMC sees it.
+        ///
+        /// `node_power_states` holds only the nodes that were read; a node
+        /// that matches nothing or cannot be read is a per-node failure.
+        async fn batch_get_power_state(
+            &self,
+            request: tonic::Request<rms::BatchGetPowerStateRequest>,
+        ) -> std::result::Result<tonic::Response<rms::BatchGetPowerStateResponse>, tonic::Status> {
+            let inventory = self.inventory.nodes();
+            let refs = crate::resolve::resolve_nodes(&inventory, request.get_ref().nodes.as_ref());
+
+            let read: Vec<(&str, Result<SimPowerState, String>)> = refs
+                .iter()
+                .map(|r| {
+                    let power = bmc_mac_of(r)
+                        .and_then(|mac| self.inventory.power_state(mac))
+                        .map_err(|e| e.to_string());
+                    (r.node_id, power)
+                })
+                .collect();
+
+            let node_power_states = read
+                .iter()
+                .filter_map(|(node_id, power)| {
+                    Some(rms::NodePowerState {
+                        node_id: (*node_id).to_owned(),
+                        pstate: power.as_ref().ok()?.as_pstate().to_owned(),
+                    })
+                })
+                .collect();
+            let results: Vec<NodeResult<'_>> = read
+                .into_iter()
+                .map(|(node_id, power)| (node_id, power.map(drop)))
+                .collect();
+
+            Ok(tonic::Response::new(rms::BatchGetPowerStateResponse {
+                response: Some(node_batch(&results, "")),
+                node_power_states,
+            }))
+        }
+
+        /// Change power on each node.
+        ///
+        /// The host applies the same rules as for a Redfish request, and a
+        /// node it refuses is a per-node failure. An unspecified operation
+        /// is rejected before any node is touched.
+        async fn batch_set_power_state(
+            &self,
+            request: tonic::Request<rms::BatchSetPowerStateRequest>,
+        ) -> std::result::Result<tonic::Response<rms::BatchSetPowerStateResponse>, tonic::Status> {
+            let op = match rms::PowerOperation::try_from(request.get_ref().operation) {
+                Ok(rms::PowerOperation::Unspecified) | Err(_) => {
+                    return Err(tonic::Status::invalid_argument(
+                        "power operation is unspecified",
+                    ));
+                }
+                Ok(op) => op,
+            };
+
+            let inventory = self.inventory.nodes();
+            let refs = crate::resolve::resolve_nodes(&inventory, request.get_ref().nodes.as_ref());
+            let results: Vec<NodeResult<'_>> = refs
+                .iter()
+                .map(|r| {
+                    let outcome = bmc_mac_of(r)
+                        .and_then(|mac| self.inventory.set_power(mac, op))
+                        .map_err(|e| e.to_string());
+                    (r.node_id, outcome)
+                })
+                .collect();
+
+            Ok(tonic::Response::new(rms::BatchSetPowerStateResponse {
+                response: Some(node_batch(&results, "")),
             }))
         }
 
@@ -246,7 +333,7 @@ rack_manager_impl! {
                 })
                 .collect();
 
-            let outcome = BatchOutcome::of(&refs);
+            let outcome = BatchOutcome::of(&matched_or_not(&refs));
             Ok(tonic::Response::new(
                 rms::BatchGetScaleUpFabricServiceStatusResponse {
                     status: outcome.status as i32,
@@ -280,7 +367,7 @@ rack_manager_impl! {
             let batch_job_id = jobs.first().map(|j| j.job_id.as_str()).unwrap_or_default();
 
             Ok(tonic::Response::new(rms::ConfigureSwitchCertificateResponse {
-                response: Some(crate::envelope::node_batch(&refs, batch_job_id)),
+                response: Some(node_batch(&matched_or_not(&refs), batch_job_id)),
                 jobs,
             }))
         }
@@ -318,9 +405,7 @@ rack_manager_impl! {
 
     unimplemented {
         set_power_state(SetPowerStateRequest) -> SetPowerStateResponse,
-        batch_set_power_state(BatchSetPowerStateRequest) -> BatchSetPowerStateResponse,
         get_power_state(GetPowerStateRequest) -> GetPowerStateResponse,
-        batch_get_power_state(BatchGetPowerStateRequest) -> BatchGetPowerStateResponse,
         sequence_rack_power(SequenceRackPowerRequest) -> SequenceRackPowerResponse,
         list_node_inventory(ListNodeInventoryRequest) -> ListNodeInventoryResponse,
         create_nodes(CreateNodesRequest) -> CreateNodesResponse,

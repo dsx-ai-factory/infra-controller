@@ -276,6 +276,11 @@ fetch_interval = "2m"
 [collectors.firmware]
 firmware_refresh_interval = "30m"
 
+# Power shelf manager (PMC) status: `manager_status` and `manager_last_reset`.
+# Runs for power shelf endpoints only and is enabled by default with a 5m poll.
+[collectors.manager]
+poll_interval = "2m"
+
 [collectors.leak_detector]
 poll_interval = "1m"
 state_refresh_interval = "30m"
@@ -291,8 +296,9 @@ state_refresh_interval = "30m"
 #  "auto": (default)
 #       - spawn SSE per endpoint
 #       - if SSE not supported, downgrade to periodic collection
-#       - if reconnects exceeds budget, downgrade to periodic collection
-#       - reset downgrades after server restart
+#       - if reconnect failures exceed both configured thresholds, downgrade
+#         to periodic collection
+#       - remain in periodic fallback unless SSE retry is enabled below
 #  "sse": always SSE; retry with exp. backoff on connect failure
 #  "periodic": always poll
 mode = "auto"
@@ -303,8 +309,13 @@ mode = "auto"
 # auto uses [collectors.logs.sse] while attempting SSE, then switches to
 # these periodic fallback parameters after downgrade.
 sse_not_available_threshold = 1
+# Transient failures must reach this duration and the count threshold below.
 connect_failure_window = "5m"
 connect_failure_threshold = 5
+# Opt in to stopping periodic fallback after 30m and retrying SSE on the next
+# discovery pass. Transitions may duplicate or miss records when SSE and
+# periodic collection cover different LogService endpoints.
+retry_sse_after_downgrade = false
 logs_collection_interval = "5m"
 state_refresh_interval = "30m"
 logs_state_file = "/tmp/logs_collector_{machine_id}.json"
