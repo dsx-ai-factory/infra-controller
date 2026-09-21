@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
@@ -32,6 +33,40 @@ import (
 // fail closed. Bound concurrent workflows as well as the caller's total wait.
 const spectrumXDiscoveryBatchSize = 5
 const spectrumXDiscoveryConcurrency = 4
+
+// SpectrumXPreparationTimeout bounds validation, discovery and transaction setup
+// from handler entry. Together with the 50s workflow wait and 5s timeout cleanup,
+// it leaves 1s for the response under the server's 60s write deadline.
+const SpectrumXPreparationTimeout = 4 * time.Second
+
+// NewSpectrumXPreparationContext reserves the full mutation workflow and cleanup
+// budgets, including when the caller supplies an earlier deadline. Do not use
+// this context for the transaction or the mutation workflow itself.
+func NewSpectrumXPreparationContext(ctx context.Context, started time.Time) (context.Context, context.CancelFunc) {
+	deadline := started.Add(SpectrumXPreparationTimeout)
+	callerDeadline, hasDeadline := ctx.Deadline()
+	if hasDeadline {
+		latestPreparation := callerDeadline.Add(-cutil.WorkflowContextTimeout - cutil.WorkflowContextNewAfterTimeout - time.Second)
+		if latestPreparation.Before(deadline) {
+			deadline = latestPreparation
+		}
+	}
+	return context.WithDeadline(ctx, deadline)
+}
+
+// ValidateSpectrumXPreparation rejects exhausted preparation before opening a
+// transaction and again before dispatching a mutation. nil means no SpectrumX
+// preflight was requested. Checking the deadline also covers a delayed timer.
+func ValidateSpectrumXPreparation(ctx context.Context) *cutil.APIError {
+	if ctx == nil {
+		return nil
+	}
+	deadline, hasDeadline := ctx.Deadline()
+	if ctx.Err() != nil || (hasDeadline && !time.Now().Before(deadline)) {
+		return cutil.NewAPIError(http.StatusGatewayTimeout, "Insufficient time remaining for SpectrumX operation; retry request", nil)
+	}
+	return nil
+}
 
 func findSpectrumXMachines(ctx context.Context, stc tclient.Client, siteID uuid.UUID, machineIDs []string) (map[string]*corev1.Machine, *cutil.APIError) {
 	ids := slices.Clone(machineIDs)

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,8 +24,74 @@ import (
 
 	cam "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
+
+func TestNewSpectrumXPreparationContext(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		elapsed    time.Duration
+		callerWait time.Duration
+		remaining  time.Duration
+	}{
+		{name: "prior validation consumes preparation time", elapsed: time.Second, remaining: 3 * time.Second},
+		{name: "earlier caller deadline reserves workflow and cleanup", callerWait: 58 * time.Second, remaining: 2 * time.Second},
+		{name: "insufficient caller budget rejects before discovery", callerWait: cutil.WorkflowContextTimeout, remaining: -6 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				started := time.Now()
+				ctx := context.Background()
+				if test.callerWait > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, test.callerWait)
+					defer cancel()
+				}
+				time.Sleep(test.elapsed)
+				preparationCtx, cancel := NewSpectrumXPreparationContext(ctx, started)
+				defer cancel()
+				deadline, ok := preparationCtx.Deadline()
+				require.True(t, ok)
+				assert.Equal(t, test.remaining, time.Until(deadline))
+				if test.remaining > 0 {
+					require.Nil(t, ValidateSpectrumXPreparation(preparationCtx))
+					time.Sleep(test.remaining)
+				}
+				apiErr := ValidateSpectrumXPreparation(preparationCtx)
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusGatewayTimeout, apiErr.Code)
+				assert.NoError(t, ctx.Err(), "preparation expiry must not cancel the handler")
+			})
+		})
+	}
+}
+
+func TestValidateSpectrumXPreparation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		cancelled bool
+	}{
+		{name: "no SpectrumX request leaves the workflow unchanged"},
+		{name: "caller cancellation prevents mutation", cancelled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var ctx context.Context
+			if test.cancelled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(context.Background())
+				cancel()
+			}
+			apiErr := ValidateSpectrumXPreparation(ctx)
+			if test.cancelled {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusGatewayTimeout, apiErr.Code)
+			} else {
+				assert.Nil(t, apiErr)
+			}
+		})
+	}
+}
 
 func TestValidateSpectrumXMachine(t *testing.T) {
 	spectrumX := corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X

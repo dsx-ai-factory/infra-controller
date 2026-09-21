@@ -1500,6 +1500,9 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 				},
 				afterHandle: func(t *testing.T, rec *httptest.ResponseRecorder) {
 					siteClient.AssertExpectations(t)
+					if scenario.compatible {
+						testSpectrumXWorkflowBudget(t, siteClient.Calls)
+					}
 					for _, candidate := range candidates {
 						machine, readErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, candidate.ID, nil, false)
 						require.NoError(t, readErr)

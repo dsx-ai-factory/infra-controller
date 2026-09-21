@@ -813,7 +813,6 @@ func (o *InstanceUpdateRequest) GetSpectrumXAttachments() []InstanceSpectrumXAtt
 
 // GetSpectrumXAttachmentsOk returns a tuple with the SpectrumXAttachments field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetSpectrumXAttachmentsOk() ([]InstanceSpectrumXAttachmentCreateOrUpdateRequest, bool) {
 	if o == nil || IsNil(o.SpectrumXAttachments) {
 		return nil, false

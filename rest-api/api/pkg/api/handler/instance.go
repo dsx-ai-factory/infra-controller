@@ -396,6 +396,7 @@ func (cih CreateInstanceHandler) buildInstanceCreateRequestOsConfig(c echo.Conte
 // @Success 201 {object} model.APIInstance
 // @Router /v2/org/{org}/nico/instance [post]
 func (cih CreateInstanceHandler) Handle(c echo.Context) error {
+	requestStarted := time.Now()
 	// Execution Steps:
 	// 1. Authentication & Authorization
 	//    - Extract user from context
@@ -1188,13 +1189,15 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	var spectrumXEligibleIDs map[string]struct{}
+	var spectrumXPreparationCtx context.Context
 	if len(apiRequest.SpectrumXAttachments) > 0 {
-		// Discovery and allocation share a caller budget rather than each
-		// consuming a full workflow wait under the HTTP write deadline.
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+		spectrumXPreparationCtx, cancel = common.NewSpectrumXPreparationContext(ctx, requestStarted)
 		defer cancel()
-		var apiErr *cutil.APIError
+		apiErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
+		if apiErr != nil {
+			return c.JSON(apiErr.Code, apiErr)
+		}
 		if apiRequest.MachineID != nil {
 			// Scope the requested ID before sending it to the Site. Availability
 			// is still checked on the locked record inside the transaction.
@@ -1209,13 +1212,17 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			if selected.SiteID != site.ID {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Machine specified in request does not belong to Site", nil)
 			}
-			apiErr = common.ValidateMachineSpectrumXAttachments(ctx, cih.scp, site.ID, selected.ID, apiRequest.SpectrumXAttachments)
+			apiErr = common.ValidateMachineSpectrumXAttachments(spectrumXPreparationCtx, cih.scp, site.ID, selected.ID, apiRequest.SpectrumXAttachments)
 		} else {
 			id, parseErr := uuid.Parse(*apiRequest.InstanceTypeID)
 			if parseErr != nil {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Instance Type ID in request is not valid", nil)
 			}
-			spectrumXEligibleIDs, apiErr = common.GetSpectrumXEligibleMachineIDs(ctx, cih.dbSession, cih.scp, site.ID, id, apiRequest.MachineLabelSelector, apiRequest.SpectrumXAttachments)
+			spectrumXEligibleIDs, apiErr = common.GetSpectrumXEligibleMachineIDs(spectrumXPreparationCtx, cih.dbSession, cih.scp, site.ID, id, apiRequest.MachineLabelSelector, apiRequest.SpectrumXAttachments)
+		}
+		preparationErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
+		if preparationErr != nil {
+			return c.JSON(preparationErr.Code, preparationErr)
 		}
 		if apiErr != nil {
 			logger.Warn().Err(apiErr.Diagnosis()).Msg("SpectrumX preflight failed")
@@ -2111,6 +2118,12 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			createInstanceRequest.InstanceTypeId = cutil.GetPtr(*apiRequest.InstanceTypeID)
 		}
 
+		// Transaction setup can consume the remaining preparation time. Roll
+		// back instead of starting Core work without its full timeout budget.
+		preparationErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
+		if preparationErr != nil {
+			return preparationErr
+		}
 		workflowOptions := temporalClient.StartWorkflowOptions{
 			ID:                       "instance-create-" + instance.ID.String(),
 			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
@@ -2677,6 +2690,7 @@ func (uih UpdateInstanceHandler) buildInstanceUpdateRequestOsConfig(c echo.Conte
 // @Success 200 {object} model.APIInstance
 // @Router /v2/org/{org}/nico/instance/{id} [patch]
 func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
+	requestStarted := time.Now()
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
@@ -3573,11 +3587,20 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	// Only an explicit nonempty replacement needs live validation. Omission
 	// preserves attachments, and an empty replacement must allow removal even
 	// after the corresponding device disappears from inventory.
+	var spectrumXPreparationCtx context.Context
 	if len(apiRequest.SpectrumXAttachments) > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+		spectrumXPreparationCtx, cancel = common.NewSpectrumXPreparationContext(ctx, requestStarted)
 		defer cancel()
-		apiErr := common.ValidateMachineSpectrumXAttachments(ctx, uih.scp, site.ID, machine.ID, apiRequest.SpectrumXAttachments)
+		apiErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
+		if apiErr != nil {
+			return c.JSON(apiErr.Code, apiErr)
+		}
+		apiErr = common.ValidateMachineSpectrumXAttachments(spectrumXPreparationCtx, uih.scp, site.ID, machine.ID, apiRequest.SpectrumXAttachments)
+		preparationErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
+		if preparationErr != nil {
+			return c.JSON(preparationErr.Code, preparationErr)
+		}
 		if apiErr != nil {
 			logger.Warn().Err(apiErr.Diagnosis()).Msg("SpectrumX preflight failed")
 			return c.JSON(apiErr.Code, apiErr)
@@ -4634,6 +4657,10 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 		updateInstanceRequest.Config.Spxconfig = &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs}
 
+		preparationErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
+		if preparationErr != nil {
+			return preparationErr
+		}
 		workflowOptions := temporalClient.StartWorkflowOptions{
 			ID:                       "instance-update-" + instance.ID.String(),
 			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
