@@ -180,7 +180,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str(mac).expect("valid mac"),
+                mac: Some(MacAddress::from_str(mac).expect("valid mac")),
             },
             collector_type: "sensor_collector",
             metadata: None,
@@ -195,7 +195,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str(mac).expect("valid mac"),
+                mac: Some(MacAddress::from_str(mac).expect("valid mac")),
             },
             collector_type: "sensor_collector",
             metadata: None,

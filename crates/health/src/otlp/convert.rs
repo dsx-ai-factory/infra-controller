@@ -554,7 +554,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "test",
             metadata: None,
@@ -648,7 +648,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "test",
             labels: std::collections::BTreeMap::from([(
@@ -698,7 +698,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "test",
             labels: Default::default(),
@@ -736,7 +736,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("11:22:33:44:55:66").expect("valid mac"),
+                mac: Some(MacAddress::from_str("11:22:33:44:55:66").expect("valid mac")),
             },
             collector_type: "test",
             labels: Default::default(),
@@ -780,7 +780,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("11:22:33:44:55:66").expect("valid mac"),
+                mac: Some(MacAddress::from_str("11:22:33:44:55:66").expect("valid mac")),
             },
             collector_type: "nvue_gnmi",
             labels: Default::default(),
@@ -836,7 +836,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("22:33:44:55:66:77").expect("valid mac"),
+                mac: Some(MacAddress::from_str("22:33:44:55:66:77").expect("valid mac")),
             },
             collector_type: "logs_collector",
             labels: Default::default(),
@@ -899,7 +899,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2)),
                 port: Some(443),
-                mac: MacAddress::from_str("33:44:55:66:77:88").expect("valid mac"),
+                mac: Some(MacAddress::from_str("33:44:55:66:77:88").expect("valid mac")),
             },
             collector_type: "logs_collector",
             labels: Default::default(),
@@ -959,7 +959,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 3, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("33:44:55:66:77:88").expect("valid mac"),
+                mac: Some(MacAddress::from_str("33:44:55:66:77:88").expect("valid mac")),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),
@@ -996,7 +996,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 3, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("33:44:55:66:77:88").expect("valid mac"),
+                mac: Some(MacAddress::from_str("33:44:55:66:77:88").expect("valid mac")),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),
@@ -1564,7 +1564,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "test",
             metadata: None,
@@ -1675,7 +1675,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("11:22:33:44:55:66").expect("valid mac"),
+                mac: Some(MacAddress::from_str("11:22:33:44:55:66").expect("valid mac")),
             },
             collector_type: "nvue_gnmi",
             labels: Default::default(),

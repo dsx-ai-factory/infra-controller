@@ -7226,6 +7226,115 @@ async fn test_implicit_instance_vfs_follow_sparse_hbn_inventory_on_create_and_up
     txn.rollback().await.unwrap();
 }
 
+/// Verifies an unchanged sparse-VF network with omitted wire IDs remains a network no-op,
+/// because legacy callers must not acquire expansion-only locks for metadata updates.
+#[crate::sqlx_test]
+async fn test_implicit_sparse_vf_noop_update_bypasses_overlap_lock(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    // Configure a sparse inventory so converter placeholders differ from the assigned VF IDs.
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let mut config = get_config();
+    config.dpu_config.num_of_vfs = 16;
+    config
+        .vmaas_config
+        .as_mut()
+        .expect("the default test configuration includes VMaaS")
+        .hbn_reps = Some("pf0hpf,pf0vf2,pf0vf5,pf1hpf".to_string());
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let host = create_managed_host(&env).await;
+    let segment_ids = env.create_vpc_and_tenant_segments(3).await;
+    let implicit_network = || {
+        let mut network = single_interface_network_config_with_vfs(segment_ids.clone());
+        for interface in &mut network.interfaces {
+            if interface.function_type() == rpc::InterfaceFunctionType::Virtual {
+                interface.virtual_function_id = None;
+            }
+        }
+        network
+    };
+
+    // Allocate the active instance through the legacy wire shape so it stores sparse VFs 2 and 5.
+    let instance = host
+        .instance_builer(&env)
+        .config(
+            InstanceConfig::default_tenant_and_os()
+                .network(implicit_network())
+                .into(),
+        )
+        .build()
+        .await;
+
+    // Re-submit the full network without VF IDs while changing only metadata.
+    let before = instance.rpc_instance().await.into_inner();
+    let mut update_config = before
+        .config
+        .clone()
+        .expect("the instance includes its config");
+    for interface in &mut update_config
+        .network
+        .as_mut()
+        .expect("the instance includes its network config")
+        .interfaces
+    {
+        if interface.function_type() == rpc::InterfaceFunctionType::Virtual {
+            interface.virtual_function_id = None;
+        }
+    }
+    let mut updated_metadata = before
+        .metadata
+        .clone()
+        .expect("the instance includes its metadata");
+    updated_metadata.description = "metadata-only sparse VF update".to_string();
+
+    // Hold the expansion lock; the unchanged resolved network must complete without waiting on it.
+    let mut blocker = env.db_txn().await;
+    db::tenant_prefix_overlap::lock_checks(&mut blocker)
+        .await
+        .unwrap();
+    let updated = tokio::time::timeout(
+        Duration::from_secs(10),
+        env.api
+            .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: before.id,
+                if_version_match: None,
+                config: Some(update_config),
+                metadata: Some(updated_metadata.clone()),
+            })),
+    )
+    .await
+    .expect("an unchanged sparse-VF update must bypass the overlap lock")
+    .expect("an unchanged sparse-VF update must succeed")
+    .into_inner();
+    blocker.rollback().await.unwrap();
+
+    // Confirm only metadata changed and no network replacement was staged.
+    assert_eq!(updated.metadata.as_ref(), Some(&updated_metadata));
+    let persisted = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .expect("the instance remains persisted");
+    assert_eq!(
+        persisted.network_config_version.to_string(),
+        before.network_config_version
+    );
+    assert!(persisted.update_network_config_request.is_none());
+    assert_eq!(
+        persisted
+            .config
+            .network
+            .interfaces
+            .iter()
+            .filter_map(|interface| match &interface.function_id {
+                InterfaceFunctionId::Physical {} => None,
+                InterfaceFunctionId::Virtual { id } => Some(*id),
+            })
+            .collect_vec(),
+        vec![2, 5]
+    );
+}
+
 /// Verifies BF4 Astra ignores a site intercept topology and uses its static VF inventory.
 #[crate::sqlx_test]
 async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and_update(

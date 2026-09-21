@@ -25,7 +25,7 @@ use figment::value::{Dict, Map, Value};
 use figment::{Figment, Metadata, Profile, Provider};
 use serde::de::DeserializeOwned;
 
-use super::file::{CarbideConfig, InitialObjectsConfig};
+use super::file::{CarbideConfig, InitialObjectsConfig, VpcPeeringPolicy};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct UnknownConfigurationField {
@@ -381,12 +381,136 @@ pub fn parse_carbide_config(
     Ok(Arc::new(config))
 }
 
+/// Logs deprecations that must be visible through the production subscriber.
+///
+/// Configuration is parsed before `carbide-api` initializes tracing, so these
+/// warnings are deliberately emitted by the caller after logging setup.
+pub fn log_vpc_peering_policy_deprecations(config: &CarbideConfig) {
+    for (path, policy) in [
+        ("vpc_peering_policy", config.vpc_peering_policy),
+        (
+            "vpc_peering_policy_on_existing",
+            config.vpc_peering_policy_on_existing,
+        ),
+    ] {
+        if policy != Some(VpcPeeringPolicy::Mixed) {
+            continue;
+        }
+        let source = config
+            .config_ctx
+            .as_ref()
+            .and_then(|figment| figment.find_metadata(path))
+            .map(super::provenance::source_label)
+            .unwrap_or_else(|| "configuration".to_string());
+        tracing::warn!(
+            config_key = path,
+            config_source = %source,
+            replacement = "exclusive",
+            "VPC peering policy `mixed` is deprecated; it is treated as `exclusive`"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::scenarios;
     use tracing_subscriber::prelude::*;
 
     use super::*;
     use crate::logging::stream::{LogStream, LogStreamLayer};
+
+    /// Preserves omission versus explicit emptiness through real TOML loading,
+    /// so an operator can disable null routes without activating the fallback.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn site_fabric_null_routes_distinguish_omitted_empty_and_configured() {
+        figment::Jail::expect_with(|jail| {
+            // Give the fallback and replacement disjoint coverage so they cannot be confused.
+            let site_prefix: ipnetwork::IpNetwork = "10.0.0.0/8".parse().unwrap();
+            let custom_route: ipnetwork::IpNetwork = "192.0.2.0/24".parse().unwrap();
+            scenarios!(
+                run = |(name, null_routes)| {
+                    // Parse the file through the production loader, including defaults.
+                    let path = format!("{name}.toml");
+                    let config_text = format!(
+                        "{}\nsite_fabric_prefixes = [\"10.0.0.0/8\"]\n{null_routes}\n",
+                        include_str!("test_data/min_config.toml")
+                    );
+                    jail.create_file(&path, &config_text).expect("write test config");
+                    parse_carbide_config(Path::new(&path), None)
+                        .map(|config| {
+                            // Check both stored presence and the resulting fallback decision.
+                            (
+                                config.site_fabric_null_routes.clone(),
+                                config.effective_site_fabric_null_routes().to_vec(),
+                            )
+                        })
+                        .map_err(|error| error.to_string())
+                };
+                "null-route configuration presence" {
+                    // Omission inherits the configured site inventory.
+                    ("omitted", "") => Yields((None, vec![site_prefix])),
+                    // Explicit emptiness must suppress the nonempty fallback.
+                    ("explicit-empty", "site_fabric_null_routes = []") => Yields((Some(vec![]), vec![])),
+                    // A replacement must not be augmented with the inherited root.
+                    ("configured", "site_fabric_null_routes = [\"192.0.2.0/24\"]") => Yields((Some(vec![custom_route]), vec![custom_route])),
+                }
+            );
+            Ok(())
+        })
+    }
+
+    /// Keeps legacy mixed policies loadable and their warnings available after
+    /// tracing starts, so operators can identify both deprecated settings.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn mixed_vpc_peering_policies_warn_that_they_are_deprecated() {
+        figment::Jail::expect_with(|jail| {
+            // Both policy keys independently need an actionable deprecation warning.
+            let config_text = format!(
+                "{}\nvpc_peering_policy = \"mixed\"\nvpc_peering_policy_on_existing = \"mixed\"\n",
+                include_str!("test_data/min_config.toml")
+            );
+            jail.create_file("config.toml", &config_text)?;
+
+            // Match startup ordering: parse before installing the logging subscriber.
+            let stream = LogStream::new(16, 64 * 1024);
+            let mut logs = stream.subscribe();
+            let subscriber = tracing_subscriber::registry().with(LogStreamLayer::new(stream));
+            let config = parse_carbide_config(Path::new("config.toml"), None)
+                .expect("deprecated mixed peering policies must remain parseable");
+            tracing::subscriber::with_default(subscriber, || {
+                log_vpc_peering_policy_deprecations(&config)
+            });
+
+            // Each warning must identify the key, source, and supported replacement.
+            let mut warnings = std::iter::from_fn(|| logs.try_recv().ok())
+                .filter(|line| {
+                    line.message
+                        == "VPC peering policy `mixed` is deprecated; it is treated as `exclusive`"
+                })
+                .collect::<Vec<_>>();
+            warnings.sort_by_key(|line| line.fields.get("config_key").cloned());
+            assert_eq!(warnings.len(), 2);
+            assert_eq!(
+                warnings
+                    .iter()
+                    .map(|line| line.fields.get("config_key").map(String::as_str))
+                    .collect::<Vec<_>>(),
+                vec![
+                    Some("vpc_peering_policy"),
+                    Some("vpc_peering_policy_on_existing"),
+                ]
+            );
+            assert!(warnings.iter().all(|line| {
+                line.level == "WARN"
+                    && line.fields.get("config_source").map(String::as_str) == Some("config.toml")
+                    && line.fields.get("replacement").map(String::as_str) == Some("exclusive")
+            }));
+            Ok(())
+        })
+    }
 
     #[test]
     #[allow(clippy::result_large_err)]

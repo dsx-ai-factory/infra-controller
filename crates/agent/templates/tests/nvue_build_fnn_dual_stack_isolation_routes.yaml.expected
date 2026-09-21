@@ -16,26 +16,15 @@
         type: swp
       pf0vf0_if:
         type: swp
-        acl: 
-          p0010_vpc_200_isolation_ipv4:
+        acl:
+          p0000_deny_prefixes_ipv4:
             inbound: {}
-          p0010_vpc_200_isolation_ipv6:
-            inbound: {} 
+          p0000_deny_prefixes_ipv6:
+            inbound: {}
         ip:
           address:
             10.0.1.1/24: {} 
-          vrf: vpc_200 
-      pf0hpf_if:
-        type: swp
-        acl: 
-          p0010_vpc_200_isolation_ipv4:
-            inbound: {}
-          p0010_vpc_200_isolation_ipv6:
-            inbound: {} 
-        ip:
-          address:
-            10.0.2.1/24: {} 
-          vrf: vpc_200 
+          vrf: vpc_100 
     nve:
       vxlan:
         arp-nd-suppress: on
@@ -84,26 +73,13 @@
                 action: deny
                 match:
                   any: {}
-          DPU_FROM_INSTANCE_PREFIX_LIST_vpc_200_if_10:
+          DPU_FROM_INSTANCE_PREFIX_LIST_vpc_100_if_10:
             rule:
               '65535':
                 action: deny
                 match:
                   any: {}
-          DPU_FROM_INSTANCE_PREFIX_LIST_IPV6_vpc_200_if_10:
-            type: ipv6
-            rule:
-              '65535':
-                action: deny
-                match:
-                  any: {}
-          DPU_FROM_INSTANCE_PREFIX_LIST_vpc_200_if_20:
-            rule:
-              '65535':
-                action: deny
-                match:
-                  any: {}
-          DPU_FROM_INSTANCE_PREFIX_LIST_IPV6_vpc_200_if_20:
+          DPU_FROM_INSTANCE_PREFIX_LIST_IPV6_vpc_100_if_10:
             type: ipv6
             rule:
               '65535':
@@ -211,14 +187,14 @@
               '65535':
                 action:
                   deny: {}
-          dpu_from_instance_vpc_200_if_10:
+          dpu_from_instance_vpc_100_if_10:
             rule:
               '11':
                 action:
                   permit: {}
                 match:
                   type: ipv4
-                  ip-prefix-list: DPU_FROM_INSTANCE_PREFIX_LIST_vpc_200_if_10
+                  ip-prefix-list: DPU_FROM_INSTANCE_PREFIX_LIST_vpc_100_if_10
                 set:
                   tag: 65101
                   community:
@@ -228,48 +204,14 @@
               '65535':
                 action:
                   deny: {}
-          dpu_from_instance_ipv6_vpc_200_if_10:
+          dpu_from_instance_ipv6_vpc_100_if_10:
             rule:
               '11':
                 action:
                   permit: {}
                 match:
                   type: ipv6
-                  ip-prefix-list: DPU_FROM_INSTANCE_PREFIX_LIST_IPV6_vpc_200_if_10
-                set:
-                  tag: 65101
-                  community:
-                      none: {}
-                  large-community:
-                    none: {}
-              '65535':
-                action:
-                  deny: {}
-          dpu_from_instance_vpc_200_if_20:
-            rule:
-              '11':
-                action:
-                  permit: {}
-                match:
-                  type: ipv4
-                  ip-prefix-list: DPU_FROM_INSTANCE_PREFIX_LIST_vpc_200_if_20
-                set:
-                  tag: 65101
-                  community:
-                      none: {}
-                  large-community:
-                    none: {}
-              '65535':
-                action:
-                  deny: {}
-          dpu_from_instance_ipv6_vpc_200_if_20:
-            rule:
-              '11':
-                action:
-                  permit: {}
-                match:
-                  type: ipv6
-                  ip-prefix-list: DPU_FROM_INSTANCE_PREFIX_LIST_IPV6_vpc_200_if_20
+                  ip-prefix-list: DPU_FROM_INSTANCE_PREFIX_LIST_IPV6_vpc_100_if_10
                 set:
                   tag: 65101
                   community:
@@ -309,7 +251,7 @@
                     route-map: leak_to_underlay
                     enable: on
                     list:
-                      vpc_200: {}
+                      vpc_100: {}
               ipv6-unicast:
                 enable: on
                 multipaths:
@@ -323,7 +265,7 @@
                     route-map: leak_to_underlay_ipv6
                     enable: on
                     list:
-                      vpc_200: {}
+                      vpc_100: {}
               l2vpn-evpn:
                 enable: on
             enable: on
@@ -369,16 +311,31 @@
                         route-map: dpu_to_evpn
 
 
-      vpc_200: 
+      vpc_100: 
         evpn:
           enable: on
           vni:
-            '200': {} 
+            '100': {} 
         loopback:
           ip:
             address:
               10.0.0.2/32: {}
         router:
+          static:
+            10.0.0.0/16:
+              address-family: ipv4-unicast
+              distance:
+                '250':
+                  via:
+                    blackhole:
+                      type: blackhole
+            fd00:abcd::/32:
+              address-family: ipv6-unicast
+              distance:
+                '250':
+                  via:
+                    blackhole:
+                      type: blackhole
           bgp:
             path-selection:
               multipath:
@@ -410,32 +367,14 @@
                   ipv4-unicast:
                     policy:
                       inbound:
-                        route-map: dpu_from_instance_vpc_200_if_10
+                        route-map: dpu_from_instance_vpc_100_if_10
                       outbound:
                         route-map: dpu_to_instance
                   ipv6-unicast:
                     enable: on
                     policy:
                       inbound:
-                        route-map: dpu_from_instance_ipv6_vpc_200_if_10
-                      outbound:
-                        route-map: dpu_to_instance
-              10.0.2.2:
-                passive-mode: on
-                peer-group: tenant
-                type: numbered
-                address-family:
-                  ipv4-unicast:
-                    policy:
-                      inbound:
-                        route-map: dpu_from_instance_vpc_200_if_20
-                      outbound:
-                        route-map: dpu_to_instance
-                  ipv6-unicast:
-                    enable: on
-                    policy:
-                      inbound:
-                        route-map: dpu_from_instance_ipv6_vpc_200_if_20
+                        route-map: dpu_from_instance_ipv6_vpc_100_if_10
                       outbound:
                         route-map: dpu_to_instance
             peer-group:
@@ -450,11 +389,11 @@
             route-export:
               to-evpn:
                 route-target:
-                  11414:200: {}
+                  11414:100: {}
             route-import:
               from-evpn:
                 route-target:
-                  11414:200: {}
+                  11414:100: {}
                   auto: {}
 
     acl:
@@ -473,50 +412,23 @@
                 source-port:
                   '68': {}
         type: ipv4
-
-
-      p0010_vpc_200_isolation_ipv4:
+      p0000_deny_prefixes_ipv4:
         type: ipv4
         rule:
-          '10':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.0.1.0/24
-          '20':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.0.2.0/24
-          '1000':
+          '1002':
             action:
               deny: {}
             match:
               ip:
-                dest-ip: 10.0.0.0/16
-      p0010_vpc_200_isolation_ipv6:
+                dest-ip: 192.0.2.0/24
+      p0000_deny_prefixes_ipv6:
         type: ipv6
         rule:
-          '10':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 2001:db8:1::/48
-          '20':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 2001:db8:2::/48
-          '1000':
+          '1002':
             action:
               deny: {}
             match:
               ip:
-                dest-ip: fd00::/32
-
+                dest-ip: 2001:db8:bad::/48
 
 

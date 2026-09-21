@@ -2361,8 +2361,12 @@ pub struct NvueGnmiPaths {
     pub interfaces_enabled: bool,
     pub platform_general_enabled: bool,
 
-    /// Collect leak sensor state from the NVOS platform-general gNMI tree.
+    /// Collect leak sensor state from an independent NVOS gNMI SAMPLE stream.
+    ///
     /// Disabled by default because path support depends on the NVOS release.
+    /// When enabled, failures on the leak-sensor path do not interrupt the
+    /// primary component, interface, or platform-general SAMPLE stream; the
+    /// leak-sensor stream retries independently.
     pub leak_sensors_enabled: bool,
 }
 

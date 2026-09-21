@@ -66,7 +66,7 @@ fn event_context_for_machine(machine_id: &str) -> EventContext {
         addr: BmcAddr {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             port: Some(443),
-            mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+            mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
         },
         collector_type: "sensor_collector",
         labels: Default::default(),

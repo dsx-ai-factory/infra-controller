@@ -380,7 +380,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().unwrap(),
                 port: None,
-                mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+                mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
             },
             collector_type,
             metadata: None,
@@ -781,7 +781,7 @@ mod tests {
                 addr: BmcAddr {
                     ip: "10.0.0.1".parse().unwrap(),
                     port: None,
-                    mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+                    mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
                 },
                 collector_type: ON_CHANGE_STREAM_ID_SYSTEM_EVENTS,
                 labels: Default::default(),

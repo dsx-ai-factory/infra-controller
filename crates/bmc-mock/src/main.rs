@@ -21,7 +21,6 @@ mod tar_router;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -31,35 +30,25 @@ use bmc_mock::mac_address_pool::{
     RangesConfig as MacAddressRangesConfig,
 };
 use bmc_mock::{
-    BmcCommand, BmcState, Callbacks, DpuFirmwareVersions, DpuMachineInfo, DpuSettings,
-    HardwareType, HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions,
-    MockPowerState, SetSystemPowerError, SystemPowerControl, VirtualMediaDeviceConfig,
-    redfish_error_envelope,
+    DpuMachineInfo, DpuSettings, HostMachineInfo, ListenerOrAddress, MachineInfo,
+    MachineRouterOptions, VirtualMediaDeviceConfig, redfish_error_envelope,
 };
-use command_line::{MachineRole, StateBackend};
+use command_line::{
+    AppType, BmcBehaviorArgs, LibvirtArgs, ListenerArgs, MachineArgs, MachineRole, StateBackend,
+    TarGzArgs,
+};
+use eyre::Context;
 use mac_address::MacAddress;
 use tar_router::TarGzOption;
-use tokio::process::Command;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tracing::info;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::prelude::*;
 
-///
-/// bmc-mock behaves like a Redfish BMC server
-/// Run: 'cargo run'
-/// Try it:
-///  - start docker-compose things
-///  - `cargo make bootstrap-forge-docker`
-///  - `grpcurl -d '{"machine_id": {"value": "71363261-a95a-4964-9eb1-8dd98b870746"}}' -insecure
-///  127.0.0.1:1079 forge.Forge/CleanupMachineCompleted`
-///  where that UUID is a host machine in DB.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut routers_by_ip: HashMap<String, Router> = HashMap::default();
-
     let env_filter = EnvFilter::from_default_env()
         .add_directive(LevelFilter::DEBUG.into())
         .add_directive("tower=warn".parse().unwrap())
@@ -72,30 +61,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(env_filter)
         .init();
 
+    match command_line::parse_args()? {
+        AppType::TarGzRouter { targz, listener } => start_tar_gz_app(targz, listener).await,
+        AppType::LibvirtApp {
+            listener,
+            machine,
+            bmc_behaviour,
+            libvirt,
+        } => start_libvirt_app(listener, machine, bmc_behaviour, libvirt).await,
+        AppType::JustMockApp {
+            listener,
+            machine,
+            bmc_behaviour,
+        } => start_mock_app(listener, machine, bmc_behaviour).await,
+    }
+}
+
+async fn start_tar_gz_app(
+    args: TarGzArgs,
+    listener: ListenerArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     // collection of path to entries map to avoid duplicating entries when multiple machines
     // use the same archive
     let mut tar_router_entries = HashMap::default();
-
-    let args = command_line::parse_args();
-    if args.enable_ipmi_simulation && (args.targz.is_some() || args.ip_router.is_some()) {
-        return Err(
-            "--enable-ipmi-simulation cannot be combined with archive-backed routers".into(),
-        );
-    }
-    let has_generated_options = args.libvirt_domain.is_some()
-        || args.hardware_profile.is_some()
-        || args.machine_role.is_some()
-        || args.state_backend.is_some()
-        || args.dpu_count.is_some()
-        || args.dpu_index.is_some()
-        || args.instance_index != 0;
-    if has_generated_options && (args.targz.is_some() || args.ip_router.is_some()) {
-        return Err(
-            "generated-machine options cannot be combined with archive-backed routers".into(),
-        );
-    }
-    let generated_config = generated_mock_config(&args)?;
-    if let Some(ip_routers) = args.ip_router {
+    let mut routers_by_ip: HashMap<String, Router> = HashMap::default();
+    if let Some(ip_routers) = args.ip_router.as_ref() {
         for ip_router in ip_routers {
             info!(
                 archive_path = %ip_router.targz.to_string_lossy(),
@@ -106,62 +96,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 TarGzOption::Disk(&ip_router.targz),
                 Some(&mut tar_router_entries),
             )
-            .unwrap();
-            routers_by_ip.insert(ip_router.ip_address, r);
+            .wrap_err_with(|| format!("failed to load redfish archive {:?}", ip_router.targz))?;
+            routers_by_ip.insert(ip_router.ip_address.clone(), r);
         }
     }
-
-    let listen_addr = args.port.map(|p| SocketAddr::from(([0, 0, 0, 0], p)));
-    info!(cert_path = ?args.cert_path, "Using BMC mock certificate path");
-    let mut backend_tasks = JoinSet::new();
-    let (router, _ipmi_sim_handle) = if let Some(tar_path) = args.targz {
+    if let Some(tar_path) = args.targz {
         info!(archive_path = %tar_path.to_string_lossy(), "Using default BMC mock archive");
-        (
+        let router =
             tar_router::tar_router(TarGzOption::Disk(&tar_path), Some(&mut tar_router_entries))
-                .unwrap(),
-            None,
-        )
-    } else {
-        info!(
-            hardware_type = %generated_config.hardware_type,
-            role = ?generated_config.machine_role,
-            backend = ?generated_config.state_backend,
-            "Using generated BMC mock",
-        );
-        if generated_config.use_channel_callbacks {
-            let command_channel = spawn_qemu_reboot_handler(&mut backend_tasks);
-            let callbacks = Arc::new(ChannelCallbacks::new(command_channel));
-            let (router, state) = generated_mock(generated_config, callbacks);
-            let ipmi = start_ipmi_simulation(&state, args.enable_ipmi_simulation).await?;
-            (router, ipmi)
-        } else if let Some(libvirt_config) = generated_config.libvirt_config.clone() {
-            let callbacks = Arc::new(bmc_mock::libvirt::LibvirtCallbacks::new(
-                libvirt_config,
-                &mut backend_tasks,
-            ));
-            let (router, state) = generated_mock(generated_config, callbacks.clone());
-            callbacks
-                .bind_state(&state)
-                .await
-                .expect("libvirt backend must bind to generated BMC state");
-            let ipmi = start_ipmi_simulation(&state, args.enable_ipmi_simulation).await?;
-            (router, ipmi)
-        } else {
-            let callbacks = Arc::new(bmc_mock::simulated::SimulatedCallbacks::new());
-            let (router, state) = generated_mock(generated_config, callbacks);
-            let ipmi = start_ipmi_simulation(&state, args.enable_ipmi_simulation).await?;
-            (router, ipmi)
-        }
-    };
-
-    routers_by_ip.insert("".to_owned(), router);
-
-    let server_config = bmc_mock::tls::server_config(args.cert_path)?;
+                .wrap_err_with(|| format!("failed to load redfish archive {tar_path:?}"))?;
+        routers_by_ip.insert("".to_owned(), router);
+    }
+    info!(cert_path = ?listener.cert_path, "Using BMC mock certificate path");
     let mut handle = bmc_mock::CombinedServer::run(
         "bmc-mock",
         Arc::new(RwLock::new(routers_by_ip)),
-        listen_addr.map(ListenerOrAddress::Address),
-        server_config,
+        listener.listener_address(),
+        bmc_mock::tls::server_config(listener.cert_path)?,
+    );
+    handle.wait().await?;
+    Ok(())
+}
+
+async fn start_libvirt_app(
+    listener: ListenerArgs,
+    machine: MachineArgs,
+    bmc_behaviour: BmcBehaviorArgs,
+    libvirt: LibvirtArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut backend_tasks = JoinSet::new();
+    info!(
+        hardware_type = ?machine.hardware_profile,
+        role = ?machine.machine_role,
+        backend = ?StateBackend::Libvirt,
+        "Using generated BMC mock",
+    );
+    let callbacks = Arc::new(bmc_mock::libvirt::LibvirtCallbacks::new(
+        libvirt.into_config(),
+        &mut backend_tasks,
+    ));
+    let (router, state) = bmc_mock::machine_router(
+        &machine.machine_info(),
+        callbacks.clone(),
+        String::default(),
+        bmc_behaviour.redfish_auth,
+        MachineRouterOptions {
+            bmc_reset_duration: bmc_behaviour.bmc_reset_duration(),
+            virtual_media_devices: machine.libvirt_virtual_media_devices(),
+            ..MachineRouterOptions::default()
+        },
+    );
+    callbacks
+        .bind_state(&state)
+        .await
+        .expect("libvirt backend must bind to generated BMC state");
+    let _ipmi = if bmc_behaviour.enable_ipmi_simulation {
+        Some(bmc_mock::ipmi_sim::start(&state, ipmi_sim_config(), None).await?)
+    } else {
+        None
+    };
+
+    info!(cert_path = ?listener.cert_path, "Using BMC mock certificate path");
+    let mut handle = bmc_mock::CombinedServer::run_router(
+        "bmc-mock",
+        router,
+        listener.listener_address(),
+        bmc_mock::tls::server_config(listener.cert_path)?,
     );
     tokio::select! {
         result = handle.wait() => result?,
@@ -174,666 +174,152 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn spawn_qemu_reboot_handler(tasks: &mut JoinSet<()>) -> mpsc::UnboundedSender<BmcCommand> {
-    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
-    tasks.spawn(async move {
-        loop {
-            let Some(command) = command_rx.recv().await else {
-                break;
-            };
-            match command {
-                // Assume SetSystemPower is just a reboot
-                BmcCommand::SetSystemPower { .. } => {}
-                BmcCommand::StateRefreshIndication => continue,
-            }
-            // Bound one reboot attempt, including collecting the command output.
-            let reboot_output = match tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                Command::new("virsh")
-                    .arg("reboot")
-                    .arg("ManagedHost")
-                    .kill_on_drop(true)
-                    .output(),
-            ).await {
-                Ok(Ok(o)) => o,
-                Ok(Err(err)) if matches!(err.kind(), ErrorKind::NotFound) => {
-                    tracing::info!("`virsh` not found. Cannot reboot QEMU host.");
-                    continue;
-                }
-                Ok(Err(err)) => {
-                    tracing::error!(
-                        error = %err,
-                        "Failed to run virsh reboot for managed host",
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    tracing::error!(%error, "virsh reboot for managed host timed out after 30 seconds");
-                    continue;
-                }
-            };
+async fn start_mock_app(
+    listener: ListenerArgs,
+    machine: MachineArgs,
+    bmc_behaviour: BmcBehaviorArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    info!(
+        hardware_type = ?machine.hardware_profile,
+        role = ?machine.machine_role,
+        backend = ?StateBackend::Internal,
+        "Using generated BMC mock",
+    );
+    let callbacks = Arc::new(bmc_mock::simulated::SimulatedCallbacks::new());
+    let (router, state) = {
+        bmc_mock::machine_router(
+            &machine.machine_info(),
+            callbacks,
+            String::default(),
+            bmc_behaviour.redfish_auth,
+            MachineRouterOptions {
+                bmc_reset_duration: bmc_behaviour.bmc_reset_duration(),
+                ..MachineRouterOptions::default()
+            },
+        )
+    };
+    let _ipmi = if bmc_behaviour.enable_ipmi_simulation {
+        Some(bmc_mock::ipmi_sim::start(&state, ipmi_sim_config(), None).await?)
+    } else {
+        None
+    };
 
-            match reboot_output.status.code() {
-                Some(0) => {
-                    tracing::debug!("Rebooted qemu managed host...");
-                }
-                Some(exit_code) => {
-                    tracing::error!(exit_code, "virsh reboot failed for managed host",);
-                    tracing::info!(
-                        stdout = %String::from_utf8_lossy(&reboot_output.stdout),
-                        "virsh reboot standard output",
-                    );
-                    tracing::info!(
-                        stderr = %String::from_utf8_lossy(&reboot_output.stderr),
-                        "virsh reboot standard error",
-                    );
-                }
-                None => {
-                    tracing::error!("Reboot command killed by signal");
-                }
-            }
-        }
-    });
-    command_tx
+    info!(cert_path = ?listener.cert_path, "Using BMC mock certificate path");
+    let mut handle = bmc_mock::CombinedServer::run_router(
+        "bmc-mock",
+        router,
+        listener.listener_address(),
+        bmc_mock::tls::server_config(listener.cert_path)?,
+    );
+    handle.wait().await?;
+    Ok(())
 }
 
-#[derive(Debug)]
-struct GeneratedMockConfig {
-    machine_role: MachineRole,
-    state_backend: StateBackend,
-    hardware_type: HardwareType,
-    dpu_count: u8,
-    dpu_index: usize,
-    instance_index: u8,
-    dpu_firmware: DpuFirmwareVersions,
-    libvirt_config: Option<bmc_mock::libvirt::Config>,
-    use_channel_callbacks: bool,
-    redfish_auth: bool,
-    bmc_reset_duration: Option<std::time::Duration>,
-}
-
-fn generated_mock_config(args: &command_line::Args) -> Result<GeneratedMockConfig, String> {
-    let explicit_mode = args.machine_role.is_some() || args.state_backend.is_some();
-    let libvirt_shorthand_mode =
-        args.libvirt_domain.is_some() && args.hardware_profile.is_some() && !explicit_mode;
-    let default_generated_mode = args.libvirt_domain.is_none()
-        && args.hardware_profile.is_none()
-        && !explicit_mode
-        && args.dpu_count.is_none()
-        && args.dpu_index.is_none()
-        && args.instance_index == 0;
-
-    if default_generated_mode {
-        return Ok(GeneratedMockConfig {
-            machine_role: MachineRole::Host,
-            state_backend: StateBackend::Internal,
-            hardware_type: HardwareType::WiwynnGB200Nvl,
-            dpu_count: 2,
-            dpu_index: 0,
-            instance_index: 0,
-            dpu_firmware: DpuFirmwareVersions::default(),
-            libvirt_config: None,
-            use_channel_callbacks: true,
-            redfish_auth: args.redfish_auth,
-            bmc_reset_duration: bmc_reset_duration(args),
+impl MachineArgs {
+    fn machine_info(&self) -> MachineInfo {
+        let instance_index = self.instance_index;
+        let mut pool = MacAddressPool::new(MacAddressConfig {
+            pool: Some(
+                MacAddressPoolConfig::new(MacAddress::new([2, 0, 0, instance_index, 0, 0]), 16)
+                    .expect("Must be constructed with these parameters"),
+            ),
+            ranges: Some(
+                MacAddressRangesConfig::new(
+                    MacAddress::new([6, 0, 0, instance_index, 0, 0]),
+                    16,
+                    8,
+                )
+                .expect("Must be constructed with these parameters"),
+            ),
         });
-    }
-
-    if !explicit_mode && !libvirt_shorthand_mode {
-        return Err(
-            "explicit generated machines require --hardware-profile, --machine-role, and --state-backend"
-                .to_string(),
-        );
-    }
-
-    let machine_role = if libvirt_shorthand_mode {
-        MachineRole::Host
-    } else {
-        args.machine_role.ok_or_else(|| {
-            "--machine-role is required when explicitly configuring a generated machine".to_string()
-        })?
-    };
-    let state_backend = if libvirt_shorthand_mode {
-        StateBackend::Libvirt
-    } else {
-        args.state_backend.ok_or_else(|| {
-            "--state-backend is required when explicitly configuring a generated machine"
-                .to_string()
-        })?
-    };
-    let hardware_type = args.hardware_profile.ok_or_else(|| {
-        "--hardware-profile is required when explicitly configuring a generated machine".to_string()
-    })?;
-
-    let dpu_count = match (hardware_type.fixed_number_of_dpu(), args.dpu_count) {
-        (Some(fixed), Some(requested)) if fixed != requested => {
-            return Err(format!(
-                "hardware profile {hardware_type} requires {fixed} DPU(s), not {requested}"
-            ));
+        let hardware_type = self.hardware_profile;
+        let dpu_settings = || DpuSettings {
+            firmware_versions: self.dpu_firmware.clone().into(),
+            ..DpuSettings::default()
+        };
+        match self.machine_role {
+            MachineRole::Host => {
+                let dpu_count = self.dpu_count();
+                let dpus = (0..dpu_count)
+                    .map(|_| DpuMachineInfo::new(hardware_type, &mut pool, dpu_settings()))
+                    .collect::<Vec<_>>();
+                let mac_range = pool
+                    .allocate_range_config()
+                    .expect("MAC address pool should be allocated");
+                MachineInfo::Host(HostMachineInfo::new(
+                    hardware_type,
+                    dpus,
+                    &mut pool,
+                    mac_range,
+                ))
+            }
+            MachineRole::Dpu => {
+                let index = self
+                    .dpu_index()
+                    .expect("Cannot get DPU index for this configuration");
+                let dpu = (0..=index)
+                    .map(|_| DpuMachineInfo::new(hardware_type, &mut pool, dpu_settings()))
+                    .last()
+                    .unwrap();
+                MachineInfo::Dpu(dpu)
+            }
         }
-        (Some(fixed), _) => fixed,
-        (None, requested) => requested.unwrap_or(0),
-    };
-    let dpu_index = args.dpu_index.unwrap_or(0);
-    if !args.dpu_firmware.is_empty() && dpu_count == 0 {
-        return Err(
-            "DPU firmware options require at least one generated DPU; set --dpu-count to a positive value"
-                .to_string(),
-        );
-    }
-    match machine_role {
-        MachineRole::Host if args.dpu_index.is_some() => {
-            return Err("--dpu-index is valid only with --machine-role=dpu".to_string());
-        }
-        MachineRole::Dpu if dpu_index >= usize::from(dpu_count) => {
-            return Err(format!(
-                "DPU index {dpu_index} is outside hardware profile {hardware_type}'s {dpu_count} DPU(s)"
-            ));
-        }
-        _ => {}
     }
 
-    let libvirt_config = match (state_backend, &args.libvirt_domain) {
-        (StateBackend::Libvirt, Some(domain)) => Some(bmc_mock::libvirt::Config {
-            virsh_path: args.virsh_path.clone(),
-            uri: args.libvirt_uri.clone(),
-            domain: domain.clone(),
+    fn libvirt_virtual_media_devices(&self) -> Option<Vec<VirtualMediaDeviceConfig>> {
+        match self.machine_role {
+            MachineRole::Host => Some(vec![
+                VirtualMediaDeviceConfig {
+                    id: Cow::Borrowed("Cd"),
+                    name: Cow::Borrowed("Operating System Virtual CD"),
+                    media_types: vec![Cow::Borrowed("CD"), Cow::Borrowed("DVD")],
+                },
+                VirtualMediaDeviceConfig {
+                    id: Cow::Borrowed("ConfigCd"),
+                    name: Cow::Borrowed("Configuration Virtual CD"),
+                    media_types: vec![Cow::Borrowed("CD"), Cow::Borrowed("DVD")],
+                },
+            ]),
+            MachineRole::Dpu => None,
+        }
+    }
+}
+
+impl ListenerArgs {
+    fn listener_address(&self) -> Option<ListenerOrAddress> {
+        self.port
+            .map(|p| SocketAddr::from(([0, 0, 0, 0], p)))
+            .map(ListenerOrAddress::Address)
+    }
+}
+
+impl BmcBehaviorArgs {
+    fn bmc_reset_duration(&self) -> Option<std::time::Duration> {
+        self.bmc_reset_duration
+            .filter(|seconds| *seconds > 0)
+            .map(std::time::Duration::from_secs)
+    }
+}
+
+impl LibvirtArgs {
+    fn into_config(self) -> bmc_mock::libvirt::Config {
+        bmc_mock::libvirt::Config {
+            virsh_path: self.virsh_path,
+            uri: self.libvirt_uri,
+            domain: self
+                .libvirt_domain
+                .expect("libvirt-domain expected be specified for libvirt backend"),
             virtual_media_targets: BTreeMap::from([
                 ("Cd".to_string(), "sdb".to_string()),
                 ("ConfigCd".to_string(), "sdc".to_string()),
             ]),
-        }),
-        (StateBackend::Libvirt, None) => {
-            return Err("--state-backend=libvirt requires --libvirt-domain".to_string());
-        }
-        (StateBackend::Internal, Some(_)) => {
-            return Err("--libvirt-domain requires --state-backend=libvirt".to_string());
-        }
-        (StateBackend::Internal, None) => None,
-    };
-
-    Ok(GeneratedMockConfig {
-        machine_role,
-        state_backend,
-        hardware_type,
-        dpu_count,
-        dpu_index,
-        instance_index: args.instance_index,
-        dpu_firmware: args.dpu_firmware.clone().into(),
-        libvirt_config,
-        use_channel_callbacks: false,
-        redfish_auth: args.redfish_auth,
-        bmc_reset_duration: bmc_reset_duration(args),
-    })
-}
-
-/// The standalone reset window; zero and absence both mean instantaneous.
-fn bmc_reset_duration(args: &command_line::Args) -> Option<std::time::Duration> {
-    args.bmc_reset_duration
-        .filter(|seconds| *seconds > 0)
-        .map(std::time::Duration::from_secs)
-}
-
-async fn start_ipmi_simulation<C: Callbacks>(
-    state: &BmcState<C>,
-    enable_ipmi: bool,
-) -> Result<Option<bmc_mock::ipmi_sim::IpmiSimHandle>, Box<dyn std::error::Error>> {
-    if enable_ipmi {
-        Ok(Some(
-            bmc_mock::ipmi_sim::start(
-                state,
-                bmc_mock::ipmi_sim::IpmiSimConfig {
-                    stable_id: "standalone-bmc-mock".to_string(),
-                    console_prompt: "root@bmc-mock # ".to_string(),
-                },
-                None,
-            )
-            .await?,
-        ))
-    } else {
-        Ok(None)
-    }
-}
-
-fn generated_mock<C: Callbacks>(
-    config: GeneratedMockConfig,
-    callbacks: Arc<C>,
-) -> (Router, BmcState<C>) {
-    let machine_info = generated_machine_info(&config);
-    if config.machine_role == MachineRole::Host && config.state_backend == StateBackend::Libvirt {
-        bmc_mock::machine_router(
-            &machine_info,
-            callbacks,
-            String::default(),
-            config.redfish_auth,
-            MachineRouterOptions {
-                bmc_reset_duration: config.bmc_reset_duration,
-                event_service: bmc_mock::EventServiceOverride::Profile,
-                virtual_media_devices: Some(vec![
-                    VirtualMediaDeviceConfig {
-                        id: Cow::Borrowed("Cd"),
-                        name: Cow::Borrowed("Operating System Virtual CD"),
-                        media_types: vec![Cow::Borrowed("CD"), Cow::Borrowed("DVD")],
-                    },
-                    VirtualMediaDeviceConfig {
-                        id: Cow::Borrowed("ConfigCd"),
-                        name: Cow::Borrowed("Configuration Virtual CD"),
-                        media_types: vec![Cow::Borrowed("CD"), Cow::Borrowed("DVD")],
-                    },
-                ]),
-            },
-        )
-    } else {
-        bmc_mock::machine_router(
-            &machine_info,
-            callbacks,
-            String::default(),
-            config.redfish_auth,
-            MachineRouterOptions {
-                bmc_reset_duration: config.bmc_reset_duration,
-                ..MachineRouterOptions::default()
-            },
-        )
-    }
-}
-
-fn generated_machine_info(config: &GeneratedMockConfig) -> MachineInfo {
-    let mut pool = MacAddressPool::new(MacAddressConfig {
-        pool: Some(
-            MacAddressPoolConfig::new(MacAddress::new([2, 0, 0, config.instance_index, 0, 0]), 16)
-                .expect("Must be constructed with these parameters"),
-        ),
-        ranges: Some(
-            MacAddressRangesConfig::new(
-                MacAddress::new([6, 0, 0, config.instance_index, 0, 0]),
-                16,
-                8,
-            )
-            .expect("Must be constructed with these parameters"),
-        ),
-    });
-
-    let mac_range = pool
-        .allocate_range_config()
-        .expect("MAC address pool should be allocated");
-    let dpus = (0..config.dpu_count)
-        .map(|_| {
-            DpuMachineInfo::new(
-                config.hardware_type,
-                &mut pool,
-                DpuSettings {
-                    firmware_versions: config.dpu_firmware.clone(),
-                    ..DpuSettings::default()
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    match config.machine_role {
-        MachineRole::Host => MachineInfo::Host(HostMachineInfo::new(
-            config.hardware_type,
-            dpus,
-            &mut pool,
-            mac_range,
-        )),
-        MachineRole::Dpu => MachineInfo::Dpu(dpus[config.dpu_index].clone()),
-    }
-}
-
-#[derive(Debug)]
-struct ChannelCallbacks {
-    command_channel: mpsc::UnboundedSender<BmcCommand>,
-}
-
-impl ChannelCallbacks {
-    fn new(command_channel: mpsc::UnboundedSender<BmcCommand>) -> Self {
-        Self { command_channel }
-    }
-}
-
-impl Callbacks for ChannelCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        MockPowerState::On
-    }
-
-    fn send_power_command(
-        &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
-        self.command_channel
-            .send(BmcCommand::SetSystemPower {
-                request: reset_type,
-                reply: None,
-            })
-            .map_err(|err| SetSystemPowerError::CommandSendError(err.to_string()))
-    }
-
-    fn state_refresh_indication(&self) {
-        let _ = self
-            .command_channel
-            .send(BmcCommand::StateRefreshIndication);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use clap::Parser;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn generated_auth_flag_reaches_the_router() {
-        use axum::body::Body;
-        use axum::http::{Request, StatusCode};
-        use tower::ServiceExt;
-
-        for enabled in [false, true] {
-            let mut arguments = vec![
-                "bmc-mock",
-                "--machine-role",
-                "host",
-                "--state-backend",
-                "internal",
-                "--hardware-profile",
-                "dell_poweredge_r750",
-            ];
-            if enabled {
-                arguments.push("--redfish-auth");
-            }
-            let (router, _) = generated_mock(
-                config(&arguments).unwrap(),
-                Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
-            );
-            let response = router
-                .oneshot(
-                    Request::builder()
-                        .uri("/redfish/v1/Systems/System.Embedded.1")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                response.status(),
-                if enabled {
-                    StatusCode::UNAUTHORIZED
-                } else {
-                    StatusCode::OK
-                }
-            );
         }
     }
+}
 
-    fn config(arguments: &[&str]) -> Result<GeneratedMockConfig, String> {
-        let args = command_line::Args::try_parse_from(arguments).unwrap();
-        generated_mock_config(&args)
-    }
-
-    #[test]
-    fn default_generated_mode_uses_channel_callbacks() {
-        let config = config(&["bmc-mock"]).unwrap();
-        assert_eq!(config.machine_role, MachineRole::Host);
-        assert_eq!(config.state_backend, StateBackend::Internal);
-        assert!(matches!(config.hardware_type, HardwareType::WiwynnGB200Nvl));
-        assert!(config.use_channel_callbacks);
-    }
-
-    #[tokio::test]
-    async fn hardware_profile_enables_event_service() {
-        let config = config(&[
-            "bmc-mock",
-            "--machine-role",
-            "host",
-            "--state-backend",
-            "internal",
-            "--hardware-profile",
-            "dell_poweredge_r750",
-        ])
-        .unwrap();
-        let (_router, state) = generated_mock(
-            config,
-            Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
-        );
-        assert!(state.event_service.is_some());
-        assert!(state.availability.is_none());
-    }
-
-    #[tokio::test]
-    async fn the_reset_window_flag_enables_the_offline_simulation() {
-        let windowed = config(&[
-            "bmc-mock",
-            "--machine-role",
-            "host",
-            "--state-backend",
-            "internal",
-            "--hardware-profile",
-            "dell_poweredge_r750",
-            "--bmc-reset-duration",
-            "5",
-        ])
-        .unwrap();
-        assert_eq!(
-            windowed.bmc_reset_duration,
-            Some(std::time::Duration::from_secs(5))
-        );
-        let (_router, state) = generated_mock(
-            windowed,
-            Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
-        );
-        assert!(state.availability.is_some());
-
-        let instantaneous = config(&["bmc-mock", "--bmc-reset-duration", "0"]).unwrap();
-        assert!(instantaneous.bmc_reset_duration.is_none());
-    }
-
-    #[test]
-    fn preserves_the_existing_libvirt_shorthand() {
-        let config = config(&[
-            "bmc-mock",
-            "--libvirt-domain",
-            "host-01",
-            "--hardware-profile",
-            "dell_poweredge_r750",
-        ])
-        .unwrap();
-        assert_eq!(config.machine_role, MachineRole::Host);
-        assert_eq!(config.state_backend, StateBackend::Libvirt);
-        assert!(!config.use_channel_callbacks);
-    }
-
-    #[test]
-    fn validates_dpu_count_and_index() {
-        let cases = [
-            [
-                "bmc-mock",
-                "--machine-role",
-                "dpu",
-                "--state-backend",
-                "internal",
-                "--hardware-profile",
-                "wiwynn_gb200_nvl",
-                "--dpu-count",
-                "1",
-                "--dpu-index",
-                "0",
-            ],
-            [
-                "bmc-mock",
-                "--machine-role",
-                "dpu",
-                "--state-backend",
-                "internal",
-                "--hardware-profile",
-                "wiwynn_gb200_nvl",
-                "--dpu-count",
-                "2",
-                "--dpu-index",
-                "2",
-            ],
-        ];
-
-        for arguments in cases {
-            assert!(config(&arguments).is_err(), "arguments {arguments:?}");
-        }
-    }
-
-    #[test]
-    fn rejects_dpu_firmware_overrides_without_generated_dpus() {
-        let error = config(&[
-            "bmc-mock",
-            "--machine-role",
-            "host",
-            "--state-backend",
-            "internal",
-            "--hardware-profile",
-            "dell_poweredge_r750",
-            "--dpu-bmc-firmware",
-            "bmc-version",
-        ])
-        .unwrap_err();
-
-        assert_eq!(
-            error,
-            "DPU firmware options require at least one generated DPU; set --dpu-count to a positive value",
-        );
-    }
-
-    #[test]
-    fn host_and_dpu_endpoints_share_deterministic_dpu_identity() {
-        let host_config = config(&[
-            "bmc-mock",
-            "--machine-role",
-            "host",
-            "--state-backend",
-            "internal",
-            "--hardware-profile",
-            "wiwynn_gb200_nvl",
-            "--instance-index",
-            "3",
-        ])
-        .unwrap();
-        let dpu_config = config(&[
-            "bmc-mock",
-            "--machine-role",
-            "dpu",
-            "--state-backend",
-            "internal",
-            "--hardware-profile",
-            "wiwynn_gb200_nvl",
-            "--dpu-index",
-            "1",
-            "--instance-index",
-            "3",
-        ])
-        .unwrap();
-        let host = generated_machine_info(&host_config);
-        let dpu = generated_machine_info(&dpu_config);
-        let MachineInfo::Host(host) = host else {
-            panic!("expected host machine info");
-        };
-        let MachineInfo::Dpu(dpu) = dpu else {
-            panic!("expected DPU machine info");
-        };
-
-        assert_eq!(host.dpus[1].serial, dpu.serial);
-        assert_eq!(host.dpus[1].bmc_mac_address, dpu.bmc_mac_address);
-    }
-
-    #[test]
-    fn configured_dpu_firmware_reaches_the_generated_host() {
-        let config = config(&[
-            "bmc-mock",
-            "--machine-role",
-            "host",
-            "--state-backend",
-            "internal",
-            "--hardware-profile",
-            "dell_poweredge_r750",
-            "--dpu-count",
-            "1",
-            "--dpu-bmc-firmware",
-            "bmc-version",
-            "--dpu-uefi-firmware",
-            "uefi-version",
-            "--dpu-bsp-firmware",
-            "bsp-version",
-            "--dpu-cec-firmware",
-            "cec-version",
-            "--dpu-nic-firmware",
-            "nic-version",
-        ])
-        .unwrap();
-        let (_, state) = generated_mock(
-            config,
-            Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
-        );
-
-        for (id, expected) in [
-            ("BMC_Firmware", "bmc-version"),
-            ("DPU_UEFI", "uefi-version"),
-            ("DPU_BSP", "bsp-version"),
-            ("Bluefield_FW_ERoT", "cec-version"),
-            ("DPU_NIC", "nic-version"),
-        ] {
-            assert_eq!(
-                state
-                    .update_service_state
-                    .find_firmware_inventory(id)
-                    .and_then(|inventory| inventory["Version"].as_str().map(str::to_owned)),
-                Some(expected.to_string()),
-                "{id}",
-            );
-        }
-    }
-
-    #[test]
-    fn configured_dpu_firmware_reaches_generated_bf4_endpoints() {
-        for (hardware_profile, machine_role) in [
-            ("dell_poweredge_r760_bf4", "host"),
-            ("dell_poweredge_r760_bf4", "dpu"),
-            ("nvidia_dgx_vr", "host"),
-            ("nvidia_dgx_vr", "dpu"),
-        ] {
-            let config = config(&[
-                "bmc-mock",
-                "--machine-role",
-                machine_role,
-                "--state-backend",
-                "internal",
-                "--hardware-profile",
-                hardware_profile,
-                "--dpu-bmc-firmware",
-                "bmc-version",
-                "--dpu-uefi-firmware",
-                "uefi-version",
-                "--dpu-bsp-firmware",
-                "bsp-version",
-                "--dpu-cec-firmware",
-                "cec-version",
-                "--dpu-nic-firmware",
-                "nic-version",
-            ])
-            .unwrap();
-            let (_, state) = generated_mock(
-                config,
-                Arc::new(bmc_mock::simulated::SimulatedCallbacks::new()),
-            );
-
-            for (id, expected) in [
-                ("BlueField_FW_BMC_0", "bmc-version"),
-                ("BlueField_FW_CPU_0", "uefi-version"),
-                ("DPU_BSP", "bsp-version"),
-                ("BlueField_FW_ERoT_BMC_0", "cec-version"),
-                ("BlueField_FW_NIC_0", "nic-version"),
-            ] {
-                assert_eq!(
-                    state
-                        .update_service_state
-                        .find_firmware_inventory(id)
-                        .and_then(|inventory| inventory["Version"].as_str().map(str::to_owned)),
-                    Some(expected.to_string()),
-                    "{hardware_profile} {machine_role} {id}",
-                );
-            }
-        }
+fn ipmi_sim_config() -> bmc_mock::ipmi_sim::IpmiSimConfig {
+    bmc_mock::ipmi_sim::IpmiSimConfig {
+        stable_id: "standalone-bmc-mock".to_string(),
+        console_prompt: "root@bmc-mock # ".to_string(),
     }
 }

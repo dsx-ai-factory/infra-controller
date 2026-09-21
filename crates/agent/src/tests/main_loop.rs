@@ -187,6 +187,10 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
         deprecated_deny_prefixes: vec!["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()],
         deny_prefixes: vec!["100.64.0.0/10".to_string(), "169.254.0.0/16".to_string()],
         site_fabric_prefixes: vec!["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()],
+        site_fabric_null_routes: Some(::rpc::common::StringList {
+            items: vec!["10.0.0.0/8".to_string(), "10.2.0.0/24".to_string()],
+        }),
+        vpc_peer_vnis_authoritative: true,
         vpc_isolation_behavior: rpc::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
         stateful_acls_enabled: true,
         ntp_servers: vec!["10.40.0.1".to_string(), "10.40.0.2".to_string()],
@@ -241,6 +245,7 @@ enum RenderedInputChange {
     ManagedHostLoopback,
     DenyPrefix,
     SiteFabricPrefix,
+    SiteFabricNullRoute,
     AdminInterfaceVni,
     TenantInterfaceVni,
     TenantInterfaceIp,
@@ -277,6 +282,12 @@ impl RenderedInputChange {
                     .site_fabric_prefixes
                     .push("192.168.0.0/16".to_string());
             }
+            Self::SiteFabricNullRoute => config
+                .site_fabric_null_routes
+                .as_mut()
+                .expect("comparison fixture has FNN null routes")
+                .items
+                .push("192.168.0.0/16".to_string()),
             Self::AdminInterfaceVni => {
                 config
                     .admin_interface
@@ -419,6 +430,7 @@ fn current_network_version_detects_rendered_input_changes() {
             RenderedInputChange::ManagedHostLoopback => false,
             RenderedInputChange::DenyPrefix => false,
             RenderedInputChange::SiteFabricPrefix => false,
+            RenderedInputChange::SiteFabricNullRoute => false,
             RenderedInputChange::NetworkVirtualizationType => false,
             RenderedInputChange::PrimaryDpu => false,
         }
@@ -447,6 +459,7 @@ enum SetLikeInputReordering {
     DhcpServers,
     RouteServers,
     SiteFabricPrefixes,
+    SiteFabricNullRoutes,
     AdminInterfaceVpcPrefixes,
     TenantVpcPrefixes,
     TenantPeerPrefixes,
@@ -467,6 +480,12 @@ impl SetLikeInputReordering {
             Self::DhcpServers => config.dhcp_servers.reverse(),
             Self::RouteServers => config.route_servers.reverse(),
             Self::SiteFabricPrefixes => config.site_fabric_prefixes.reverse(),
+            Self::SiteFabricNullRoutes => config
+                .site_fabric_null_routes
+                .as_mut()
+                .expect("comparison fixture has FNN null routes")
+                .items
+                .reverse(),
             Self::AdminInterfaceVpcPrefixes => config
                 .admin_interface
                 .as_mut()
@@ -543,6 +562,7 @@ fn current_network_version_ignores_set_like_input_order() {
             SetLikeInputReordering::DhcpServers => true,
             SetLikeInputReordering::RouteServers => true,
             SetLikeInputReordering::SiteFabricPrefixes => true,
+            SetLikeInputReordering::SiteFabricNullRoutes => true,
             SetLikeInputReordering::AdditionalRouteTargets => true,
             SetLikeInputReordering::TopLevelRoutingProfileRouteTargets => true,
             SetLikeInputReordering::NetworkSecurityPolicyOverrides => true,

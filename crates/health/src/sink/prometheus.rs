@@ -67,7 +67,7 @@ impl PrometheusSink {
     fn stream_metric_id(context: &EventContext) -> String {
         format!(
             "sink_gauge_metrics_{}_{}",
-            Self::sanitize_id(context.endpoint_key()),
+            Self::sanitize_id(&context.addr.registry_key()),
             Self::sanitize_id(context.collector_type)
         )
     }
@@ -163,7 +163,15 @@ impl PrometheusSink {
                 Cow::Borrowed("endpoint_key"),
                 context.endpoint_key().to_string(),
             ),
-            (Cow::Borrowed("endpoint_mac"), context.addr.mac.to_string()),
+            // An empty value means this inventory endpoint has no MAC address.
+            (
+                Cow::Borrowed("endpoint_mac"),
+                context
+                    .addr
+                    .mac
+                    .map(|mac| mac.to_string())
+                    .unwrap_or_default(),
+            ),
             (Cow::Borrowed("endpoint_ip"), context.addr.ip.to_string()),
             (
                 Cow::Borrowed("collector_type"),
@@ -368,13 +376,60 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_registry_identities_remain_distinct() {
+        let metrics_manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+        let sink = PrometheusSink::new(metrics_manager.clone(), "test_sink").expect("sink");
+        let addresses = ["::ffff:192.0.2.1", "::ffff:192:0:2:1"];
+
+        for ip in addresses {
+            let context = EventContext {
+                endpoint_key: format!("ip:{ip}"),
+                addr: BmcAddr {
+                    ip: ip.parse().expect("valid IPv6 address"),
+                    port: None,
+                    mac: None,
+                },
+                collector_type: "sensor_collector",
+                labels: Default::default(),
+                metadata: None,
+                rack_id: None,
+            };
+            sink.try_handle_event(
+                &context,
+                &CollectorEvent::Metric(Box::new(MetricSample {
+                    key: "temperature".to_string(),
+                    name: "temperature".to_string(),
+                    metric_type: "sensor".to_string(),
+                    unit: "celsius".to_string(),
+                    value: 42.0,
+                    labels: Vec::new(),
+                    context: None,
+                })),
+            )
+            .expect("distinct IPv6 endpoints must both register metrics");
+        }
+
+        let exposition = metrics_manager.export_telemetry().expect("telemetry");
+        for ip in addresses {
+            let line = exposition
+                .lines()
+                .find(|line| line.contains(&format!("endpoint_key=\"ip:{ip}\"")))
+                .expect("each endpoint must have its own series");
+            assert!(line.contains(&format!("endpoint_ip=\"{ip}\"")));
+            assert!(line.contains("endpoint_mac=\"\""));
+            assert!(line.contains("collector_type=\"sensor_collector\""));
+            assert!(line.ends_with(" 42"));
+        }
+    }
+
+    #[test]
     fn test_stream_static_labels_includes_machine_metadata() {
         let context = EventContext {
             endpoint_key: "42:9e:b1:bd:9d:dd".to_string(),
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),
@@ -406,6 +461,7 @@ mod tests {
             Some("fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0")
         );
         assert_eq!(label_value("serial_number"), Some("MN-001"));
+        assert_eq!(label_value("endpoint_mac"), Some("42:9E:B1:BD:9D:DD"));
         assert_eq!(
             label_value("system_uuid"),
             Some("4c4c4544-0044-4710-8052-cac04f4b4632")
@@ -431,7 +487,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.1.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("11:22:33:44:55:66").unwrap(),
+                mac: Some(MacAddress::from_str("11:22:33:44:55:66").unwrap()),
             },
             collector_type: "switch_collector",
             labels: Default::default(),
@@ -479,7 +535,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.2.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("22:33:44:55:66:77").unwrap(),
+                mac: Some(MacAddress::from_str("22:33:44:55:66:77").unwrap()),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),
@@ -535,8 +591,10 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.1.1".parse().expect("test IP address should parse"),
                 port: Some(443),
-                mac: MacAddress::from_str("11:22:33:44:55:66")
-                    .expect("test MAC address should parse"),
+                mac: Some(
+                    MacAddress::from_str("11:22:33:44:55:66")
+                        .expect("test MAC address should parse"),
+                ),
             },
             collector_type: "nvue_gnmi_events",
             labels: [("site".to_string(), "test".to_string())].into(),

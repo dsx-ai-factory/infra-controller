@@ -1391,10 +1391,21 @@ pub(crate) async fn update_instance_config(
         kind: "machine",
         id: machine_id.to_string(),
     })?;
-    // We assign `initial_instance` from this first snapshot as the comparison baseline
-    // for request validation and resource updates. An overlap wait reloads the snapshot
-    // before resource validation; an IB change later locks the Instance and Machine,
-    // reloads the snapshot, and uses the refreshed `instance` below.
+    // DPF instance admission needs Astra interfaces before resolving omitted VF IDs.
+    if mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
+        mh_snapshot.dpa_interface_snapshots = db::dpa_interface::find_by_machine_id(
+            &mut txn,
+            machine_id,
+            DpaSearchConfig {
+                only_svpc: false,
+                only_astra: true,
+            },
+        )
+        .await?;
+    }
+    // This first snapshot establishes the request's comparison baseline.
+    // An overlap wait reloads it before resource validation; an IB change
+    // later rereads it after locking the Instance and Machine.
     let initial_instance = mh_snapshot
         .instance
         .as_ref()
@@ -1445,6 +1456,15 @@ pub(crate) async fn update_instance_config(
         config.network.auto_config = Some(auto_config);
     }
 
+    // Resolve legacy omitted VF IDs before deciding whether the network expands.
+    if implicit_vf_allocation {
+        assign_implicit_instance_vfs_from_effective_dpu_inventory(
+            &mut config.network,
+            &api.runtime_config,
+            instance_vf_inventory_source(&mh_snapshot),
+        )?;
+    }
+
     // Check whether the update is allowed
     initial_instance
         .config
@@ -1459,9 +1479,9 @@ pub(crate) async fn update_instance_config(
         &initial_instance.config.network,
         &config.network,
     );
-    let needs_overlap_check = mh_snapshot.has_managed_dpus()
-        && (initial_instance.config.network_security_group_id != config.network_security_group_id
-            || network_expands);
+    // NSG changes cannot override FNN null routes; only added routing visibility
+    // requires overlap admission here.
+    let needs_overlap_check = mh_snapshot.has_managed_dpus() && network_expands;
     if needs_overlap_check {
         db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
         // No resource locks precede this wait. Reload the retained networks,
@@ -1476,19 +1496,18 @@ pub(crate) async fn update_instance_config(
             kind: "machine",
             id: machine_id.to_string(),
         })?;
-    }
-    // DPF instance admission needs Astra interfaces on the final snapshot so VF
-    // inventory selection still works when the overlap wait reloads the host.
-    if mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
-        mh_snapshot.dpa_interface_snapshots = db::dpa_interface::find_by_machine_id(
-            &mut txn,
-            machine_id,
-            DpaSearchConfig {
-                only_svpc: false,
-                only_astra: true,
-            },
-        )
-        .await?;
+        // Preserve Astra-aware VF validation after refreshing the snapshot.
+        if mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
+            mh_snapshot.dpa_interface_snapshots = db::dpa_interface::find_by_machine_id(
+                &mut txn,
+                machine_id,
+                DpaSearchConfig {
+                    only_svpc: false,
+                    only_astra: true,
+                },
+            )
+            .await?;
+        }
     }
     let initial_instance = mh_snapshot
         .instance
@@ -1556,18 +1575,13 @@ pub(crate) async fn update_instance_config(
     )
     .await?;
 
-    let network_update_context = InstanceNetworkUpdateContext {
-        assign_implicit_vfs: implicit_vf_allocation,
-        validate_prefix_overlap: needs_overlap_check,
-        network_expands,
-    };
     update_instance_network_config(
         api,
         initial_instance,
         &mut config,
         &mh_snapshot,
-        network_update_context,
         &mut txn,
+        needs_overlap_check,
     )
     .await?;
 
@@ -1673,14 +1687,6 @@ pub(crate) async fn update_instance_config(
     Ok(Response::new(instance))
 }
 
-/// Carries request-derived decisions into network update handling so caller
-/// intent remains available after RPC conversion and resource reuse.
-struct InstanceNetworkUpdateContext {
-    assign_implicit_vfs: bool,
-    validate_prefix_overlap: bool,
-    network_expands: bool,
-}
-
 /// Validate a requested network change, reuse existing resources, and allocate
 /// resources for new interfaces before queuing the update. The Instance state
 /// machine promotes that configuration and advances `network_config_version`.
@@ -1689,8 +1695,8 @@ async fn update_instance_network_config(
     instance: &InstanceSnapshot,
     config: &mut InstanceConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
-    context: InstanceNetworkUpdateContext,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    needs_overlap_check: bool,
 ) -> Result<(), CarbideError> {
     if instance.update_network_config_request.is_some() {
         return Err(ConfigValidationError::InstanceNetworkConfigUpdateAlreadyInProgress.into());
@@ -1760,31 +1766,17 @@ async fn update_instance_network_config(
 
     let vf_inventory_source = instance_vf_inventory_source(mh_snapshot);
 
-    if context.assign_implicit_vfs {
-        assign_implicit_instance_vfs_from_effective_dpu_inventory(
-            network,
-            runtime_config,
-            vf_inventory_source,
-        )?;
-    }
-
     if !instance
         .config
         .network
         .is_network_config_update_requested(network)
     {
-        if context.validate_prefix_overlap {
+        if needs_overlap_check {
             config
                 .network
                 .copy_existing_resources(&instance.config.network);
-            tenant_prefix_overlap::validate_instance_network(
-                api,
-                txn,
-                config,
-                Some(instance),
-                context.network_expands,
-            )
-            .await?;
+            tenant_prefix_overlap::validate_instance_network(api, txn, config, Some(instance))
+                .await?;
         }
         return Ok(());
     }
@@ -1835,15 +1827,8 @@ async fn update_instance_network_config(
     )?;
     validate_instance_interface_routing_profiles(txn, network, runtime_config.fnn.as_ref()).await?;
 
-    if context.validate_prefix_overlap {
-        tenant_prefix_overlap::validate_instance_network(
-            api,
-            txn,
-            config,
-            Some(instance),
-            context.network_expands,
-        )
-        .await?;
+    if needs_overlap_check {
+        tenant_prefix_overlap::validate_instance_network(api, txn, config, Some(instance)).await?;
     }
     let network = &mut config.network;
 
