@@ -98,20 +98,14 @@ fn weave_ew_virtual_network_attachment_spec_from_astra_attachment(
             });
         }
         SpxAttachmentType::Virtual => {
-            let Some(virtual_function_id) = astra_attachment_status.virtual_function_id else {
+            let Some(attachment_vf) = astra_attachment_status.attachment_vf.as_ref() else {
                 return Err(State {
                     phase: Phase::Error.into(),
                     reason: "Missing Astra virtual_function_id".to_string(),
                     message: "create_virtual_network_attachment".to_string(),
                 });
             };
-            let Ok(vf_index) = u32::try_from(virtual_function_id) else {
-                return Err(State {
-                    phase: Phase::Error.into(),
-                    reason: "Invalid Astra virtual_function_id".to_string(),
-                    message: "create_virtual_network_attachment".to_string(),
-                });
-            };
+            let vf_index = attachment_vf.vf_index;
 
             spec.attachment_type = AttachmentType::Vf.into();
             spec.attachment_vf = Some(AttachmentVf {
@@ -121,8 +115,9 @@ fn weave_ew_virtual_network_attachment_spec_from_astra_attachment(
         }
         SpxAttachmentType::Ovs => {
             let Some(network_name) = astra_attachment_status
-                .network_name
+                .attachment_ovs
                 .as_ref()
+                .and_then(|attachment_ovs| attachment_ovs.network_name.as_ref())
                 .filter(|network_name| !network_name.is_empty())
             else {
                 return Err(State {
@@ -134,7 +129,7 @@ fn weave_ew_virtual_network_attachment_spec_from_astra_attachment(
 
             spec.attachment_type = AttachmentType::Ovs.into();
             spec.attachment_ovs = Some(AttachmentOvs {
-                ovn_network_name: Some(network_name.clone()),
+                ovn_network_name: Some(network_name.to_string()),
                 bridge_name: String::new(),
             });
         }
@@ -1118,8 +1113,8 @@ fn build_astra_config_status(astra_config: &AstraConfig) -> eyre::Result<AstraCo
             subnet_ipv4: astra_attachment.subnet_ipv4.clone(),
             subnet_mask: astra_attachment.subnet_mask,
             attachment_type: astra_attachment.attachment_type,
-            virtual_function_id: astra_attachment.virtual_function_id,
-            network_name: astra_attachment.network_name.clone(),
+            attachment_vf: astra_attachment.attachment_vf,
+            attachment_ovs: astra_attachment.attachment_ovs.clone(),
             revision: revision.to_string(),
             status: Some(AstraStatus {
                 phase: AstraPhase::PhaseReady.into(),
@@ -1292,8 +1287,8 @@ fn sync_astra_config_status_from_weave_ew_vpc_attachments(
                 subnet_ipv4: astra_attachment.subnet_ipv4.clone(),
                 subnet_mask: astra_attachment.subnet_mask,
                 attachment_type: astra_attachment.attachment_type,
-                virtual_function_id: astra_attachment.virtual_function_id,
-                network_name: astra_attachment.network_name.clone(),
+                attachment_vf: astra_attachment.attachment_vf,
+                attachment_ovs: astra_attachment.attachment_ovs.clone(),
                 revision: revision.to_string(),
                 status: Some(AstraStatus {
                     phase: AstraPhase::PhaseReady.into(),
@@ -1352,8 +1347,8 @@ fn sync_astra_config_status_from_weave_ew_vpc_attachments(
             subnet_ipv4: astra_attachment.subnet_ipv4.clone(),
             subnet_mask: astra_attachment.subnet_mask,
             attachment_type: astra_attachment.attachment_type,
-            virtual_function_id: astra_attachment.virtual_function_id,
-            network_name: astra_attachment.network_name.clone(),
+            attachment_vf: astra_attachment.attachment_vf,
+            attachment_ovs: astra_attachment.attachment_ovs.clone(),
             revision: revision.to_string(),
             status: None,
         };
@@ -1732,10 +1727,9 @@ mod tests {
             subnet_ipv4: "192.0.2.0".to_string(),
             subnet_mask: 24,
             attachment_type: Some(rpc::SpxAttachmentType::Physical as i32),
-            virtual_function_id: Some(7),
-            network_name: Some("test-network".to_string()),
+            attachment_vf: None,
+            attachment_ovs: None,
             revision: revision.to_string(),
-            bridge_name: None,
         }
     }
 
@@ -1749,10 +1743,9 @@ mod tests {
             subnet_ipv4: "192.0.2.0".to_string(),
             subnet_mask: 24,
             attachment_type: None,
-            virtual_function_id: None,
-            network_name: None,
+            attachment_vf: None,
+            attachment_ovs: None,
             revision: revision.to_string(),
-            bridge_name: None,
         }
     }
 
@@ -2626,8 +2619,8 @@ mod tests {
             first_status.attachment_type,
             Some(rpc::SpxAttachmentType::Physical as i32)
         );
-        assert_eq!(first_status.virtual_function_id, Some(7));
-        assert_eq!(first_status.network_name.as_deref(), Some("test-network"));
+        assert_eq!(first_status.attachment_vf, None);
+        assert_eq!(first_status.attachment_ovs, None);
         assert_eq!(first_status.revision, "test-revision");
 
         let first_phase = first_status.status.as_ref().map(|status| status.phase);
