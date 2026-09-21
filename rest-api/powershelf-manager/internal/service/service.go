@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -56,9 +57,12 @@ func New(ctx context.Context, c Config) (*Service, error) {
 
 // Start begins the PowershelfManager, binds the gRPC server on the configured port, and serves until the listener is closed.
 func (s *Service) Start(ctx context.Context) error {
-	certOpt := s.certOption()
+	certOpt, err := s.certOption()
+	if err != nil {
+		return err
+	}
 
-	err := s.psm.Start(ctx)
+	err = s.psm.Start(ctx)
 	if err != nil {
 		return err
 	}
@@ -108,20 +112,20 @@ func (s *Service) Stop(ctx context.Context) {
 // certOption returns the gRPC server option for TLS/mTLS if certificates are
 // present. The service refuses to start without certificates unless
 // ALLOW_INSECURE_GRPC=true is set.
-func (s *Service) certOption() grpc.ServerOption {
+func (s *Service) certOption() (grpc.ServerOption, error) {
 	tlsConfig, certDir, err := certs.TLSConfig()
 	if err != nil {
 		if err == certs.ErrNotPresent {
 			if os.Getenv("ALLOW_INSECURE_GRPC") == "true" {
 				log.Warnf("TLS certs not present, running without mTLS (ALLOW_INSECURE_GRPC=true)")
-				return grpc.EmptyServerOption{}
+				return grpc.EmptyServerOption{}, nil
 			}
-			log.Fatalf("TLS certificates required but not found; set ALLOW_INSECURE_GRPC=true for local development")
+			return nil, errors.New("TLS certificates required but not found; set ALLOW_INSECURE_GRPC=true for local development")
 		}
-		log.Fatalf("Failed to load TLS certificates: %v", err)
+		return nil, fmt.Errorf("failed to load TLS certificates: %w", err)
 	}
 	log.Printf("Using certificates from %s (mTLS enabled)", certDir)
-	return grpc.Creds(credentials.NewTLS(tlsConfig))
+	return grpc.Creds(credentials.NewTLS(tlsConfig)), nil
 }
 
 // logrusInterceptorLogger adapts logrus to the go-grpc-middleware logging.Logger interface.

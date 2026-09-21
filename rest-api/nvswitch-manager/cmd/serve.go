@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"strconv"
@@ -96,8 +97,10 @@ var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the gRPC server",
 	Long:  `Start the gRPC server to allow other services to manage NV-Switch trays`,
-	Run: func(cmd *cobra.Command, args []string) {
-		doServe()
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// Runtime failures are not usage errors; keep usage for flag errors only.
+		cmd.SilenceUsage = true
+		return doServe()
 	},
 }
 
@@ -126,21 +129,20 @@ func init() {
 	serveCmd.Flags().IntVar(&firmwarePollSeconds, "fw_poll_seconds", getEnvIntOrDefault("FW_POLL_SECONDS", defaultFirmwarePollSeconds), "Worker poll interval in seconds (env: FW_POLL_SECONDS)")
 }
 
-func doServe() {
+func doServe() error {
 	ctx := context.Background()
 
 	otelShutdown, otelErr := cotel.Bootstrap(ctx, cotel.ExporterConfigured(), "nico-nvswitch-manager")
 	if otelErr != nil {
 		log.Printf("failed to initialize tracing: %v", otelErr)
-	} else {
-		defer func() {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := otelShutdown(shutdownCtx); err != nil {
-				log.Printf("failed to shut down tracing: %v", err)
-			}
-		}()
 	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := otelShutdown(shutdownCtx); err != nil {
+			log.Printf("failed to shut down tracing: %v", err)
+		}
+	}()
 	service, err := svc.New(
 		ctx,
 		svc.Config{
@@ -172,7 +174,7 @@ func doServe() {
 	}
 
 	if err != nil {
-		log.Fatalf("failed to create the new gRPC server: %v\n", err)
+		return fmt.Errorf("failed to create the new gRPC server: %w", err)
 	}
 
 	log.Printf("New service is created with port: %+v, data store type: %s, vault address: %s", port, datastoreType, vaultAddress)
@@ -184,7 +186,10 @@ func doServe() {
 		service.Stop(ctx)
 	}()
 
-	if err := service.Start(ctx); err != nil {
-		log.Fatalf("failed to start the service: %v\n", err)
+	err = service.Start(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to start the service: %w", err)
 	}
+
+	return nil
 }

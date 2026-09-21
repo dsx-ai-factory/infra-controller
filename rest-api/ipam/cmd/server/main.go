@@ -28,6 +28,12 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run returns an exit code instead of calling log.Fatalf so the deferred
+// trace flush runs on every exit path.
+func run() int {
 	otelShutdown, otelErr := cotel.Bootstrap(context.Background(), cotel.ExporterConfigured(), "nico-ipam")
 	if otelErr != nil {
 		log.Printf("failed to initialize tracing: %v", otelErr)
@@ -390,11 +396,12 @@ func main() {
 		},
 	}
 
-	err := app.Run(os.Args)
-	if err != nil {
-		log.Fatalf("Error in cli: %v", err)
+	if err := app.Run(os.Args); err != nil {
+		log.Printf("Error in cli: %v", err)
+		return 1
 	}
 
+	return 0
 }
 
 func mongoURI(host, port string) string {
