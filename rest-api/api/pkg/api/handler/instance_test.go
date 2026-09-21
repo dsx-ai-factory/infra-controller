@@ -3891,18 +3891,22 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		},
 	}
 	for _, scenario := range []struct {
-		name          string
-		targeted      bool
-		missing       bool
-		count         uint32
-		lookupErr     error
-		allocationErr error
-		status        int
+		name              string
+		targeted          bool
+		missing           bool
+		count             uint32
+		lookupErr         error
+		allocationErr     error
+		expireDiscovery   bool
+		expireTransaction bool
+		status            int
 	}{
-		{name: "targeted SpectrumX create", targeted: true, count: 1, status: http.StatusCreated},
+		{name: "targeted SpectrumX create preserves workflow budget after slow discovery", targeted: true, count: 1, status: http.StatusCreated},
 		{name: "SpectrumX ordinal rejected before writes", targeted: true, status: http.StatusBadRequest},
 		{name: "Core missing targeted SpectrumX machine", targeted: true, missing: true, status: http.StatusConflict},
 		{name: "SpectrumX discovery timeout does not allocate", targeted: true, lookupErr: tp.NewTimeoutError(enums.TIMEOUT_TYPE_START_TO_CLOSE, nil), status: http.StatusGatewayTimeout},
+		{name: "SpectrumX preparation expiry rejects a late successful discovery", targeted: true, count: 1, expireDiscovery: true, status: http.StatusGatewayTimeout},
+		{name: "SpectrumX transaction setup expiry rolls back without dispatching Core", targeted: true, count: 1, expireTransaction: true, status: http.StatusGatewayTimeout},
 		{name: "Instance Type skips incompatible SpectrumX machines", count: 1, status: http.StatusCreated},
 		{name: "Core allocation can reject successful SpectrumX preflight", targeted: true, count: 1, allocationErr: errors.New("inventory changed"), status: http.StatusInternalServerError},
 	} {
@@ -3940,7 +3944,22 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					if !scenario.missing {
 						inventory[selected.ID] = testSpectrumXMachine(selected.ID, "ConnectX-8", scenario.count)
 					}
-					testSpectrumXDiscovery(t, siteClient, inventory, scenario.lookupErr).Once()
+					testSpectrumXDiscovery(t, siteClient, inventory, scenario.lookupErr).Run(func(args mock.Arguments) {
+						lookupCtx := args.Get(0).(context.Context)
+						if scenario.expireDiscovery {
+							select {
+							case <-lookupCtx.Done():
+							case <-time.After(5 * time.Second):
+								t.Error("discovery did not respect the preparation deadline")
+							}
+						} else if scenario.expireTransaction {
+							deadline, ok := lookupCtx.Deadline()
+							require.True(t, ok)
+							dbSession.DB.AddQueryHook(&testSpectrumXQueryDelay{deadline: deadline})
+						} else if scenario.targeted && scenario.status == http.StatusCreated {
+							time.Sleep(100 * time.Millisecond)
+						}
+					}).Once()
 					if scenario.status == http.StatusCreated || scenario.allocationErr != nil {
 						run := &tmocks.WorkflowRun{}
 						run.On("GetID").Return(uuid.NewString())
@@ -3950,6 +3969,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				},
 				afterHandle: func(t *testing.T, rec *httptest.ResponseRecorder) {
 					siteClient.AssertExpectations(t)
+					if scenario.status == http.StatusCreated || scenario.allocationErr != nil {
+						testSpectrumXWorkflowBudget(t, siteClient.Calls)
+					}
 					machine, err := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, selected.ID, nil, false)
 					require.NoError(t, err)
 					assert.Equal(t, scenario.status == http.StatusCreated, machine.IsAssigned)
@@ -7694,8 +7716,12 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				testSpectrumXDiscovery(t, tsc, map[string]*corev1.Machine{id: testSpectrumXMachine(id, "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC", 1)}, nil).Once()
 			}
 
+			workflowCallsStart := len(tsc.Calls)
 			if err := uih.Handle(ec); (err != nil) != tt.wantErr {
 				t.Errorf("UpdateInstanceHandler.Handle() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if len(tt.args.reqData.SpectrumXAttachments) > 0 && tt.args.respCode == http.StatusOK {
+				testSpectrumXWorkflowBudget(t, tsc.Calls[workflowCallsStart:])
 			}
 			if tt.args.expectSpectrumXValidationFailure {
 				after, readErr := cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, beforeSpectrumXInstance.ID, nil)

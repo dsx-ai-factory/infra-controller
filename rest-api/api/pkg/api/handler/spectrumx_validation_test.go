@@ -6,17 +6,59 @@ package handler
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
+
+// Check the actual handler-dispatched contexts, not just timeout constants: a
+// workflow parented by discovery would inherit its earlier deadline.
+func testSpectrumXWorkflowBudget(t *testing.T, calls []mock.Call) {
+	t.Helper()
+	var discoveryDeadline, workflowDeadline time.Time
+	for _, call := range calls {
+		if call.Method != "ExecuteWorkflow" {
+			continue
+		}
+		ctx := call.Arguments.Get(0).(context.Context)
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok)
+		if call.Arguments.Get(2) == grpcproxy.Core.WorkflowName {
+			discoveryDeadline = deadline
+		} else {
+			workflowDeadline = deadline
+		}
+	}
+	require.False(t, discoveryDeadline.IsZero())
+	require.False(t, workflowDeadline.IsZero())
+	assert.Greater(t, workflowDeadline.Sub(discoveryDeadline), cutil.WorkflowExecutionTimeout)
+}
+
+// Delay one transaction query until preparation expires. The database connection
+// remains real, so the handler must roll back its writes without dispatching Core.
+type testSpectrumXQueryDelay struct {
+	deadline time.Time
+}
+
+func (h *testSpectrumXQueryDelay) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	if !h.deadline.IsZero() {
+		time.Sleep(time.Until(h.deadline) + time.Millisecond)
+		h.deadline = time.Time{}
+	}
+	return ctx
+}
+
+func (*testSpectrumXQueryDelay) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 func testSpectrumXMachine(id, device string, count uint32) *corev1.Machine {
 	kind := corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X

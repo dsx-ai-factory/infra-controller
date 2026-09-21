@@ -8430,11 +8430,17 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: The selected Machine is no longer reported by the Site, or another resource conflict prevents creation.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
         '429':
           $ref: '#/components/responses/ResourceExhaustedError'
+        '504':
+          description: SpectrumX discovery timed out or the preparation budget was exhausted. For nonempty SpectrumX attachments, validation, discovery and database preparation share a 4-second budget from the start of request handling. A shorter caller deadline may cause earlier rejection. Exhausting preparation rejects the request before dispatching creation to the Site and rolls back any database writes.
+          $ref: '#/components/responses/GenericHttpError'
       description: |
         Create an Instance for Tenant.
 
@@ -8616,11 +8622,17 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Insufficient compatible Machines are available, or another resource conflict prevents batch creation.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
         '429':
           $ref: '#/components/responses/ResourceExhaustedError'
+        '504':
+          description: SpectrumX discovery timed out or the preparation budget was exhausted. For nonempty SpectrumX attachments, validation, discovery and database preparation share a 4-second budget from the start of request handling. A shorter caller deadline may cause earlier rejection. Exhausting preparation rejects the batch before dispatching creation to the Site and rolls back any database writes.
+          $ref: '#/components/responses/GenericHttpError'
       description: |
         Batch create multiple Instances for Tenant with NVLink domain-aware machine allocation.
 
@@ -9021,11 +9033,17 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: The Instance's Machine is no longer reported by the Site, or another resource conflict prevents the update.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
         '429':
           $ref: '#/components/responses/ResourceExhaustedError'
+        '504':
+          description: SpectrumX discovery timed out or the preparation budget was exhausted. For a nonempty SpectrumX attachment replacement, validation, discovery and database preparation share a 4-second budget from the start of request handling. A shorter caller deadline may cause earlier rejection. Exhausting preparation rejects the request before dispatching the update to the Site and rolls back any database writes. Omitted, null and empty attachment lists do not incur this preparation limit.
+          $ref: '#/components/responses/GenericHttpError'
       description: |-
         Update an Instance by ID
 

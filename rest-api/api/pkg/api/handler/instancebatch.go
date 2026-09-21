@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"time"
 
 	goset "github.com/deckarep/golang-set/v2"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -230,6 +231,7 @@ func (bcih BatchCreateInstanceHandler) buildBatchInstanceCreateRequestOsConfig(c
 // @Success 201 {object} []model.APIInstance
 // @Router /v2/org/{org}/nico/instance/batch [post]
 func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
+	requestStarted := time.Now()
 	// Execution Steps:
 	// 1. Authentication & Authorization
 	//    - Extract user from context
@@ -1303,17 +1305,26 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 
 	// ==================== Step 3: Database Transaction ====================
 
+	var spectrumXPreparationCtx context.Context
+	var spectrumXEligibleIDs map[string]struct{}
 	if len(apiRequest.SpectrumXAttachments) > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+		spectrumXPreparationCtx, cancel = common.NewSpectrumXPreparationContext(ctx, requestStarted)
 		defer cancel()
+		spectrumXErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
+		if spectrumXErr != nil {
+			return c.JSON(spectrumXErr.Code, spectrumXErr)
+		}
+		spectrumXEligibleIDs, spectrumXErr = common.GetSpectrumXEligibleMachineIDs(spectrumXPreparationCtx, bcih.dbSession, bcih.scp, site.ID, instancetype.ID, apiRequest.MachineLabelSelector, apiRequest.SpectrumXAttachments)
+		preparationErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
+		if preparationErr != nil {
+			return c.JSON(preparationErr.Code, preparationErr)
+		}
+		if spectrumXErr != nil {
+			logger.Warn().Err(spectrumXErr.Diagnosis()).Msg("SpectrumX preflight failed")
+			return c.JSON(spectrumXErr.Code, spectrumXErr)
+		}
 	}
-	spectrumXEligibleIDs, spectrumXErr := common.GetSpectrumXEligibleMachineIDs(ctx, bcih.dbSession, bcih.scp, site.ID, instancetype.ID, apiRequest.MachineLabelSelector, apiRequest.SpectrumXAttachments)
-	if spectrumXErr != nil {
-		logger.Warn().Err(spectrumXErr.Diagnosis()).Msg("SpectrumX preflight failed")
-		return c.JSON(spectrumXErr.Code, spectrumXErr)
-	}
-
 	// instanceData holds all the per-instance rows + workflow configs that
 	// get assembled inside the closure and reused for the HTTP response after
 	// the closure returns.
@@ -1932,6 +1943,10 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			Msg("triggering batch create Instances workflow")
 
 		// Trigger batch workflow (use batchSuffix for consistency with instance names)
+		preparationErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
+		if preparationErr != nil {
+			return preparationErr
+		}
 		workflowID := "instance-batch-create-" + batchSuffix
 		workflowOptions := temporalClient.StartWorkflowOptions{
 			ID: workflowID,
