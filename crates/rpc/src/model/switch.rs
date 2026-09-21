@@ -91,6 +91,7 @@ impl TryFrom<rpc::SwitchConfig> for SwitchConfig {
 impl TryFrom<Switch> for rpc::Switch {
     type Error = RpcDataConversionError;
 
+    #[allow(deprecated)]
     fn try_from(src: Switch) -> Result<Self, Self::Error> {
         let health = derive_switch_aggregate_health(&src.health_reports);
         let fabric_manager_status = src
@@ -144,6 +145,7 @@ impl TryFrom<Switch> for rpc::Switch {
                         lifecycle: Some(lifecycle),
                         fabric_manager_status,
                         fabric_manager_status_details,
+                        nvos_ports: Vec::new(),
                     }
                 }
                 (None, fabric_manager_status, fabric_manager_status_details) => rpc::SwitchStatus {
@@ -158,6 +160,7 @@ impl TryFrom<Switch> for rpc::Switch {
                     lifecycle: Some(lifecycle),
                     fabric_manager_status,
                     fabric_manager_status_details,
+                    nvos_ports: Vec::new(),
                 },
             },
         );

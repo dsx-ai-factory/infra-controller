@@ -118,22 +118,38 @@
 <p>TBD</p>
 
 <h2>Interfaces</h2>
+{% if nvos_ports.is_empty() %}
+<p class="text-muted">No NVOS management port information available.</p>
+{% else %}
+{% for nvos_port in nvos_ports %}
+<h3>NVOS Management Endpoint {{ loop.index }}</h3>
 <table class="detailsview">
-	{% if let Some(nvos_info) = nvos_info %}
-	{% if let Some(ip) = nvos_info.ip %}
 	<tr>
-		<th>NVOS IP</th>
-		<td>{{ ip }}</td>
+		<th>MAC Address</th>
+		<td>{{ nvos_port.mac }}</td>
+	</tr>
+	{% if let Some(service_port) = nvos_port.service_port %}
+	<tr>
+		<th>Service Port</th>
+		<td>{{ service_port }}</td>
 	</tr>
 	{% endif %}
-	{% if let Some(mac) = nvos_info.mac %}
+	{% if nvos_port.addresses.is_empty() %}
 	<tr>
-		<th>NVOS MAC</th>
-		<td>{{ mac }}</td>
+		<th>IP Addresses</th>
+		<td class="text-muted">No IP addresses available.</td>
 	</tr>
-	{% endif %}
+	{% else %}
+	{% for address in nvos_port.addresses %}
+	<tr>
+		<th>{{ address.address_family }} Address</th>
+		<td>{{ address.address }}</td>
+	</tr>
+	{% endfor %}
 	{% endif %}
 </table>
+{% endfor %}
+{% endif %}
 
 <h2>History</h2>
 <a href="/admin/switch/{{ id }}/state-history">Open State History on separate page</a>
