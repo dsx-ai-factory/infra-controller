@@ -44,9 +44,7 @@ use crate::crds::dpudeployments_generated::{
 };
 #[cfg(test)]
 use crate::crds::dpudevices_generated::DpuDeviceCluster;
-use crate::crds::dpudevices_generated::{
-    DPUDevice, DpuDeviceBmcFactoryResetPolicy, DpuDeviceSpec,
-};
+use crate::crds::dpudevices_generated::{DPUDevice, DpuDeviceBmcFactoryResetPolicy, DpuDeviceSpec};
 use crate::crds::dpunodes_generated::{
     DPUNode, DpuNodeDpus, DpuNodeNodeRebootMethod, DpuNodeNodeRebootMethodExternal, DpuNodeSpec,
 };
