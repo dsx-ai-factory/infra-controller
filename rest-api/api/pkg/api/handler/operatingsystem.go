@@ -235,22 +235,35 @@ func validateIpxeTemplateAvailableAtSites(ctx context.Context, dbSession *cdb.Se
 	return nil
 }
 
-// getTenantSiteIDs returns the IDs of all sites the tenant has access to,
-// regardless of site status. Used to scope provider-owned Operating System
-// visibility for tenant admins.
-func getTenantSiteIDs(ctx context.Context, dbSession *cdb.Session, tenantID uuid.UUID) ([]uuid.UUID, error) {
+// getTenantSiteIDs combines explicit membership with effective privileged site
+// access, matching the Site API. An empty result must remain non-nil so queries
+// match no sites rather than removing the site restriction.
+func getTenantSiteIDs(ctx context.Context, dbSession *cdb.Session, tenant *cdbm.Tenant) ([]uuid.UUID, error) {
 	tsDAO := cdbm.NewTenantSiteDAO(dbSession)
 	tss, _, err := tsDAO.GetAll(ctx, nil,
-		cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenantID}},
+		cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}},
 		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
 		nil,
 	)
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]uuid.UUID, len(tss))
-	for i, ts := range tss {
-		ids[i] = ts.SiteID
+	privilegedIDs, err := common.GetPrivilegedAccessSiteIDsForTenant(ctx, nil, dbSession, tenant)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[uuid.UUID]struct{}, len(tss)+len(privilegedIDs))
+	ids := make([]uuid.UUID, 0, len(tss)+len(privilegedIDs))
+	for _, ts := range tss {
+		seen[ts.SiteID] = struct{}{}
+		ids = append(ids, ts.SiteID)
+	}
+	for _, id := range privilegedIDs {
+		_, exists := seen[id]
+		if !exists {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
 	}
 	return ids, nil
 }
@@ -825,7 +838,7 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 		filter.InfrastructureProviderID = &ip.ID
 	case tenant != nil && ip == nil:
 		// Tenant admin only: own entries + provider entries at tenant-accessible sites.
-		tenantSiteIDs, tsErr := getTenantSiteIDs(ctx, gash.dbSession, tenant.ID)
+		tenantSiteIDs, tsErr := getTenantSiteIDs(ctx, gash.dbSession, tenant)
 		if tsErr != nil {
 			logger.Error().Err(tsErr).Msg("error retrieving tenant site IDs for visibility filter")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine site access for tenant", nil)
@@ -909,6 +922,7 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Site specified in query", nil)
 			}
 			_, tenantHasAccess := tenantSiteIDs[siteID]
+			tenantHasAccess = tenantHasAccess || slices.Contains(tenantVisibleProviderSiteIDs, siteID)
 			providerHasAccess := ip != nil && site.InfrastructureProviderID == ip.ID
 			if !tenantHasAccess && !providerHasAccess {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Caller is not associated with Site specified in query", nil)
@@ -1046,6 +1060,8 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 	var siteIDs []uuid.UUID
 	if filter.SiteIDs != nil {
 		siteIDs = filter.SiteIDs
+	} else if tenant != nil && ip == nil {
+		siteIDs = tenantVisibleProviderSiteIDs
 	}
 	dbossas, _, err := ossaDAO.GetAll(
 		ctx,
@@ -1219,7 +1235,7 @@ func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
 	// associated with it. Apply the same site scope to visibility and output.
 	var tenantSiteIDs []uuid.UUID
 	if tenant != nil && ip == nil {
-		tenantSiteIDs, err = getTenantSiteIDs(ctx, gsh.dbSession, tenant.ID)
+		tenantSiteIDs, err = getTenantSiteIDs(ctx, gsh.dbSession, tenant)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving tenant site IDs for visibility check")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine site access for tenant", nil)
