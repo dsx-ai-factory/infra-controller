@@ -3816,6 +3816,15 @@ func promptInstanceInterfaces(s *Session, networkConfig instanceNetworkConfig) (
 			}
 			iface["virtualFunctionId"] = virtualFunctionID
 		}
+		if networkConfig.selectorKey == "vpcPrefixId" {
+			ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			if ipAddress != "" {
+				iface["ipAddress"] = ipAddress
+			}
+		}
 		ifaces = append(ifaces, iface)
 	}
 }
@@ -3886,12 +3895,20 @@ func promptMultiDPUInstanceInterfaces(s *Session, networkConfig instanceNetworkC
 		if err != nil {
 			return ifaces, err
 		}
-		ifaces = append(ifaces, map[string]interface{}{
+		iface := map[string]interface{}{
 			networkConfig.selectorKey: physical.ID,
 			"device":                  capability.name,
 			"deviceInstance":          deviceInstance,
 			"isPhysical":              true,
-		})
+		}
+		ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+		if promptErr != nil {
+			return ifaces, promptErr
+		}
+		if ipAddress != "" {
+			iface["ipAddress"] = ipAddress
+		}
+		ifaces = append(ifaces, iface)
 
 		vfIDs := deviceVirtualFunctionIDs{
 			used: make(map[int]bool),
@@ -3931,10 +3948,24 @@ func promptMultiDPUInstanceInterfaces(s *Session, networkConfig instanceNetworkC
 				"isPhysical":              false,
 				"virtualFunctionId":       virtualFunctionID,
 			}
+			ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			if ipAddress != "" {
+				iface["ipAddress"] = ipAddress
+			}
 			ifaces = append(ifaces, iface)
 		}
 	}
 	return ifaces, nil
+}
+
+func promptOptionalInstanceInterfaceIPAddress() (string, error) {
+	return PromptText(
+		"IP address (optional; leave blank to auto-assign from an available IP in the VPC prefix)",
+		false,
+	)
 }
 
 func selectDPUInterfaceResource(
