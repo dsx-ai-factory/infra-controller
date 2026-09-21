@@ -55,9 +55,9 @@ func (cp *ClientPool) GetClientByID(siteID uuid.UUID) (tsdkClient.Client, error)
 	tc, err := tsdkClient.NewLazyClient(tOptions)
 
 	if err != nil {
-		log.Panic().Err(err).Str("Temporal Namespace", siteID.String()).
+		log.Error().Err(err).Str("Temporal Namespace", siteID.String()).
 			Msg("failed to create Temporal client for site")
-		return nil, err
+		return nil, fmt.Errorf("creating Temporal client for site %s: %w", siteID, err)
 	}
 
 	cp.IDClientMap[siteID.String()] = tc

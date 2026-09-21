@@ -107,7 +107,7 @@ func run(ctx context.Context) (retErr error) {
 	// Initialize DB connection
 	dbSession, err := cdb.NewSession(ctx, dbConfig.Host, dbConfig.Port, dbConfig.Name, dbConfig.User, dbConfig.Password, "")
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to initialize DB session")
+		return fmt.Errorf("failed to initialize DB session: %w", err)
 	}
 	defer dbSession.Close()
 
@@ -116,20 +116,20 @@ func run(ctx context.Context) (retErr error) {
 	tcfg, err := cfg.GetTemporalConfig()
 
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to get Temporal config")
+		return fmt.Errorf("failed to get Temporal config: %w", err)
 	}
 
 	tc, tnc, err := capis.InitTemporalClients(tcfg)
 
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to create Temporal clients")
+		return fmt.Errorf("failed to create Temporal clients: %w", err)
 	}
 	defer tc.Close()
 	defer tnc.Close()
 
 	_, err = tc.CheckHealth(ctx, &tClient.CheckHealthRequest{})
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to check Temporal health")
+		return fmt.Errorf("failed to check Temporal health: %w", err)
 	}
 
 	scp := sc.NewClientPool(tcfg)
@@ -138,7 +138,7 @@ func run(ctx context.Context) (retErr error) {
 	if cfg.GetDPSEnabled() {
 		dps, err := dpsclient.NewClient(cfg.GetDPSConfig())
 		if err != nil {
-			log.Panic().Err(err).Msg("failed to initialize DPS client")
+			return fmt.Errorf("failed to initialize DPS client: %w", err)
 		}
 		defer dps.Close()
 		powerProvisioner = dps
