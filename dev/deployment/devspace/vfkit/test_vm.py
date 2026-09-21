@@ -41,10 +41,12 @@ class LifecycleTests(unittest.TestCase):
         machine = MagicMock()
         machine.runtime = self.machine.runtime
         with patch.object(vm, "VM", return_value=machine), \
+                patch.object(vm, "check_vfkit_version") as check_version, \
                 patch.object(vm.platform, "system", return_value="Darwin"), \
                 patch.object(vm.platform, "machine", return_value="arm64"), \
                 patch.object(vm.platform, "mac_ver", return_value=("26.0", (), "")):
             vm.main(["--vm-dir", str(self.directory), "up"])
+        check_version.assert_called_once_with()
         self.assertEqual([entry[0] for entry in machine.mock_calls],
                          ["create", "ensure_disk", "seed", "start", "ready", "sync",
                           "provision", "prepare_dev", "verify"])
@@ -143,7 +145,7 @@ class LifecycleTests(unittest.TestCase):
 
     def test_native_build_version_comes_from_host_not_synthetic_guest_head(self):
         version = "v2.3.0-pr-146-g12345678"
-        with patch.object(vm, "run", side_effect=[
+        with patch.object(vm, "host_git", side_effect=[
                 subprocess.CompletedProcess([], 0, stdout=version + "\n"),
                 subprocess.CompletedProcess([], 0, stdout="12345678\n")]), \
                 patch.object(self.machine, "ssh") as ssh:
@@ -155,7 +157,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(result.stdout, version + " 12345678")
 
     def test_native_build_version_rejects_checkout_without_version_tag(self):
-        with patch.object(vm, "run", return_value=subprocess.CompletedProcess(
+        with patch.object(vm, "host_git", return_value=subprocess.CompletedProcess(
                 [], 0, stdout="12345678\n")), patch.object(self.machine, "ssh") as ssh:
             with self.assertRaisesRegex(ValueError, "lacks a version tag"):
                 self.machine.sync_build_version()
@@ -166,6 +168,68 @@ class LifecycleTests(unittest.TestCase):
         with patch.object(vm, "run", return_value=subprocess.CompletedProcess(
                 [], 0, stdout="vfkit --device virtio-blk,path=/another/vm/root.raw")):
             self.assertIsNone(self.machine.pid())
+
+
+class HostPreflightTests(unittest.TestCase):
+    def test_supported_vfkit_versions(self):
+        for version in ("v0.6.2", "v0.10.0"):
+            with self.subTest(version=version), patch.object(vm, "run", return_value=
+                    subprocess.CompletedProcess([], 0, stdout=f"vfkit version: {version}\n")) as run:
+                vm.check_vfkit_version()
+                run.assert_called_once_with(["vfkit", "--version"], capture_output=True, text=True)
+
+    def test_unsupported_vfkit_rejected_before_accessing_vm_state(self):
+        for action, version in (("up", "v0.6.1"), ("start", "development")):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(vm.platform, "system", return_value="Darwin"), \
+                    patch.object(vm.platform, "machine", return_value="arm64"), \
+                    patch.object(vm.platform, "mac_ver", return_value=("26.0", (), "")), \
+                    patch.object(vm, "VM") as machine, \
+                    patch.object(vm, "run", return_value=subprocess.CompletedProcess(
+                        [], 0, stdout=f"vfkit version: {version}\n")):
+                directory = Path(temporary) / "state"
+                with self.assertRaisesRegex(ValueError, "vfkit 0.6.2 or newer is required"):
+                    vm.main(["--vm-dir", str(directory), action])
+                machine.assert_not_called()
+                self.assertFalse(directory.exists())
+
+    def test_host_git_ignores_foreign_repository_environment(self):
+        with tempfile.TemporaryDirectory(prefix="nico-git-env-test-") as temporary:
+            root = Path(temporary)
+            # Keep fixture creation independent of the invoking shell and user hooks.
+            environment = {name: value for name, value in os.environ.items()
+                           if not name.startswith("GIT_")}
+
+            def git(repo, *args):
+                return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                      env=environment, capture_output=True, text=True).stdout
+
+            checkout, foreign = root / "checkout", root / "foreign"
+            for repo, tag in ((checkout, "v1.0.0"), (foreign, "v9.0.0")):
+                repo.mkdir()
+                git(repo, "init", "-q")
+                (repo / repo.name).write_text(tag)
+                git(repo, "add", repo.name)
+                git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+                    "commit", "-qm", "Fixture")
+                git(repo, "-c", "tag.gpgSign=false", "tag", tag)
+            (checkout / "untracked").write_text("local edits")
+            commands = [("ls-files", "-z", "--cached", "--others", "--exclude-standard"),
+                        ("describe", "--tags", "--first-parent", "--always", "--long"),
+                        ("rev-parse", "--short=8", "HEAD")]
+            expected = [git(checkout, *command) for command in commands]
+            overrides = {"GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(foreign),
+                         "GIT_COMMON_DIR": str(foreign / ".git"),
+                         "GIT_INDEX_FILE": str(foreign / ".git/index"),
+                         "GIT_OBJECT_DIRECTORY": str(foreign / ".git/objects"),
+                         "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(foreign / ".git/objects")}
+            with patch.dict(os.environ, dict(environment, **overrides), clear=True), \
+                    patch.object(vm, "REPO", checkout):
+                actual = [vm.host_git(*command, capture_output=True, text=True).stdout
+                          for command in commands]
+                self.assertEqual(actual, expected)
+                self.assertEqual(os.environ["GIT_DIR"], overrides["GIT_DIR"])
 
 
 class NativePreparationTests(unittest.TestCase):
