@@ -9,6 +9,9 @@ source /etc/os-release
 [[ "$(uname -m)" == aarch64 ]]
 [[ -n "$(ip -4 -o addr show dev eth0 scope global)" ]]
 ip -4 route show default | grep -q '^default '
+if [[ "$1" == nat ]]; then
+  [[ "$(cat /sys/class/net/eth0/mtu)" == 1280 ]]
+fi
 if [[ "$1" != nat ]]; then
   [[ -n "$(ip -6 -o addr show dev eth0 scope global)" ]]
   ip -6 route show default | grep -q '^default '

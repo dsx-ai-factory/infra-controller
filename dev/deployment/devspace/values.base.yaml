@@ -1,4 +1,6 @@
 nico-api:
+  # Single-node development cannot reserve CPU for several draining rollouts.
+  terminationGracePeriodSeconds: 30
   # Disable legacy forge-system namespace alias for local dev
   legacyAlias:
     enabled: false

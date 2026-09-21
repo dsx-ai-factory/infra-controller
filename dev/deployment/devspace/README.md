@@ -122,6 +122,7 @@ DevSpace will:
 - deploy the REST umbrella, site-agent, and MCP charts in [`helm/rest`](../../../helm/rest)
 - inject the built image names and DevSpace-generated tags into both deployments at runtime
 - register a local REST site, configure its Temporal namespace, and confirm that the site agent establishes a Core gRPC connection
+- wait for a fresh, completed machine inventory cycle, confirm that REST reports every MAT host as tenant-usable at the registered, online site, and verify Core readiness and Scout responses
 
 The image builds are configured in [`devspace.yaml`](../../../devspace.yaml). DevSpace always invokes the native [`dev/docker/Dockerfile.build-container-x86_64`](../../../dev/docker/Dockerfile.build-container-x86_64) or [`dev/docker/Dockerfile.build-container-aarch64`](../../../dev/docker/Dockerfile.build-container-aarch64) build so Docker notices architecture and Dockerfile changes while reusing unchanged layers from its cache. In the first build stage, a single shared builder compiles the API, admin CLI, BMC proxy, and machine-a-tron binaries while the REST images build in parallel. The builder exports those binaries to the local `nico-devspace-core-artifacts` image. In the second stage, the three Core runtime Dockerfiles copy their binaries from that image in parallel and add only their distinct runtime packages and assets. DevSpace always invokes these lightweight second-stage builds because its custom-build change cache can outlive the corresponding local Docker images; Docker still reuses unchanged layers. BuildKit cache mounts are used for Cargo registry, Cargo git checkouts, and Cargo target output so rebuilds stay fast without copying host build artifacts into the image.
 
@@ -147,6 +148,15 @@ The local REST Dockerfiles inherit BuildKit's target operating system and archit
 DevSpace watches the Rust workspace, toolchain metadata, and the runtime Dockerfiles to decide when the shared Core artifacts need rebuilding. It always runs the three second-stage Core runtime builds to guarantee their generated tags exist locally. On kind clusters, the pre-deploy hooks then load all Core and REST images into the cluster selected by the current kube context.
 
 The `nico-machine-a-tron` Helm subchart configuration is in [`values.base.yaml`](values.base.yaml). The post-deploy setup resolves the `nico-machine-a-tron-mat-0-bmc-mock` Service ClusterIP and sets Core's runtime BMC proxy to that literal address. After allowing earlier requests to drain, it clears cached lockout-protection errors and refreshes existing host and DPU BMC endpoint records reported by machine-a-tron; endpoints not yet recorded on a clean install are left for normal discovery. This avoids hostname connection failures on affected ARM64 hosts and works unchanged on AMD64.
+
+The readiness check allows 180 attempts with five-second pauses between attempts, reports progress every twelve attempts, and exits nonzero on failure. It matches REST's controller machine IDs against Core hosts in `Ready` or `Assigned/Ready`; REST's `isUsableByTenant` flag alone does not prove initialization has finished. Unassigned `Ready` hosts must also have a connected Scout stream and respond to a ping. Already assigned hosts do not require Scout while running a tenant OS, so success does not mean every host is free for a new allocation. Temporary port forwards are stopped and joined on normal exit, interrupt, or termination.
+
+Core recovery calls use [`core-admin.sh`](core-admin.sh), which selects a ready, non-terminating Core pod and obtains a one-hour admin certificate from that pod's configured Vault PKI role. It requires the root-token development setup (or a compatible Vault token with issuance permission), the trusted Vault admin CA, and `kubectl`/`jq` on the caller. The private key is passed over stdin, stored temporarily with owner-only permissions inside the pod, and removed on exit; server certificate verification is enabled. `LOCAL_DEV_NAMESPACE` selects the Core namespace (default `nico-system`); remaining arguments are passed to the bundled CLI:
+
+```bash
+bash dev/deployment/devspace/core-admin.sh -f json machine show
+bash dev/deployment/devspace/core-admin.sh scout-stream show
+```
 
 Common usage:
 
@@ -276,9 +286,9 @@ bash dev/deployment/devspace/setup-devspace-mac-vfkit.sh deploy
 
 On ARM64, native preparation selects the same `clang -fuse-ld=mold` linker driver used by CI through `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER`. It applies to Cargo commands in a fresh login shell, including `exec`, without replacing the system linker used by other builds.
 
-`deploy` copies the checkout again and runs the full Linux setup, including prerequisite bootstrap, DevSpace deployment, and its stack health checks. Linux tool versions and image tags remain shared through [`versions.env`](versions.env). `prepare-dev` refreshes native prerequisites for an existing VM without deploying the stack. It may restart the test PostgreSQL container to increase an older connection limit, preserving its data; do not run it during tests. The preparation step is not proof that every workspace test passes; run the desired tests in the VM.
+`deploy` copies the checkout again and runs the full Linux setup, including prerequisite bootstrap, DevSpace deployment, and its stack health checks. Tool and image versions are selected by the existing Linux setup scripts; the vfkit launcher does not select separate versions. `prepare-dev` refreshes native prerequisites for an existing VM without deploying the stack. It may restart the test PostgreSQL container to increase an older connection limit, preserving its data; do not run it during tests. The preparation step is not proof that every workspace test passes; run the desired tests in the VM.
 
-Native preparation disables Cargo HTTP multiplexing in its download commands and the developer's login environment. Go module downloads also use HTTP/1.1, scoped to that download command. This avoids dependency download stalls observed over the vfkit NAT path while retaining TLS certificate verification.
+Repeated setup leaves Docker and kind's container runtime running when their TLS-compatibility configuration is unchanged. A changed runtime configuration can still require a restart. Core uses a 30-second termination grace period in this single-node development stack to keep draining revisions from exhausting scheduling capacity during consecutive rollouts. The local Vault is an in-memory development server, not a durable secrets store: VM/runtime restarts can lose its state, so preserving the VM disk alone does not guarantee application-state recovery. Use a persistent external Vault for tests that require secrets to survive restarts.
 
 The guest account is `nico`, with password authentication disabled and passwordless sudo. The launcher generates a dedicated SSH key in the VM directory. SSH uses a private Unix socket and virtio-vsock, so management does not depend on discovering the guest's IP address. `ssh` opens a login shell in `/home/nico/infra-controller`; `exec -- COMMAND ARG...` runs an argument-preserving command there. Shell expressions require an explicit `bash -lc` command.
 
@@ -316,7 +326,7 @@ Transfer overwrites corresponding guest files but preserves guest-only files and
 
 The guest enables IPv6 forwarding and accepts router advertisements on `eth0`. Docker's default bridge has a private IPv6 subnet, and kind is created with `networking.ipFamily: dual`. DevSpace purge preserves the cluster's IP family. This configures Linux/container networking; it does not convert every application Service or MAT listener into an IPv6 endpoint.
 
-`nat` uses Apple's built-in NAT. Its upstream IPv6 capability depends on the host network; it must not be treated as proof of routed IPv6 access. For gateway-provided IPv4/IPv6, use a VMNet bridge or an existing gateway socket:
+`nat` uses Apple's built-in NAT. New NAT VMs use a 1280-byte guest MTU, with DHCP and router-advertisement MTU overrides disabled: larger HTTPS requests stalled with repeated TCP retransmissions at MTU 1500 on the tested macOS NAT path. This retains IPv6's minimum MTU. The setting is installed by first-boot cloud-init, so existing VMs must be recreated to receive it; `verify` checks it. Gateway modes retain their network-provided MTU. Upstream IPv6 capability depends on the host network; NAT must not be treated as proof of routed IPv6 access. For gateway-provided IPv4/IPv6, use a VMNet bridge or an existing gateway socket:
 
 - `--network bridged --interface en0` runs vfkit through `vmnet-run --operation-mode bridged --shared-interface en0`. Install [vmnet-helper](https://github.com/nirs/vmnet-helper#installation) using the instructions for your macOS version. `vmnet-run` must be on `PATH` or in its supported Homebrew or `/opt/vmnet-helper/bin` location. Choose the actual interface connected to your dual-stack network.
 - `--network socket --network-socket /absolute/path/to/gateway.sock` attaches vfkit's Ethernet device to an existing compatible Unix datagram socket. The gateway must already be running and supply DHCPv4, IPv6 router advertisements or DHCPv6, DNS, and upstream routes. The launcher does not create or stop that gateway.
@@ -382,6 +392,5 @@ devspace deploy -n nico-system
 - [`setup-rest-integration.sh`](setup-rest-integration.sh)
 - [`devspace.yaml`](../../../devspace.yaml)
 - [`values.base.yaml`](values.base.yaml)
-- [`versions.env`](versions.env)
 - `values.generated.yaml`, written by `bootstrap-prereqs.sh` and not tracked
 - [`nuke-postgres.sh`](nuke-postgres.sh)
