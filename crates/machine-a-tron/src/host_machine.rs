@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, Callbacks, HostFirmwareVersions, HostMachineInfo, MachineInfo, MockPowerState,
+    Callbacks, HostFirmwareVersions, HostMachineInfo, MachineInfo, MockPowerState,
     ResourceResetType, SetSystemPowerError, SetSystemPowerResult,
 };
 use carbide_utils::test_support::certs::create_random_self_signed_cert;
@@ -35,6 +35,7 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::api_client::ApiClient;
+use crate::bmc_mock_wrapper::BmcCommand;
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRelayResult, DhcpResponseInfo, DpuDhcpRelay};
 use crate::dpu_machine::{DpuMachine, DpuMachineHandle};

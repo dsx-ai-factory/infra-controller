@@ -24,13 +24,13 @@ use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId}
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
-    POWER_CYCLE_DELAY, ResourceResetType, SetSystemPowerError, SetSystemPowerResult,
+    Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState, POWER_CYCLE_DELAY,
+    ResourceResetType, SetSystemPowerError, SetSystemPowerResult,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRequestInfo, DhcpRequester, DhcpResponseInfo, vendor_class};
 use crate::machine_state_machine::{MachineStateError, OsImage};

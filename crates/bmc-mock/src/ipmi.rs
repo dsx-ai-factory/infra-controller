@@ -16,9 +16,6 @@
  */
 
 //! IPMI-over-HTTP mock handler for testing.
-//!
-//! Receives JSON requests from `IPMIToolHttpImpl` and translates them
-//! into `BmcCommand::SetSystemPower` calls to machine-a-tron.
 
 use axum::routing::post;
 use axum::{Json, Router};

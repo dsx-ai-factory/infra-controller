@@ -103,8 +103,8 @@ pub use machine_info::{
     MachineInfo,
 };
 pub use mock_machine_router::{
-    BmcCommand, EventServiceOverride, MachineRouterOptions, SetSystemPowerError,
-    SetSystemPowerResult, machine_router, machine_router_with_injection_store,
+    EventServiceOverride, MachineRouterOptions, SetSystemPowerError, SetSystemPowerResult,
+    machine_router, machine_router_with_injection_store,
 };
 pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
 pub use rack_info::RackInfo;
