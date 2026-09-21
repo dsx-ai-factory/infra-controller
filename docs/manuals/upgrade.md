@@ -346,6 +346,18 @@ DPF manages DPU provisioning state in `DPUCluster`, `DPUService`, and `DPF` CRs,
 
 NICo 2.1 requires `startupProbe` to be explicitly configured in the machine-a-tron deployment (issue #4298). The chart now validates this at render time and fails with a clear error if `startupProbe` is absent. The default values provide a suitable probe scaled to ~2,300 hosts; for larger sites, refer to `helm-prereqs/values/machine-a-tron-scale.yaml` for recommended parameters scaled to 13,500 hosts.
 
+### 2.2 → 2.3: Kustomize deployment deprecated
+
+The Kustomize deployment under `deploy/` (`deploy/kustomization.yaml`,
+`deploy/nico-base`, `deploy/nico-system`, `deploy/nico-unbound-base`) is
+deprecated in 2.3 and will be removed in 2.4. Every service it deploys has a
+Helm chart under `helm/`, and `setup.sh` installs NICo Core from those charts
+only. Kustomize deployments keep working in 2.3 but receive no new
+configuration. Before upgrading to 2.4, install with the Helm charts as
+described in the [quick start](../getting-started/quick-start.md) and retire the
+Kustomize overlays. The `rest-api/deploy/kustomize` bases that `setup.sh` uses
+for cert-manager, PostgreSQL, and Temporal are not affected.
+
 ## Rollback
 
 <Warning>
