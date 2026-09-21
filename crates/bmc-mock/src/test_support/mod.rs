@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::routing::get;
@@ -22,6 +23,7 @@ use axum::{Json, Router};
 use axum_http_client::AxumRouterHttpClient;
 use mac_address::MacAddress;
 use nv_redfish::bmc_http::{BmcCredentials, CacheSettings, HttpBmc};
+use tokio::sync::Notify;
 use url::Url;
 
 use crate::injection::{Action, Rule, RuleId, Selector};
@@ -38,23 +40,59 @@ use crate::{
 
 pub mod axum_http_client;
 
-/// Test backend with no external effects.
-#[derive(Clone, Debug)]
-pub struct NoopCallbacks;
+/// Records power commands and refresh notifications without external effects.
+/// Power reads return the configured state (On by default); commands do not change it.
+#[derive(Debug, Default)]
+pub struct TestCallbacks {
+    power_state: MockPowerState,
+    pub(crate) commands: Mutex<Vec<SystemPowerControl>>,
+    pub(crate) refresh_count: AtomicUsize,
+    command_received: Notify,
+}
 
-impl Callbacks for NoopCallbacks {
+impl TestCallbacks {
+    #[cfg(test)]
+    pub(crate) fn new(power_state: MockPowerState) -> Self {
+        Self {
+            power_state,
+            ..Default::default()
+        }
+    }
+
+    /// Waits up to five seconds for the expected number of recorded commands.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_command_count(&self, expected_count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let command_received = self.command_received.notified();
+                if self.commands.lock().unwrap().len() >= expected_count {
+                    return;
+                }
+                command_received.await;
+            }
+        })
+        .await
+        .expect("timed out waiting for BMC power commands");
+    }
+}
+
+impl Callbacks for TestCallbacks {
     fn get_power_state(&self) -> MockPowerState {
-        MockPowerState::On
+        self.power_state
     }
 
     fn send_power_command(
         &self,
-        _reset_type: SystemPowerControl,
+        reset_type: SystemPowerControl,
     ) -> Result<(), SetSystemPowerError> {
+        self.commands.lock().unwrap().push(reset_type);
+        self.command_received.notify_one();
         Ok(())
     }
 
-    fn state_refresh_indication(&self) {}
+    fn state_refresh_indication(&self) {
+        self.refresh_count.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub type TestBmc = HttpBmc<AxumRouterHttpClient>;
@@ -67,13 +105,22 @@ lazy_static::lazy_static! {
         })));
 }
 
-#[derive(Clone)]
-pub struct TestBmcHandle<C: Callbacks = NoopCallbacks> {
+pub struct TestBmcHandle<C: Callbacks = TestCallbacks> {
     pub service_root: Arc<nv_redfish::ServiceRoot<TestBmc>>,
     /// The client behind `service_root`, for collectors that take the BMC
     /// directly rather than a service root.
     pub bmc: Arc<TestBmc>,
     pub state: BmcState<C>,
+}
+
+impl<C: Callbacks> Clone for TestBmcHandle<C> {
+    fn clone(&self) -> Self {
+        Self {
+            service_root: self.service_root.clone(),
+            bmc: self.bmc.clone(),
+            state: self.state.clone(),
+        }
+    }
 }
 
 async fn test_bmc<C: Callbacks>((router, state): (axum::Router, BmcState<C>)) -> TestBmcHandle<C> {
@@ -118,7 +165,7 @@ pub async fn bmc_for_machine(machine_info: MachineInfo) -> TestBmcHandle {
     };
     test_bmc(machine_router(
         &machine_info,
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         machine_id.to_string(),
         false,
         MachineRouterOptions::default(),
@@ -143,7 +190,7 @@ pub(super) fn host_info(hw_type: HardwareType) -> MachineInfo {
 pub async fn wiwynn_gb200_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::WiwynnGB200Nvl),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -154,7 +201,7 @@ pub async fn wiwynn_gb200_bmc() -> TestBmcHandle {
 pub async fn lenovo_gb300_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::LenovoGB300Nvl),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -165,7 +212,7 @@ pub async fn lenovo_gb300_bmc() -> TestBmcHandle {
 pub async fn nvidia_dgx_h100_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::NvidiaDgxH100),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -176,7 +223,7 @@ pub async fn nvidia_dgx_h100_bmc() -> TestBmcHandle {
 pub async fn dgx_gb300_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::NvidiaDgxGb300),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -192,7 +239,7 @@ pub async fn dgx_gb300_bmc() -> TestBmcHandle {
 pub async fn nvidia_dgx_vr_host_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::NvidiaDgxVr),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -203,7 +250,7 @@ pub async fn nvidia_dgx_vr_host_bmc() -> TestBmcHandle {
 pub async fn supermicro_gb300_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::SupermicroGb300Nvl),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -211,9 +258,9 @@ pub async fn supermicro_gb300_bmc() -> TestBmcHandle {
     .await
 }
 
-/// Creates a generic Supermicro test BMC with no-op callbacks.
+/// Creates a generic Supermicro test BMC with a fixed On power state.
 pub async fn generic_supermicro_bmc() -> TestBmcHandle {
-    generic_supermicro_bmc_with_callbacks(Arc::new(NoopCallbacks)).await
+    generic_supermicro_bmc_with_callbacks(Arc::new(TestCallbacks::default())).await
 }
 
 /// Creates a generic Supermicro test BMC with the supplied backend callbacks.
@@ -233,7 +280,7 @@ pub async fn generic_supermicro_bmc_with_callbacks<C: Callbacks>(
 pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::LiteOnPowerShelf),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -244,7 +291,7 @@ pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
 pub async fn delta_powershelf_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::DeltaPowerShelf),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -262,7 +309,7 @@ pub async fn delta_powershelf_bmc_with_psu_power(states: Vec<bool>) -> TestBmcHa
     };
     test_bmc(machine_router(
         &machine_info,
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -273,7 +320,7 @@ pub async fn delta_powershelf_bmc_with_psu_power(states: Vec<bool>) -> TestBmcHa
 pub async fn nvidia_switch_nd5200_ld_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::NvidiaSwitchNd5200Ld),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -284,7 +331,7 @@ pub async fn nvidia_switch_nd5200_ld_bmc() -> TestBmcHandle {
 pub async fn nvidia_switch_n5700_ld_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::NvidiaSwitchN5700Ld),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -295,7 +342,7 @@ pub async fn nvidia_switch_n5700_ld_bmc() -> TestBmcHandle {
 pub async fn dell_poweredge_r750_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::DellPowerEdgeR750),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -314,7 +361,7 @@ pub async fn dell_poweredge_r750_bluefield3_bmc(settings: DpuSettings) -> TestBm
     };
     test_bmc(machine_router(
         &machine_info,
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-dpu-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -326,7 +373,7 @@ pub async fn dell_poweredge_r760_bluefield4_bmc(dpu: DpuMachineInfo) -> TestBmcH
     let machine_info = MachineInfo::Dpu(dpu);
     test_bmc(machine_router(
         &machine_info,
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-dpu-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -345,7 +392,7 @@ pub async fn nvidia_dgx_vr_bluefield4_dpu_bmc(settings: DpuSettings) -> TestBmcH
     };
     test_bmc(machine_router(
         &machine_info,
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-dpu-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -356,7 +403,7 @@ pub async fn nvidia_dgx_vr_bluefield4_dpu_bmc(settings: DpuSettings) -> TestBmcH
 pub async fn hpe_proliant_dl380a_gen11_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::HpeProliantDl380aGen11),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -367,7 +414,7 @@ pub async fn hpe_proliant_dl380a_gen11_bmc() -> TestBmcHandle {
 pub async fn generic_ami_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::GenericAmi),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -502,10 +549,10 @@ const TEST_DISABLED_INTERFACE: &str = "/redfish/v1/Systems/Self/EthernetInterfac
 /// Builds a generic host router with supplemental network adapter ports.
 pub fn generic_ami_router_with_network_adapter_ports(
     ports: Vec<serde_json::Value>,
-) -> (axum::Router, BmcState<NoopCallbacks>) {
+) -> (axum::Router, BmcState<TestCallbacks>) {
     let (router, state) = machine_router(
         &host_info(HardwareType::GenericAmi),
-        Arc::new(NoopCallbacks),
+        Arc::new(TestCallbacks::default()),
         "test-host-id".to_string(),
         false,
         MachineRouterOptions::default(),
@@ -586,7 +633,7 @@ pub fn generic_ami_router_with_network_adapter_ports(
 /// Builds a generic host router with one supplemental network adapter port.
 pub fn generic_ami_router_with_network_adapter_port(
     port: serde_json::Value,
-) -> (axum::Router, BmcState<NoopCallbacks>) {
+) -> (axum::Router, BmcState<TestCallbacks>) {
     generic_ami_router_with_network_adapter_ports(vec![port])
 }
 
@@ -594,7 +641,7 @@ pub fn generic_ami_router_with_network_adapter_port(
 /// adapter-port test router.
 pub fn generic_ami_router_with_network_adapter_port_and_disabled_system_mac(
     port: serde_json::Value,
-) -> (axum::Router, BmcState<NoopCallbacks>) {
+) -> (axum::Router, BmcState<TestCallbacks>) {
     let (router, state) = generic_ami_router_with_network_adapter_port(port);
     state.injection.upsert(Rule {
         id: RuleId::from("disabled-system-interface"),
@@ -665,7 +712,7 @@ mod test {
         });
         let (router, state) = crate::machine_router_with_injection_store(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "test-host-id".to_string(),
             false,
             injection.clone(),
@@ -690,26 +737,9 @@ mod test {
     /// expires, recovery is lazy, and the server's power is never touched.
     #[tokio::test]
     async fn manager_reset_takes_bmc_offline_then_recovers() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
-        #[derive(Debug, Default)]
-        struct PowerCommandCounter(AtomicUsize);
-        impl Callbacks for PowerCommandCounter {
-            fn get_power_state(&self) -> MockPowerState {
-                MockPowerState::On
-            }
-            fn send_power_command(
-                &self,
-                _reset_type: SystemPowerControl,
-            ) -> Result<(), SetSystemPowerError> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }
-            fn state_refresh_indication(&self) {}
-        }
-
-        let callbacks = Arc::new(PowerCommandCounter::default());
+        let callbacks = Arc::new(TestCallbacks::default());
         let (router, _state) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
             callbacks.clone(),
@@ -770,7 +800,7 @@ mod test {
         assert_eq!(response.status(), StatusCode::OK);
 
         // a BMC reset must not touch the server's power
-        assert_eq!(callbacks.0.load(Ordering::SeqCst), 0);
+        assert!(callbacks.commands.lock().unwrap().is_empty());
     }
 
     /// Regression guard: a ZERO `bmc_reset_duration` (e.g. from a profile
@@ -782,7 +812,7 @@ mod test {
 
         let (router, state) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions {
@@ -840,7 +870,7 @@ mod test {
         let client = AxumRouterHttpClient::new(
             machine_router(
                 &host_info(HardwareType::DellPowerEdgeR750),
-                Arc::new(NoopCallbacks),
+                Arc::new(TestCallbacks::default()),
                 "test-host-id".to_string(),
                 false,
                 MachineRouterOptions::default(),

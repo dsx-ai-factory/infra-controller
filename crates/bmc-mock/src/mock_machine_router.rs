@@ -273,7 +273,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::test_support::{NoopCallbacks, host_info};
+    use crate::test_support::{TestCallbacks, host_info};
 
     #[tokio::test]
     async fn omitted_event_service_has_no_discovery_or_routes() {
@@ -293,7 +293,7 @@ mod tests {
         for (scenario, profile, event_service) in disabled {
             let (router, state) = machine_router_inner(
                 &host_info(crate::HardwareType::DellPowerEdgeR750),
-                Arc::new(NoopCallbacks),
+                Arc::new(TestCallbacks::default()),
                 "disabled-event-service".into(),
                 false,
                 Arc::new(InjectionStore::new()),

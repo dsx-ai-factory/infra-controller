@@ -586,59 +586,20 @@ async fn serve_console(
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use bytes::Bytes;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
-    use tokio::sync::Notify;
 
     use super::{
         ChassisControlEvent, ConsoleOutputStream, ConsoleOutputStreamFactory, Error,
         IPMI_SIM_EXECUTABLE, IpmiSimConfig, MockConsole, stable_guid, start, validate_credential,
         validate_executable_in_path,
     };
-    use crate::{Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl};
-
-    #[derive(Debug, Default)]
-    struct RecordingCallbacks {
-        commands: Mutex<Vec<SystemPowerControl>>,
-        command_received: Notify,
-    }
-
-    impl RecordingCallbacks {
-        async fn wait_for_command_count(&self, expected_count: usize) {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let command_received = self.command_received.notified();
-                    if self.commands.lock().unwrap().len() >= expected_count {
-                        return;
-                    }
-                    command_received.await;
-                }
-            })
-            .await
-            .expect("timed out waiting for chassis reset callback");
-        }
-    }
-
-    impl Callbacks for RecordingCallbacks {
-        fn get_power_state(&self) -> MockPowerState {
-            MockPowerState::On
-        }
-
-        fn send_power_command(
-            &self,
-            request: SystemPowerControl,
-        ) -> Result<(), SetSystemPowerError> {
-            self.commands.lock().unwrap().push(request);
-            self.command_received.notify_one();
-            Ok(())
-        }
-
-        fn state_refresh_indication(&self) {}
-    }
+    use crate::SystemPowerControl;
+    use crate::test_support::TestCallbacks;
 
     #[test]
     fn ipmi_sim_executable_is_required() {
@@ -714,7 +675,7 @@ mod tests {
 
     #[tokio::test]
     async fn real_ipmitool_resets_chassis() {
-        let callbacks = Arc::new(RecordingCallbacks::default());
+        let callbacks = Arc::new(TestCallbacks::default());
         let bmc =
             crate::test_support::generic_supermicro_bmc_with_callbacks(callbacks.clone()).await;
         let state = bmc.state;

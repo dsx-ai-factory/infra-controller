@@ -1504,7 +1504,7 @@ mod tests {
     use tower_http::normalize_path::NormalizePathLayer;
 
     use super::*;
-    use crate::test_support::{NoopCallbacks, host_info};
+    use crate::test_support::{TestCallbacks, host_info};
     use crate::{HardwareType, MachineRouterOptions, machine_router};
 
     /// Reads one successful JSON response from the in-process mock router.
@@ -1523,7 +1523,7 @@ mod tests {
     async fn log_services_discovery_names_the_log_collection() {
         let (router, _) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             String::new(),
             false,
             MachineRouterOptions::default(),
@@ -1559,10 +1559,10 @@ mod tests {
             .status()
     }
 
-    fn dell_router() -> (Router, BmcState<NoopCallbacks>) {
+    fn dell_router() -> (Router, BmcState<TestCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             String::new(),
             false,
             MachineRouterOptions::default(),
@@ -1636,7 +1636,7 @@ mod tests {
     async fn storage_discovery_names_the_storage_collection() {
         let (router, _) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             String::new(),
             false,
             MachineRouterOptions::default(),
@@ -1661,7 +1661,7 @@ mod tests {
     async fn hpe_boot_order_is_persisted_separately_from_standard_boot_order() {
         let router = machine_router(
             &host_info(HardwareType::HpeProliantDl380aGen11),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions::default(),
@@ -1702,7 +1702,7 @@ mod tests {
     async fn simulated_ssh_port_can_be_added_without_profile_serial_console_data() {
         let (router, state) = machine_router(
             &host_info(HardwareType::LenovoGB300Nvl),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions::default(),
