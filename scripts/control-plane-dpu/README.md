@@ -44,6 +44,7 @@ The following tools must be installed on the build machine:
 | `mkisofs` (Linux) or `xorrisofs` (macOS) | Build ISO |
 
 Install on Ubuntu:
+
 ```bash
 # yq (mikefarah v4) — do NOT use apt-get install yq, that installs the wrong one
 sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
@@ -57,6 +58,7 @@ sudo apt-get install wget curl jq zip gzip genisoimage
 ```
 
 Install on macOS:
+
 ```bash
 brew install yq gomplate wget curl jq zip xorriso
 ```
@@ -478,6 +480,7 @@ image over it is slow, and if the DPU is still busy with post-boot initialisatio
 the transfer starts, its receive buffers fill up and the transfer stalls indefinitely.
 
 The scripts mitigate this automatically:
+
 - A **20-second delay** is inserted after the DPU comes online before any file transfer
   begins, giving the DPU time to finish its boot activity
 - SSH keepalives (`ServerAliveInterval=30`, `ServerAliveCountMax=3`) detect a stalled
