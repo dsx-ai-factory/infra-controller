@@ -106,19 +106,19 @@ fn deny_prefixes_for_agent(
 
 /// Builds the deprecated deny field with the same address-family contract as `deny_prefixes`.
 ///
-/// Mutual isolation folds site-fabric prefixes into this field, so those prefixes must pass
-/// through the per-DPU filter as well.
+/// Mutual isolation folds the virtualizer's effective site-isolation prefixes into this field,
+/// so those prefixes must pass through the per-DPU address-family filter as well.
 fn deprecated_deny_prefixes_for_agent(
     deny_prefixes: &[String],
-    site_fabric_prefixes: &[IpNetwork],
+    site_isolation_prefixes: &[IpNetwork],
     isolation_behavior: VpcIsolationBehaviorType,
     network_virtualization_type: VpcVirtualizationType,
 ) -> Vec<String> {
     match isolation_behavior {
         VpcIsolationBehaviorType::MutualIsolation => {
-            let site_fabric_prefixes =
-                deny_prefixes_for_agent(site_fabric_prefixes, network_virtualization_type);
-            [site_fabric_prefixes.as_slice(), deny_prefixes].concat()
+            let site_isolation_prefixes =
+                deny_prefixes_for_agent(site_isolation_prefixes, network_virtualization_type);
+            [site_isolation_prefixes.as_slice(), deny_prefixes].concat()
         }
         VpcIsolationBehaviorType::Open => deny_prefixes.to_vec(),
     }
@@ -572,16 +572,32 @@ async fn get_managed_host_network_config_inner(
     let deny_prefixes =
         deny_prefixes_for_agent(&api.eth_data.deny_prefixes, network_virtualization_type);
 
-    let site_fabric_networks = api
-        .eth_data
-        .site_fabric_prefixes
-        .as_ref()
-        .map(|s| s.as_ip_slice())
-        .unwrap_or_default();
-    let site_fabric_prefixes: Vec<String> = site_fabric_networks
+    // Keep the legacy fields on their original site-prefix contract so older
+    // agents retain their existing behavior throughout a rolling upgrade.
+    let site_fabric_networks = &api.runtime_config.site_fabric_prefixes;
+    let site_fabric_prefixes = site_fabric_networks
         .iter()
-        .map(|net| net.to_string())
+        .map(ToString::to_string)
         .collect();
+
+    let retained_operator_roots = if network_virtualization_type == VpcVirtualizationType::Fnn
+        && api.runtime_config.site_fabric_null_routes.is_none()
+    {
+        db::site_prefix::find_operator_managed_prefixes_with_retained_vpc_prefixes(txn.as_pgconn())
+            .await?
+    } else {
+        vec![]
+    };
+    let site_fabric_null_routes =
+        (network_virtualization_type == VpcVirtualizationType::Fnn).then(|| {
+            let items = api
+                .runtime_config
+                .resolved_site_fabric_null_routes(&retained_operator_roots)
+                .into_iter()
+                .map(|prefix| prefix.to_string())
+                .collect();
+            rpc_common::StringList { items }
+        });
 
     let deprecated_deny_prefixes = deprecated_deny_prefixes_for_agent(
         &deny_prefixes,
@@ -755,6 +771,8 @@ async fn get_managed_host_network_config_inner(
         deprecated_deny_prefixes,
         deny_prefixes,
         site_fabric_prefixes,
+        site_fabric_null_routes,
+        vpc_peer_vnis_authoritative: true,
         anycast_site_prefixes: api
             .runtime_config
             .anycast_site_prefixes
@@ -1867,7 +1885,7 @@ async fn get_bgp_password(
 }
 
 #[cfg(test)]
-mod deny_prefix_tests {
+mod prefix_policy_tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;

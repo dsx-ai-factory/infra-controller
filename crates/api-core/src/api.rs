@@ -122,7 +122,7 @@ impl Forge for Api {
         &self,
         request: Request<rpc::VersionRequest>,
     ) -> Result<Response<rpc::BuildInfo>, Status> {
-        crate::handlers::api::version(self, request)
+        crate::handlers::api::version(self, request).await
     }
 
     async fn create_domain(

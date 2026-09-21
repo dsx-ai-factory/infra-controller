@@ -623,6 +623,9 @@ impl CurrentNetworkVersion {
         config.route_servers.sort_unstable();
         config.deny_prefixes.sort_unstable();
         config.site_fabric_prefixes.sort_unstable();
+        if let Some(site_fabric_null_routes) = &mut config.site_fabric_null_routes {
+            site_fabric_null_routes.items.sort_unstable();
+        }
         config.anycast_site_prefixes.sort_unstable();
         config
             .additional_route_target_imports

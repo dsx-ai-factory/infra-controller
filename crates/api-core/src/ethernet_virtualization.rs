@@ -75,10 +75,6 @@ impl SiteFabricPrefixList {
         prefixes.none_if_empty().map(|prefixes| Self { prefixes })
     }
 
-    pub(crate) fn as_ip_slice(&self) -> &[IpNetwork] {
-        &self.prefixes
-    }
-
     // Check whether the given network matches any of our site fabric prefixes.
     pub(crate) fn contains(&self, network: IpNetwork) -> bool {
         use IpNetwork::*;
@@ -687,14 +683,12 @@ pub(crate) async fn tenant_network(
     if let Some(policy) = vpc_peering_policy_on_existing
         && let Some(vpc_id) = segment.config.vpc_id
     {
-        // The peer-ID universe depends on the site policy. Under
-        // `Exclusive`, the per-type capability layer dictates which
-        // peer types are compatible (e.g. an FNN VPC can have Flat
-        // peers via Flat's `peers_with` listing). Under `Mixed`, the
-        // operator opts out of capability enforcement and we accept
-        // any peering record. `None` disables peering entirely.
+        // The per-type capability layer dictates which peer types are
+        // compatible (e.g. an FNN VPC can have Flat peers via Flat's
+        // `peers_with` listing). Deprecated `Mixed` now has the same
+        // behavior as `Exclusive`; `None` disables all peer imports.
         let vpc_peer_ids: Vec<VpcId> = match policy {
-            VpcPeeringPolicy::Exclusive => {
+            VpcPeeringPolicy::Exclusive | VpcPeeringPolicy::Mixed => {
                 let allowed_peer_types = network_virtualization_type
                     .capabilities()
                     .peers_with
@@ -705,21 +699,22 @@ pub(crate) async fn tenant_network(
                     .map(|(id, _)| id)
                     .collect()
             }
-            VpcPeeringPolicy::Mixed => db::vpc_peering::get_vpc_peer_ids(txn, vpc_id).await?,
             VpcPeeringPolicy::None => vec![],
         };
 
         vpc_peer_prefixes = get_prefixes_by_vpcs(txn, &vpc_peer_ids).await?;
 
-        // VNI-based peer route imports are independent of peering
-        // policy: they're a per-type question on both sides.
+        // VNI-based peer route imports are a per-type question on both sides
+        // when stored peerings are enabled.
         // - Self: does this VPC's DPU plumb peer VNIs into its VRF?
         //   (`imports_peer_vnis_into_overlay`, FNN-only today.)
         // - Peer: should this peer's VNI be exposed for the self-side
         //   to pick up? (`vni_advertised_to_peers`, FNN + Flat today --
         //   Flat advertises its VNI so pluggable SDN integrations on
         //   the network operator's fabric can use it.)
-        if network_virtualization_type.imports_peer_vnis_into_overlay() {
+        if policy != VpcPeeringPolicy::None
+            && network_virtualization_type.imports_peer_vnis_into_overlay()
+        {
             let vni_peer_types: Vec<_> = ALL_VPC_VIRTUALIZATION_TYPES
                 .iter()
                 .copied()

@@ -118,6 +118,18 @@ pub(super) async fn validate_retained_prefixes(
     if pairs.is_empty() {
         return Ok(());
     }
+    // Retained validation must use the same null routes that Core renders to
+    // FNN. New admission deliberately continues to use current configuration
+    // so retiring roots cannot authorize additional prefix reuse.
+    let retained_operator_roots = if api.runtime_config.site_fabric_null_routes.is_none() {
+        db::site_prefix::find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn)
+            .await?
+    } else {
+        vec![]
+    };
+    let isolation_routes = api
+        .runtime_config
+        .resolved_site_fabric_null_routes(&retained_operator_roots);
     let prefix_ids = pairs
         .iter()
         .flat_map(|(first, second)| [*first, *second])
@@ -173,6 +185,7 @@ pub(super) async fn validate_retained_prefixes(
     for (first, second) in pairs {
         if !retained_pair_is_isolated(
             &api.runtime_config,
+            &isolation_routes,
             participant(first)?,
             participant(second)?,
         ) {

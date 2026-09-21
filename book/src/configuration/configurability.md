@@ -145,9 +145,9 @@ sections and which page in this guide owns the deep dive.
 
 ### Site identity
 
-`sitename`, `initial_domain_name`, `asn`, `datacenter_asn`,
-`vpc_isolation_behavior`, `vpc_peering_policy`,
-`max_concurrent_machine_updates`. Set once at install time.
+`sitename`, `initial_domain_name`, `asn`, `datacenter_asn`, `vpc_isolation_behavior`, `vpc_peering_policy`, `vpc_peering_policy_on_existing`, `max_concurrent_machine_updates`. Set once at install time.
+
+The `mixed` value for either VPC peering policy is deprecated. NICo logs a startup warning and treats it as `exclusive`. ETV and FNN VPCs are not compatible peers. Creation requests for that pair return `InvalidArgument` under every policy. Stored ETV/FNN peering rows remain discoverable and removable but contribute neither ETV peer-prefix ACL permits nor FNN peer-VNI route-target imports. `vpc_peering_policy_on_existing = "none"` disables both mechanisms for every stored peering.
 
 ### IP and VNI pools
 
@@ -168,10 +168,11 @@ for `prefix_v6`, `dhcpv6_link_address`, examples, and compatibility requirements
 
 ### Tenant traffic policy
 
-`site_fabric_prefixes` (CIDRs allowed for tenant-to-tenant traffic) and
-`deny_prefixes` (CIDRs tenant instances must not reach — typically OOB,
-management, control-plane). `deny_prefixes` generates iptables DROP rules
-and NVUE ACL policies on DPUs.
+`site_fabric_prefixes` defines the tenant address space within the site. With mutual isolation, ETV enforces its IPv4 entries with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL.
+
+`site_fabric_null_routes` controls the FNN isolation routes. When omitted, it inherits `site_fabric_prefixes` and retains removed operator-managed roots while they contain a VpcPrefix or VPC-attached direct NetworkPrefix. Soft-deleted children retain coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative. An empty list disables the routes. Inherited roots are reduced to their minimal exact union. Explicit CIDRs are canonicalized and exact duplicates are removed, but parent, child, and adjacent entries remain distinct so a child blackhole can remain beneath an importable parent route. FNN installs the routes with administrative distance 250 in each VPC VRF, so an authorized route wins only when it is at least as specific as the applicable blackhole. Do not combine an effective `/0` null route with `leak_default_route_from_underlay = true` for the same address family; the imported default has a better administrative distance than the equal-prefix blackhole.
+
+`deny_prefixes` identifies CIDRs tenant instances must not reach—typically OOB, management, or control-plane networks—and generates iptables DROP rules and NVUE ACL policies on DPUs. Open isolation installs neither the FNN blackhole routes nor the ETV isolation ACLs.
 
 ### DHCP, route servers, and BGP
 

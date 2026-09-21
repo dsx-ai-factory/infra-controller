@@ -131,9 +131,14 @@ nico-api:
 
       # -----------------------------------------------------------------------
       # site_fabric_prefixes: prefixes that ARE part of the site fabric.
+      # site_fabric_null_routes: optional FNN blackholes; omitted means
+      # site_fabric_prefixes plus retiring roots until their VpcPrefixes are
+      # hard-deleted, with inherited roots collapsed. Explicit lists preserve
+      # distinct prefix boundaries, while [] explicitly disables the routes.
       # deny_prefixes: prefixes instances must NOT reach (OOB, ctrl-plane, underlay).
       # -----------------------------------------------------------------------
       site_fabric_prefixes = []                  # REQUIRED: your fabric CIDR(s)
+      # site_fabric_null_routes = []             # OPTIONAL: explicitly no FNN null routes
       deny_prefixes = []                         # your OOB / control-plane / underlay CIDRs
 
       # -----------------------------------------------------------------------

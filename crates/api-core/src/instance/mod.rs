@@ -2275,7 +2275,6 @@ pub(crate) async fn batch_allocate_instances(
                 txn.as_mut(),
                 &request.config,
                 None,
-                true,
             )
             .await?;
         }
