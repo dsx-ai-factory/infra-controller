@@ -2402,22 +2402,27 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
                 privileged: Some(service.security_privileged),
                 spiffe: None,
             }),
-            service_daemon_set: Some(DpuServiceServiceDaemonSet {
-                annotations: service.service_daemon_set.annotations.clone(),
-                labels: service.service_daemon_set.labels.clone(),
-                node_selector: Some(detached_node_selector(&service.node_selector_labels)),
-                resources: service.service_daemon_set.resources.clone(),
-                update_strategy: service.service_daemon_set.update_strategy.as_ref().map(
-                    |strategy| DpuServiceServiceDaemonSetUpdateStrategy {
-                        r#type: strategy.strategy_type.clone(),
-                        rolling_update: strategy.rolling_update.as_ref().map(|rolling| {
-                            DpuServiceServiceDaemonSetUpdateStrategyRollingUpdate {
-                                max_surge: rolling.max_surge.clone(),
-                                max_unavailable: rolling.max_unavailable.clone(),
-                            }
-                        }),
-                    },
-                ),
+            service_daemon_set: service.service_daemon_set.as_ref().map(|daemon_set| {
+                DpuServiceServiceDaemonSet {
+                    annotations: daemon_set.annotations.clone(),
+                    labels: daemon_set.labels.clone(),
+                    node_selector: daemon_set
+                        .node_selector_labels
+                        .as_ref()
+                        .map(detached_node_selector),
+                    resources: daemon_set.resources.clone(),
+                    update_strategy: daemon_set.update_strategy.as_ref().map(|strategy| {
+                        DpuServiceServiceDaemonSetUpdateStrategy {
+                            r#type: strategy.strategy_type.clone(),
+                            rolling_update: strategy.rolling_update.as_ref().map(|rolling| {
+                                DpuServiceServiceDaemonSetUpdateStrategyRollingUpdate {
+                                    max_surge: rolling.max_surge.clone(),
+                                    max_unavailable: rolling.max_unavailable.clone(),
+                                }
+                            }),
+                        }
+                    }),
+                }
             }),
             service_id: None,
         },
@@ -6618,18 +6623,20 @@ mod tests {
             },
             deploy_in_cluster: false,
             security_privileged: false,
-            node_selector_labels: BTreeMap::from([(
-                "nico/extension-service".to_owned(),
-                "enabled".to_owned(),
-            )]),
-            service_daemon_set: Default::default(),
+            service_daemon_set: None,
         }
     }
 
+    /// Verifies explicitly supplied DaemonSet fields survive conversion through
+    /// the generated DPF type, including caller-selected placement.
     #[test]
     fn detached_dpu_service_daemon_set_fields_round_trip_through_checked_cr_type() {
         let mut service = test_dpu_service("extension-service");
-        service.service_daemon_set = crate::types::DetachedServiceDaemonSet {
+        service.service_daemon_set = Some(crate::types::DetachedServiceDaemonSet {
+            node_selector_labels: Some(BTreeMap::from([(
+                "nico/extension-service".to_owned(),
+                "enabled".to_owned(),
+            )])),
             annotations: Some(BTreeMap::from([(
                 "example.com/owner".to_owned(),
                 "tenant".to_owned(),
@@ -6646,23 +6653,20 @@ mod tests {
                     max_unavailable: Some(IntOrString::Int(1)),
                 }),
             }),
-        };
+        });
 
+        // Convert through the checked CR type to exercise the SDK boundary.
         let observed = dpu_service_from_resource(dpu_service_to_resource(&service)).unwrap();
         let observed_daemon_set = observed.service_daemon_set.unwrap();
+        let expected_daemon_set = service.service_daemon_set.unwrap();
 
+        // All caller-supplied fields, including placement, must remain present.
         assert_eq!(
             observed_daemon_set.annotations,
-            service.service_daemon_set.annotations
+            expected_daemon_set.annotations
         );
-        assert_eq!(
-            observed_daemon_set.labels,
-            service.service_daemon_set.labels
-        );
-        assert_eq!(
-            observed_daemon_set.resources,
-            service.service_daemon_set.resources
-        );
+        assert_eq!(observed_daemon_set.labels, expected_daemon_set.labels);
+        assert_eq!(observed_daemon_set.resources, expected_daemon_set.resources);
         assert_eq!(
             observed_daemon_set.update_strategy,
             Some(json!({
@@ -6671,17 +6675,6 @@ mod tests {
             }))
         );
         assert!(observed_daemon_set.node_selector.is_some());
-    }
-
-    #[test]
-    fn dpu_service_observation_preserves_absent_service_daemon_set() {
-        let service = test_dpu_service("extension-service");
-        let mut resource = dpu_service_to_resource(&service);
-        resource.spec.service_daemon_set = None;
-
-        let observed = dpu_service_from_resource(resource).unwrap();
-
-        assert!(observed.service_daemon_set.is_none());
     }
 
     #[tokio::test]

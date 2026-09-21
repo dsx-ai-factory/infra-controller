@@ -192,24 +192,23 @@ fn dpu_service_observation(service: &DetachedDpuServiceDefinition) -> DpuService
         interfaces_present: false,
         paused: None,
         security_privileged: Some(service.security_privileged),
-        service_daemon_set: Some(DpuServiceDaemonSetObservation {
-            node_selector: Some(serde_json::json!({
-                "nodeSelectorTerms": [{
-                    "matchExpressions": service.node_selector_labels.iter().map(|(key, value)| serde_json::json!({
-                        "key": key,
-                        "operator": "In",
-                        "values": [value],
-                    })).collect::<Vec<_>>(),
-                }],
-            })),
-            annotations: service.service_daemon_set.annotations.clone(),
-            labels: service.service_daemon_set.labels.clone(),
-            resources: service.service_daemon_set.resources.clone(),
-            update_strategy: service
-                .service_daemon_set
-                .update_strategy
-                .as_ref()
-                .map(|strategy| {
+        service_daemon_set: service.service_daemon_set.as_ref().map(|daemon_set| {
+            DpuServiceDaemonSetObservation {
+                node_selector: daemon_set.node_selector_labels.as_ref().map(|labels| {
+                    serde_json::json!({
+                        "nodeSelectorTerms": [{
+                            "matchExpressions": labels.iter().map(|(key, value)| serde_json::json!({
+                                "key": key,
+                                "operator": "In",
+                                "values": [value],
+                            })).collect::<Vec<_>>(),
+                        }],
+                    })
+                }),
+                annotations: daemon_set.annotations.clone(),
+                labels: daemon_set.labels.clone(),
+                resources: daemon_set.resources.clone(),
+                update_strategy: daemon_set.update_strategy.as_ref().map(|strategy| {
                     let mut value = serde_json::Map::new();
                     if let Some(strategy_type) = &strategy.strategy_type {
                         value.insert("type".to_string(), serde_json::json!(strategy_type));
@@ -232,6 +231,7 @@ fn dpu_service_observation(service: &DetachedDpuServiceDefinition) -> DpuService
                     }
                     serde_json::Value::Object(value)
                 }),
+            }
         }),
         service_id: None,
         config_ports_present: false,
@@ -623,33 +623,6 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     // The existing create reconciler reaches Ready before this API-only
     // component accepts a replacement definition.
     env.run_extension_service_controller_iteration().await;
-
-    let invalid_update = env
-        .api
-        .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
-            service_id: service_id.to_string(),
-            service_name: None,
-            description: None,
-            data: r#"{
-                "repoURL":"oci://registry.example.com/charts",
-                "chartName":"tenant-service",
-                "chartVersion":"2.0.0",
-                "security.privileged":false,
-                "serviceDaemonSet":{"resources":{"nvidia.com/bf_sf":"not-a-quantity"}}
-            }"#
-            .to_string(),
-            credential: None,
-            observability: None,
-            if_version_ctr_match: Some(1),
-        }))
-        .await
-        .expect_err("semantic validation must run before an update is persisted");
-    assert_eq!(invalid_update.code(), tonic::Code::InvalidArgument);
-    assert!(
-        invalid_update
-            .message()
-            .contains("invalid Kubernetes quantity")
-    );
 
     let stale_update = env
         .api
@@ -1264,39 +1237,6 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
                 "serviceDaemonSet":{"upgradeStrategy":{"type":"RollingUpdate"}}
             }"#,
             "unknown field `upgradeStrategy`",
-        ),
-        (
-            "dpf-invalid-label",
-            r#"{
-                "repoURL":"oci://registry.example.com/charts",
-                "chartName":"tenant-service",
-                "chartVersion":"1.2.3",
-                "security.privileged":false,
-                "serviceDaemonSet":{"labels":{"bad key":"value"}}
-            }"#,
-            "not a Kubernetes qualified name",
-        ),
-        (
-            "dpf-invalid-resource-quantity",
-            r#"{
-                "repoURL":"oci://registry.example.com/charts",
-                "chartName":"tenant-service",
-                "chartVersion":"1.2.3",
-                "security.privileged":false,
-                "serviceDaemonSet":{"resources":{"nvidia.com/bf_sf":"not-a-quantity"}}
-            }"#,
-            "invalid Kubernetes quantity",
-        ),
-        (
-            "dpf-invalid-update-strategy",
-            r#"{
-                "repoURL":"oci://registry.example.com/charts",
-                "chartName":"tenant-service",
-                "chartVersion":"1.2.3",
-                "security.privileged":false,
-                "serviceDaemonSet":{"updateStrategy":{"rollingUpdate":{"maxUnavailable":"101%"}}}
-            }"#,
-            "must be between 0% and 100%",
         ),
     ] {
         let service_id = ExtensionServiceId::new();

@@ -34,7 +34,7 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-const validDpfHelmChartDataForHandlerTest = `{"repoURL":"oci://registry.example.com/charts","chartName":"firewall","chartVersion":"1.2.3","security.privileged":false,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"firewall"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}`
+const validDpfHelmChartData = `{"repoURL":"oci://registry.example.com/charts","chartName":"firewall","chartVersion":"1.2.3","security.privileged":false,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"firewall"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}`
 
 // TestCreateDpuExtensionServiceHandler_Handle tests the Create DPU Extension Service handler
 func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
@@ -180,7 +180,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		ServiceType: model.DpuExtensionServiceTypeDpfHelmChart,
 		DpuTarget:   cutil.GetPtr(model.DpuExtensionServiceDpuTargetAllActive),
 		SiteID:      st1.ID.String(),
-		Data:        validDpfHelmChartDataForHandlerTest,
+		Data:        validDpfHelmChartData,
 	}
 	dpfBodyBytes, _ := json.Marshal(dpfBody)
 
@@ -865,7 +865,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 
 	dpfBody := model.APIDpuExtensionServiceUpdateRequest{
 		Description: cutil.GetPtr("Updated DPF Description"),
-		Data:        cutil.GetPtr(validDpfHelmChartDataForHandlerTest),
+		Data:        cutil.GetPtr(validDpfHelmChartData),
 	}
 	dpfBodyBytes, _ := json.Marshal(dpfBody)
 

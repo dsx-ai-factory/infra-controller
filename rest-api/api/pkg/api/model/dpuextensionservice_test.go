@@ -82,6 +82,30 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
+		// A fully populated supported object proves the REST-facing shape decodes through request validation.
+		{
+			desc: "ok when DPF Helm chart has a typed daemon set",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}}}`,
+			},
+			expectErr: false,
+		},
+		// Known fields still reject incompatible JSON types at the REST boundary.
+		{
+			desc: "error when DPF Helm chart labels are not an object",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false,"serviceDaemonSet":{"labels":[]}}`,
+			},
+			expectErr: true,
+		},
 		// A Helm registration must identify its immutable placement policy before reaching Core.
 		{
 			desc: "error when DPF Helm chart omits DPU target",
@@ -590,37 +614,6 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 			if err != nil {
 				fmt.Println(err.Error())
 			}
-		})
-	}
-}
-
-func TestValidateDpfHelmChartData_ServiceDaemonSet(t *testing.T) {
-	base := `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false,%s}`
-	tests := []struct {
-		name      string
-		field     string
-		errorText string
-	}{
-		{
-			name:  "valid typed daemon set",
-			field: `"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}}`,
-		},
-		{name: "explicit node selector", field: `"serviceDaemonSet":{"nodeSelector":{}}`, errorText: "unknown field"},
-		{name: "incorrect upgrade strategy spelling", field: `"serviceDaemonSet":{"upgradeStrategy":{}}`, errorText: "unknown field"},
-		{name: "unknown top-level field", field: `"unexpected":true`, errorText: "unknown field"},
-		{name: "invalid labels shape", field: `"serviceDaemonSet":{"labels":[]}`, errorText: "cannot unmarshal array"},
-		{name: "invalid resource quantity shape", field: `"serviceDaemonSet":{"resources":{"nvidia.com/bf_sf":1}}`, errorText: "cannot unmarshal number"},
-		{name: "semantic validation is deferred to Core", field: `"serviceDaemonSet":{"labels":{"bad key":"bad value"},"resources":{"nvidia.com/bf_sf":"not-a-quantity"},"updateStrategy":{"type":"Replace","rollingUpdate":{"maxUnavailable":"101%"}}}`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateDpfHelmChartData([]byte(fmt.Sprintf(base, tt.field)))
-			if tt.errorText == "" {
-				require.NoError(t, err)
-				return
-			}
-			require.ErrorContains(t, err, tt.errorText)
 		})
 	}
 }

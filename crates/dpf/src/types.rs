@@ -681,15 +681,17 @@ pub struct DetachedDpuServiceDefinition {
     pub helm_chart: DetachedHelmChart,
     pub deploy_in_cluster: bool,
     pub security_privileged: bool,
-    /// Exact-match node labels for the detached service's DaemonSet. The SDK
-    /// renders these as one NodeSelector term with `In` expressions.
-    pub node_selector_labels: BTreeMap<String, String>,
-    pub service_daemon_set: DetachedServiceDaemonSet,
+    /// Optional DaemonSet settings supplied by the feature using the SDK.
+    /// Absence remains absence; the SDK does not impose placement policy.
+    pub service_daemon_set: Option<DetachedServiceDaemonSet>,
 }
 
-/// Tenant-configurable fields on a detached DPUService's generated DaemonSet.
+/// Caller-configurable fields on a detached DPUService's generated DaemonSet.
 #[derive(Debug, Clone, Default)]
 pub struct DetachedServiceDaemonSet {
+    /// Exact-match node labels rendered as one NodeSelector term with `In`
+    /// expressions when the caller explicitly requests placement.
+    pub node_selector_labels: Option<BTreeMap<String, String>>,
     pub annotations: Option<BTreeMap<String, String>>,
     pub labels: Option<BTreeMap<String, String>>,
     pub resources: Option<BTreeMap<String, IntOrString>>,

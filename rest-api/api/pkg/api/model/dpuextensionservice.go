@@ -4,11 +4,9 @@
 package model
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -74,15 +72,18 @@ func ValidatePodYaml(yamlData []byte) error {
 	return nil
 }
 
+// dpfHelmChartData defines a DPF Helm extension service's Data field
 type dpfHelmChartData struct {
 	RepoURL            string                        `json:"repoURL"`
 	ChartName          string                        `json:"chartName"`
 	ChartVersion       string                        `json:"chartVersion"`
 	SecurityPrivileged *bool                         `json:"security.privileged"`
-	Values             *map[string]any               `json:"values,omitempty"`
+	Values             map[string]any                `json:"values,omitempty"`
 	ServiceDaemonSet   *dpfHelmChartServiceDaemonSet `json:"serviceDaemonSet,omitempty"`
 }
 
+// dpfHelmChartServiceDaemonSet defines the supported DaemonSet settings while
+// excluding placement fields such as nodeSelector, which NICo owns in Core.
 type dpfHelmChartServiceDaemonSet struct {
 	Labels         *map[string]string          `json:"labels,omitempty"`
 	Annotations    *map[string]string          `json:"annotations,omitempty"`
@@ -101,17 +102,12 @@ type dpfDaemonSetRollingUpdate struct {
 }
 
 // ValidateDpfHelmChartData checks the REST-facing shape of a DPF Helm chart
-// definition and rejects fields owned by NICo. Kubernetes and DPF semantic
-// validation is canonical in Core, immediately before desired state is persisted.
+// definition and rejects the known NICo-owned placement override. Kubernetes
+// and DPF semantic validation is canonical in Core before persistence.
 func ValidateDpfHelmChartData(jsonData []byte) error {
 	var chart dpfHelmChartData
-	decoder := json.NewDecoder(bytes.NewReader(jsonData))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&chart); err != nil {
+	if err := json.Unmarshal(jsonData, &chart); err != nil {
 		return fmt.Errorf("failed to parse json: %w", err)
-	}
-	if err := ensureJSONEOF(decoder); err != nil {
-		return err
 	}
 
 	if chart.RepoURL == "" {
@@ -134,27 +130,12 @@ func ValidateDpfHelmChartData(jsonData []byte) error {
 		return errors.New("security.privileged must be specified")
 	}
 
-	if chart.Values != nil {
-		serviceDaemonSet, ok := (*chart.Values)["serviceDaemonSet"].(map[string]any)
-		if !ok {
-			serviceDaemonSet = nil
-		}
+	if serviceDaemonSet, ok := chart.Values["serviceDaemonSet"].(map[string]any); ok {
 		if _, reserved := serviceDaemonSet["nodeSelector"]; reserved {
 			return errors.New("values may not set NICo-owned field serviceDaemonSet.nodeSelector")
 		}
 	}
 
-	return nil
-}
-
-func ensureJSONEOF(decoder *json.Decoder) error {
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("failed to parse json: multiple JSON values are not supported")
-		}
-		return fmt.Errorf("failed to parse json: %w", err)
-	}
 	return nil
 }
 
