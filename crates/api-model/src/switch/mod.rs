@@ -367,13 +367,23 @@ pub enum ReProvisioningState {
 pub enum SwitchDecommissioningState {
     /// Site Explorer is being suppressed before the destructive reset.
     SuppressingSiteExplorer,
-    /// NVOS DHCP is suppressed before the factory reset so post-reset discovers are ignored.
-    SuppressingNvosDhcp,
     /// Submits the destructive RMS NVOS factory-reset job.
-    /// Completion is not polled: NVOS DHCP is already suppressed, so the job
-    /// cannot be observed reliably; progress continues via DHCP acknowledgement.
     FactoryResetNvos,
-    /// Waiting for the pre-reset NVOS DHCP suppression to be acknowledged.
+    /// A lost submission response leaves no job ID; operator recovery is required.
+    NvosFactoryResetOutcomeUnknown {
+        /// Submission failure explaining why the reset must not be retried automatically.
+        error: String,
+    },
+    /// Polls the submitted reset without submitting another destructive operation.
+    WaitingForNvosFactoryReset {
+        /// Opaque RMS job handle retained across controller iterations and restarts.
+        job_id: String,
+    },
+    /// NVOS DHCP is suppressed after the factory reset completes.
+    SuppressingNvosDhcp,
+    /// Reboots the switch through its BMC after NVOS DHCP suppression is requested.
+    RebootingSwitch,
+    /// Waiting for NVOS DHCP suppression to be acknowledged after the switch reboot.
     WaitingForNvosDhcpAcknowledgement,
     /// BMC DHCP is suppressed before the BMC factory reset.
     SuppressingBmcDhcp,
@@ -509,8 +519,19 @@ pub fn state_sla(state: &SwitchControllerState, state_version: &ConfigVersion) -
                 std::time::Duration::from_secs(slas::DECOMMISSIONING_SUPPRESSING_NVOS_DHCP),
                 time_in_state,
             ),
-            SwitchDecommissioningState::FactoryResetNvos => StateSla::with_sla(
-                std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_NVOS),
+            SwitchDecommissioningState::FactoryResetNvos
+            | SwitchDecommissioningState::NvosFactoryResetOutcomeUnknown { .. } => {
+                StateSla::with_sla(
+                    std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_NVOS),
+                    time_in_state,
+                )
+            }
+            SwitchDecommissioningState::WaitingForNvosFactoryReset { .. } => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_WAITING_FOR_NVOS_RESET),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::RebootingSwitch => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_REBOOTING_SWITCH),
                 time_in_state,
             ),
             SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => StateSla::with_sla(
