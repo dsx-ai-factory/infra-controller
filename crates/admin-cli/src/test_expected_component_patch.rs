@@ -90,6 +90,38 @@ async fn machine_flags_select_only_supplied_fields() {
     }
     for case in [
         Case {
+            scenario: "labels alone select only the supplied collection",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--label",
+                "env:prod",
+                "--label",
+                "team:platform",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["metadata.labels"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                metadata: Some(forge::Metadata {
+                    labels: vec![
+                        forge::Label {
+                            key: "env".to_string(),
+                            value: Some("prod".to_string()),
+                        },
+                        forge::Label {
+                            key: "team".to_string(),
+                            value: Some("platform".to_string()),
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        },
+        Case {
             scenario: "ID selection sends false and empty resets without reading the record",
             args: vec![
                 "expected-machine",
