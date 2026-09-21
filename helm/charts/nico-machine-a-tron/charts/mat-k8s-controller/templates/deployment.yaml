@@ -7,7 +7,10 @@ metadata:
   labels:
     {{- include "mat-k8s-controller.labels" . | nindent 4 }}
 spec:
+  # Namespace-scoped controller without leader election: one replica always
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "mat-k8s-controller.selectorLabels" . | nindent 6 }}

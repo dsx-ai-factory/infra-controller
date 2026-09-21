@@ -1,0 +1,14 @@
+suite: deployment tests
+templates:
+  - templates/deployment.yaml
+tests:
+  - it: should render a singleton controller that never overlaps on rollout
+    set:
+      enabled: true
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+      - equal:
+          path: spec.strategy.type
+          value: Recreate

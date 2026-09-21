@@ -25,6 +25,11 @@ helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
 When `mat-k8s-controller` is enabled, it always deploys into the same namespace
 as nico-machine-a-tron. The controller does not support a separate namespace.
 
+Only one `mat-k8s-controller` may manage a namespace. It has no leader
+election, so two active controllers duplicate reconcile work and race on the
+same Services. The chart enforces this by rendering a single replica with
+a `Recreate` rollout, and by exposing no replica count value.
+
 ## Deployment Modes
 
 | Mode | Use Case | Real HW Compatible | Network Setup |
