@@ -29,6 +29,26 @@ def run(args, **kwargs):
     return subprocess.run([str(arg) for arg in args], check=True, **kwargs)
 
 
+def host_git(*args, **kwargs):
+    """Run Git against this checkout, ignoring inherited repository overrides."""
+    environment = os.environ.copy()
+    # Git hooks export repository-local variables that take precedence over -C.
+    local_vars = run(["git", "rev-parse", "--local-env-vars"],
+                     capture_output=True, text=True).stdout.splitlines()
+    for name in local_vars:
+        environment.pop(name, None)
+    return run(["git", "-C", REPO, *args], env=environment, **kwargs)
+
+
+def check_vfkit_version():
+    """Require cloud-init network-config support before creating or starting a VM."""
+    version = run(["vfkit", "--version"], capture_output=True, text=True).stdout.strip()
+    match = re.fullmatch(r"vfkit version: v?(\d+)\.(\d+)\.(\d+)", version)
+    if not match or tuple(map(int, match.groups())) < (0, 6, 2):
+        raise ValueError(f"vfkit 0.6.2 or newer is required for cloud-init network-config; "
+                         f"found {version!r}. Upgrade with: brew upgrade vfkit")
+
+
 def digest(path):
     checksum = hashlib.sha256()
     with path.open("rb") as stream:
@@ -376,8 +396,8 @@ class VM:
         self.ssh("mkdir", "-p", GUEST_REPO)
         # Transfer tracked and untracked, nonignored files, including local edits.
         # Excluding .git avoids dangling worktree pointers and copying host credentials.
-        files = run(["git", "-C", REPO, "ls-files", "-z", "--cached", "--others",
-                     "--exclude-standard"], capture_output=True).stdout
+        files = host_git("ls-files", "-z", "--cached", "--others",
+                         "--exclude-standard", capture_output=True).stdout
         files = b"\0".join(name for name in files.split(b"\0")
                             if name and os.path.lexists(REPO / os.fsdecode(name))) + b"\0"
         # BSD tar preserves the repository's absolute, dangling Linux symlinks;
@@ -403,12 +423,12 @@ class VM:
     def sync_build_version(self):
         # The synthetic guest HEAD has no release ancestry. Preserve the host
         # version via the same build-script inputs CI uses, not a fabricated tag.
-        version = run(["git", "-C", REPO, "describe", "--tags", "--first-parent", "--always", "--long"],
-                      capture_output=True, text=True).stdout.strip()
+        version = host_git("describe", "--tags", "--first-parent", "--always", "--long",
+                           capture_output=True, text=True).stdout.strip()
         if not re.match(r"^v[0-9]", version):
             raise ValueError("checkout lacks a version tag; fetch repository tags before syncing native tests")
-        sha = run(["git", "-C", REPO, "rev-parse", "--short=8", "HEAD"],
-                  capture_output=True, text=True).stdout.strip()
+        sha = host_git("rev-parse", "--short=8", "HEAD",
+                       capture_output=True, text=True).stdout.strip()
         environment = (f"export VERSION={shlex.quote(version)}\n"
                        f"export CI_COMMIT_SHORT_SHA={shlex.quote(sha)}\n")
         self.ssh("bash", "-c", 'umask 077; mkdir -p "$HOME/.config/nico" && '
@@ -510,6 +530,8 @@ def main(argv=None):
         raise ValueError("requires Apple Silicon macOS")
     if int(platform.mac_ver()[0].split(".")[0]) < 13:
         raise ValueError("EFI boot requires macOS 13 or newer")
+    if args.action in ("up", "start"):
+        check_vfkit_version()
     directory = check_volume(args.vm_dir)
     if directory.resolve() == REPO or REPO in directory.resolve().parents:
         raise ValueError("--vm-dir must be outside the checkout to avoid copying VM disks into the guest")
