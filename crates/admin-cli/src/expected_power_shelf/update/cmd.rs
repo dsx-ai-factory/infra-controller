@@ -23,7 +23,7 @@ use crate::rpc::{ApiClient, maybe_unimplemented};
 
 pub(super) async fn update(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
     let paths = data.update_mask();
-    let legacy: ExpectedPowerShelf = data.try_into()?;
+    let legacy: ExpectedPowerShelf = data.into();
     // Keep the caller's selector for the legacy RPC; PATCH requires its ID.
     let mut patch = legacy.clone();
     if patch.expected_power_shelf_id.is_none() {
