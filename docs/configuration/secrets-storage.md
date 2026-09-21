@@ -6,13 +6,9 @@ This page covers the `[secrets]` section of the `nico-api` config, how to supply
 
 Vault/OpenBao Transit is the available server-side KMS backend. The Integrated
 backend loads KEK material into the NICo process from an environment variable,
-file, or inline value. [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253)
-tracks qualification of a production non-Vault replacement and explicitly
-includes a hardened Integrated deployment backed by a CSI secrets-store or
-External-Secrets mount as a possible interim, alongside managed KMS, HSM, and
-KMIP providers. Inline Integrated keys remain for development and test; a
-mounted-key deployment is production-supported only if #3253 selects and
-qualifies that custody, availability, rotation, and recovery model.
+file, or inline value. Inline Integrated keys are for development and test.
+Operators using mounted `env` or `file` key sources own key custody, startup
+availability, controlled-restart rotation, backup, and recovery.
 
 ## How It Works
 
@@ -105,7 +101,7 @@ keys = { "site-kek-1" = { env = "NICO_SECRETS_KEK" } }
 
 Providers are named. The `active` provider wraps DEKs for new writes; every configured provider answers unwraps for the `kek_id`s it holds, which is what keeps old entries readable while keys move. Two provider types exist:
 
-- `integrated`: local key material. `keys` maps each `kek_id` to where its base64-encoded 256-bit key loads from: `{ env = "NAME" }`, `{ file = "/path" }`, or `{ value = "..." }`. With `env` or `file`, the config contains only the locator. Inline `value` is development/test-only because the config is debug-logged at startup and served on the web debug page. A mounted `env` or `file` source is production-supported only if [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253) qualifies its custody, startup availability, controlled-restart rotation, and recovery model.
+- `integrated`: local key material. `keys` maps each `kek_id` to where its base64-encoded 256-bit key loads from: `{ env = "NAME" }`, `{ file = "/path" }`, or `{ value = "..." }`. With `env` or `file`, the config contains only the locator, and operators are responsible for custody, startup availability, controlled-restart rotation, backup, and recovery. Inline `value` is development/test-only because the config is debug-logged at startup and served on the web debug page.
 - `transit`: Vault or OpenBao Transit, which wraps and unwraps DEKs server-side, so KEK material never leaves the KMS. `keys` lists the Transit key names this provider answers for, and `transit_mount` overrides the secrets-engine mount (default `"transit"`). Transit requires a static Vault token; the Kubernetes service-account login flow is not supported for Transit yet.
 
 Transit needs setup that `helm-prereqs` does not perform: its Vault policy covers only the KV and PKI paths. Before enabling a Transit provider, enable the engine at the mount, create each key named in `keys`, and grant the token `update` on the three paths NICo calls:
@@ -204,6 +200,6 @@ Rotation moves new writes immediately and existing entries on your schedule:
    nico-admin-cli secrets re-wrap
    ```
 
-   The walk visits every journal row, including historical entries, and re-wraps each one whose KEK differs from the routed target. Only the DEK wrapping is redone (credential ciphertext is untouched), batches commit independently, and a lease-based work lock keeps it to one walk at a time, so the command is safe to re-run; each run starts from the beginning and skips rows already on the routed KEK without calling the KMS. `--batch-size` sets the rows scanned per batch, default 100 and clamped to the range 1 to 10000; a smaller batch lightens the load on an external KMS. The command prints the `re_wrapped` and `already_current` counts and a sentence about rows still wrapped by unrouted KEKs; the server logs `secrets re-wrap completed` with all three counts. It fails with a precondition error if the config has no `[secrets]` section or another re-wrap is running.
+   The walk visits every journal row, including historical entries, and re-wraps each one whose KEK differs from the routed target. Only the DEK wrapping is redone (credential ciphertext is untouched), and batches commit independently. A renewable work-lock lease rejects another start while keepalives retain it; if keepalives fail until the lease expires, another walk can start before the first exits. With routing converged across the fleet, overlapping updates and repeated commands are idempotent: each walk starts from the beginning and skips rows already on the routed KEK without calling the KMS. `--batch-size` sets the rows scanned per batch, default 100 and clamped to the range 1 to 10000; a smaller batch lightens the load on an external KMS. The command prints the `re_wrapped` and `already_current` counts and a sentence about rows still wrapped by unrouted KEKs; the server logs `secrets re-wrap completed` with all three counts. It fails with a precondition error if the config has no `[secrets]` section or another re-wrap currently owns the lease.
 
 3. **Retire the old key.** `stale_remaining` counts live entries wrapped by KEKs that no routing entry references; it does not inspect backups. Remove a KEK from every routing entry and run `secrets re-wrap` again. After `stale_remaining` reports 0, keep the old key and provider through the backup-retention and rollback windows: restoring a pre-re-wrap database backup still needs the old key. To roll the live site back to the old provider, keep both providers configured, set `[secrets.kms] active` back to the old provider, reverse routing to its KEK, restart, and run re-wrap again. Keep the new provider available to unwrap its rows until the reverse re-wrap reaches zero stale rows. Delete either key only after its backup-retention and rollback windows end.
