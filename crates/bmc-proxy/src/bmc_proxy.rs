@@ -58,8 +58,9 @@ use url::Url;
 
 use crate::config::{AuthConfig, TlsConfig};
 use crate::metrics::{
-    AuthContextMissing, MethodLabel, PrincipalAllowListDenied, RequestAclDenied,
-    RequestPathRejected, UpstreamAuthRetried, UpstreamRequestCompleted, UpstreamStatus,
+    AuthContextMissing, MethodLabel, PrincipalAllowListDenied, RedirectSuppressed,
+    RequestAclDenied, RequestPathRejected, UpstreamAuthRetried, UpstreamRequestCompleted,
+    UpstreamStatus,
 };
 use crate::span_isolation::SpanIsolationMiddleware;
 
@@ -835,8 +836,9 @@ async fn proxy_request_inner(
     } = upstream_response;
     let status = response.status();
     let headers = response.headers().clone();
-    // capture resolved upstream URL for inclusion in the response body
-    let upstream_url = response.url().clone();
+    // The URL the response came back on and the BMC it was proxied for: a
+    // `Location` may name this BMC by either.
+    let origins = BmcOrigins::new(response.url().clone(), target_ip);
     let body = prepare_response_body(
         status,
         &headers,
@@ -849,7 +851,13 @@ async fn proxy_request_inner(
         evict_cached_credentials(target_ip, &state.credential_cache).await;
     }
 
-    Ok(build_response(status, &headers, body, &upstream_url))
+    Ok(build_response(
+        status,
+        &headers,
+        body,
+        &origins,
+        &parts.method,
+    ))
 }
 
 /// The caller's request body, in a form the proxy can attach to an upstream
@@ -1175,8 +1183,40 @@ fn build_response(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
     body: PreparedResponseBody,
-    upstream: &Url,
+    origins: &BmcOrigins,
+    method: &Method,
 ) -> Response<Body> {
+    // Only a redirect is refused outright: a 3xx stripped of its Location is an
+    // undefined response, so the client gets a 502 it can act on instead. Any
+    // other status keeps its truth -- a 201 says the resource WAS created -- and
+    // the header loop below withholds the unsafe Location alone.
+    // Every Location value, not just the first: a duplicate header is malformed
+    // to begin with, and a harmless first value must not vouch for a second.
+    if status.is_redirection()
+        && let Some(value) = headers
+            .get_all(reqwest::header::LOCATION)
+            .iter()
+            .find(|value| {
+                matches!(
+                    redirect_location(value, origins),
+                    RedirectLocation::Suppressed
+                )
+            })
+    {
+        emit(RedirectSuppressed::new(
+            method,
+            status,
+            String::from_utf8_lossy(value.as_bytes()).into_owned(),
+        ));
+        return error_response(
+            (
+                StatusCode::BAD_GATEWAY,
+                "redirect could not be safely relayed",
+            )
+                .into(),
+        );
+    }
+
     let body_was_rewritten = !matches!(&body, PreparedResponseBody::Unchanged(_));
     let body_was_replaced = matches!(&body, PreparedResponseBody::Replaced(_));
     let body = match body {
@@ -1197,10 +1237,18 @@ fn build_response(
         {
             continue;
         }
-        if name == reqwest::header::LOCATION
-            && let Some(relative) = make_redirect_relative(value, upstream)
-        {
-            response = response.header(name, relative);
+        if name == reqwest::header::LOCATION {
+            match redirect_location(value, origins) {
+                RedirectLocation::Relative(relative) => response = response.header(name, relative),
+                RedirectLocation::Unchanged => response = response.header(name, value),
+                // A redirect was refused above; on any other status the response
+                // stands and only this header is withheld.
+                RedirectLocation::Suppressed => emit(RedirectSuppressed::new(
+                    method,
+                    status,
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )),
+            }
             continue;
         }
         response = response.header(name, value);
@@ -1211,21 +1259,86 @@ fn build_response(
     response.body(body).unwrap()
 }
 
-/// Makes redirects relative if `Location` points back at the same BMC,
-/// since we disable following redirects, we want clients to keep using this proxy
-fn make_redirect_relative(value: &http::HeaderValue, upstream: &Url) -> Option<http::HeaderValue> {
-    let location = Url::parse(value.to_str().ok()?).ok()?;
-    (location.host_str() == upstream.host_str()
-        && location.port_or_known_default() == upstream.port_or_known_default())
-    .then(|| {
-        let mut relative = location.path().to_string();
-        if let Some(query) = location.query() {
-            relative.push('?');
-            relative.push_str(query);
-        }
-        http::HeaderValue::from_str(&relative).ok()
-    })
-    .flatten()
+/// The authorities a `Location` may use to name this BMC: the URL the response
+/// came back on, and the BMC's own address. They differ only when `bmc_proxy`
+/// chains the request through another proxy, which dials the BMC for us and
+/// may hand its absolute `Location` back untouched.
+struct BmcOrigins {
+    upstream: Url,
+    bmc: Url,
+}
+
+impl BmcOrigins {
+    fn new(upstream: Url, target_ip: IpAddr) -> Self {
+        let authority = build_authority(Cow::Owned(target_ip.to_string()), None);
+        let bmc = Url::parse(&format!("https://{authority}"))
+            .expect("an IP address is a valid https authority");
+        Self { upstream, bmc }
+    }
+
+    fn candidates(&self) -> [&Url; 2] {
+        [&self.upstream, &self.bmc]
+    }
+}
+
+/// How the proxy's response should relay an upstream `Location`.
+#[derive(Debug, PartialEq)]
+enum RedirectLocation {
+    /// This BMC: make it relative (path, no authority section) so the client re-enters
+    /// this proxy vs going to BMC directly.
+    Relative(http::HeaderValue),
+    /// Another host: left untouched, not ours to deal with
+    Unchanged,
+    /// This BMC, but in a form we cannot safely rewrite: a resolved path
+    /// beginning with `//` (an authority once made relative), another port or
+    /// scheme, or an unparseable reference — withheld: a redirect is refused
+    /// with a 502, any other response passes without the header.
+    Suppressed,
+}
+
+/// Classifies an upstream `Location`. Per RFC 9110 §10.2.2 it is resolved against
+/// the request, so `//bmc/x` and `x` name the same target as `https://bmc/x`. Since
+/// redirects are returned rather than followed, the client sees a `Location` that is
+/// either rewritten to a relative reference (the same authority stripped), returned
+/// as-is (another host), or withheld. "This BMC" is either of `origins`. The
+/// fragment survives the rewrite: a 3xx `Location` without one makes the client
+/// inherit the original request's instead (RFC 9110 §10.2.2).
+fn redirect_location(value: &http::HeaderValue, origins: &BmcOrigins) -> RedirectLocation {
+    let Ok(raw) = value.to_str() else {
+        return RedirectLocation::Suppressed;
+    };
+    let Ok(location) = origins.upstream.join(raw) else {
+        return RedirectLocation::Suppressed;
+    };
+    let this_bmc = origins
+        .candidates()
+        .into_iter()
+        .filter(|origin| origin.host_str() == location.host_str())
+        .collect::<Vec<_>>();
+    if this_bmc.is_empty() {
+        return RedirectLocation::Unchanged;
+    }
+    let same_origin = this_bmc.iter().any(|origin| {
+        location.scheme() == origin.scheme()
+            && location.port_or_known_default() == origin.port_or_known_default()
+    });
+    // `Location: //something/path` reads as a redirect to a new host.
+    if !same_origin || location.path().starts_with("//") {
+        return RedirectLocation::Suppressed;
+    }
+    let mut relative = location.path().to_string();
+    if let Some(query) = location.query() {
+        relative.push('?');
+        relative.push_str(query);
+    }
+    if let Some(fragment) = location.fragment() {
+        relative.push('#');
+        relative.push_str(fragment);
+    }
+    match http::HeaderValue::from_str(&relative) {
+        Ok(value) => RedirectLocation::Relative(value),
+        Err(_) => RedirectLocation::Suppressed,
+    }
 }
 
 fn copy_request_headers(source: &HeaderMap, dest: &mut HeaderMap) {
@@ -1594,16 +1707,16 @@ mod tests {
     use url::Url;
 
     use super::{
-        BmcCredentials, BmcProxyState, CREDENTIAL_CACHE_IDLE_TTL, ConnectionFailReason,
+        BmcCredentials, BmcOrigins, BmcProxyState, CREDENTIAL_CACHE_IDLE_TTL, ConnectionFailReason,
         CredentialCache, ForwardedTarget, IP_CACHE_TTL, MAX_BUFFERED_BODY_SIZE,
         MAX_REDACTABLE_ERROR_BODY_SIZE, MethodLabel, OMITTED_BMC_ERROR_RESPONSE,
-        PreparedResponseBody, TcpAcceptFailed, TlsCertificateReloadFailed, TlsConnectionFailed,
-        UpstreamBody, authorize_principal_allow_list, bmc_proxy_request_span, bounded_cache,
-        build_authority, build_http_client, build_response, copy_request_headers, create_client,
-        error_response, evict_cached_credentials, forwarded_header_value, idle_bounded_cache,
-        ip_for_forwarded_target, is_hop_by_hop_header, make_redirect_relative,
-        method_supports_body, parse_forwarded_host_value, path_the_acls_cannot_speak_for,
-        prepare_response_body, refuse_rewritten_path, request_principal_ids, span_status,
+        PreparedResponseBody, RedirectLocation, TcpAcceptFailed, TlsCertificateReloadFailed,
+        TlsConnectionFailed, UpstreamBody, authorize_principal_allow_list, bmc_proxy_request_span,
+        bounded_cache, build_authority, build_http_client, build_response, copy_request_headers,
+        create_client, error_response, evict_cached_credentials, forwarded_header_value,
+        idle_bounded_cache, ip_for_forwarded_target, is_hop_by_hop_header, method_supports_body,
+        parse_forwarded_host_value, path_the_acls_cannot_speak_for, prepare_response_body,
+        redirect_location, refuse_rewritten_path, request_principal_ids, span_status,
     };
 
     const TEST_CONFIG: &str = r#"
@@ -2059,7 +2172,7 @@ mod tests {
     /// to name the path — on both branches, since a literal `{path}` in one of
     /// them is exactly the regression `is_some()` above cannot see.
     #[test]
-    fn a_refusal_reason_names_the_path() {
+    fn refusal_reason_names_the_path() {
         for path in ["/redfish/v1/../x", "/redfish/v1/a%20b"] {
             let reason = path_the_acls_cannot_speak_for(path).expect("refused");
             assert!(reason.contains(path), "{reason:?} does not name {path:?}");
@@ -2081,7 +2194,7 @@ mod tests {
     // Two tests rather than one table: `MetricsCapture::start` holds a
     // process-wide lock for its guard's life.
     #[test]
-    fn a_rewritten_path_is_refused_and_recorded() {
+    fn rewritten_path_is_refused_and_recorded() {
         let metrics = MetricsCapture::start();
         let mut refusal = None;
         let logs =
@@ -2102,7 +2215,7 @@ mod tests {
     }
 
     #[test]
-    fn a_path_the_upstream_receives_as_written_passes_through() {
+    fn path_the_upstream_receives_as_written_passes_through() {
         let metrics = MetricsCapture::start();
         let mut refusal = Some(error_response((StatusCode::OK, "placeholder").into()));
         let logs = capture_logs(|| {
@@ -2117,44 +2230,342 @@ mod tests {
         );
     }
 
+    /// A BMC reached directly: the response URL is the BMC's own address.
+    fn origins(upstream: &str) -> BmcOrigins {
+        let upstream = Url::parse(upstream).expect("upstream url");
+        let ip: IpAddr = upstream
+            .host_str()
+            .expect("a host")
+            .trim_matches(['[', ']'])
+            .parse()
+            .expect("an IP literal host");
+        BmcOrigins::new(upstream, ip)
+    }
+
+    /// `bmc_proxy` chains the request through another proxy, so the response
+    /// comes back on that proxy's URL while the BMC still writes its own
+    /// address into `Location`. Both name this BMC; a port the proxy does not
+    /// reach the BMC on does not.
     #[test]
-    fn a_location_naming_the_same_bmc_is_reduced_to_a_path() {
+    fn location_naming_the_bmc_behind_a_chained_proxy_is_still_this_bmc() {
+        value_scenarios!(
+            run = |(upstream, bmc, location): (&str, &str, &str)| {
+                let upstream = Url::parse(upstream).expect("upstream url");
+                let origins = BmcOrigins::new(upstream, bmc.parse().expect("an IP"));
+                redirect_location(&HeaderValue::from_str(location).unwrap(), &origins)
+            };
+
+            "the BMC's own address is this BMC" {
+                ("https://proxy.local:1079/redfish/v1", "10.0.0.5", "https://10.0.0.5/redfish/v1/Systems")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1/Systems")),
+                ("https://proxy.local:1079/redfish/v1", "10.0.0.5", "//10.0.0.5/x")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/x")),
+                ("https://proxy.local:1079/redfish/v1", "2001:db8::1", "https://[2001:db8::1]/x")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/x")),
+            }
+
+            "so is the proxy the response came back on" {
+                ("https://proxy.local:1079/redfish/v1", "10.0.0.5", "https://proxy.local:1079/redfish/v1/x")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1/x")),
+                ("https://proxy.local:1079/redfish/v1", "10.0.0.5", "/redfish/v1/x")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1/x")),
+            }
+
+            // A port override (`bmc_proxy = ":8443"`) keeps the BMC's host, so its
+            // default-port spelling and the overridden one are both this BMC.
+            "either port the BMC is reached on is this BMC, a third is not" {
+                ("https://192.0.2.5:8443/redfish", "192.0.2.5", "https://192.0.2.5/x")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/x")),
+                ("https://192.0.2.5:8443/redfish", "192.0.2.5", "https://192.0.2.5:8443/x")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/x")),
+                ("https://192.0.2.5:8443/redfish", "192.0.2.5", "https://192.0.2.5:9000/x")
+                    => RedirectLocation::Suppressed,
+            }
+
+            "the BMC's address on another port, or with a // path, is still refused" {
+                ("https://proxy.local:1079/redfish/v1", "10.0.0.5", "https://10.0.0.5:8443/x")
+                    => RedirectLocation::Suppressed,
+                ("https://proxy.local:1079/redfish/v1", "10.0.0.5", "https://10.0.0.5//169.254.169.254/x")
+                    => RedirectLocation::Suppressed,
+            }
+
+            "another host is still left as it arrived" {
+                ("https://proxy.local:1079/redfish/v1", "10.0.0.5", "https://192.0.2.9/x")
+                    => RedirectLocation::Unchanged,
+            }
+        );
+    }
+
+    #[test]
+    fn location_naming_the_same_bmc_is_reduced_to_a_path() {
         value_scenarios!(
             run = |(upstream, location): (&str, &str)| {
-                let upstream = Url::parse(upstream).expect("upstream url");
-                make_redirect_relative(&HeaderValue::from_str(location).unwrap(), &upstream)
-                    .map(|value| value.to_str().expect("ascii").to_string())
+                redirect_location(&HeaderValue::from_str(location).unwrap(), &origins(upstream))
             };
 
             "the same BMC becomes a relative reference" {
                 ("https://192.0.2.5/redfish", "https://192.0.2.5/redfish/v1/")
-                    => Some("/redfish/v1/".to_string()),
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1/")),
                 ("https://192.0.2.5/redfish", "https://192.0.2.5/redfish/v1?$select=Id")
-                    => Some("/redfish/v1?$select=Id".to_string()),
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1?$select=Id")),
+            }
+
+            // RFC 9110 §10.2.2: a 3xx Location without a fragment makes the client
+            // inherit the request's, so the BMC's — even an empty one — survives.
+            "the fragment survives the rewrite" {
+                ("https://192.0.2.5/redfish", "https://192.0.2.5/redfish/v1#Status")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1#Status")),
+                ("https://192.0.2.5/redfish", "https://192.0.2.5/redfish/v1?$select=Id#Status")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1?$select=Id#Status")),
+                ("https://192.0.2.5/redfish", "https://192.0.2.5/redfish/v1#")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1#")),
             }
 
             "an explicit default port is still the same BMC" {
                 ("https://192.0.2.5/redfish", "https://192.0.2.5:443/redfish/v1/")
-                    => Some("/redfish/v1/".to_string()),
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1/")),
             }
 
             "an IPv6 BMC is compared like any other" {
                 ("https://[2001:db8::1]/redfish", "https://[2001:db8::1]/redfish/v1/")
-                    => Some("/redfish/v1/".to_string()),
-                ("https://[2001:db8::1]/redfish", "https://[2001:db8::2]/redfish/v1/") => None,
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1/")),
+                ("https://[2001:db8::1]/redfish", "https://[2001:db8::2]/redfish/v1/")
+                    => RedirectLocation::Unchanged,
             }
 
-            // redirect to another host/port would be weird, but we don't handle this by design.
+            // A Location is a URI reference resolved against the request
+            // (RFC 9110 §10.2.2): every one of these names this BMC too.
+            "a relative reference resolves against the request and stays on the proxy" {
+                ("https://192.0.2.5/redfish", "/redfish/v1/")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1/")),
+                ("https://192.0.2.5/redfish/v1", "Sessions/1")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/Sessions/1")),
+                ("https://192.0.2.5/redfish", "//192.0.2.5/redfish/v1/")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1/")),
+                ("https://192.0.2.5/redfish", "\\\\192.0.2.5/redfish/v1/")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1/")),
+            }
+
+            // Redirecting elsewhere is the BMC's business; whether it can reach
+            // that host is the client's, not this proxy's.
             "another host is left as it arrived" {
-                ("https://192.0.2.5/redfish", "https://192.0.2.9/redfish/v1/") => None,
-                ("https://192.0.2.5/redfish", "https://192.0.2.5:8443/redfish/v1/") => None,
-                ("https://192.0.2.5/redfish", "http://169.254.169.254/latest/meta-data/") => None,
+                ("https://192.0.2.5/redfish", "https://192.0.2.9/redfish/v1/")
+                    => RedirectLocation::Unchanged,
+                ("https://192.0.2.5/redfish", "//192.0.2.9/redfish/v1/")
+                    => RedirectLocation::Unchanged,
+                ("https://192.0.2.5/redfish", "http://169.254.169.254/latest/meta-data/")
+                    => RedirectLocation::Unchanged,
             }
 
-            // Parsing fails and the header passes on — the same outcome.
-            "a relative location needs no rewriting" {
-                ("https://192.0.2.5/redfish", "/redfish/v1/") => None,
+            // Rewritten to relative form, `//something/path` reads as a new
+            // authority; forwarded as sent, it hands out the BMC's own address.
+            // Neither is safe, however the `//` was spelled.
+            "a same-BMC path starting with // is refused rather than forwarded" {
+                ("https://192.0.2.5/redfish", "https://192.0.2.5//169.254.169.254/x")
+                    => RedirectLocation::Suppressed,
+                ("https://192.0.2.5/redfish", "//192.0.2.5//169.254.169.254/x")
+                    => RedirectLocation::Suppressed,
+                ("https://192.0.2.5/redfish", "https://192.0.2.5/\\169.254.169.254/x")
+                    => RedirectLocation::Suppressed,
+                ("https://192.0.2.5/redfish", "https://192.0.2.5/x/..//169.254.169.254/y")
+                    => RedirectLocation::Suppressed,
             }
+
+            // The proxy reaches the BMC at one origin only, so it can neither
+            // rewrite this to a path nor let the client go there directly.
+            "the same host on another port or scheme is refused" {
+                ("https://192.0.2.5/redfish", "https://192.0.2.5:8443/redfish/v1/")
+                    => RedirectLocation::Suppressed,
+                ("https://192.0.2.5/redfish", "http://192.0.2.5/redfish/v1/")
+                    => RedirectLocation::Suppressed,
+            }
+
+            // A value we cannot classify is not relayed: fail closed.
+            "a Location that cannot be resolved is refused" {
+                ("https://192.0.2.5/redfish", "http://[::1") => RedirectLocation::Suppressed,
+                ("https://192.0.2.5/redfish", "https://192.0.2.5/x\u{ff}")
+                    => RedirectLocation::Suppressed,
+            }
+
+            // Escapes survive the rewrite; the client's next request then meets
+            // `path_the_acls_cannot_speak_for`, which refuses them with 400.
+            "an escaped path is rewritten and left to the request check" {
+                ("https://192.0.2.5/redfish", "https://192.0.2.5/%2F%2F169.254.169.254/x")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/%2F%2F169.254.169.254/x")),
+            }
+        );
+    }
+
+    const REDIRECT_LABELS: [(&str, &str); 2] =
+        [("authorization_layer", "redirect"), ("method", "get")];
+
+    // Two tests rather than one table: `MetricsCapture::start` holds a
+    // process-wide lock for its guard's life.
+    #[tokio::test]
+    async fn same_bmc_ambiguous_redirect_is_refused_rather_than_forwarded() {
+        let metrics = MetricsCapture::start();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::LOCATION,
+            HeaderValue::from_static("https://192.0.2.5//169.254.169.254/x"),
+        );
+        let upstream = origins("https://192.0.2.5/redfish/v1");
+
+        let mut response = None;
+        let logs = capture_logs(|| {
+            response = Some(build_response(
+                reqwest::StatusCode::FOUND,
+                &headers,
+                PreparedResponseBody::Unchanged(Body::empty()),
+                &upstream,
+                &Method::GET,
+            ));
+        });
+        let response = response.expect("build_response always returns");
+
+        // Forwarding the original Location would let the client contact the BMC
+        // directly, bypassing the proxy's ACL on the next hop.
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(!response.headers().contains_key(reqwest::header::LOCATION));
+        assert_eq!(
+            authorization_event_names(&logs),
+            vec!["bmc_proxy_redirect_suppressed".to_string()]
+        );
+        assert_eq!(
+            metrics.counter_delta(AUTHORIZATION_DENIED_METRIC, &REDIRECT_LABELS),
+            1.0
+        );
+    }
+
+    #[tokio::test]
+    async fn same_bmc_redirect_with_an_ordinary_path_is_not_refused() {
+        let metrics = MetricsCapture::start();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::LOCATION,
+            HeaderValue::from_static("https://192.0.2.5/redfish/v1/"),
+        );
+        let upstream = origins("https://192.0.2.5/redfish/v1");
+
+        let mut response = None;
+        let logs = capture_logs(|| {
+            response = Some(build_response(
+                reqwest::StatusCode::FOUND,
+                &headers,
+                PreparedResponseBody::Unchanged(Body::empty()),
+                &upstream,
+                &Method::GET,
+            ));
+        });
+        let response = response.expect("build_response always returns");
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response.headers().get(reqwest::header::LOCATION).unwrap(),
+            "/redfish/v1/"
+        );
+        assert!(authorization_event_names(&logs).is_empty());
+        assert_eq!(
+            metrics.counter_delta(AUTHORIZATION_DENIED_METRIC, &REDIRECT_LABELS),
+            0.0
+        );
+    }
+
+    /// The Redfish session flow: `POST .../Sessions` answers `201` with the new
+    /// session's `Location`. A same-BMC one is rewritten like any redirect's,
+    /// and an unsafe one is withheld -- but the `201` stands either way, since
+    /// turning it into a 502 would hide a session that WAS created and invite a
+    /// retry that leaks another of the BMC's few session slots.
+    #[tokio::test]
+    async fn created_response_keeps_its_status_and_withholds_only_an_unsafe_location() {
+        let metrics = MetricsCapture::start();
+        let upstream = origins("https://192.0.2.5/redfish/v1");
+        let created = |location: &'static str| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::LOCATION,
+                HeaderValue::from_static(location),
+            );
+            build_response(
+                reqwest::StatusCode::CREATED,
+                &headers,
+                PreparedResponseBody::Unchanged(Body::empty()),
+                &upstream,
+                &Method::POST,
+            )
+        };
+
+        let mut rewritten = None;
+        let quiet = capture_logs(|| {
+            rewritten = Some(created(
+                "https://192.0.2.5/redfish/v1/SessionService/Sessions/42",
+            ));
+        });
+        let rewritten = rewritten.expect("build_response always returns");
+        assert_eq!(rewritten.status(), StatusCode::CREATED);
+        assert_eq!(
+            rewritten.headers().get(reqwest::header::LOCATION).unwrap(),
+            "/redfish/v1/SessionService/Sessions/42"
+        );
+        assert!(authorization_event_names(&quiet).is_empty());
+
+        let mut withheld = None;
+        let logs = capture_logs(|| {
+            withheld = Some(created("https://192.0.2.5//169.254.169.254/x"));
+        });
+        let withheld = withheld.expect("build_response always returns");
+        assert_eq!(withheld.status(), StatusCode::CREATED);
+        assert!(!withheld.headers().contains_key(reqwest::header::LOCATION));
+        assert_eq!(
+            authorization_event_names(&logs),
+            vec!["bmc_proxy_redirect_suppressed".to_string()]
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                AUTHORIZATION_DENIED_METRIC,
+                &[("authorization_layer", "redirect"), ("method", "post")]
+            ),
+            1.0
+        );
+    }
+
+    #[tokio::test]
+    async fn dup_location_header_cannot_smuggle_the_bmc_address_past_the_first() {
+        let metrics = MetricsCapture::start();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::LOCATION,
+            HeaderValue::from_static("/redfish/v1/"),
+        );
+        headers.append(
+            reqwest::header::LOCATION,
+            HeaderValue::from_static("https://192.0.2.5//169.254.169.254/x"),
+        );
+        let upstream = origins("https://192.0.2.5/redfish/v1");
+
+        let mut response = None;
+        let logs = capture_logs(|| {
+            response = Some(build_response(
+                reqwest::StatusCode::FOUND,
+                &headers,
+                PreparedResponseBody::Unchanged(Body::empty()),
+                &upstream,
+                &Method::GET,
+            ));
+        });
+        let response = response.expect("build_response always returns");
+
+        // Checking only the first value would let the harmless one vouch for
+        // the second, which the header loop would then copy out verbatim.
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(!response.headers().contains_key(reqwest::header::LOCATION));
+        assert_eq!(
+            authorization_event_names(&logs),
+            vec!["bmc_proxy_redirect_suppressed".to_string()]
+        );
+        assert_eq!(
+            metrics.counter_delta(AUTHORIZATION_DENIED_METRIC, &REDIRECT_LABELS),
+            1.0
         );
     }
 
@@ -2163,7 +2574,7 @@ mod tests {
     /// Asserting the second location is never requested is what makes removing
     /// `Policy::none()` fail a test rather than only change a line.
     #[tokio::test]
-    async fn the_upstream_client_does_not_follow_a_redirect() {
+    async fn upstream_client_does_not_follow_redirect() {
         let mut server = mockito::Server::new_async().await;
         let redirect = server
             .mock("GET", "/redfish/v1")
@@ -3100,12 +3511,13 @@ mod tests {
             Result::<Bytes, Infallible>::Ok(Bytes::from_static(br#""ok"}"#)),
         ]));
 
-        let upstream = Url::parse("https://192.0.2.5/redfish/v1").expect("upstream url");
+        let upstream = origins("https://192.0.2.5/redfish/v1");
         let response = build_response(
             reqwest::StatusCode::OK,
             &headers,
             PreparedResponseBody::Unchanged(body),
             &upstream,
+            &Method::GET,
         );
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -3161,12 +3573,13 @@ mod tests {
         .await;
         assert!(matches!(&body, PreparedResponseBody::Redacted(_)));
 
-        let upstream = Url::parse("https://192.0.2.5/redfish/v1").expect("upstream url");
+        let upstream = origins("https://192.0.2.5/redfish/v1");
         let response = build_response(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             &headers,
             body,
             &upstream,
+            &Method::GET,
         );
 
         // Rewritten responses omit stale entity metadata and every secret form.
@@ -3269,12 +3682,13 @@ mod tests {
         )
         .await;
         assert!(matches!(&prepared, PreparedResponseBody::Replaced(_)));
-        let upstream = Url::parse("https://192.0.2.5/redfish/v1").expect("upstream url");
+        let upstream = origins("https://192.0.2.5/redfish/v1");
         let response = build_response(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             &reqwest::header::HeaderMap::new(),
             prepared,
             &upstream,
+            &Method::GET,
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(
@@ -3304,12 +3718,13 @@ mod tests {
         .await;
         assert!(matches!(&prepared, PreparedResponseBody::Replaced(_)));
 
-        let upstream = Url::parse("https://192.0.2.5/redfish/v1").expect("upstream url");
+        let upstream = origins("https://192.0.2.5/redfish/v1");
         let response = build_response(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             &headers,
             prepared,
             &upstream,
+            &Method::GET,
         );
         assert!(
             !response
@@ -3339,8 +3754,14 @@ mod tests {
         .await;
         assert!(matches!(&prepared, PreparedResponseBody::Unchanged(_)));
 
-        let upstream = Url::parse("https://192.0.2.5/redfish/v1").expect("upstream url");
-        let response = build_response(reqwest::StatusCode::OK, &headers, prepared, &upstream);
+        let upstream = origins("https://192.0.2.5/redfish/v1");
+        let response = build_response(
+            reqwest::StatusCode::OK,
+            &headers,
+            prepared,
+            &upstream,
+            &Method::GET,
+        );
         assert_eq!(
             response.headers().get(reqwest::header::CONTENT_ENCODING),
             Some(&HeaderValue::from_static("gzip"))

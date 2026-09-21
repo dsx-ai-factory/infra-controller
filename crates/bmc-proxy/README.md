@@ -108,9 +108,15 @@ The matcher does not attempt to resolve `.` or `..`, neither does it decode the 
 in path segments so a request path containing the above is refused with `400` before
 the ACLs are evaluated.
 
-Redirects are **not followed**; the `3xx` is returned instead, with server part of the URL
-stripped (relative redirect) if Location's host is the same target. This is done to enforce
-access authorization for redirects to follow the same policy as for the original requests.
+Redirects are **not followed** by the proxy; the `3xx` is returned instead. `Location` is resolved
+against the original request, so `https://<bmc>/x`, `//<bmc>/x` and `/x` are the same target.
+If that target is the same destination BMC — by the address the proxy dialled or, when
+`bmc_proxy` chains through another proxy, the BMC's own — the server part is stripped, causing
+the client to re-enter the proxy. A same-BMC `Location` the proxy cannot rewrite safely — a
+resolved path beginning with `//`, another port or scheme, or a value it cannot parse — is
+withheld: a redirect is rejected with a `502` error, and any other response (a `201 Created`,
+say) passes without the header. A redirect to a different host is passed through untouched and
+is **not** re-authorized by this proxy.
 
 Examples:
 
