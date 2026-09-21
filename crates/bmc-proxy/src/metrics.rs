@@ -24,7 +24,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use carbide_instrument::{Event, LabelValue, MetricFamily};
-use http::Method;
+use http::{Method, StatusCode};
 use metrics_endpoint::{MetricsEndpointConfig, MetricsSetup};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -93,13 +93,14 @@ impl From<&Method> for MethodLabel {
 /// The authorization boundary that rejected a request or could not evaluate
 /// it. The outer allow-list decides which principals may use the proxy at all;
 /// the request ACL then decides which Redfish method and path they may use;
-/// `RequestPath` is the check that the path those ACLs match is the resource
-/// the BMC will act on.
+/// `RequestPath` is the target resource path, ACL-checked, as seen by the BMC;
+/// `Redirect` is a same-BMC `Location` the proxy could not safely re-evaluate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 enum AuthorizationLayer {
     PrincipalAllowList,
     RequestAcl,
     RequestPath,
+    Redirect,
 }
 
 /// The one metric the Events below record.
@@ -146,6 +147,42 @@ impl RequestPathRejected {
             method_label: method.into(),
             path,
             reason,
+            method: method.as_str().to_string(),
+        }
+    }
+}
+
+/// An upstream `Location` naming this BMC in a form that cannot be safely made
+/// relative (see `bmc_proxy::redirect_location`) was withheld: a redirect is
+/// refused with 502, any other response passes without the header.
+/// `response_status` says which of the two happened.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_redirect_suppressed",
+    metric_family = BmcProxyAuthorizationDenied,
+    log = warn,
+    message = "Upstream Location withheld: it could not be safely relayed"
+)]
+pub(crate) struct RedirectSuppressed {
+    #[label]
+    authorization_layer: AuthorizationLayer,
+    #[label]
+    method_label: MethodLabel,
+    #[context]
+    response_status: u16,
+    #[context]
+    redirect_target: String,
+    #[context]
+    method: String,
+}
+
+impl RedirectSuppressed {
+    pub(crate) fn new(method: &Method, status: StatusCode, redirect_target: String) -> Self {
+        Self {
+            authorization_layer: AuthorizationLayer::Redirect,
+            method_label: method.into(),
+            response_status: status.as_u16(),
+            redirect_target,
             method: method.as_str().to_string(),
         }
     }
@@ -649,6 +686,8 @@ mod tests {
             "authorization layer" {
                 AuthorizationLayer::PrincipalAllowList.label_value() => "principal_allow_list".to_string(),
                 AuthorizationLayer::RequestAcl.label_value() => "request_acl".to_string(),
+                AuthorizationLayer::RequestPath.label_value() => "request_path".to_string(),
+                AuthorizationLayer::Redirect.label_value() => "redirect".to_string(),
             }
 
             "proxied method" {

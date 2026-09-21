@@ -74,11 +74,15 @@ Path wildcards:
 - `foo*bar` is not valid.
 - Only one `**` is allowed per path pattern.
 
-A *request* path the BMC would read differently is refused with `400` before
-the ACLs run: `.`/`..` in any spelling, percent-escapes of any kind, and
-characters the path encoding rewrites, braces included. Redirects are not followed — the
-`3xx` is returned, so the next hop is authorised like any other request. See
-the crate README.
+A *request* path the BMC would read differently is refused with a `400` response before
+the ACLs run: `.`/`..` in any spelling, percent-escapes of any kind, and any characters
+the path encoding would rewrite, braces included. Redirects are not followed — the
+`3xx` is returned instead. A redirect back to the proxied BMC is rewritten to a relative
+reference so the next hop is authorized like any other request. If the proxy cannot rewrite
+the `Location` safely (a resolved path beginning with `//`, another port or scheme, an
+unresolvable value), it is withheld rather than forwarded: a redirect is refused with a `502`
+response, any other response passes without the header. A redirect to a different host is
+passed through unchanged and is not re-authorized by the proxy.
 
 When converting Redfish-style documented endpoints to ACLs, replace templated path components
 like `{id}` or `{session_id}` with `*`.
