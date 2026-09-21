@@ -126,7 +126,9 @@ The controller image ships both binaries: `dev/k8s/machine-a-tron-controller/Doc
 builds the Go controller and `mat-protocol-gateway` from the repository root,
 and the `mat-k8s-controller` image published by this repository's CI is built
 from it. The gateway's listener certificate is issued through
-`global.certificate.issuerRef`. For its inventory requests to the
+`global.certificate.issuerRef`. The gateway re-reads the mounted certificate
+and key every 30 seconds, so a renewed certificate is served without a
+container restart. For its inventory requests to the
 machine-a-tron pods it trusts that certificate's CA unless
 `mat-k8s-controller.config.insecureSkipVerify` is set, which disables
 certificate verification for those requests only; the listener is unaffected.

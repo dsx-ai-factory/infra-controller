@@ -218,6 +218,7 @@ jobs:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.cargo/**'
               - 'Makefile.toml'
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yaml'
