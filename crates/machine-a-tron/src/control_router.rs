@@ -267,6 +267,10 @@ impl RmsInventory for ControlState {
             // The Redfish mock reports a cycling device as off until the
             // cycle's delay has run, and RMS has no state in between.
             MockPowerState::Off | MockPowerState::PowerCycling { .. } => SimPowerState::Off,
+            // Likewise for the transitional Redfish states: RMS reports the
+            // state the transition started from until it completes.
+            MockPowerState::PoweringOn => SimPowerState::Off,
+            MockPowerState::PoweringOff => SimPowerState::On,
         })
     }
 

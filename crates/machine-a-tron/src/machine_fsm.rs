@@ -38,6 +38,9 @@ enum MachineState {
         bmc_only: bool,
         dhcp_retry: DhcpRetryFsm,
     },
+    /// Power requested; the BMC has not yet reported the host `On`. Leaves on
+    /// `Timer::MachineOn` (`reboot`).
+    PoweringOn,
     Init {
         dhcp_retry: DhcpRetryFsm,
     },
@@ -46,6 +49,10 @@ enum MachineState {
     MachineUp {
         os_fsm: OsFsm,
     },
+    /// Graceful shutdown in progress; the host is going down but `PowerState` is not
+    /// yet `Off`. Leaves on `Timer::PowerOffGraceful` (`power_off_graceful`), or at
+    /// once on `ForceOff` / a power cycle.
+    PoweringOff,
     BmcOnlyMachineUp,
     BmcOnlyMachineDown,
 }
@@ -123,10 +130,12 @@ impl MachineState {
                 bmc_only,
                 dhcp_retry,
             } => self.fsm_bmc_init(event, power_on, bmc_only, dhcp_retry),
+            Self::PoweringOn => self.fsm_powering_on(event),
             Self::Init { dhcp_retry } => self.fsm_init(event, dhcp_retry),
             Self::MachineDown => self.fsm_machine_down(event),
             Self::DhcpComplete => self.fsm_dhcp_complete(event),
             Self::MachineUp { os_fsm } => self.fsm_machine_up(event, os_fsm),
+            Self::PoweringOff => self.fsm_powering_off(event),
 
             Self::BmcOnlyMachineUp => self.fsm_bmc_only_machine_up(event),
             Self::BmcOnlyMachineDown => self.fsm_bmc_only_machine_down(event),
@@ -143,10 +152,12 @@ impl MachineState {
             Self::BmcInit {
                 power_on: false, ..
             } => MockPowerState::Off,
+            Self::PoweringOn => MockPowerState::PoweringOn,
             Self::Init { .. } => MockPowerState::On,
             Self::MachineDown => MockPowerState::Off,
             Self::DhcpComplete => MockPowerState::On,
             Self::MachineUp { .. } => MockPowerState::On,
+            Self::PoweringOff => MockPowerState::PoweringOff,
             Self::BmcOnlyMachineUp => MockPowerState::On,
             Self::BmcOnlyMachineDown => MockPowerState::Off,
         }
@@ -155,10 +166,12 @@ impl MachineState {
     fn state_string(&self) -> &'static str {
         match self {
             Self::BmcInit { .. } => "BmcInit",
+            Self::PoweringOn => "PoweringOn",
             Self::Init { .. } => "Init",
             Self::MachineDown => "MachineDown",
             Self::DhcpComplete => "DhcpComplete",
             Self::MachineUp { .. } => "MachineUp",
+            Self::PoweringOff => "PoweringOff",
             Self::BmcOnlyMachineUp => "BmcOnly/MachineUp",
             Self::BmcOnlyMachineDown => "BmcOnly/MachineDown",
         }
@@ -218,9 +231,7 @@ impl MachineState {
                         Self::BmcOnlyMachineDown
                     }
                 } else if power_on {
-                    Self::Init {
-                        dhcp_retry: DhcpRetryFsm::new(),
-                    }
+                    Self::PoweringOn
                 } else {
                     Self::MachineDown
                 };
@@ -251,7 +262,8 @@ impl MachineState {
                     ]
                 },
             ),
-            Event::PowerOff => (
+            // No host OS exists yet, so a graceful shutdown is as immediate as a forced one.
+            Event::PowerOff | Event::PowerOffGraceful => (
                 Self::BmcInit {
                     bmc_only,
                     power_on: false,
@@ -282,6 +294,27 @@ impl MachineState {
         }
     }
 
+    fn fsm_powering_on(self, event: Event) -> (Self, Vec<Action>) {
+        match event {
+            // The BMC now reports the host On: apply what a power-on applies (staged
+            // firmware, BIOS jobs, the powered-on log entry) and start booting; the OS
+            // asks for DHCP when `OsReady` fires.
+            Event::TimerAlert(Timer::MachineOn) => (
+                Self::Init {
+                    dhcp_retry: DhcpRetryFsm::new(),
+                },
+                vec![
+                    Action::BmcEvent(BmcEvent::PowerOn),
+                    Action::SetTimer(Timer::OsReady),
+                ],
+            ),
+            // Nothing is running on the host yet: any power-off is immediate.
+            Event::PowerOff | Event::PowerOffGraceful => self.machine_down_on_power_off(),
+            Event::PowerCycle => self.machine_down_on_power_cycle(),
+            _ => (self, vec![]),
+        }
+    }
+
     fn fsm_init(self, event: Event, dhcp_retry: DhcpRetryFsm) -> (Self, Vec<Action>) {
         match event {
             Event::DhcpFailed(jitter) => {
@@ -298,18 +331,18 @@ impl MachineState {
                     map_retry_actions(actions, DhcpType::Machine),
                 )
             }
-            Event::TimerAlert(Timer::MachineOn) => (
-                self,
-                vec![
-                    Action::BmcEvent(BmcEvent::PowerOn),
-                    Action::Dhcp(DhcpType::Machine),
-                ],
-            ),
+            Event::TimerAlert(Timer::OsReady) => (self, vec![Action::Dhcp(DhcpType::Machine)]),
             Event::DhcpComplete => {
                 let (_, retry_actions) = dhcp_retry.event(RetryEvent::Completed);
                 let mut actions = map_retry_actions(retry_actions, DhcpType::Machine);
                 actions.push(Action::PxeBootRequest);
                 (Self::DhcpComplete, actions)
+            }
+            Event::PowerOffGraceful => {
+                let (_, retry_actions) = dhcp_retry.event(RetryEvent::Abandon);
+                let mut actions = map_retry_actions(retry_actions, DhcpType::Machine);
+                actions.push(Action::SetTimer(Timer::PowerOffGraceful));
+                (Self::PoweringOff, actions)
             }
             Event::PowerCycle => {
                 let (_, retry_actions) = dhcp_retry.event(RetryEvent::Abandon);
@@ -345,9 +378,7 @@ impl MachineState {
                 ],
             ),
             Event::PowerOn | Event::TimerAlert(Timer::PowerCycle) => (
-                Self::Init {
-                    dhcp_retry: DhcpRetryFsm::new(),
-                },
+                Self::PoweringOn,
                 vec![
                     Action::ConsoleOutputStart,
                     Action::SetTimer(Timer::MachineOn),
@@ -361,6 +392,7 @@ impl MachineState {
         match event {
             Event::PowerCycle => self.machine_down_on_power_cycle(),
             Event::PowerOff => self.machine_down_on_power_off(),
+            Event::PowerOffGraceful => self.powering_off(),
             Event::PxeComplete(os_image) => {
                 let os_fsm = match os_image {
                     OsImage::None => OsFsm::None,
@@ -384,6 +416,7 @@ impl MachineState {
         match event {
             Event::PowerCycle => self.machine_down_on_power_cycle(),
             Event::PowerOff => self.machine_down_on_power_off(),
+            Event::PowerOffGraceful => self.powering_off(),
             // A host whose OS failed and is parked waiting for a reboot -- e.g.
             // its machine was force-deleted, so its agent hit `MachineNotFound`
             // -- reboots when the controller powers it back on, so it re-PXEs and
@@ -398,9 +431,25 @@ impl MachineState {
         }
     }
 
+    fn fsm_powering_off(self, event: Event) -> (Self, Vec<Action>) {
+        match event {
+            // The OS has finished shutting down, or the operator did not wait for it.
+            Event::TimerAlert(Timer::PowerOffGraceful) | Event::PowerOff => {
+                self.machine_down_on_power_off()
+            }
+            Event::PowerCycle => self.machine_down_on_power_cycle(),
+            // Like real hardware: a power-on while shutting down is not honoured until
+            // the shutdown completes. A second graceful request changes nothing.
+            _ => (self, vec![]),
+        }
+    }
+
     fn fsm_bmc_only_machine_up(self, event: Event) -> (Self, Vec<Action>) {
         match event {
-            Event::PowerOff => (Self::BmcOnlyMachineDown, vec![Action::ConsoleOutputStop]),
+            // A BMC-only device has no host OS to shut down.
+            Event::PowerOff | Event::PowerOffGraceful => {
+                (Self::BmcOnlyMachineDown, vec![Action::ConsoleOutputStop])
+            }
             Event::PowerCycle => (
                 Self::BmcOnlyMachineDown,
                 vec![
@@ -434,6 +483,16 @@ impl MachineState {
         (
             Self::MachineDown,
             vec![Action::ConsoleOutputStop, Action::CleanupOnPowerOff],
+        )
+    }
+
+    /// A timed graceful shutdown from a state with a running host: `PowerState`
+    /// reads `PoweringOff` and the power-off cleanup runs when
+    /// `Timer::PowerOffGraceful` fires (or a forced power-off arrives).
+    fn powering_off(self) -> (Self, Vec<Action>) {
+        (
+            Self::PoweringOff,
+            vec![Action::SetTimer(Timer::PowerOffGraceful)],
         )
     }
 
@@ -481,6 +540,8 @@ pub(super) enum Event {
     DhcpRetryExpired,
     PowerOn,
     PowerOff,
+    /// `GracefulShutdown`: the host stays `PoweringOff` for `power_off_graceful`.
+    PowerOffGraceful,
     PowerCycle,
     TimerAlert(Timer),
     PxeComplete(OsImage),
@@ -519,6 +580,10 @@ pub(super) enum Action {
 pub(super) enum Timer {
     PowerCycle,
     MachineOn,
+    /// `PowerState` `On` → the host asks for DHCP (`power_on_os_ready`).
+    OsReady,
+    /// `GracefulShutdown` → `PowerState` `Off` (`power_off_graceful`).
+    PowerOffGraceful,
     ScoutAgentControlPoll,
     DpuAgentControlPoll,
 }
@@ -694,14 +759,14 @@ mod tests {
     #[test]
     fn bmc_dhcp_completion_selects_state_and_actions() {
         enum ExpectedState {
-            Init,
+            PoweringOn,
             MachineDown,
             BmcOnlyMachineUp,
             BmcOnlyMachineDown,
         }
 
         for (power_on, bmc_only, expected_state, starts_boot) in [
-            (true, false, ExpectedState::Init, true),
+            (true, false, ExpectedState::PoweringOn, true),
             (false, false, ExpectedState::MachineDown, false),
             (true, true, ExpectedState::BmcOnlyMachineUp, false),
             (false, true, ExpectedState::BmcOnlyMachineDown, false),
@@ -711,7 +776,7 @@ mod tests {
 
             assert!(
                 match expected_state {
-                    ExpectedState::Init => matches!(fsm.state, MachineState::Init { .. }),
+                    ExpectedState::PoweringOn => matches!(fsm.state, MachineState::PoweringOn),
                     ExpectedState::MachineDown => matches!(fsm.state, MachineState::MachineDown),
                     ExpectedState::BmcOnlyMachineUp => {
                         matches!(fsm.state, MachineState::BmcOnlyMachineUp)
@@ -739,6 +804,244 @@ mod tests {
             );
         }
     }
+
+    /// Drive a freshly created, powered-on host to the state named by `stop`.
+    fn host_at(stop: &str) -> MachineFsm {
+        let (fsm, _) = MachineFsm::init(true, false);
+        let (fsm, _) = fsm.event(Event::DhcpComplete); // BmcInit → PoweringOn
+        if stop == "PoweringOn" {
+            assert!(matches!(fsm.state, MachineState::PoweringOn));
+            return fsm;
+        }
+        let (fsm, _) = fsm.event(Event::TimerAlert(Timer::MachineOn)); // → Init
+        if stop == "Init" {
+            return fsm;
+        }
+        let (fsm, _) = fsm.event(Event::TimerAlert(Timer::OsReady)); // DHCP starts
+        let (fsm, _) = fsm.event(Event::DhcpComplete); // → DhcpComplete
+        if stop == "DhcpComplete" {
+            return fsm;
+        }
+        let (fsm, _) = fsm.event(Event::PxeComplete(OsImage::None)); // → MachineUp
+        assert!(matches!(fsm.state, MachineState::MachineUp { .. }));
+        fsm
+    }
+
+    #[test]
+    fn forced_power_off_is_immediate_from_every_host_state() {
+        for start in ["Init", "DhcpComplete", "MachineUp"] {
+            let fsm = host_at(start);
+            let (fsm, actions) = fsm.event(Event::PowerOff);
+            assert!(matches!(fsm.state, MachineState::MachineDown), "{start}");
+            assert!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, Action::CleanupOnPowerOff))
+                    && !actions
+                        .iter()
+                        .any(|a| matches!(a, Action::SetTimer(Timer::PowerOffGraceful))),
+                "{start}: cleanup now, no graceful timer: {actions:?}"
+            );
+            assert!(matches!(fsm.power_state(), MockPowerState::Off));
+        }
+    }
+
+    // ── the power-on: PoweringOn, then Init, then DHCP ──────────────────────
+
+    #[test]
+    fn os_ready_phase_splits_the_power_on() {
+        // PoweringOn: power requested, BMC has not reported the host On.
+        let fsm = host_at("PoweringOn");
+        assert!(matches!(fsm.power_state(), MockPowerState::PoweringOn));
+        assert!(!fsm.is_up());
+        assert_eq!(fsm.state_string(), "PoweringOn");
+
+        // MachineOn: the BMC flips to On (BmcEvent::PowerOn) and the OS starts
+        // booting; nothing on the host answers until OsReady.
+        let (fsm, actions) = fsm.event(Event::TimerAlert(Timer::MachineOn));
+        assert!(matches!(fsm.state, MachineState::Init { .. }));
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                Action::BmcEvent(BmcEvent::PowerOn),
+                Action::SetTimer(Timer::OsReady)
+            ]
+        ));
+        assert!(matches!(fsm.power_state(), MockPowerState::On));
+        assert!(!fsm.is_up());
+
+        // OsReady: the host asks for DHCP; the BMC event is not repeated.
+        let (fsm, actions) = fsm.event(Event::TimerAlert(Timer::OsReady));
+        assert!(matches!(fsm.state, MachineState::Init { .. }));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Dhcp(DhcpType::Machine)]
+        ));
+    }
+
+    #[test]
+    fn stray_timers_do_not_advance_the_power_on_phases() {
+        let fsm = host_at("PoweringOn");
+        let (fsm, actions) = fsm.event(Event::TimerAlert(Timer::OsReady));
+        assert!(matches!(fsm.state, MachineState::PoweringOn));
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn power_cycle_goes_through_both_power_on_phases() {
+        let fsm = host_at("MachineUp");
+        let (fsm, actions) = fsm.event(Event::PowerCycle);
+        assert!(matches!(fsm.state, MachineState::MachineDown));
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                Action::ConsoleOutputStop,
+                Action::CleanupOnPowerOff,
+                Action::SetTimer(Timer::PowerCycle)
+            ]
+        ));
+        assert!(matches!(fsm.power_state(), MockPowerState::Off));
+
+        let (fsm, actions) = fsm.event(Event::TimerAlert(Timer::PowerCycle));
+        assert!(matches!(fsm.state, MachineState::PoweringOn));
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                Action::ConsoleOutputStart,
+                Action::SetTimer(Timer::MachineOn)
+            ]
+        ));
+        assert!(matches!(fsm.power_state(), MockPowerState::PoweringOn));
+    }
+
+    #[test]
+    fn graceful_shutdown_before_the_host_is_on_is_immediate() {
+        // PoweringOn: no OS yet, nothing to shut down gracefully.
+        let fsm = host_at("PoweringOn");
+        let (fsm, actions) = fsm.event(Event::PowerOffGraceful);
+        assert!(matches!(fsm.state, MachineState::MachineDown));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::ConsoleOutputStop, Action::CleanupOnPowerOff]
+        ));
+
+        // BmcInit: the BMC is still acquiring its address.
+        let (fsm, _) = MachineFsm::init(true, false);
+        let (fsm, actions) = fsm.event(Event::PowerOffGraceful);
+        assert!(matches!(
+            fsm.state,
+            MachineState::BmcInit {
+                power_on: false,
+                ..
+            }
+        ));
+        assert!(matches!(actions.as_slice(), [Action::ConsoleOutputStop]));
+
+        // BMC-only device: no host at all.
+        let (fsm, _) = MachineFsm::init(true, true);
+        let (fsm, _) = fsm.event(Event::DhcpComplete);
+        let (fsm, actions) = fsm.event(Event::PowerOffGraceful);
+        assert!(matches!(fsm.state, MachineState::BmcOnlyMachineDown));
+        assert!(matches!(actions.as_slice(), [Action::ConsoleOutputStop]));
+    }
+
+    // ── the graceful phase: Event::PowerOffGraceful ──────────────────────────
+
+    #[test]
+    fn graceful_shutdown_event_is_timed_and_forced_off_is_not() {
+        for (start, description) in [
+            ("MachineUp", "serving host"),
+            ("DhcpComplete", "host waiting for PXE"),
+        ] {
+            let fsm = host_at(start);
+            let (fsm, actions) = fsm.event(Event::PowerOffGraceful);
+            assert!(
+                matches!(fsm.state, MachineState::PoweringOff),
+                "{description}: graceful shutdown should enter PoweringOff"
+            );
+            assert!(
+                matches!(
+                    actions.as_slice(),
+                    [Action::SetTimer(Timer::PowerOffGraceful)]
+                ),
+                "{description}: cleanup must wait for the graceful timer"
+            );
+            assert!(matches!(fsm.power_state(), MockPowerState::PoweringOff));
+            assert!(!fsm.is_up());
+            assert_eq!(fsm.state_string(), "PoweringOff");
+
+            let (fsm, actions) = fsm.event(Event::TimerAlert(Timer::PowerOffGraceful));
+            assert!(matches!(fsm.state, MachineState::MachineDown));
+            assert!(matches!(
+                actions.as_slice(),
+                [Action::ConsoleOutputStop, Action::CleanupOnPowerOff]
+            ));
+            assert!(matches!(fsm.power_state(), MockPowerState::Off));
+        }
+
+        // ForceOff from a running host is immediate, as before.
+        let fsm = host_at("MachineUp");
+        let (fsm, actions) = fsm.event(Event::PowerOff);
+        assert!(matches!(fsm.state, MachineState::MachineDown));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::ConsoleOutputStop, Action::CleanupOnPowerOff]
+        ));
+    }
+
+    #[test]
+    fn powering_off_honours_force_and_cycle_but_not_power_on() {
+        let fsm = host_at("MachineUp");
+        let (powering_off, _) = fsm.event(Event::PowerOffGraceful);
+
+        let (fsm, actions) = powering_off.event(Event::PowerOff);
+        assert!(matches!(fsm.state, MachineState::MachineDown));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::ConsoleOutputStop, Action::CleanupOnPowerOff]
+        ));
+
+        let (fsm, actions) = powering_off.event(Event::PowerCycle);
+        assert!(matches!(fsm.state, MachineState::MachineDown));
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                Action::ConsoleOutputStop,
+                Action::CleanupOnPowerOff,
+                Action::SetTimer(Timer::PowerCycle)
+            ]
+        ));
+
+        for event in [Event::PowerOn, Event::PowerOffGraceful] {
+            let (fsm, actions) = powering_off.event(event);
+            assert!(matches!(fsm.state, MachineState::PoweringOff));
+            assert!(
+                actions.is_empty(),
+                "{event:?} must not interrupt PoweringOff"
+            );
+        }
+    }
+
+    #[test]
+    fn graceful_shutdown_while_booting_abandons_machine_dhcp_retry() {
+        let fsm = host_at("Init");
+        let (fsm, _) = fsm.event(Event::TimerAlert(Timer::OsReady));
+        let (fsm, _) = fsm.event(Event::dhcp_failed_with_jitter(Milliseconds::new(0)));
+
+        let (fsm, actions) = fsm.event(Event::PowerOffGraceful);
+        assert!(matches!(fsm.state, MachineState::PoweringOff));
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                Action::CancelDhcpRetry,
+                Action::SetTimer(Timer::PowerOffGraceful)
+            ]
+        ));
+        let (_, actions) = fsm.event(Event::DhcpRetryExpired);
+        assert!(actions.is_empty());
+    }
+
+    // ── retries across power changes (pre-existing behaviour) ────────────────
 
     #[test]
     fn bmc_only_power_on_during_initialization_does_not_start_boot() {
@@ -777,8 +1080,8 @@ mod tests {
 
     #[test]
     fn power_off_abandons_machine_dhcp_retry() {
-        let (fsm, _) = MachineFsm::init(true, false);
-        let (fsm, _) = fsm.event(Event::DhcpComplete);
+        let fsm = host_at("Init");
+        let (fsm, _) = fsm.event(Event::TimerAlert(Timer::OsReady)); // DHCP starts here
         let (fsm, _) = fsm.event(Event::dhcp_failed_with_jitter(Milliseconds::new(0)));
 
         let (fsm, actions) = fsm.event(Event::PowerOff);
@@ -799,9 +1102,7 @@ mod tests {
     #[test]
     fn output_stops_before_boot_completion_and_steady_agent_work() {
         for os_image in [OsImage::Scout, OsImage::DpuAgent] {
-            let (fsm, _) = MachineFsm::init(true, false);
-            let (fsm, _) = fsm.event(Event::DhcpComplete);
-            let (fsm, _) = fsm.event(Event::DhcpComplete);
+            let fsm = host_at("DhcpComplete");
             let (fsm, actions) = fsm.event(Event::PxeComplete(os_image));
             assert!(matches!(
                 actions.as_slice(),
@@ -822,9 +1123,7 @@ mod tests {
 
     #[test]
     fn disk_boot_stops_output_before_boot_completion() {
-        let (fsm, _) = MachineFsm::init(true, false);
-        let (fsm, _) = fsm.event(Event::DhcpComplete);
-        let (fsm, _) = fsm.event(Event::DhcpComplete);
+        let fsm = host_at("DhcpComplete");
         let (_, actions) = fsm.event(Event::PxeComplete(OsImage::None));
 
         assert!(matches!(

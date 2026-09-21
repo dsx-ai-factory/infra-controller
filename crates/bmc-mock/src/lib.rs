@@ -236,6 +236,10 @@ pub enum MockPowerState {
     #[default]
     On,
     Off,
+    /// Power-on accepted; the host is not yet `On` (POST has not begun).
+    PoweringOn,
+    /// Graceful shutdown accepted; the OS is going down but power is still applied.
+    PoweringOff,
     PowerCycling {
         since: Instant,
     },
@@ -246,6 +250,8 @@ impl fmt::Display for MockPowerState {
         match self {
             Self::On => "On".fmt(f),
             Self::Off => "Off".fmt(f),
+            Self::PoweringOn => "PoweringOn".fmt(f),
+            Self::PoweringOff => "PoweringOff".fmt(f),
             Self::PowerCycling { since } => write!(f, "PowerCycling {:?}", since.elapsed()),
         }
     }
@@ -268,9 +274,11 @@ pub trait Callbacks: std::fmt::Debug + Send + Sync + 'static {
             ) => Err(SetSystemPowerError::BadRequest(
                 "bmc-mock: cannot power off machine, it is already off".to_string(),
             )),
-            (C::On | C::ForceOn, MockPowerState::On) => Err(SetSystemPowerError::BadRequest(
-                "bmc-mock: cannot power on machine, it is already on".to_string(),
-            )),
+            (C::On | C::ForceOn, MockPowerState::On | MockPowerState::PoweringOn) => {
+                Err(SetSystemPowerError::BadRequest(
+                    "bmc-mock: cannot power on machine, it is already on".to_string(),
+                ))
+            }
             (_, MockPowerState::PowerCycling { since }) if since.elapsed() < POWER_CYCLE_DELAY => {
                 Err(SetSystemPowerError::BadRequest(format!(
                     "bmc-mock: cannot reset machine, it is in the middle of power cycling since {:?} ago",

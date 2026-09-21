@@ -1438,6 +1438,8 @@ impl SystemBuilder {
         let power_state = match state {
             MockPowerState::On => "On",
             MockPowerState::Off => "Off",
+            MockPowerState::PoweringOn => "PoweringOn",
+            MockPowerState::PoweringOff => "PoweringOff",
             MockPowerState::PowerCycling { since } => {
                 if since.elapsed() < POWER_CYCLE_DELAY {
                     "Off"
