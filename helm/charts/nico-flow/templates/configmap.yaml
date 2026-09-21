@@ -1,4 +1,4 @@
-{{- include "nico-flow.flowConfigMap" . -}}
+{{- $cfg := include "nico-flow.flowConfig" . | fromYaml -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -9,7 +9,7 @@ metadata:
 data:
   ## Keys mirror the yaml tags in rest-api/flow/internal/config/config.go.
   flowconfig.yaml: |
-    inventory_run_frequency: {{ include "nico-flow.flowConfigInterval" (dict "key" "inventoryRunFrequency" "value" .Values.flowConfig.inventoryRunFrequency) }}
-    disable_inventory: {{ include "nico-flow.flowConfigBool" (dict "key" "disableInventory" "value" .Values.flowConfig.disableInventory) }}
-    leak_detection_interval: {{ include "nico-flow.flowConfigInterval" (dict "key" "leakDetectionInterval" "value" .Values.flowConfig.leakDetectionInterval) }}
-    disable_leak_detection: {{ include "nico-flow.flowConfigBool" (dict "key" "disableLeakDetection" "value" .Values.flowConfig.disableLeakDetection) }}
+    inventory_run_frequency: {{ include "nico-flow.flowConfigInterval" (dict "key" "inventoryRunFrequency" "value" $cfg.inventoryRunFrequency) }}
+    disable_inventory: {{ include "nico-flow.flowConfigBool" (dict "key" "disableInventory" "value" $cfg.disableInventory) }}
+    leak_detection_interval: {{ include "nico-flow.flowConfigInterval" (dict "key" "leakDetectionInterval" "value" $cfg.leakDetectionInterval) }}
+    disable_leak_detection: {{ include "nico-flow.flowConfigBool" (dict "key" "disableLeakDetection" "value" $cfg.disableLeakDetection) }}
