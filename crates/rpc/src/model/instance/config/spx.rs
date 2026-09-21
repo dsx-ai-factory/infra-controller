@@ -71,10 +71,10 @@ impl TryFrom<InstanceSpxConfig> for rpc::InstanceSpxConfig {
                 device_instance: attachment.device_instance,
                 spx_partition_id: Some(attachment.spx_partition_id),
                 attachment_type: attachment.attachment_type as i32,
-                attachment_vf: attachment.attachment_vf.map(|vf| rpc::SpxAttchmentVf {
+                attachment_vf: attachment.attachment_vf.map(|vf| rpc::SpxAttachmentVf {
                     vf_index: vf.vf_index,
                 }),
-                attachment_ovs: attachment.attachment_ovs.map(|ovs| rpc::SpxAttchmentOvs {
+                attachment_ovs: attachment.attachment_ovs.map(|ovs| rpc::SpxAttachmentOvs {
                     bridge_name: ovs.bridge_name,
                     ovn_network_name: ovs.ovn_network_name,
                 }),
