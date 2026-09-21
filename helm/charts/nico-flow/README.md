@@ -82,6 +82,9 @@ helm upgrade flow ./helm/charts/nico-flow \
   --set flowConfig.disableInventory=true
 ```
 
+On Helm 4, add `--force-conflicts` after `--reset-then-reuse-values` when the
+chart version changes.
+
 Confirm the rendered file after the rollout:
 
 ```bash

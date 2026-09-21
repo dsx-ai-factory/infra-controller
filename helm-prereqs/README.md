@@ -349,6 +349,21 @@ helm upgrade flow ./helm/charts/nico-flow \
   --wait
 
 kubectl rollout status deployment/flow -n flow --timeout=300s
+```
+
+On Helm 4, run the upgrade with the conflict flag instead:
+
+```bash
+helm upgrade flow ./helm/charts/nico-flow \
+  --namespace flow \
+  --reset-then-reuse-values \
+  --force-conflicts \
+  --set global.image.repository="${NICO_IMAGE_REGISTRY}" \
+  --set global.image.tag="${NICO_REST_IMAGE_TAG}" \
+  --timeout 300s \
+  --wait
+
+kubectl rollout status deployment/flow -n flow --timeout=300s
 
 kubectl get pods -n flow -l app=flow \
   --field-selector=status.phase!=Succeeded,status.phase!=Failed \
