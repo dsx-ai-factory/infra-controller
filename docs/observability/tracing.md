@@ -9,7 +9,10 @@ How NICo component tracing works, what it covers, how to turn it on and off and 
 - **nico-api** (the `carbide-api` binary) is NICo's primary tracing source and the subject of this
   document. **nico-dns** also emits traces, but with a separate simpler opt-in setup.
   **nico-bmc-proxy** emits traces for each proxied BMC request when configured (see
-  [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)).
+  [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)). The Go REST services (nico-rest-api, the
+  workflow workers, cert-manager, site-manager, site-agent, flow, ipam, and the switch and
+  power-shelf managers) share a separate bootstrap configured through standard `OTEL_*` variables;
+  see [REST distributed tracing](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/deploy/README.md#distributed-tracing-opentelemetry).
 - **nico-api traces are off by default**; two things must both be true before any spans are emitted:
   - An OTLP endpoint is configured at startup, either in the nico-api config TOML:
 

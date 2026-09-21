@@ -8,16 +8,16 @@ import (
 	"fmt"
 	"testing"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
+
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func testVpcSetupSchema(t *testing.T, dbSession *db.Session) {
@@ -132,8 +132,6 @@ func TestVpcSQLDAO_GetByID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -295,8 +293,6 @@ func TestVpcSQLDAO_GetCountByStatus(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -948,8 +944,6 @@ func TestVpc_GetAll(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1141,8 +1135,6 @@ func TestVpcSQLDAO_CreateFromParams(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1334,8 +1326,6 @@ func TestVpcSQLDAO_Update(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1446,8 +1436,6 @@ func TestVpcSQLDAO_DeleteByID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1571,8 +1559,7 @@ func TestVpcSQLDAO_ClearFromParams(t *testing.T) {
 	_, _, ctx := testCommonTraceProviderSetup(t, context.Background())
 
 	type fields struct {
-		dbSession  *db.Session
-		tracerSpan *stracer.TracerSpan
+		dbSession *db.Session
 	}
 	type args struct {
 		ctx                                    context.Context
@@ -1616,8 +1603,7 @@ func TestVpcSQLDAO_ClearFromParams(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			vsd := VpcSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: tt.fields.tracerSpan,
+				dbSession: tt.fields.dbSession,
 			}
 
 			input := VpcClearInput{

@@ -9,14 +9,16 @@ import (
 	"slices"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	"github.com/uptrace/bun"
 
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -282,20 +284,17 @@ type InstanceTypeDAO interface {
 type InstanceTypeSQLDAO struct {
 	dbSession *db.Session
 	InstanceTypeDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new InstanceType from the given parameters
 // The returned InstanceType will not have any related structs (InfrastructureProvider/Site) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (itsd InstanceTypeSQLDAO) Create(ctx context.Context, tx *db.Tx, input InstanceTypeCreateInput) (*InstanceType, error) {
+func (itsd InstanceTypeSQLDAO) Create(ctx context.Context, tx *db.Tx, input InstanceTypeCreateInput) (_ *InstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.Create")
-	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
-		itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "name", input.Name)
-	}
+	ctx, instanceTypeDAOSpan := cotel.StartSpan(ctx, "InstanceTypeDAO.Create")
+	defer func() { cotel.EndSpan(instanceTypeDAOSpan, retErr) }()
+	cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("name", input.Name))
 
 	if !db.IsStrInSlice(input.Status, InstanceTypeStatusChoices) {
 		return nil, errors.Wrap(db.ErrInvalidValue, "status")
@@ -336,14 +335,11 @@ func (itsd InstanceTypeSQLDAO) Create(ctx context.Context, tx *db.Tx, input Inst
 
 // GetByID returns a InstanceType by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (itsd InstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*InstanceType, error) {
+func (itsd InstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *InstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.GetByID")
-	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
-
-		itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "id", id.String())
-	}
+	ctx, instanceTypeDAOSpan := cotel.StartSpan(ctx, "InstanceTypeDAO.GetByID")
+	defer func() { cotel.EndSpan(instanceTypeDAOSpan, retErr) }()
+	cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("id", id.String()))
 
 	it := &InstanceType{}
 
@@ -369,12 +365,10 @@ func (itsd InstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.U
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in InstanceTypeOrderByDefault in ascending order
-func (itsd InstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InstanceTypeFilterInput, includeRelations []string, offset *int, limit *int, orderBy *paginator.OrderBy) ([]InstanceType, int, error) {
+func (itsd InstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InstanceTypeFilterInput, includeRelations []string, offset *int, limit *int, orderBy *paginator.OrderBy) (_ []InstanceType, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.GetAll")
-	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
-	}
+	ctx, instanceTypeDAOSpan := cotel.StartSpan(ctx, "InstanceTypeDAO.GetAll")
+	defer func() { cotel.EndSpan(instanceTypeDAOSpan, retErr) }()
 
 	its := []InstanceType{}
 
@@ -386,50 +380,32 @@ func (itsd InstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Ins
 
 	if filter.Name != nil {
 		query = query.Where("it.name = ?", *filter.Name)
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "name", *filter.Name)
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("name", *filter.Name))
 	}
 
 	if filter.DisplayName != nil {
 		query = query.Where("it.display_name = ?", *filter.DisplayName)
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "display_name", *filter.DisplayName)
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("display_name", *filter.DisplayName))
 	}
 
 	if filter.InfrastructureProviderID != nil {
 		query = query.Where("it.infrastructure_provider_id = ?", *filter.InfrastructureProviderID)
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "infrastructure_provider_id", filter.InfrastructureProviderID.String())
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("infrastructure_provider_id", filter.InfrastructureProviderID.String()))
 	}
 
 	if filter.SiteIDs != nil {
 		if len(filter.SiteIDs) == 1 {
 			query = query.Where("it.site_id = ?", filter.SiteIDs[0])
+			cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("site_id", filter.SiteIDs[0].String()))
 
-			if instanceTypeDAOSpan != nil {
-				itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "site_id", filter.SiteIDs[0].String())
-			}
 		} else {
 			query = query.Where("it.site_id IN (?)", bun.In(filter.SiteIDs))
-
-			if instanceTypeDAOSpan != nil {
-				itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "site_ids", filter.SiteIDs)
-			}
 		}
 	}
 
 	if filter.Status != nil {
 		query = query.Where("it.status = ?", *filter.Status)
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "status", *filter.Status)
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("status", *filter.Status))
 	}
 
 	if filter.TenantIDs != nil {
@@ -475,10 +451,7 @@ func (itsd InstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Ins
 				WhereOr("it.labels::text ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("it.status ILIKE ?", "%"+searchQuery+"%")
 		})
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "search_query", searchQuery)
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	if filter.InstanceTypeIDs != nil {
@@ -512,12 +485,10 @@ func (itsd InstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Ins
 // For setting to null values, use: ClearFromParams
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (itsd InstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, input InstanceTypeUpdateInput) (*InstanceType, error) {
+func (itsd InstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, input InstanceTypeUpdateInput) (_ *InstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.UpdateFromParams")
-	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
-	}
+	ctx, instanceTypeDAOSpan := cotel.StartSpan(ctx, "InstanceTypeDAO.UpdateFromParams")
+	defer func() { cotel.EndSpan(instanceTypeDAOSpan, retErr) }()
 
 	it := &InstanceType{
 		ID: input.ID,
@@ -528,45 +499,28 @@ func (itsd InstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, input Inst
 	if input.Name != nil {
 		it.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "name", *input.Name)
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.DisplayName != nil {
 		it.DisplayName = input.DisplayName
 		updatedFields = append(updatedFields, "display_name")
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "display_name", *input.DisplayName)
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("display_name", *input.DisplayName))
 	}
 	if input.Description != nil {
 		it.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "description", *input.Description)
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("description", *input.Description))
 	}
 
 	if input.Version != nil {
 		it.Version = *input.Version
 		updatedFields = append(updatedFields, "version")
-
-		// This shouldn't be necessary; SetAttribute appears to handle nil correctly.
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "version", *input.Version)
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("version", *input.Version))
 	}
 
 	if input.Labels != nil {
 		it.Labels = input.Labels
 		updatedFields = append(updatedFields, "labels")
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "labels", input.Labels)
-		}
 	}
 
 	if input.Status != nil {
@@ -576,30 +530,21 @@ func (itsd InstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, input Inst
 		}
 
 		updatedFields = append(updatedFields, "status")
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "status", *input.Status)
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("status", *input.Status))
 	}
 
 	if input.SiteID != nil {
 		it.SiteID = input.SiteID
 
 		updatedFields = append(updatedFields, "site_id")
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "site_id", input.SiteID.String())
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("site_id", input.SiteID.String()))
 	}
 
 	if input.InfinityResourceTypeID != nil {
 		it.InfinityResourceTypeID = input.InfinityResourceTypeID
 
 		updatedFields = append(updatedFields, "infinity_resource_type_id")
-
-		if instanceTypeDAOSpan != nil {
-			itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "infinity_resource_type_id", input.InfinityResourceTypeID.String())
-		}
+		cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("infinity_resource_type_id", input.InfinityResourceTypeID.String()))
 	}
 
 	if len(updatedFields) > 0 {
@@ -623,12 +568,10 @@ func (itsd InstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, input Inst
 // parameters displayName, description, siteID when true, the are set to null in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (itsd InstanceTypeSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceTypeClearInput) (*InstanceType, error) {
+func (itsd InstanceTypeSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceTypeClearInput) (_ *InstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.Clear")
-	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
-	}
+	ctx, instanceTypeDAOSpan := cotel.StartSpan(ctx, "InstanceTypeDAO.Clear")
+	defer func() { cotel.EndSpan(instanceTypeDAOSpan, retErr) }()
 
 	it := &InstanceType{
 		ID: input.InstanceTypeID,
@@ -673,14 +616,11 @@ func (itsd InstanceTypeSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Insta
 // DeleteByID deletes an InstanceType by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (itsd InstanceTypeSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (itsd InstanceTypeSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.DeleteByID")
-	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
-
-		itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "id", id.String())
-	}
+	ctx, instanceTypeDAOSpan := cotel.StartSpan(ctx, "InstanceTypeDAO.DeleteByID")
+	defer func() { cotel.EndSpan(instanceTypeDAOSpan, retErr) }()
+	cotel.SetAttribute(instanceTypeDAOSpan, attribute.String("id", id.String()))
 
 	it := &InstanceType{
 		ID: id,
@@ -697,7 +637,6 @@ func (itsd InstanceTypeSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uui
 // NewInstanceTypeDAO returns a new InstanceTypeDAO
 func NewInstanceTypeDAO(dbSession *db.Session) InstanceTypeDAO {
 	return &InstanceTypeSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

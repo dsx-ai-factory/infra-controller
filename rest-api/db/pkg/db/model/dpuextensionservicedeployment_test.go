@@ -7,14 +7,14 @@ import (
 	"context"
 	"testing"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
+
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 func TestDpuExtensionServiceDeploymentSQLDAO_GetByID(t *testing.T) {
@@ -107,8 +107,7 @@ func TestDpuExtensionServiceDeploymentSQLDAO_GetByID(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			desdsd := DpuExtensionServiceDeploymentSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 
 			got, err := desdsd.GetByID(tt.args.ctx, nil, tt.args.id, tt.paramRelations)
@@ -134,8 +133,6 @@ func TestDpuExtensionServiceDeploymentSQLDAO_GetByID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -407,8 +404,7 @@ func TestDpuExtensionServiceDeploymentSQLDAO_GetAll(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			desdsd := DpuExtensionServiceDeploymentSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 
 			filter := DpuExtensionServiceDeploymentFilterInput{
@@ -449,8 +445,6 @@ func TestDpuExtensionServiceDeploymentSQLDAO_GetAll(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -556,8 +550,7 @@ func TestDpuExtensionServiceDeploymentSQLDAO_Create(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			desdsd := DpuExtensionServiceDeploymentSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 
 			got, err := desdsd.Create(tt.args.ctx, nil, tt.args.input)
@@ -577,8 +570,6 @@ func TestDpuExtensionServiceDeploymentSQLDAO_Create(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -662,8 +653,7 @@ func TestDpuExtensionServiceDeploymentSQLDAO_Update(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			desdsd := DpuExtensionServiceDeploymentSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 
 			got, err := desdsd.Update(tt.args.ctx, nil, tt.args.input)
@@ -681,8 +671,6 @@ func TestDpuExtensionServiceDeploymentSQLDAO_Update(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -773,8 +761,7 @@ func TestDpuExtensionServiceDeploymentSQLDAO_Delete(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			desdsd := DpuExtensionServiceDeploymentSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 
 			err := desdsd.Delete(tt.args.ctx, nil, tt.args.id)
@@ -791,8 +778,6 @@ func TestDpuExtensionServiceDeploymentSQLDAO_Delete(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -937,8 +922,6 @@ func TestDpuExtensionServiceDeploymentSQLDAO_CreateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

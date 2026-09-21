@@ -13,12 +13,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -289,19 +290,15 @@ type SpectrumXPartitionDAO interface {
 
 // SpectrumXPartitionSQLDAO is an implementation of the SpectrumXPartitionDAO interface
 type SpectrumXPartitionSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // Get returns a SpectrumXPartition by ID
-func (sxpsd SpectrumXPartitionSQLDAO) Get(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*SpectrumXPartition, error) {
+func (sxpsd SpectrumXPartitionSQLDAO) Get(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *SpectrumXPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXPartitionDAOSpan := sxpsd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXPartitionDAO.Get")
-	if SpectrumXPartitionDAOSpan != nil {
-		defer SpectrumXPartitionDAOSpan.End()
-
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "id", id.String())
-	}
+	ctx, SpectrumXPartitionDAOSpan := cotel.StartSpan(ctx, "SpectrumXPartitionDAO.Get")
+	defer func() { cotel.EndSpan(SpectrumXPartitionDAOSpan, retErr) }()
+	cotel.SetAttribute(SpectrumXPartitionDAOSpan, attribute.String("id", id.String()))
 
 	sxp := &SpectrumXPartition{}
 
@@ -326,12 +323,10 @@ func (sxpsd SpectrumXPartitionSQLDAO) Get(ctx context.Context, tx *db.Tx, id uui
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in SpectrumXPartitionOrderByDefault in ascending order
-func (sxpsd SpectrumXPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SpectrumXPartitionFilterInput, page paginator.PageInput, includeRelations []string) ([]SpectrumXPartition, int, error) {
+func (sxpsd SpectrumXPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SpectrumXPartitionFilterInput, page paginator.PageInput, includeRelations []string) (_ []SpectrumXPartition, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXPartitionDAOSpan := sxpsd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXPartitionDAO.GetAll")
-	if SpectrumXPartitionDAOSpan != nil {
-		defer SpectrumXPartitionDAOSpan.End()
-	}
+	ctx, SpectrumXPartitionDAOSpan := cotel.StartSpan(ctx, "SpectrumXPartitionDAO.GetAll")
+	defer func() { cotel.EndSpan(SpectrumXPartitionDAOSpan, retErr) }()
 
 	sxps := []SpectrumXPartition{}
 
@@ -341,31 +336,24 @@ func (sxpsd SpectrumXPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fil
 	}
 	if filter.Names != nil {
 		query = query.Where("sxp.name IN (?)", bun.In(filter.Names))
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "name", filter.Names)
 	}
 	if filter.SiteIDs != nil {
 		query = query.Where("sxp.site_id IN (?)", bun.In(filter.SiteIDs))
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "site_id", filter.SiteIDs)
 	}
 	if filter.TenantIDs != nil {
 		query = query.Where("sxp.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "tenant_id", filter.TenantIDs)
 	}
 	if filter.TenantOrgs != nil {
 		query = query.Where("sxp.org IN (?)", bun.In(filter.TenantOrgs))
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "org", filter.TenantOrgs)
 	}
 	if filter.Statuses != nil {
 		query = query.Where("sxp.status IN (?)", bun.In(filter.Statuses))
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "status", filter.Statuses)
 	}
 	if filter.SpectrumXPartitionIDs != nil {
 		query = query.Where("sxp.id IN (?)", bun.In(filter.SpectrumXPartitionIDs))
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "id", filter.SpectrumXPartitionIDs)
 	}
 	if filter.VNIs != nil {
 		query = query.Where("sxp.vni IN (?)", bun.In(filter.VNIs))
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "vni", filter.VNIs)
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -378,7 +366,7 @@ func (sxpsd SpectrumXPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fil
 				WhereOr("sxp.status ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("sxp.labels::text ILIKE ?", "%"+searchQuery+"%")
 		})
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(SpectrumXPartitionDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -404,14 +392,11 @@ func (sxpsd SpectrumXPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fil
 }
 
 // Create creates a new SpectrumXPartition from the given parameters
-func (sxpsd SpectrumXPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, input SpectrumXPartitionCreateInput) (*SpectrumXPartition, error) {
+func (sxpsd SpectrumXPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, input SpectrumXPartitionCreateInput) (_ *SpectrumXPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXPartitionDAOSpan := sxpsd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXPartitionDAO.Create")
-	if SpectrumXPartitionDAOSpan != nil {
-		defer SpectrumXPartitionDAOSpan.End()
-
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "name", input.Name)
-	}
+	ctx, SpectrumXPartitionDAOSpan := cotel.StartSpan(ctx, "SpectrumXPartitionDAO.Create")
+	defer func() { cotel.EndSpan(SpectrumXPartitionDAOSpan, retErr) }()
+	cotel.SetAttribute(SpectrumXPartitionDAOSpan, attribute.String("name", input.Name))
 
 	id := uuid.New()
 
@@ -452,14 +437,10 @@ func (sxpsd SpectrumXPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, inp
 }
 
 // Update updates an existing SpectrumXPartition from the given parameters
-func (sxpsd SpectrumXPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, input SpectrumXPartitionUpdateInput) (*SpectrumXPartition, error) {
+func (sxpsd SpectrumXPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, input SpectrumXPartitionUpdateInput) (_ *SpectrumXPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXPartitionDAOSpan := sxpsd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXPartitionDAO.Update")
-	if SpectrumXPartitionDAOSpan != nil {
-		defer SpectrumXPartitionDAOSpan.End()
-
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "id", input.SpectrumXPartitionID)
-	}
+	ctx, SpectrumXPartitionDAOSpan := cotel.StartSpan(ctx, "SpectrumXPartitionDAO.Update")
+	defer func() { cotel.EndSpan(SpectrumXPartitionDAOSpan, retErr) }()
 
 	sxp := &SpectrumXPartition{
 		ID: input.SpectrumXPartitionID,
@@ -476,22 +457,20 @@ func (sxpsd SpectrumXPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, inp
 		}
 		sxp.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(SpectrumXPartitionDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.Description != nil {
 		sxp.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "description", *input.Description)
+		cotel.SetAttribute(SpectrumXPartitionDAOSpan, attribute.String("description", *input.Description))
 	}
 	if input.VNI != nil {
 		sxp.VNI = input.VNI
 		updatedFields = append(updatedFields, "vni")
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "vni", *input.VNI)
 	}
 	if input.Labels != nil {
 		sxp.Labels = input.Labels
 		updatedFields = append(updatedFields, "labels")
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "labels", input.Labels)
 	}
 	if input.Status != nil {
 		if !SpectrumXPartitionStatusMap[*input.Status] {
@@ -499,12 +478,10 @@ func (sxpsd SpectrumXPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, inp
 		}
 		sxp.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "status", *input.Status)
 	}
 	if input.IsMissingOnSite != nil {
 		sxp.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
 	}
 
 	if len(updatedFields) > 0 {
@@ -524,14 +501,10 @@ func (sxpsd SpectrumXPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, inp
 }
 
 // Clear clears SpectrumXPartition attributes based on provided arguments
-func (sxpsd SpectrumXPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SpectrumXPartitionClearInput) (*SpectrumXPartition, error) {
+func (sxpsd SpectrumXPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SpectrumXPartitionClearInput) (_ *SpectrumXPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXPartitionDAOSpan := sxpsd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXPartitionDAO.Clear")
-	if SpectrumXPartitionDAOSpan != nil {
-		defer SpectrumXPartitionDAOSpan.End()
-
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "id", input.SpectrumXPartitionID)
-	}
+	ctx, SpectrumXPartitionDAOSpan := cotel.StartSpan(ctx, "SpectrumXPartitionDAO.Clear")
+	defer func() { cotel.EndSpan(SpectrumXPartitionDAOSpan, retErr) }()
 
 	sxp := &SpectrumXPartition{
 		ID: input.SpectrumXPartitionID,
@@ -579,14 +552,11 @@ func (sxpsd SpectrumXPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, inpu
 }
 
 // Delete deletes a SpectrumXPartition by ID
-func (sxpsd SpectrumXPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (sxpsd SpectrumXPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXPartitionDAOSpan := sxpsd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXPartitionDAO.Delete")
-	if SpectrumXPartitionDAOSpan != nil {
-		defer SpectrumXPartitionDAOSpan.End()
-
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "id", id.String())
-	}
+	ctx, SpectrumXPartitionDAOSpan := cotel.StartSpan(ctx, "SpectrumXPartitionDAO.Delete")
+	defer func() { cotel.EndSpan(SpectrumXPartitionDAOSpan, retErr) }()
+	cotel.SetAttribute(SpectrumXPartitionDAOSpan, attribute.String("id", id.String()))
 
 	sxp := &SpectrumXPartition{
 		ID: id,
@@ -601,13 +571,10 @@ func (sxpsd SpectrumXPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id 
 }
 
 // DeleteAllBySiteID deletes all SpectrumXPartition records for a given Site
-func (sxpsd SpectrumXPartitionSQLDAO) DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) error {
-	ctx, SpectrumXPartitionDAOSpan := sxpsd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXPartitionDAO.DeleteAllBySiteID")
-	if SpectrumXPartitionDAOSpan != nil {
-		defer SpectrumXPartitionDAOSpan.End()
-
-		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "site_id", siteID.String())
-	}
+func (sxpsd SpectrumXPartitionSQLDAO) DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) (retErr error) {
+	ctx, SpectrumXPartitionDAOSpan := cotel.StartSpan(ctx, "SpectrumXPartitionDAO.DeleteAllBySiteID")
+	defer func() { cotel.EndSpan(SpectrumXPartitionDAOSpan, retErr) }()
+	cotel.SetAttribute(SpectrumXPartitionDAOSpan, attribute.String("site_id", siteID.String()))
 
 	sxp := &SpectrumXPartition{
 		SiteID: siteID,
@@ -621,7 +588,6 @@ func (sxpsd SpectrumXPartitionSQLDAO) DeleteAllBySiteID(ctx context.Context, tx 
 // NewSpectrumXPartitionDAO returns a new SpectrumXPartitionDAO
 func NewSpectrumXPartitionDAO(dbSession *db.Session) SpectrumXPartitionDAO {
 	return &SpectrumXPartitionSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -44,21 +45,19 @@ import (
 
 // CreateVpcPrefixHandler is the API Handler for creating new VPC prefix
 type CreateVpcPrefixHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateVpcPrefixHandler initializes and returns a new handler for creating VPC prefix
 func NewCreateVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateVpcPrefixHandler {
 	return CreateVpcPrefixHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -74,7 +73,7 @@ func NewCreateVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Success 201 {object} model.APIVpcPrefix
 // @Router /v2/org/{org}/nico/vpcprefix [post]
 func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Create", c, csh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -332,19 +331,17 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 
 // GetAllVpcPrefixHandler is the API Handler for getting all VpcPrefixs
 type GetAllVpcPrefixHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllVpcPrefixHandler initializes and returns a new handler for getting all VpcPrefixs
 func NewGetAllVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllVpcPrefixHandler {
 	return GetAllVpcPrefixHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -367,7 +364,7 @@ func NewGetAllVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Success 200 {object} []model.APIVpcPrefix
 // @Router /v2/org/{org}/nico/vpcprefix [get]
 func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "GetAll", c, gash.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -479,7 +476,7 @@ func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gash.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Create response
@@ -576,19 +573,17 @@ func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
 
 // GetVpcPrefixHandler is the API Handler for retrieving VPC prefix
 type GetVpcPrefixHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetVpcPrefixHandler initializes and returns a new handler to retrieve VPC prefix
 func NewGetVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetVpcPrefixHandler {
 	return GetVpcPrefixHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -606,7 +601,7 @@ func NewGetVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Success 200 {object} model.APIVpcPrefix
 // @Router /v2/org/{org}/nico/vpcprefix/{id} [get]
 func (gsh GetVpcPrefixHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Get", c, gsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -657,7 +652,7 @@ func (gsh GetVpcPrefixHandler) Handle(c echo.Context) error {
 	// Get VPC prefix ID from URL param
 	sStrID := c.Param("id")
 
-	gsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID))
 
 	sID, err := uuid.Parse(sStrID)
 	if err != nil {
@@ -729,21 +724,19 @@ func (gsh GetVpcPrefixHandler) Handle(c echo.Context) error {
 
 // UpdateVpcPrefixHandler is the API Handler for updating a VPC prefix
 type UpdateVpcPrefixHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateVpcPrefixHandler initializes and returns a new handler for updating VPC prefix
 func NewUpdateVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateVpcPrefixHandler {
 	return UpdateVpcPrefixHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -760,7 +753,7 @@ func NewUpdateVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Success 200 {object} model.APIVpcPrefix
 // @Router /v2/org/{org}/nico/vpcprefix/{id} [patch]
 func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Update", c, ush.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -789,7 +782,7 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 	// Get VPC prefix ID from URL param
 	sStrID := c.Param("id")
 
-	ush.tracerSpan.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID))
 
 	sID, err := uuid.Parse(sStrID)
 	if err != nil {
@@ -950,21 +943,19 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 
 // DeleteVpcPrefixHandler is the API Handler for deleting a VPC prefix
 type DeleteVpcPrefixHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteVpcPrefixHandler initializes and returns a new handler for deleting VPC prefix
 func NewDeleteVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteVpcPrefixHandler {
 	return DeleteVpcPrefixHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -980,7 +971,7 @@ func NewDeleteVpcPrefixHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Success 202
 // @Router /v2/org/{org}/nico/vpcprefix/{id} [delete]
 func (dsh DeleteVpcPrefixHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Delete", c, dsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPC prefix", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1009,7 +1000,7 @@ func (dsh DeleteVpcPrefixHandler) Handle(c echo.Context) error {
 	// Get VPC prefix ID from URL param
 	sStrID := c.Param("id")
 
-	dsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("VpcPrefixId", sStrID))
 
 	sID, err := uuid.Parse(sStrID)
 	if err != nil {

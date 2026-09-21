@@ -8,13 +8,15 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
-
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 )
 
 const (
@@ -219,19 +221,15 @@ type TenantAccountDAO interface {
 
 // TenantAccountSQLDAO is an implementation of the TenantAccountDAO interface
 type TenantAccountSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // GetByID returns a TenantAccount by ID
-func (tasd TenantAccountSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*TenantAccount, error) {
+func (tasd TenantAccountSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *TenantAccount, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.GetByID")
-	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
-
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "id", id.String())
-	}
+	ctx, tnaDAOSpan := cotel.StartSpan(ctx, "TenantAccountDAO.GetByID")
+	defer func() { cotel.EndSpan(tnaDAOSpan, retErr) }()
+	cotel.SetAttribute(tnaDAOSpan, attribute.String("id", id.String()))
 
 	ta := &TenantAccount{}
 
@@ -253,12 +251,10 @@ func (tasd TenantAccountSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.
 }
 
 // GetCountByStatus returns count of TenantAccounts for given status
-func (tasd TenantAccountSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, tenantID *uuid.UUID) (map[string]int, error) {
+func (tasd TenantAccountSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, tenantID *uuid.UUID) (_ map[string]int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.GetCountByStatus")
-	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
-	}
+	ctx, tnaDAOSpan := cotel.StartSpan(ctx, "TenantAccountDAO.GetCountByStatus")
+	defer func() { cotel.EndSpan(tnaDAOSpan, retErr) }()
 
 	ta := &TenantAccount{}
 	var statusQueryResults []map[string]interface{}
@@ -266,11 +262,11 @@ func (tasd TenantAccountSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx,
 	query := db.GetIDB(tx, tasd.dbSession).NewSelect().Model(ta)
 	if infrastructureProviderID != nil {
 		query = query.Where("ta.infrastructure_provider_id = ?", *infrastructureProviderID)
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "infrastructure_provider_id", infrastructureProviderID.String())
+		cotel.SetAttribute(tnaDAOSpan, attribute.String("infrastructure_provider_id", infrastructureProviderID.String()))
 	}
 	if tenantID != nil {
 		query = query.Where("ta.tenant_id = ?", *tenantID)
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "tenant_id", tenantID.String())
+		cotel.SetAttribute(tnaDAOSpan, attribute.String("tenant_id", tenantID.String()))
 	}
 
 	err := query.Column("ta.status").ColumnExpr("COUNT(*) AS total_count").GroupExpr("ta.status").Scan(ctx, &statusQueryResults)
@@ -296,12 +292,10 @@ func (tasd TenantAccountSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx,
 }
 
 // GetByAccountNumber returns a TenantAccount by account number
-func (tasd TenantAccountSQLDAO) GetByAccountNumber(ctx context.Context, tx *db.Tx, accountNumber string, includeRelations []string) (*TenantAccount, error) {
+func (tasd TenantAccountSQLDAO) GetByAccountNumber(ctx context.Context, tx *db.Tx, accountNumber string, includeRelations []string) (_ *TenantAccount, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.GetByAccountNumber")
-	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
-	}
+	ctx, tnaDAOSpan := cotel.StartSpan(ctx, "TenantAccountDAO.GetByAccountNumber")
+	defer func() { cotel.EndSpan(tnaDAOSpan, retErr) }()
 
 	ta := &TenantAccount{}
 
@@ -319,14 +313,13 @@ func (tasd TenantAccountSQLDAO) GetByAccountNumber(ctx context.Context, tx *db.T
 	return ta, nil
 }
 
-func (tasd TenantAccountSQLDAO) setQueryWithFilter(filter TenantAccountFilterInput, query *bun.SelectQuery, tnaDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (tasd TenantAccountSQLDAO) setQueryWithFilter(filter TenantAccountFilterInput, query *bun.SelectQuery, tnaDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.TenantIDs != nil {
 		if len(filter.TenantIDs) == 1 {
 			query = query.Where("ta.tenant_id = ?", filter.TenantIDs[0])
 		} else {
 			query = query.Where("ta.tenant_id IN (?)", bun.In(filter.TenantIDs))
 		}
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "tenant_id", filter.TenantIDs)
 	}
 
 	if filter.TenantOrgs != nil {
@@ -335,13 +328,11 @@ func (tasd TenantAccountSQLDAO) setQueryWithFilter(filter TenantAccountFilterInp
 		} else {
 			query = query.Where("ta.tenant_org IN (?)", bun.In(filter.TenantOrgs))
 		}
-
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "tenant_org", filter.TenantOrgs)
 	}
 
 	if filter.InfrastructureProviderID != nil {
 		query = query.Where("ta.infrastructure_provider_id = ?", *filter.InfrastructureProviderID)
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "infrastructure_provider_id", filter.InfrastructureProviderID.String())
+		cotel.SetAttribute(tnaDAOSpan, attribute.String("infrastructure_provider_id", filter.InfrastructureProviderID.String()))
 	}
 
 	if filter.Statuses != nil {
@@ -350,7 +341,6 @@ func (tasd TenantAccountSQLDAO) setQueryWithFilter(filter TenantAccountFilterInp
 		} else {
 			query = query.Where("ta.status IN (?)", bun.In(filter.Statuses))
 		}
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "status", filter.Statuses)
 	}
 
 	if filter.TenantAccountIDs != nil {
@@ -359,7 +349,6 @@ func (tasd TenantAccountSQLDAO) setQueryWithFilter(filter TenantAccountFilterInp
 		} else {
 			query = query.Where("ta.id IN (?)", bun.In(filter.TenantAccountIDs))
 		}
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "id", filter.TenantAccountIDs)
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -371,19 +360,17 @@ func (tasd TenantAccountSQLDAO) setQueryWithFilter(filter TenantAccountFilterInp
 				WhereOr("ta.tenant_org ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("EXISTS (SELECT 1 FROM tenant WHERE tenant.id = ta.tenant_id AND tenant.deleted IS NULL AND tenant.org_display_name ILIKE ?)", "%"+searchQuery+"%")
 		})
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(tnaDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	return query, nil
 }
 
 // GetCount returns the count of TenantAccounts that match the parameters
-func (tasd TenantAccountSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter TenantAccountFilterInput) (int, error) {
+func (tasd TenantAccountSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter TenantAccountFilterInput) (_ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tenantAccountDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.GetCount")
-	if tenantAccountDAOSpan != nil {
-		defer tenantAccountDAOSpan.End()
-	}
+	ctx, tenantAccountDAOSpan := cotel.StartSpan(ctx, "TenantAccountDAO.GetCount")
+	defer func() { cotel.EndSpan(tenantAccountDAOSpan, retErr) }()
 
 	query := db.GetIDB(tx, tasd.dbSession).NewSelect().Model((*TenantAccount)(nil))
 	query, err := tasd.setQueryWithFilter(filter, query, tenantAccountDAOSpan)
@@ -396,12 +383,10 @@ func (tasd TenantAccountSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter 
 
 // GetAll returns a list of TenantAccounts filtering by tenantID, tenantOrg, infrastructureProviderID, offset, limit and orderBy
 // if orderBy is nil, then records are ordered by column specified in TenantAccountOrderByDefault in ascending order
-func (tasd TenantAccountSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter TenantAccountFilterInput, page paginator.PageInput, includeRelations []string) ([]TenantAccount, int, error) {
+func (tasd TenantAccountSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter TenantAccountFilterInput, page paginator.PageInput, includeRelations []string) (_ []TenantAccount, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.GetAll")
-	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
-	}
+	ctx, tnaDAOSpan := cotel.StartSpan(ctx, "TenantAccountDAO.GetAll")
+	defer func() { cotel.EndSpan(tnaDAOSpan, retErr) }()
 
 	tas := []TenantAccount{}
 
@@ -457,12 +442,10 @@ func (tasd TenantAccountSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Te
 }
 
 // Create creates a new TenantAccount from the given parameters
-func (tasd TenantAccountSQLDAO) Create(ctx context.Context, tx *db.Tx, input TenantAccountCreateInput) (*TenantAccount, error) {
+func (tasd TenantAccountSQLDAO) Create(ctx context.Context, tx *db.Tx, input TenantAccountCreateInput) (_ *TenantAccount, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.Create")
-	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
-	}
+	ctx, tnaDAOSpan := cotel.StartSpan(ctx, "TenantAccountDAO.Create")
+	defer func() { cotel.EndSpan(tnaDAOSpan, retErr) }()
 
 	ta := &TenantAccount{
 		ID:                        uuid.New(),
@@ -494,13 +477,11 @@ func (tasd TenantAccountSQLDAO) Create(ctx context.Context, tx *db.Tx, input Ten
 }
 
 // Update updates an existing TenantAccount from the given parameters
-func (tasd TenantAccountSQLDAO) Update(ctx context.Context, tx *db.Tx, input TenantAccountUpdateInput) (*TenantAccount, error) {
+func (tasd TenantAccountSQLDAO) Update(ctx context.Context, tx *db.Tx, input TenantAccountUpdateInput) (_ *TenantAccount, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.Update")
-	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "id", input.TenantAccountID.String())
-	}
+	ctx, tnaDAOSpan := cotel.StartSpan(ctx, "TenantAccountDAO.Update")
+	defer func() { cotel.EndSpan(tnaDAOSpan, retErr) }()
+	cotel.SetAttribute(tnaDAOSpan, attribute.String("id", input.TenantAccountID.String()))
 
 	ta := &TenantAccount{
 		ID: input.TenantAccountID,
@@ -511,31 +492,31 @@ func (tasd TenantAccountSQLDAO) Update(ctx context.Context, tx *db.Tx, input Ten
 	if input.TenantID != nil {
 		ta.TenantID = input.TenantID
 		updatedFields = append(updatedFields, "tenant_id")
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "tenant_id", input.TenantID.String())
+		cotel.SetAttribute(tnaDAOSpan, attribute.String("tenant_id", input.TenantID.String()))
 	}
 
 	if input.SubscriptionID != nil {
 		ta.SubscriptionID = input.SubscriptionID
 		updatedFields = append(updatedFields, "subscription_id")
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "subscription_id", *input.SubscriptionID)
+		cotel.SetAttribute(tnaDAOSpan, attribute.String("subscription_id", *input.SubscriptionID))
 	}
 
 	if input.SubscriptionTier != nil {
 		ta.SubscriptionTier = input.SubscriptionTier
 		updatedFields = append(updatedFields, "subscription_tier")
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "subscription_tier", *input.SubscriptionTier)
+		cotel.SetAttribute(tnaDAOSpan, attribute.String("subscription_tier", *input.SubscriptionTier))
 	}
 
 	if input.TenantContactID != nil {
 		ta.TenantContactID = input.TenantContactID
 		updatedFields = append(updatedFields, "tenant_contact_id")
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "tenant_contact_id", input.TenantContactID.String())
+		cotel.SetAttribute(tnaDAOSpan, attribute.String("tenant_contact_id", input.TenantContactID.String()))
 	}
 
 	if input.Status != nil {
 		ta.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(tnaDAOSpan, attribute.String("status", *input.Status))
 	}
 
 	if len(updatedFields) > 0 {
@@ -567,13 +548,11 @@ func (tasd TenantAccountSQLDAO) Update(ctx context.Context, tx *db.Tx, input Ten
 }
 
 // Delete deletes a TenantAccount by ID
-func (tasd TenantAccountSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (tasd TenantAccountSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.DeleteByID")
-	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
-		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "id", id.String())
-	}
+	ctx, tnaDAOSpan := cotel.StartSpan(ctx, "TenantAccountDAO.DeleteByID")
+	defer func() { cotel.EndSpan(tnaDAOSpan, retErr) }()
+	cotel.SetAttribute(tnaDAOSpan, attribute.String("id", id.String()))
 
 	ta := &TenantAccount{
 		ID: id,
@@ -590,7 +569,6 @@ func (tasd TenantAccountSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.U
 // NewTenantAccountDAO creates a new TenantAccountDAO
 func NewTenantAccountDAO(dbSession *db.Session) TenantAccountDAO {
 	return &TenantAccountSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

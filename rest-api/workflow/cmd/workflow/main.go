@@ -17,17 +17,14 @@ import (
 	"logur.dev/logur"
 
 	tsdkClient "go.temporal.io/sdk/client"
-	tsdkConverter "go.temporal.io/sdk/converter"
 	tsdkWorker "go.temporal.io/sdk/worker"
-
-	"go.opentelemetry.io/otel"
-	"go.temporal.io/sdk/contrib/opentelemetry"
-	"go.temporal.io/sdk/interceptor"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
@@ -105,8 +102,6 @@ import (
 
 	nvLinkLogicalPartitionActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/nvlinklogicalpartition"
 	nvLinkLogicalPartitionWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/nvlinklogicalpartition"
-
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/tracing"
 )
 
 const (
@@ -117,10 +112,6 @@ const (
 )
 
 func main() {
-	// First: interceptors and handlers below capture the global propagator.
-	tracing.InstallPropagator()
-	// No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
-	defer tracing.InstallExporter("nico-rest-workflow")()
 	// Initialize context
 	ctx := context.Background()
 
@@ -131,6 +122,19 @@ func main() {
 
 	cfg := config.NewConfig()
 	defer cfg.Close()
+
+	otelShutdown, err := cotel.Bootstrap(ctx, cfg.GetTracingEnabled(), cfg.GetTracingServiceName())
+	if err != nil {
+		log.Panic().Err(err).Msg("failed to initialize tracing")
+	}
+
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := otelShutdown(shutdownCtx); err != nil {
+			log.Error().Err(err).Msg("failed to shut down tracing")
+		}
+	}()
 
 	dbConfig := cfg.GetDBConfig()
 
@@ -194,36 +198,17 @@ func main() {
 		log.Panic().Err(err).Msg("failed to get Temporal config")
 	}
 
-	var tInterceptors []interceptor.ClientInterceptor
-	var wInterceptors []interceptor.WorkerInterceptor
-
-	if cfg.GetTracingEnabled() {
-		otelInterceptor, err := opentelemetry.NewTracingInterceptor(opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
-		if err != nil {
-			log.Panic().Err(err).Msg("unable to get otelInterceptor")
-		}
-		tInterceptors = append(tInterceptors, otelInterceptor)
-		wInterceptors = append(wInterceptors, otelInterceptor)
+	// Shared options carry the payload converter every binary agrees on and,
+	// when transport tracing is configured, the OpenTelemetry interceptor.
+	// The SDK applies a client interceptor that also implements the worker
+	// interface to every worker built from that client, so the worker must
+	// not register it again.
+	tOptions, err := ctemporal.ClientOptions(tcfg.GetHostPort(), tcfg.Namespace, tcfg.ClientTLSCfg, tLogger)
+	if err != nil {
+		log.Panic().Err(err).Msg("failed to build Temporal client options")
 	}
 
-	tc, err = tsdkClient.NewLazyClient(tsdkClient.Options{
-		HostPort:  tcfg.GetHostPort(),
-		Namespace: tcfg.Namespace,
-		ConnectionOptions: tsdkClient.ConnectionOptions{
-			TLS: tcfg.ClientTLSCfg,
-		},
-		DataConverter: tsdkConverter.NewCompositeDataConverter(
-			tsdkConverter.NewNilPayloadConverter(),
-			tsdkConverter.NewByteSlicePayloadConverter(),
-			tsdkConverter.NewProtoJSONPayloadConverterWithOptions(tsdkConverter.ProtoJSONPayloadConverterOptions{
-				AllowUnknownFields: true,
-			}),
-			tsdkConverter.NewProtoPayloadConverter(),
-			tsdkConverter.NewJSONPayloadConverter(),
-		),
-		Interceptors: tInterceptors,
-		Logger:       tLogger,
-	})
+	tc, err = tsdkClient.NewLazyClient(tOptions)
 
 	if err != nil {
 		log.Panic().Err(err).Msg("failed to create Temporal client")
@@ -235,7 +220,6 @@ func main() {
 		WorkflowPanicPolicy:              tsdkWorker.FailWorkflow,
 		MaxConcurrentActivityTaskPollers: cfg.GetMaxConcurrentActivityPollers(),
 		MaxConcurrentWorkflowTaskPollers: 10,
-		Interceptors:                     wInterceptors,
 	})
 
 	siteClientPool := sc.NewClientPool(tcfg)

@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/uptrace/bun"
 )
@@ -285,19 +287,15 @@ type SpectrumXAttachmentDAO interface {
 
 // SpectrumXAttachmentSQLDAO is an implementation of the SpectrumXAttachmentDAO interface
 type SpectrumXAttachmentSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // Get returns a SpectrumXAttachment by ID
-func (sxasd SpectrumXAttachmentSQLDAO) Get(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*SpectrumXAttachment, error) {
+func (sxasd SpectrumXAttachmentSQLDAO) Get(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *SpectrumXAttachment, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXAttachmentDAOSpan := sxasd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXAttachmentDAO.Get")
-	if SpectrumXAttachmentDAOSpan != nil {
-		defer SpectrumXAttachmentDAOSpan.End()
-
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "id", id.String())
-	}
+	ctx, SpectrumXAttachmentDAOSpan := cotel.StartSpan(ctx, "SpectrumXAttachmentDAO.Get")
+	defer func() { cotel.EndSpan(SpectrumXAttachmentDAOSpan, retErr) }()
+	cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("id", id.String()))
 
 	sxa := &SpectrumXAttachment{}
 
@@ -322,12 +320,10 @@ func (sxasd SpectrumXAttachmentSQLDAO) Get(ctx context.Context, tx *db.Tx, id uu
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in SpectrumXAttachmentOrderByDefault in ascending order
-func (sxasd SpectrumXAttachmentSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SpectrumXAttachmentFilterInput, page paginator.PageInput, includeRelations []string) ([]SpectrumXAttachment, int, error) {
+func (sxasd SpectrumXAttachmentSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SpectrumXAttachmentFilterInput, page paginator.PageInput, includeRelations []string) (_ []SpectrumXAttachment, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXAttachmentDAOSpan := sxasd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXAttachmentDAO.GetAll")
-	if SpectrumXAttachmentDAOSpan != nil {
-		defer SpectrumXAttachmentDAOSpan.End()
-	}
+	ctx, SpectrumXAttachmentDAOSpan := cotel.StartSpan(ctx, "SpectrumXAttachmentDAO.GetAll")
+	defer func() { cotel.EndSpan(SpectrumXAttachmentDAOSpan, retErr) }()
 
 	sxas := []SpectrumXAttachment{}
 
@@ -337,35 +333,27 @@ func (sxasd SpectrumXAttachmentSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 	}
 	if filter.InstanceIDs != nil {
 		query = query.Where("sxa.instance_id IN (?)", bun.In(filter.InstanceIDs))
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "instance_ids", filter.InstanceIDs)
 	}
 	if filter.SiteIDs != nil {
 		query = query.Where("sxa.site_id IN (?)", bun.In(filter.SiteIDs))
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "site_id", filter.SiteIDs)
 	}
 	if filter.SpectrumXPartitionIDs != nil {
 		query = query.Where("sxa.spectrumx_partition_id IN (?)", bun.In(filter.SpectrumXPartitionIDs))
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "spectrumx_partition_id", filter.SpectrumXPartitionIDs)
 	}
 	if filter.Statuses != nil {
 		query = query.Where("sxa.status IN (?)", bun.In(filter.Statuses))
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "status", filter.Statuses)
 	}
 	if filter.Devices != nil {
 		query = query.Where("sxa.device IN (?)", bun.In(filter.Devices))
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "device", filter.Devices)
 	}
 	if filter.AttachmentTypes != nil {
 		query = query.Where("sxa.attachment_type IN (?)", bun.In(filter.AttachmentTypes))
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "attachment_type", filter.AttachmentTypes)
 	}
 	if filter.MacAddresses != nil {
 		query = query.Where("sxa.mac_address IN (?)", bun.In(filter.MacAddresses))
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "mac_address", filter.MacAddresses)
 	}
 	if filter.SpectrumXAttachmentIDs != nil {
 		query = query.Where("sxa.id IN (?)", bun.In(filter.SpectrumXAttachmentIDs))
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "ids", filter.SpectrumXAttachmentIDs)
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -379,7 +367,7 @@ func (sxasd SpectrumXAttachmentSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 				WhereOr("sxa.ip_address ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("sxa.status ILIKE ?", "%"+searchQuery+"%")
 		})
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -405,12 +393,10 @@ func (sxasd SpectrumXAttachmentSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 }
 
 // Create creates a new SpectrumXAttachment from the given parameters
-func (sxasd SpectrumXAttachmentSQLDAO) Create(ctx context.Context, tx *db.Tx, input SpectrumXAttachmentCreateInput) (*SpectrumXAttachment, error) {
+func (sxasd SpectrumXAttachmentSQLDAO) Create(ctx context.Context, tx *db.Tx, input SpectrumXAttachmentCreateInput) (_ *SpectrumXAttachment, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXAttachmentDAOSpan := sxasd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXAttachmentDAO.Create")
-	if SpectrumXAttachmentDAOSpan != nil {
-		defer SpectrumXAttachmentDAOSpan.End()
-	}
+	ctx, SpectrumXAttachmentDAOSpan := cotel.StartSpan(ctx, "SpectrumXAttachmentDAO.Create")
+	defer func() { cotel.EndSpan(SpectrumXAttachmentDAOSpan, retErr) }()
 
 	results, err := sxasd.CreateMultiple(ctx, tx, []SpectrumXAttachmentCreateInput{input})
 	if err != nil {
@@ -420,17 +406,14 @@ func (sxasd SpectrumXAttachmentSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 }
 
 // CreateMultiple creates multiple SpectrumXAttachments from the given parameters
-func (sxasd SpectrumXAttachmentSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []SpectrumXAttachmentCreateInput) ([]SpectrumXAttachment, error) {
+func (sxasd SpectrumXAttachmentSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []SpectrumXAttachmentCreateInput) (_ []SpectrumXAttachment, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
 
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXAttachmentDAOSpan := sxasd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXAttachmentDAO.CreateMultiple")
-	if SpectrumXAttachmentDAOSpan != nil {
-		defer SpectrumXAttachmentDAOSpan.End()
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, SpectrumXAttachmentDAOSpan := cotel.StartSpan(ctx, "SpectrumXAttachmentDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(SpectrumXAttachmentDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []SpectrumXAttachment{}, nil
@@ -498,14 +481,10 @@ func (sxasd SpectrumXAttachmentSQLDAO) CreateMultiple(ctx context.Context, tx *d
 }
 
 // Update updates an existing SpectrumXAttachment from the given parameters
-func (sxasd SpectrumXAttachmentSQLDAO) Update(ctx context.Context, tx *db.Tx, input SpectrumXAttachmentUpdateInput) (*SpectrumXAttachment, error) {
+func (sxasd SpectrumXAttachmentSQLDAO) Update(ctx context.Context, tx *db.Tx, input SpectrumXAttachmentUpdateInput) (_ *SpectrumXAttachment, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXAttachmentDAOSpan := sxasd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXAttachmentDAO.Update")
-	if SpectrumXAttachmentDAOSpan != nil {
-		defer SpectrumXAttachmentDAOSpan.End()
-
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "id", input.SpectrumXAttachmentID)
-	}
+	ctx, SpectrumXAttachmentDAOSpan := cotel.StartSpan(ctx, "SpectrumXAttachmentDAO.Update")
+	defer func() { cotel.EndSpan(SpectrumXAttachmentDAOSpan, retErr) }()
 
 	sxa := &SpectrumXAttachment{
 		ID: input.SpectrumXAttachmentID,
@@ -516,32 +495,29 @@ func (sxasd SpectrumXAttachmentSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 	if input.Device != nil {
 		sxa.Device = *input.Device
 		updatedFields = append(updatedFields, "device")
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "device", *input.Device)
+		cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("device", *input.Device))
 	}
 	if input.DeviceInstance != nil {
 		sxa.DeviceInstance = *input.DeviceInstance
 		updatedFields = append(updatedFields, "device_instance")
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "device_instance", *input.DeviceInstance)
 	}
 	if input.AttachmentType != nil {
 		sxa.AttachmentType = *input.AttachmentType
 		updatedFields = append(updatedFields, "attachment_type")
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "attachment_type", *input.AttachmentType)
 	}
 	if input.VirtualFunctionID != nil {
 		sxa.VirtualFunctionID = input.VirtualFunctionID
 		updatedFields = append(updatedFields, "virtual_function_id")
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "virtual_function_id", *input.VirtualFunctionID)
 	}
 	if input.MacAddress != nil {
 		sxa.MacAddress = input.MacAddress
 		updatedFields = append(updatedFields, "mac_address")
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "mac_address", *input.MacAddress)
+		cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("mac_address", *input.MacAddress))
 	}
 	if input.IPAddress != nil {
 		sxa.IPAddress = input.IPAddress
 		updatedFields = append(updatedFields, "ip_address")
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "ip_address", *input.IPAddress)
+		cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("ip_address", *input.IPAddress))
 	}
 	if input.Status != nil {
 		if !SpectrumXAttachmentStatusMap[*input.Status] {
@@ -549,12 +525,11 @@ func (sxasd SpectrumXAttachmentSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 		}
 		sxa.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("status", *input.Status))
 	}
 	if input.IsMissingOnSite != nil {
 		sxa.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
 	}
 
 	if len(updatedFields) > 0 {
@@ -574,14 +549,10 @@ func (sxasd SpectrumXAttachmentSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 }
 
 // Clear clears SpectrumXAttachment attributes based on provided arguments
-func (sxasd SpectrumXAttachmentSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SpectrumXAttachmentClearInput) (*SpectrumXAttachment, error) {
+func (sxasd SpectrumXAttachmentSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SpectrumXAttachmentClearInput) (_ *SpectrumXAttachment, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXAttachmentDAOSpan := sxasd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXAttachmentDAO.Clear")
-	if SpectrumXAttachmentDAOSpan != nil {
-		defer SpectrumXAttachmentDAOSpan.End()
-
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "id", input.SpectrumXAttachmentID)
-	}
+	ctx, SpectrumXAttachmentDAOSpan := cotel.StartSpan(ctx, "SpectrumXAttachmentDAO.Clear")
+	defer func() { cotel.EndSpan(SpectrumXAttachmentDAOSpan, retErr) }()
 
 	sxa := &SpectrumXAttachment{
 		ID: input.SpectrumXAttachmentID,
@@ -629,14 +600,11 @@ func (sxasd SpectrumXAttachmentSQLDAO) Clear(ctx context.Context, tx *db.Tx, inp
 }
 
 // Delete deletes a SpectrumXAttachment by ID
-func (sxasd SpectrumXAttachmentSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (sxasd SpectrumXAttachmentSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, SpectrumXAttachmentDAOSpan := sxasd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXAttachmentDAO.Delete")
-	if SpectrumXAttachmentDAOSpan != nil {
-		defer SpectrumXAttachmentDAOSpan.End()
-
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "id", id.String())
-	}
+	ctx, SpectrumXAttachmentDAOSpan := cotel.StartSpan(ctx, "SpectrumXAttachmentDAO.Delete")
+	defer func() { cotel.EndSpan(SpectrumXAttachmentDAOSpan, retErr) }()
+	cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("id", id.String()))
 
 	sxa := &SpectrumXAttachment{
 		ID: id,
@@ -652,13 +620,10 @@ func (sxasd SpectrumXAttachmentSQLDAO) Delete(ctx context.Context, tx *db.Tx, id
 
 // DeleteAllBySiteID deletes all SpectrumXAttachment records for a given Site
 // error is returned only if there is a db error
-func (sxasd SpectrumXAttachmentSQLDAO) DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) error {
-	ctx, SpectrumXAttachmentDAOSpan := sxasd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXAttachmentDAO.DeleteAllBySiteID")
-	if SpectrumXAttachmentDAOSpan != nil {
-		defer SpectrumXAttachmentDAOSpan.End()
-
-		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "site_id", siteID.String())
-	}
+func (sxasd SpectrumXAttachmentSQLDAO) DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) (retErr error) {
+	ctx, SpectrumXAttachmentDAOSpan := cotel.StartSpan(ctx, "SpectrumXAttachmentDAO.DeleteAllBySiteID")
+	defer func() { cotel.EndSpan(SpectrumXAttachmentDAOSpan, retErr) }()
+	cotel.SetAttribute(SpectrumXAttachmentDAOSpan, attribute.String("site_id", siteID.String()))
 
 	sxa := &SpectrumXAttachment{
 		SiteID: siteID,
@@ -672,7 +637,6 @@ func (sxasd SpectrumXAttachmentSQLDAO) DeleteAllBySiteID(ctx context.Context, tx
 // NewSpectrumXAttachmentDAO returns a new SpectrumXAttachmentDAO
 func NewSpectrumXAttachmentDAO(dbSession *db.Session) SpectrumXAttachmentDAO {
 	return &SpectrumXAttachmentSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

@@ -10,41 +10,41 @@ import (
 	"math"
 	"net/http"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"go.opentelemetry.io/otel/attribute"
+	tclient "go.temporal.io/sdk/client"
+
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
-	validation "github.com/go-ozzo/ozzo-validation/v4"
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
-	"go.opentelemetry.io/otel/attribute"
-	tclient "go.temporal.io/sdk/client"
 )
 
 // ~~~~~ Create Handler ~~~~~ //
 
 // CreateExpectedRackHandler is the API Handler for creating a new ExpectedRack
 type CreateExpectedRackHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateExpectedRackHandler initializes and returns a new handler for creating ExpectedRack
 func NewCreateExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) CreateExpectedRackHandler {
 	return CreateExpectedRackHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -60,7 +60,7 @@ func NewCreateExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cf
 // @Success 201 {object} model.APIExpectedRack
 // @Router /v2/org/{org}/expected-rack [post]
 func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Create", c, cerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -87,7 +87,7 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 	}
 
 	logger = logger.With().Str("RackID", apiRequest.RackID).Logger()
-	cerh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", apiRequest.RackID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", apiRequest.RackID))
 
 	// Retrieve the Site from the DB
 	site, err := common.GetSiteFromIDString(ctx, nil, apiRequest.SiteID, cerh.dbSession)
@@ -206,17 +206,15 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 
 // GetAllExpectedRackHandler is the API Handler for getting all ExpectedRacks
 type GetAllExpectedRackHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetAllExpectedRackHandler initializes and returns a new handler for getting all ExpectedRacks
 func NewGetAllExpectedRackHandler(dbSession *cdb.Session, cfg *config.Config) GetAllExpectedRackHandler {
 	return GetAllExpectedRackHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -236,7 +234,7 @@ func NewGetAllExpectedRackHandler(dbSession *cdb.Session, cfg *config.Config) Ge
 // @Success 200 {object} []model.APIExpectedRack
 // @Router /v2/org/{org}/expected-rack [get]
 func (gaerh GetAllExpectedRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "GetAll", c, gaerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -373,17 +371,15 @@ func (gaerh GetAllExpectedRackHandler) Handle(c echo.Context) error {
 
 // GetExpectedRackHandler is the API Handler for retrieving an ExpectedRack
 type GetExpectedRackHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetExpectedRackHandler initializes and returns a new handler to retrieve ExpectedRack
 func NewGetExpectedRackHandler(dbSession *cdb.Session, cfg *config.Config) GetExpectedRackHandler {
 	return GetExpectedRackHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -400,7 +396,7 @@ func NewGetExpectedRackHandler(dbSession *cdb.Session, cfg *config.Config) GetEx
 // @Success 200 {object} model.APIExpectedRack
 // @Router /v2/org/{org}/expected-rack/{id} [get]
 func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Get", c, gerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -417,7 +413,7 @@ func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {
 	}
 
 	logger = logger.With().Str("ExpectedRackID", expectedRackID.String()).Logger()
-	gerh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()))
 
 	// Get and validate includeRelation params
 	qParams := c.QueryParams()
@@ -476,19 +472,17 @@ func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {
 
 // UpdateExpectedRackHandler is the API Handler for updating an ExpectedRack
 type UpdateExpectedRackHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateExpectedRackHandler initializes and returns a new handler for updating ExpectedRack
 func NewUpdateExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) UpdateExpectedRackHandler {
 	return UpdateExpectedRackHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -505,7 +499,7 @@ func NewUpdateExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cf
 // @Success 200 {object} model.APIExpectedRack
 // @Router /v2/org/{org}/expected-rack/{id} [patch]
 func (uerh UpdateExpectedRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Update", c, uerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -522,7 +516,7 @@ func (uerh UpdateExpectedRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Expected Rack ID in URL", nil)
 	}
 	logger = logger.With().Str("ExpectedRackID", expectedRackID.String()).Logger()
-	uerh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()))
 
 	// Validate request
 	// Bind request data to API model
@@ -661,19 +655,17 @@ func (uerh UpdateExpectedRackHandler) Handle(c echo.Context) error {
 
 // DeleteExpectedRackHandler is the API Handler for deleting an ExpectedRack
 type DeleteExpectedRackHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteExpectedRackHandler initializes and returns a new handler for deleting ExpectedRack
 func NewDeleteExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteExpectedRackHandler {
 	return DeleteExpectedRackHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -689,7 +681,7 @@ func NewDeleteExpectedRackHandler(dbSession *cdb.Session, scp *sc.ClientPool, cf
 // @Success 204
 // @Router /v2/org/{org}/expected-rack/{id} [delete]
 func (derh DeleteExpectedRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Delete", c, derh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -705,7 +697,7 @@ func (derh DeleteExpectedRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Expected Rack ID in URL", nil)
 	}
 	logger = logger.With().Str("ExpectedRackID", expectedRackID.String()).Logger()
-	derh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_rack_id", expectedRackID.String()))
 
 	// Get ExpectedRack from DB by ID, including Site relation
 	erDAO := cdbm.NewExpectedRackDAO(derh.dbSession)
@@ -789,19 +781,17 @@ func (derh DeleteExpectedRackHandler) Handle(c echo.Context) error {
 // ReplaceAllExpectedRacksHandler is the API Handler for replacing the full
 // set of ExpectedRacks for a given Site with a provided list.
 type ReplaceAllExpectedRacksHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewReplaceAllExpectedRacksHandler initializes and returns a new handler for replacing all ExpectedRacks on a Site
 func NewReplaceAllExpectedRacksHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) ReplaceAllExpectedRacksHandler {
 	return ReplaceAllExpectedRacksHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -817,7 +807,7 @@ func NewReplaceAllExpectedRacksHandler(dbSession *cdb.Session, scp *sc.ClientPoo
 // @Success 200 {object} []model.APIExpectedRack
 // @Router /v2/org/{org}/expected-rack [put]
 func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "ReplaceAll", c, raerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "ReplaceAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -842,8 +832,8 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 	}
 
 	logger = logger.With().Str("SiteID", apiRequest.SiteID).Int("RackCount", len(apiRequest.ExpectedRacks)).Logger()
-	raerh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", apiRequest.SiteID), logger)
-	raerh.tracerSpan.SetAttribute(handlerSpan, attribute.Int("rack_count", len(apiRequest.ExpectedRacks)), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", apiRequest.SiteID))
+	cotel.SetAttribute(handlerSpan, attribute.Int("rack_count", len(apiRequest.ExpectedRacks)))
 
 	// Retrieve the Site
 	site, err := common.GetSiteFromIDString(ctx, nil, apiRequest.SiteID, raerh.dbSession)
@@ -954,19 +944,17 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 // DeleteAllExpectedRacksHandler is the API Handler for deleting all ExpectedRacks
 // scoped to a specific Site (siteId query parameter).
 type DeleteAllExpectedRacksHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteAllExpectedRacksHandler initializes and returns a new handler for deleting all ExpectedRacks for a Site
 func NewDeleteAllExpectedRacksHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteAllExpectedRacksHandler {
 	return DeleteAllExpectedRacksHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -982,7 +970,7 @@ func NewDeleteAllExpectedRacksHandler(dbSession *cdb.Session, scp *sc.ClientPool
 // @Success 204
 // @Router /v2/org/{org}/expected-rack/all [delete]
 func (daerh DeleteAllExpectedRacksHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "DeleteAll", c, daerh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedRack", "DeleteAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1002,7 +990,7 @@ func (daerh DeleteAllExpectedRacksHandler) Handle(c echo.Context) error {
 	}
 
 	logger = logger.With().Str("SiteID", siteIDStr).Logger()
-	daerh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", siteIDStr), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", siteIDStr))
 
 	// Retrieve the Site
 	site, err := common.GetSiteFromIDString(ctx, nil, siteIDStr, daerh.dbSession)

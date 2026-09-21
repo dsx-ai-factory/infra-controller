@@ -23,6 +23,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -106,21 +107,19 @@ func prepareTaskRuleHandler(
 
 // CreateTaskRuleHandler is the API Handler for creating a new Operation Rule.
 type CreateTaskRuleHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateTaskRuleHandler initializes and returns a new handler for creating a Rule.
 func NewCreateTaskRuleHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateTaskRuleHandler {
 	return CreateTaskRuleHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -136,7 +135,7 @@ func NewCreateTaskRuleHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc
 // @Success 201 {object} model.APITaskRule
 // @Router /v2/org/{org}/nico/task/rule [post]
 func (h CreateTaskRuleHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRule", "Create", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRule", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -192,21 +191,19 @@ func (h CreateTaskRuleHandler) Handle(c echo.Context) error {
 
 // GetTaskRuleHandler is the API Handler for getting an Operation Rule by ID.
 type GetTaskRuleHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetTaskRuleHandler initializes and returns a new handler for getting a Rule.
 func NewGetTaskRuleHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetTaskRuleHandler {
 	return GetTaskRuleHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -223,13 +220,13 @@ func NewGetTaskRuleHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cl
 // @Success 200 {object} model.APITaskRule
 // @Router /v2/org/{org}/nico/task/rule/{id} [get]
 func (h GetTaskRuleHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRule", "Get", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRule", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
 
 	ruleID := c.Param("id")
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("rule_id", ruleID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rule_id", ruleID))
 	if _, err := uuid.Parse(ruleID); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Rule ID specified in URL", nil)
 	}
@@ -283,21 +280,19 @@ func (h GetTaskRuleHandler) Handle(c echo.Context) error {
 
 // GetAllTaskRuleHandler is the API Handler for listing Operation Rules.
 type GetAllTaskRuleHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllTaskRuleHandler initializes a new GetAllTaskRuleHandler.
 func NewGetAllTaskRuleHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllTaskRuleHandler {
 	return GetAllTaskRuleHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -316,7 +311,7 @@ func NewGetAllTaskRuleHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc
 // @Success 200 {array} model.APITaskRule
 // @Router /v2/org/{org}/nico/task/rule [get]
 func (h GetAllTaskRuleHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRule", "List", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRule", "List", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -391,21 +386,19 @@ func (h GetAllTaskRuleHandler) Handle(c echo.Context) error {
 
 // UpdateTaskRuleHandler is the API Handler for updating an Operation Rule.
 type UpdateTaskRuleHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateTaskRuleHandler initializes a new UpdateTaskRuleHandler.
 func NewUpdateTaskRuleHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateTaskRuleHandler {
 	return UpdateTaskRuleHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -422,13 +415,13 @@ func NewUpdateTaskRuleHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc
 // @Success 204 "No Content"
 // @Router /v2/org/{org}/nico/task/rule/{id} [patch]
 func (h UpdateTaskRuleHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRule", "Update", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRule", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
 
 	ruleID := c.Param("id")
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("rule_id", ruleID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rule_id", ruleID))
 	if _, err := uuid.Parse(ruleID); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Rule ID specified in URL", nil)
 	}
@@ -478,21 +471,19 @@ func (h UpdateTaskRuleHandler) Handle(c echo.Context) error {
 // this handler surfaces the Flow error verbatim via UnwrapWorkflowError so the
 // client gets a meaningful 4xx.
 type DeleteTaskRuleHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteTaskRuleHandler initializes a new DeleteTaskRuleHandler.
 func NewDeleteTaskRuleHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteTaskRuleHandler {
 	return DeleteTaskRuleHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -509,13 +500,13 @@ func NewDeleteTaskRuleHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc
 // @Success 204 "No Content"
 // @Router /v2/org/{org}/nico/task/rule/{id} [delete]
 func (h DeleteTaskRuleHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRule", "Delete", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRule", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
 
 	ruleID := c.Param("id")
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("rule_id", ruleID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rule_id", ruleID))
 	if _, err := uuid.Parse(ruleID); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Rule ID specified in URL", nil)
 	}
