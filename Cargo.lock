@@ -3457,6 +3457,7 @@ dependencies = [
 name = "carbide-utils"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "byte-unit",
  "carbide-instrument",
  "carbide-network",

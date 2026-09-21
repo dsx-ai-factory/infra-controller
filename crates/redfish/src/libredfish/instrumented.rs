@@ -78,20 +78,25 @@ pub(super) const REDFISH_BACKEND: &str = "redfish";
 pub(super) struct InstrumentedRedfish {
     inner: Box<dyn Redfish>,
     /// Retained only to scrub an untrusted BMC response before it is logged or returned.
-    authentication_password: Option<String>,
+    authentication_sensitive_values: Vec<String>,
 }
 
 impl InstrumentedRedfish {
-    pub(super) fn new(inner: Box<dyn Redfish>, authentication_password: Option<String>) -> Self {
+    pub(super) fn new(
+        inner: Box<dyn Redfish>,
+        authentication_sensitive_values: Vec<String>,
+    ) -> Self {
         Self {
             inner,
-            authentication_password: authentication_password
-                .filter(|password| !password.is_empty()),
+            authentication_sensitive_values: authentication_sensitive_values
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .collect(),
         }
     }
 
     /// Times a single Redfish call on the shared RED instrument. The client's
-    /// authentication password and any password arguments belonging to this
+    /// authentication secrets and any password arguments belonging to this
     /// operation are union-redacted before an error is logged or returned.
     async fn instrumented_redfish<'a, T, const N: usize>(
         &'a self,
@@ -102,9 +107,9 @@ impl InstrumentedRedfish {
         instrumented_redfish_call(
             operation,
             true,
-            self.authentication_password
-                .as_deref()
-                .into_iter()
+            self.authentication_sensitive_values
+                .iter()
+                .map(String::as_str)
                 .chain(additional_sensitive_values),
             call,
         )
@@ -114,9 +119,9 @@ impl InstrumentedRedfish {
 
 /// Instruments client creation without changing its existing outcome contract:
 /// every initialization error remains an `error`, including `NotSupported`.
-pub(super) async fn instrumented_redfish_initialization<T, const N: usize>(
+pub(super) async fn instrumented_redfish_initialization<'a, T>(
     operation: &'static str,
-    sensitive_values: [&str; N],
+    sensitive_values: impl IntoIterator<Item = &'a str>,
     call: impl Future<Output = Result<T, RedfishError>>,
 ) -> Result<T, RedfishError> {
     instrumented_redfish_call(operation, false, sensitive_values, call).await
@@ -135,8 +140,14 @@ async fn instrumented_redfish_call<'a, T>(
         .into_iter()
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
+
+    // Measure only the external future. Sanitization and diagnostic logging
+    // are local work and must not inflate the outbound-call latency metric.
     let started = Instant::now();
     let result = call.await;
+    let external_duration = started.elapsed();
+
+    // Scrub untrusted response text before either logging or returning it.
     let result = if sensitive_values.is_empty() {
         result
     } else {
@@ -153,7 +164,7 @@ async fn instrumented_redfish_call<'a, T>(
         REDFISH_BACKEND,
         operation,
         outcome,
-        started.elapsed().as_secs_f64() * 1_000.0,
+        external_duration.as_secs_f64() * 1_000.0,
     );
     if let Err(error) = &result
         && !is_expected_not_supported
@@ -470,6 +481,7 @@ impl Redfish for InstrumentedRedfish {
 mod tests {
     use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture};
     use carbide_secrets::credentials::{CredentialKey, CredentialType};
+    use carbide_utils::redfish::redfish_basic_authorization_value;
 
     use super::*;
     use crate::libredfish::test_support::RedfishSim;
@@ -487,7 +499,7 @@ mod tests {
             )
             .await
             .expect("sim client");
-        InstrumentedRedfish::new(client, None)
+        InstrumentedRedfish::new(client, Vec::new())
     }
 
     #[tokio::test]
@@ -549,7 +561,7 @@ mod tests {
             .expect("current-thread runtime");
         let mut result = None;
         let logs = carbide_instrument::testing::capture_logs(|| {
-            result = Some(rt.block_on(instrumented_redfish_initialization::<(), 1>(
+            result = Some(rt.block_on(instrumented_redfish_initialization::<()>(
                 "create_client",
                 ["secret"],
                 std::future::ready(Err(RedfishError::HTTPErrorCode {
@@ -665,8 +677,12 @@ mod tests {
         );
     }
 
+    /// Verifies ordinary client failures remove both plaintext and derived
+    /// Basic authentication values before the error crosses the client boundary.
     #[test]
-    fn ordinary_failure_redacts_authentication_password_before_logging_and_returning() {
+    fn ordinary_failure_redacts_authentication_secrets_before_logging_and_returning() {
+        // Build a decorated client with the same redaction context retained by
+        // the production pool for direct Basic authentication.
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("current-thread runtime");
@@ -679,7 +695,13 @@ mod tests {
                 None,
             ))
             .expect("sim client");
-        let client = InstrumentedRedfish::new(inner, Some("secret".to_string()));
+        let basic_authorization = redfish_basic_authorization_value("root", Some("secret"));
+        let client = InstrumentedRedfish::new(
+            inner,
+            vec!["secret".to_string(), basic_authorization.clone()],
+        );
+
+        // Return an untrusted BMC body that echoes both credential forms.
         let mut result: Option<Result<(), RedfishError>> = None;
         let logs = carbide_instrument::testing::capture_logs(|| {
             result = Some(rt.block_on(client.instrumented_redfish(
@@ -688,12 +710,14 @@ mod tests {
                 std::future::ready(Err(RedfishError::HTTPErrorCode {
                     url: "https://bmc.example/redfish/v1/Systems/1".to_string(),
                     status_code: http::StatusCode::INTERNAL_SERVER_ERROR,
-                    response_body:
-                        r#"{"error":{"message":"credential s\u0065cret rejected"}}"#.to_string(),
+                    response_body: format!(
+                        r#"{{"error":{{"message":"credential s\u0065cret or {basic_authorization} rejected"}}}}"#,
+                    ),
                 })),
             )));
         });
 
+        // The returned error and emitted diagnostic must expose neither form.
         let error = result
             .expect("captured result")
             .expect_err("the simulated HTTP failure remains an error");
@@ -702,11 +726,17 @@ mod tests {
         };
         let response: serde_json::Value =
             serde_json::from_str(&response_body).expect("redacted body remains valid JSON");
-        assert_eq!(response["error"]["message"], "credential REDACTED rejected");
+        assert_eq!(
+            response["error"]["message"],
+            "credential REDACTED or REDACTED rejected"
+        );
 
         let log = logs.first().expect("one ordinary failure log");
         assert_eq!(logs.len(), 1);
         assert_eq!(log.field("operation"), Some("get_system"));
-        assert_eq!(log.field("error"), Some("credential REDACTED rejected"));
+        assert_eq!(
+            log.field("error"),
+            Some("credential REDACTED or REDACTED rejected")
+        );
     }
 }

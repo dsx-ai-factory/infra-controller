@@ -17,12 +17,27 @@
 
 use std::net::IpAddr;
 
+use base64::Engine as _;
 use mac_address::MacAddress;
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
 const REDFISH_ERROR_MESSAGE_LIMIT: usize = 1024;
 const REDACTED: &str = "REDACTED";
 const UNRECOGNIZED_REDFISH_ERROR_RESPONSE: &str = "<unrecognized Redfish error response>";
+
+/// Builds the exact HTTP Basic authorization value emitted for Redfish credentials.
+///
+/// Redfish error sanitizers retain this derived wire value because a BMC can
+/// echo the complete `Authorization` header without repeating the plaintext
+/// password. The encoding intentionally matches `reqwest::RequestBuilder::basic_auth`.
+pub fn redfish_basic_authorization_value(username: &str, password: Option<&str>) -> String {
+    // RFC 7617 encodes the UTF-8 username, a colon, and the optional password.
+    let credentials = format!("{username}:{}", password.unwrap_or_default());
+    let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+
+    // Retain the authentication scheme because the full header is the wire secret.
+    format!("Basic {encoded}")
+}
 
 /// Logs the diagnostic fields shared by HTTP failures from both Redfish clients.
 ///
@@ -460,6 +475,20 @@ mod tests {
     use carbide_test_support::{Check, check_values, value_scenarios};
 
     use super::*;
+
+    /// Verifies the shared helper matches reqwest's HTTP Basic wire format so
+    /// every Redfish layer redacts the exact authorization value it emits.
+    #[test]
+    fn redfish_basic_authorization_value_matches_the_wire_format() {
+        // Exercise both a normal password and the empty-password form that
+        // reqwest represents by retaining the separator after the username.
+        let with_password = redfish_basic_authorization_value("admin", Some("secret"));
+        let without_password = redfish_basic_authorization_value("admin", None);
+
+        // These fixed RFC 4648 encodings protect compatibility with reqwest.
+        assert_eq!(with_password, "Basic YWRtaW46c2VjcmV0");
+        assert_eq!(without_password, "Basic YWRtaW46");
+    }
 
     #[test]
     fn redfish_error_message_uses_dmtf_fallbacks_without_message_arguments() {

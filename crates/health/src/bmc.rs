@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use carbide_utils::redfish::{
     format_forwarded_host_parameter, log_redfish_http_error, redact_redfish_response_body,
+    redfish_basic_authorization_value,
 };
 use carbide_uuid::rack::RackId;
 use futures::TryStreamExt;
@@ -916,25 +917,35 @@ fn redact_request_credential<T>(
     result: Result<T, BmcError>,
     credentials: &NvBmcCredentials,
 ) -> Result<T, BmcError> {
-    let sensitive_value = match credentials {
-        NvBmcCredentials::UsernamePassword {
-            password: Some(password),
-            ..
-        } => Some(password.as_str()),
-        NvBmcCredentials::Token { token } => Some(token.as_str()),
-        NvBmcCredentials::UsernamePassword { password: None, .. } => None,
+    // Retain both the plaintext password and the exact Basic value generated
+    // inside nv-redfish; tokens are already sent verbatim.
+    let mut sensitive_values = Vec::with_capacity(2);
+    match credentials {
+        NvBmcCredentials::UsernamePassword { username, password } => {
+            if let Some(password) = password.as_deref().filter(|password| !password.is_empty()) {
+                sensitive_values.push(password.to_string());
+            }
+            sensitive_values.push(redfish_basic_authorization_value(
+                username,
+                password.as_deref(),
+            ));
+        }
+        NvBmcCredentials::Token { token } if !token.is_empty() => {
+            sensitive_values.push(token.clone());
+        }
+        NvBmcCredentials::Token { .. } => {}
     }
-    .filter(|value| !value.is_empty());
 
-    let Some(sensitive_value) = sensitive_value else {
+    if sensitive_values.is_empty() {
         return result;
-    };
+    }
 
+    // Sanitize only response-bearing failures; transport errors contain no BMC body.
     result.map_err(|error| match error {
         BmcError::InvalidResponse { url, status, text } => BmcError::InvalidResponse {
             url,
             status,
-            text: redact_redfish_response_body(&text, [sensitive_value]),
+            text: redact_redfish_response_body(&text, sensitive_values.iter().map(String::as_str)),
         },
         error => error,
     })
@@ -1007,15 +1018,18 @@ impl HttpClient for InstrumentedHttpClient {
     where
         T: DeserializeOwned + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
-        let result = redact_request_credential(
-            self.inner
-                .get::<T>(url, credentials, etag, custom_headers)
-                .await,
-            credentials,
-        );
-        self.observe_result("GET", &request_url, &result, "200", started.elapsed());
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
+        let result = self
+            .inner
+            .get::<T>(url, credentials, etag, custom_headers)
+            .await;
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
+        self.observe_result("GET", &request_url, &result, "200", external_duration);
         result
     }
 
@@ -1030,21 +1044,24 @@ impl HttpClient for InstrumentedHttpClient {
         B: Serialize + Send + Sync,
         T: DeserializeOwned + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
         let entity_status_code = post_entity_status_code(&request_url);
-        let result = redact_request_credential(
-            self.inner
-                .post::<B, T>(url, body, credentials, custom_headers)
-                .await,
-            credentials,
-        );
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
+        let result = self
+            .inner
+            .post::<B, T>(url, body, credentials, custom_headers)
+            .await;
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
         self.observe_modification_result(
             "POST",
             &request_url,
             &result,
             entity_status_code,
-            started.elapsed(),
+            external_duration,
         );
         result
     }
@@ -1059,15 +1076,18 @@ impl HttpClient for InstrumentedHttpClient {
         B: Serialize + Send + Sync,
         T: DeserializeOwned + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
-        let result = redact_session_request_values(
-            self.inner
-                .post_session::<B, T>(url, body, custom_headers)
-                .await,
-            body,
-        );
-        self.observe_result("POST", &request_url, &result, "201", started.elapsed());
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
+        let result = self
+            .inner
+            .post_session::<B, T>(url, body, custom_headers)
+            .await;
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_session_request_values(result, body);
+        self.observe_result("POST", &request_url, &result, "201", external_duration);
         result
     }
 
@@ -1083,15 +1103,18 @@ impl HttpClient for InstrumentedHttpClient {
         T: DeserializeOwned + Send + Sync,
         V: Serialize + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
-        let result = redact_request_credential(
-            self.inner
-                .post_multipart_update::<U, V, T>(url, request, credentials, custom_headers)
-                .await,
-            credentials,
-        );
-        self.observe_modification_result("POST", &request_url, &result, "200", started.elapsed());
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
+        let result = self
+            .inner
+            .post_multipart_update::<U, V, T>(url, request, credentials, custom_headers)
+            .await;
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
+        self.observe_modification_result("POST", &request_url, &result, "200", external_duration);
         result
     }
 
@@ -1107,15 +1130,18 @@ impl HttpClient for InstrumentedHttpClient {
         B: Serialize + Send + Sync,
         T: DeserializeOwned + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
-        let result = redact_request_credential(
-            self.inner
-                .patch::<B, T>(url, etag, body, credentials, custom_headers)
-                .await,
-            credentials,
-        );
-        self.observe_modification_result("PATCH", &request_url, &result, "200", started.elapsed());
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
+        let result = self
+            .inner
+            .patch::<B, T>(url, etag, body, credentials, custom_headers)
+            .await;
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
+        self.observe_modification_result("PATCH", &request_url, &result, "200", external_duration);
         result
     }
 
@@ -1128,15 +1154,18 @@ impl HttpClient for InstrumentedHttpClient {
     where
         T: DeserializeOwned + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
-        let result = redact_request_credential(
-            self.inner
-                .delete::<T>(url, credentials, custom_headers)
-                .await,
-            credentials,
-        );
-        self.observe_modification_result("DELETE", &request_url, &result, "200", started.elapsed());
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
+        let result = self
+            .inner
+            .delete::<T>(url, credentials, custom_headers)
+            .await;
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
+        self.observe_modification_result("DELETE", &request_url, &result, "200", external_duration);
         result
     }
 
@@ -1146,13 +1175,15 @@ impl HttpClient for InstrumentedHttpClient {
         credentials: &nv_redfish::bmc_http::BmcCredentials,
         custom_headers: &HeaderMap,
     ) -> Result<BoxTryStream<T, Self::Error>, Self::Error> {
-        let started = Instant::now();
         let request_url = url.clone();
-        let result = redact_request_credential(
-            self.inner.sse::<T>(url, credentials, custom_headers).await,
-            credentials,
-        );
-        self.observe_result("GET", &request_url, &result, "200", started.elapsed());
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
+        let result = self.inner.sse::<T>(url, credentials, custom_headers).await;
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
+        self.observe_result("GET", &request_url, &result, "200", external_duration);
         result
     }
 }
@@ -1724,26 +1755,33 @@ mod tests {
         }
     }
 
+    /// Verifies the health client's final diagnostic removes both plaintext
+    /// and derived Basic credentials before the failure reaches shared logging.
     #[test]
     fn final_http_failure_logs_request_redacted_context() {
+        // Build a representative error that echoes both credential forms used
+        // by one exact nv-redfish request.
         let client = test_client();
-        let credentials = NvBmcCredentials::token("secret".to_string());
+        let basic_authorization = redfish_basic_authorization_value("root", Some("secret"));
+        let credentials = NvBmcCredentials::new("root".to_string(), "secret".to_string());
         let error = redact_request_credential::<()>(
             Err(BmcError::InvalidResponse {
                 url: Url::parse("https://127.0.0.1/redfish/v1/Systems/1").expect("valid test URL"),
                 status: http::StatusCode::INTERNAL_SERVER_ERROR,
-                text: r#"{
-                    "error": {
-                        "@Message.ExtendedInfo": [{"Message": "s\u0065cret rejected"}]
-                    }
-                }"#
-                .to_string(),
+                text: format!(
+                    r#"{{
+                    "error": {{
+                        "@Message.ExtendedInfo": [{{"Message": "s\u0065cret or {basic_authorization} rejected"}}]
+                    }}
+                }}"#,
+                ),
             }),
             &credentials,
         )
         .expect_err("HTTP failure remains an error after request-boundary redaction");
         let error = HealthError::from(error);
 
+        // Run the ordinary finalization path that emits the operator diagnostic.
         let (result, logs) = {
             let mut result = None;
             let logs = capture_logs(|| {
@@ -1752,6 +1790,7 @@ mod tests {
             (result.expect("captured result"), logs)
         };
 
+        // The operation still fails, but its log contains no reusable credential form.
         assert!(result.is_err(), "the original failure must still propagate");
         let log = logs.first().expect("one final Redfish failure log");
         assert_eq!(logs.len(), 1);
@@ -1763,7 +1802,7 @@ mod tests {
         );
         assert_eq!(log.field("http_status"), Some("500"));
         assert_eq!(log.field_kind("http_status"), Some(CapturedFieldKind::U64));
-        assert_eq!(log.field("error"), Some("REDACTED rejected"));
+        assert_eq!(log.field("error"), Some("REDACTED or REDACTED rejected"));
     }
 
     #[tokio::test]

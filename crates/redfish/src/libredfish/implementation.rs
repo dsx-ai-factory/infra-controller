@@ -24,7 +24,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use carbide_secrets::credentials::{CredentialReader, Credentials};
 use carbide_utils::HostPortPair;
-use carbide_utils::redfish::format_forwarded_host_parameter;
+use carbide_utils::redfish::{format_forwarded_host_parameter, redfish_basic_authorization_value};
 use libredfish::model::service_root::RedfishVendor;
 use libredfish::{Endpoint, Redfish};
 
@@ -110,10 +110,18 @@ impl RedfishClientPool for RedfishClientPoolImpl {
                 (username, password)
             }
         };
-        // Keep the authentication password only as redaction context after the
-        // credentials move into libredfish's endpoint. Both initialization and
-        // later operation failures can contain untrusted BMC response text.
-        let authentication_password = password.clone().filter(|password| !password.is_empty());
+        // Keep every secret representation libredfish places on the wire as
+        // redaction context for initialization and later operation failures.
+        let mut authentication_sensitive_values = Vec::with_capacity(2);
+        if let Some(password) = password.as_deref().filter(|password| !password.is_empty()) {
+            authentication_sensitive_values.push(password.to_string());
+        }
+        if let Some(username) = username.as_deref() {
+            authentication_sensitive_values.push(redfish_basic_authorization_value(
+                username,
+                password.as_deref(),
+            ));
+        }
 
         let endpoint = Endpoint {
             host: libredfish_endpoint_host(host).into_owned(),
@@ -143,7 +151,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
             // Auto-detect vendor from the service root.
             None => instrumented_redfish_initialization(
                 "create_client",
-                [authentication_password.as_deref().unwrap_or_default()],
+                authentication_sensitive_values.iter().map(String::as_str),
                 self.pool
                     .create_client_with_custom_headers(endpoint, custom_headers),
             )
@@ -164,7 +172,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
             // Use the provided vendor directly.
             Some(vendor) => instrumented_redfish_initialization(
                 "create_client",
-                [authentication_password.as_deref().unwrap_or_default()],
+                authentication_sensitive_values.iter().map(String::as_str),
                 self.pool
                     .create_client_with_vendor(endpoint, vendor, custom_headers),
             )
@@ -176,7 +184,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
         // call records the per-operation RED triad no matter the call site.
         Ok(Box::new(InstrumentedRedfish::new(
             client,
-            authentication_password,
+            authentication_sensitive_values,
         )))
     }
 
@@ -298,7 +306,7 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
             .map_err(RedfishClientCreationError::RedfishError)?,
         };
 
-        Ok(Box::new(InstrumentedRedfish::new(client, None)))
+        Ok(Box::new(InstrumentedRedfish::new(client, Vec::new())))
     }
 
     fn credential_reader(&self) -> &dyn CredentialReader {

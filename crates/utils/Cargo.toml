@@ -38,6 +38,7 @@ test-support = [
 carbide-instrument = { path = "../instrument" }
 carbide-network = { path = "../network" }
 
+base64 = { workspace = true }
 byte-unit = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
