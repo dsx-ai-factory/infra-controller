@@ -86,3 +86,16 @@ issuerRef:
   group: {{ .global.certificate.issuerRef.group }}
 secretName: {{ .name }}
 {{- end -}}
+
+{{/*
+Data encryption key settings, nil-safe for releases whose reused values predate
+the dataEncryption block (chart 0.1.0).
+*/}}
+{{- define "nico-flow.dataEncryptionExistingSecret" -}}
+{{- $key := default dict (get (default dict .Values.dataEncryption) "key") -}}
+{{- trim (default "" (get $key "existingSecret")) -}}
+{{- end -}}
+{{- define "nico-flow.dataEncryptionKeyValue" -}}
+{{- $key := default dict (get (default dict .Values.dataEncryption) "key") -}}
+{{- trim (default "" (get $key "value")) -}}
+{{- end -}}
