@@ -53,9 +53,8 @@ type RackComponent struct {
 	// Flow-derived operability phase of the component
 	OperationStatus *string `json:"operationStatus,omitempty"`
 	// Whether the component is considered leaking coolant
-	LeakStatus *string `json:"leakStatus,omitempty"`
-	// Flow's leakage-handling status for the component. Unknown means Flow could not determine the status; None means no supported handling task exists; ShuttingDown means a forced-shutdown task is waiting, pending, or running; Down means it completed; and Failed means the latest supported handling task failed or was terminated. Down describes handling progress, not the component's current power state.
-	LeakHandlingStatus *string `json:"leakHandlingStatus,omitempty"`
+	LeakStatus         *string             `json:"leakStatus,omitempty"`
+	LeakHandlingStatus *LeakHandlingStatus `json:"leakHandlingStatus,omitempty"`
 }
 
 // NewRackComponent instantiates a new RackComponent object
@@ -588,9 +587,9 @@ func (o *RackComponent) SetLeakStatus(v string) {
 }
 
 // GetLeakHandlingStatus returns the LeakHandlingStatus field value if set, zero value otherwise.
-func (o *RackComponent) GetLeakHandlingStatus() string {
+func (o *RackComponent) GetLeakHandlingStatus() LeakHandlingStatus {
 	if o == nil || IsNil(o.LeakHandlingStatus) {
-		var ret string
+		var ret LeakHandlingStatus
 		return ret
 	}
 	return *o.LeakHandlingStatus
@@ -598,7 +597,7 @@ func (o *RackComponent) GetLeakHandlingStatus() string {
 
 // GetLeakHandlingStatusOk returns a tuple with the LeakHandlingStatus field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *RackComponent) GetLeakHandlingStatusOk() (*string, bool) {
+func (o *RackComponent) GetLeakHandlingStatusOk() (*LeakHandlingStatus, bool) {
 	if o == nil || IsNil(o.LeakHandlingStatus) {
 		return nil, false
 	}
@@ -614,8 +613,8 @@ func (o *RackComponent) HasLeakHandlingStatus() bool {
 	return false
 }
 
-// SetLeakHandlingStatus gets a reference to the given string and assigns it to the LeakHandlingStatus field.
-func (o *RackComponent) SetLeakHandlingStatus(v string) {
+// SetLeakHandlingStatus gets a reference to the given LeakHandlingStatus and assigns it to the LeakHandlingStatus field.
+func (o *RackComponent) SetLeakHandlingStatus(v LeakHandlingStatus) {
 	o.LeakHandlingStatus = &v
 }
 

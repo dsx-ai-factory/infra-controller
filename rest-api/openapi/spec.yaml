@@ -24603,19 +24603,7 @@ components:
             - Leaking
           description: Whether the component is considered leaking coolant
         leakHandlingStatus:
-          type: string
-          enum:
-            - Unknown
-            - None
-            - ShuttingDown
-            - Down
-            - Failed
-          description: |-
-            Flow's leakage-handling status for the component. Unknown means Flow could not
-            determine the status; None means no supported handling task exists; ShuttingDown
-            means a forced-shutdown task is waiting, pending, or running; Down means it
-            completed; and Failed means the latest supported handling task failed or was
-            terminated. Down describes handling progress, not the component's current power state.
+          $ref: '#/components/schemas/LeakHandlingStatus'
     BMCInfo:
       title: BMCInfo
       type: object
@@ -24712,19 +24700,7 @@ components:
             - Leaking
           description: Whether the tray is considered leaking coolant
         leakHandlingStatus:
-          type: string
-          enum:
-            - Unknown
-            - None
-            - ShuttingDown
-            - Down
-            - Failed
-          description: |-
-            Flow's leakage-handling status for the tray. Unknown means Flow could not determine
-            the status; None means no supported handling task exists; ShuttingDown means a
-            forced-shutdown task is waiting, pending, or running; Down means it completed; and
-            Failed means the latest supported handling task failed or was terminated. Down
-            describes handling progress, not the tray's current power state.
+          $ref: '#/components/schemas/LeakHandlingStatus'
         position:
           $ref: '#/components/schemas/TrayPosition'
           description: 'Position of the Tray within the Rack'
@@ -26205,6 +26181,21 @@ components:
         error:
           type: string
           description: Failure summary when `status == failed`. Truncated to 512 bytes.
+    LeakHandlingStatus:
+      title: LeakHandlingStatus
+      type: string
+      description: |-
+        Flow's leakage-handling status. Unknown means Flow could not determine the status;
+        None means no supported handling task exists; ShuttingDown means a forced-shutdown
+        task is waiting, pending, or running; Down means it completed; and Failed means the
+        latest supported handling task failed or was terminated. Down describes handling
+        progress, not the component's current power state.
+      enum:
+        - Unknown
+        - None
+        - ShuttingDown
+        - Down
+        - Failed
     TaskReportV1Status:
       title: TaskReportV1Status
       type: string

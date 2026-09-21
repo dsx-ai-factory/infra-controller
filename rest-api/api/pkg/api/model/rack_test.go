@@ -205,7 +205,7 @@ func TestNewAPIRack(t *testing.T) {
 						SlotID:             1,
 						OperationStatus:    "Ready",
 						LeakStatus:         "NoLeak",
-						LeakHandlingStatus: "Down",
+						LeakHandlingStatus: APILeakHandlingStatusDown,
 					},
 					{
 						ID:                 "nico-switch-456",
@@ -215,7 +215,7 @@ func TestNewAPIRack(t *testing.T) {
 						SlotID:             48,
 						OperationStatus:    "Unknown",
 						LeakStatus:         "Unknown",
-						LeakHandlingStatus: "Unknown",
+						LeakHandlingStatus: APILeakHandlingStatusUnknown,
 					},
 				},
 			},

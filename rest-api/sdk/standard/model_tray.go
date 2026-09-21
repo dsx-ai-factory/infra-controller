@@ -45,9 +45,8 @@ type Tray struct {
 	// Flow-derived operability phase of the tray
 	OperationStatus *string `json:"operationStatus,omitempty"`
 	// Whether the tray is considered leaking coolant
-	LeakStatus *string `json:"leakStatus,omitempty"`
-	// Flow's leakage-handling status for the tray. Unknown means Flow could not determine the status; None means no supported handling task exists; ShuttingDown means a forced-shutdown task is waiting, pending, or running; Down means it completed; and Failed means the latest supported handling task failed or was terminated. Down describes handling progress, not the tray's current power state.
-	LeakHandlingStatus *string `json:"leakHandlingStatus,omitempty"`
+	LeakStatus         *string             `json:"leakStatus,omitempty"`
+	LeakHandlingStatus *LeakHandlingStatus `json:"leakHandlingStatus,omitempty"`
 	// Position of the Tray within the Rack
 	Position *TrayPosition `json:"position,omitempty"`
 	// BMC (Baseboard Management Controller) entries for the tray
@@ -433,9 +432,9 @@ func (o *Tray) SetLeakStatus(v string) {
 }
 
 // GetLeakHandlingStatus returns the LeakHandlingStatus field value if set, zero value otherwise.
-func (o *Tray) GetLeakHandlingStatus() string {
+func (o *Tray) GetLeakHandlingStatus() LeakHandlingStatus {
 	if o == nil || IsNil(o.LeakHandlingStatus) {
-		var ret string
+		var ret LeakHandlingStatus
 		return ret
 	}
 	return *o.LeakHandlingStatus
@@ -443,7 +442,7 @@ func (o *Tray) GetLeakHandlingStatus() string {
 
 // GetLeakHandlingStatusOk returns a tuple with the LeakHandlingStatus field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *Tray) GetLeakHandlingStatusOk() (*string, bool) {
+func (o *Tray) GetLeakHandlingStatusOk() (*LeakHandlingStatus, bool) {
 	if o == nil || IsNil(o.LeakHandlingStatus) {
 		return nil, false
 	}
@@ -459,8 +458,8 @@ func (o *Tray) HasLeakHandlingStatus() bool {
 	return false
 }
 
-// SetLeakHandlingStatus gets a reference to the given string and assigns it to the LeakHandlingStatus field.
-func (o *Tray) SetLeakHandlingStatus(v string) {
+// SetLeakHandlingStatus gets a reference to the given LeakHandlingStatus and assigns it to the LeakHandlingStatus field.
+func (o *Tray) SetLeakHandlingStatus(v LeakHandlingStatus) {
 	o.LeakHandlingStatus = &v
 }
 
