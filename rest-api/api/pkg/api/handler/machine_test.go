@@ -3596,9 +3596,8 @@ func TestMachineHandler_GetDpuMachines(t *testing.T) {
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gadmh := GetAllDpuMachineHandler{
-				dbSession:  dbSession,
-				scp:        tc.scp,
-				tracerSpan: cutil.NewTracerSpan(),
+				dbSession: dbSession,
+				scp:       tc.scp,
 			}
 			err := gadmh.Handle(ec)
 			assert.Nil(t, err)

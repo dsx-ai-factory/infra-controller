@@ -26,7 +26,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
@@ -127,11 +126,10 @@ func TestNewCreateNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: CreateNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -809,10 +807,9 @@ func TestNewGetAllNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetAllNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -1227,10 +1224,9 @@ func TestNewGetNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -1551,11 +1547,10 @@ func TestNewDeleteNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: DeleteNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -1925,11 +1920,10 @@ func TestNewUpdateNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: UpdateNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}

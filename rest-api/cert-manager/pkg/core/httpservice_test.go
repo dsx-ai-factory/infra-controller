@@ -261,3 +261,65 @@ func Test_recordingResponseWriter(t *testing.T) {
 	router.ServeHTTP(w1.writer, r)
 	assert.Equal(t, http.StatusTeapot, w1.statusCode)
 }
+
+func TestHTTPServiceDoneWaitsForActiveRequest(t *testing.T) {
+	ctx := WithDefaultLogger(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	release := make(chan struct{})
+	entered := make(chan struct{})
+
+	s := NewHTTPService("127.0.0.1:0")
+	s.ShutDownGracePeriod = 300 * time.Millisecond
+	s.Router.HandleFunc("/block", func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	})
+
+	ln, err := s.Start(ctx)
+	assert.Nil(t, err)
+
+	go func() {
+		c := &http.Client{Timeout: 10 * time.Second}
+		resp, err := c.Get(fmt.Sprintf("http://%s/block", ln.Addr().String()))
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	<-entered
+
+	// Shutdown starts, but the handler is still running.
+	cancel()
+
+	select {
+	case <-s.Done():
+		t.Fatal("Done closed while a request was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The handler outlives the drain deadline, so Close must end the wait.
+	select {
+	case <-s.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done never closed after the drain deadline")
+	}
+
+	close(release)
+}
+
+func TestHTTPServiceDoneClosesOnListenerFailure(t *testing.T) {
+	ctx := WithDefaultLogger(context.Background())
+
+	s := NewHTTPService("127.0.0.1:-1")
+	_, err := s.Start(ctx)
+	assert.NotNil(t, err)
+
+	select {
+	case <-s.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done never closed after Start failed")
+	}
+}

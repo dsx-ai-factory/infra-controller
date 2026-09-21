@@ -7,6 +7,8 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 const (
@@ -83,6 +85,7 @@ func (a *APIError) WithRetryable(retryable bool) *APIError {
 func (a *APIError) Send(c echo.Context) error {
 	response := *a
 	response.Source, _ = c.Get(APINameContextKey).(string)
+	cotel.RecordHTTPError(c.Request().Context(), response.Code)
 	return c.JSON(response.Code, response)
 }
 

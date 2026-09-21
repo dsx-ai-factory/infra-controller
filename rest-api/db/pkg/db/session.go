@@ -7,7 +7,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -16,6 +15,7 @@ import (
 	"github.com/uptrace/bun/extra/bunotel"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 // Session is a wrapper for an ORM DB object
@@ -53,12 +53,8 @@ func NewSessionFromConfig(ctx context.Context, c Config) (*Session, error) {
 	// Reference: https://bun.uptrace.dev/guide/running-bun-in-production.html
 	db := bun.NewDB(stdlib.OpenDBFromPool(pool), pgdialect.New(), bun.WithDiscardUnknownColumns())
 
-	// if tracing service name is configured, add otel hooks
-	if os.Getenv("TRACING_SERVICE_NAME") != "" {
-		db.AddQueryHook(bunotel.NewQueryHook(
-			bunotel.WithDBName(c.DBName),
-			bunotel.WithFormattedQueries(true),
-		))
+	if hook := tracingQueryHook(c.DBName); hook != nil {
+		db.AddQueryHook(hook)
 	}
 
 	return &Session{
@@ -67,6 +63,17 @@ func NewSessionFromConfig(ctx context.Context, c Config) (*Session, error) {
 		pool:         pool,
 		errorChecker: &PostgresErrorChecker{},
 	}, nil
+}
+
+// tracingQueryHook returns the Bun hook that records one span per query, or
+// nil when the OpenTelemetry bootstrap did not install a tracer provider, so
+// the hook is never attached to a no-op provider. Statements are recorded as
+// templates with placeholders; bound parameter values never reach a span.
+func tracingQueryHook(dbName string) bun.QueryHook {
+	if !cotel.Enabled() {
+		return nil
+	}
+	return bunotel.NewQueryHook(bunotel.WithDBName(dbName))
 }
 
 // Close closes the session and the underlying connection pool.

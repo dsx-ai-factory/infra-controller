@@ -12,20 +12,19 @@ import (
 	cam "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/api/model"
 	caa "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authentication"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	ccu "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 // LoginHandler is the API Handler for user authentication with OAuth2 flow
 type LoginHandler struct {
 	keycloakAuth *caa.KeycloakAuthService
-	tracerSpan   *ccu.TracerSpan
 }
 
 // NewLoginHandler initializes and returns a new handler for user login
 func NewLoginHandler(keycloakAuth *caa.KeycloakAuthService) LoginHandler {
 	return LoginHandler{
 		keycloakAuth: keycloakAuth,
-		tracerSpan:   ccu.NewTracerSpan(),
 	}
 }
 
@@ -49,13 +48,8 @@ func (lh LoginHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("started API handler")
 
 	// Create a child span and set the attributes for current request
-	newctx, handlerSpan := lh.tracerSpan.CreateChildInContext(ctx, "LoginHandler", logger)
-	if handlerSpan != nil {
-		// Set newly created span context as a current context
-		ctx = newctx
-
-		defer handlerSpan.End()
-	}
+	ctx, handlerSpan := cotel.StartSpan(ctx, "LoginHandler")
+	defer handlerSpan.End()
 
 	var req cam.APILoginRequest
 	// Bind request data into API model
@@ -109,14 +103,12 @@ func (lh LoginHandler) Handle(c echo.Context) error {
 // CallbackHandler is the API Handler for OAuth2 callback handling
 type CallbackHandler struct {
 	keycloakAuth *caa.KeycloakAuthService
-	tracerSpan   *ccu.TracerSpan
 }
 
 // NewCallbackHandler initializes and returns a new handler for OAuth2 callback
 func NewCallbackHandler(keycloakAuth *caa.KeycloakAuthService) CallbackHandler {
 	return CallbackHandler{
 		keycloakAuth: keycloakAuth,
-		tracerSpan:   ccu.NewTracerSpan(),
 	}
 }
 
@@ -137,13 +129,8 @@ func (ch CallbackHandler) Handle(c echo.Context) error {
 	logger := log.With().Str("Model", "Auth").Str("Handler", "Callback").Logger()
 
 	// Create a child span and set the attributes for current request
-	newctx, handlerSpan := ch.tracerSpan.CreateChildInContext(ctx, "CallbackHandler", logger)
-	if handlerSpan != nil {
-		// Set newly created span context as a current context
-		ctx = newctx
-
-		defer handlerSpan.End()
-	}
+	ctx, handlerSpan := cotel.StartSpan(ctx, "CallbackHandler")
+	defer handlerSpan.End()
 
 	// Bind request data into API model
 	var req cam.APICallbackRequest
@@ -175,14 +162,12 @@ func (ch CallbackHandler) Handle(c echo.Context) error {
 // LogoutHandler is the API Handler for user logout
 type LogoutHandler struct {
 	keycloakAuth *caa.KeycloakAuthService
-	tracerSpan   *ccu.TracerSpan
 }
 
 // NewLogoutHandler initializes and returns a new handler for user logout
 func NewLogoutHandler(keycloakAuth *caa.KeycloakAuthService) LogoutHandler {
 	return LogoutHandler{
 		keycloakAuth: keycloakAuth,
-		tracerSpan:   ccu.NewTracerSpan(),
 	}
 }
 
@@ -205,13 +190,8 @@ func (lh LogoutHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("started API handler")
 
 	// Create a child span and set the attributes for current request
-	newctx, handlerSpan := lh.tracerSpan.CreateChildInContext(ctx, "LogoutHandler", logger)
-	if handlerSpan != nil {
-		// Set newly created span context as a current context
-		ctx = newctx
-
-		defer handlerSpan.End()
-	}
+	ctx, handlerSpan := cotel.StartSpan(ctx, "LogoutHandler")
+	defer handlerSpan.End()
 
 	var req cam.APILogoutRequest
 
@@ -243,14 +223,12 @@ func (lh LogoutHandler) Handle(c echo.Context) error {
 // RefreshTokenHandler is the API Handler for refreshing access tokens
 type RefreshTokenHandler struct {
 	keycloakAuth *caa.KeycloakAuthService
-	tracerSpan   *ccu.TracerSpan
 }
 
 // NewRefreshTokenHandler initializes and returns a new handler for token refresh
 func NewRefreshTokenHandler(keycloakAuth *caa.KeycloakAuthService) RefreshTokenHandler {
 	return RefreshTokenHandler{
 		keycloakAuth: keycloakAuth,
-		tracerSpan:   ccu.NewTracerSpan(),
 	}
 }
 
@@ -273,14 +251,9 @@ func (rth RefreshTokenHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("started API handler")
 
 	// Create a child span and set the attributes for current request
-	newctx, handlerSpan := rth.tracerSpan.CreateChildInContext(ctx, "RefreshTokenHandler", logger)
-	if handlerSpan != nil {
-		// Set newly created span context as a current context
-		ctx = newctx
-		c.SetRequest(c.Request().WithContext(newctx))
-
-		defer handlerSpan.End()
-	}
+	ctx, handlerSpan := cotel.StartSpan(ctx, "RefreshTokenHandler")
+	c.SetRequest(c.Request().WithContext(ctx))
+	defer handlerSpan.End()
 
 	var req cam.APIRefreshTokenRequest
 
