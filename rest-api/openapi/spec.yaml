@@ -30354,6 +30354,96 @@ components:
         observability:
           $ref: '#/components/schemas/DpuExtensionServiceObservability'
           description: Observability configuration for this DPU Extension Service version
+    DpuExtensionServiceDpfHelmChartData:
+      title: DpuExtensionServiceDpfHelmChartData
+      type: object
+      additionalProperties: false
+      description: DpfHelmChart configuration documented as an object; requests serialize this object into the `data` string.
+      required:
+        - repoURL
+        - chartName
+        - chartVersion
+        - security.privileged
+      properties:
+        repoURL:
+          type: string
+          minLength: 1
+          pattern: '^(https://|oci://)'
+          description: Helm repository URL beginning with https:// or oci://
+        chartName:
+          type: string
+          minLength: 1
+          description: Helm chart name
+        chartVersion:
+          type: string
+          minLength: 1
+          description: Helm chart version
+        security.privileged:
+          type: boolean
+          description: DPF privileged-workload setting. This is a literal dotted key, not a nested security object; false is valid.
+        values:
+          type: [object, 'null']
+          additionalProperties: true
+          description: Optional chart values. values.serviceDaemonSet.nodeSelector is reserved for NICo and must not be supplied.
+        serviceDaemonSet:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartServiceDaemonSet'
+    DpuExtensionServiceDpfHelmChartServiceDaemonSet:
+      title: DpuExtensionServiceDpfHelmChartServiceDaemonSet
+      type: [object, 'null']
+      additionalProperties: false
+      description: Optional tenant-configurable DaemonSet settings. NICo owns nodeSelector.
+      properties:
+        labels:
+          type: [object, 'null']
+          additionalProperties:
+            type: string
+          description: Optional labels passed to DPF for the service DaemonSet
+        annotations:
+          type: [object, 'null']
+          additionalProperties:
+            type: string
+          description: Optional annotations passed to DPF for the service DaemonSet
+        resources:
+          type: [object, 'null']
+          additionalProperties:
+            $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+          description: Optional resource quantities, for example {"nvidia.com/bf_sf":1,"memory":"500Mi"}
+        updateStrategy:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartUpdateStrategy'
+    DpuExtensionServiceDpfHelmChartUpdateStrategy:
+      title: DpuExtensionServiceDpfHelmChartUpdateStrategy
+      type: [object, 'null']
+      additionalProperties: false
+      description: Optional update strategy passed to DPF
+      properties:
+        type:
+          type: [string, 'null']
+          description: Update strategy type, typically RollingUpdate or OnDelete
+        rollingUpdate:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartRollingUpdate'
+    DpuExtensionServiceDpfHelmChartRollingUpdate:
+      title: DpuExtensionServiceDpfHelmChartRollingUpdate
+      type: [object, 'null']
+      additionalProperties: false
+      description: Optional rolling-update limits passed to DPF
+      properties:
+        maxSurge:
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+            - type: 'null'
+          description: Optional additional pod count or percentage string, for example 1 or "25%"
+        maxUnavailable:
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+            - type: 'null'
+          description: Optional unavailable pod count or percentage string, for example 1 or "25%"
+    DpuExtensionServiceDpfHelmChartIntOrString:
+      title: DpuExtensionServiceDpfHelmChartIntOrString
+      description: Integer or string value accepted by DPF
+      oneOf:
+        - type: integer
+          format: int32
+        - type: string
     DpuExtensionServiceCreateRequest:
       title: DpuExtensionServiceCreateRequest
       type: object
@@ -30403,10 +30493,15 @@ components:
           format: uuid
           description: ID for the Site the DPU Extension Service belongs to
         data:
-          type: string
-          maxLength: 131072
-          description: >-
-            Deployment spec, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. KubernetesPod requires a parseable Pod manifest declaring at least one container, whose kind, when present, is Pod. DpfHelmChart requires a strict JSON object with repoURL, chartName, chartVersion, security.privileged, and optional values and serviceDaemonSet; repoURL must use https:// or oci://. The typed serviceDaemonSet supports only labels, annotations, ResourceList-style resources, and updateStrategy. Metadata uses Kubernetes key/value syntax. updateStrategy supports RollingUpdate and OnDelete. Rolling-update limits are non-negative integers or percentage strings from 0% through 100%; after Kubernetes defaults are applied, exactly one of maxSurge and maxUnavailable must be non-zero. Explicit serviceDaemonSet.nodeSelector, the incorrect upgradeStrategy spelling, values.serviceDaemonSet.nodeSelector, and all other unsupported fields are rejected because NICo owns placement and the typed contract is strict.
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartData'
+            - type: string
+              maxLength: 131072
+          description: |-
+            Deployment specification as a string, limited to 131072 UTF-8 bytes.
+            Use a YAML/JSON Pod manifest for KubernetesPod or JSON-encoded Helm
+            configuration for DpfHelmChart. The object schema documents the Helm
+            structure; requests must still send a string.
         credentials:
           $ref: '#/components/schemas/DpuExtensionServiceCredentials'
           description: Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
@@ -30446,11 +30541,12 @@ components:
             - 'null'
           description: Optional description for the DPU Extension Service
         data:
-          type:
-            - string
-            - 'null'
-          maxLength: 131072
-          description: Deployment spec for the DPU Extension Service, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. For KubernetesPod this is the same Pod manifest accepted on create. For DpfHelmChart this is the same strict JSON definition and serviceDaemonSet validation accepted on create, and updates stable V1 in place.
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartData'
+            - type: string
+              maxLength: 131072
+            - type: 'null'
+          description: Replacement deployment spec using the create request's format. Omission or null leaves the existing configuration unchanged.
         credentials:
           $ref: '#/components/schemas/DpuExtensionServiceCredentials'
           description: Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
