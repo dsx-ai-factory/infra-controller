@@ -68,10 +68,11 @@ use crate::ethernet_virtualization::validate_instance_interface_routing_profiles
 use crate::instance::{
     InstanceAllocationRequest, allocate_ib_port_guid, allocate_instance, allocate_network,
     allocate_spx_port_mac, assign_implicit_instance_vfs_from_effective_dpu_inventory,
-    ib_memberships_from_config, instance_vf_inventory_source, load_extension_services,
-    load_ib_partition_pkeys, requests_implicit_vf_allocation, validate_ib_partition_ownership,
-    validate_instance_extension_services, validate_instance_vfs_against_effective_dpu_inventory,
-    validate_os_definition_usable, validate_spx_partition_ownership,
+    expected_machine_declares_cx9, ib_memberships_from_config, instance_vf_inventory_source,
+    load_extension_services, load_ib_partition_pkeys, requests_implicit_vf_allocation,
+    validate_ib_partition_ownership, validate_instance_extension_services,
+    validate_instance_vfs_against_effective_dpu_inventory, validate_os_definition_usable,
+    validate_spx_partition_ownership,
 };
 use crate::{CarbideError, CarbideResult};
 
@@ -1391,18 +1392,21 @@ pub(crate) async fn update_instance_config(
         kind: "machine",
         id: machine_id.to_string(),
     })?;
-    // DPF instance admission needs Astra interfaces before resolving omitted VF IDs.
-    if mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
-        mh_snapshot.dpa_interface_snapshots = db::dpa_interface::find_by_machine_id(
-            &mut txn,
-            machine_id,
-            DpaSearchConfig {
-                only_svpc: false,
-                only_astra: true,
-            },
-        )
-        .await?;
-    }
+    // Resolve the persisted CX9 declaration used by DPF provisioning before validating VFs.
+    let expected_machine = if mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
+        match mh_snapshot.host_snapshot.status.bmc_info.mac {
+            Some(bmc_mac) => {
+                db::expected_machine::find_by_bmc_mac_address(&mut txn, bmc_mac).await?
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let vf_inventory_source = instance_vf_inventory_source(
+        &mh_snapshot,
+        expected_machine_declares_cx9(expected_machine.as_ref()),
+    );
     // This first snapshot establishes the request's comparison baseline.
     // An overlap wait reloads it before resource validation; an IB change
     // later rereads it after locking the Instance and Machine.
@@ -1461,7 +1465,7 @@ pub(crate) async fn update_instance_config(
         assign_implicit_instance_vfs_from_effective_dpu_inventory(
             &mut config.network,
             &api.runtime_config,
-            instance_vf_inventory_source(&mh_snapshot),
+            vf_inventory_source,
         )?;
     }
 
@@ -1496,18 +1500,6 @@ pub(crate) async fn update_instance_config(
             kind: "machine",
             id: machine_id.to_string(),
         })?;
-        // Preserve Astra-aware VF validation after refreshing the snapshot.
-        if mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
-            mh_snapshot.dpa_interface_snapshots = db::dpa_interface::find_by_machine_id(
-                &mut txn,
-                machine_id,
-                DpaSearchConfig {
-                    only_svpc: false,
-                    only_astra: true,
-                },
-            )
-            .await?;
-        }
     }
     let initial_instance = mh_snapshot
         .instance
@@ -1580,6 +1572,7 @@ pub(crate) async fn update_instance_config(
         initial_instance,
         &mut config,
         &mh_snapshot,
+        vf_inventory_source,
         &mut txn,
         needs_overlap_check,
     )
@@ -1695,6 +1688,7 @@ async fn update_instance_network_config(
     instance: &InstanceSnapshot,
     config: &mut InstanceConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
+    vf_inventory_source: crate::instance::InstanceVfInventorySource,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     needs_overlap_check: bool,
 ) -> Result<(), CarbideError> {
@@ -1763,8 +1757,6 @@ async fn update_instance_network_config(
             &inband_segment_ids,
         )?;
     }
-
-    let vf_inventory_source = instance_vf_inventory_source(mh_snapshot);
 
     if !instance
         .config

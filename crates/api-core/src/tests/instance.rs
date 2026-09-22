@@ -50,8 +50,8 @@ use futures_util::future::join_all;
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use itertools::Itertools;
 use model::controller_outcome::PersistentStateHandlerOutcome;
-use model::dpa_interface::{DpaInterfaceType, NewDpaInterface};
 use model::dpu_machine_update::DpuMachineUpdate;
+use model::expected_machine::ExpectedInterface;
 use model::instance::config::network::{
     DeviceLocator, InstanceInterfaceIpFamilyMode, InstanceInterfaceVpcSelection,
     InstanceNetworkConfig, InterfaceFunctionId, Ipv6InterfaceConfig, NetworkDetails,
@@ -7335,15 +7335,20 @@ async fn test_implicit_sparse_vf_noop_update_bypasses_overlap_lock(
     );
 }
 
-/// Verifies BF4 Astra ignores a site intercept topology and uses its static VF inventory.
+/// Verifies BF4 with a declared CX9 ignores a site intercept topology and uses Astra's static VFs.
+/// This protects deployments whose disabled Astra site flag leaves no persisted Astra DPA rows.
 #[crate::sqlx_test]
 async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and_update(
     _: PgPoolOptions,
     options: PgConnectOptions,
 ) {
-    async fn create_bf4_astra_host(env: &TestEnv) -> TestManagedHost {
+    /// Builds a BF4 DPF host whose persisted CX9 declaration selects Astra even without DPA rows.
+    /// This proves admission follows provisioning rather than site-gated Astra enablement state.
+    async fn create_bf4_astra_host(env: &TestEnv, cx9_mac_suffix: u8) -> TestManagedHost {
         let host = create_managed_host(env).await;
         let mut txn = env.db_txn().await;
+
+        // Mark the attached DPU as BF4, which combines with the CX9 declaration to select Astra.
         let dpu = host.dpu().db_machine(&mut txn).await;
         let mut hardware_info = dpu
             .status
@@ -7363,19 +7368,41 @@ async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and
         db::machine::mark_machine_ingestion_done_with_dpf(txn.as_mut(), &host.id)
             .await
             .unwrap();
-        db::dpa_interface::persist(
-            NewDpaInterface {
-                machine_id: *host.id,
-                mac_address: mac_address::MacAddress::from([0x02, 0, 0, 0, 0, 1]),
-                device_type: "ConnectX-9".to_string(),
-                pci_name: "0000:01:00.0".to_string(),
-                device_description: None,
-                interface_type: DpaInterfaceType::Astra,
-            },
+
+        // Declare CX9 in expected-machine data without creating a site-gated Astra DPA row.
+        let host_machine = host.host().db_machine(&mut txn).await;
+        let bmc_mac = host_machine
+            .status
+            .bmc_info
+            .mac
+            .expect("the fixture host includes a BMC MAC");
+        let mut expected_machine =
+            db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), bmc_mac)
+                .await
+                .unwrap()
+                .expect("the fixture host includes an expected-machine declaration");
+        expected_machine.data.interfaces.push(ExpectedInterface {
+            mac_address: mac_address::MacAddress::from([0x02, 0, 0, 0, 0, cx9_mac_suffix]),
+            nic_type: Some("CX9".to_string()),
+            ..ExpectedInterface::default()
+        });
+        db::expected_machine::update(txn.as_mut(), &expected_machine)
+            .await
+            .unwrap();
+
+        // Keep the fixture on the failing boundary: the Astra site flag is disabled, so the
+        // expected-machine CX9 declaration remains the only Astra classification signal.
+        let astra_interfaces = db::dpa_interface::find_by_machine_id(
             txn.as_mut(),
+            *host.id,
+            model::dpa_interface::DpaSearchConfig {
+                only_svpc: false,
+                only_astra: true,
+            },
         )
         .await
         .unwrap();
+        assert!(astra_interfaces.is_empty());
         txn.commit().await.unwrap();
 
         host
@@ -7385,8 +7412,8 @@ async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and
     let mut config = crate::test_support::default_config::with_dpf_intercept_topology(&[14]);
     config.dpu_config.num_of_vfs = 16;
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
-    let create_host = create_bf4_astra_host(&env).await;
-    let update_host = create_bf4_astra_host(&env).await;
+    let create_host = create_bf4_astra_host(&env, 1).await;
+    let update_host = create_bf4_astra_host(&env, 2).await;
     let segment_ids = env.create_vpc_and_tenant_segments(2).await;
 
     let implicit_network = || {
@@ -7422,8 +7449,7 @@ async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and
         .collect_vec();
     assert_eq!(created_vfs, vec![0]);
 
-    // Allocate directly instead of advancing the machine to Ready: an Astra interface makes the
-    // host wait for DPA readiness, which is unrelated to this admission contract.
+    // Allocate directly because this test needs only an existing instance as the update baseline.
     let update_instance = env
         .api
         .allocate_instance(
@@ -7441,8 +7467,7 @@ async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and
     let update_instance_id = update_instance
         .id
         .expect("the allocated update fixture includes its ID");
-    // Network updates require an assigned Ready host. Skip only the unrelated Astra DPA
-    // convergence; the update handler still reloads the persisted Astra inventory below.
+    // Network updates require an assigned Ready host; DPF convergence is outside this contract.
     let mut txn = env.db_txn().await;
     db::machine::update_state(
         txn.as_mut(),

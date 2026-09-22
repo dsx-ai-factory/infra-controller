@@ -43,6 +43,7 @@ use ipnetwork::IpNetwork;
 use itertools::Itertools;
 use model::ConfigValidationError;
 use model::dpa_interface::{DpaInterface, DpaSearchConfig};
+use model::expected_machine::ExpectedMachine;
 use model::extension_service::{
     DpuTarget, ExtensionService, ExtensionServiceLifecycleState, ExtensionServiceType,
 };
@@ -153,9 +154,24 @@ pub(crate) enum InstanceVfInventorySource {
     Bf4AstraStatic,
 }
 
-/// Selects the VF inventory source using the same BF4 Astra distinction as DPF provisioning.
+/// Reports whether the persisted expected-machine declaration selects Astra for BF4 provisioning.
+///
+/// DPF provisioning uses an exact `CX9` NIC-type match, so admission must use that same declaration
+/// instead of DPA-interface rows whose creation also depends on site enablement flags.
+pub(crate) fn expected_machine_declares_cx9(expected_machine: Option<&ExpectedMachine>) -> bool {
+    expected_machine.is_some_and(|expected_machine| {
+        expected_machine
+            .data
+            .interfaces
+            .iter()
+            .any(|interface| interface.nic_type.as_deref() == Some("CX9"))
+    })
+}
+
+/// Selects the VF inventory source using the same BF4-and-CX9 distinction as DPF provisioning.
 pub(crate) fn instance_vf_inventory_source(
     mh_snapshot: &ManagedHostStateSnapshot,
+    expected_machine_has_cx9: bool,
 ) -> InstanceVfInventorySource {
     if !mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
         return InstanceVfInventorySource::HbnRepresentors;
@@ -170,7 +186,7 @@ pub(crate) fn instance_vf_inventory_source(
                 .is_some_and(|dmi_data| is_bf4_dmi_product(&dmi_data.product_name))
         });
 
-    if mh_snapshot.has_astra_nics() && all_dpus_are_bf4 {
+    if expected_machine_has_cx9 && all_dpus_are_bf4 {
         InstanceVfInventorySource::Bf4AstraStatic
     } else {
         InstanceVfInventorySource::DpfInterceptTopology
@@ -2116,6 +2132,17 @@ pub(crate) async fn batch_allocate_instances(
             .unwrap_or_default();
     }
 
+    // Admission must classify Astra from the same persisted CX9 declaration as DPF provisioning.
+    let expected_machine_bmc_macs = snapshot_map
+        .values()
+        .filter(|snapshot| snapshot.host_snapshot.config.dpf.used_for_ingestion)
+        .filter_map(|snapshot| snapshot.host_snapshot.status.bmc_info.mac)
+        .unique()
+        .collect_vec();
+    let expected_machines_by_bmc =
+        db::expected_machine::find_many_by_bmc_mac_address(&mut txn, &expected_machine_bmc_macs)
+            .await?;
+
     // Verify all snapshots were loaded and validate usability
     for request in &requests {
         let machine_id = request.machine_id;
@@ -2322,7 +2349,16 @@ pub(crate) async fn batch_allocate_instances(
                 kind: "machine",
                 id: machine_id.to_string(),
             })?;
-        let vf_inventory_source = instance_vf_inventory_source(&mh_snapshot);
+        let expected_machine = mh_snapshot
+            .host_snapshot
+            .status
+            .bmc_info
+            .mac
+            .and_then(|bmc_mac| expected_machines_by_bmc.get(&bmc_mac));
+        let vf_inventory_source = instance_vf_inventory_source(
+            &mh_snapshot,
+            expected_machine_declares_cx9(expected_machine),
+        );
 
         if request.implicit_vf_allocation {
             assign_implicit_instance_vfs_from_effective_dpu_inventory(
