@@ -32,7 +32,7 @@ type OperatingSystemUpdateRequest struct {
 	ImageUrl NullableString `json:"imageUrl,omitempty"`
 	// SHA hash of the image file. Immutable after creation: it may be re-sent unchanged, but changing it is rejected.
 	ImageSha NullableString `json:"imageSha,omitempty"`
-	// Authentication type for image URL, if needed, e.g., basic/bearer/token; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha.
+	// Authentication type for image URL, if needed; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha.
 	ImageAuthType NullableString `json:"imageAuthType,omitempty"`
 	// Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha.
 	ImageAuthToken NullableString `json:"imageAuthToken,omitempty"`

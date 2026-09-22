@@ -48,11 +48,16 @@ func (mhm MachineHealthReportMode) FromProto(mode corev1.HealthReportApplyMode) 
 	return MachineHealthReportModeMerge
 }
 
+// Time when the deprecated observed_at attribute stops being returned.
+// Same date as the other snake_case alias removals.
+var machineHealthObservedAtDeprecationTime = time.Date(2026, time.September, 10, 0, 0, 0, 0, time.UTC)
+
 // APIMachineHealth is the Machine API representation of aggregate hardware health.
-// ObservedAtDeprecated preserves the legacy snake_case field on Machine responses.
+// ObservedAtDeprecated preserves the legacy snake_case field on Machine responses
+// until its deprecation date.
 type APIMachineHealth struct {
 	APIAggregateHealth
-	ObservedAtDeprecated *string `json:"observed_at"`
+	ObservedAtDeprecated *string `json:"observed_at,omitempty"`
 }
 
 // FromProto populates an APIMachineHealth from its Core protobuf form.
@@ -62,9 +67,9 @@ func (mh *APIMachineHealth) FromProto(protoHealth *corev1.HealthReport) {
 	}
 	var aggregate APIAggregateHealth
 	aggregate.FromProto(protoHealth)
-	*mh = APIMachineHealth{
-		APIAggregateHealth:   aggregate,
-		ObservedAtDeprecated: aggregate.ObservedAt,
+	*mh = APIMachineHealth{APIAggregateHealth: aggregate}
+	if time.Now().Before(machineHealthObservedAtDeprecationTime) {
+		mh.ObservedAtDeprecated = aggregate.ObservedAt
 	}
 }
 
@@ -75,9 +80,9 @@ func (mh *APIMachineHealth) FromDBModel(machineHealth *cdbm.MachineHealth) {
 	}
 	var aggregate APIAggregateHealth
 	aggregate.FromDBModel(machineHealth)
-	*mh = APIMachineHealth{
-		APIAggregateHealth:   aggregate,
-		ObservedAtDeprecated: aggregate.ObservedAt,
+	*mh = APIMachineHealth{APIAggregateHealth: aggregate}
+	if time.Now().Before(machineHealthObservedAtDeprecationTime) {
+		mh.ObservedAtDeprecated = aggregate.ObservedAt
 	}
 }
 

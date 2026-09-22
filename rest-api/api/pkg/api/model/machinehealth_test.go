@@ -17,7 +17,9 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-func TestAPIMachineHealthPreservesDeprecatedObservedAt(t *testing.T) {
+// The deprecated observed_at alias is date-gated and its deprecation date
+// (2026-09-10) has passed, so Machine responses carry only observedAt.
+func TestAPIMachineHealthOmitsExpiredDeprecatedObservedAt(t *testing.T) {
 	observedAt := "2026-09-28T12:00:00Z"
 	var health APIMachineHealth
 	health.FromDBModel(&cdbm.MachineHealth{ObservedAt: &observedAt})
@@ -27,7 +29,6 @@ func TestAPIMachineHealthPreservesDeprecatedObservedAt(t *testing.T) {
 	assert.JSONEq(t, `{
 		"source":"",
 		"observedAt":"2026-09-28T12:00:00Z",
-		"observed_at":"2026-09-28T12:00:00Z",
 		"successes":[],
 		"alerts":[]
 	}`, string(encoded))
