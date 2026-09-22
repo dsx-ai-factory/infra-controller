@@ -90,6 +90,38 @@ async fn machine_flags_select_only_supplied_fields() {
     }
     for case in [
         Case {
+            scenario: "labels alone select only the supplied collection",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--label",
+                "env:prod",
+                "--label",
+                "team:platform",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["metadata.labels"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                metadata: Some(forge::Metadata {
+                    labels: vec![
+                        forge::Label {
+                            key: "env".to_string(),
+                            value: Some("prod".to_string()),
+                        },
+                        forge::Label {
+                            key: "team".to_string(),
+                            value: Some("platform".to_string()),
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        },
+        Case {
             scenario: "ID selection sends false and empty resets without reading the record",
             args: vec![
                 "expected-machine",
@@ -138,6 +170,26 @@ async fn machine_flags_select_only_supplied_fields() {
                 dpu_mode: Some(forge::DpuMode::Unspecified as i32),
                 bmc_ip_allocation: Some(forge::BmcIpAllocationType::Auto as i32),
                 metadata: Some(forge::Metadata::default()),
+                ..Default::default()
+            },
+        },
+        Case {
+            scenario: "standalone lockdown false selects only the nested lifecycle field",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--disable-lockdown",
+                "false",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["host_lifecycle_profile.disable_lockdown"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: Some(false),
+                }),
                 ..Default::default()
             },
         },
@@ -306,23 +358,16 @@ async fn shelf_updates_select_supplied_values_without_replaying_lookup_fields() 
                 "update",
                 "--bmc-mac-address",
                 MAC,
-                "--shelf-serial-number",
-                "SHELF-002",
                 "--bmc-retain-credentials",
                 "false",
                 "--meta-name",
                 "",
             ],
             methods: &["GetExpectedPowerShelf", "PatchExpectedPowerShelf"],
-            paths: &[
-                "shelf_serial_number",
-                "bmc_retain_credentials",
-                "metadata.name",
-            ],
+            paths: &["bmc_retain_credentials", "metadata.name"],
             expected: forge::ExpectedPowerShelf {
                 expected_power_shelf_id: Some(rpc_id()),
                 bmc_mac_address: MAC.to_string(),
-                shelf_serial_number: "SHELF-002".to_string(),
                 bmc_retain_credentials: Some(false),
                 metadata: Some(forge::Metadata::default()),
                 ..Default::default()

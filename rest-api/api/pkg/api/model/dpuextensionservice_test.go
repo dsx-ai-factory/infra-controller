@@ -82,6 +82,30 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
+		// A fully populated object proves REST accepts DPF's integer resource form alongside string quantities.
+		{
+			desc: "ok when DPF Helm chart has a typed daemon set",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":1,"memory":"500Mi"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}}}`,
+			},
+			expectErr: false,
+		},
+		// Known fields still reject incompatible JSON types at the REST boundary.
+		{
+			desc: "error when DPF Helm chart labels are not an object",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false,"serviceDaemonSet":{"labels":[]}}`,
+			},
+			expectErr: true,
+		},
 		// A Helm registration must identify its immutable placement policy before reaching Core.
 		{
 			desc: "error when DPF Helm chart omits DPU target",

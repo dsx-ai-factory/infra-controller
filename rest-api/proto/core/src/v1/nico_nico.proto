@@ -585,6 +585,18 @@ service Forge {
   // Delete all expected racks in site
   rpc DeleteAllExpectedRacks(google.protobuf.Empty) returns (google.protobuf.Empty);
 
+  // Expected Rack Group Management
+  rpc AddExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
+  rpc DeleteExpectedRackGroup(ExpectedRackGroupRequest) returns (google.protobuf.Empty);
+  // Replace the full record, including both lists and metadata.
+  rpc UpdateExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
+  rpc GetExpectedRackGroup(ExpectedRackGroupRequest) returns (ExpectedRackGroup);
+  rpc FindExpectedRackGroupIds(ExpectedRackGroupSearchFilter) returns (ExpectedRackGroupIdList);
+  rpc FindExpectedRackGroupsByIds(ExpectedRackGroupsByIdsRequest) returns (ExpectedRackGroupList);
+  // Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
+  rpc ReplaceAllExpectedRackGroups(ExpectedRackGroupList) returns (google.protobuf.Empty);
+  rpc DeleteAllExpectedRackGroups(google.protobuf.Empty) returns (google.protobuf.Empty);
+
   // Perform Attestation Procedure for Measured Boot
   rpc AttestQuote	(AttestQuoteRequest) returns (AttestQuoteResponse);
 
@@ -2763,6 +2775,53 @@ message LinkedExpectedSwitch {
   optional common.UUID expected_switch_id = 4;
   optional string explored_endpoint_address = 5; // The explored BMC IP
   optional common.RackId rack_id = 6;
+}
+
+message ExpectedRackGroup {
+  // Required external identifier, non-blank and at most 128 characters.
+  optional common.RackGroupId rack_group_id = 1;
+  // External group-level NVLink topology identifier, non-blank and at most 128 characters.
+  string topology = 2;
+  // Non-blank, unique rack IDs, independent of device membership. Input order is preserved; may be empty.
+  repeated common.RackId rack_ids = 3;
+  // Descriptive attributes such as name, manufacturer, and location labels.
+  Metadata metadata = 4;
+  // Ordered device identities; (type, manufacturer, id) tuples must be unique. May be empty.
+  repeated ExpectedRackGroupMember members = 5;
+}
+
+message ExpectedRackGroupMember {
+  // Core rack capability spelling: Compute, Switch, or PowerShelf (case-sensitive).
+  string type = 1;
+  // Non-blank external manufacturer name.
+  string manufacturer = 2;
+  // Non-blank external inventory identifier.
+  string id = 3;
+}
+
+message ExpectedRackGroupRequest {
+  // Required external identifier, non-blank and at most 128 characters.
+  string rack_group_id = 1;
+}
+
+message ExpectedRackGroupList {
+  repeated ExpectedRackGroup expected_rack_groups = 1;
+}
+
+// Lists identifiers only; callers fetch complete records in bounded batches.
+message ExpectedRackGroupSearchFilter {
+}
+
+message ExpectedRackGroupIdList {
+  // Identifiers sorted lexicographically by the database.
+  repeated common.RackGroupId rack_group_ids = 1;
+}
+
+message ExpectedRackGroupsByIdsRequest {
+  // Non-empty batch, limited by the server's max_find_by_ids setting.
+  // Invalid identifiers are rejected; valid but absent identifiers are omitted.
+  // Results contain each existing record once, sorted by rack_group_id.
+  repeated common.RackGroupId rack_group_ids = 1;
 }
 
 message ExpectedRack {

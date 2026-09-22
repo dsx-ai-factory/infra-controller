@@ -28,8 +28,10 @@ exporter:
 ##   command: ["/bin/sh", "-c"]
 ##   args:
 ##     - |
-##       printf 'server:\n  interface: 0.0.0.0\n  interface: ::0\n  access-control: 0.0.0.0/0 allow\ninclude: "/etc/unbound/local.conf.d/*.conf"\n' > /tmp/unbound.conf
+##       printf 'server:\n  interface: 0.0.0.0\n  interface: ::0\ninclude: "/etc/unbound/local.conf.d/*.conf"\n' > /tmp/unbound.conf
 ##       exec unbound -d -c /tmp/unbound.conf
+## If reusing an older copy, remove its inline `access-control: 0.0.0.0/0 allow`.
+## Keep access rules in `localConfig.access_control.conf` so site overrides apply.
 command: []
 args: []
 
@@ -86,6 +88,7 @@ localConfig:
   access_control.conf: |
     server:
         access-control: 0.0.0.0/0 allow
+        access-control: ::/0 allow
   extended_statistics.conf: |
     server:
         extended-statistics: yes

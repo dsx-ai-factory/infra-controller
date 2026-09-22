@@ -14,6 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! Database operations for network prefixes.
+//!
+//! Explicit result columns keep this table's queries working across column
+//! additions. Cached wildcard statements otherwise fail with PostgreSQL's
+//! "cached plan must not change result type".
+
 use std::net::IpAddr;
 
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
@@ -113,7 +120,9 @@ pub async fn containing_prefix(
     txn: impl DbReader<'_>,
     prefix: &str,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let query = "SELECT * FROM network_prefixes
+    let query = "SELECT id, segment_id, prefix, gateway, dhcpv6_link_address,
+            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip
+        FROM network_prefixes
         WHERE prefix && $1::inet
         ORDER BY segment_id, prefix";
     let container = sqlx::query_as(query)
@@ -136,7 +145,8 @@ pub async fn find_allocation_occupancy(
     vpc_prefix: IpNetwork,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
     let query = r#"
-        SELECT np.*
+        SELECT np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address,
+               np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip
         FROM network_prefixes np
         WHERE np.prefix && $1::cidr
           AND (np.vpc_prefix_id = $2 OR np.vpc_prefix_id IS NULL)
@@ -154,7 +164,9 @@ pub async fn find(
     txn: &mut PgConnection,
     uuid: NetworkPrefixId,
 ) -> Result<NetworkPrefix, DatabaseError> {
-    let query = "select * from network_prefixes where id=$1";
+    let query = "SELECT id, segment_id, prefix, gateway, dhcpv6_link_address,
+            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip
+        FROM network_prefixes WHERE id=$1";
     sqlx::query_as(query)
         .bind(uuid)
         .fetch_one(txn)
@@ -169,8 +181,12 @@ pub async fn find_by<'a, C: super::ColumnInfo<'a, TableType = NetworkPrefix>>(
     txn: &mut PgConnection,
     filter: super::ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let mut query =
-        super::FilterableQueryBuilder::new("SELECT * FROM network_prefixes").filter(&filter);
+    let mut query = super::FilterableQueryBuilder::new(
+        "SELECT id, segment_id, prefix, gateway, dhcpv6_link_address,
+            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip
+        FROM network_prefixes",
+    )
+    .filter(&filter);
 
     query
         .build_query_as()
@@ -213,7 +229,9 @@ pub async fn find_by_vpc(
     txn: &mut PgConnection,
     vpc_id: VpcId,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let query = "SELECT np.* FROM network_prefixes np \
+    let query = "SELECT np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address, \
+            np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip \
+            FROM network_prefixes np \
             INNER JOIN network_segments ns ON np.segment_id = ns.id \
             WHERE np.vpc_prefix_id IS NULL AND ns.vpc_id = $1 ORDER BY ns.created";
 
@@ -231,7 +249,9 @@ pub async fn find_by_vpcs(
     txn: &mut PgConnection,
     vpc_ids: &Vec<VpcId>,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let query = "SELECT np.* FROM network_prefixes np
+    let query = "SELECT np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address,
+            np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip
+            FROM network_prefixes np
             INNER JOIN network_segments ns ON np.segment_id = ns.id
             WHERE np.vpc_prefix_id IS NULL AND ns.vpc_id = ANY($1) ORDER BY ns.created";
 
@@ -272,7 +292,8 @@ pub async fn create_for(
     let mut inserted_prefixes: Vec<NetworkPrefix> = Vec::with_capacity(prefixes.len());
     let query = "INSERT INTO network_prefixes (segment_id, prefix, gateway, dhcpv6_link_address, num_reserved)
             VALUES ($1::uuid, $2::cidr, $3::inet, $4::inet, $5::integer)
-            RETURNING *";
+            RETURNING id, segment_id, prefix, gateway, dhcpv6_link_address,
+                num_reserved, vpc_prefix_id, vpc_prefix, svi_ip";
     for prefix in prefixes {
         let new_prefix: NetworkPrefix = sqlx::query_as(query)
             .bind(segment_id)
@@ -313,8 +334,9 @@ pub async fn set_vpc_prefix(
     vpc_prefix_id: &VpcPrefixId,
     prefix: &IpNetwork,
 ) -> Result<(), DatabaseError> {
-    let query =
-        "UPDATE network_prefixes SET vpc_prefix_id=$1, vpc_prefix=$2 WHERE id=$3 RETURNING *";
+    let query = "UPDATE network_prefixes SET vpc_prefix_id=$1, vpc_prefix=$2 WHERE id=$3
+        RETURNING id, segment_id, prefix, gateway, dhcpv6_link_address,
+            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip";
     let network_prefix = sqlx::query_as::<_, NetworkPrefix>(query)
         .bind(vpc_prefix_id)
         .bind(prefix)
@@ -335,7 +357,9 @@ pub async fn set_svi_ip(
     prefix_id: NetworkPrefixId,
     svi_ip: &IpAddr,
 ) -> Result<(), DatabaseError> {
-    let query = "UPDATE network_prefixes SET svi_ip=$1::inet WHERE id=$2 RETURNING *";
+    let query = "UPDATE network_prefixes SET svi_ip=$1::inet WHERE id=$2
+        RETURNING id, segment_id, prefix, gateway, dhcpv6_link_address,
+            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip";
     sqlx::query_as::<_, NetworkPrefix>(query)
         .bind(svi_ip)
         .bind(prefix_id)

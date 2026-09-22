@@ -38,7 +38,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::redfish::account_service::PasswordUpdater;
 use crate::redfish::manager::ManagerState;
-use crate::{BmcState, Callbacks, SystemPowerControl};
+use crate::{BmcState, Callbacks, ResourceResetType};
 
 const START_ATTEMPTS: usize = 5;
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -305,8 +305,9 @@ impl ChassisControl {
                 match lines.next_line().await {
                     Ok(Some(line)) => match line.parse::<ChassisControlEvent>() {
                         Ok(ChassisControlEvent::Reset) => {
-                            if let Err(error) =
-                                callbacks.send_power_command(SystemPowerControl::ForceRestart)
+                            if let Err(error) = callbacks
+                                .computer_system_reset(ResourceResetType::ForceRestart)
+                                .await
                             {
                                 tracing::warn!(
                                     error = %error,
@@ -618,7 +619,7 @@ mod tests {
         IPMI_SIM_EXECUTABLE, IpmiSimConfig, MockConsole, stable_guid, start, validate_credential,
         validate_executable_in_path,
     };
-    use crate::SystemPowerControl;
+    use crate::ResourceResetType;
     use crate::test_support::TestCallbacks;
 
     #[test]
@@ -748,7 +749,7 @@ mod tests {
 
         assert_eq!(
             *callbacks.commands.lock().unwrap(),
-            vec![SystemPowerControl::ForceRestart]
+            vec![ResourceResetType::ForceRestart]
         );
     }
 

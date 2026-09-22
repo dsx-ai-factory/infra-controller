@@ -15,6 +15,12 @@
  * limitations under the License.
  */
 
+//! Database operations for VPC prefixes.
+//!
+//! Explicit result columns keep this table's queries working across column
+//! additions. Cached wildcard statements otherwise fail with PostgreSQL's
+//! "cached plan must not change result type".
+
 use std::collections::HashMap;
 
 use carbide_network::ip::IdentifyAddressFamily;
@@ -35,6 +41,9 @@ use sqlx::{FromRow, PgConnection, QueryBuilder, Row};
 use super::{ColumnInfo, DatabaseError, ObjectColumnFilter};
 use crate::vpc::increment_vpc_version;
 use crate::{ConditionalWrite, ControllerStateNotCurrent};
+
+#[cfg(test)]
+mod tests;
 
 async fn network_prefix_occupancy_by_vpc_prefix_id(
     vpc_prefix_ids: &[VpcPrefixId],
@@ -165,8 +174,13 @@ pub async fn get_by_id<'a, C>(
 where
     C: ColumnInfo<'a, TableType = VpcPrefix>,
 {
-    let mut query =
-        super::FilterableQueryBuilder::new("SELECT * FROM network_vpc_prefixes").filter(&filter);
+    let mut query = super::FilterableQueryBuilder::new(
+        "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
+            labels, description, controller_state, controller_state_outcome,
+            controller_state_version, deleted
+        FROM network_vpc_prefixes",
+    )
+    .filter(&filter);
     match deleted_filter {
         DeletedFilter::Exclude => {
             query.push(" AND deleted IS NULL");
@@ -197,7 +211,9 @@ pub async fn get_for_allocation_by_ids(
     vpc_prefix_ids: &[VpcPrefixId],
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
     let query = r#"
-        SELECT *
+        SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
+               labels, description, controller_state, controller_state_outcome,
+               controller_state_version, deleted
         FROM network_vpc_prefixes
         -- Omit a deletion predicate so allocation validation can distinguish
         -- deleted prefixes from unknown IDs.
@@ -223,7 +239,9 @@ pub async fn find_allocation_candidates(
     vpc_ids: &[VpcId],
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
     let query = r#"
-        SELECT *
+        SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
+               labels, description, controller_state, controller_state_outcome,
+               controller_state_version, deleted
         FROM network_vpc_prefixes
         WHERE vpc_id = ANY($1)
           -- Soft-deleted prefixes are not eligible automatic candidates.
@@ -249,7 +267,9 @@ pub async fn lock_for_allocation(
     vpc_prefix_id: VpcPrefixId,
 ) -> Result<Option<VpcPrefix>, DatabaseError> {
     let query = r#"
-        SELECT *
+        SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
+               labels, description, controller_state, controller_state_outcome,
+               controller_state_version, deleted
         FROM network_vpc_prefixes
         WHERE id = $1
           -- Deletion can race discovery, so re-check it while taking the row lock.
@@ -269,7 +289,10 @@ pub async fn find_by_vpc(
     txn: &mut PgConnection,
     vpc_id: VpcId,
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
-    let query = "SELECT * FROM network_vpc_prefixes WHERE vpc_id=$1 \
+    let query = "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix, \
+            labels, description, controller_state, controller_state_outcome, \
+            controller_state_version, deleted \
+            FROM network_vpc_prefixes WHERE vpc_id=$1 \
             AND deleted IS NULL \
             ORDER BY prefix";
     let mut container = sqlx::query_as(query)
@@ -287,7 +310,10 @@ pub async fn find_by_vpcs(
     txn: &mut PgConnection,
     vpc_ids: &Vec<VpcId>,
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
-    let query = "SELECT * FROM network_vpc_prefixes WHERE vpc_id=ANY($1) \
+    let query = "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix, \
+                labels, description, controller_state, controller_state_outcome, \
+                controller_state_version, deleted \
+                FROM network_vpc_prefixes WHERE vpc_id=ANY($1) \
                 AND deleted IS NULL \
                 ORDER BY prefix";
     sqlx::query_as(query)
@@ -303,7 +329,11 @@ pub async fn update_last_used_prefix(
     vpc_prefix_id: &VpcPrefixId,
     last_used_prefix: IpNetwork,
 ) -> Result<(), DatabaseError> {
-    let query = "UPDATE network_vpc_prefixes SET last_used_prefix=$1 WHERE id=$2 AND deleted IS NULL RETURNING *";
+    let query =
+        "UPDATE network_vpc_prefixes SET last_used_prefix=$1 WHERE id=$2 AND deleted IS NULL
+        RETURNING id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
+            labels, description, controller_state, controller_state_outcome,
+            controller_state_version, deleted";
     sqlx::query_as::<_, VpcPrefix>(query)
         .bind(last_used_prefix)
         .bind(vpc_prefix_id)
@@ -410,7 +440,9 @@ pub async fn persist(
                 controller_state,
                 controller_state_version)
             VALUES ($1, $2, $3, $4::json, $5, $6, $7, $8::json, $9)
-            RETURNING *";
+            RETURNING id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
+                labels, description, controller_state, controller_state_outcome,
+                controller_state_version, deleted";
     let vpc_prefix: VpcPrefix = match sqlx::query_as(insert_query)
         .bind(value.id)
         .bind(value.config.prefix)
@@ -456,7 +488,10 @@ pub async fn probe(
     txn: &mut PgConnection,
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
     // Include soft-deleted rows because the global exclusion constraint still reserves them.
-    let query = "SELECT * FROM network_vpc_prefixes WHERE prefix && $1";
+    let query = "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
+            labels, description, controller_state, controller_state_outcome,
+            controller_state_version, deleted
+        FROM network_vpc_prefixes WHERE prefix && $1";
     sqlx::query_as(query)
         .bind(network)
         .fetch_all(txn)
@@ -488,7 +523,9 @@ pub async fn probe_segment_prefixes(
     network: IpNetwork,
     txn: &mut PgConnection,
 ) -> Result<Vec<AttachedSegmentPrefix>, DatabaseError> {
-    let query = "SELECT ns.vpc_id AS vpc_id, ns.network_segment_type, np.* \
+    let query = "SELECT ns.vpc_id AS vpc_id, ns.network_segment_type, \
+            np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address, \
+            np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip \
             FROM network_prefixes np \
             INNER JOIN network_segments ns ON np.segment_id = ns.id \
             WHERE np.prefix && $1 \
@@ -513,7 +550,10 @@ pub async fn update(
     update: &UpdateVpcPrefix,
     txn: &mut PgConnection,
 ) -> Result<VpcPrefix, DatabaseError> {
-    let query = "UPDATE network_vpc_prefixes SET name=$1, labels=$2::json, description=$3 WHERE id=$4 AND deleted IS NULL RETURNING *";
+    let query = "UPDATE network_vpc_prefixes SET name=$1, labels=$2::json, description=$3 WHERE id=$4 AND deleted IS NULL
+        RETURNING id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
+            labels, description, controller_state, controller_state_outcome,
+            controller_state_version, deleted";
     sqlx::query_as(query)
         .bind(&update.metadata.name)
         .bind(sqlx::types::Json(&update.metadata.labels))
@@ -533,8 +573,10 @@ pub async fn mark_as_deleted(
     txn: &mut PgConnection,
 ) -> Result<VpcPrefixId, DatabaseError> {
     // Mark the prefix deleted while keeping its address space reserved for the controller.
-    let query =
-        "UPDATE network_vpc_prefixes SET deleted=NOW() WHERE id=$1 AND deleted IS NULL RETURNING *";
+    let query = "UPDATE network_vpc_prefixes SET deleted=NOW() WHERE id=$1 AND deleted IS NULL
+        RETURNING id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
+            labels, description, controller_state, controller_state_outcome,
+            controller_state_version, deleted";
     let deleted_prefix: VpcPrefix = sqlx::query_as(query)
         .bind(value.id)
         .fetch_one(&mut *txn)

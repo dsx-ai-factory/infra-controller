@@ -15,6 +15,12 @@
  * limitations under the License.
  */
 
+//! Database operations for SitePrefixes.
+//!
+//! Explicit result columns keep this table's queries working across column
+//! additions. Cached wildcard statements otherwise fail with PostgreSQL's
+//! "cached plan must not change result type".
+
 use std::collections::HashMap;
 
 use carbide_uuid::site_prefix::SitePrefixId;
@@ -162,7 +168,8 @@ async fn insert(value: NewSitePrefix, txn: &mut PgConnection) -> DatabaseResult<
             version
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
-        RETURNING *
+        RETURNING id, prefix, authority, tenant_organization_id, routing_scope,
+            lifecycle_state, name, description, labels, version, created_at, updated_at
     "#;
 
     let site_prefix: SitePrefix = sqlx::query_as(query)
@@ -337,7 +344,9 @@ pub async fn reconcile_configured(
     configured_prefixes.sort_by_cached_key(ToString::to_string);
     configured_prefixes.dedup();
 
-    let find_query = "SELECT * FROM site_prefixes WHERE authority = $1 FOR UPDATE";
+    let find_query = "SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+        lifecycle_state, name, description, labels, version, created_at, updated_at
+        FROM site_prefixes WHERE authority = $1 FOR UPDATE";
     let stored: Vec<SitePrefix> = sqlx::query_as(find_query)
         .bind(SitePrefixAuthority::OperatorManaged)
         .fetch_all(&mut *txn)
@@ -438,7 +447,9 @@ pub async fn find_by_id_for_update(
     txn: &mut PgConnection,
     site_prefix_id: SitePrefixId,
 ) -> DatabaseResult<Option<SitePrefix>> {
-    let query = "SELECT * FROM site_prefixes WHERE id = $1 FOR UPDATE";
+    let query = "SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+        lifecycle_state, name, description, labels, version, created_at, updated_at
+        FROM site_prefixes WHERE id = $1 FOR UPDATE";
     sqlx::query_as(query)
         .bind(site_prefix_id)
         .fetch_optional(txn)
@@ -455,7 +466,9 @@ pub async fn find_by_id_for_vpc_prefix_attachment(
     txn: &mut PgConnection,
     site_prefix_id: SitePrefixId,
 ) -> DatabaseResult<Option<SitePrefix>> {
-    let query = "SELECT * FROM site_prefixes WHERE id = $1 FOR SHARE";
+    let query = "SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+        lifecycle_state, name, description, labels, version, created_at, updated_at
+        FROM site_prefixes WHERE id = $1 FOR SHARE";
     sqlx::query_as(query)
         .bind(site_prefix_id)
         .fetch_optional(txn)
@@ -474,7 +487,8 @@ pub async fn find_legacy_operator_managed_for_vpc_prefix_attachment(
     prefix: IpNetwork,
 ) -> DatabaseResult<Vec<SitePrefix>> {
     let query = r#"
-        SELECT *
+        SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+            lifecycle_state, name, description, labels, version, created_at, updated_at
         FROM site_prefixes
         WHERE authority = $1
           AND prefix >>= $2
@@ -500,7 +514,8 @@ pub async fn find_containing_tenant_managed_for_vpc_prefix_attachment(
     tenant_organization_id: &str,
 ) -> DatabaseResult<Vec<SitePrefix>> {
     let query = r#"
-        SELECT *
+        SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+            lifecycle_state, name, description, labels, version, created_at, updated_at
         FROM site_prefixes
         WHERE authority = $1
           AND prefix >>= $2
@@ -811,7 +826,8 @@ pub async fn update_tenant_metadata(
           AND authority = $7
           AND lifecycle_state <> $8
           AND version = $9
-        RETURNING *
+        RETURNING id, prefix, authority, tenant_organization_id, routing_scope,
+            lifecycle_state, name, description, labels, version, created_at, updated_at
     "#;
     sqlx::query_as(query)
         .bind(&value.metadata.name)
@@ -870,7 +886,8 @@ pub async fn retire_tenant_managed(
           AND tenant_organization_id = $4
           AND authority = $5
           AND version = $6
-        RETURNING *
+        RETURNING id, prefix, authority, tenant_organization_id, routing_scope,
+            lifecycle_state, name, description, labels, version, created_at, updated_at
     "#;
     let site_prefix: SitePrefix = sqlx::query_as(query)
         .bind(SitePrefixLifecycleState::Deleting)
@@ -960,7 +977,9 @@ pub async fn find_by_ids(
     db: impl DbReader<'_>,
     site_prefix_ids: &[SitePrefixId],
 ) -> DatabaseResult<Vec<SitePrefix>> {
-    let query = "SELECT * FROM site_prefixes WHERE id = ANY($1) ORDER BY id";
+    let query = "SELECT id, prefix, authority, tenant_organization_id, routing_scope,
+        lifecycle_state, name, description, labels, version, created_at, updated_at
+        FROM site_prefixes WHERE id = ANY($1) ORDER BY id";
     sqlx::query_as(query)
         .bind(site_prefix_ids)
         .fetch_all(db)
@@ -973,6 +992,7 @@ mod tests {
 
     use model::metadata::Metadata;
     use model::site_prefix::NewTenantManagedSitePrefix;
+    use sqlx::Connection;
 
     use super::*;
 
@@ -1029,6 +1049,137 @@ mod tests {
             &site_prefix_id,
         )
         .await
+    }
+
+    #[crate::sqlx_test]
+    async fn site_prefix_queries_survive_added_columns(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        create_tenant(&pool, "tenant-a").await?;
+        let mut api_connection = pool.acquire().await?;
+        exercise_site_prefix_queries(&mut api_connection, "10.72.0.0/24".parse()?).await?;
+        assert!(api_connection.cached_statements_size() > 0);
+
+        let mut migration_connection = pool.acquire().await?;
+        let mut migration = migration_connection.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL lock_timeout = '5s';
+             ALTER TABLE site_prefixes
+                 ADD COLUMN test_added_timestamp timestamptz,
+                 ADD COLUMN test_added_outcome jsonb;",
+        )
+        .execute(&mut *migration)
+        .await?;
+        migration.commit().await?;
+
+        exercise_site_prefix_queries(&mut api_connection, "10.73.0.0/24".parse()?).await?;
+        Ok(())
+    }
+
+    async fn exercise_site_prefix_queries(
+        connection: &mut PgConnection,
+        prefix: IpNetwork,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = connection.begin().await?;
+        reconcile_configured(&mut txn, &[prefix]).await?;
+        let [operator]: [SitePrefix; 1] =
+            find_legacy_operator_managed_for_vpc_prefix_attachment(&mut txn, prefix)
+                .await?
+                .try_into()
+                .expect("one containing operator prefix");
+        assert_eq!(operator.config.prefix, prefix);
+        assert_eq!(operator.config.tenant_organization_id, None);
+        assert_eq!(
+            operator.status.authority,
+            SitePrefixAuthority::OperatorManaged
+        );
+        assert_eq!(
+            operator.status.lifecycle_state,
+            SitePrefixLifecycleState::Ready
+        );
+
+        // The first pass retires its tenant root, which still counts toward quota.
+        let created =
+            create_tenant_managed(tenant_managed(&prefix.to_string(), "tenant-a"), 2, &mut txn)
+                .await?
+                .site_prefix;
+        assert_eq!(created.config.prefix, prefix);
+        assert_eq!(
+            created.config.tenant_organization_id,
+            Some("tenant-a".parse()?)
+        );
+        assert_eq!(created.status.authority, SitePrefixAuthority::TenantManaged);
+        assert_eq!(
+            created.status.lifecycle_state,
+            SitePrefixLifecycleState::Provisioning
+        );
+
+        let metadata = Metadata {
+            name: "updated cached prefix".to_string(),
+            description: "cached SitePrefix query".to_string(),
+            labels: HashMap::from([("test".to_string(), "column addition".to_string())]),
+        };
+        let updated = update_tenant_metadata(
+            &UpdateSitePrefixMetadata {
+                id: created.id,
+                tenant_organization_id: "tenant-a".parse()?,
+                metadata: metadata.clone(),
+                if_version_match: Some(created.version),
+            },
+            created.version,
+            &mut txn,
+        )
+        .await?;
+        assert_eq!(updated.metadata, metadata);
+
+        for (name, rows) in [
+            (
+                "find_by_id_for_update",
+                vec![
+                    find_by_id_for_update(&mut txn, created.id)
+                        .await?
+                        .expect("created tenant prefix"),
+                ],
+            ),
+            (
+                "find_by_id_for_vpc_prefix_attachment",
+                vec![
+                    find_by_id_for_vpc_prefix_attachment(&mut txn, created.id)
+                        .await?
+                        .expect("created tenant prefix"),
+                ],
+            ),
+            (
+                "find_containing_tenant_managed_for_vpc_prefix_attachment",
+                find_containing_tenant_managed_for_vpc_prefix_attachment(
+                    &mut txn, prefix, "tenant-a",
+                )
+                .await?,
+            ),
+            ("find_by_ids", find_by_ids(&mut *txn, &[created.id]).await?),
+        ] {
+            assert_eq!(rows.as_slice(), std::slice::from_ref(&updated), "{name}");
+        }
+
+        let retired = retire_tenant_managed(
+            &RetireTenantManagedSitePrefix {
+                id: created.id,
+                tenant_organization_id: "tenant-a".parse()?,
+            },
+            &updated,
+            &mut txn,
+        )
+        .await?;
+        assert_eq!(
+            retired.status.lifecycle_state,
+            SitePrefixLifecycleState::Deleting
+        );
+        assert_eq!(retired.config, updated.config);
+        assert_eq!(retired.metadata, metadata);
+        txn.commit().await?;
+
+        assert_eq!(find_by_ids(connection, &[created.id]).await?, vec![retired]);
+        Ok(())
     }
 
     #[crate::sqlx_test]
