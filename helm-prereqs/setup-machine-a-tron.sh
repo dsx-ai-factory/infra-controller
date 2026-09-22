@@ -140,9 +140,9 @@
 #                          max_concurrency (parallel state-machine tasks).
 #   SCALE_SERVICE_CIDRS    Cluster Service CIDR(s), space-separated, when the
 #                          preflight cannot read them from the cluster.
-#   SCALE_BMC_PREFIXES     Extra BMC network prefixes to validate against the
-#                          ServiceCIDR, space-separated, for a values file whose
-#                          bmcDhcpRelayAddress networks it cannot resolve.
+#   SCALE_BMC_PREFIXES     BMC network prefixes to validate against the
+#                          ServiceCIDR, space-separated, for bmcDhcpRelayAddress
+#                          networks the live site config does not declare yet.
 #   SCALE_ALLOW_UNKNOWN_SERVICE_CIDR
 #                          Set to 1 to deploy when the ServiceCIDR cannot be
 #                          determined. Default: stop.
@@ -395,8 +395,9 @@ if [[ "$MAT_MODE" == "scale" ]]; then
     # apiserver does not validate, so a BMC network inside the ServiceCIDR
     # collides silently with allocated clusterIPs. Every BMC network this run
     # deploys is checked: the SCALE_OOB_PREFIX segment plus the network of each
-    # bmcDhcpRelayAddress in the values file, resolved from the prefixes the
-    # file documents, the live site config, or SCALE_BMC_PREFIXES. ServiceCIDR
+    # bmcDhcpRelayAddress in the values file, resolved from the live site
+    # config's [networks.*] stanzas or SCALE_BMC_PREFIXES (comments in the values
+    # file are documentation, not evidence). Every explicit CIDR must parse. ServiceCIDR
     # sources: SCALE_SERVICE_CIDRS, else ServiceCIDR objects (k8s 1.33+),
     # kubeadm's ClusterConfiguration, then the apiserver flag. Unknown means
     # stop, unless SCALE_ALLOW_UNKNOWN_SERVICE_CIDR=1 accepts the risk.
@@ -421,19 +422,21 @@ values_file, oob_prefix, extra, svc, site_path = sys.argv[1:6]
 text = open(values_file).read()
 site = open(site_path).read()
 
-def nets(cands):
+def nets(cands, source):
+    """Parse CIDRs; an explicit token that is not a CIDR is reported, never dropped."""
     out = []
     for c in cands:
         try:
             out.append(ipaddress.ip_network(c, strict=False))
         except ValueError:
-            pass
+            bad.append(f"{source}={c}")
     return out
 
+bad = []
 oob = ipaddress.ip_network(oob_prefix, strict=False)
-documented = nets(re.findall(r'[0-9]+(?:\.[0-9]+){3}/[0-9]+', text))
-site_nets = nets(re.findall(r'^\s*prefix\s*=\s*"([^"]+)"', site, re.M))
-extra_nets = nets(extra.split())
+site_nets = nets(re.findall(r'^\s*prefix\s*=\s*"([^"]+)"', site, re.M), "site-config")
+extra_nets = nets(extra.split(), "SCALE_BMC_PREFIXES")
+svc_nets = nets(svc.split(), "SCALE_SERVICE_CIDRS")
 # Relay addresses of every machine group (camelCase and rack-group snake_case
 # keys); commented-out lines are ignored, as in the pool-fit check.
 relays = []
@@ -450,9 +453,9 @@ for raw in text.splitlines():
 
 def resolve(addr):
     # Most specific containing prefix wins: a relay sits inside its own
-    # segment and inside any wider range the file documents.
+    # segment and inside any wider range the site config declares.
     best = None
-    for net in [oob] + documented + site_nets + extra_nets:
+    for net in [oob] + site_nets + extra_nets:
         if addr in net and (best is None or net.prefixlen > best.prefixlen):
             best = net
     return best
@@ -466,8 +469,10 @@ for r in relays:
         prefixes.add(n)
 prefixes |= set(extra_nets)
 order = sorted(prefixes, key=lambda n: (int(n.network_address), n.prefixlen))
-overlaps = [f"{p} overlaps {c}" for p in order for c in nets(svc.split()) if p.overlaps(c)]
+overlaps = [f"{p} overlaps {c}" for p in order for c in svc_nets if p.overlaps(c)]
 print("PREFIXES " + " ".join(str(p) for p in order))
+if bad:
+    print("BADCIDR " + " ".join(bad))
 if unresolved:
     print("UNRESOLVED " + " ".join(sorted(set(unresolved))))
 if overlaps:
@@ -475,10 +480,12 @@ if overlaps:
 PY
 )"
     rm -f "$_SITE_NETS"
+    _NET_BAD="$(sed -n 's/^BADCIDR //p' <<<"$_NETCHK")"
+    [[ -z "$_NET_BAD" ]] || die "not a CIDR: ${_NET_BAD}; every entry of SCALE_SERVICE_CIDRS and SCALE_BMC_PREFIXES and every [networks.*] prefix in the site config must be <address>/<length>"
     _NET_PFX="$(sed -n 's/^PREFIXES //p' <<<"$_NETCHK")"
     _NET_UNRES="$(sed -n 's/^UNRESOLVED //p' <<<"$_NETCHK")"
     _NET_OVL="$(sed -n 's/^OVERLAP //p' <<<"$_NETCHK")"
-    [[ -z "$_NET_UNRES" ]] || die "cannot determine the BMC network of bmcDhcpRelayAddress ${_NET_UNRES} in ${VALUES_FILE}; document its prefix in the values file, create its [networks.*] stanza in the site config first, or set SCALE_BMC_PREFIXES=\"<cidr> ...\""
+    [[ -z "$_NET_UNRES" ]] || die "cannot determine the BMC network of bmcDhcpRelayAddress ${_NET_UNRES} in ${VALUES_FILE}; create its [networks.*] stanza in the site config before running setup, or set SCALE_BMC_PREFIXES=\"<cidr> ...\" (comments in the values file do not count)"
     [[ -z "$_NET_OVL" ]] || die "BMC network overlaps the cluster ServiceCIDR: ${_NET_OVL}; Controller Mode publishes BMC IPs as Service externalIPs, so every BMC network must lie outside it (helm/charts/nico-machine-a-tron/README.md, Requirements)"
     [[ -z "$_SVC_CIDRS" ]] || ok "BMC networks ${_NET_PFX} are outside the ServiceCIDR (${_SVC_CIDRS})"
 fi

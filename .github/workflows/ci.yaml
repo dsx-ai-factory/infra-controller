@@ -956,6 +956,35 @@ jobs:
   # Like the release-container builds above, deliberately not gated on
   # `check-rest-core-proto-sync`: the tests do not read anything it produces,
   # and `core-ci-pass` still fails the merge when the protos are out of sync.
+  test-mat-k8s-controller:
+    name: test-mat-k8s-controller
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.source_files_changed == 'true'
+      }}
+    needs:
+      - prepare
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: dev/k8s/machine-a-tron-controller/go.mod
+          cache: true
+          cache-dependency-path: dev/k8s/machine-a-tron-controller/go.sum
+
+      - name: Run the mat-k8s-controller unit tests
+        run: make -C dev/k8s/machine-a-tron-controller test
+
   test-release-container-services:
     if: >-
       ${{
@@ -2238,6 +2267,7 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - test-mat-k8s-controller
       - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
@@ -2425,6 +2455,7 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - test-mat-k8s-controller
       - test-release-container-services
 
       # CLI images

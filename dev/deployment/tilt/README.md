@@ -123,8 +123,12 @@ Redfish request through the shared machine-a-tron proxy.
 
 The Tilt BMC underlay is `10.200.0.0/18`. BMC addresses are Service externalIPs,
 which the apiserver neither allocates nor validates and for which kube-proxy
-programs forwarding rules on every node, so this range must stay outside Kind's
-default `10.96.0.0/16` ServiceCIDR and `10.244.0.0/16` pod CIDR.
+programs forwarding rules on every node, so this range must stay outside the
+Kubernetes ServiceCIDR, the pod CIDR, the node network, and any network the
+nodes or pods must otherwise reach. On Kind the first two default to
+`10.96.0.0/16` and `10.244.0.0/16`. Refer to the chart's
+[Requirements](../../../helm/charts/nico-machine-a-tron/README.md#requirements)
+for the full contract.
 
 ## Image builds
 
