@@ -537,7 +537,7 @@ match the stored version, and the write changes nothing otherwise
 (`ConcurrentModificationError`). When omitted the write proceeds.
 
 The format rule guarantees structurally that derivation can never produce `any`:
-a derived class always has three `_`-separated fields, and `any` has one.
+a derived class always has two `_`-separated fields, and `any` has one.
 
 ### 6.3 The admin CLI
 
