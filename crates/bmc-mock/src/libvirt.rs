@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
+use eyre::WrapErr;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
 use tokio::io::AsyncReadExt;
@@ -34,19 +35,7 @@ use url::Url;
 
 use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult};
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
-use crate::{
-    BmcState, BootOptionKind, Callbacks, MockPowerState, ResourceResetType, SetSystemPowerError,
-};
-
-#[derive(Debug, thiserror::Error)]
-enum VirtualMediaError {
-    #[error("invalid virtual media request: {0}")]
-    BadRequest(String),
-    #[error("virtual media command failed: {0}")]
-    Command(String),
-}
-
-type VirtualMediaResult = Result<(), VirtualMediaError>;
+use crate::{ActionError, BmcState, BootOptionKind, Callbacks, MockPowerState, ResourceResetType};
 
 /// Maximum duration of one virsh attempt, including output collection.
 const VIRSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -182,7 +171,7 @@ impl LibvirtBackend {
         Ok(())
     }
 
-    async fn virsh_output(&self, arguments: &[&str]) -> Result<Output, String> {
+    async fn virsh_output(&self, arguments: &[&str]) -> eyre::Result<Output> {
         let command = self.config.virsh_path.display().to_string();
         let mut child = Command::new(&self.config.virsh_path)
             .arg("--connect")
@@ -193,7 +182,7 @@ impl LibvirtBackend {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|error| format!("could not execute {command}: {error}"))?;
+            .with_context(|| format!("could not execute {command}"))?;
         let mut stdout = child.stdout.take().expect("stdout is piped");
         let mut stderr = child.stderr.take().expect("stderr is piped");
         let mut stdout_bytes = Vec::new();
@@ -217,45 +206,45 @@ impl LibvirtBackend {
             failed => {
                 child
                     .start_kill()
-                    .map_err(|error| format!("could not stop {command}: {error}"))?;
+                    .with_context(|| format!("could not stop {command}"))?;
                 // On timeout, returning drops Child and leaves reaping to Tokio's
                 // best-effort cleanup so the actor can keep processing.
                 tokio::time::timeout(VIRSH_CLEANUP_TIMEOUT, child.wait())
                     .await
-                    .map_err(|_| {
+                    .with_context(|| {
                         format!("could not reap {command} within {VIRSH_CLEANUP_TIMEOUT:?} after kill request")
                     })?
-                    .map_err(|error| format!("could not reap {command}: {error}"))?;
+                    .with_context(|| format!("could not reap {command}"))?;
                 Err(match failed {
-                    Err(_) => format!("{command} timed out after {VIRSH_COMMAND_TIMEOUT:?}"),
-                    Ok(Err(error)) => format!("could not collect {command} output: {error}"),
+                    Err(_) => eyre::eyre!("{command} timed out after {VIRSH_COMMAND_TIMEOUT:?}"),
+                    Ok(Err(error)) => {
+                        eyre::eyre!("could not collect {command} output: {error}")
+                    }
                     Ok(Ok(_)) => unreachable!(),
                 })
             }
         }
     }
 
-    async fn virsh(&self, arguments: &[&str]) -> Result<Output, String> {
+    async fn virsh(&self, arguments: &[&str]) -> eyre::Result<Output> {
         let output = self.virsh_output(arguments).await?;
         if output.status.success() {
-            return Ok(output);
+            Ok(output)
+        } else {
+            Err(eyre::eyre!(
+                "{} exited with {}: {}",
+                self.config.virsh_path.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
         }
-        Err(format!(
-            "{} exited with {}: {}",
-            self.config.virsh_path.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
     }
 
-    async fn domain_command(&self, command: &str) -> Result<(), SetSystemPowerError> {
-        self.virsh(&[command, &self.config.domain])
-            .await
-            .map(drop)
-            .map_err(SetSystemPowerError::CommandSendError)
+    async fn domain_command(&self, command: &str) -> eyre::Result<()> {
+        self.virsh(&[command, &self.config.domain]).await.map(drop)
     }
 
-    async fn start(&mut self) -> Result<(), SetSystemPowerError> {
+    async fn start(&mut self) -> eyre::Result<()> {
         self.domain_command("start").await?;
         let restore_boot = std::mem::take(&mut self.restore_boot_after_power_on);
         if restore_boot {
@@ -267,7 +256,7 @@ impl LibvirtBackend {
         Ok(())
     }
 
-    async fn restore_persistent_boot_order(&self) -> Result<(), SetSystemPowerError> {
+    async fn restore_persistent_boot_order(&self) -> eyre::Result<()> {
         let selection = self
             .system_state
             .as_ref()
@@ -280,16 +269,16 @@ impl LibvirtBackend {
         self.set_persistent_boot_selection(selection).await
     }
 
-    async fn reapply_effective_boot_order(&mut self) -> Result<(), SetSystemPowerError> {
+    async fn reapply_effective_boot_order(&mut self) -> Result<(), ActionError> {
         let Some(state) = self.system_state.as_ref().and_then(Weak::upgrade) else {
-            return Err(SetSystemPowerError::CommandSendError(
-                "libvirt backend is not bound to BMC mock state".to_string(),
-            ));
+            return Err(ActionError::Internal(eyre::eyre!(
+                "libvirt backend is not bound to BMC mock state"
+            )));
         };
         let Some(system) = state.controlled_system() else {
-            return Err(SetSystemPowerError::CommandSendError(
-                "BMC mock state has no controlled ComputerSystem".to_string(),
-            ));
+            return Err(ActionError::Internal(eyre::eyre!(
+                "BMC mock state has no controlled ComputerSystem"
+            )));
         };
         let boot_source_override = system.boot_source_override();
         if boot_source_override_is_active(&boot_source_override) {
@@ -297,13 +286,14 @@ impl LibvirtBackend {
         } else {
             self.set_persistent_boot_selection(system.resolve_persistent_boot_selection())
                 .await
+                .map_err(ActionError::Internal)
         }
     }
 
     async fn set_persistent_boot_selection(
         &self,
         selection: Option<BootOptionKind>,
-    ) -> Result<(), SetSystemPowerError> {
+    ) -> eyre::Result<()> {
         match selection {
             Some(BootOptionKind::Disk) => self.set_boot_devices(&["hd"]).await,
             Some(BootOptionKind::Network) => self.set_boot_devices(&["network", "hd"]).await,
@@ -311,56 +301,42 @@ impl LibvirtBackend {
         }
     }
 
-    async fn set_boot_devices(&self, devices: &[&str]) -> Result<(), SetSystemPowerError> {
+    async fn set_boot_devices(&self, devices: &[&str]) -> eyre::Result<()> {
         let output = self
             .virsh(&["dumpxml", "--inactive", &self.config.domain])
-            .await
-            .map_err(SetSystemPowerError::CommandSendError)?;
-        let xml = String::from_utf8(output.stdout).map_err(|error| {
-            SetSystemPowerError::CommandSendError(format!(
-                "virsh dumpxml returned invalid UTF-8: {error}"
-            ))
-        })?;
+            .await?;
         let xml =
-            set_boot_order_xml(&xml, devices).map_err(SetSystemPowerError::CommandSendError)?;
-        let file = tempfile::NamedTempFile::new().map_err(|error| {
-            SetSystemPowerError::CommandSendError(format!(
-                "could not create temporary domain XML: {error}"
-            ))
-        })?;
+            String::from_utf8(output.stdout).context("virsh dumpxml returned invalid UTF-8")?;
+        let xml = set_boot_order_xml(&xml, devices)?;
+        let file =
+            tempfile::NamedTempFile::new().context("could not create temporary domain XML")?;
         tokio::fs::write(file.path(), xml.as_bytes())
             .await
-            .map_err(|error| {
-                SetSystemPowerError::CommandSendError(format!(
-                    "could not write temporary domain XML: {error}"
-                ))
-            })?;
+            .context("could not write temporary domain XML")?;
         self.virsh(&["define", file.path().to_string_lossy().as_ref()])
             .await
             .map(drop)
-            .map_err(SetSystemPowerError::CommandSendError)
     }
 
-    fn target_for_device(&self, device_id: &str) -> Result<&str, VirtualMediaError> {
+    fn target_for_device(&self, device_id: &str) -> Result<&str, ActionError> {
         self.config
             .virtual_media_targets
             .get(device_id)
             .map(String::as_str)
             .ok_or_else(|| {
-                VirtualMediaError::BadRequest(format!(
-                    "virtual media device {device_id} has no libvirt target"
+                ActionError::BadRequest(eyre::eyre!(
+                    "virtual media device {} has no libvirt target",
+                    device_id
                 ))
             })
     }
 
-    async fn target_is_attached(&self, target: &str) -> Result<bool, VirtualMediaError> {
+    async fn target_is_attached(&self, target: &str) -> eyre::Result<bool> {
         let output = self
             .virsh(&["domblklist", "--details", &self.config.domain])
-            .await
-            .map_err(VirtualMediaError::Command)?;
-        let output = String::from_utf8(output.stdout).map_err(|error| {
-            VirtualMediaError::Command(format!("virsh domblklist returned invalid UTF-8: {error}"))
-        })?;
+            .await?;
+        let output =
+            String::from_utf8(output.stdout).context("virsh domblklist returned invalid UTF-8")?;
         Ok(output.lines().any(|line| {
             line.split_whitespace()
                 .nth(2)
@@ -368,20 +344,19 @@ impl LibvirtBackend {
         }))
     }
 
-    async fn detach_target(&self, target: &str) -> VirtualMediaResult {
+    async fn detach_target(&self, target: &str) -> eyre::Result<()> {
         if !self.target_is_attached(target).await? {
             return Ok(());
         }
         self.virsh(&["detach-disk", &self.config.domain, target, "--persistent"])
             .await
             .map(drop)
-            .map_err(VirtualMediaError::Command)
     }
 
     async fn set_boot_source_override(
         &mut self,
         boot_source_override: &serde_json::Value,
-    ) -> Result<(), SetSystemPowerError> {
+    ) -> Result<(), ActionError> {
         let enabled = boot_source_override
             .get("BootSourceOverrideEnabled")
             .and_then(serde_json::Value::as_str);
@@ -394,13 +369,15 @@ impl LibvirtBackend {
             (_, Some("Hdd")) => &["hd"][..],
             (_, Some("Pxe" | "UefiHttp")) => &["network", "hd"][..],
             (_, Some(target)) => {
-                return Err(SetSystemPowerError::BadRequest(format!(
+                return Err(ActionError::BadRequest(eyre::eyre!(
                     "unsupported boot source override target: {target}"
                 )));
             }
             (_, None) => return Ok(()),
         };
-        self.set_boot_devices(devices).await?;
+        self.set_boot_devices(devices)
+            .await
+            .map_err(ActionError::Internal)?;
         self.restore_boot_after_power_on = enabled == Some("Once");
         Ok(())
     }
@@ -410,18 +387,15 @@ impl LibvirtBackend {
         device_id: &str,
         image: &str,
         write_protected: bool,
-    ) -> VirtualMediaResult {
+    ) -> eyre::Result<()> {
         let target = self.target_for_device(device_id)?;
         self.detach_target(target).await?;
         let xml = virtual_media_xml(device_id, target, image, write_protected)?;
-        let file = tempfile::NamedTempFile::new().map_err(|error| {
-            VirtualMediaError::Command(format!("could not create temporary device XML: {error}"))
-        })?;
+        let file =
+            tempfile::NamedTempFile::new().context("could not create temporary device XML")?;
         tokio::fs::write(file.path(), xml.as_bytes())
             .await
-            .map_err(|error| {
-                VirtualMediaError::Command(format!("could not write temporary device XML: {error}"))
-            })?;
+            .context("could not write temporary device XML")?;
         self.virsh(&[
             "attach-device",
             &self.config.domain,
@@ -430,34 +404,35 @@ impl LibvirtBackend {
         ])
         .await
         .map(drop)
-        .map_err(VirtualMediaError::Command)
     }
 
-    async fn eject_virtual_media(&self, device_id: &str) -> VirtualMediaResult {
+    async fn eject_virtual_media(&self, device_id: &str) -> eyre::Result<()> {
         let target = self.target_for_device(device_id)?;
         self.detach_target(target).await
     }
 
-    async fn apply_virtual_media(&self, state: &serde_json::Value) -> VirtualMediaResult {
+    async fn apply_virtual_media(&self, state: &serde_json::Value) -> Result<(), ActionError> {
         let device_id = state
             .get("Id")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                VirtualMediaError::BadRequest("virtual media state has no Id".to_string())
-            })?;
+            .ok_or_else(|| ActionError::BadRequest(eyre::eyre!("virtual media state has no id")))?;
         let inserted = state
             .get("Inserted")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         if !inserted {
-            return self.eject_virtual_media(device_id).await;
+            return self
+                .eject_virtual_media(device_id)
+                .await
+                .map_err(ActionError::Internal);
         }
         let image = state
             .get("Image")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| {
-                VirtualMediaError::BadRequest(format!(
-                    "inserted virtual media device {device_id} has no Image"
+                ActionError::BadRequest(eyre::eyre!(
+                    "inserted virtual media device {} has no image",
+                    device_id
                 ))
             })?;
         let write_protected = state
@@ -466,6 +441,7 @@ impl LibvirtBackend {
             .unwrap_or(true);
         self.insert_virtual_media(device_id, image, write_protected)
             .await
+            .map_err(ActionError::Internal)
     }
 
     async fn reconcile_state(&mut self, desired: AppliedState) -> Result<(), String> {
@@ -546,7 +522,7 @@ impl LibvirtBackend {
             Err(error) => {
                 tracing::warn!(
                     domain = %self.config.domain,
-                    error,
+                    error = ?error,
                     "could not read libvirt domain power state",
                 );
                 MockPowerState::Off
@@ -562,7 +538,7 @@ impl LibvirtBackend {
     async fn send_power_command(
         &mut self,
         reset_type: ResourceResetType,
-    ) -> Result<(), SetSystemPowerError> {
+    ) -> Result<(), ActionError> {
         use ResourceResetType::*;
         // Only a cold start loads the saved domain XML. Reboot and reset keep
         // the running domain's boot configuration and their existing semantics.
@@ -570,20 +546,43 @@ impl LibvirtBackend {
             self.reapply_effective_boot_order().await?;
         }
         match reset_type {
-            On | ForceOn => self.start().await,
-            GracefulShutdown => self.domain_command("shutdown").await,
-            ForceOff => self.domain_command("destroy").await,
-            GracefulRestart => self.domain_command("reboot").await,
-            ForceRestart => self.domain_command("reset").await,
+            On | ForceOn => self.start().await.map_err(ActionError::Internal),
+            GracefulShutdown => self
+                .domain_command("shutdown")
+                .await
+                .map_err(ActionError::Internal),
+            ForceOff => self
+                .domain_command("destroy")
+                .await
+                .map_err(ActionError::Internal),
+            GracefulRestart => self
+                .domain_command("reboot")
+                .await
+                .map_err(ActionError::Internal),
+            ForceRestart => self
+                .domain_command("reset")
+                .await
+                .map_err(ActionError::Internal),
             PowerCycle | FullPowerCycle => {
-                self.domain_command("destroy").await?;
-                self.start().await
+                self.domain_command("destroy")
+                    .await
+                    .map_err(ActionError::Internal)?;
+                self.start().await.map_err(ActionError::Internal)
             }
-            Pause => self.domain_command("suspend").await,
-            Resume => self.domain_command("resume").await,
-            Nmi => self.domain_command("inject-nmi").await,
+            Pause => self
+                .domain_command("suspend")
+                .await
+                .map_err(ActionError::Internal),
+            Resume => self
+                .domain_command("resume")
+                .await
+                .map_err(ActionError::Internal),
+            Nmi => self
+                .domain_command("inject-nmi")
+                .await
+                .map_err(ActionError::Internal),
             Sleep | Hibernate | PushPowerButton | Suspend | UnsupportedValue => {
-                Err(SetSystemPowerError::BadRequest(format!(
+                Err(ActionError::BadRequest(eyre::eyre!(
                     "libvirt backend does not support {reset_type:?}"
                 )))
             }
@@ -662,10 +661,14 @@ impl Callbacks for LibvirtCallbacks {
         *self.power_state.read().expect("power state lock poisoned")
     }
 
-    fn send_power_command(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError> {
+    async fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.get_power_state().validate_reset_type(reset_type)?;
         self.mailbox
             .send(LibvirtMessage::SendPowerCommand { reset_type })
-            .map_err(|error| SetSystemPowerError::CommandSendError(error.to_string()))
+            .map_err(|err| ActionError::Internal(err.into()))
     }
 
     fn state_refresh_indication(&self) {
@@ -678,7 +681,7 @@ impl Callbacks for LibvirtCallbacks {
     }
 }
 
-fn set_boot_order_xml(xml: &str, devices: &[&str]) -> Result<String, String> {
+fn set_boot_order_xml(xml: &str, devices: &[&str]) -> eyre::Result<String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut writer = Writer::new(Vec::new());
@@ -686,7 +689,7 @@ fn set_boot_order_xml(xml: &str, devices: &[&str]) -> Result<String, String> {
     loop {
         let event = reader
             .read_event()
-            .map_err(|error| format!("could not parse libvirt domain XML: {error}"))?;
+            .context("could not parse libvirt domain XML")?;
         match event {
             Event::Start(start) if start.name().as_ref() == b"os" => {
                 inside_os = true;
@@ -708,10 +711,9 @@ fn set_boot_order_xml(xml: &str, devices: &[&str]) -> Result<String, String> {
             Event::Eof => break,
             event => writer.write_event(event.into_owned()),
         }
-        .map_err(|error| format!("could not write libvirt domain XML: {error}"))?;
+        .context("could not write libvirt domain XML")?;
     }
-    String::from_utf8(writer.into_inner())
-        .map_err(|error| format!("generated libvirt domain XML is invalid UTF-8: {error}"))
+    String::from_utf8(writer.into_inner()).context("generated libvirt domain XML is invalid UTF-8")
 }
 
 enum MediaSource {
@@ -725,7 +727,7 @@ enum MediaSource {
 }
 
 impl MediaSource {
-    fn parse(image: &str) -> Result<Self, VirtualMediaError> {
+    fn parse(image: &str) -> Result<Self, ActionError> {
         let Ok(url) = Url::parse(image) else {
             return Ok(Self::File(PathBuf::from(image)));
         };
@@ -733,15 +735,15 @@ impl MediaSource {
             "file" => url
                 .to_file_path()
                 .map(Self::File)
-                .map_err(|()| VirtualMediaError::BadRequest(format!("invalid file URL: {image}"))),
+                .map_err(|()| ActionError::BadRequest(eyre::eyre!("invalid file URL: {}", image))),
             "http" | "https" => {
                 if url.username() != "" || url.password().is_some() || url.query().is_some() {
-                    return Err(VirtualMediaError::BadRequest(
-                        "virtual media URLs must not contain credentials or a query".to_string(),
-                    ));
+                    return Err(ActionError::BadRequest(eyre::eyre!(
+                        "virtual media URLs must not contain credentials or a query",
+                    )));
                 }
                 let host = url.host().ok_or_else(|| {
-                    VirtualMediaError::BadRequest(format!("virtual media URL has no host: {image}"))
+                    ActionError::BadRequest(eyre::eyre!("virtual media URL has no host: {}", image))
                 })?;
                 // `Host::Display` brackets IPv6, but libvirt needs the bare address.
                 let host = match host {
@@ -757,8 +759,9 @@ impl MediaSource {
                     path: url.path().to_string(),
                 })
             }
-            scheme => Err(VirtualMediaError::BadRequest(format!(
-                "unsupported virtual media URL scheme: {scheme}"
+            scheme => Err(ActionError::BadRequest(eyre::eyre!(
+                "unsupported virtual media URL scheme: {}",
+                scheme
             ))),
         }
     }
@@ -769,7 +772,7 @@ fn virtual_media_xml(
     target: &str,
     image: &str,
     write_protected: bool,
-) -> Result<String, VirtualMediaError> {
+) -> eyre::Result<String> {
     let mut writer = Writer::new(Vec::new());
     let mut disk = BytesStart::new("disk");
     let source = MediaSource::parse(image)?;
@@ -833,9 +836,7 @@ fn virtual_media_xml(
         .write_event(Event::End(BytesEnd::new("disk")))
         .unwrap();
 
-    String::from_utf8(writer.into_inner()).map_err(|error| {
-        VirtualMediaError::Command(format!("generated device XML is invalid UTF-8: {error}"))
-    })
+    String::from_utf8(writer.into_inner()).context("generated device XML is invalid UTF-8")
 }
 
 #[cfg(test)]

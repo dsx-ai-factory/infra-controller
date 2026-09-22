@@ -24,8 +24,8 @@ use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId}
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState, POWER_CYCLE_DELAY,
-    ResourceResetType, SetSystemPowerError, SetSystemPowerResult,
+    ActionError, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
+    POWER_CYCLE_DELAY, ResourceResetType,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -92,18 +92,28 @@ struct SwitchCallbacks {
     mailbox: ActorMailbox<SwitchMessage>,
 }
 
-impl Callbacks for SwitchCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        self.state.read().unwrap().power_state
-    }
-
-    fn send_power_command(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError> {
+impl SwitchCallbacks {
+    pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        self.get_power_state().validate_reset_type(reset_type)?;
         self.mailbox
             .send(SwitchMessage::Bmc(BmcCommand::SetSystemPower {
                 request: reset_type,
                 reply: None,
             }))
-            .map_err(|error| SetSystemPowerError::CommandSendError(error.to_string()))
+            .map_err(|error| ActionError::Internal(error.into()))
+    }
+}
+
+impl Callbacks for SwitchCallbacks {
+    fn get_power_state(&self) -> MockPowerState {
+        self.state.read().unwrap().power_state
+    }
+
+    async fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.set_power_state(reset_type)
     }
 
     fn state_refresh_indication(&self) {
@@ -468,7 +478,7 @@ impl SwitchActor {
         Ok(())
     }
 
-    fn set_system_power(&mut self, request: ResourceResetType) -> SetSystemPowerResult {
+    fn set_system_power(&mut self, request: ResourceResetType) -> Result<(), ActionError> {
         use ResourceResetType::*;
 
         match request {
@@ -476,8 +486,9 @@ impl SwitchActor {
             GracefulShutdown | ForceOff => self.fsm_event(Event::PowerOff),
             GracefulRestart | ForceRestart | PowerCycle => self.fsm_event(Event::PowerCycle),
             _ => {
-                return Err(SetSystemPowerError::BadRequest(format!(
-                    "Machine-a-tron mock: unsupported power request {request:?}"
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "machine-a-tron mock: unsupported power request {:?}",
+                    request
                 )));
             }
         }
@@ -575,10 +586,7 @@ impl SwitchHandle {
 
     /// Drive power through the guard the BMC mock uses, so an RMS power
     /// request obeys the same rules as a Redfish one.
-    pub(crate) fn set_system_power(
-        &self,
-        request: ResourceResetType,
-    ) -> Result<(), SetSystemPowerError> {
+    pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
         SwitchCallbacks {
             state: self.0.live_state.clone(),
             mailbox: self.0.mailbox.clone(),

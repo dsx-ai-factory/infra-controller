@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::{
-    BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
-    ResourceResetType, SetSystemPowerError, SetSystemPowerResult,
+    ActionError, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
+    ResourceResetType,
 };
 use carbide_network::virtualization::build_dual_stack_list;
 use carbide_uuid::machine::{DpuMachineId, InvalidMachineType, MachineId, MachineInterfaceId};
@@ -179,6 +179,16 @@ impl LiveStateCallbacks {
             command_channel,
         }
     }
+
+    pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        self.get_power_state().validate_reset_type(reset_type)?;
+        self.command_channel
+            .send(BmcCommand::SetSystemPower {
+                request: reset_type,
+                reply: None,
+            })
+            .map_err(|err| ActionError::Internal(err.into()))
+    }
 }
 
 impl Callbacks for LiveStateCallbacks {
@@ -186,13 +196,11 @@ impl Callbacks for LiveStateCallbacks {
         self.state.read().unwrap().power_state
     }
 
-    fn send_power_command(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError> {
-        self.command_channel
-            .send(BmcCommand::SetSystemPower {
-                request: reset_type,
-                reply: None,
-            })
-            .map_err(|err| SetSystemPowerError::CommandSendError(err.to_string()))
+    async fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.set_power_state(reset_type)
     }
 
     fn state_refresh_indication(&self) {
@@ -1343,7 +1351,10 @@ impl MachineStateMachine {
         Ok(())
     }
 
-    pub(super) fn set_system_power(&mut self, request: ResourceResetType) -> SetSystemPowerResult {
+    pub(super) fn set_system_power(
+        &mut self,
+        request: ResourceResetType,
+    ) -> Result<(), ActionError> {
         use ResourceResetType::*;
         match request {
             On | ForceOn => self.fsm_event(Event::PowerOn),
@@ -1354,9 +1365,11 @@ impl MachineStateMachine {
             ForceOff => self.fsm_event(Event::PowerOff),
             PushPowerButton | Nmi | Suspend | Pause | Resume | Sleep | Hibernate
             | UnsupportedValue => {
-                let msg = format!("Machine-a-tron mock: unsupported power request {request:?}",);
                 tracing::warn!(?request, "unsupported machine-a-tron mock power request",);
-                return Err(SetSystemPowerError::BadRequest(msg));
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "machine-a-tron mock: unsupported power request {:?}",
+                    request
+                )));
             }
         };
         self.update_live_state();

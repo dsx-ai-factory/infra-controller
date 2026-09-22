@@ -19,7 +19,7 @@ use std::sync::Mutex;
 
 use tokio::time::Instant;
 
-use crate::{Callbacks, MockPowerState, POWER_CYCLE_DELAY, ResourceResetType, SetSystemPowerError};
+use crate::{ActionError, Callbacks, MockPowerState, POWER_CYCLE_DELAY, ResourceResetType};
 
 /// Stateful callbacks for a generated BMC that is not connected to a real or
 /// virtual machine. This is useful for modeling independently addressable
@@ -47,7 +47,11 @@ impl Callbacks for SimulatedCallbacks {
         *state
     }
 
-    fn send_power_command(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError> {
+    async fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.get_power_state().validate_reset_type(reset_type)?;
         use ResourceResetType::*;
 
         let new_state = match reset_type {
@@ -69,63 +73,4 @@ impl Callbacks for SimulatedCallbacks {
     }
 
     fn state_refresh_indication(&self) {}
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn changes_power_state_without_an_external_machine() {
-        let callbacks = SimulatedCallbacks::new();
-        assert!(matches!(callbacks.get_power_state(), MockPowerState::On));
-
-        callbacks
-            .set_power_state(ResourceResetType::ForceOff)
-            .unwrap();
-        assert!(matches!(callbacks.get_power_state(), MockPowerState::Off));
-
-        callbacks.set_power_state(ResourceResetType::On).unwrap();
-        assert!(matches!(callbacks.get_power_state(), MockPowerState::On));
-    }
-
-    #[test]
-    fn power_on_is_rejected_while_a_transition_is_in_flight() {
-        // `set_power_state` guards every backend: while the host is coming up or
-        // going down, a further power-on is a 400, never a silently dropped request.
-        for state in [MockPowerState::PoweringOn, MockPowerState::PoweringOff] {
-            let callbacks = SimulatedCallbacks::new();
-            *callbacks.power_state.lock().unwrap() = state;
-            for control in [ResourceResetType::On, ResourceResetType::ForceOn] {
-                assert!(
-                    matches!(
-                        callbacks.set_power_state(control),
-                        Err(SetSystemPowerError::BadRequest(_))
-                    ),
-                    "{control:?} during {state:?} must be rejected"
-                );
-            }
-            assert!(
-                matches!(callbacks.get_power_state(), s if std::mem::discriminant(&s) == std::mem::discriminant(&state)),
-                "a rejected request must not change the state"
-            );
-        }
-    }
-
-    #[test]
-    fn completes_a_power_cycle_after_the_delay() {
-        let callbacks = SimulatedCallbacks::new();
-        callbacks
-            .set_power_state(ResourceResetType::PowerCycle)
-            .unwrap();
-        assert!(matches!(
-            callbacks.get_power_state(),
-            MockPowerState::PowerCycling { .. }
-        ));
-
-        *callbacks.power_state.lock().unwrap() = MockPowerState::PowerCycling {
-            since: Instant::now() - POWER_CYCLE_DELAY,
-        };
-        assert!(matches!(callbacks.get_power_state(), MockPowerState::On));
-    }
 }

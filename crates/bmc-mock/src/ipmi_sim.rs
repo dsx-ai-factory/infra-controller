@@ -305,8 +305,9 @@ impl ChassisControl {
                 match lines.next_line().await {
                     Ok(Some(line)) => match line.parse::<ChassisControlEvent>() {
                         Ok(ChassisControlEvent::Reset) => {
-                            if let Err(error) =
-                                callbacks.send_power_command(ResourceResetType::ForceRestart)
+                            if let Err(error) = callbacks
+                                .computer_system_reset(ResourceResetType::ForceRestart)
+                                .await
                             {
                                 tracing::warn!(
                                     error = %error,

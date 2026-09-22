@@ -74,7 +74,10 @@ async fn handle_ipmi<C: Callbacks>(
     let response = match req.action.as_str() {
         "chassis_power_reset" => {
             tracing::info!("IPMI: chassis power reset");
-            match callbacks.send_power_command(ResourceResetType::ForceRestart) {
+            match callbacks
+                .computer_system_reset(ResourceResetType::ForceRestart)
+                .await
+            {
                 Ok(()) => {
                     if let Some(system) = state.system_state.primary_system_odata_id() {
                         state.record_event(LogEntryDraft::reset_requested(
@@ -100,7 +103,10 @@ async fn handle_ipmi<C: Callbacks>(
         }
         "dpu_legacy_boot" => {
             tracing::info!("IPMI: dpu legacy boot");
-            match callbacks.send_power_command(ResourceResetType::ForceRestart) {
+            match callbacks
+                .computer_system_reset(ResourceResetType::ForceRestart)
+                .await
+            {
                 Ok(()) => IpmiResponse::ok(),
                 Err(e) => {
                     tracing::error!(error = ?e, "dpu legacy boot failed");

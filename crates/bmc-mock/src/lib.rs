@@ -103,8 +103,7 @@ pub use machine_info::{
     MachineInfo,
 };
 pub use mock_machine_router::{
-    EventServiceOverride, MachineRouterOptions, SetSystemPowerError, SetSystemPowerResult,
-    machine_router, machine_router_with_injection_store,
+    EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_injection_store,
 };
 pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
 pub use rack_info::RackInfo;
@@ -232,6 +231,14 @@ impl HardwareType {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ActionError {
+    #[error("bad request: {0}")]
+    BadRequest(eyre::Error),
+    #[error("internal error: {0}")]
+    Internal(eyre::Error),
+}
+
 #[derive(Debug, Copy, Clone, Default)]
 pub enum MockPowerState {
     #[default]
@@ -244,6 +251,35 @@ pub enum MockPowerState {
     PowerCycling {
         since: Instant,
     },
+}
+
+impl MockPowerState {
+    pub fn validate_reset_type(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        type C = ResourceResetType;
+        match (reset_type, self) {
+            (
+                C::GracefulShutdown | C::ForceOff | C::GracefulRestart | C::ForceRestart,
+                MockPowerState::Off,
+            ) => Err(ActionError::BadRequest(eyre::eyre!(
+                "bmc-mock: cannot power off machine, it is already off",
+            ))),
+            (C::On | C::ForceOn, MockPowerState::On | MockPowerState::PoweringOn) => {
+                Err(ActionError::BadRequest(eyre::eyre!(
+                    "bmc-mock: cannot power on machine, it is already on"
+                )))
+            }
+            (C::On | C::ForceOn, MockPowerState::PoweringOff) => Err(ActionError::BadRequest(
+                eyre::eyre!("bmc-mock: cannot power on machine, it is shutting down"),
+            )),
+            (_, MockPowerState::PowerCycling { since }) if since.elapsed() < POWER_CYCLE_DELAY => {
+                Err(ActionError::BadRequest(eyre::eyre!(
+                    "bmc-mock: cannot reset machine, it is in the middle of power cycling since {:?} ago",
+                    since.elapsed()
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl fmt::Display for MockPowerState {
@@ -262,38 +298,12 @@ impl fmt::Display for MockPowerState {
 pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 
 /// Backend operations for one BMC, selected by the router's concrete callback type.
-pub trait Callbacks: std::fmt::Debug + Send + Sync + 'static {
+pub trait Callbacks: Send + Sync + 'static {
     fn get_power_state(&self) -> MockPowerState;
-    fn send_power_command(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError>;
-    fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError> {
-        type C = ResourceResetType;
-        match (reset_type, self.get_power_state()) {
-            (
-                C::GracefulShutdown | C::ForceOff | C::GracefulRestart | C::ForceRestart,
-                MockPowerState::Off,
-            ) => Err(SetSystemPowerError::BadRequest(
-                "bmc-mock: cannot power off machine, it is already off".to_string(),
-            )),
-            (C::On | C::ForceOn, MockPowerState::On | MockPowerState::PoweringOn) => {
-                Err(SetSystemPowerError::BadRequest(
-                    "bmc-mock: cannot power on machine, it is already on".to_string(),
-                ))
-            }
-            (C::On | C::ForceOn, MockPowerState::PoweringOff) => {
-                Err(SetSystemPowerError::BadRequest(
-                    "bmc-mock: cannot power on machine, it is shutting down".to_string(),
-                ))
-            }
-            (_, MockPowerState::PowerCycling { since }) if since.elapsed() < POWER_CYCLE_DELAY => {
-                Err(SetSystemPowerError::BadRequest(format!(
-                    "bmc-mock: cannot reset machine, it is in the middle of power cycling since {:?} ago",
-                    since.elapsed()
-                )))
-            }
-            _ => Ok(()),
-        }?;
-        self.send_power_command(reset_type)
-    }
+    fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send;
 
     fn state_refresh_indication(&self);
 }
