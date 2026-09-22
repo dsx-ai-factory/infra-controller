@@ -25,6 +25,11 @@ use crate::{DatabaseError, DatabaseResult};
 
 const KIND: &str = "attestation profile";
 
+/// Stores the first profile for a class, at the initial version.
+///
+/// The document is validated before the insert, and a class that already has
+/// a profile is an `AlreadyFoundError` rather than an overwrite; [`update`]
+/// is the way to replace one.
 pub async fn create(
     txn: &mut PgConnection,
     hardware_class: &str,
@@ -56,6 +61,8 @@ pub async fn create(
         })
 }
 
+/// Reads the profile stored against exactly this class, with no fallback to
+/// `any`. [`resolve`] applies the fallback an endpoint would actually get.
 pub async fn find(
     db: impl DbReader<'_>,
     hardware_class: &str,
