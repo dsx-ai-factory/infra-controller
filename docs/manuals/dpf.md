@@ -72,7 +72,7 @@ The following table maps the sections on this page to what the run does:
 | §2 [Operator install](#2-dpf-installation) | Clones `NVIDIA/doca-platform` at `NICO_DPF_VERSION` (default `v26.4.0`, cached under `helm-prereqs/.dpf-src/`) and installs `deploy/charts/dpf-operator`.<br/><br/>The in-repo source chart ships an empty `controllerManager.image`, so setup.sh sets it to `nvcr.io/nvidia/doca/dpf-system:$NICO_DPF_VERSION` (override with `NICO_DPF_IMAGE_REPO`).<br/><br/>The GA `nvidia/doca` images are **public**, so they pull anonymously by default — a registry-scoped pull secret without `nvidia/doca` entitlement makes nvcr.io 403 the pull. Set `NICO_DPF_IMAGE_PULL_SECRET` only for private DPF/DOCA registries. |
 | §3.1 [RBAC](#31-rbac-for-the-nico-orchestrator) | Created by the NICo Core chart (`nico-api.dpf.rbacCreate=true`, set automatically) — the Role/RoleBinding subject is the chart's actual ServiceAccount. |
 | §3.2–3.4 CRs  | [DPFOperatorConfig](#32-dpfoperatorconfig) (API VIP/port derived from the `kubernetes` Endpoints unless `NICO_DPF_K8S_API_VIP/PORT` are set), [DPUCluster](#33-dpucluster), and the optional [VIP LoadBalancer Service](#34-vip-loadbalancer-service-and-endpoints) are applied from `helm-prereqs/operators/dpf/`. |
-| §3.5 [Site config](#35-enable-dpf-in-the-nico-site-config) + §4 [Enablement](#4-restart-carbide-api-to-create-the-dpf-initialization-objects) | **Two-phase (phase 6b).** The site-wide BMC root password can only be set through a running carbide-api, so DPF cannot be enabled on the very first Core deploy.<br/><br/>`setup.sh` deploys Core with `[dpf]` **off**, sets the BMC root password via `nico-admin-cli` (see below), upgrades Core to `[dpf]` **on**, then **restarts carbide-api**.<br/><br/>The upgrade only rewrites the ConfigMap; `[dpf]` is read at startup only. The restart ensures that the DPF SDK initializes and creates the BFB, DPUFlavor, and DPUDeployment. |
+| §3.5 [Site config](#35-enable-dpf-in-the-nico-site-config) + §4 [Enablement](#4-restart-carbide-api-to-create-the-dpf-initialization-objects) | **Two-phase (phase 6b).** Carbide-api's DPF SDK requires the site-wide BMC root password at startup, which can only be set through a running carbide-api.<br/><br/>`setup.sh` deploys Core with `[dpf]` **off**, sets the BMC root password through `nico-admin-cli` (refer to the details below), upgrades Core to `[dpf]` **on**, then **restarts carbide-api**.<br/><br/>The upgrade rewrites only the ConfigMap. `[dpf]` is read at startup only. The restart ensures that the DPF SDK initializes and creates the provisioning source, flavor resource, and DPUDeployment. |
 
 [Per-host enablement](#37-mark-hosts-as-dpf-managed-in-expected-machines) (§3.7) and the [CLI appendix](#appendix-nico-admin-cli-dpf-command-reference) still apply unchanged. The sections below remain the reference for what is being installed, for manual installs, and for environments not using `setup.sh`.
 
@@ -724,7 +724,11 @@ them over its generated template values. Deployment-specific
 Notes:
 
 - Tables merge recursively.
-- Nested scalars and arrays replace generated values.
+- Nested scalars and arrays replace generated values, except for
+  `doca_hbn.resources["nvidia.com/bf_sf"]`. NICo derives and restores that value
+  after merging top-level `[dpf.services.doca_hbn.extra_helm_values]` and
+  per-deployment
+  `[dpf.deployments.<name>.services.doca_hbn.extra_helm_values]` overrides.
 - Omitted keys keep their generated values.
 
 Set the DPU agent machine identity proxy with a key similar to the following:
@@ -787,9 +791,34 @@ resource and `DPUDeployment`: BF3 and generic BF4 use `DPUFlavor`, while Astra
 uses `DPUFlavorTemplate`. BF3 uses a BFB URL (`bfb_url`), while BF4 uses a
 `[bluefield_software]` block instead of a BFB.
 
-Every active deployment must have a **unique** `deployment_name`, `flavor_name`,
-and `node_label_key`; carbide-api validates this at startup and refuses to start
-if any deployments collide.
+To isolate `DPUServiceInterface` resources by deployment, enable deployment
+scoping:
+
+```toml
+[dpf]
+deployment_scoped_service_interfaces = true
+```
+
+For an existing DPF namespace, treat this setting change as a planned migration:
+
+1. Stop NICo.
+1. Remove the old-mode NICo `DPUServiceInterface` resources.
+1. Re-ingest the DPUs.
+1. Restart NICo.
+
+NICo does not detect or delete old-mode resources. If you skip cleanup,
+competing interface generations can remain active. A fresh namespace configured
+in scoped mode before its first startup has no old-mode resources to remove.
+
+Every active deployment must have a unique `deployment_name`, `flavor_name`,
+and `node_label_key`. Carbide-api validates these values at startup and refuses
+to start if deployments collide.
+
+Do not set `node_label_key` to `feature.node.kubernetes.io/dpu-enabled`, which
+is shared by every DPF-managed node. Do not use
+`carbide.nvidia.com/host-bmc-ip`, which registration overwrites with the
+per-node host BMC address. Validation is local and does not query or modify
+cluster resources.
 
 #### BF4 Astra Spectrum-X runtime ConfigMap
 
@@ -831,7 +860,7 @@ Per-deployment field reference:
 | `bluefield_software.pldm_fw_bundle` | BF4 only | — | Non-empty map of PSID → PLDM firmware bundle URL. Include one entry for each DPU model served by the deployment. |
 | `flavor_name` | yes | `carbide-dpu-flavor` | Base name for the generated `DPUFlavor` (BF3/generic BF4) or `DPUFlavorTemplate` (Astra) CR. |
 | `deployment_name` | yes | `nico-deployment-v2` | `DPUDeployment` CR name. |
-| `node_label_key` | yes | `carbide.nvidia.com/controlled.node.v2` | Node-selector label key applied to this deployment's DPUNodes. |
+| `node_label_key` | yes | `carbide.nvidia.com/controlled.node.v2` | Node-selector label key applied to this deployment's DPUNodes. Must be unique across active deployments and must not be `feature.node.kubernetes.io/dpu-enabled` or `carbide.nvidia.com/host-bmc-ip`. |
 | `services` | no | inherit `[dpf.services]` | Optional per-deployment mandatory-services override (see below). |
 | `extra_services` | no | none | Optional deployment-local field overrides for extra services. Only extras supported by this deployment type are used. |
 
@@ -974,6 +1003,8 @@ Field reference (all under `[dpf]`):
 | TOML key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Master switch. Must be `true` to use DPF-based provisioning. |
+| `deployment_scoped_service_interfaces` | bool | `false` | Uses deployment-suffixed `DPUServiceInterface` resources selected on remote DPU-cluster Nodes through DPF's propagated `svc.dpu.nvidia.com/owned-by-dpudeployment=<namespace>_<deployment_name>` label. Management-cluster DPUNode deployment labels are not used for this selector. Changing modes in an existing namespace requires a controlled cleanup of `DPUServiceInterface` resources and DPU re-ingestion. |
+| `pf_total_sf_reserved` | `u32` | `30` | BF3 and generic-BF4 SF capacity reserved beyond managed endpoints when HBN traffic intercept bridging is configured. Without this configuration, the value is the complete legacy `PF_TOTAL_SF`. Changing the reserve changes the BF3 or generic-BF4 flavor. Every HBN traffic intercept inventory change requires a controlled cleanup of `DPUServiceInterface` resources and DPU re-ingestion, even when it does not produce a different flavor hash. Startup rejects overflow in the managed-endpoint count plus reserve. |
 | `docker_image_pull_secret` | string (optional) | none | Top-level override for the image-pull Secret of the carbide services (`dpu_agent`, `dhcp_server`, `fmds`, `otel`) and fallback for Astra extra services (Weave DHCP, Weave flow controller, Xplane); never applied to `dts`/`doca_hbn`. An extra service's own secret takes precedence. Unset by default: services pull from a public registry (no `imagePullSecrets`) unless a secret is given here or per-service. |
 | `dpu_agent_bootstrap_ca` | tagged table | `source = "legacy_download"` | Selects legacy download or mounted-object bootstrap trust for the DPU agent. |
 | `services.<svc>` | table | per-service defaults | Helm/image overrides for each mandatory DPUService. |
@@ -987,6 +1018,14 @@ Field reference (all under `[dpf]`):
 | `proxy.no_proxy` | list of strings | `[]` | Hosts/CIDRs that must bypass the proxy. |
 | `extra_bfcfg_parameters` | list of strings | `[]` | `bf.cfg` lines appended verbatim to every deployment's `DPUFlavor` `bfcfgParameters`. Not interpreted or quoted by NICo; entries containing `{{` are rejected at startup. Changing the list renames every flavor and reprovisions the site's DPUs. |
 | `deployments.<name>.extra_bfcfg_parameters` | list of strings | `[]` | `bf.cfg` lines for this deployment's `DPUFlavor` only. Appends to the site-wide `extra_bfcfg_parameters`; does not replace it. |
+
+<Warning>
+Hardware discovery does not bound `pf_total_sf_reserved`. NICo rejects
+arithmetic overflow but does not verify the resulting `PF_TOTAL_SF` against the
+target DPU's SF and BAR capacity. Choose a compatible value before
+reprovisioning. A non-overflowing value can still produce an unusable immutable
+flavor.
+</Warning>
 
 Notes:
 
@@ -1350,7 +1389,9 @@ Astra deployments), using that deployment's own `bfb_url`, `flavor_name`, and
 
 - A `Secret` (`bmc-shared-password`) holding the shared BMC password (shared
   across deployments)
-- A `BFB` CR named `bf-bundle-<sha256(bfb_url)>`, from the deployment's `bfb_url`
+- Exactly one provisioning-source CR: a `BFB` named
+  `bf-bundle-<sha256(bfb_url)>` for BF3, or a `BlueFieldSoftware` CR for BF4.
+  Identical source inputs reuse the same deterministic CR.
 - A `DPUFlavor` CR (BF3/generic BF4) or `DPUFlavorTemplate` CR (Astra) named
   `<flavor_name>-<spec-hash>`. The 16-character hex suffix is a SHA-256 digest
   of the flavor spec or template; changing it, including adding or changing
@@ -1362,19 +1403,80 @@ Astra deployments), using that deployment's own `bfb_url`, `flavor_name`, and
   `carbide-fmds`, and `carbide-otelcol`). The set is built from the deployment's
   resolved services -- either its `[dpf.deployments.<name>.services]` override if
   set, otherwise the top-level `[dpf.services]`.
+- The deployment's effective physical, PF, VF, or Patch inventory as
+  `DPUServiceInterface` resources:
+  - With deployment scoping enabled, each class receives its own suffixed set.
+    DPF selects that set on remote DPU-cluster Nodes through its propagated
+    deployment-ownership label.
+  - Management-cluster DPUNode class labels continue to select the
+    `DPUDeployment`, but the remote selector cannot access them.
+  - In the default unscoped mode, BF3 and generic BF4 use the same unsuffixed
+    names and share one global set.
+  - Static BF3 and generic BF4 inventories contain
+    `4 + min(dpu_config.num_of_vfs, 14)` interfaces.
+  - Configured HBN traffic intercept inventories contain `2 + P + V`
+    interfaces. The supported contract requires `P = 1`.
+  - A configured HBN traffic intercept topology defines the complete managed
+    inventory. Every selected VF must be VF15 or lower and less than
+    `dpu_config.num_of_vfs`. Every selected PF and VF receives HBN and DHCP.
+    Only the PF receives FMDS.
+  - Generated topology inventories can attach at most 32 HBN interfaces. The
+    one-PF, sixteen-VF maximum attaches 19.
 - A `DPUDeployment` CR named after the deployment's `deployment_name`, which
-  references the BFB, its flavor resource, and the service templates above. For
+  references its provisioning source, flavor resource, and service templates. For
   Astra, it uses `flavorTemplate`, which the DPF operator renders into a
   per-DPU `DPUFlavor`; otherwise it uses `flavor`. The operator then reconciles
   these into actual `DPUService` and per-DPU resources.
 
+NICo applies the desired `DPUServiceInterface` resources but does not prune
+resources omitted from a later inventory. Every HBN traffic intercept inventory
+transition requires this controlled process:
+
+1. Stop NICo.
+1. Remove the old NICo `DPUServiceInterface` resources.
+1. Re-ingest the DPUs.
+1. Restart NICo.
+
+This process also applies to transitions that retain the same deployment-scoping
+mode.
+
+`allow_instance_vf` controls VF admission for instance creation and network
+updates. When it is `false`, NICo rejects every instance VF. When it is `true`
+and an HBN traffic intercept topology is configured, NICo admits only VF IDs
+selected by that topology. A PF-only topology admits no VFs.
+
+Existing valid topologies within the VF15 boundary render the same DPF resources
+after this admission enforcement is deployed. The enforcement itself does not
+require cleanup of `DPUServiceInterface` resources or DPU re-ingestion. A
+topology that selects VF16 or higher is invalid and requires correction through
+the existing topology-change workflow.
+
+Without a configured HBN traffic intercept topology, NICo preserves the static
+VF0–VF13 inventory, its VF0–VF7 DHCP subset, and historical instance-admission
+behavior. In this mode, `pf_total_sf_reserved` is the complete `PF_TOTAL_SF` and
+defaults to `30`. Explicit operator overrides remain supported. Reconciling the
+inventory, DHCP, or admission surfaces would change existing
+`DPUServiceInterface` resources and the hashed `DPUFlavor`. That change requires
+a separately planned cleanup and DPU re-ingestion migration.
+
+Changing `dpu_config.num_of_vfs` changes the immutable BF3 or generic-BF4 flavor
+and requires a carbide-api restart and DPU reprovisioning. Reducing the value
+below the static inventory's previous effective VF count also removes desired
+VF `DPUServiceInterface` resources. NICo does not prune those resources.
+Operators must stop NICo, remove the omitted resources, re-ingest the DPUs, and
+restart. With a configured HBN traffic intercept inventory, every selected
+`vf_id` must remain lower than the new value.
+
 Because this path runs only at process start, **any change to `[dpf]`** —
-enabling DPF for the first time, changing a deployment's BFB URL, renaming a
-`DPUDeployment`/flavor resource, adding or removing BF4 deployment tables,
-pinning a different chart/image version under `[dpf.services.*]` or a
-deployment's `[dpf.deployments.<name>.services]`, or adding/changing
-`[dpf.proxy]` or `[dpf].extra_bfcfg_parameters` — **requires a carbide-api
-restart** for the new configuration to take effect.
+enabling DPF for the first time, changing a deployment's provisioning source,
+renaming a `DPUDeployment`/flavor resource, adding or removing BF4 deployment
+tables, pinning a different chart/image version under `[dpf.services.*]` or a
+deployment's `[dpf.deployments.<name>.services]`, or adding/changing `[dpf.proxy]`
+or `[dpf].extra_bfcfg_parameters` — **requires a carbide-api restart** for the
+new configuration to take effect.
+
+Changing `dpu_config.num_of_vfs` or the HBN traffic intercept topology under
+`[vmaas_config]` also requires a carbide-api restart.
 
 ---
 
@@ -1384,11 +1486,6 @@ restart** for the new configuration to take effect.
 toggling DPF state on already-ingested hosts and for diffing the running DPF
 service stack against the configured one. The full set is listed below.
 
-> **Important**: All `dpf enable` changes are written to the
-> machine's metadata only. **They are wiped on force-delete** and on
-> rediscovery the host reverts to whatever its expected-machine entry says.
-> To persist the per-host DPF setting, update the expected-machines table
-> (see section 3.7). This is useful when you want to reprovision a host that
 <Tip>
 All `dpf enable` changes are written to the machine's metadata only. **They are wiped on force-delete** and on rediscovery the host reverts to whatever its expected-machine entry says.
 
