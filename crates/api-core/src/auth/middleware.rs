@@ -24,6 +24,7 @@ use tower_http::auth::AsyncAuthorizeRequest;
 
 use crate::auth::internal_rbac_rules::InternalRBACRules;
 use crate::auth::{AuthContext, CasbinAuthorizer, Predicate, PrincipalClass};
+use crate::cfg::file::AuthConfig;
 
 /// A caller was denied by an authorizer -- the canonical security signal.
 /// The denial rate is the alert; `authorizer` names the engine that denied
@@ -265,17 +266,17 @@ fn empty_response_with_status(status: StatusCode) -> Response<AxumBody> {
         .unwrap()
 }
 
-#[derive(Clone)]
-pub(crate) struct InternalRBACHandler {}
+#[derive(Clone, Default)]
+pub(crate) struct InternalRBACHandler {
+    allow_machineatron_scout_stream: bool,
+}
 
 impl InternalRBACHandler {
-    pub(crate) fn new() -> Self {
-        Self {}
-    }
-}
-impl Default for InternalRBACHandler {
-    fn default() -> Self {
-        Self::new()
+    pub(crate) fn new(auth_config: Option<&AuthConfig>) -> Self {
+        Self {
+            allow_machineatron_scout_stream: auth_config
+                .is_some_and(|config| config.allow_machineatron_scout_stream),
+        }
     }
 }
 impl<B> AsyncAuthorizeRequest<B> for InternalRBACHandler
@@ -287,6 +288,7 @@ where
     type Future = BoxFuture<'static, Result<Request<B>, Response<Self::ResponseBody>>>;
 
     fn authorize(&mut self, request: Request<B>) -> Self::Future {
+        let allow_machineatron_scout_stream = self.allow_machineatron_scout_stream;
         Box::pin(async move {
             let request_permitted = match RequestClass::from(&request) {
                 // Forge-owned endpoints must go through access control.
@@ -303,7 +305,15 @@ where
                         })?;
                     let principals = &req_auth_context.principals;
 
-                    let allowed = InternalRBACRules::allowed_from_static(&method_name, principals);
+                    // The simulator exception is opt-in per listener and never
+                    // changes the production rules or other service permissions.
+                    let allowed = InternalRBACRules::allowed_from_static(&method_name, principals)
+                        || (allow_machineatron_scout_stream
+                            && method_name == "ScoutStream"
+                            && principals.iter().any(|principal| {
+                                matches!(principal, Principal::SpiffeServiceIdentifier(id)
+                                    if id == "machine-a-tron")
+                            }));
 
                     if !allowed {
                         carbide_instrument::emit(AuthorizationDenied {
@@ -433,7 +443,7 @@ mod tests {
                     handler.authorize(request).now_or_never()
                 }
                 MissingAuthContextHandler::InternalRbac => {
-                    let mut handler = InternalRBACHandler::new();
+                    let mut handler = InternalRBACHandler::default();
                     handler.authorize(request).now_or_never()
                 }
             }
@@ -560,12 +570,108 @@ mod tests {
         );
     }
 
+    #[test]
+    fn machineatron_scout_stream_requires_explicit_devspace_opt_in() {
+        let values: serde_yaml::Value = serde_yaml::from_str(include_str!(
+            "../../../../dev/deployment/devspace/values.base.yaml"
+        ))
+        .unwrap();
+        let devspace_config: toml::Table = toml::from_str(
+            values["nico-api"]["siteConfig"]["nicoApiSiteConfig"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let enabled = toml::to_string(&devspace_config["auth"]).unwrap();
+        let disabled = "permissive_mode = true\nallow_machineatron_scout_stream = false";
+        let mat = || Principal::SpiffeServiceIdentifier("machine-a-tron".to_string());
+        let stream = ::rpc::service_path!("ScoutStream");
+
+        check_values(
+            [
+                Check {
+                    scenario: "no auth configuration denies MAT",
+                    input: (None, stream, mat()),
+                    expect: false,
+                },
+                Check {
+                    scenario: "omitted opt-in denies MAT even in permissive mode",
+                    input: (Some("permissive_mode = true"), stream, mat()),
+                    expect: false,
+                },
+                Check {
+                    scenario: "explicit false denies MAT",
+                    input: (Some(disabled), stream, mat()),
+                    expect: false,
+                },
+                Check {
+                    scenario: "DevSpace explicitly permits MAT streams",
+                    input: (Some(enabled.as_str()), stream, mat()),
+                    expect: true,
+                },
+                Check {
+                    scenario: "opt-in does not admit unrelated services",
+                    input: (
+                        Some(enabled.as_str()),
+                        stream,
+                        Principal::SpiffeServiceIdentifier("nico-dns".to_string()),
+                    ),
+                    expect: false,
+                },
+                Check {
+                    scenario: "opt-in still requires an authenticated service identity",
+                    input: (
+                        Some(enabled.as_str()),
+                        stream,
+                        Principal::TrustedCertificate,
+                    ),
+                    expect: false,
+                },
+                Check {
+                    scenario: "real Scouts do not require the opt-in",
+                    input: (
+                        None,
+                        stream,
+                        Principal::SpiffeMachineIdentifier("host".to_string()),
+                    ),
+                    expect: true,
+                },
+                Check {
+                    scenario: "opt-in does not grant MAT administrative stream RPCs",
+                    input: (
+                        Some(enabled.as_str()),
+                        ::rpc::service_path!("ScoutStreamDisconnect"),
+                        mat(),
+                    ),
+                    expect: false,
+                },
+                Check {
+                    scenario: "existing MAT permissions do not require the opt-in",
+                    input: (None, ::rpc::service_path!("ForgeAgentControl"), mat()),
+                    expect: true,
+                },
+            ],
+            |(config, uri, principal)| {
+                let config = config.map(|text| toml::from_str::<AuthConfig>(text).unwrap());
+                let mut handler = InternalRBACHandler::new(config.as_ref());
+                let request = forge_request(uri, vec![principal], "198.51.100.4:40000");
+                match handler.authorize(request).now_or_never().unwrap() {
+                    Ok(_) => true,
+                    Err(response) => {
+                        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                        false
+                    }
+                }
+            },
+        );
+    }
+
     /// The internal RBAC denial path emits the same event as the Casbin path,
     /// distinguished by the authorizer label, and the caller gets 403.
     #[test]
     fn denied_internal_rbac_call_logs_and_counts() {
         let metrics = MetricsCapture::start();
-        let mut handler = InternalRBACHandler::new();
+        let mut handler = InternalRBACHandler::default();
 
         let logs = capture_logs(|| {
             // MachineSetup permits only the admin CLI, never a bare trusted
