@@ -55,6 +55,12 @@ pub(super) const DECOMMISSIONING_SUPPRESSING_NVOS_DHCP: u64 = 300; // 5 minutes
 /// SLA for submitting the NVOS factory-reset RMS job during decommissioning
 pub(super) const DECOMMISSIONING_FACTORY_RESET_NVOS: u64 = 300; // 5 minutes
 
+/// SLA for RMS to finish resetting NVOS and recover the default login.
+pub(super) const DECOMMISSIONING_WAITING_FOR_NVOS_RESET: u64 = 15 * 60; // 15 minutes
+
+/// SLA for rebooting the switch after NVOS DHCP suppression is requested.
+pub(super) const DECOMMISSIONING_REBOOTING_SWITCH: u64 = 300; // 5 minutes
+
 /// SLA for waiting for NVOS DHCP suppression acknowledgement after reset
 pub(super) const DECOMMISSIONING_WAITING_FOR_NVOS_DHCP_ACKNOWLEDGEMENT: u64 = 15 * 60; // 15 minutes
 
