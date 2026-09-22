@@ -113,7 +113,7 @@ func NewUpdateNVLinkDomainPowerStateHandler(
 // Handle godoc
 // @Summary Power control an NVLink Domain
 // @Description Power control an NVLink Domain identified by UUID.
-// @Tags nvlink-domain
+// @Tags domain
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -246,7 +246,7 @@ func NewBatchUpdateNVLinkDomainPowerStateHandler(
 // Handle godoc
 // @Summary Power control NVLink Domains
 // @Description Power control one or more NVLink Domains identified by UUID.
-// @Tags nvlink-domain
+// @Tags domain
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -372,7 +372,7 @@ func NewUpdateNVLinkDomainFirmwareHandler(
 // Handle godoc
 // @Summary Firmware update an NVLink Domain
 // @Description Update firmware on an NVLink Domain identified by UUID.
-// @Tags nvlink-domain
+// @Tags domain
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -512,7 +512,7 @@ func NewBatchUpdateNVLinkDomainFirmwareHandler(
 // Handle godoc
 // @Summary Firmware update NVLink Domains
 // @Description Update firmware on one or more NVLink Domains identified by UUID.
-// @Tags nvlink-domain
+// @Tags domain
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth

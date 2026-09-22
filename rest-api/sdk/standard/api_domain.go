@@ -22,12 +22,12 @@ import (
 	"strings"
 )
 
-// NVLinkDomainAPIService NVLinkDomainAPI service
-type NVLinkDomainAPIService service
+// DomainAPIService DomainAPI service
+type DomainAPIService service
 
 type ApiFirmwareUpdateNvlinkDomainRequest struct {
 	ctx                               context.Context
-	ApiService                        *NVLinkDomainAPIService
+	ApiService                        *DomainAPIService
 	org                               string
 	id                                string
 	nVLinkDomainFirmwareUpdateRequest *NVLinkDomainFirmwareUpdateRequest
@@ -54,7 +54,7 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 	@param id ID of the NVLink Domain
 	@return ApiFirmwareUpdateNvlinkDomainRequest
 */
-func (a *NVLinkDomainAPIService) FirmwareUpdateNvlinkDomain(ctx context.Context, org string, id string) ApiFirmwareUpdateNvlinkDomainRequest {
+func (a *DomainAPIService) FirmwareUpdateNvlinkDomain(ctx context.Context, org string, id string) ApiFirmwareUpdateNvlinkDomainRequest {
 	return ApiFirmwareUpdateNvlinkDomainRequest{
 		ApiService: a,
 		ctx:        ctx,
@@ -66,7 +66,7 @@ func (a *NVLinkDomainAPIService) FirmwareUpdateNvlinkDomain(ctx context.Context,
 // Execute executes the request
 //
 //	@return FirmwareUpdateResponse
-func (a *NVLinkDomainAPIService) FirmwareUpdateNvlinkDomainExecute(r ApiFirmwareUpdateNvlinkDomainRequest) (*FirmwareUpdateResponse, *http.Response, error) {
+func (a *DomainAPIService) FirmwareUpdateNvlinkDomainExecute(r ApiFirmwareUpdateNvlinkDomainRequest) (*FirmwareUpdateResponse, *http.Response, error) {
 	var (
 		localVarHTTPMethod  = http.MethodPatch
 		localVarPostBody    interface{}
@@ -74,7 +74,7 @@ func (a *NVLinkDomainAPIService) FirmwareUpdateNvlinkDomainExecute(r ApiFirmware
 		localVarReturnValue *FirmwareUpdateResponse
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "NVLinkDomainAPIService.FirmwareUpdateNvlinkDomain")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.FirmwareUpdateNvlinkDomain")
 	if err != nil {
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
@@ -213,7 +213,7 @@ func (a *NVLinkDomainAPIService) FirmwareUpdateNvlinkDomainExecute(r ApiFirmware
 
 type ApiFirmwareUpdateNvlinkDomainsRequest struct {
 	ctx                                    context.Context
-	ApiService                             *NVLinkDomainAPIService
+	ApiService                             *DomainAPIService
 	org                                    string
 	batchNVLinkDomainFirmwareUpdateRequest *BatchNVLinkDomainFirmwareUpdateRequest
 }
@@ -238,7 +238,7 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 	@param org Name of the Org
 	@return ApiFirmwareUpdateNvlinkDomainsRequest
 */
-func (a *NVLinkDomainAPIService) FirmwareUpdateNvlinkDomains(ctx context.Context, org string) ApiFirmwareUpdateNvlinkDomainsRequest {
+func (a *DomainAPIService) FirmwareUpdateNvlinkDomains(ctx context.Context, org string) ApiFirmwareUpdateNvlinkDomainsRequest {
 	return ApiFirmwareUpdateNvlinkDomainsRequest{
 		ApiService: a,
 		ctx:        ctx,
@@ -249,7 +249,7 @@ func (a *NVLinkDomainAPIService) FirmwareUpdateNvlinkDomains(ctx context.Context
 // Execute executes the request
 //
 //	@return FirmwareUpdateResponse
-func (a *NVLinkDomainAPIService) FirmwareUpdateNvlinkDomainsExecute(r ApiFirmwareUpdateNvlinkDomainsRequest) (*FirmwareUpdateResponse, *http.Response, error) {
+func (a *DomainAPIService) FirmwareUpdateNvlinkDomainsExecute(r ApiFirmwareUpdateNvlinkDomainsRequest) (*FirmwareUpdateResponse, *http.Response, error) {
 	var (
 		localVarHTTPMethod  = http.MethodPatch
 		localVarPostBody    interface{}
@@ -257,7 +257,7 @@ func (a *NVLinkDomainAPIService) FirmwareUpdateNvlinkDomainsExecute(r ApiFirmwar
 		localVarReturnValue *FirmwareUpdateResponse
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "NVLinkDomainAPIService.FirmwareUpdateNvlinkDomains")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.FirmwareUpdateNvlinkDomains")
 	if err != nil {
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
@@ -395,7 +395,7 @@ func (a *NVLinkDomainAPIService) FirmwareUpdateNvlinkDomainsExecute(r ApiFirmwar
 
 type ApiPowerControlNvlinkDomainRequest struct {
 	ctx                     context.Context
-	ApiService              *NVLinkDomainAPIService
+	ApiService              *DomainAPIService
 	org                     string
 	id                      string
 	updatePowerStateRequest *UpdatePowerStateRequest
@@ -424,7 +424,7 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 	@param id ID of the NVLink Domain
 	@return ApiPowerControlNvlinkDomainRequest
 */
-func (a *NVLinkDomainAPIService) PowerControlNvlinkDomain(ctx context.Context, org string, id string) ApiPowerControlNvlinkDomainRequest {
+func (a *DomainAPIService) PowerControlNvlinkDomain(ctx context.Context, org string, id string) ApiPowerControlNvlinkDomainRequest {
 	return ApiPowerControlNvlinkDomainRequest{
 		ApiService: a,
 		ctx:        ctx,
@@ -436,7 +436,7 @@ func (a *NVLinkDomainAPIService) PowerControlNvlinkDomain(ctx context.Context, o
 // Execute executes the request
 //
 //	@return UpdatePowerStateResponse
-func (a *NVLinkDomainAPIService) PowerControlNvlinkDomainExecute(r ApiPowerControlNvlinkDomainRequest) (*UpdatePowerStateResponse, *http.Response, error) {
+func (a *DomainAPIService) PowerControlNvlinkDomainExecute(r ApiPowerControlNvlinkDomainRequest) (*UpdatePowerStateResponse, *http.Response, error) {
 	var (
 		localVarHTTPMethod  = http.MethodPatch
 		localVarPostBody    interface{}
@@ -444,7 +444,7 @@ func (a *NVLinkDomainAPIService) PowerControlNvlinkDomainExecute(r ApiPowerContr
 		localVarReturnValue *UpdatePowerStateResponse
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "NVLinkDomainAPIService.PowerControlNvlinkDomain")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.PowerControlNvlinkDomain")
 	if err != nil {
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
@@ -583,7 +583,7 @@ func (a *NVLinkDomainAPIService) PowerControlNvlinkDomainExecute(r ApiPowerContr
 
 type ApiPowerControlNvlinkDomainsRequest struct {
 	ctx                                      context.Context
-	ApiService                               *NVLinkDomainAPIService
+	ApiService                               *DomainAPIService
 	org                                      string
 	batchUpdateNVLinkDomainPowerStateRequest *BatchUpdateNVLinkDomainPowerStateRequest
 }
@@ -610,7 +610,7 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 	@param org Name of the Org
 	@return ApiPowerControlNvlinkDomainsRequest
 */
-func (a *NVLinkDomainAPIService) PowerControlNvlinkDomains(ctx context.Context, org string) ApiPowerControlNvlinkDomainsRequest {
+func (a *DomainAPIService) PowerControlNvlinkDomains(ctx context.Context, org string) ApiPowerControlNvlinkDomainsRequest {
 	return ApiPowerControlNvlinkDomainsRequest{
 		ApiService: a,
 		ctx:        ctx,
@@ -621,7 +621,7 @@ func (a *NVLinkDomainAPIService) PowerControlNvlinkDomains(ctx context.Context, 
 // Execute executes the request
 //
 //	@return UpdatePowerStateResponse
-func (a *NVLinkDomainAPIService) PowerControlNvlinkDomainsExecute(r ApiPowerControlNvlinkDomainsRequest) (*UpdatePowerStateResponse, *http.Response, error) {
+func (a *DomainAPIService) PowerControlNvlinkDomainsExecute(r ApiPowerControlNvlinkDomainsRequest) (*UpdatePowerStateResponse, *http.Response, error) {
 	var (
 		localVarHTTPMethod  = http.MethodPatch
 		localVarPostBody    interface{}
@@ -629,7 +629,7 @@ func (a *NVLinkDomainAPIService) PowerControlNvlinkDomainsExecute(r ApiPowerCont
 		localVarReturnValue *UpdatePowerStateResponse
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "NVLinkDomainAPIService.PowerControlNvlinkDomains")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.PowerControlNvlinkDomains")
 	if err != nil {
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}

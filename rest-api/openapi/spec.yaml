@@ -254,9 +254,9 @@ tags:
   - name: Rack
     description: |-
       Rack is a physical enclosure that contains a number of Machines. Racks are the physical building blocks of a Site.
-  - name: NVLink Domain
+  - name: Domain
     description: |-
-      An NVLink Domain represents an NVLink fabric spanning one or more Racks. NVLink Domain operation endpoints submit asynchronous work for every Rack that belongs to the selected NVLink Domain.
+      Domain endpoints group fabric-scoped operations by domain type. The `nvlink` subpath operates on NVLink Domains, which span one or more Racks, and submits asynchronous work for every Rack in each selected Domain.
   - name: Tray
     description: |-
       Tray represents a component within a Rack.
@@ -1288,93 +1288,6 @@ paths:
           in: query
           name: orderBy
           description: Ordering for pagination query
-  '/v2/org/{org}/nico/task':
-    parameters:
-      - schema:
-          type: string
-        name: org
-        in: path
-        required: true
-        description: Name of the Org
-    get:
-      summary: Retrieve all Tasks
-      operationId: get-all-tasks
-      description: |-
-        List all Tasks created in the specified Site, across every Rack and Tray.
-
-        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix, and the Site must belong to that Provider and have NICo Flow enabled.
-
-        Setting `activeOnly=true` restricts the result to tasks in a non-terminal REST state (`Pending` or `Running`). Results are ordered by creation time descending, then Task UUID descending, before pagination. The `X-Pagination` response header reports the total count over the post-filter set.
-
-        By default the `report` field is omitted from each Task in the response. Set `includeReport=true` to include it; this is opt-in because report bodies can be several KB.
-      parameters:
-        - schema:
-            type: string
-            format: uuid
-          name: siteId
-          in: query
-          required: true
-          description: ID of the Site whose Tasks are returned.
-        - schema:
-            type: boolean
-            default: false
-          name: activeOnly
-          in: query
-          description: Restrict results to non-terminal Tasks.
-        - schema:
-            type: boolean
-            default: false
-          name: includeReport
-          in: query
-          description: Include the per-task execution report on each returned Task.
-        - schema:
-            $ref: '#/components/schemas/PageNumber'
-            default: 1
-          in: query
-          name: pageNumber
-          description: Page number for pagination query.
-        - schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-            default: 20
-          in: query
-          name: pageSize
-          description: Number of Tasks returned per page.
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Task'
-              examples:
-                example-1:
-                  value:
-                    - id: 550e8400-e29b-41d4-a716-446655440000
-                      status: Running
-                      description: Power on rack components
-                      message: 'Processing 3 of 5 components'
-          headers:
-            X-Pagination:
-              schema:
-                type: string
-                example: '{"pageNumber":1,"pageSize":20,"total":1,"orderBy":null}'
-              description: Pagination result in JSON format.
-        '400':
-          $ref: '#/components/responses/ValidationError'
-        '403':
-          $ref: '#/components/responses/ForbiddenError'
-        '412':
-          $ref: '#/components/responses/GenericHttpError'
-        '500':
-          $ref: '#/components/responses/GenericHttpError'
-        '504':
-          $ref: '#/components/responses/GatewayTimeoutError'
-      tags:
-        - Task
   '/v2/org/{org}/nico/credential/bmc':
     parameters:
       - schema:
@@ -11997,6 +11910,58 @@ paths:
           name: orderBy
           description: |-
             Ordering for pagination query. TYPE_ASC orders capability type ascending and TYPE_DESC orders it descending. Defaults to TYPE_ASC. Ties are ordered by name, frequency, capacity, vendor, count, deviceType, inactiveDevices, and internal ID, all ascending with null values last.
+  '/v2/org/{org}/nico/domain/nvlink/power':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    patch:
+      summary: Power control NVLink Domains
+      operationId: power-control-nvlink-domains
+      description: |-
+        Power control one or more NVLink Domains identified by UUID. Flow resolves each NVLink Domain to its member Racks and creates one task per Rack.
+
+        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchUpdateNVLinkDomainPowerStateRequest'
+            examples:
+              power-off-domains:
+                value:
+                  siteId: 550e8400-e29b-41d4-a716-446655440000
+                  domainIds:
+                    - 650e8400-e29b-41d4-a716-446655440001
+                    - 750e8400-e29b-41d4-a716-446655440002
+                  state: 'off'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdatePowerStateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+      tags:
+        - Domain
   '/v2/org/{org}/nico/rack':
     parameters:
       - schema:
@@ -12723,7 +12688,7 @@ paths:
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - Rack
-  '/v2/org/{org}/nico/task/{id}':
+  '/v2/org/{org}/nico/tray':
     parameters:
       - schema:
           type: string
@@ -12731,24 +12696,18 @@ paths:
         in: path
         required: true
         description: Name of the Org
-      - schema:
-          type: string
-          format: uuid
-        name: id
-        in: path
-        required: true
-        description: UUID of the Task
     get:
-      summary: Retrieve a Task
-      operationId: get-task
+      summary: Retrieve all Trays
+      operationId: get-all-tray
       description: |-
-        Get a Task by UUID.
+        Get all Trays (components) for the specified Site.
 
-        The same handler is also mounted at `/v2/org/{org}/nico/rack/task/{id}` for
-        backward compatibility; prefer this path for new clients.
-
-        Tasks are site-scoped; `siteId` must be the Site where the task was created.
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        **Filter constraints:**
+        - `rackId` and `rackName` are mutually exclusive
+        - `rackId`/`rackName` cannot be combined with `id` (rack-level vs component-level targeting)
+        - `slotId` restricts to trays at that rack slot, requires `rackId` or `rackName`, and composes with the rest of the query via AND
       parameters:
         - schema:
             type: string
@@ -12756,122 +12715,112 @@ paths:
           name: siteId
           in: query
           required: true
-          description: ID of the Site that owns the task (tasks are site-scoped).
+          description: ID of the Site to retrieve Trays from
+        - schema:
+            type: string
+          name: rackId
+          in: query
+          description: Filter by Rack ID
+        - schema:
+            type: string
+          name: rackName
+          in: query
+          description: Filter by Rack name
+        - schema:
+            type: string
+            enum:
+              - Compute
+              - NVSwitch
+              - PowerShelf
+          name: type
+          in: query
+          description: Filter by tray type. When `id` is specified, the type disambiguates component IDs shared by different component types.
+        - schema:
+            type: string
+          name: id
+          in: query
+          description: Filter by component ID. Can be specified multiple times to filter on more than one Tray ID.
+        - schema:
+            type: integer
+            format: int32
+            minimum: 0
+          name: slotId
+          in: query
+          description: |-
+            Restrict to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter via AND.
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            example: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            example: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            enum:
+              - NAME_ASC
+              - NAME_DESC
+              - MANUFACTURER_ASC
+              - MANUFACTURER_DESC
+              - MODEL_ASC
+              - MODEL_DESC
+              - TYPE_ASC
+              - TYPE_DESC
+          in: query
+          name: orderBy
+          description: Ordering for pagination query
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Task'
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tray'
               examples:
                 example-1:
                   value:
-                    id: 550e8400-e29b-41d4-a716-446655440000
-                    status: Running
-                    description: Power on rack components
-                    message: 'Processing 3 of 5 components'
-        '400':
-          $ref: '#/components/responses/ValidationError'
+                    - id: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+                      type: Compute
+                      name: compute-tray-1
+                      manufacturer: NVIDIA
+                      model: GB200
+                      serialNumber: TSN001
+                      description: Compute tray in slot 1
+                      firmwareVersion: 2.1.0
+                      powerState: 'on'
+                      leakStatus: Leaking
+                      leakHandlingStatus: Down
+                      position:
+                        slotId: 1
+                        trayIdx: 0
+                        hostId: 1
+                      rackId: rack-01
+                      nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+                      taskStats:
+                        pendingTaskCount: 0
+                        activeTaskCount: 0
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy":"NAME_ASC"}'
+              description: Pagination result in JSON format
         '403':
           $ref: '#/components/responses/ForbiddenError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
-        - Task
-  '/v2/org/{org}/nico/task/{id}/cancel':
-    parameters:
-      - schema:
-          type: string
-        name: org
-        in: path
-        required: true
-        description: Name of the Org
-      - schema:
-          type: string
-          format: uuid
-        name: id
-        in: path
-        required: true
-        description: UUID of the Task
-    post:
-      summary: Cancel a Task
-      operationId: cancel-task
-      description: |-
-        Cancel a Task.
-
-        The same handler is also mounted at `/v2/org/{org}/nico/rack/task/{id}/cancel`
-        for backward compatibility; prefer this path for new clients.
-
-        Cancellation is best-effort and idempotent: tasks in non-terminal
-        states (`Pending`, `Running`) are marked `Terminated`
-        and any underlying Temporal workflow is terminated. Cancelling an
-        already-`Terminated` task returns the same task without changes.
-        Tasks that have already finished (`Succeeded` or `Failed`) cannot
-        be cancelled.
-
-        Tasks are site-scoped; `siteId` must be the Site where the task was
-        created. Org must have an Infrastructure Provider entity. User must
-        have authorization role with `PROVIDER_ADMIN` suffix.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - siteId
-              properties:
-                siteId:
-                  type: string
-                  format: uuid
-                  description: ID of the Site that owns the task (tasks are site-scoped).
-            examples:
-              example-1:
-                value:
-                  siteId: 660e8400-e29b-41d4-a716-446655440000
-      responses:
-        '202':
-          description: |-
-            Accepted. The cancellation request was accepted and the Task's
-            last known state is returned. Clients should `GET` the task to
-            observe the final state, since cancellation is best-effort and
-            the operation may still be terminating.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Task'
-              examples:
-                example-1:
-                  value:
-                    id: 550e8400-e29b-41d4-a716-446655440000
-                    status: Terminated
-                    description: Power on rack components
-                    message: Cancelled by user
-        '400':
-          $ref: '#/components/responses/ValidationError'
-        '403':
-          $ref: '#/components/responses/ForbiddenError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
-        '412':
-          description: The Task has already finished with status `Succeeded` or `Failed` and cannot be cancelled.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NICoAPIError'
-              examples:
-                terminal-task:
-                  value:
-                    source: nico
-                    message: 'task cannot be cancelled: task 550e8400-e29b-41d4-a716-446655440000 has status failed'
-                    data: null
-        '504':
-          $ref: '#/components/responses/GatewayTimeoutError'
-      tags:
-        - Task
+        - Tray
   '/v2/org/{org}/nico/task/rule':
     parameters:
       - schema:
@@ -13047,6 +12996,242 @@ paths:
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - Rule
+  '/v2/org/{org}/nico/task':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    get:
+      summary: Retrieve all Tasks
+      operationId: get-all-tasks
+      description: |-
+        List all Tasks created in the specified Site, across every Rack and Tray.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix, and the Site must belong to that Provider and have NICo Flow enabled.
+
+        Setting `activeOnly=true` restricts the result to tasks in a non-terminal REST state (`Pending` or `Running`). Results are ordered by creation time descending, then Task UUID descending, before pagination. The `X-Pagination` response header reports the total count over the post-filter set.
+
+        By default the `report` field is omitted from each Task in the response. Set `includeReport=true` to include it; this is opt-in because report bodies can be several KB.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site whose Tasks are returned.
+        - schema:
+            type: boolean
+            default: false
+          name: activeOnly
+          in: query
+          description: Restrict results to non-terminal Tasks.
+        - schema:
+            type: boolean
+            default: false
+          name: includeReport
+          in: query
+          description: Include the per-task execution report on each returned Task.
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query.
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          in: query
+          name: pageSize
+          description: Number of Tasks returned per page.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Task'
+              examples:
+                example-1:
+                  value:
+                    - id: 550e8400-e29b-41d4-a716-446655440000
+                      status: Running
+                      description: Power on rack components
+                      message: 'Processing 3 of 5 components'
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":1,"orderBy":null}'
+              description: Pagination result in JSON format.
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '412':
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+      tags:
+        - Task
+  '/v2/org/{org}/nico/task/{id}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          format: uuid
+        name: id
+        in: path
+        required: true
+        description: UUID of the Task
+    get:
+      summary: Retrieve a Task
+      operationId: get-task
+      description: |-
+        Get a Task by UUID.
+
+        The same handler is also mounted at `/v2/org/{org}/nico/rack/task/{id}` for
+        backward compatibility; prefer this path for new clients.
+
+        Tasks are site-scoped; `siteId` must be the Site where the task was created.
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site that owns the task (tasks are site-scoped).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              examples:
+                example-1:
+                  value:
+                    id: 550e8400-e29b-41d4-a716-446655440000
+                    status: Running
+                    description: Power on rack components
+                    message: 'Processing 3 of 5 components'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+      tags:
+        - Task
+  '/v2/org/{org}/nico/task/{id}/cancel':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          format: uuid
+        name: id
+        in: path
+        required: true
+        description: UUID of the Task
+    post:
+      summary: Cancel a Task
+      operationId: cancel-task
+      description: |-
+        Cancel a Task.
+
+        The same handler is also mounted at `/v2/org/{org}/nico/rack/task/{id}/cancel`
+        for backward compatibility; prefer this path for new clients.
+
+        Cancellation is best-effort and idempotent: tasks in non-terminal
+        states (`Pending`, `Running`) are marked `Terminated`
+        and any underlying Temporal workflow is terminated. Cancelling an
+        already-`Terminated` task returns the same task without changes.
+        Tasks that have already finished (`Succeeded` or `Failed`) cannot
+        be cancelled.
+
+        Tasks are site-scoped; `siteId` must be the Site where the task was
+        created. Org must have an Infrastructure Provider entity. User must
+        have authorization role with `PROVIDER_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - siteId
+              properties:
+                siteId:
+                  type: string
+                  format: uuid
+                  description: ID of the Site that owns the task (tasks are site-scoped).
+            examples:
+              example-1:
+                value:
+                  siteId: 660e8400-e29b-41d4-a716-446655440000
+      responses:
+        '202':
+          description: |-
+            Accepted. The cancellation request was accepted and the Task's
+            last known state is returned. Clients should `GET` the task to
+            observe the final state, since cancellation is best-effort and
+            the operation may still be terminating.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              examples:
+                example-1:
+                  value:
+                    id: 550e8400-e29b-41d4-a716-446655440000
+                    status: Terminated
+                    description: Power on rack components
+                    message: Cancelled by user
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Task has already finished with status `Succeeded` or `Failed` and cannot be cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                terminal-task:
+                  value:
+                    source: nico
+                    message: 'task cannot be cancelled: task 550e8400-e29b-41d4-a716-446655440000 has status failed'
+                    data: null
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+      tags:
+        - Task
   '/v2/org/{org}/nico/task/rule/{id}':
     parameters:
       - schema:
@@ -13997,58 +14182,6 @@ paths:
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - Rack
-  '/v2/org/{org}/nico/domain/nvlink/power':
-    parameters:
-      - schema:
-          type: string
-        name: org
-        in: path
-        required: true
-        description: Name of the Org
-    patch:
-      summary: Power control NVLink Domains
-      operationId: power-control-nvlink-domains
-      description: |-
-        Power control one or more NVLink Domains identified by UUID. Flow resolves each NVLink Domain to its member Racks and creates one task per Rack.
-
-        Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
-
-        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/BatchUpdateNVLinkDomainPowerStateRequest'
-            examples:
-              power-off-domains:
-                value:
-                  siteId: 550e8400-e29b-41d4-a716-446655440000
-                  domainIds:
-                    - 650e8400-e29b-41d4-a716-446655440001
-                    - 750e8400-e29b-41d4-a716-446655440002
-                  state: 'off'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/UpdatePowerStateResponse'
-        '400':
-          $ref: '#/components/responses/ValidationError'
-        '403':
-          $ref: '#/components/responses/ForbiddenError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
-        '500':
-          $ref: '#/components/responses/GenericHttpError'
-        '503':
-          $ref: '#/components/responses/GenericHttpError'
-        '504':
-          $ref: '#/components/responses/GatewayTimeoutError'
-      tags:
-        - NVLink Domain
   '/v2/org/{org}/nico/domain/nvlink/{id}/power':
     parameters:
       - schema:
@@ -14104,7 +14237,7 @@ paths:
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
-        - NVLink Domain
+        - Domain
   '/v2/org/{org}/nico/domain/nvlink/firmware':
     parameters:
       - schema:
@@ -14154,7 +14287,7 @@ paths:
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
-        - NVLink Domain
+        - Domain
   '/v2/org/{org}/nico/domain/nvlink/{id}/firmware':
     parameters:
       - schema:
@@ -14211,140 +14344,7 @@ paths:
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
-        - NVLink Domain
-  '/v2/org/{org}/nico/tray':
-    parameters:
-      - schema:
-          type: string
-        name: org
-        in: path
-        required: true
-        description: Name of the Org
-    get:
-      summary: Retrieve all Trays
-      operationId: get-all-tray
-      description: |-
-        Get all Trays (components) for the specified Site.
-
-        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
-
-        **Filter constraints:**
-        - `rackId` and `rackName` are mutually exclusive
-        - `rackId`/`rackName` cannot be combined with `id` (rack-level vs component-level targeting)
-        - `slotId` restricts to trays at that rack slot, requires `rackId` or `rackName`, and composes with the rest of the query via AND
-      parameters:
-        - schema:
-            type: string
-            format: uuid
-          name: siteId
-          in: query
-          required: true
-          description: ID of the Site to retrieve Trays from
-        - schema:
-            type: string
-          name: rackId
-          in: query
-          description: Filter by Rack ID
-        - schema:
-            type: string
-          name: rackName
-          in: query
-          description: Filter by Rack name
-        - schema:
-            type: string
-            enum:
-              - Compute
-              - NVSwitch
-              - PowerShelf
-          name: type
-          in: query
-          description: Filter by tray type. When `id` is specified, the type disambiguates component IDs shared by different component types.
-        - schema:
-            type: string
-          name: id
-          in: query
-          description: Filter by component ID. Can be specified multiple times to filter on more than one Tray ID.
-        - schema:
-            type: integer
-            format: int32
-            minimum: 0
-          name: slotId
-          in: query
-          description: |-
-            Restrict to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter via AND.
-        - schema:
-            $ref: '#/components/schemas/PageNumber'
-            example: 1
-            default: 1
-          in: query
-          name: pageNumber
-          description: Page number for pagination query
-        - schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-            example: 20
-          in: query
-          name: pageSize
-          description: Page size for pagination query
-        - schema:
-            type: string
-            enum:
-              - NAME_ASC
-              - NAME_DESC
-              - MANUFACTURER_ASC
-              - MANUFACTURER_DESC
-              - MODEL_ASC
-              - MODEL_DESC
-              - TYPE_ASC
-              - TYPE_DESC
-          in: query
-          name: orderBy
-          description: Ordering for pagination query
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Tray'
-              examples:
-                example-1:
-                  value:
-                    - id: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
-                      type: Compute
-                      name: compute-tray-1
-                      manufacturer: NVIDIA
-                      model: GB200
-                      serialNumber: TSN001
-                      description: Compute tray in slot 1
-                      firmwareVersion: 2.1.0
-                      powerState: 'on'
-                      leakStatus: Leaking
-                      leakHandlingStatus: Down
-                      position:
-                        slotId: 1
-                        trayIdx: 0
-                        hostId: 1
-                      rackId: rack-01
-                      nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
-                      taskStats:
-                        pendingTaskCount: 0
-                        activeTaskCount: 0
-          headers:
-            X-Pagination:
-              schema:
-                type: string
-                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy":"NAME_ASC"}'
-              description: Pagination result in JSON format
-        '403':
-          $ref: '#/components/responses/ForbiddenError'
-        '504':
-          $ref: '#/components/responses/GatewayTimeoutError'
-      tags:
-        - Tray
+        - Domain
   '/v2/org/{org}/nico/tray/{id}':
     parameters:
       - schema:
