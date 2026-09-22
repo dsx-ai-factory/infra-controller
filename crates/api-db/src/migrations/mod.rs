@@ -341,7 +341,18 @@ mod tests {
         .await
         .unwrap();
 
-        migrate(&pool).await.unwrap();
+        // Compare only the authority rename; later migrations can add columns.
+        let rename_migration = current_epoch
+            .post_squash
+            .iter()
+            .find(|migration| migration.version == RENAME_SITE_PREFIX_AUTHORITY_VERSION)
+            .unwrap()
+            .clone();
+        Migrator::with_migrations(vec![rename_migration])
+            .ignoring_missing()
+            .run(&pool)
+            .await
+            .unwrap();
 
         let row_after: serde_json::Value = sqlx::query_scalar(
             "SELECT to_jsonb(site_prefixes) - 'authority' \

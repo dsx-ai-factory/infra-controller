@@ -35,12 +35,15 @@ use api_test_helper::{
 use bmc_mock::test_support::TEST_MAC_POOL;
 use bmc_mock::{HardwareType, ListenerOrAddress};
 use carbide_uuid::machine::StableHostMachineId;
+use carbide_uuid::site_prefix::SitePrefixId;
 use eyre::ContextCompat;
 use futures::FutureExt;
 use futures::future::join_all;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::machine_boot_interface::BootInterfaceSelectionSource;
+use model::metadata::Metadata;
+use model::site_prefix::{NewTenantManagedSitePrefix, SitePrefixLifecycleState};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -63,6 +66,42 @@ async fn test_integration() -> eyre::Result<()> {
         println!("test_integration: SKIPPED (set REPO_ROOT and DATABASE_URL to run)");
         return Ok(());
     };
+
+    // Persist a predecessor root without a protection request before either API
+    // starts, then verify that the background controller makes it ready.
+    db::migrations::migrate(&test_env.db_pool).await?;
+    let mut txn = test_env.db_pool.begin().await?;
+    let recovery_tenant_id = "site-prefix-recovery";
+    db::tenant::create_and_persist(
+        recovery_tenant_id.to_string(),
+        Metadata {
+            name: "SitePrefix Recovery".to_string(),
+            ..Default::default()
+        },
+        None,
+        &mut txn,
+    )
+    .await?;
+    let site_prefix = db::site_prefix::create_tenant_managed(
+        NewTenantManagedSitePrefix {
+            id: SitePrefixId::new(),
+            tenant_organization_id: recovery_tenant_id.parse()?,
+            prefix: "10.250.0.0/24".parse()?,
+            metadata: Metadata {
+                name: "readiness-recovery".to_string(),
+                ..Default::default()
+            },
+        },
+        1,
+        &mut txn,
+    )
+    .await?
+    .site_prefix;
+    txn.commit().await?;
+    assert_eq!(
+        site_prefix.status.lifecycle_state,
+        SitePrefixLifecycleState::Provisioning,
+    );
 
     let bmc_address_registry = BmcMockRegistry::default();
     let certs_dir = PathBuf::from(format!("{}/crates/bmc-mock", test_env.root_dir.display()));
@@ -126,6 +165,28 @@ async fn test_integration() -> eyre::Result<()> {
 
     let tenant_org_id = "tenant_organization";
     tenant::create(carbide_api_addrs, tenant_org_id, "Tenant Organization").await?;
+
+    // The first enqueue is immediate; allow later 30-second passes and jitter.
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let stored = db::site_prefix::find_by_ids(&test_env.db_pool, &[site_prefix.id])
+                .await?
+                .pop()
+                .context("readiness fixture SitePrefix disappeared")?;
+            if stored.status.lifecycle_state == SitePrefixLifecycleState::Ready {
+                return Ok::<(), eyre::Report>(());
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        eyre::eyre!(
+            "SitePrefix {} did not become ready within 120 seconds",
+            site_prefix.id,
+        )
+    })??;
+
     let tenant1_vpc = vpc::create(carbide_api_addrs, tenant_org_id).await?;
     let domain_id = domain::create(carbide_api_addrs, "tenant-1.local").await?;
     let managed_segment_id =

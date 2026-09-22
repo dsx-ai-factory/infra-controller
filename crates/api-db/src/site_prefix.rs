@@ -25,8 +25,11 @@ use std::collections::HashMap;
 
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::VpcPrefixId;
+use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use ipnetwork::IpNetwork;
+use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::machine::{LoadSnapshotOptions, ManagedHostStateSnapshot};
 use model::site_prefix::{
     NewSitePrefix, NewTenantManagedSitePrefix, PrefixMatch, RetireTenantManagedSitePrefix,
     SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState, SitePrefixRoutingScope,
@@ -36,7 +39,8 @@ use model::tenant::TenantOrganizationId;
 use sqlx::{PgConnection, QueryBuilder};
 
 use crate::db_read::DbReader;
-use crate::{DatabaseError, DatabaseResult};
+use crate::machine::MachineNetworkConfigNotCurrent;
+use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult};
 
 const TENANT_PREFIX_EXCLUSION: &str = "site_prefixes_tenant_prefix_excl";
 const TENANT_ADMISSION_CHECK: &str = "site_prefixes_tenant_admission_check";
@@ -997,6 +1001,145 @@ pub async fn find_by_ids(
         .fetch_all(db)
         .await
         .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `find_isolation_hosts` includes assigned or tenant-serving hosts, retaining
+/// hosts waiting for their DPUs to stop tenant forwarding. Idle inventory and
+/// hosts without managed DPU topology do not need an acknowledgement.
+/// When the caller's site policy does not require isolation, no hosts are selected.
+pub async fn find_isolation_hosts(
+    txn: &mut PgConnection,
+    isolation_required: bool,
+) -> DatabaseResult<Vec<ManagedHostStateSnapshot>> {
+    if !isolation_required {
+        return Ok(Vec::new());
+    }
+
+    let mut hosts = crate::managed_host::load_all(txn, LoadSnapshotOptions::default())
+        .await?
+        .into_iter()
+        .filter(ManagedHostStateSnapshot::needs_site_prefix_isolation)
+        .collect::<Vec<_>>();
+    // Use the same machine lock order for every prefix's initial request.
+    hosts.sort_unstable_by_key(|host| host.host_snapshot.id);
+    Ok(hosts)
+}
+
+/// Returns the initial protection request time, or None for an unrequested or
+/// missing root. Once recorded, this time does not change during readiness.
+pub async fn isolation_requested_at(
+    txn: &mut PgConnection,
+    site_prefix_id: SitePrefixId,
+) -> DatabaseResult<Option<DateTime<Utc>>> {
+    let query = "SELECT isolation_requested_at FROM site_prefixes WHERE id = $1";
+    sqlx::query_scalar(query)
+        .bind(site_prefix_id)
+        .fetch_optional(txn)
+        .await
+        .map(Option::flatten)
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `request_isolation` requests the complete protection configuration once for
+/// a tenant SitePrefix. The caller holds the routing lock and the SitePrefix
+/// row lock, and commits the host/DPU version changes with the returned request
+/// time. Repeated calls return that time without generating more versions.
+/// `isolation_required` is the caller's site policy decision; false records the
+/// request with no receivers, allowing the normal readiness transition.
+///
+/// `NotApplied` means a host disappeared or changed network version. The
+/// caller must roll back all writes and retry from fresh snapshots.
+pub async fn request_isolation(
+    txn: &mut PgConnection,
+    site_prefix: &SitePrefix,
+    isolation_required: bool,
+) -> DatabaseResult<ConditionalWrite<DateTime<Utc>, MachineNetworkConfigNotCurrent>> {
+    if site_prefix.status.authority != SitePrefixAuthority::TenantManaged
+        || site_prefix.status.lifecycle_state != SitePrefixLifecycleState::Provisioning
+    {
+        return Err(DatabaseError::FailedPrecondition(
+            "only a provisioning tenant SitePrefix can request isolation".to_string(),
+        ));
+    }
+
+    if let Some(requested_at) = isolation_requested_at(txn, site_prefix.id).await? {
+        return Ok(ConditionalWrite::Applied(requested_at));
+    }
+
+    for host in find_isolation_hosts(txn, isolation_required).await? {
+        if let ConditionalWrite::NotApplied(reason) = crate::machine::try_update_network_config(
+            txn,
+            &host.host_snapshot.id,
+            host.host_snapshot.network_config.version,
+            &host.host_snapshot.network_config.value,
+        )
+        .await?
+        {
+            return Ok(ConditionalWrite::NotApplied(reason));
+        }
+    }
+
+    // This is progress within Provisioning, not a public lifecycle or metadata
+    // change. Its transaction includes every group update, so a restart can
+    // resume the acknowledgement wait without resetting any host's target.
+    // Use request completion time, not the transaction's earlier start time.
+    let query = "UPDATE site_prefixes SET isolation_requested_at = clock_timestamp() \
+        WHERE id = $1 RETURNING isolation_requested_at";
+    let requested_at = sqlx::query_scalar(query)
+        .bind(site_prefix.id)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(ConditionalWrite::Applied(requested_at))
+}
+
+/// `try_mark_ready` applies a controller readiness decision only while the same
+/// tenant root is still Provisioning and its initial protection request exists.
+/// Missing, retired, or concurrently changed roots return `NotApplied`.
+pub async fn try_mark_ready(
+    txn: &mut PgConnection,
+    site_prefix_id: SitePrefixId,
+    old_version: ConfigVersion,
+    new_version: ConfigVersion,
+) -> DatabaseResult<ConditionalWrite<(), ControllerStateNotCurrent>> {
+    let query = r#"
+        UPDATE site_prefixes
+        SET lifecycle_state = $1, version = $2, updated_at = now()
+        WHERE id = $3 AND version = $4 AND authority = $5
+          AND lifecycle_state = $6 AND isolation_requested_at IS NOT NULL
+    "#;
+    let result = sqlx::query(query)
+        .bind(SitePrefixLifecycleState::Ready)
+        .bind(new_version)
+        .bind(site_prefix_id)
+        .bind(old_version)
+        .bind(SitePrefixAuthority::TenantManaged)
+        .bind(SitePrefixLifecycleState::Provisioning)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(if result.rows_affected() == 1 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(ControllerStateNotCurrent)
+    })
+}
+
+/// `update_controller_state_outcome` stores the last readiness handler result
+/// without changing the SitePrefix's public lifecycle or optimistic version.
+pub async fn update_controller_state_outcome(
+    txn: &mut PgConnection,
+    site_prefix_id: SitePrefixId,
+    outcome: PersistentStateHandlerOutcome,
+) -> DatabaseResult<()> {
+    let query = "UPDATE site_prefixes SET controller_state_outcome = $1 WHERE id = $2";
+    sqlx::query(query)
+        .bind(sqlx::types::Json(outcome))
+        .bind(site_prefix_id)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
 }
 
 #[cfg(test)]

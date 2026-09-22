@@ -5214,11 +5214,16 @@ func (SitePrefixRoutingScope) EnumDescriptor() ([]byte, []int) {
 type SitePrefixLifecycleState int32
 
 const (
-	SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_UNSPECIFIED  SitePrefixLifecycleState = 0
+	SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_UNSPECIFIED SitePrefixLifecycleState = 0
+	// The tenant-managed prefix is not yet usable for new VpcPrefixes. Under
+	// mutual isolation, readiness waits for every affected DPU to acknowledge
+	// the network configuration that includes its protection.
 	SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_PROVISIONING SitePrefixLifecycleState = 1
-	SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY        SitePrefixLifecycleState = 2
-	SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING     SitePrefixLifecycleState = 3
-	SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_ERROR        SitePrefixLifecycleState = 4
+	// The prefix can be used for new VpcPrefixes. A tenant-managed prefix has
+	// completed the protection update required by the site's isolation policy.
+	SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY    SitePrefixLifecycleState = 2
+	SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING SitePrefixLifecycleState = 3
+	SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_ERROR    SitePrefixLifecycleState = 4
 )
 
 // Enum value maps for SitePrefixLifecycleState.

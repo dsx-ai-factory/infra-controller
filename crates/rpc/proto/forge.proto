@@ -10899,7 +10899,12 @@ enum SitePrefixRoutingScope {
 enum SitePrefixLifecycleState {
   option (carbide.codegen.v1.enum_derive) = "serde::Serialize";
   SITE_PREFIX_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  // The tenant-managed prefix is not yet usable for new VpcPrefixes. Under
+  // mutual isolation, readiness waits for every affected DPU to acknowledge
+  // the network configuration that includes its protection.
   SITE_PREFIX_LIFECYCLE_STATE_PROVISIONING = 1;
+  // The prefix can be used for new VpcPrefixes. A tenant-managed prefix has
+  // completed the protection update required by the site's isolation policy.
   SITE_PREFIX_LIFECYCLE_STATE_READY = 2;
   SITE_PREFIX_LIFECYCLE_STATE_DELETING = 3;
   SITE_PREFIX_LIFECYCLE_STATE_ERROR = 4;

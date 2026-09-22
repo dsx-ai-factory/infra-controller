@@ -381,6 +381,23 @@ pub(crate) async fn create(
                 result.site_prefix.config.prefix,
             )?;
         }
+        let isolation_required = matches!(
+            api.runtime_config.vpc_isolation_behavior,
+            VpcIsolationBehaviorType::MutualIsolation
+        );
+        if result.site_prefix.status.lifecycle_state == SitePrefixLifecycleState::Provisioning
+            && let db::ConditionalWrite::NotApplied(_) = db::site_prefix::request_isolation(
+                &mut txn,
+                &result.site_prefix,
+                isolation_required,
+            )
+            .await?
+        {
+            return Err(CarbideError::FailedPrecondition(
+                "an affected host changed while requesting SitePrefix protection; retry the request"
+                    .to_string(),
+            ));
+        }
         Ok(result)
     }
     .await;

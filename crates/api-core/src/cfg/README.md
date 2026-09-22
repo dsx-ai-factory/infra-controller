@@ -54,7 +54,7 @@ behavior.
 | `max_site_prefix_isolation_rules` | `u32` | `64` | `networking` | Maximum compacted legacy DPU site-prefix input for new tenant-root admission under mutual isolation; accepts `0` through `64`. Open isolation does not enforce this limit. This is not an FNN route-capacity limit. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules). |
 | `anycast_site_prefixes` | `Vec<Ipv4Network>` | `[]` | `networking` | Aggregate IPv4 prefixes containing tenant-announced prefixes (e.g., BYOIP). **Deprecated.** Use [`routing_profiles.allowed_anycast_prefixes`](#fnnroutingprofileconfig) instead. |
 | `common_tenant_host_asn` | `Option<u32>` | — | `networking` | ASN that tenants use to peer with the DPU. If unset, any ASN is accepted. |
-| `vpc_isolation_behavior` | `VpcIsolationBehaviorType` | `MutualIsolation` | `networking` | VPC isolation policy: `mutual_isolation` or `open`. |
+| `vpc_isolation_behavior` | `VpcIsolationBehaviorType` | `MutualIsolation` | `networking` | VPC isolation policy: `mutual_isolation` or `open`. Set at installation; changing it on an existing site is not supported. |
 | `host_naming_strategy` | `HostNamingStrategyKind` | `IpAddress` | `machines` | How new machine hostnames are derived: `ip_address` (IP-derived, e.g. `10-1-2-3`; the default and backwards-compatible), `fun` (stable adjective-noun handles like `wholesale-walrus`), `serial_number` (a machine's hardware serial -- the primary interface gets the bare serial, secondary interfaces get `serial-<mac>`, BMC interfaces stay IP-named), or `mac_address` (each interface's own MAC, e.g. `0a-1b-2c-3d-4e-5f`). Only `fun` leaves existing hostnames unchanged -- it keeps any real name, whether IP-, serial-, or MAC-derived, so after a switch fun names appear only on newly named interfaces; the others re-derive, so switching to one progressively renames interfaces as they reconcile. Junk placeholder serials (e.g. `To Be Filled By O.E.M.`) fall back to the IP name, and `serial_number` errors on duplicate serials rather than assigning a substitute name. |
 | `dpu_network_monitor_pinger_type` | `Option<String>` | — | `networking` | Pinger implementation type (e.g., `"OobNetBind"`) for DPU link health checks. |
 | `tls` | `Option<TlsConfig>` | — | `server` | TLS certificate/key paths (see [TlsConfig](#tlsconfig)). |
@@ -900,6 +900,9 @@ with the existing tenant quota:
 This creation freeze is unnecessary when the old API and its requests are fully
 stopped before the new API starts, or when null routes are inherited. Setting
 `tenant_prefix_overlap_enabled = false` does not block SitePrefix creation.
+This procedure addresses explicit-override coverage, not readiness. Upgrading
+from an API that does not render tenant prefixes also requires the drain
+described below, even when null routes are inherited.
 
 `max_site_prefix_isolation_rules` limits the compacted legacy list when creating a
 tenant-managed root. It defaults to `64` and accepts integers from `0` through
@@ -921,11 +924,65 @@ block startup or truncate either DPU input. New tenant roots intersecting a conf
 `deny_prefixes` entry are rejected with `InvalidArgument`.
 
 Tenant roots remain included in every retained lifecycle state, including
-`Deleting`, even when `tenant_prefix_overlap_enabled` is false. New tenant roots remain
-`Provisioning` and cannot be used for new VpcPrefixes until the DPU readiness
-work in [#6314](https://github.com/dsx-ai-factory/infra-controller/issues/6314).
+`Deleting`, even when `tenant_prefix_overlap_enabled` is false. New tenant roots start
+in `Provisioning` and cannot be used for new VpcPrefixes until they become `Ready`.
+Under `mutual_isolation`, `nico-api` requests a network configuration update for
+hosts assigned to Instances or still able to serve tenant traffic. The readiness
+controller waits for every DPU in each affected host's topology to acknowledge
+the current host network configuration version before marking the root `Ready`.
+Missing acknowledgements leave the root `Provisioning`. Retries and API restarts
+resume that wait without repeatedly changing the target versions.
+
+If a host's network configuration changes during creation, `CreateSitePrefix`
+can return `FailedPrecondition` with a message asking the caller to retry. The
+transaction rolls back the new root and every version update; retry the request.
+
+An unavailable DPU on any affected host can keep new tenant prefixes waiting.
+The controller logs `Waiting for SitePrefix DPU acknowledgements` with the
+`site_prefix_id`, the first blocking `host_machine_id`, its
+`network_config_version`, and `isolation_requested_at`. The latest handler result
+is also stored in `site_prefixes.controller_state_outcome`; it is not exposed
+through the SitePrefix RPCs or CLI. Restore the missing DPU acknowledgement
+instead of changing the prefix to `Ready` manually. An unrelated host network
+update can extend the wait because readiness checks the current version.
+
+Ordinary waits check acknowledgements without the routing lock. Before marking
+a prefix `Ready`, the controller takes the shared routing lock and checks again.
+The initial request still scans affected hosts and updates their versions while
+holding the exclusive routing lock, which blocks DPU configuration requests.
+The duration of that work needs qualification at the site's fleet size.
+
+Idle hosts do not delay readiness. A later Instance assignment receives the retained
+tenant prefixes with its network configuration. With `open`, the controller marks
+the root `Ready` without refreshing host versions or waiting for isolation
+acknowledgements. `vpc_isolation_behavior` is selected at installation; changing
+an existing site from `open` to `mutual_isolation` is not supported and does not
+restart readiness for prefixes already marked `Ready`.
+
 Retiring operator roots are excluded from the legacy input but remain in inherited
 FNN null routes until their children are hard-deleted.
+
+Before starting an API with this readiness controller, every API process serving
+DPU configurations must include the tenant-prefix rendering added in
+[#6388](https://github.com/dsx-ai-factory/infra-controller/pull/6388).
+For a direct upgrade from an API without it, such as `v2.2.0-rc.8`, stop the old
+API processes and drain their requests before starting the new API. The Helm
+and Kustomize `RollingUpdate` deployments do not enforce this ordering, even
+with one replica. Otherwise, an old API can return a new network version
+without its tenant-prefix protection, and its DPU acknowledgement can incorrectly
+satisfy readiness. Setting the tenant quota to zero does not prevent recovery of
+existing `Provisioning` roots and is not sufficient for this upgrade.
+
+An API such as `v2.2.0-rc.8` can have cached wildcard queries on `site_prefixes`.
+Adding `isolation_requested_at` and `controller_state_outcome` can make those
+queries fail until the old API's connections or process are replaced. Stopping
+the old API before migrations avoids this additional error window.
+
+Deleting a tenant root still keeps its CIDR, quota slot, and protection until final
+removal. The retirement work in
+[#3894](https://github.com/dsx-ai-factory/infra-controller/issues/3894) requires proof
+that learned routes have been withdrawn; a configuration acknowledgement alone
+does not provide that proof.
 
 ### Tenant prefix overlap checks
 

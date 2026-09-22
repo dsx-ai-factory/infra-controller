@@ -309,7 +309,8 @@ pub struct CarbideConfig {
     pub common_tenant_host_asn: Option<u32>,
 
     /// VPC isolation policy enforced on tenant traffic.
-    /// Controls whether VPCs are mutually isolated or open.
+    /// Select `mutual_isolation` (the default) or `open` at site installation.
+    /// Changing this policy on an existing site is not supported.
     #[serde(default)]
     pub vpc_isolation_behavior: VpcIsolationBehaviorType,
 
