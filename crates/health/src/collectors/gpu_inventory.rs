@@ -176,7 +176,8 @@ impl<B: Bmc + 'static> GpuInventoryCollector<B> {
 
     fn emit_alert(&self, message: String) {
         tracing::warn!(
-            bmc_mac_address = %self.endpoint.addr.mac,
+            bmc_mac_address = self.endpoint.addr.mac.as_ref().map(tracing::field::display),
+            bmc_ip_address = %self.endpoint.addr.ip,
             reason = %message,
             rack_id = self.event_context.rack_id().map(tracing::field::display),
             "GPU inventory alert"
@@ -314,7 +315,8 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for GpuInventoryCollector<B> {
         // skip this iteration rather than false-alerting on a not-yet-known count.
         let Some(actual) = self.count_gpus() else {
             tracing::debug!(
-                bmc_mac_address = %self.endpoint.addr.mac,
+                bmc_mac_address = self.endpoint.addr.mac.as_ref().map(tracing::field::display),
+                bmc_ip_address = %self.endpoint.addr.ip,
                 rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "Entity inventory not ready yet; skipping GPU inventory iteration"
             );
@@ -328,7 +330,8 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for GpuInventoryCollector<B> {
         let report = gpu_count_report(expected_count, actual);
         if !report.alerts.is_empty() {
             tracing::warn!(
-                bmc_mac_address = %self.endpoint.addr.mac,
+                bmc_mac_address = self.endpoint.addr.mac.as_ref().map(tracing::field::display),
+                bmc_ip_address = %self.endpoint.addr.ip,
                 expected_gpu_count = expected_count,
                 actual_gpu_count = actual,
                 rack_id = self.event_context.rack_id().map(tracing::field::display),

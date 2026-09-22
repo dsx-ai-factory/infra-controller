@@ -1452,9 +1452,9 @@ pub(crate) async fn update_instance_config(
         &initial_instance.config.network,
         &config.network,
     );
-    let needs_overlap_check = mh_snapshot.has_managed_dpus()
-        && (initial_instance.config.network_security_group_id != config.network_security_group_id
-            || network_expands);
+    // NSG changes cannot override FNN null routes; only added routing visibility
+    // requires overlap admission here.
+    let needs_overlap_check = mh_snapshot.has_managed_dpus() && network_expands;
     if needs_overlap_check {
         db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
         // No resource locks precede this wait. Reload the retained networks,
@@ -1543,7 +1543,6 @@ pub(crate) async fn update_instance_config(
         &mh_snapshot,
         &mut txn,
         needs_overlap_check,
-        network_expands,
     )
     .await?;
 
@@ -1659,7 +1658,6 @@ async fn update_instance_network_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     needs_overlap_check: bool,
-    network_expands: bool,
 ) -> Result<(), CarbideError> {
     if instance.update_network_config_request.is_some() {
         return Err(ConfigValidationError::InstanceNetworkConfigUpdateAlreadyInProgress.into());
@@ -1736,14 +1734,8 @@ async fn update_instance_network_config(
             config
                 .network
                 .copy_existing_resources(&instance.config.network);
-            tenant_prefix_overlap::validate_instance_network(
-                api,
-                txn,
-                config,
-                Some(instance),
-                network_expands,
-            )
-            .await?;
+            tenant_prefix_overlap::validate_instance_network(api, txn, config, Some(instance))
+                .await?;
         }
         return Ok(());
     }
@@ -1791,14 +1783,7 @@ async fn update_instance_network_config(
     validate_instance_interface_routing_profiles(txn, network, runtime_config.fnn.as_ref()).await?;
 
     if needs_overlap_check {
-        tenant_prefix_overlap::validate_instance_network(
-            api,
-            txn,
-            config,
-            Some(instance),
-            network_expands,
-        )
-        .await?;
+        tenant_prefix_overlap::validate_instance_network(api, txn, config, Some(instance)).await?;
     }
     let network = &mut config.network;
 

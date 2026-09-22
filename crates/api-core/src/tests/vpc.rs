@@ -229,10 +229,13 @@ async fn create_routing_profile_vpc(
         .into_inner())
 }
 
+/// Verifies VPC assignment waits for a concurrent NSG update but commits without
+/// overlap admission, keeping attachment synchronization independent of ACL policy.
 #[crate::sqlx_test]
-async fn vpc_nsg_assignment_without_tenant_prefixes_rechecks_locked_policy(
+async fn vpc_nsg_assignment_waits_for_nsg_update_without_overlap_lock(
     pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
+    // Use a prefix-free VPC to isolate NSG attachment from routing changes.
     let mut config = crate::test_support::default_config::get();
     config.tenant_prefix_overlap_enabled = false;
     config.network_security_group.stateful_acls_enabled = true;
@@ -262,6 +265,7 @@ async fn vpc_nsg_assignment_without_tenant_prefixes_rechecks_locked_policy(
             },
         ))
         .await?;
+    // Keep a stateful-policy update uncommitted so assignment must wait for it.
     let id = nsg_id.parse()?;
     let mut writer = env.pool.begin().await?;
     let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -283,11 +287,9 @@ async fn vpc_nsg_assignment_without_tenant_prefixes_rechecks_locked_policy(
         None,
     )
     .await?;
+    // Keep routing admission locked until the concurrent assignment has committed.
     let mut overlap_blocker = env.pool.begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut overlap_blocker).await?;
-    let overlap_blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(overlap_blocker.as_mut())
-        .await?;
     let assignment = env
         .api
         .update_vpc(tonic::Request::new(rpc::forge::VpcUpdateRequest {
@@ -297,34 +299,21 @@ async fn vpc_nsg_assignment_without_tenant_prefixes_rechecks_locked_policy(
             ..Default::default()
         }));
     let release = async {
+        // Observe the row-lock wait before committing so this exercises a real race.
         wait_for_blocked_query(&env.pool, writer_pid, "network_security_groups").await;
-        writer.commit().await?;
-        wait_for_blocked_query(
-            &env.pool,
-            overlap_blocker_pid,
-            "tenant_prefix_overlap:checks",
-        )
-        .await;
-        let available = tokio::time::timeout(
-            Duration::from_secs(10),
-            db::network_security_group::find_by_ids(
-                &mut overlap_blocker,
-                std::slice::from_ref(&id),
-                None,
-                true,
-            ),
-        )
-        .await??;
-        assert_eq!(available, vec![expanded.clone()]);
-        overlap_blocker.commit().await?;
-        Ok::<(), eyre::Report>(())
+        writer.commit().await
     };
+    // Assignment must finish while the unrelated overlap lock remains held.
     let (result, released) = tokio::time::timeout(Duration::from_secs(70), async {
         tokio::join!(assignment, release)
     })
     .await?;
     released?;
     let updated = result?.into_inner().vpc.unwrap();
+    overlap_blocker.rollback().await?;
+
+    // Read back both resources to prove the attachment committed once without
+    // overwriting the concurrent NSG policy update.
     assert_eq!(
         forge_vpc_config(&updated)
             .network_security_group_id
@@ -338,12 +327,19 @@ async fn vpc_nsg_assignment_without_tenant_prefixes_rechecks_locked_policy(
         created_version.version_nr() + 1
     );
     assert_eq!(find_test_vpc(&env, vpc_id).await?, updated);
-    let mut txn = env.pool.begin().await?;
-    assert_eq!(
-        db::network_security_group::find_by_ids(&mut txn, &[id], None, false).await?,
-        vec![expanded]
-    );
-    txn.commit().await?;
+    let persisted = env
+        .api
+        .find_network_security_groups_by_ids(tonic::Request::new(
+            rpc::forge::FindNetworkSecurityGroupsByIdsRequest {
+                network_security_group_ids: vec![nsg_id],
+                tenant_organization_id: Some(tenant.to_string()),
+            },
+        ))
+        .await?
+        .into_inner()
+        .network_security_groups;
+    let expected: rpc::forge::NetworkSecurityGroup = expanded.try_into()?;
+    assert_eq!(persisted, vec![expected]);
     Ok(())
 }
 

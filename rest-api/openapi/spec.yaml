@@ -11882,8 +11882,10 @@ paths:
             X-Pagination:
               schema:
                 type: string
-                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
+                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "TYPE_ASC"}'
               description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-machine-capabilities
@@ -11956,15 +11958,13 @@ paths:
         - schema:
             type: string
             enum:
-              - STATUS_ASC
-              - STATUS_DESC
-              - CREATED_ASC
-              - CREATED_DESC
-              - UPDATED_ASC
-              - UPDATED_DESC
+              - TYPE_ASC
+              - TYPE_DESC
+            default: TYPE_ASC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: |-
+            Ordering for pagination query. TYPE_ASC orders capability type ascending and TYPE_DESC orders it descending. Defaults to TYPE_ASC. Ties are ordered by name, frequency, capacity, vendor, count, deviceType, inactiveDevices, and internal ID, all ascending with null values last.
   '/v2/org/{org}/nico/rack':
     parameters:
       - schema:
@@ -24837,6 +24837,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this operation to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -24881,6 +24890,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this operation to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -24991,7 +25009,15 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -25006,6 +25032,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this batch to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -26017,6 +26052,15 @@ components:
           description: |-
             Operation Rule to pin for each target's firmware Task. Null to let
             Flow's default rule resolution pick one.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -26156,7 +26200,15 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         targets:
           type: array
           items:
@@ -26209,6 +26261,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this batch to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -26344,7 +26405,15 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         targets:
           type: array
           items:
@@ -26396,6 +26465,15 @@ components:
           description: |-
             Optional Operation Rule UUID. When set, pins this firmware update to
             the named rule and overrides Flow's default rule resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -30143,6 +30221,9 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        dpuTarget:
+          $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
+          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
         siteId:
           type: string
           format: uuid
@@ -30192,6 +30273,16 @@ components:
         - Error
         - Updating
         - Deleting
+    DpuExtensionServiceDpuTarget:
+      title: DpuExtensionServiceDpuTarget
+      type:
+        - string
+        - 'null'
+      description: DPU placement policy. Primary targets the host's primary attached DPU; AllActive targets DPUs used by instance networking, including legacy fallbacks; All targets every attached DPU.
+      enum:
+        - Primary
+        - AllActive
+        - All
     DpuExtensionServiceSummary:
       title: DpuExtensionServiceSummary
       type: object
@@ -30217,6 +30308,9 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        dpuTarget:
+          $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
+          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
         latestVersion:
           type:
             - string
@@ -30295,6 +30389,9 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        dpuTarget:
+          $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
+          description: Required for DpfHelmChart services and unsupported for KubernetesPod services
         siteId:
           type: string
           format: uuid

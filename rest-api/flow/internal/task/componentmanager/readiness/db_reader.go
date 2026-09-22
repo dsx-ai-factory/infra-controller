@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -115,3 +116,65 @@ func (r *DBReader) GetHostExternalIDsByRackIDs(ctx context.Context, rackIDs []st
 }
 
 var _ StatusReader = (*DBReader)(nil)
+
+// GetStatusesByManagementMACs resolves active management BMC ownership and
+// checks Flow inventory directly. A missing or ambiguous target is an error;
+// a known component with no status retains the gate's permissive semantics.
+func (r *DBReader) GetStatusesByManagementMACs(ctx context.Context, componentType devicetypes.ComponentType, macs []string) (map[string][]*types.ComponentOperationStatus, error) {
+	out := make(map[string][]*types.ComponentOperationStatus, len(macs))
+	if len(macs) == 0 {
+		return out, nil
+	}
+	normalized := make([]string, len(macs))
+	for i, mac := range macs {
+		normalized[i] = strings.ToLower(mac)
+	}
+	type row struct {
+		MAC          string
+		Owner        uuid.UUID
+		Type         string
+		Status       *types.ComponentOperationStatus
+		HostStatus   *types.ComponentOperationStatus
+		RackID       *uuid.UUID
+		ActiveRackID *uuid.UUID
+	}
+	var rows []row
+	query := r.idb.NewSelect().TableExpr("bmc AS b").
+		ColumnExpr("lower(b.mac_address) AS mac, c.id AS owner, c.type, c.status, h.status AS host_status, c.rack_id, r.id AS active_rack_id").
+		Join("JOIN component AS c ON c.id = b.component_id AND c.deleted_at IS NULL").
+		Join("LEFT JOIN rack AS r ON r.id = c.rack_id AND r.deleted_at IS NULL").
+		Join("LEFT JOIN component AS h ON c.type != 'Compute' AND h.rack_id = r.id AND h.type = ? AND h.deleted_at IS NULL", devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute)).
+		Where("b.type = ?", devicetypes.BMCTypeToString(devicetypes.BMCTypeHost)).
+		Where("lower(b.mac_address) IN (?)", bun.In(normalized))
+	err := query.Scan(ctx, &rows)
+	if err != nil {
+		return nil, fmt.Errorf("read management MAC readiness: %w", err)
+	}
+	owners := make(map[string]uuid.UUID)
+	byMAC := make(map[string][]*types.ComponentOperationStatus)
+	for _, row := range rows {
+		if owner, ok := owners[row.MAC]; ok && owner != row.Owner {
+			return nil, fmt.Errorf("ambiguous management MAC %s", row.MAC)
+		}
+		if row.Type != devicetypes.ComponentTypeToString(componentType) {
+			return nil, fmt.Errorf("management MAC %s has unexpected component type %s", row.MAC, row.Type)
+		}
+		owners[row.MAC] = row.Owner
+		if componentType != devicetypes.ComponentTypeCompute && row.RackID != nil && row.ActiveRackID == nil {
+			return nil, fmt.Errorf("management MAC %s references a missing rack", row.MAC)
+		}
+		status := row.Status
+		if componentType != devicetypes.ComponentTypeCompute {
+			status = row.HostStatus
+		}
+		byMAC[row.MAC] = append(byMAC[row.MAC], status)
+	}
+	for _, mac := range macs {
+		statuses, ok := byMAC[strings.ToLower(mac)]
+		if !ok {
+			return nil, fmt.Errorf("management MAC %s not found in Flow inventory", mac)
+		}
+		out[mac] = statuses
+	}
+	return out, nil
+}

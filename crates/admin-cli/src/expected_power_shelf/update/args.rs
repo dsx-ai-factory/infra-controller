@@ -135,13 +135,31 @@ pub(crate) struct Args {
 
 impl Args {
     pub(super) fn validate(&self) -> Result<(), clap::Error> {
-        if self.host_name.is_some() {
-            return Err(Self::command()
+        let error = |kind, message: &str| {
+            Self::command()
                 .bin_name("nico-admin-cli expected-power-shelf update")
-                .error(
-                    ErrorKind::ValueValidation,
-                    "--host_name is not supported for expected power shelf updates; remove it from the command",
+                .error(kind, message)
+        };
+        match (&self.bmc_mac_address, &self.id) {
+            (Some(_), Some(_)) => {
+                return Err(error(
+                    ErrorKind::ArgumentConflict,
+                    "cannot specify both --bmc-mac-address and --id; provide only one",
                 ));
+            }
+            (None, None) => {
+                return Err(error(
+                    ErrorKind::MissingRequiredArgument,
+                    "must specify either --bmc-mac-address or --id",
+                ));
+            }
+            _ => {}
+        }
+        if self.host_name.is_some() {
+            return Err(error(
+                ErrorKind::ValueValidation,
+                "--host_name is not supported for expected power shelf updates; remove it from the command",
+            ));
         }
         Ok(())
     }
@@ -172,18 +190,6 @@ impl TryFrom<Args> for rpc::forge::ExpectedPowerShelf {
     type Error = CarbideCliError;
 
     fn try_from(args: Args) -> Result<Self, Self::Error> {
-        match (&args.bmc_mac_address, &args.id) {
-            (Some(_), Some(_)) => {
-                return Err(CarbideCliError::ChooseOneError("--bmc-mac-address", "--id"));
-            }
-            (None, None) => {
-                return Err(CarbideCliError::RequireOneError(
-                    "--bmc-mac-address",
-                    "--id",
-                ));
-            }
-            _ => {}
-        }
         if args.bmc_username.is_none()
             && args.bmc_password.is_none()
             && args.shelf_serial_number.is_none()

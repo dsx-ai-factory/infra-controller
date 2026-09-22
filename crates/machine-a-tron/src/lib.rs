@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-mod actor;
 pub mod api_client;
 pub mod api_throttler;
 mod bmc_mock_wrapper;

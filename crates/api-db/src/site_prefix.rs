@@ -71,8 +71,14 @@ pub struct VpcPrefixSitePrefixLineageReport {
 }
 
 impl VpcPrefixSitePrefixLineageReport {
-    pub fn unresolved_vpc_prefix_count(&self) -> usize {
-        self.missing_vpc_prefix_ids.len() + self.ambiguous.len()
+    /// Reports whether startup may safely accept this lineage result.
+    ///
+    /// Ambiguous operator lineage is always unsafe. Missing lineage is unsafe
+    /// only while operator roots are configured, because a rootless VpcPrefix
+    /// remains valid when that legacy admission boundary is disabled.
+    pub fn is_safe_for_startup(&self, require_parent_for_every_vpc_prefix: bool) -> bool {
+        self.ambiguous.is_empty()
+            && (!require_parent_for_every_vpc_prefix || self.missing_vpc_prefix_ids.is_empty())
     }
 }
 
@@ -530,14 +536,48 @@ pub async fn find_unassigned_vpc_prefix_site_prefix_ids(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// Returns unassigned VpcPrefixes that have a historical operator parent.
+///
+/// Listen-only replicas use this narrower audit when no operator roots are
+/// configured. It still blocks rows that an authoritative replica must
+/// backfill or reject, without rejecting valid rootless VpcPrefixes.
+pub async fn find_unassigned_vpc_prefix_ids_with_operator_parent_candidates(
+    db: impl DbReader<'_>,
+) -> DatabaseResult<Vec<VpcPrefixId>> {
+    let query = r#"
+        -- With no configured roots, unrelated rootless prefixes remain valid.
+        -- Audit only rows that an authoritative Core must assign or reject.
+        SELECT network_vpc_prefixes.id
+        FROM network_vpc_prefixes
+        WHERE network_vpc_prefixes.site_prefix_id IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM site_prefixes
+              WHERE site_prefixes.authority = $1
+                -- Retiring roots can still own legacy children awaiting backfill.
+                AND site_prefixes.lifecycle_state IN ($2, $3)
+                AND site_prefixes.prefix >>= network_vpc_prefixes.prefix
+          )
+        ORDER BY network_vpc_prefixes.id
+    "#;
+    sqlx::query_scalar(query)
+        .bind(SitePrefixAuthority::OperatorManaged)
+        .bind(SitePrefixLifecycleState::Ready)
+        .bind(SitePrefixLifecycleState::Deleting)
+        .fetch_all(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Backfills exact SitePrefix lineage for legacy VpcPrefixes and audits rows
 /// that cannot be assigned safely.
 ///
 /// This is intended to run in the same startup transaction immediately after
 /// operator-managed SitePrefix reconciliation. It locks every unassigned row,
 /// assigns only rows with one containing operator-managed parent, and leaves
-/// missing or ambiguous rows unchanged for the caller to report and reject.
-/// Re-running it is safe: successfully assigned rows are no longer selected.
+/// missing or ambiguous rows unchanged for the caller to interpret under the
+/// configured-root policy. Re-running it is safe: successfully assigned rows
+/// are no longer selected.
 pub async fn backfill_vpc_prefix_site_prefix_lineage(
     txn: &mut PgConnection,
 ) -> DatabaseResult<VpcPrefixSitePrefixLineageReport> {
@@ -621,6 +661,73 @@ pub async fn backfill_vpc_prefix_site_prefix_lineage(
     }
 
     Ok(report)
+}
+
+/// Returns whether persisted operator-managed roots require legacy VpcPrefix
+/// lineage handling, including roots removed from the current configuration.
+pub async fn operator_managed_prefixes_exist(db: impl DbReader<'_>) -> DatabaseResult<bool> {
+    // Use persisted inventory so an empty configuration cannot skip historical lineage checks.
+    let query = "SELECT EXISTS (SELECT 1 FROM site_prefixes WHERE authority = $1)";
+    sqlx::query_scalar(query)
+        .bind(SitePrefixAuthority::OperatorManaged)
+        .fetch_one(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Returns operator-managed roots that still require routing isolation.
+///
+/// Configured-root reconciliation retains removed roots in `Deleting` while
+/// their children drain. Soft-deleted VpcPrefixes may remain referenced by
+/// generated segments, while VPC-attached direct NetworkPrefixes remain until
+/// their segment is hard-deleted. Callers preserve routing isolation until the
+/// last child of either kind is physically removed. Legacy rows without exact
+/// lineage conservatively retain every containing operator root rather than
+/// guessing between nested roots.
+pub async fn find_operator_managed_prefixes_with_retained_vpc_prefixes(
+    db: impl DbReader<'_>,
+) -> DatabaseResult<Vec<IpNetwork>> {
+    let query = r#"
+        -- Keep routing coverage through soft deletion; either kind of child can
+        -- still supply tenant routes until its owning row is physically deleted.
+        SELECT site_prefix.prefix
+        FROM site_prefixes AS site_prefix
+        WHERE site_prefix.authority = $1
+          AND site_prefix.lifecycle_state IN ($2, $3)
+          AND (
+              EXISTS (
+                  SELECT 1
+                  FROM network_vpc_prefixes AS vpc_prefix
+                  -- Exact lineage takes precedence over geometric containment.
+                  WHERE vpc_prefix.site_prefix_id = site_prefix.id
+                     OR (
+                         -- Legacy rows lack lineage, so retain every containing
+                         -- operator root without guessing between nested roots.
+                         vpc_prefix.site_prefix_id IS NULL
+                         AND site_prefix.prefix >>= vpc_prefix.prefix
+                     )
+              )
+              OR EXISTS (
+                  -- Direct tenant segments have no VpcPrefix parent. Keep their
+                  -- coverage while draining, but exclude infrastructure segments.
+                  SELECT 1
+                  FROM network_prefixes AS network_prefix
+                  JOIN network_segments AS network_segment
+                    ON network_segment.id = network_prefix.segment_id
+                  WHERE network_prefix.vpc_prefix_id IS NULL
+                    AND network_segment.vpc_id IS NOT NULL
+                    AND site_prefix.prefix >>= network_prefix.prefix
+              )
+          )
+        ORDER BY site_prefix.prefix
+    "#;
+    sqlx::query_scalar(query)
+        .bind(SitePrefixAuthority::OperatorManaged)
+        .bind(SitePrefixLifecycleState::Ready)
+        .bind(SitePrefixLifecycleState::Deleting)
+        .fetch_all(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// Counts every tenant-managed row for one tenant. Rows remain in this count
@@ -1488,6 +1595,8 @@ mod tests {
         Ok(())
     }
 
+    /// Proves startup lineage repair assigns only a unique historical root,
+    /// while preserving the distinct missing and ambiguous policy outcomes.
     #[crate::sqlx_test]
     async fn lineage_backfill_assigns_only_one_unambiguous_operator_parent(
         pool: sqlx::PgPool,
@@ -1562,6 +1671,8 @@ mod tests {
             .await?;
         }
 
+        // Before repair, the broad audit sees every unassigned prefix, while
+        // the root-aware audit excludes the unrelated rootless prefix.
         let mut initially_unassigned =
             find_unassigned_vpc_prefix_site_prefix_ids(&mut *txn).await?;
         initially_unassigned.sort();
@@ -1572,11 +1683,22 @@ mod tests {
         ];
         expected_initially_unassigned.sort();
         assert_eq!(initially_unassigned, expected_initially_unassigned);
+        let mut initially_with_parent_candidates =
+            find_unassigned_vpc_prefix_ids_with_operator_parent_candidates(&mut *txn).await?;
+        initially_with_parent_candidates.sort();
+        let mut expected_with_parent_candidates =
+            vec![unique_vpc_prefix_id, ambiguous_vpc_prefix_id];
+        expected_with_parent_candidates.sort();
+        assert_eq!(
+            initially_with_parent_candidates,
+            expected_with_parent_candidates
+        );
 
+        // Repair assigns the unique parent but leaves missing and ambiguous
+        // lineage distinguishable for startup policy enforcement.
         let report = backfill_vpc_prefix_site_prefix_lineage(&mut txn).await?;
         assert_eq!(report.assigned_vpc_prefix_ids, vec![unique_vpc_prefix_id]);
         assert_eq!(report.missing_vpc_prefix_ids, vec![missing_vpc_prefix_id]);
-        assert_eq!(report.unresolved_vpc_prefix_count(), 2);
         assert_eq!(
             report.ambiguous,
             vec![VpcPrefixSitePrefixLineageAmbiguity {
@@ -1584,7 +1706,22 @@ mod tests {
                 candidate_site_prefix_ids: ambiguous_root_ids.clone(),
             }]
         );
+        assert!(
+            !report.is_safe_for_startup(false),
+            "ambiguous lineage must block startup even without configured roots"
+        );
 
+        // Missing lineage alone is accepted only when the configured operator
+        // boundary is disabled; nonempty configuration remains strict.
+        let missing_only_report = VpcPrefixSitePrefixLineageReport {
+            missing_vpc_prefix_ids: vec![missing_vpc_prefix_id],
+            ..Default::default()
+        };
+        assert!(missing_only_report.is_safe_for_startup(false));
+        assert!(!missing_only_report.is_safe_for_startup(true));
+
+        // Verify the unique relationship was persisted and unresolved rows
+        // were not assigned by guessing.
         let assignments: Vec<(VpcPrefixId, Option<SitePrefixId>)> =
             sqlx::query_as("SELECT id, site_prefix_id FROM network_vpc_prefixes ORDER BY id")
                 .fetch_all(&mut *txn)
@@ -1598,7 +1735,13 @@ mod tests {
         let mut expected_still_unassigned = vec![ambiguous_vpc_prefix_id, missing_vpc_prefix_id];
         expected_still_unassigned.sort();
         assert_eq!(still_unassigned, expected_still_unassigned);
+        assert_eq!(
+            find_unassigned_vpc_prefix_ids_with_operator_parent_candidates(&mut *txn).await?,
+            vec![ambiguous_vpc_prefix_id],
+            "listen-only startup must ignore only the unrelated rootless prefix"
+        );
 
+        // Re-running repair remains idempotent and reports the same blockers.
         let repeated_report = backfill_vpc_prefix_site_prefix_lineage(&mut txn).await?;
         assert!(repeated_report.assigned_vpc_prefix_ids.is_empty());
         assert_eq!(
@@ -1611,6 +1754,189 @@ mod tests {
                 vpc_prefix_id: ambiguous_vpc_prefix_id,
                 candidate_site_prefix_ids: ambiguous_root_ids,
             }]
+        );
+
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Proves ambiguous predecessor lineage retains every containing operator
+    /// root, because choosing one nested root could withdraw required isolation.
+    #[crate::sqlx_test]
+    async fn unassigned_vpc_prefix_retains_all_containing_operator_roots(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        create_tenant(&pool, "tenant-a").await?;
+
+        let broad_root: IpNetwork = "10.0.0.0/8".parse()?;
+        let specific_root: IpNetwork = "10.1.0.0/16".parse()?;
+        let unrelated_root: IpNetwork = "192.0.2.0/24".parse()?;
+        let mut txn = pool.begin().await?;
+
+        // Reconstruct persisted predecessor roots after the target config has
+        // removed its final root.
+        reconcile_configured(&mut txn, &[broad_root, specific_root, unrelated_root]).await?;
+        reconcile_configured(&mut txn, &[]).await?;
+        assert!(operator_managed_prefixes_exist(&mut *txn).await?);
+
+        let vpc_id = carbide_uuid::vpc::VpcId::new();
+        sqlx::query(
+            "INSERT INTO vpcs (id, name, organization_id, version) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(vpc_id)
+        .bind("ambiguous retained lineage")
+        .bind("tenant-a")
+        .bind(ConfigVersion::initial())
+        .execute(&mut *txn)
+        .await?;
+        let vpc_prefix_id = VpcPrefixId::new();
+        sqlx::query(
+            "INSERT INTO network_vpc_prefixes (id, prefix, name, vpc_id) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(vpc_prefix_id)
+        .bind("10.1.2.0/24".parse::<IpNetwork>()?)
+        .bind("ambiguous predecessor child")
+        .bind(vpc_id)
+        .execute(&mut *txn)
+        .await?;
+
+        // Both containing roots remain fail-closed; an unrelated root does not.
+        let mut retained =
+            find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?;
+        retained.sort_by_cached_key(ToString::to_string);
+        let mut expected = vec![broad_root, specific_root];
+        expected.sort_by_cached_key(ToString::to_string);
+        assert_eq!(retained, expected);
+
+        // Hard deletion ends route retention, while persisted deleting roots
+        // continue to require startup lineage preflight.
+        sqlx::query("DELETE FROM network_vpc_prefixes WHERE id = $1")
+            .bind(vpc_prefix_id)
+            .execute(&mut *txn)
+            .await?;
+        assert!(
+            find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn)
+                .await?
+                .is_empty()
+        );
+        assert!(operator_managed_prefixes_exist(&mut *txn).await?);
+
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Retains operator coverage through child soft deletion, while exact tenant
+    /// lineage keeps a containing operator root from claiming unrelated children.
+    #[crate::sqlx_test]
+    async fn operator_roots_remain_visible_until_vpc_prefixes_are_hard_deleted(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Keep one operator root ready and retire another while a tenant owns nested space.
+        create_tenant(&pool, "tenant-a").await?;
+
+        let ready_root: IpNetwork = "10.0.0.0/8".parse()?;
+        let retiring_root: IpNetwork = "172.16.0.0/12".parse()?;
+        let operator_root_covering_tenant_child: IpNetwork = "192.168.0.0/15".parse()?;
+        let mut txn = pool.begin().await?;
+        reconcile_configured(
+            &mut txn,
+            &[
+                ready_root,
+                retiring_root,
+                operator_root_covering_tenant_child,
+            ],
+        )
+        .await?;
+        reconcile_configured(&mut txn, &[ready_root, operator_root_covering_tenant_child]).await?;
+        let tenant_root =
+            create_tenant_managed(tenant_managed("192.168.0.0/16", "tenant-a"), 8, &mut txn)
+                .await?
+                .site_prefix;
+        sqlx::query("UPDATE site_prefixes SET lifecycle_state = $1 WHERE id = $2")
+            .bind(SitePrefixLifecycleState::Ready)
+            .bind(tenant_root.id)
+            .execute(&mut *txn)
+            .await?;
+
+        let roots: Vec<(SitePrefixId, IpNetwork)> =
+            sqlx::query_as("SELECT id, prefix FROM site_prefixes ORDER BY prefix")
+                .fetch_all(&mut *txn)
+                .await?;
+        let root_id = |prefix| {
+            roots
+                .iter()
+                .find_map(|(id, stored)| (*stored == prefix).then_some(*id))
+                .unwrap()
+        };
+
+        let vpc_id = carbide_uuid::vpc::VpcId::new();
+        // Persist explicit parent links so containment cannot substitute for ownership.
+        sqlx::query(
+            "INSERT INTO vpcs (id, name, organization_id, version) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(vpc_id)
+        .bind("operator-root-retention")
+        .bind("tenant-a")
+        .bind(ConfigVersion::initial())
+        .execute(&mut *txn)
+        .await?;
+
+        let ready_child_id = VpcPrefixId::new();
+        let retiring_child_id = VpcPrefixId::new();
+        let tenant_child_id = VpcPrefixId::new();
+        for (id, prefix, site_prefix_id) in [
+            // A ready operator root still needs isolation for its own child.
+            (ready_child_id, "10.1.0.0/24", root_id(ready_root)),
+            // Retirement cannot withdraw coverage while its child still exists.
+            (retiring_child_id, "172.16.1.0/24", root_id(retiring_root)),
+            // A tenant-owned child must not retain a geometrically containing operator root.
+            (tenant_child_id, "192.168.1.0/24", tenant_root.id),
+        ] {
+            sqlx::query(
+                "INSERT INTO network_vpc_prefixes (id, prefix, name, vpc_id, site_prefix_id) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(id)
+            .bind(prefix.parse::<IpNetwork>()?)
+            .bind(prefix)
+            .bind(vpc_id)
+            .bind(site_prefix_id)
+            .execute(&mut *txn)
+            .await?;
+        }
+
+        // Only exact operator ownership should contribute roots at this point.
+        let mut retained =
+            find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?;
+        retained.sort_by_cached_key(ToString::to_string);
+        let mut expected = vec![ready_root, retiring_root];
+        expected.sort_by_cached_key(ToString::to_string);
+        assert_eq!(
+            retained, expected,
+            "exact tenant-managed lineage must not geometrically retain a covering operator root"
+        );
+
+        // Soft deletion leaves the row available to generated segments that are draining.
+        sqlx::query("UPDATE network_vpc_prefixes SET deleted = now() WHERE id = $1")
+            .bind(retiring_child_id)
+            .execute(&mut *txn)
+            .await?;
+        let mut retained =
+            find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?;
+        retained.sort_by_cached_key(ToString::to_string);
+        assert_eq!(
+            retained, expected,
+            "soft deletion must retain isolation while generated segments can still reference the child"
+        );
+
+        // Physical deletion is the point where the retired root may disappear.
+        sqlx::query("DELETE FROM network_vpc_prefixes WHERE id = $1")
+            .bind(retiring_child_id)
+            .execute(&mut *txn)
+            .await?;
+        assert_eq!(
+            find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?,
+            vec![ready_root]
         );
 
         txn.commit().await?;

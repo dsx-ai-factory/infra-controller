@@ -372,7 +372,7 @@ mod tests {
             addr: crate::endpoint::BmcAddr {
                 ip: "10.85.14.144".parse().unwrap(),
                 port: Some(443),
-                mac: MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap(),
+                mac: Some(MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap()),
             },
             collector_type: "test",
             metadata: None,

@@ -257,7 +257,7 @@ impl DeviceState {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
 
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
@@ -265,40 +265,15 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::test_support::host_info;
-    use crate::{
-        Callbacks, HardwareType, MachineRouterOptions, MockPowerState, SetSystemPowerError,
-        SystemPowerControl, machine_router,
-    };
+    use crate::test_support::{TestCallbacks, host_info};
+    use crate::{HardwareType, MachineRouterOptions, MockPowerState, machine_router};
 
-    #[derive(Debug, Default)]
-    struct RecordingCallbacks {
-        refresh_count: AtomicUsize,
-    }
-
-    impl Callbacks for RecordingCallbacks {
-        fn get_power_state(&self) -> MockPowerState {
-            MockPowerState::Off
-        }
-
-        fn send_power_command(
-            &self,
-            _reset_type: SystemPowerControl,
-        ) -> Result<(), SetSystemPowerError> {
-            Ok(())
-        }
-
-        fn state_refresh_indication(&self) {
-            self.refresh_count.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    fn test_router() -> (Router, Arc<RecordingCallbacks>) {
+    fn test_router() -> (Router, Arc<TestCallbacks>) {
         test_router_for(HardwareType::DellPowerEdgeR750)
     }
 
-    fn test_router_for(hardware_type: HardwareType) -> (Router, Arc<RecordingCallbacks>) {
-        let callbacks = Arc::new(RecordingCallbacks::default());
+    fn test_router_for(hardware_type: HardwareType) -> (Router, Arc<TestCallbacks>) {
+        let callbacks = Arc::new(TestCallbacks::new(MockPowerState::Off));
         let router = machine_router(
             &host_info(hardware_type),
             callbacks.clone(),

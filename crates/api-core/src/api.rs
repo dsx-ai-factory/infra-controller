@@ -122,7 +122,7 @@ impl Forge for Api {
         &self,
         request: Request<rpc::VersionRequest>,
     ) -> Result<Response<rpc::BuildInfo>, Status> {
-        crate::handlers::api::version(self, request)
+        crate::handlers::api::version(self, request).await
     }
 
     async fn create_domain(
@@ -2546,6 +2546,22 @@ impl Forge for Api {
         request: Request<rpc::MachineValidationAttemptGetRequest>,
     ) -> Result<Response<rpc::MachineValidationAttempt>, Status> {
         crate::handlers::machine_validation::get_machine_validation_attempt(self, request).await
+    }
+
+    async fn append_machine_validation_attempt_log(
+        &self,
+        request: Request<rpc::MachineValidationAttemptLogAppendRequest>,
+    ) -> Result<Response<rpc::MachineValidationAttemptLogAppendResponse>, Status> {
+        crate::handlers::machine_validation::append_machine_validation_attempt_log(self, request)
+            .await
+    }
+
+    async fn get_machine_validation_attempt_logs(
+        &self,
+        request: Request<rpc::MachineValidationAttemptLogGetRequest>,
+    ) -> Result<Response<rpc::MachineValidationAttemptLogList>, Status> {
+        crate::handlers::machine_validation::get_machine_validation_attempt_logs(self, request)
+            .await
     }
 
     async fn heartbeat_machine_validation_run(

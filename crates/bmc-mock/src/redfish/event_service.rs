@@ -726,7 +726,7 @@ pub(crate) mod fixtures {
     use tower::ServiceExt;
 
     use super::{EventServiceConfig, EventServiceLimits, EventServiceState};
-    use crate::test_support::{NoopCallbacks, host_info};
+    use crate::test_support::{TestCallbacks, host_info};
     use crate::{BmcState, HardwareType, MachineRouterOptions, machine_router};
 
     pub(crate) fn event() -> Value {
@@ -770,10 +770,10 @@ pub(crate) mod fixtures {
     }
 
     /// A Dell R750 mock with a ten-millisecond outage window on reset.
-    pub(crate) fn router(auth: bool) -> (Router, BmcState<NoopCallbacks>) {
+    pub(crate) fn router(auth: bool) -> (Router, BmcState<TestCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "sse-test".into(),
             auth,
             MachineRouterOptions {
@@ -836,7 +836,7 @@ mod tests {
 
     use super::fixtures::{event, json_body, limits, metric, request, router, state};
     use super::*;
-    use crate::test_support::{NoopCallbacks, host_info, serve_https};
+    use crate::test_support::{TestCallbacks, host_info, serve_https};
     use crate::{
         BmcEvent, BmcState, EventServiceOverride, HardwareType, MachineRouterOptions,
         machine_router,
@@ -866,7 +866,7 @@ mod tests {
     fn poisoned_state_does_not_panic_in_destructors() {
         let (router, bmc) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "poison".into(),
             false,
             MachineRouterOptions::default(),
@@ -995,10 +995,10 @@ mod tests {
         );
     }
 
-    fn router_with(limits: EventServiceConfig) -> (Router, BmcState<NoopCallbacks>) {
+    fn router_with(limits: EventServiceConfig) -> (Router, BmcState<TestCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "sse-limits-test".into(),
             false,
             MachineRouterOptions {
@@ -1131,7 +1131,7 @@ mod tests {
                 };
                 let (router, state) = machine_router(
                     &info,
-                    Arc::new(NoopCallbacks),
+                    Arc::new(TestCallbacks::default()),
                     "hardware-event-service".into(),
                     false,
                     MachineRouterOptions {
@@ -1302,7 +1302,7 @@ mod tests {
     async fn ipmi_cold_reset_closes_stream_and_invalidates_replay() {
         let (router, bmc) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "ipmi-reset".into(),
             false,
             MachineRouterOptions {
@@ -1883,7 +1883,7 @@ mod tests {
     async fn manager_reset_without_outage_still_closes_sse() {
         let (router, bmc) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "reset-test".into(),
             false,
             MachineRouterOptions::default(),
@@ -1975,7 +1975,7 @@ mod tests {
         // A profile without a log service still publishes, pointing at the system.
         let (bare, bare_bmc) = machine_router(
             &host_info(HardwareType::GenericAmi),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "bare-log".into(),
             false,
             MachineRouterOptions::default(),

@@ -22,6 +22,9 @@ global:
   ## Namespace override (propagates to subcharts). Required when mat-k8s-controller is enabled.
   ## Example: --set global.namespaceOverride=nico-system
   namespaceOverride: ""
+  ## Pull Secrets referenced by the machine-a-tron and controller Deployments.
+  ## Example: [{name: machine-a-tron-pull}] together with imagePullSecret.create.
+  imagePullSecrets: []
   certificate:
     duration: 720h0m0s
     renewBefore: 360h0m0s
@@ -47,6 +50,12 @@ image:
 
 ## Create namespace when global.namespaceOverride is set
 createNamespace: true
+
+## Create the `machine-a-tron-pull` pull Secret from base64-encoded docker config
+## JSON. Reference it in global.imagePullSecrets.
+imagePullSecret:
+  create: false
+  dockerconfigjson: ""
 
 automountServiceAccountToken: false
 

@@ -514,7 +514,9 @@ interfaces_enabled = true
 # `/platform-general/state` (a singleton, not keyed by interface or component name).
 platform_general_enabled = true
 # Per-sensor leakage state from `/platform-general/leak-sensors/leak-sensor[id]/state/state`.
-# Enable only on NVOS releases that support this path. Default: false.
+# The path uses an independent SAMPLE stream, so an unsupported path does not
+# interrupt component, interface, or platform-general telemetry. The leak-sensor
+# stream retries independently. Default: false.
 leak_sensors_enabled = false
 
 # Additional subscriptions are optional and default to an empty list. Each

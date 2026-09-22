@@ -90,7 +90,7 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for EntityDiscoveryCollector<B> {
         })));
 
         tracing::info!(
-            bmc = %self.endpoint.addr.mac,
+            bmc = %self.endpoint.key(),
             rack_id = self.endpoint.rack_id.as_ref().map(tracing::field::display),
             entity_count,
             generation = self.generation,

@@ -1792,6 +1792,7 @@ jobs:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
           charts: >-
+            bluefield/charts/nico-dpu-agent
             bluefield/charts/nico-otelcol
             helm
             helm/charts/nico-api
@@ -2130,12 +2131,24 @@ jobs:
           lint: 'true'
           template: 'true'
 
+      - name: Test nico-dhcp-server listener command
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml busybox
+          /usr/bin/python3 -B bluefield/charts/nico-dhcp-server/tests/test_listener_command.py
+
       - name: Validate nico-fmds chart
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@94bde998f5d7965576b0c663db7d5d709c918167
         with:
           chart-path: bluefield/charts/nico-fmds
           lint: 'true'
           template: 'true'
+
+      - name: Test nico-fmds listener command
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml busybox
+          /usr/bin/python3 -B bluefield/charts/nico-fmds/tests/test_listener_command.py
 
   build-push-bluefield-helm-charts:
     needs:

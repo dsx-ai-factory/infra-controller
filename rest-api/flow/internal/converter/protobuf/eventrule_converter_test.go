@@ -208,6 +208,7 @@ func TestTaskOperationFrom(t *testing.T) {
 						EndTime:                timestamppb.New(end),
 						SubTargets:             []string{"bmc"},
 						OverrideReadinessCheck: true,
+						OverrideVersionCheck:   true,
 					},
 				},
 			},
@@ -220,6 +221,7 @@ func TestTaskOperationFrom(t *testing.T) {
 				require.Equal(t, end.Unix(), firmware.EndTime)
 				require.Equal(t, []string{"bmc"}, firmware.SubTargets)
 				require.True(t, firmware.OverrideReadinessCheck)
+				require.True(t, firmware.OverrideVersionCheck)
 			},
 		},
 		"firmware control without window": {
@@ -362,6 +364,7 @@ func TestTaskOperationTo(t *testing.T) {
 				EndTime:                end.Unix(),
 				SubTargets:             []string{"bios"},
 				OverrideReadinessCheck: true,
+				OverrideVersionCheck:   true,
 			},
 			check: func(t *testing.T, converted *pb.TaskOperation) {
 				firmware := converted.GetFirmwareControl()
@@ -375,6 +378,7 @@ func TestTaskOperationTo(t *testing.T) {
 				require.Equal(t, end, firmware.GetEndTime().AsTime())
 				require.Equal(t, []string{"bios"}, firmware.GetSubTargets())
 				require.True(t, firmware.GetOverrideReadinessCheck())
+				require.True(t, firmware.GetOverrideVersionCheck())
 			},
 		},
 		"firmware control equal window": {

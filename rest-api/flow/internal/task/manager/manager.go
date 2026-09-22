@@ -429,6 +429,8 @@ func validateResolvedRackTargets(
 		(op.Type == taskcommon.TaskTypeBringUp &&
 			op.Code == taskcommon.OpCodeIngest &&
 			ruleUsesOnlyExpectedInventory(ruleDef))
+	macTargetSupported := op.Type == taskcommon.TaskTypePowerControl ||
+		op.Type == taskcommon.TaskTypeFirmwareControl
 
 	for rackID, resolvedRack := range rackMap {
 		if resolvedRack == nil || len(resolvedRack.Components) == 0 {
@@ -439,7 +441,8 @@ func validateResolvedRackTargets(
 			continue
 		}
 		for _, comp := range resolvedRack.Components {
-			if comp.ComponentID == "" {
+			if comp.ComponentID == "" &&
+				(!macTargetSupported || comp.ManagementMAC() == "") {
 				unlinkedComponents = append(
 					unlinkedComponents,
 					fmt.Sprintf(
@@ -1083,6 +1086,7 @@ func workflowComponentsFrom(
 		comps[i] = taskdef.WorkflowComponent{
 			Type:        c.Type,
 			ComponentID: c.ComponentID,
+			MACAddress:  c.ManagementMAC(),
 		}
 	}
 
