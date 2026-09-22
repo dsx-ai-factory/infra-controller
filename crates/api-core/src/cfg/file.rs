@@ -3781,6 +3781,12 @@ pub struct AuthConfig {
     /// Enable permissive mode in the authorization enforcer (for development).
     pub permissive_mode: bool,
 
+    /// Allow the authenticated machine-a-tron service to open ScoutStream RPCs.
+    /// Defaults to false. Only enable in isolated simulation environments: this
+    /// permission does not restrict the machine IDs the simulator may claim.
+    #[serde(default)]
+    pub allow_machineatron_scout_stream: bool,
+
     /// The Casbin policy file (in CSV format).
     pub casbin_policy_file: Option<PathBuf>,
 

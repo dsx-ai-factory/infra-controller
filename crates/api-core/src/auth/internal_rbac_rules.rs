@@ -942,8 +942,7 @@ impl InternalRBACRules {
         x.perm("GetRackProfile", vec![ForgeAdminCLI]);
         x.perm("ListRackProfiles", vec![ForgeAdminCLI]);
         x.perm("RackManagerCall", vec![ForgeAdminCLI]);
-        // MAT opens one simulated Scout stream per host using its service identity.
-        x.perm("ScoutStream", vec![Scout, Machineatron]);
+        x.perm("ScoutStream", vec![Scout]);
         x.perm("ScoutStreamShowConnections", vec![ForgeAdminCLI]);
         x.perm("ScoutStreamDisconnect", vec![ForgeAdminCLI]);
         x.perm("ScoutStreamPing", vec![ForgeAdminCLI]);
@@ -1154,31 +1153,6 @@ mod rbac_rule_tests {
     use super::*;
     use crate::auth::Principal;
 
-    #[test]
-    fn scout_stream_accepts_scout_and_simulator_but_not_other_services() {
-        for (principal, allowed) in [
-            (Principal::SpiffeMachineIdentifier("host".to_string()), true),
-            (
-                Principal::SpiffeServiceIdentifier("machine-a-tron".to_string()),
-                true,
-            ),
-            (
-                Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
-                false,
-            ),
-            (Principal::TrustedCertificate, false),
-        ] {
-            assert_eq!(
-                InternalRBACRules::allowed_from_static(
-                    "ScoutStream",
-                    std::slice::from_ref(&principal)
-                ),
-                allowed,
-                "{principal:?}",
-            );
-        }
-    }
-
     fn ensure_identical_permissions(princ_a: &Principal, princ_b: &Principal) {
         for (rule_name, rule) in &INTERNAL_RBAC_RULES.perms {
             if rule.principals.contains(princ_a) {
@@ -1276,21 +1250,6 @@ mod rbac_rule_tests {
         assert!(!InternalRBACRules::allowed_from_static(
             "SetMaintenance",
             std::slice::from_ref(&probe),
-        ));
-    }
-
-    /// machine-a-tron simulates Scout agents for its managed machines, so its
-    /// service certificate must be accepted by the Scout streaming endpoint.
-    #[test]
-    fn machine_a_tron_can_open_scout_streams() {
-        let machine_a_tron = Principal::SpiffeServiceIdentifier("machine-a-tron".to_string());
-        assert!(InternalRBACRules::allowed_from_static(
-            "ScoutStream",
-            &[machine_a_tron],
-        ));
-        assert!(!InternalRBACRules::allowed_from_static(
-            "ScoutStream",
-            &[Principal::SpiffeServiceIdentifier("nico-dns".to_string())],
         ));
     }
 
