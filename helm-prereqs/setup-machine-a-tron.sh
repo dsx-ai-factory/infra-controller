@@ -1016,22 +1016,37 @@ PY
         # allocation_strategy is forced to 'dynamic': templates may be
         # 'reserved' (static-assignments segments), which rejects every mat
         # DHCP with "configured for static DHCP leases only".
-        psql_q "INSERT INTO network_segments
-            SELECT (jsonb_populate_record(ns, jsonb_build_object(
-                'id', gen_random_uuid()::text, 'name', '${name}',
-                'allocation_strategy', 'dynamic',
-                'vlan_id', NULL, 'vni_id', NULL))).*
-            FROM network_segments ns
-            WHERE ns.network_segment_type::text ILIKE '${typ}' LIMIT 1;" >/dev/null \
-            || die "failed to create segment ${name} (no ${typ} template segment?)"
         # svi_ip = gateway: the FNN host network-config builder requires an
         # SVI IP on L2 segments — without it get_managed_host_network_config
         # fails with "SVI IP is not allocated" and hosts park in dpuinit at
         # waitingfornetworkconfig.
-        psql_q "INSERT INTO network_prefixes (segment_id, prefix, gateway, num_reserved, svi_ip)
+        # Share the API's overlap lock and check both tables. The cloned
+        # segment and its global prefix must either both exist or neither.
+        local created
+        created="$(psql_q "BEGIN;
+            SELECT pg_advisory_xact_lock(hashtextextended('tenant_prefix_overlap:checks', 0));
+            WITH created_segment AS (
+                INSERT INTO network_segments
+                SELECT (jsonb_populate_record(ns, jsonb_build_object(
+                    'id', gen_random_uuid()::text, 'name', '${name}',
+                    'allocation_strategy', 'dynamic',
+                    'vlan_id', NULL, 'vni_id', NULL))).*
+                FROM network_segments ns
+                WHERE ns.network_segment_type::text ILIKE '${typ}'
+                  AND NOT EXISTS (SELECT 1 FROM network_prefixes WHERE prefix && '${pfx}'::cidr)
+                  AND NOT EXISTS (SELECT 1 FROM network_vpc_prefixes
+                      WHERE prefix && '${pfx}'::cidr
+                        AND overlap_vpc_id IS NOT NULL)
+                LIMIT 1
+                RETURNING id
+            )
+            INSERT INTO network_prefixes (segment_id, prefix, gateway, num_reserved, svi_ip)
             SELECT id, '${pfx}'::cidr, '${gw}'::inet, ${rsv}, '${gw}'::inet
-            FROM network_segments WHERE name='${name}';" >/dev/null \
-            || die "failed to add prefix ${pfx} to segment ${name}"
+            FROM created_segment
+            RETURNING 'created:1';
+            COMMIT;")" || die "failed to create segment ${name} with prefix ${pfx}"
+        [[ "$created" == *"created:1"* ]] \
+            || die "segment ${name} was not created: prefix ${pfx} overlaps existing address space or no ${typ} template exists"
         ok "segment ${name} created: ${pfx} (gw ${gw}, svi ${gw}, reserved ${rsv})"
     }
     _ensure_segment "simulated-oob"   "underlay" "$SCALE_OOB_PREFIX"   "$SCALE_OOB_GW"   "$SCALE_RESERVE"

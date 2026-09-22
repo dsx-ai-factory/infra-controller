@@ -305,7 +305,10 @@ async fn test_overlapping_prefix(pool: sqlx::PgPool) -> Result<(), eyre::Report>
         Err(status) if status.code() == tonic::Code::Internal => Err(eyre::eyre!(
             "overlapping network prefix was caught by DB constraint. should be checked earlier"
         )),
-        Err(status) if status.code() == tonic::Code::InvalidArgument => Ok(()),
+        Err(status) if status.code() == tonic::Code::InvalidArgument => {
+            assert_eq!(status.message(), "prefix overlaps with an existing one");
+            Ok(())
+        }
         Err(err) => Err(err.into()), // unexpected error
     }
 }

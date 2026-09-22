@@ -22,7 +22,6 @@ use ::db::{ObjectColumnFilter, vpc_prefix as db};
 use ::rpc::forge as rpc;
 use ::rpc::forge::PrefixMatchType;
 use carbide_network::virtualization::VpcVirtualizationType;
-use carbide_uuid::vpc::VpcId;
 use ipnetwork::IpNetwork;
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::NetworkSegmentType;
@@ -106,6 +105,15 @@ async fn validate_vpc_prefix_overlaps(
 ) -> CarbideResult<()> {
     if overlaps.is_empty() {
         return Ok(());
+    }
+
+    // Eligibility changes do not reclassify a row that was created globally.
+    if candidate.overlap_vpc_id != Some(candidate.vpc_id)
+        || overlaps
+            .iter()
+            .any(|prefix| prefix.overlap_vpc_id != Some(prefix.vpc_id))
+    {
+        return Err(super::tenant_prefix_overlap::overlap_error());
     }
 
     let Some(candidate_site_prefix) = candidate_site_prefix else {
@@ -224,12 +232,22 @@ pub(super) async fn validate_overlap_vni(
 /// A direct prefix on another VPC or a non-Tenant segment cannot be linked to
 /// this `VpcPrefix`, so the request is rejected without identifying its owner.
 fn adoptable_segment_prefixes(
-    overlaps: Vec<db::AttachedSegmentPrefix>,
-    candidate_vpc_id: VpcId,
+    overlaps: Vec<db::OverlappingSegmentPrefix>,
+    candidate: &vpc_prefix::NewVpcPrefix,
 ) -> CarbideResult<Vec<NetworkPrefix>> {
     let mut adoptable = Vec::with_capacity(overlaps.len());
     for overlap in overlaps {
-        if overlap.vpc_id != candidate_vpc_id || overlap.segment_type != NetworkSegmentType::Tenant
+        // Preserve global VPC prefixes over VPC-less Admin and HostInband
+        // networks. Parented children must still participate in admission.
+        if candidate.overlap_vpc_id.is_none()
+            && overlap.vpc_id.is_none()
+            && overlap.prefix.vpc_prefix_id.is_none()
+        {
+            continue;
+        }
+        if overlap.prefix.vpc_prefix_id.is_some()
+            || overlap.vpc_id != Some(candidate.vpc_id)
+            || overlap.segment_type != NetworkSegmentType::Tenant
         {
             return Err(super::tenant_prefix_overlap::overlap_error());
         }
@@ -369,6 +387,15 @@ pub(crate) async fn create(
     }
     let expected_vpc_version = vpc.version;
 
+    new_prefix.overlap_vpc_id = selected_site_prefix.as_ref().and_then(|site_prefix| {
+        super::tenant_prefix_overlap::vpc_prefix_overlap_scope(
+            &api.runtime_config,
+            site_prefix,
+            vpc,
+            new_prefix.config.prefix,
+        )
+    });
+
     let conflicting_vpc_prefixes = db::probe(new_prefix.config.prefix, &mut txn).await?;
     validate_vpc_prefix_overlaps(
         api,
@@ -389,7 +416,7 @@ pub(crate) async fn create(
     .await?;
 
     let segment_prefixes = db::probe_segment_prefixes(new_prefix.config.prefix, &mut txn).await?;
-    let segment_prefixes = adoptable_segment_prefixes(segment_prefixes, new_prefix.vpc_id)?;
+    let segment_prefixes = adoptable_segment_prefixes(segment_prefixes, &new_prefix)?;
 
     // Check that the network segment prefixes we found can actually fit into
     // this new VPC prefix container.
@@ -411,15 +438,6 @@ pub(crate) async fn create(
         .metadata
         .validate(true)
         .map_err(CarbideError::from)?;
-
-    new_prefix.overlap_vpc_id = selected_site_prefix.as_ref().and_then(|site_prefix| {
-        super::tenant_prefix_overlap::vpc_prefix_overlap_scope(
-            &api.runtime_config,
-            site_prefix,
-            vpc,
-            new_prefix.config.prefix,
-        )
-    });
 
     let vpc_prefix = db::persist(new_prefix, expected_vpc_version, &mut txn).await?;
     let vpc_prefix_id = vpc_prefix.id;

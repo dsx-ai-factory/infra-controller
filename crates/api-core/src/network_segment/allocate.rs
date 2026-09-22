@@ -150,26 +150,13 @@ impl PrefixAllocator {
         let name = format!("vpc_prefix_{}", prefix.network());
         let segment_id = NetworkSegmentId::new();
 
-        // The `no_gateway_on_ipv6` database constraint requires IPv6 prefixes
-        // to omit an explicit gateway.
-        let gateway = if prefix.is_ipv4() {
-            Some(prefix.network())
-        } else {
-            None
-        };
-
         let ns = NewNetworkSegment {
             id: segment_id,
             name,
             subdomain_id: None,
             vpc_id: Some(vpc_id),
             mtu: 9000, // Default value.
-            prefixes: vec![NewNetworkPrefix {
-                prefix,
-                gateway,
-                dhcpv6_link_address: None,
-                num_reserved: generated_linknet_num_reserved(prefix),
-            }],
+            prefixes: vec![],
             vlan_id: None,
             vni: None,
             segment_type: model::network_segment::NetworkSegmentType::Tenant,
@@ -182,17 +169,15 @@ impl PrefixAllocator {
         // gateway, etc.) and don't need the state controller to provision them. Starting
         // in Ready avoids the race where the instance allocator tries to use the segment
         // before the state controller transitions it from Provisioning.
-        let mut segment = db::network_segment::persist(
+        let segment = db::network_segment::persist(
             ns,
             txn,
             model::network_segment::NetworkSegmentControllerState::Ready,
         )
         .await?;
 
-        for prefix in &mut segment.prefixes {
-            db::network_prefix::set_vpc_prefix(prefix, txn, &self.vpc_prefix_id, &self.vpc_prefix)
-                .await?;
-        }
+        self.allocate_linknet_for_segment_with_prefix(txn, segment.id, prefix)
+            .await?;
 
         Ok((segment.id, prefix))
     }
@@ -213,7 +198,7 @@ impl PrefixAllocator {
             None
         };
 
-        let mut new_prefixes = db::network_prefix::create_for(
+        db::network_prefix::create_for(
             txn,
             &segment_id,
             &[NewNetworkPrefix {
@@ -222,13 +207,9 @@ impl PrefixAllocator {
                 dhcpv6_link_address: None,
                 num_reserved: generated_linknet_num_reserved(prefix),
             }],
+            Some(self.vpc_prefix_id),
         )
         .await?;
-
-        for np in &mut new_prefixes {
-            db::network_prefix::set_vpc_prefix(np, txn, &self.vpc_prefix_id, &self.vpc_prefix)
-                .await?;
-        }
 
         Ok(prefix)
     }

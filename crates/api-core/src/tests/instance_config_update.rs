@@ -72,6 +72,7 @@ async fn create_instance_overlap_fixture(
     config.tenant_prefix_overlap_enabled = gate_enabled;
     config.default_tenant_routing_profile_type = "INSTANCE_OVERLAP".to_string();
     config.vpc_isolation_behavior = crate::cfg::file::VpcIsolationBehaviorType::MutualIsolation;
+    config.vpc_peering_policy = Some(crate::cfg::file::VpcPeeringPolicy::Exclusive);
     // Duplicate tenant prefixes are eligible only when the rendered FNN
     // blackhole set covers their address space.
     config.site_fabric_null_routes = Some(vec!["10.0.0.0/8".parse().unwrap()]);
@@ -167,6 +168,76 @@ fn instance_overlap_config(fixture: &InstanceOverlapFixture) -> rpc::forge::Inst
         network_security_group_id: Some(fixture.stateless_nsg_id.clone()),
         ..Default::default()
     }
+}
+
+async fn create_instance_overlap_prefix_pair(env: &TestEnv, first_vpc: VpcId) -> VpcId {
+    let second_vpc = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .routing_profile_type("INSTANCE_OVERLAP".to_string())
+                .metadata(rpc::forge::Metadata {
+                    name: "isolated prefix copy".to_string(),
+                    ..Default::default()
+                })
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let root = env
+        .api
+        .create_site_prefix(Request::new(rpc::forge::SitePrefixCreationRequest {
+            id: Some(SitePrefixId::new()),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            prefix: "10.117.0.0/16".to_string(),
+            metadata: Some(rpc::forge::Metadata {
+                name: "stored overlap root".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    sqlx::query("UPDATE site_prefixes SET lifecycle_state = 'ready' WHERE id = $1")
+        .bind(root)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    for vpc_id in [first_vpc, second_vpc] {
+        env.api
+            .create_vpc_prefix(Request::new(rpc::forge::VpcPrefixCreationRequest {
+                id: Some(VpcPrefixId::new()),
+                vpc_id: Some(vpc_id),
+                site_prefix_id: Some(root),
+                prefix: String::new(),
+                config: Some(rpc::forge::VpcPrefixConfig {
+                    prefix: "10.117.1.0/24".to_string(),
+                }),
+                metadata: Some(rpc::forge::Metadata {
+                    name: "stored overlap prefix".to_string(),
+                    ..Default::default()
+                }),
+            }))
+            .await
+            .unwrap();
+    }
+    let scopes: Vec<VpcId> = sqlx::query_scalar(
+        "SELECT overlap_vpc_id FROM network_vpc_prefixes WHERE site_prefix_id = $1 ORDER BY overlap_vpc_id",
+    )
+    .bind(root)
+    .fetch_all(&env.pool)
+    .await
+    .unwrap();
+    let mut expected = vec![first_vpc, second_vpc];
+    expected.sort_unstable();
+    assert_eq!(scopes, expected);
+    second_vpc
 }
 
 /// Verifies single and batch allocation accept inherited stateful NSGs while
@@ -417,13 +488,8 @@ async fn instance_overlap_prefix_writer_checks_waiting_and_pending_attachments(p
         .unwrap()
         .version;
 
-    for (name, network, pending, expected_message) in [
-        (
-            "waiting Instance",
-            both_networks.clone(),
-            None,
-            expected_error,
-        ),
+    for (name, network, pending) in [
+        ("waiting Instance", both_networks.clone(), None),
         (
             "pending old network",
             first_network.clone(),
@@ -431,7 +497,6 @@ async fn instance_overlap_prefix_writer_checks_waiting_and_pending_attachments(p
                 old_config: both_networks.clone(),
                 new_config: first_network.clone(),
             }),
-            expected_error,
         ),
         (
             "pending new network",
@@ -440,13 +505,6 @@ async fn instance_overlap_prefix_writer_checks_waiting_and_pending_attachments(p
                 old_config: first_network.clone(),
                 new_config: both_networks.clone(),
             }),
-            expected_error,
-        ),
-        (
-            "one attached VPC",
-            first_network.clone(),
-            None,
-            "overlaps an existing or deleting VPC prefix",
         ),
     ] {
         sqlx::query("UPDATE instances SET network_config = $1, update_network_config_request = $2 WHERE id = $3")
@@ -461,12 +519,7 @@ async fn instance_overlap_prefix_writer_checks_waiting_and_pending_attachments(p
             .await
             .expect_err(name);
         assert_eq!(error.code(), tonic::Code::InvalidArgument, "{name}");
-        // The deployed exclusion still blocks otherwise safe reuse. Its
-        // different error proves the Instance check accepted the last case.
-        assert!(
-            error.message().contains(expected_message),
-            "{name}: {error}"
-        );
+        assert_eq!(error.message(), expected_error, "{name}");
         let count: i64 =
             sqlx::query_scalar("SELECT count(*) FROM network_vpc_prefixes WHERE id = $1")
                 .bind(prefix_id)
@@ -485,6 +538,9 @@ async fn instance_overlap_prefix_writer_checks_waiting_and_pending_attachments(p
 
     // Stage a newly retained interface while the prefix request waits. It
     // must read the committed update, not the earlier single-VPC network.
+    sqlx::query("UPDATE instances SET network_config = $1, update_network_config_request = NULL WHERE id = $2")
+        .bind(sqlx::types::Json(&first_network))
+        .bind(instance_id).execute(&env.pool).await.unwrap();
     let mut attachment = env.db_txn().await;
     db::tenant_prefix_overlap::lock_checks(&mut attachment)
         .await
@@ -535,19 +591,56 @@ async fn instance_overlap_prefix_writer_checks_waiting_and_pending_attachments(p
     assert_eq!(
         persisted.update_network_config_request,
         Some(InstanceNetworkConfigUpdate {
-            old_config: first_network,
+            old_config: first_network.clone(),
             new_config: both_networks,
         })
     );
+
+    // Once only one VPC remains attached, the second copy must persist. A
+    // database rejection can no longer conceal an unnecessary Instance check.
+    sqlx::query("UPDATE instances SET update_network_config_request = NULL WHERE id = $1")
+        .bind(instance_id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let request = prefix_request(second_vpc);
+    let prefix_id = request.id.unwrap();
+    assert_eq!(
+        env.api
+            .create_vpc_prefix(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner()
+            .id,
+        Some(prefix_id)
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM network_vpc_prefixes WHERE id = $1")
+        .bind(prefix_id)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let persisted = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.config.network, first_network);
+    assert!(persisted.update_network_config_request.is_none());
 }
 
-/// Verifies saved stateful NSGs remain renderable and pass startup validation,
-/// so changing ACL policy cannot invalidate independently isolated FNN routes.
+/// Stored duplicate prefixes remain renderable with stateful NSGs. Policy
+/// updates reject unsafe routing even without Instances, while startup and DPU
+/// configuration also reject unsafe retained routing.
 #[crate::sqlx_test]
-async fn instance_overlap_config_serving_and_startup_accept_stateful_nsg(pool: sqlx::PgPool) {
+async fn instance_overlap_stored_pairs_validate_startup_and_dpu_config(pool: sqlx::PgPool) {
     // Establish an active stateless baseline before changing only persisted NSG policy.
     let fixture = create_instance_overlap_fixture(pool, true).await;
     let env = &fixture.env;
+    let first_vpc = db::vpc::find_by_segment(&env.pool, fixture.segment_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let second_vpc_id = create_instance_overlap_prefix_pair(env, first_vpc.id).await;
     let host = create_managed_host(env).await;
     let instance = host
         .instance_builer(env)
@@ -616,6 +709,290 @@ async fn instance_overlap_config_serving_and_startup_accept_stateful_nsg(pool: s
         original.config.network_security_group_id
     );
     assert_eq!(persisted.config_version, original.config_version);
+
+    // A separate receiver imports one copy safely. Importing the second copy
+    // must fail even though the receiver owns neither overlapping prefix.
+    let receiver_vpc_id = VpcId::new();
+    let receiver_segment = env
+        .create_vpc_and_tenant_segments_with_vpc_details(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .id(receiver_vpc_id)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .routing_profile_type("INSTANCE_OVERLAP".to_string())
+                .metadata(rpc::forge::Metadata {
+                    name: "sibling receiver".to_string(),
+                    ..Default::default()
+                })
+                .rpc(),
+            1,
+        )
+        .await[0];
+    let receiver_host = create_managed_host(env).await;
+    let mut receiver_config = instance_overlap_config(&fixture);
+    receiver_config.network = Some(single_interface_network_config(receiver_segment));
+    let _receiver_instance = receiver_host
+        .instance_builer(env)
+        .config(receiver_config)
+        .build()
+        .await;
+    env.api
+        .create_vpc_peering(Request::new(rpc::forge::VpcPeeringCreationRequest {
+            id: None,
+            vpc_id: Some(receiver_vpc_id),
+            peer_vpc_id: Some(first_vpc.id),
+        }))
+        .await
+        .unwrap();
+    env.api
+        .get_managed_host_network_config(Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(receiver_host.dpu().id),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let second_vpc = db::vpc::find_by(
+        &env.pool,
+        db::ObjectColumnFilter::One(db::vpc::IdColumn, &second_vpc_id),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    // The second VPC's prefixes still affect the first VPC's isolation even
+    // though no Instance uses the second VPC.
+    assert!(
+        db::instance::find_ids(
+            &env.pool,
+            model::instance::InstanceSearchFilter {
+                vpc_id: Some(second_vpc_id.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    let error = env
+        .api
+        .update_vpc(Request::new(rpc::forge::VpcUpdateRequest {
+            id: Some(second_vpc_id),
+            if_version_match: Some(second_vpc.version.to_string()),
+            metadata: Some(second_vpc.metadata.clone().into()),
+            routing_profile_overrides: Some(rpc::forge::VpcRoutingProfileOverrides {
+                leak_default_route_from_underlay: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "the requested policy is not safe for tenant prefix reuse"
+    );
+    let unchanged_vpc = db::vpc::find_by(
+        &env.pool,
+        db::ObjectColumnFilter::One(db::vpc::IdColumn, &second_vpc_id),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert_eq!(unchanged_vpc, second_vpc);
+    crate::handlers::tenant_prefix_overlap::validate_retained_state(&env.api)
+        .await
+        .unwrap();
+    env.api
+        .get_managed_host_network_config(request())
+        .await
+        .unwrap();
+
+    enum RetainedFailure {
+        PairPolicy,
+        VniOwnership,
+        Peer(VpcId),
+    }
+    for (name, failure, dpu_id) in [
+        (
+            "retained pair policy",
+            RetainedFailure::PairPolicy,
+            host.dpu().id,
+        ),
+        (
+            "VNI ownership",
+            RetainedFailure::VniOwnership,
+            host.dpu().id,
+        ),
+        (
+            "direct receiver",
+            RetainedFailure::Peer(first_vpc.id),
+            host.dpu().id,
+        ),
+        (
+            "sibling receiver",
+            RetainedFailure::Peer(receiver_vpc_id),
+            receiver_host.dpu().id,
+        ),
+    ] {
+        let peering_id = carbide_uuid::vpc_peering::VpcPeeringId::new();
+        // Model state retained across a configuration change or an older
+        // writer. Public admission must not be bypassed to create the pair.
+        let mut txn = env.pool.begin().await.unwrap();
+        match failure {
+            RetainedFailure::PairPolicy => {
+                sqlx::query("UPDATE vpcs SET routing_profile_overrides = $1 WHERE id = $2")
+                    .bind(sqlx::types::Json(model::vpc::VpcRoutingProfileOverrides {
+                        leak_default_route_from_underlay: Some(true),
+                        ..Default::default()
+                    }))
+                    .bind(second_vpc_id)
+                    .execute(&mut *txn)
+                    .await
+                    .unwrap();
+            }
+            RetainedFailure::VniOwnership => {
+                sqlx::query("UPDATE vpcs SET status = $1 WHERE id = $2")
+                    .bind(sqlx::types::Json(model::vpc::VpcStatus {
+                        vni: Some(second_vpc.status.vni.unwrap() + 100000),
+                    }))
+                    .bind(second_vpc_id)
+                    .execute(&mut *txn)
+                    .await
+                    .unwrap();
+            }
+            RetainedFailure::Peer(receiver) => {
+                db::vpc_peering::create(&mut txn, receiver, second_vpc_id, peering_id)
+                    .await
+                    .unwrap();
+            }
+        }
+        txn.commit().await.unwrap();
+
+        let startup_error: tonic::Status =
+            crate::handlers::tenant_prefix_overlap::validate_retained_state(&env.api)
+                .await
+                .expect_err(name)
+                .into();
+        let serving_error = env
+            .api
+            .get_managed_host_network_config(Request::new(
+                rpc::forge::ManagedHostNetworkConfigRequest {
+                    dpu_machine_id: Some(dpu_id),
+                },
+            ))
+            .await
+            .expect_err(name);
+        for error in [startup_error, serving_error] {
+            assert_eq!(
+                error.code(),
+                tonic::Code::InvalidArgument,
+                "{name}: {error}"
+            );
+            assert_eq!(
+                error.message(),
+                "the requested prefix overlaps address space that is not eligible for reuse",
+                "{name}"
+            );
+        }
+
+        sqlx::query("UPDATE vpcs SET routing_profile_overrides = $1, status = $2 WHERE id = $3")
+            .bind(
+                second_vpc
+                    .config
+                    .routing_profile_overrides
+                    .as_ref()
+                    .map(sqlx::types::Json),
+            )
+            .bind(sqlx::types::Json(&second_vpc.status))
+            .bind(second_vpc_id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM vpc_peerings WHERE id = $1")
+            .bind(peering_id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+    }
+    crate::handlers::tenant_prefix_overlap::validate_retained_state(&env.api)
+        .await
+        .unwrap();
+}
+
+#[crate::sqlx_test]
+async fn instance_overlap_peering_rejects_combined_networks_with_stored_copies(pool: sqlx::PgPool) {
+    use crate::tests::common::api_fixtures::instance::single_interface_network_config_with_vfs;
+
+    let fixture = create_instance_overlap_fixture(pool, true).await;
+    let env = &fixture.env;
+    let first_vpc = db::vpc::find_by_segment(&env.pool, fixture.segment_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let second_vpc = create_instance_overlap_prefix_pair(env, first_vpc.id).await;
+    let receiver_vpc = VpcId::new();
+    let receiver_segment = env
+        .create_vpc_and_tenant_segments_with_vpc_details(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .id(receiver_vpc)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .routing_profile_type("INSTANCE_OVERLAP".to_string())
+                .metadata(rpc::forge::Metadata {
+                    name: "second Instance receiver".to_string(),
+                    ..Default::default()
+                })
+                .rpc(),
+            1,
+        )
+        .await[0];
+    let host = create_managed_host(env).await;
+    let mut config = instance_overlap_config(&fixture);
+    config.network = Some(single_interface_network_config_with_vfs(vec![
+        fixture.segment_id,
+        receiver_segment,
+    ]));
+    let instance = host.instance_builer(env).config(config).build().await;
+    let before = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Neither peering endpoint imports both copies. The conflict exists only
+    // in the union of the Instance's first and second network interfaces.
+    let peering_id = carbide_uuid::vpc_peering::VpcPeeringId::new();
+    let error = env
+        .api
+        .create_vpc_peering(Request::new(rpc::forge::VpcPeeringCreationRequest {
+            id: Some(peering_id),
+            vpc_id: Some(receiver_vpc),
+            peer_vpc_id: Some(second_vpc),
+        }))
+        .await
+        .expect_err("peering must not connect both prefix copies to one Instance");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        error.message(),
+        "the requested prefix overlaps address space that is not eligible for reuse"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM vpc_peerings WHERE id = $1")
+        .bind(peering_id)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let after = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.config.network, before.config.network);
+    assert_eq!(after.network_config_version, before.network_config_version);
+    assert_eq!(
+        after.update_network_config_request,
+        before.update_network_config_request
+    );
 }
 
 #[crate::sqlx_test]

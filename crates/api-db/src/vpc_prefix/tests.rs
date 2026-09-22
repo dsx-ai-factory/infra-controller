@@ -126,6 +126,7 @@ async fn exercise_prefix_queries(
             dhcpv6_link_address: None,
             num_reserved: 1,
         }],
+        None,
     )
     .await?;
     let [mut child]: [NetworkPrefix; 1] = children.try_into().expect("one created network prefix");
@@ -185,7 +186,7 @@ async fn exercise_prefix_queries(
     }
     let attached = probe_segment_prefixes(child_prefix, &mut txn).await?;
     assert_eq!(attached.len(), 1);
-    assert_eq!(attached[0].vpc_id, vpc_id);
+    assert_eq!(attached[0].vpc_id, Some(vpc_id));
     assert_eq!(attached[0].segment_type, NetworkSegmentType::Tenant);
     assert_eq!(
         serde_json::to_value(&attached[0].prefix)?,

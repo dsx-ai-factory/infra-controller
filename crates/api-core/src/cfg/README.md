@@ -49,7 +49,7 @@ behavior.
 | `deny_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 CIDR prefixes that tenant instances are blocked from reaching. FNN generates family-specific NVUE ACL policies; all non-FNN virtualizers apply the IPv4 prefixes only. |
 | `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 prefixes assigned for tenant use within this site. With `mutual_isolation`, ETV enforces the IPv4 prefixes with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL. With `open`, that ACL is not installed. On upgrade, authoritative Core scans persisted Ready and Deleting operator-managed SitePrefixes even when this list is empty. It assigns an unparented legacy VpcPrefix when exactly one operator root contains it; ambiguous parentage blocks startup. With a nonempty list, missing parentage also blocks startup. Listen-only replicas require an authoritative Core to assign unresolved lineage first. |
 | `site_fabric_null_routes` | `Option<Vec<IpNetwork>>` | Inherited roots | `networking` | IPv4 and IPv6 prefixes installed by FNN as blackhole routes under `mutual_isolation`. Omission combines `site_fabric_prefixes`, every retained tenant-managed SitePrefix, and removed operator-managed roots that still contain a VpcPrefix or VPC-attached direct NetworkPrefix, reducing them to their minimal exact union. Soft-deleted children retain operator coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative: each CIDR uses its network address and exact duplicates are removed, but parent, child, and adjacent entries are not aggregated. Under mutual isolation, new tenant roots require an equal or broader explicit route; startup rejects an override that leaves any retained tenant root uncovered. An empty list (`[]`) installs no null routes and cannot support tenant roots under mutual isolation. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. An effective `/0` null route and `leak_default_route_from_underlay = true` for the same address family are unsupported because the imported default wins the equal-prefix distance comparison. With `open`, the routes are not installed and tenant coverage is not required. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules) and [overlap checks](#tenant-prefix-overlap-checks). |
-| `tenant_prefix_overlap_enabled` | `bool` | `false` | `networking` | Site opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). The existing `VpcPrefix` exclusion continues to prevent overlapping `VpcPrefix` persistence until the cutover tracked by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892). |
+| `tenant_prefix_overlap_enabled` | `bool` | `false` | `networking` | Site opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). Keep disabled through the [database cutover](#prefix-overlap-database-cutover). Enablement also requires DPU readiness and [site qualification](https://github.com/dsx-ai-factory/infra-controller/issues/3902). |
 | `max_site_prefixes_per_tenant` | `u32` | `8` | `networking` | Maximum tenant-managed SitePrefixes retained for one tenant at this site. Prefixes awaiting removal still count against this limit and keep their CIDR reserved. |
 | `max_site_prefix_isolation_rules` | `u32` | `64` | `networking` | Maximum compacted legacy DPU site-prefix input for new tenant-root admission under mutual isolation; accepts `0` through `64`. Open isolation does not enforce this limit. This is not an FNN route-capacity limit. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules). |
 | `anycast_site_prefixes` | `Vec<Ipv4Network>` | `[]` | `networking` | Aggregate IPv4 prefixes containing tenant-announced prefixes (e.g., BYOIP). **Deprecated.** Use [`routing_profiles.allowed_anycast_prefixes`](#fnnroutingprofileconfig) instead. |
@@ -969,13 +969,21 @@ For an overlapping prefix, `CreateVpcPrefix` locks the participating VPCs
 until its transaction ends. Concurrent VNI changes or VPC deletion must wait,
 including for a VPC owned by another tenant.
 
-The gRPC `CreateNetworkSegment` and `AttachNetworkSegmentToVpc` handlers reject
-any direct prefix that overlaps a `VpcPrefix`, regardless of the site gate. The
-gRPC `CreateVpcPrefix` handler considers prefixes on attached segments. It may
+The gRPC `CreateNetworkSegment` handler, when a VPC is specified, and
+`AttachNetworkSegmentToVpc` reject any direct prefix that overlaps a `VpcPrefix`,
+regardless of the site gate. The gRPC `CreateVpcPrefix` handler considers prefixes
+on attached segments. It can
 adopt only direct Tenant segment prefixes in the same VPC that are not already
 linked to a `VpcPrefix`; every other direct `NetworkPrefix` overlap on an
-attached segment is rejected. An unattached `CreateNetworkSegment` request does
-not run these checks, but a later attachment does.
+attached segment is rejected. An unattached `CreateNetworkSegment` request can
+overlap a globally scoped `VpcPrefix`, but rejects overlap with a VPC-scoped
+`VpcPrefix` regardless of the site gate. A later VPC attachment rejects either
+overlap. Every `CreateNetworkSegment` request takes the overlap transaction lock
+until its transaction ends, including requests without a VPC.
+
+Networks seeded from the site configuration retain their existing allowance to
+overlap a globally scoped `VpcPrefix`, even when `vpc_name` attaches them to a VPC.
+They still reject overlaps with VPC-scoped prefixes.
 
 With `tenant_prefix_overlap_enabled = true`, peering creation, `VpcPrefix`
 creation, and VPC virtualization changes that add imports also check each
@@ -986,7 +994,7 @@ imports; there are no transitive peer imports. Prefixes awaiting removal still
 count. These writers also check the combined networks of each affected Instance,
 including Instances waiting for their network segments and pending replacements.
 
-VPC routing-profile changes check the affected tenant-serving FNN interfaces. Allocated Instances remain relevant even before their controllers leave Admin networking, including while waiting for network segments. Pending networks and deleting Instances not yet in the controller's return-to-Admin state also count. Core rejects unsafe routing-profile changes on these paths with `FailedPrecondition`, even before duplicate CIDRs exist. Unused definitions remain editable. Metadata updates, unchanged stored routing policy, and proven restrictions do not take the overlap transaction lock unless a concurrent update changes the policy they replace. With overlap enabled, `UpdateVpc` can return `FailedPrecondition` if the VPC changes while the request waits for its row lock. With overlap disabled, requests without `if_version_match` instead use the latest locked record and repeat any needed routing-policy checks. Explicit version conditions still apply in either mode.
+VPC routing-profile changes check the affected tenant-serving FNN interfaces. Allocated Instances remain relevant even before their controllers leave Admin networking, including while waiting for network segments. Pending networks and deleting Instances not yet in the controller's return-to-Admin state also count. Core rejects unsafe routing-profile changes on these paths with `FailedPrecondition`, even before duplicate CIDRs exist. A VPC that owns retained overlapping tenant prefixes must also preserve routing isolation, even without Instances. Other unused definitions remain editable. Metadata updates, unchanged stored routing policy, and proven restrictions do not take the overlap transaction lock unless a concurrent update changes the policy they replace. With overlap enabled, `UpdateVpc` can return `FailedPrecondition` if the VPC changes while the request waits for its row lock. With overlap disabled, requests without `if_version_match` instead use the latest locked record and repeat any needed routing-policy checks. Explicit version conditions still apply in either mode.
 
 Instance allocation and network expansion check all VPCs used by the requested, current, and pending networks together, including their direct peer imports. An Instance must not connect to overlapping address space from different VPCs, even when those VPCs are otherwise isolated. Core returns `InvalidArgument` for that conflict. With overlap enabled, allocation and network expansion also check the effective FNN routing policy before duplicate CIDRs exist. Network expansion requires an eligible resolved routing profile and safe site-wide policy. NSG permits and stateful egress do not participate in overlap admission: FNN isolation is enforced by routing blackholes, which ACL policy cannot bypass.
 
@@ -999,7 +1007,7 @@ new reuse. An explicit empty list disables tenant prefix reuse.
 
 When `tenant_prefix_overlap_enabled = false` but another VPC still uses the same addresses, Instance allocation and network expansion return `InvalidArgument`. Prefixes being deleted still count. Metadata edits and removal of unchanged interfaces remain available. A request cannot replace a pending network update. Requests that need admission take the overlap transaction lock before resource locks, including when the gate is off. A waiting Instance update reloads its dependencies but keeps its original configuration version. If that version changed, the request returns `FailedPrecondition`.
 
-With the gate off, peering and VPC virtualization changes also reject new imports of overlapping address space involving a tenant-managed `VpcPrefix`. Existing imports and nonexpanding changes remain available. Unsafe routing-profile changes are rejected where an affected Instance can reach that duplicate address space.
+With the gate off, peering and VPC virtualization changes also reject new imports of overlapping address space involving a tenant-managed `VpcPrefix`. Existing imports and nonexpanding changes remain available. Unsafe routing-profile changes are rejected where the VPC owns retained overlapping tenant prefixes or an affected Instance can reach that duplicate address space.
 
 Core checks retained prefixes, peer imports, Instance networks, and effective
 FNN policy before starting controllers or the API listener, including with
@@ -1033,11 +1041,7 @@ startup and writer checks, following the
 [peering and policy checks](https://github.com/dsx-ai-factory/infra-controller/issues/5114)
 and [Instance admission](https://github.com/dsx-ai-factory/infra-controller/issues/5115).
 
-Even when the application accepts an eligible pair, the existing `VpcPrefix`
-exclusion rejects overlapping `VpcPrefix` persistence until the cutover tracked
-by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892).
-
-**Stored Prefix Scope**
+### Stored Prefix Scope
 
 `network_vpc_prefixes.overlap_vpc_id` and `network_prefixes.overlap_vpc_id` are
 internal database fields, not API or configuration settings. `NULL` means the
@@ -1052,24 +1056,66 @@ Generated, non-stretched Tenant linknets inherit that ID from their exact
 parent. Direct segments remain global even when a VpcPrefix adopts them.
 
 Existing rows and inserts from older binaries remain global. An older binary
-can also create a global child beneath a scoped parent. The additive migration
-retains both original global exclusions, so application rollback does not allow
-overlap or require a database rollback. The four additional exclusions protect
-global rows from each other and scoped rows within the same VPC, including rows
-awaiting deletion. They do not compare a global row with a scoped row.
+can also create a global child beneath a scoped parent. Current routing
+eligibility does not change either row's stored scope. Admission rejects a
+conflict when either participant is global, including an attached global child.
+Allocation and reported capacity use the same scope comparison: only a child
+in a different non-null VPC scope can be ignored.
 
-The migration blocks reads and writes to these prefix tables while building
-the indexes. It releases the locks when it commits. Cached wildcard queries on
-the outgoing API's connections can still fail until that API is replaced.
+The four partial database exclusions protect global rows from each other and
+scoped rows within the same VPC, including rows awaiting deletion. They do not
+compare global rows with scoped rows or compare the two prefix tables. Writers
+take the same overlap transaction lock and check those conflicts before
+inserting. Generated Tenant linknets record their exact parent and scope in the
+initial insert; adopting a direct segment does not change its global scope.
+VPC-less, unparented networks retain their existing ability to overlap a global
+VPC prefix, but cannot later attach to a VPC over that overlap. They cannot
+overlap a scoped VPC prefix, even when the site admission flag is disabled.
 
-The following read-only query must return ten rows, all with `convalidated = t`.
-The scope checks and foreign key prove that each non-null key agrees with its
-stored VPC/parent relationship; the original exclusions still prevent overlap.
-This is a structural check, not approval to drop those exclusions: the
-[#3892 cutover](https://github.com/dsx-ai-factory/infra-controller/issues/3892)
-must also make every writer and allocation check respect global scope, including
-parented global children, and verify the supported application versions.
-Core's startup checks continue to validate runtime routing policy.
+### Prefix Overlap Database Cutover
+
+The [#3892 cutover](https://github.com/dsx-ai-factory/infra-controller/issues/3892)
+removes the two original global exclusions. It does not change existing scope
+values or enable tenant prefix overlap. Before applying this migration:
+
+1. Keep `tenant_prefix_overlap_enabled = false` on every outgoing API version
+   that supports this setting. Wait for any previously enabled process and its
+   requests to finish.
+2. If the two prefix tables already have `overlap_vpc_id`, run this read-only
+   preflight. Both counts must be zero, including rows awaiting deletion. If
+   either count is nonzero, stop the upgrade and resolve it separately; do not
+   clear or backfill scopes to pass the check.
+
+```sql
+SELECT 'network_vpc_prefixes' AS table_name, count(*) AS scoped_rows
+FROM network_vpc_prefixes WHERE overlap_vpc_id IS NOT NULL
+UNION ALL
+SELECT 'network_prefixes', count(*)
+FROM network_prefixes WHERE overlap_vpc_id IS NOT NULL;
+```
+
+If the columns do not exist yet, skip that query. The additive scope migration
+creates them as nullable columns, so existing rows and writes from the old API
+remain global. No intermediate API release is required.
+
+Keep the flag false while deploying the migration and new binary, until every
+old process and request has finished. With all scopes null and the flag off,
+outgoing writes remain global and the retained global partial exclusions keep
+rejecting same-table overlaps. The migration rebuilds full-table GiST indexes
+for overlap lookups without their former exclusion semantics. It holds table
+locks during that work and may wait for active transactions; new queries can
+queue behind it. Concurrent traffic can deadlock with the migration, aborting
+either the API request or the migration attempt. A failed migration rolls back
+the whole file; the Helm and Kustomize migration Jobs restart failed containers.
+An upgrade that also adds the scope columns builds the exclusion indexes under
+table locks as well.
+Cached wildcard queries on the outgoing API's connections can still fail until
+that API is replaced.
+
+After cutover, the following structural check must return eight rows, all with
+`convalidated = t`. Scope checks and the foreign key constrain each non-null
+scope to its stored VPC and exact parent. Startup also validates runtime routing
+policy.
 
 ```sql
 SELECT conname, convalidated
@@ -1078,6 +1124,12 @@ WHERE conrelid IN ('public.network_vpc_prefixes'::regclass, 'public.network_pref
   AND (conname LIKE '%overlap%' OR contype = 'x')
 ORDER BY conname;
 ```
+
+This database change is not site enablement approval. DPU isolation and the
+[qualification work](https://github.com/dsx-ai-factory/infra-controller/issues/3902)
+remain prerequisites. Disabling overlap does not remove duplicate data or make
+an older binary safe to restore. The final operator rollout and rollback
+procedure is tracked in [#3903](https://github.com/dsx-ai-factory/infra-controller/issues/3903).
 
 ### `VpcDefinition`
 

@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
+use carbide_uuid::vpc::VpcId;
 use db::resource_pool::ResourcePoolDatabaseError;
 use db::{AnnotatedSqlxError, DatabaseError, ObjectColumnFilter, network_segment};
 use ipnetwork::IpNetwork;
@@ -88,8 +89,10 @@ pub(crate) async fn find_by_ids(
     }))
 }
 
-/// `reject_vpc_prefix_overlaps` rejects direct `NetworkPrefix` records that
-/// overlap a `VpcPrefix`.
+/// Rejects direct prefixes that conflict with a scoped VPC prefix. Supplying
+/// `vpc_id` also rejects global parents for RPC creation and attachment.
+/// Bootstrap omits it to preserve configured networks over global parents.
+/// Stored scoped prefixes remain protected even when overlap is disabled.
 ///
 /// The caller holds the overlap transaction lock from this probe through the
 /// `NetworkSegment` write, so another participating `VpcPrefix` request cannot
@@ -97,9 +100,14 @@ pub(crate) async fn find_by_ids(
 async fn reject_vpc_prefix_overlaps(
     txn: &mut PgConnection,
     prefixes: &[IpNetwork],
+    vpc_id: Option<VpcId>,
 ) -> CarbideResult<()> {
     for prefix in prefixes {
-        if !db::vpc_prefix::probe(*prefix, &mut *txn).await?.is_empty() {
+        if db::vpc_prefix::probe(*prefix, &mut *txn)
+            .await?
+            .iter()
+            .any(|overlap| vpc_id.is_some() || overlap.overlap_vpc_id.is_some())
+        {
             return Err(super::tenant_prefix_overlap::overlap_error());
         }
     }
@@ -150,9 +158,7 @@ pub(crate) async fn create(
     }
 
     let mut txn = api.txn_begin().await?;
-    if new_network_segment.vpc_id.is_some() {
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
-    }
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
 
     let allocate_svi_ip = if let Some(vpc_id) = new_network_segment.vpc_id {
         let vpcs = db::vpc::find_by(
@@ -178,13 +184,13 @@ pub(crate) async fn create(
         false
     };
 
-    if new_network_segment.vpc_id.is_some() {
+    if let Some(vpc_id) = new_network_segment.vpc_id {
         let prefixes = new_network_segment
             .prefixes
             .iter()
             .map(|prefix| prefix.prefix)
             .collect::<Vec<_>>();
-        reject_vpc_prefix_overlaps(&mut txn, &prefixes).await?;
+        reject_vpc_prefix_overlaps(&mut txn, &prefixes, Some(vpc_id)).await?;
     }
 
     let network_segment = save(api, &mut txn, new_network_segment, false, allocate_svi_ip).await?;
@@ -267,7 +273,7 @@ pub(crate) async fn attach_to_vpc(
                 .filter(|prefix| prefix.vpc_prefix_id.is_none())
                 .map(|prefix| prefix.prefix)
                 .collect::<Vec<_>>();
-            reject_vpc_prefix_overlaps(&mut txn, &prefixes).await?;
+            reject_vpc_prefix_overlaps(&mut txn, &prefixes, Some(vpc_id)).await?;
             db::network_segment::attach_to_vpc(&segment, txn.as_mut(), vpc_id).await?
         }
     };
@@ -419,6 +425,8 @@ pub(crate) async fn save(
 /// and the static-assignments anchor so startup can update all reverse zones
 /// once, in the same transaction and with a stable lock order. Any other caller
 /// must arrange the matching DNS update before committing.
+///
+/// Callers hold the overlap transaction lock through validation and persistence.
 pub(crate) async fn save_without_reverse_zones(
     api: &Api,
     txn: &mut PgTransaction<'_>,
@@ -426,6 +434,26 @@ pub(crate) async fn save_without_reverse_zones(
     set_to_ready: bool,
     allocate_svi_ip: bool,
 ) -> Result<NetworkSegment, CarbideError> {
+    let prefixes = ns
+        .prefixes
+        .iter()
+        .map(|prefix| prefix.prefix)
+        .collect::<Vec<_>>();
+    for prefix in &prefixes {
+        if !db::network_prefix::containing_prefix(txn.as_mut(), &prefix.to_string())
+            .await?
+            .is_empty()
+        {
+            return Err(CarbideError::InvalidArgument(
+                "prefix overlaps with an existing one".to_string(),
+            ));
+        }
+    }
+    // Configured networks also need these checks: scoped prefixes must not
+    // overlap direct prefixes. Bootstrap still permits global VPC parents;
+    // the RPC's attached-segment rule above is intentionally stricter.
+    reject_vpc_prefix_overlaps(txn.as_mut(), &prefixes, None).await?;
+
     if ns.segment_type != NetworkSegmentType::Underlay {
         ns.vlan_id = Some(allocate_vlan_id(api, txn, &ns.name).await?);
         ns.vni = Some(allocate_vni(api, txn, &ns.name).await?);
