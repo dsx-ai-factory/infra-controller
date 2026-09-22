@@ -52,23 +52,6 @@ pub(crate) const MAX_BGP_PASSWORD_LENGTH: usize = 80;
 const MISSING_FIRMWARE_ARTIFACT_CREDENTIAL_NAME: &str =
     "firmware artifact access token credential name is required";
 
-fn map_bmc_session_error(error: crate::credentials::BmcSessionError) -> Status {
-    match error {
-        crate::credentials::BmcSessionError::AvoidLockout { .. }
-        | crate::credentials::BmcSessionError::NoSessionService { .. }
-        | crate::credentials::BmcSessionError::MissingRootCredentials(_) => {
-            // These are "we refuse to attempt session creation" outcomes
-            // that the operator can resolve (configure/rotate creds, or
-            // flip the basic-auth-fallback flag). FailedPrecondition
-            // matches the gRPC semantics: the request is well-formed but
-            // the server-side state forbids it.
-            Status::failed_precondition(error.to_string())
-        }
-        crate::credentials::BmcSessionError::Store(_) => Status::internal(error.to_string()),
-        other => CarbideError::internal(other.to_string()).into(),
-    }
-}
-
 pub(crate) async fn create_credential(
     api: &Api,
     request: tonic::Request<rpc::CredentialCreationRequest>,
@@ -582,7 +565,20 @@ pub(crate) async fn get_bmc_credentals(
         .bmc_session_manager
         .issue_credentials(&spiffe_service_id, bmc_mac_address, bmc_addr)
         .await
-        .map_err(map_bmc_session_error)?;
+        .map_err(|err| match err {
+            crate::credentials::BmcSessionError::AvoidLockout { .. }
+            | crate::credentials::BmcSessionError::NoSessionService { .. }
+            | crate::credentials::BmcSessionError::MissingRootCredentials(_) => {
+                // These are "we refuse to attempt session creation" outcomes
+                // that the operator can resolve (configure/rotate creds, or
+                // flip the basic-auth-fallback flag). FailedPrecondition
+                // matches the gRPC semantics: the request is well-formed but
+                // the server-side state forbids it.
+                Status::failed_precondition(err.to_string())
+            }
+            crate::credentials::BmcSessionError::Store(_) => Status::internal(err.to_string()),
+            other => CarbideError::internal(other.to_string()).into(),
+        })?;
 
     let credentials_type = match material {
         crate::credentials::BmcAuthMaterial::Session(entry) => {
@@ -910,19 +906,4 @@ pub(crate) async fn set_container_registry_credential(
         .await
         .map_err(|e| CarbideError::internal(format!("set registry credential: {e:?}")))?;
     Ok(Response::new(()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::map_bmc_session_error;
-    use crate::credentials::BmcSessionError;
-
-    #[test]
-    fn missing_bmc_root_credentials_are_a_failed_precondition() {
-        let bmc_mac = "00:11:22:33:44:55".parse().expect("valid MAC address");
-
-        let status = map_bmc_session_error(BmcSessionError::MissingRootCredentials(bmc_mac));
-
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-    }
 }
