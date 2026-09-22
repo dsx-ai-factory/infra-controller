@@ -8269,6 +8269,8 @@ message RackList {
 message RackSearchFilter {
   // Supports filtering on key, value, or key and value.
   optional Label label = 1;
+  // Controls whether deleted racks are included. Defaults to EXCLUDE.
+  DeletedFilter deleted = 2;
 }
 
 message RackIdList {
