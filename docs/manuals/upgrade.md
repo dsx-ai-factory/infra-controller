@@ -344,7 +344,11 @@ DPF manages DPU provisioning state in `DPUCluster`, `DPUService`, and `DPF` CRs,
 
 ### 2.0 → 2.1: NICo Core startupProbe
 
-NICo 2.1 requires `startupProbe` to be explicitly configured in the machine-a-tron deployment (issue #4298). The chart now validates this at render time and fails with a clear error if `startupProbe` is absent. The default values provide a suitable probe scaled to ~2,300 hosts; for larger sites, refer to `helm-prereqs/values/machine-a-tron-scale.yaml` for recommended parameters scaled to 13,500 hosts.
+NICo 2.1 requires `startupProbe` to be explicitly configured in the machine-a-tron deployment (issue #4298). The chart now validates this at render time and fails with a clear error if `startupProbe` is absent.
+
+### 2.2 → 2.3: Machine-a-Tron startupProbe Default
+
+NICo 2.3 raises the default `startupProbe.failureThreshold` from 20 to 120 (60 minutes), sized for a 250-rack site spread over ten pods ([issue 5968](https://github.com/dsx-ai-factory/infra-controller/issues/5968)). The threshold applies to each pod on its own, so size it for the pod that registers the most records. For larger sites, raise `startupProbe.failureThreshold` following the sizing rule in the chart's `values.yaml`, as `helm-prereqs/values/machine-a-tron-scale.yaml` does.
 
 ## Rollback
 

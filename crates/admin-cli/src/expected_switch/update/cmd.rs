@@ -23,7 +23,7 @@ use super::args::Args;
 use crate::rpc::{ApiClient, maybe_unimplemented};
 
 pub(super) async fn update(data: Args, api_client: &ApiClient) -> color_eyre::Result<()> {
-    let legacy: ExpectedSwitch = data.try_into()?;
+    let legacy: ExpectedSwitch = data.into();
     let update_mask = expected_switch_update_mask(&legacy);
     // Keep the caller's selector for the legacy RPC; PATCH requires its ID.
     let mut patch = legacy.clone();

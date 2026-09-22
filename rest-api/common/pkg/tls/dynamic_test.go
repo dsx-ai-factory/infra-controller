@@ -4,15 +4,19 @@
 package tls
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -236,39 +240,216 @@ func TestDynTLSCfg(t *testing.T) {
 	caCertPool = x509.NewCertPool()
 	caCertPool.AppendCertsFromPEM([]byte(test2Cert))
 	assert.True(t, caCertPool.Equal(sCfg.RootCAs))
+	assert.True(t, caCertPool.Equal(sCfg.ClientCAs))
 }
 
-// TestDynTLSCfg_RefreshClearsStickyError verifies that a successful refresh
-// clears any error stored from a prior failed refresh. Without this, a
-// transient cert/key mismatch (e.g. when k8s remounts a Secret and writes
-// the two files non-atomically) would poison the tls config until the
-// process restarted, even after the files settled into a consistent state.
-func TestDynTLSCfg_RefreshClearsStickyError(t *testing.T) {
-	dir, err := os.MkdirTemp("", "certs-sticky")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
-
-	key := filepath.Join(dir, "t.key")
+func TestNewDynTLSCfg(t *testing.T) {
+	// This test changes global logging state and must not run in parallel.
+	var globalLogs bytes.Buffer
+	standard := logrus.StandardLogger()
+	originalOutput, originalLevel := standard.Out, standard.GetLevel()
+	standard.SetOutput(&globalLogs)
+	standard.SetLevel(logrus.ErrorLevel)
+	t.Cleanup(func() {
+		standard.SetOutput(originalOutput)
+		standard.SetLevel(originalLevel)
+	})
+	dir := t.TempDir()
+	key := filepath.Join(dir, "tls.key")
 	require.NoError(t, os.WriteFile(key, []byte(test1Key), 0600))
-	cert := filepath.Join(dir, "t.pem")
+	cert := filepath.Join(dir, "tls.crt")
 	require.NoError(t, os.WriteFile(cert, []byte(test1Cert), 0644))
-	ca := filepath.Join(dir, "ca.pem")
+	ca := filepath.Join(dir, "ca.crt")
+	for name, tc := range map[string]struct {
+		bundle        string
+		wantErr       bool
+		mismatchedKey bool
+	}{
+		"invalid startup identity": {bundle: testCaCert, wantErr: true, mismatchedKey: true},
+		"no certificates":          {bundle: "not a certificate", wantErr: true},
+		"partially valid bundle":   {bundle: testCaCert + "\n" + string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid DER")}))},
+	} {
+		t.Run(name, func(t *testing.T) {
+			keyPEM := test1Key
+			if tc.mismatchedKey {
+				keyPEM = test2Key
+			}
+			require.NoError(t, os.WriteFile(key, []byte(keyPEM), 0600))
+			require.NoError(t, os.WriteFile(ca, []byte(tc.bundle), 0644))
+			d, err := NewDynTLSCfg(key, cert, ca)
+			if d != nil {
+				d.Close()
+			}
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, d)
+				return
+			}
+			require.NoError(t, err)
+			expected := x509.NewCertPool()
+			require.True(t, expected.AppendCertsFromPEM([]byte(tc.bundle)))
+			assert.True(t, expected.Equal(d.caCertPool))
+			assert.Empty(t, globalLogs.String(), "startup CA diagnostics must not use the global logger")
+		})
+	}
+}
+
+func TestParseCABundle(t *testing.T) {
+	invalidDER := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid DER")}))
+	invalidPEM := "-----BEGIN CERTIFICATE-----\nnot-base64!\n-----END CERTIFICATE-----\n"
+	auxiliary := string(pem.EncodeToMemory(&pem.Block{Type: "COMMENT", Bytes: []byte("auxiliary data")}))
+	cases := map[string]struct {
+		bundle  string
+		wantErr bool
+		wantLog bool
+	}{
+		"multiple certificates and auxiliary block": {bundle: testCaCert + "\n" + auxiliary + test2Cert},
+		"CRLF certificate":                          {bundle: strings.ReplaceAll(testCaCert, "\n", "\r\n")},
+		"marker in explanatory text":                {bundle: "# Example boundary: -----BEGIN CERTIFICATE-----\n" + testCaCert},
+		"invalid DER alongside valid certificate":   {bundle: testCaCert + "\n" + invalidDER, wantLog: true},
+		"malformed PEM before valid certificate":    {bundle: invalidPEM + testCaCert, wantLog: true},
+		"malformed PEM after valid certificate":     {bundle: testCaCert + "\n" + invalidPEM, wantLog: true},
+		"malformed PEM before auxiliary block":      {bundle: testCaCert + "\n" + invalidPEM + auxiliary, wantLog: true},
+		"no certificate blocks":                     {bundle: auxiliary, wantErr: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := logrus.New()
+			logger.SetOutput(&logs)
+			pool, err := parseCABundle([]byte(tc.bundle), logger)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, pool)
+				return
+			}
+			require.NoError(t, err)
+			expected := x509.NewCertPool()
+			// Match the predecessor's standard-library loading semantics exactly.
+			require.True(t, expected.AppendCertsFromPEM([]byte(tc.bundle)))
+			assert.True(t, expected.Equal(pool))
+			if tc.wantLog {
+				assert.Contains(t, logs.String(), "level=error")
+				assert.Contains(t, logs.String(), "using parseable certificates")
+			} else {
+				assert.Empty(t, logs.String())
+			}
+		})
+	}
+}
+
+func TestDynTLSCfg_Refresh(t *testing.T) {
+	cases := map[string]struct{ client, missingCA bool }{
+		"server retains pool on invalid CA": {},
+		"server retains pool on missing CA": {missingCA: true},
+		"client retains pool on missing CA": {client: true, missingCA: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			key, cert, ca := filepath.Join(dir, "tls.key"), filepath.Join(dir, "tls.crt"), filepath.Join(dir, "ca.crt")
+			require.NoError(t, os.WriteFile(key, []byte(test1Key), 0600))
+			require.NoError(t, os.WriteFile(cert, []byte(test1Cert), 0644))
+			require.NoError(t, os.WriteFile(ca, []byte(testCaCert), 0644))
+			d, err := NewDynTLSCfg(key, cert, ca)
+			require.NoError(t, err)
+			defer d.Close()
+			d.ticker.Stop() // Drive refresh explicitly so intermediate file writes cannot race the poller.
+			var current func() (*tls.Certificate, *x509.CertPool, error)
+			if tc.client {
+				cfg := d.ClientCfg()
+				current = func() (*tls.Certificate, *x509.CertPool, error) {
+					cert, err := cfg.GetClientCertificate(nil)
+					return cert, cfg.RootCAs, err
+				}
+			} else {
+				cfg := d.ServerCfg()
+				current = func() (*tls.Certificate, *x509.CertPool, error) {
+					cfg, err := cfg.GetConfigForClient(nil)
+					if err != nil {
+						return nil, nil, err
+					}
+					return &cfg.Certificates[0], cfg.ClientCAs, nil
+				}
+			}
+			originalCert, originalPool, err := current()
+			require.NoError(t, err)
+			invalid := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid DER")}))
+			if tc.missingCA {
+				require.NoError(t, os.Remove(ca))
+			} else {
+				require.NoError(t, os.WriteFile(ca, []byte(invalid), 0644))
+			}
+			d.refresh()
+			d.Lock()
+			assert.Same(t, originalPool, d.caCertPool)
+			assert.Equal(t, []byte(testCaCert), d.cachedCa)
+			assert.False(t, d.cacheUpdated)
+			d.Unlock()
+			unchangedCert, unchangedPool, err := current()
+			require.NoError(t, err, "CA failure must not reject handshake callbacks")
+			assert.Equal(t, originalCert, unchangedCert)
+			assert.Same(t, originalPool, unchangedPool)
+
+			// A missing or mismatched key must retain the last usable identity.
+			require.NoError(t, os.Remove(key))
+			d.refresh()
+			retainedCert, _, err := current()
+			require.NoError(t, err)
+			assert.Equal(t, originalCert, retainedCert)
+			// Renew identity without repairing the CA; refresh must still proceed.
+			require.NoError(t, os.WriteFile(key, []byte(test2Key), 0600))
+			d.refresh()
+			retainedCert, _, err = current()
+			require.NoError(t, err)
+			assert.Equal(t, originalCert, retainedCert)
+			require.NoError(t, os.WriteFile(cert, []byte(test2Cert), 0644))
+			d.refresh()
+			renewedCert, retainedPool, err := current()
+			require.NoError(t, err)
+			expectedCert, err := tls.LoadX509KeyPair(cert, key)
+			require.NoError(t, err)
+			assert.Equal(t, expectedCert, *renewedCert)
+			assert.NotEqual(t, originalCert.Certificate, renewedCert.Certificate)
+			assert.Same(t, originalPool, retainedPool)
+
+			hook := logtest.NewLocal(d.logger)
+			// A mixed bundle must install its usable certificates, as before strict validation.
+			require.NoError(t, os.WriteFile(ca, []byte(test2Cert+"\n"+invalid), 0644))
+			d.refresh()
+			_, updatedPool, err := current()
+			require.NoError(t, err)
+			if tc.client {
+				assert.Same(t, originalPool, updatedPool, "client CA hot reload remains out of scope")
+				d.refresh()
+				assert.Len(t, hook.AllEntries(), 1, "unchanged client CA must not repeat warnings")
+				require.NoError(t, os.WriteFile(ca, []byte(testCaCert), 0644))
+				d.refresh()
+				require.NoError(t, os.WriteFile(ca, []byte(test2Cert), 0644))
+				d.refresh()
+				assert.Len(t, hook.AllEntries(), 3, "each newly observed CA change is reported")
+				assert.Equal(t, []byte(testCaCert), d.cachedCa, "installed CA is not overwritten by observations")
+			} else {
+				expected := x509.NewCertPool()
+				require.True(t, expected.AppendCertsFromPEM([]byte(test2Cert)))
+				assert.True(t, expected.Equal(updatedPool))
+				assert.NotSame(t, originalPool, updatedPool)
+			}
+		})
+	}
+}
+
+func TestDynTLSCfg_CloseIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "tls.key")
+	require.NoError(t, os.WriteFile(key, []byte(test1Key), 0600))
+	cert := filepath.Join(dir, "tls.crt")
+	require.NoError(t, os.WriteFile(cert, []byte(test1Cert), 0644))
+	ca := filepath.Join(dir, "ca.crt")
 	require.NoError(t, os.WriteFile(ca, []byte(testCaCert), 0644))
 
-	d, err := NewDynTLSCfg(key, cert, ca)
+	dynamicConfig, err := NewDynTLSCfg(key, cert, ca)
 	require.NoError(t, err)
-	defer d.Close()
-
-	// Simulate a prior failed refresh leaving a sticky error behind
-	// (the bug this test guards against).
-	d.Lock()
-	d.err = errors.New("simulated prior refresh failure")
-	d.Unlock()
-
-	d.refresh()
-
-	d.Lock()
-	gotErr := d.err
-	d.Unlock()
-	assert.NoError(t, gotErr, "refresh() should clear sticky error from prior failed attempt")
+	dynamicConfig.Close()
+	assert.NotPanics(t, dynamicConfig.Close)
 }

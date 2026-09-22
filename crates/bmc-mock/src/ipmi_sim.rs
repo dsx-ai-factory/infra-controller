@@ -34,11 +34,11 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::pipe;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::redfish::account_service::PasswordUpdater;
 use crate::redfish::manager::ManagerState;
-use crate::{BmcState, Callbacks, SystemPowerControl};
+use crate::{BmcState, Callbacks, ResourceResetType};
 
 const START_ATTEMPTS: usize = 5;
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -62,6 +62,9 @@ pub struct IpmiSimConfig {
     pub console_prompt: String,
 }
 
+/// Owns an IPMI simulator and its SOL console.
+///
+/// Dropping the handle stops the simulator and cancels accepted SOL connections and their output.
 pub struct IpmiSimHandle {
     child: tokio::process::Child,
     _chassis_control: ChassisControl,
@@ -302,8 +305,9 @@ impl ChassisControl {
                 match lines.next_line().await {
                     Ok(Some(line)) => match line.parse::<ChassisControlEvent>() {
                         Ok(ChassisControlEvent::Reset) => {
-                            if let Err(error) =
-                                callbacks.send_power_command(SystemPowerControl::ForceRestart)
+                            if let Err(error) = callbacks
+                                .computer_system_reset(ResourceResetType::ForceRestart)
+                                .await
                             {
                                 tracing::warn!(
                                     error = %error,
@@ -531,14 +535,31 @@ impl MockConsole {
         let listener = TokioTcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
         let bmc_mock_console_port = listener.local_addr()?.port();
         let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let prompt = prompt.clone();
-                let output = output_factory.as_ref().map(|factory| factory());
-                tokio::spawn(async move {
-                    if let Err(error) = serve_console(stream, &prompt, output).await {
-                        tracing::debug!(%error, "mock SOL console connection closed with error");
+            let mut connections = JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (stream, _) = match accepted {
+                            Ok(connection) => connection,
+                            Err(error) => {
+                                tracing::warn!(%error, "mock SOL console accept failed");
+                                break;
+                            }
+                        };
+                        let prompt = prompt.clone();
+                        let output = output_factory.as_ref().map(|factory| factory());
+                        connections.spawn(async move {
+                            if let Err(error) = serve_console(stream, &prompt, output).await {
+                                tracing::debug!(%error, "mock SOL console connection closed with error");
+                            }
+                        });
                     }
-                });
+                    result = connections.join_next(), if !connections.is_empty() => {
+                        if let Some(Err(error)) = result {
+                            tracing::warn!(%error, "mock SOL console connection task failed");
+                        }
+                    }
+                }
             }
         });
         Ok(Self {
@@ -586,59 +607,20 @@ async fn serve_console(
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use bytes::Bytes;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
-    use tokio::sync::Notify;
 
     use super::{
         ChassisControlEvent, ConsoleOutputStream, ConsoleOutputStreamFactory, Error,
         IPMI_SIM_EXECUTABLE, IpmiSimConfig, MockConsole, stable_guid, start, validate_credential,
         validate_executable_in_path,
     };
-    use crate::{Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl};
-
-    #[derive(Debug, Default)]
-    struct RecordingCallbacks {
-        commands: Mutex<Vec<SystemPowerControl>>,
-        command_received: Notify,
-    }
-
-    impl RecordingCallbacks {
-        async fn wait_for_command_count(&self, expected_count: usize) {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let command_received = self.command_received.notified();
-                    if self.commands.lock().unwrap().len() >= expected_count {
-                        return;
-                    }
-                    command_received.await;
-                }
-            })
-            .await
-            .expect("timed out waiting for chassis reset callback");
-        }
-    }
-
-    impl Callbacks for RecordingCallbacks {
-        fn get_power_state(&self) -> MockPowerState {
-            MockPowerState::On
-        }
-
-        fn send_power_command(
-            &self,
-            request: SystemPowerControl,
-        ) -> Result<(), SetSystemPowerError> {
-            self.commands.lock().unwrap().push(request);
-            self.command_received.notify_one();
-            Ok(())
-        }
-
-        fn state_refresh_indication(&self) {}
-    }
+    use crate::ResourceResetType;
+    use crate::test_support::TestCallbacks;
 
     #[test]
     fn ipmi_sim_executable_is_required() {
@@ -714,7 +696,7 @@ mod tests {
 
     #[tokio::test]
     async fn real_ipmitool_resets_chassis() {
-        let callbacks = Arc::new(RecordingCallbacks::default());
+        let callbacks = Arc::new(TestCallbacks::default());
         let bmc =
             crate::test_support::generic_supermicro_bmc_with_callbacks(callbacks.clone()).await;
         let state = bmc.state;
@@ -767,7 +749,7 @@ mod tests {
 
         assert_eq!(
             *callbacks.commands.lock().unwrap(),
-            vec![SystemPowerControl::ForceRestart]
+            vec![ResourceResetType::ForceRestart]
         );
     }
 

@@ -18,24 +18,33 @@
 use std::collections::{HashMap, HashSet};
 
 use carbide_uuid::site_prefix::SitePrefixId;
+use carbide_uuid::vpc::{VpcId, VpcPrefixId};
+use config_version::ConfigVersion;
+use ipnetwork::IpNetwork;
 use model::metadata::Metadata;
 use model::site_prefix::{
     NewTenantManagedSitePrefix, SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState,
 };
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{
-    Label, Metadata as RpcMetadata, PrefixMatchType, SitePrefixAuthority as RpcSitePrefixAuthority,
+    Label, ManagedHostNetworkConfigRequest, Metadata as RpcMetadata, NetworkSegmentDeletionRequest,
+    NetworkSegmentsByIdsRequest, PrefixMatchType, SitePrefixAuthority as RpcSitePrefixAuthority,
     SitePrefixCreationRequest, SitePrefixDeletionRequest,
     SitePrefixLifecycleState as RpcSitePrefixLifecycleState,
     SitePrefixRoutingScope as RpcSitePrefixRoutingScope, SitePrefixSearchFilter,
     SitePrefixStateHistoriesRequest, SitePrefixUpdateRequest, SitePrefixesByIdsRequest,
+    VersionRequest,
 };
 use tonic::{Code, Request};
 
+use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
 use crate::tests::common::api_fixtures::{
-    TestEnv, TestEnvOverrides, create_test_env, create_test_env_with_overrides, get_config,
+    TestEnv, TestEnvOverrides, create_managed_host, create_test_env,
+    create_test_env_with_overrides, get_config,
 };
+use crate::tests::common::network_segment::NetworkSegmentHelper;
+use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 fn tenant_managed_site_prefix(
     prefix: &str,
@@ -109,6 +118,23 @@ async fn persist_configured_site_prefix(env: &TestEnv, prefix: &str) -> SitePref
         .unwrap()
         .pop()
         .unwrap()
+}
+
+/// Reads the effective FNN null routes through the public Version RPC so
+/// retention tests verify the operator-visible contract rather than DB state.
+async fn runtime_config_null_routes(env: &TestEnv) -> Vec<String> {
+    env.api
+        .version(Request::new(VersionRequest {
+            display_config: true,
+        }))
+        .await
+        .expect("Version must succeed")
+        .into_inner()
+        .runtime_config
+        .expect("display_config must return runtime configuration")
+        .site_fabric_null_routes
+        .expect("new Core must report the effective null-route set")
+        .items
 }
 
 fn filter_ids(ids: &[SitePrefixId]) -> HashSet<SitePrefixId> {
@@ -766,4 +792,367 @@ async fn site_prefix_update_retirement_and_history_enforce_ownership(pool: sqlx:
         .await
         .unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
+}
+
+/// Verifies the Version RPC retains a retired operator root through child soft
+/// deletion, so operator-visible isolation lasts until the address space drains.
+#[crate::sqlx_test]
+async fn runtime_config_retains_removed_operator_root_until_child_hard_delete(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Current configuration omits the old root; persistence must supply it.
+    let configured_root: IpNetwork = "10.0.0.0/8".parse()?;
+    let retiring_root: IpNetwork = "172.16.0.0/12".parse()?;
+    let mut config = get_config();
+    config.site_fabric_prefixes = vec![configured_root];
+    config.site_fabric_null_routes = None;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+
+    // Reconstruct a retired root with exact legacy child lineage. Direct SQL
+    // models the predecessor state after new admission for that root has closed.
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &[configured_root, retiring_root]).await?;
+    db::site_prefix::reconcile_configured(&mut txn, &[configured_root]).await?;
+    let retiring_root_id: SitePrefixId =
+        sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1")
+            .bind(retiring_root)
+            .fetch_one(&mut *txn)
+            .await?;
+    let vpc_id = VpcId::new();
+    sqlx::query("INSERT INTO vpcs (id, name, organization_id, version) VALUES ($1, $2, $3, $4)")
+        .bind(vpc_id)
+        .bind("runtime-config-retained-root")
+        .bind("tenant-a")
+        .bind(ConfigVersion::initial())
+        .execute(&mut *txn)
+        .await?;
+    let child_id = VpcPrefixId::new();
+    sqlx::query(
+        "INSERT INTO network_vpc_prefixes (id, prefix, name, vpc_id, site_prefix_id) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(child_id)
+    .bind("172.16.1.0/24".parse::<IpNetwork>()?)
+    .bind("retained child")
+    .bind(vpc_id)
+    .bind(retiring_root_id)
+    .execute(&mut *txn)
+    .await?;
+    // A draining child still owns address space even after its soft deletion.
+    sqlx::query("UPDATE network_vpc_prefixes SET deleted = now() WHERE id = $1")
+        .bind(child_id)
+        .execute(&mut *txn)
+        .await?;
+    txn.commit().await?;
+
+    // Re-read through Version so the assertion proves committed query wiring.
+    let mut null_routes = runtime_config_null_routes(&env).await;
+    null_routes.sort();
+    assert_eq!(
+        null_routes,
+        vec![configured_root.to_string(), retiring_root.to_string()],
+        "soft-deleted children must retain the retiring root"
+    );
+
+    // Only physical removal of the last child permits the route to disappear.
+    sqlx::query("DELETE FROM network_vpc_prefixes WHERE id = $1")
+        .bind(child_id)
+        .execute(&env.pool)
+        .await?;
+    assert_eq!(
+        runtime_config_null_routes(&env).await,
+        vec![configured_root.to_string()],
+        "the retiring root may be withdrawn after its last child is hard-deleted"
+    );
+
+    Ok(())
+}
+
+/// Proves a retired root remains protected while a public direct VPC segment
+/// drains, because its NetworkPrefix has no VpcPrefix lineage to retain it.
+#[crate::sqlx_test]
+async fn runtime_config_retains_removed_operator_root_until_direct_segment_hard_delete(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Keep admission on the predecessor roots while runtime config models
+    // retirement, so the public segment creation path remains representative.
+    let configured_root: IpNetwork = "10.0.0.0/8".parse()?;
+    let retiring_root: IpNetwork = "172.16.0.0/12".parse()?;
+    let mut config = get_config();
+    config.site_fabric_prefixes = vec![configured_root];
+    config.site_fabric_null_routes = None;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            // Admission represents the pre-retirement configuration, while
+            // runtime configuration represents the restarted target Core.
+            site_prefixes: Some(vec![configured_root, retiring_root]),
+            network_segments_drain_period: Some(chrono::Duration::zero()),
+            ..TestEnvOverrides::with_config(config).with_fnn_config(None)
+        },
+    )
+    .await;
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
+
+    // Reconstruct the operator root before creating the tenant resource
+    // through the same public path used before its configuration retirement.
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &[configured_root, retiring_root]).await?;
+    txn.commit().await?;
+    let vpc_id = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .metadata(RpcMetadata {
+                    name: "direct-prefix retained-root VPC".to_string(),
+                    ..Default::default()
+                })
+                .tonic_request(),
+        )
+        .await?
+        .into_inner()
+        .id
+        .expect("created VPC must have an ID");
+    let segment =
+        NetworkSegmentHelper::new_with_tenant_prefix("172.16.1.0/24", "172.16.1.1", vpc_id)
+            .create_with_api(&env.api)
+            .await?;
+    let segment_id = segment.id.expect("created segment must have an ID");
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+
+    // Reload through the public API to prove the direct segment and its prefix
+    // reached persistence before testing the retention contract.
+    let persisted_segments = env
+        .api
+        .find_network_segments_by_ids(Request::new(NetworkSegmentsByIdsRequest {
+            network_segments_ids: vec![segment_id],
+            include_history: false,
+            include_num_free_ips: false,
+        }))
+        .await?
+        .into_inner()
+        .network_segments;
+    assert_eq!(persisted_segments.len(), 1);
+    assert_eq!(persisted_segments[0].id, Some(segment_id));
+
+    // Retire the root as startup reconciliation does after its removal from
+    // configuration, then verify the direct prefix retains its blackhole.
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &[configured_root]).await?;
+    txn.commit().await?;
+    assert_eq!(
+        runtime_config_null_routes(&env).await,
+        vec![configured_root.to_string(), retiring_root.to_string()]
+    );
+
+    // Soft deletion must not withdraw isolation while the segment's direct
+    // NetworkPrefix remains present during controller draining.
+    env.api
+        .delete_network_segment(Request::new(NetworkSegmentDeletionRequest {
+            id: Some(segment_id),
+        }))
+        .await?;
+    assert_eq!(
+        runtime_config_null_routes(&env).await,
+        vec![configured_root.to_string(), retiring_root.to_string()]
+    );
+
+    // Drive the zero-duration drain through physical deletion, which removes
+    // the final direct prefix and permits the retired route to disappear.
+    for _ in 0..3 {
+        env.run_network_segment_controller_iteration().await;
+    }
+    assert!(
+        env.api
+            .find_network_segments_by_ids(Request::new(NetworkSegmentsByIdsRequest {
+                network_segments_ids: vec![segment_id],
+                include_history: false,
+                include_num_free_ips: false,
+            }))
+            .await?
+            .into_inner()
+            .network_segments
+            .is_empty()
+    );
+    assert_eq!(
+        runtime_config_null_routes(&env).await,
+        vec![configured_root.to_string()]
+    );
+
+    Ok(())
+}
+
+/// Proves an FNN DPU response remains fail-closed for predecessor data whose
+/// VpcPrefix lineage is ambiguous after the final configured root is removed.
+#[crate::sqlx_test]
+async fn dpu_response_retains_containing_roots_for_unassigned_predecessor_prefix(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Separate the predecessor owner from the serving tenant so retained roots
+    // must be discovered site-wide even with no roots in current configuration.
+    let broad_root: IpNetwork = "10.0.0.0/8".parse()?;
+    let specific_root: IpNetwork = "10.1.0.0/16".parse()?;
+    let mut config = get_config();
+    config.site_fabric_prefixes.clear();
+    config.site_fabric_null_routes = None;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(vec![]),
+            ..TestEnvOverrides::with_config(config).with_fnn_config(None)
+        },
+    )
+    .await;
+    let predecessor_tenant = "predecessor-lineage-tenant";
+    create_fixture_tenant(&env, predecessor_tenant).await?;
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
+    let predecessor_vpc_id = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(predecessor_tenant)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .metadata(RpcMetadata {
+                    name: "predecessor-lineage VPC".to_string(),
+                    ..Default::default()
+                })
+                .tonic_request(),
+        )
+        .await?
+        .into_inner()
+        .id
+        .expect("predecessor VPC must have an ID");
+    let segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .metadata(RpcMetadata {
+                    name: "serving tenant VPC".to_string(),
+                    ..Default::default()
+                })
+                .rpc(),
+        )
+        .await;
+
+    // Reconstruct v2.1-style nested roots and a child left unassigned by the
+    // lineage migration, then remove the final target configuration root.
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &[broad_root, specific_root]).await?;
+    db::site_prefix::reconcile_configured(&mut txn, &[]).await?;
+    sqlx::query(
+        "INSERT INTO network_vpc_prefixes (id, prefix, name, vpc_id) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(VpcPrefixId::new())
+    .bind("10.1.2.0/24".parse::<IpNetwork>()?)
+    .bind("ambiguous predecessor child")
+    .bind(predecessor_vpc_id)
+    .execute(&mut *txn)
+    .await?;
+    txn.commit().await?;
+
+    // Exercise the public DPU response rather than only the retained-root
+    // query so the complete fail-closed rendering path is protected.
+    let host = create_managed_host(&env).await;
+    host.instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let response = env
+        .api
+        .get_managed_host_network_config(Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(host.dpu().id),
+        }))
+        .await?
+        .into_inner();
+    let mut rendered_roots = response
+        .site_fabric_null_routes
+        .expect("new Core must send a presence-bearing FNN route list")
+        .items;
+    rendered_roots.sort();
+    let expected = vec![broad_root.to_string()];
+
+    // Core conservatively discovers both possible parents, then collapses the
+    // inherited exact union for the new field. Legacy fields remain bound to
+    // the now-empty configured site-prefix list so old agents behave exactly
+    // as they did before route-based isolation was introduced.
+    assert_eq!(rendered_roots, expected);
+    assert!(response.site_fabric_prefixes.is_empty());
+    assert!(response.deprecated_deny_prefixes.is_empty());
+
+    Ok(())
+}
+
+/// Proves the public FNN DPU response uses the explicit runtime override,
+/// rather than the independently seeded legacy Ethernet data.
+#[crate::sqlx_test]
+async fn dpu_response_uses_explicit_fnn_null_route_override(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let inherited_root: IpNetwork = "198.51.100.0/24".parse()?;
+    let null_route: IpNetwork = "10.0.0.0/8".parse()?;
+    let stronger_null_route: IpNetwork = "10.2.0.0/24".parse()?;
+
+    // Keep every possible source distinct so the response identifies whether
+    // Core used runtime configuration or independently seeded legacy data.
+    let mut config = get_config();
+    config.site_fabric_prefixes = vec![inherited_root];
+    config.site_fabric_null_routes = Some(vec![null_route, stronger_null_route]);
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_fnn_config(None),
+    )
+    .await;
+
+    // Attach an FNN instance so the public DPU handler takes its FNN-specific
+    // null-route path rather than the ETV site-prefix path.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
+    let segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .metadata(RpcMetadata {
+                    name: "explicit null-route VPC".to_string(),
+                    ..Default::default()
+                })
+                .rpc(),
+        )
+        .await;
+    let host = create_managed_host(&env).await;
+    host.instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    // Exercise the wire response because Core must keep legacy site prefixes
+    // separate from the authoritative null routes selected for new agents.
+    let response = env
+        .api
+        .get_managed_host_network_config(Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(host.dpu().id),
+        }))
+        .await?
+        .into_inner();
+    let expected = vec![null_route.to_string(), stronger_null_route.to_string()];
+
+    // The original site-prefix data remains in the legacy fields. The
+    // contained /24 remains present only in the new field so an authorized /8
+    // import does not make that range reachable on updated agents.
+    assert_eq!(
+        response.site_fabric_prefixes,
+        vec![inherited_root.to_string()]
+    );
+    assert_eq!(
+        response.deprecated_deny_prefixes,
+        vec![inherited_root.to_string()]
+    );
+    assert_eq!(
+        response
+            .site_fabric_null_routes
+            .expect("new Core must send a presence-bearing FNN route list")
+            .items,
+        expected
+    );
+
+    Ok(())
 }

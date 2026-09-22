@@ -34,6 +34,7 @@ pub(crate) struct GnmiSampleProcessor {
     pub(crate) data_sink: Option<Arc<dyn DataSink>>,
     pub(crate) event_context: EventContext,
     pub(crate) switch_id: String,
+    pub(crate) diagnostic_stream: Option<&'static str>,
 }
 
 impl GnmiSampleProcessor {
@@ -51,6 +52,7 @@ impl GnmiSampleProcessor {
                 tracing::warn!(
                     grpc_status_code = e.code,
                     error = %e.message,
+                    stream = self.diagnostic_stream,
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
                     "nvue_gnmi SAMPLE: server error in stream"
                 );
@@ -1197,7 +1199,7 @@ mod tests {
         let addr = BmcAddr {
             ip: "10.0.0.1".parse().unwrap(),
             port: None,
-            mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+            mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
         };
         let event_context = EventContext {
             endpoint_key: "aa:bb:cc:dd:ee:ff".to_string(),
@@ -1211,6 +1213,7 @@ mod tests {
             data_sink: None,
             event_context,
             switch_id: "serial-abc".to_string(),
+            diagnostic_stream: None,
         }
     }
 
@@ -1268,7 +1271,7 @@ mod tests {
                 addr: BmcAddr {
                     ip: "10.0.0.1".parse().unwrap(),
                     port: None,
-                    mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+                    mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
                 },
                 collector_type: NVUE_GNMI_SAMPLE_STREAM_ID,
                 labels: Default::default(),
@@ -1286,6 +1289,7 @@ mod tests {
                 rack_id: Some(RackId::new("RACK_2")),
             },
             switch_id: "SN-SWITCH-001".to_string(),
+            diagnostic_stream: None,
         };
         let notification = proto::Notification {
             timestamp: 0,

@@ -145,9 +145,9 @@ sections and which page in this guide owns the deep dive.
 
 ### Site identity
 
-`sitename`, `initial_domain_name`, `asn`, `datacenter_asn`,
-`vpc_isolation_behavior`, `vpc_peering_policy`,
-`max_concurrent_machine_updates`. Set once at install time.
+`sitename`, `initial_domain_name`, `asn`, `datacenter_asn`, `vpc_isolation_behavior`, `vpc_peering_policy`, `vpc_peering_policy_on_existing`, `max_concurrent_machine_updates`. Set once at install time.
+
+The `mixed` value for either VPC peering policy is deprecated. NICo logs a startup warning and treats it as `exclusive`. ETV and FNN VPCs are not compatible peers. Creation requests for that pair return `InvalidArgument` under every policy. Stored ETV/FNN peering rows remain discoverable and removable but contribute neither ETV peer-prefix ACL permits nor FNN peer-VNI route-target imports. `vpc_peering_policy_on_existing = "none"` disables both mechanisms for every stored peering.
 
 ### IP and VNI pools
 
@@ -168,10 +168,11 @@ for `prefix_v6`, `dhcpv6_link_address`, examples, and compatibility requirements
 
 ### Tenant traffic policy
 
-`site_fabric_prefixes` (CIDRs allowed for tenant-to-tenant traffic) and
-`deny_prefixes` (CIDRs tenant instances must not reach — typically OOB,
-management, control-plane). `deny_prefixes` generates iptables DROP rules
-and NVUE ACL policies on DPUs.
+`site_fabric_prefixes` defines the tenant address space within the site. With mutual isolation, ETV enforces its IPv4 entries with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL.
+
+`site_fabric_null_routes` controls the FNN isolation routes. When omitted, it inherits `site_fabric_prefixes` and retains removed operator-managed roots while they contain a VpcPrefix or VPC-attached direct NetworkPrefix. Soft-deleted children retain coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative. An empty list disables the routes. Inherited roots are reduced to their minimal exact union. Explicit CIDRs are canonicalized and exact duplicates are removed, but parent, child, and adjacent entries remain distinct so a child blackhole can remain beneath an importable parent route. FNN installs the routes with administrative distance 250 in each VPC VRF, so an authorized route wins only when it is at least as specific as the applicable blackhole. Do not combine an effective `/0` null route with `leak_default_route_from_underlay = true` for the same address family; the imported default has a better administrative distance than the equal-prefix blackhole.
+
+`deny_prefixes` identifies CIDRs tenant instances must not reach—typically OOB, management, or control-plane networks—and generates iptables DROP rules and NVUE ACL policies on DPUs. Open isolation installs neither the FNN blackhole routes nor the ETV isolation ACLs.
 
 ### DHCP, route servers, and BGP
 
@@ -231,9 +232,11 @@ field.
 NICo trims outer whitespace from `product_family` and vendor values and requires
 both to be non-empty. It does not validate either value against a fixed list.
 RMS determines whether each role/vendor/product-family combination is supported
-when a request is made. See
-[Supported RMS descriptor combinations](../../../docs/configuration/component-manager-rms.md#supported-rms-descriptor-combinations),
-including VRNVL72.
+when a request is made. Refer to the
+[Hardware Compatibility List](https://docs.nvidia.com/rms/documentation/reference/hardware-compatibility-list)
+as a compatibility reference. The list includes hardware under development, and
+inclusion does not imply qualification, certification, or support. Confirm
+support for each combination against the deployed RMS release.
 
 For product families other than `gb200` and `gb300`, the `GetRackProfile`
 `product_family` enum is `UNSPECIFIED`. The configured string remains available
@@ -279,7 +282,7 @@ vendor = "LiteOn"
 count = 8
 ```
 
-Example: GB300 rack with Lenovo compute trays and Delta power shelves:
+Example: GB300 rack with NVIDIA compute trays and Delta power shelves:
 
 ```toml
 [component_manager]
@@ -292,7 +295,7 @@ product_family = "gb300"
 rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
 
 [rack_profiles.NVL72_GB300.rack_capabilities.compute]
-vendor = "Lenovo"
+vendor = "NVIDIA"
 count = 18
 
 [rack_profiles.NVL72_GB300.rack_capabilities.switch]
@@ -1065,11 +1068,12 @@ this request timeout, although the parser accepts other duration units such as
 milliseconds (`ms`), minutes (`m`), and hours (`h`). Without the block, NICo
 skips compute-tray pre-ingestion updates and both automatic rack maintenance
 update phases. An explicit maintenance request can supply a firmware object
-instead. If no firmware object is available while a switch in the maintenance
-scope is already waiting for an NVOS update, the rack transitions to `Error`
-instead of skipping the NVOS phase. The optional `access_token_credential`
-names a stored firmware artifact access token used by compute-tray
-pre-ingestion. When omitted, NICo sends the RMS no-auth sentinel.
+instead. If no firmware object is available while a selected switch is in
+`WaitingForNVOSUpgrade` for a reprovision request whose initiator is
+`rack-{rack_id}`, the rack transitions to `Error` instead of skipping the NVOS
+phase. The optional `access_token_credential` names a stored firmware artifact
+access token used by compute-tray pre-ingestion. When omitted, NICo sends the
+RMS no-auth sentinel.
 
 ---
 

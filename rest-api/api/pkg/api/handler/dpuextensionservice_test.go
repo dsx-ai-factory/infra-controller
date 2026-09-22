@@ -34,7 +34,7 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-const validDpfHelmChartDataForHandlerTest = `{"repoURL":"oci://registry.example.com/charts","chartName":"firewall","chartVersion":"1.2.3","security.privileged":false}`
+const validDpfHelmChartData = `{"repoURL":"oci://registry.example.com/charts","chartName":"firewall","chartVersion":"1.2.3","security.privileged":false,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"firewall"},"annotations":{"example.com/owner":"tenant"},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}`
 
 // TestCreateDpuExtensionServiceHandler_Handle tests the Create DPU Extension Service handler
 func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
@@ -180,7 +180,7 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 		ServiceType: model.DpuExtensionServiceTypeDpfHelmChart,
 		DpuTarget:   cutil.GetPtr(model.DpuExtensionServiceDpuTargetAllActive),
 		SiteID:      st1.ID.String(),
-		Data:        validDpfHelmChartDataForHandlerTest,
+		Data:        validDpfHelmChartData,
 	}
 	dpfBodyBytes, _ := json.Marshal(dpfBody)
 
@@ -865,6 +865,7 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 
 	dpfBody := model.APIDpuExtensionServiceUpdateRequest{
 		Description: cutil.GetPtr("Updated DPF Description"),
+		Data:        cutil.GetPtr(validDpfHelmChartData),
 	}
 	dpfBodyBytes, _ := json.Marshal(dpfBody)
 
@@ -1056,6 +1057,8 @@ func TestUpdateDpuExtensionServiceHandler_Handle(t *testing.T) {
 					// Core did not report a lifecycle state, so the stored status is kept
 					assert.Equal(t, cdbm.DpuExtensionServiceStatusPending, apiDES.Status)
 					assert.Equal(t, *dpfBody.Description, *apiDES.Description)
+					require.NotNil(t, capturedUpdateRequest)
+					assert.Equal(t, *dpfBody.Data, capturedUpdateRequest.Data)
 				} else if strings.Contains(tt.name, "data/credentials") {
 					assert.Equal(t, *okBody2.Name, apiDES.Name)
 					assert.Equal(t, *okBody2.Description, *apiDES.Description)

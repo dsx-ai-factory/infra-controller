@@ -389,9 +389,10 @@ async fn reset_set_rejects_a_force_deleting_host(pool: sqlx::PgPool) {
 /// `Clear` is the withdrawal path, and it closes once the controller stamps `started_at`
 /// and begins tearing the host down. Both halves matter: an operator has to be able to take
 /// back a request that has not started, and a late clear must not cancel a teardown that is
-/// already deleting the tenant instance and the host's DPF CRs.
+/// already deleting the tenant instance and the host's DPF CRs. A second `set` is refused for
+/// the same reason: it would restart the teardown from scratch.
 #[crate::sqlx_test]
-async fn reset_clear_withdraws_only_a_reset_that_has_not_started(pool: sqlx::PgPool) {
+async fn reset_set_and_clear_are_refused_once_a_reset_has_started(pool: sqlx::PgPool) {
     let env = dpf_test_env(pool).await;
     let managed_host = dpf_ingested_host(&env).await;
     managed_host.mark_machine_for_updates().await;
@@ -450,13 +451,26 @@ async fn reset_clear_withdraws_only_a_reset_that_has_not_started(pool: sqlx::PgP
         error.message()
     );
 
+    // A second `set` must not replace a started reset.
+    let error = env
+        .api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error.message().contains("already in progress"),
+        "unexpected message: {}",
+        error.message()
+    );
+
     let mut txn = env.db_txn().await;
     let request = managed_host
         .host()
         .db_machine(&mut txn)
         .await
         .reset_requested
-        .expect("the started reset should survive a refused clear");
+        .expect("the started reset should survive a refused clear and set");
     assert!(request.started_at.is_some());
 }
 

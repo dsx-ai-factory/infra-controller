@@ -265,8 +265,26 @@ mod tests {
     use crate::cfg::file::ApiAdmissionControlConfig;
     use crate::tests::create_test_env;
 
-    #[crate::sqlx_test]
-    async fn stalled_initial_message_times_out_and_releases_admission_capacity(pool: sqlx::PgPool) {
+    #[test]
+    fn stalled_initial_message_times_out_and_releases_admission_capacity() {
+        let mut args = sqlx::testing::TestArgs::new(concat!(
+            module_path!(),
+            "::stalled_initial_message_times_out_and_releases_admission_capacity"
+        ));
+        args.fixtures(Box::leak(Box::new(vec![])));
+        let test_fn: fn(sqlx::PgPool) -> _ = stalled_initial_message_test_body;
+        // The unoptimized generated Forge dispatcher alone consumes nearly 2 MiB
+        // of stack as RPCs are added. Keep the real router test on a dedicated
+        // stack without changing production runtime settings or test assertions.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+            .expect("spawn scout stream router test")
+            .join()
+            .expect("scout stream router test panicked");
+    }
+
+    async fn stalled_initial_message_test_body(pool: sqlx::PgPool) {
         let env = create_test_env(pool).await;
         let mut join_set = JoinSet::new();
         let controller = ApiAdmissionControl::from_config(

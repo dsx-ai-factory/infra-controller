@@ -224,10 +224,10 @@ All of these are **admin-only**; the Forge gRPC service enforces admin authoriza
 | admin-cli | Forge RPC | Purpose |
 |---|---|---|
 | `em add …` | `AddExpectedMachine` | Add one host (BMC creds, `--dpu-policy`, `--interfaces`, metadata). |
-| `em show [--bmc-mac-address <mac>]` | `GetAllExpectedMachines` / `GetExpectedMachine` | List all, or show one. Add `-f json` to export. |
+| `em show [<mac>]` or `em show --id <uuid>` | `GetAllExpectedMachines` / `GetExpectedMachine` | Use one selector to show one entry, or omit both to list all. Put `-f json` before `em` for JSON output. |
 | `em update --filename <json>` | `UpdateExpectedMachine` | Full replacement of one entry from JSON. |
 | `em patch --bmc-mac-address <mac> …` | `UpdateExpectedMachine` | Partial update (e.g. `--dpu-policy`), preserving other fields. |
-| `em delete --bmc-mac-address <mac>` | `DeleteExpectedMachine` | Remove one entry. |
+| `em delete <mac>` or `em delete --id <uuid>` | `DeleteExpectedMachine` | Remove one entry. Provide exactly one selector. |
 | `em replace-all --filename <json>` | (bulk) | Replace the entire table from a file. |
 | `em erase` | (bulk) | Erase the entire table. |
 

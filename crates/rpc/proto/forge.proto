@@ -602,6 +602,18 @@ service Forge {
   // Delete all expected racks in site
   rpc DeleteAllExpectedRacks(google.protobuf.Empty) returns (google.protobuf.Empty);
 
+  // Expected Rack Group Management
+  rpc AddExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
+  rpc DeleteExpectedRackGroup(ExpectedRackGroupRequest) returns (google.protobuf.Empty);
+  // Replace the full record, including both lists and metadata.
+  rpc UpdateExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
+  rpc GetExpectedRackGroup(ExpectedRackGroupRequest) returns (ExpectedRackGroup);
+  rpc FindExpectedRackGroupIds(ExpectedRackGroupSearchFilter) returns (ExpectedRackGroupIdList);
+  rpc FindExpectedRackGroupsByIds(ExpectedRackGroupsByIdsRequest) returns (ExpectedRackGroupList);
+  // Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
+  rpc ReplaceAllExpectedRackGroups(ExpectedRackGroupList) returns (google.protobuf.Empty);
+  rpc DeleteAllExpectedRackGroups(google.protobuf.Empty) returns (google.protobuf.Empty);
+
   // Perform Attestation Procedure for Measured Boot
   rpc AttestQuote	(AttestQuoteRequest) returns (AttestQuoteResponse);
 
@@ -1760,6 +1772,13 @@ message RuntimeConfig {
   bool svpc_enabled = 55;
   bool astra_enabled = 56;
   bool ewethers_enabled = 57;
+
+  // Effective FNN null-route set. When site_fabric_null_routes is omitted from
+  // site configuration, this includes site_fabric_prefixes and removed
+  // operator-managed roots while they contain a VpcPrefix or VPC-attached
+  // direct NetworkPrefix. Older Core versions omit this field; an empty items
+  // list is authoritative.
+  optional common.StringList site_fabric_null_routes = 58;
 }
 
 message EchoRequest {
@@ -2261,6 +2280,8 @@ message VpcPeeringList {
 }
 
 message VpcPeeringCreationRequest {
+  // ETV and FNN VPCs are incompatible. Requests that pair them return
+  // INVALID_ARGUMENT regardless of the configured VPC peering policy.
   common.VpcId vpc_id = 1;
   common.VpcId peer_vpc_id = 2;
 
@@ -2847,6 +2868,56 @@ message LinkedExpectedSwitch {
   optional common.UUID expected_switch_id = 4;
   optional string explored_endpoint_address = 5; // The explored BMC IP
   optional common.RackId rack_id = 6;
+}
+
+message ExpectedRackGroup {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Required external identifier, non-blank and at most 128 characters.
+  optional common.RackGroupId rack_group_id = 1;
+  // External group-level NVLink topology identifier, non-blank and at most 128 characters.
+  string topology = 2;
+  // Non-blank, unique rack IDs, independent of device membership. Input order is preserved; may be empty.
+  repeated common.RackId rack_ids = 3;
+  // Descriptive attributes such as name, manufacturer, and location labels.
+  Metadata metadata = 4;
+  // Ordered device identities; (type, manufacturer, id) tuples must be unique. May be empty.
+  repeated ExpectedRackGroupMember members = 5;
+}
+
+message ExpectedRackGroupMember {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Core rack capability spelling: Compute, Switch, or PowerShelf (case-sensitive).
+  string type = 1;
+  // Non-blank external manufacturer name.
+  string manufacturer = 2;
+  // Non-blank external inventory identifier.
+  string id = 3;
+}
+
+message ExpectedRackGroupRequest {
+  // Required external identifier, non-blank and at most 128 characters.
+  string rack_group_id = 1;
+}
+
+message ExpectedRackGroupList {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  repeated ExpectedRackGroup expected_rack_groups = 1;
+}
+
+// Lists identifiers only; callers fetch complete records in bounded batches.
+message ExpectedRackGroupSearchFilter {
+}
+
+message ExpectedRackGroupIdList {
+  // Identifiers sorted lexicographically by the database.
+  repeated common.RackGroupId rack_group_ids = 1;
+}
+
+message ExpectedRackGroupsByIdsRequest {
+  // Non-empty batch, limited by the server's max_find_by_ids setting.
+  // Invalid identifiers are rejected; valid but absent identifiers are omitted.
+  // Results contain each existing record once, sorted by rack_group_id.
+  repeated common.RackGroupId rack_group_ids = 1;
 }
 
 message ExpectedRack {
@@ -5038,8 +5109,16 @@ message ManagedHostNetworkConfigResponse {
   // IP prefixes to be denied in the DPU ACL rules.
   repeated string deny_prefixes = 18;
 
-  // List of IP prefixes (in CIDR notation) that are assigned for tenant
-  // use within this site.
+  // Legacy site-prefix field. Core continues to send the configured
+  // site_fabric_prefixes here unchanged so older agents retain their existing
+  // behavior during a rolling upgrade. New FNN agents prefer the
+  // presence-bearing site_fabric_null_routes field below. When that field is
+  // absent in a response from an older Core, a new FNN agent reduces this list
+  // to its minimal exact union before rendering fallback blackhole routes.
+  // Other virtualizers consume this field directly. With mutual isolation,
+  // FNN installs floating blackhole routes while ETV enforces an IPv4
+  // isolation ACL only when the rendered configuration has no NSG. Open
+  // isolation installs neither form of enforcement.
   repeated string site_fabric_prefixes = 19;
 
   // Level of VPC isolation to apply
@@ -5053,6 +5132,18 @@ message ManagedHostNetworkConfigResponse {
   // site-level configured NTP server IPs
   // If empty, the agent may fall back to resolving carbide-ntp.forge for compatibility.
   repeated string ntp_servers = 22;
+
+  // True when Core authoritatively applied its stored-peering activation
+  // policy to every FlatInterfaceConfig.vpc_peer_vnis list in this response.
+  // Agents must ignore those lists when this is false. Older Core versions do
+  // not send this field, so rolling upgrades fail closed.
+  bool vpc_peer_vnis_authoritative = 23;
+
+  // Final FNN blackhole routes resolved by Core. Presence is authoritative,
+  // including a present empty list, and each distinct prefix boundary must be
+  // rendered. New agents fall back to site_fabric_prefixes only when this is
+  // absent in a response from an older Core. Non-FNN responses omit it.
+  optional common.StringList site_fabric_null_routes = 24;
 
   // Enable forge DHCP on HBN.
   // Deprecated: It is always enabled now.
@@ -5131,8 +5222,8 @@ message ManagedHostNetworkConfigResponse {
 
   // Due to limitations in Cumulus Linux route-leaking,
   // some sites may require all VRFs to use the same VNI.
-  // Isolation is still possible via ACLs, and route-imports
-  // will still use the dynamically allocated VNI for deriving
+  // FNN isolation still uses per-VRF site-fabric null routes, and
+  // route-imports still use the dynamically allocated VNI for deriving
   // route-targets.
   optional uint32 site_global_vpc_vni = 117;
 
@@ -5299,7 +5390,11 @@ message FlatInterfaceConfig {
   // Is this interface using L2 or L3.
   bool is_l2_segment = 15;
 
+  // Peer prefixes retained for ETV and older DPU agents. Current FNN agents
+  // establish peering only by importing the peer VNIs below.
   repeated string vpc_peer_prefixes = 16;
+  // Peer VNIs imported as EVPN route targets by FNN. Empty when stored VPC
+  // peerings are disabled by vpc_peering_policy_on_existing.
   repeated uint32 vpc_peer_vnis = 17;
 
   // MTU size

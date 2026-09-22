@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::collections::BTreeMap;
+
 use carbide_uuid::extension_service::ExtensionServiceId;
 use chrono::prelude::*;
 use config_version::{ConfigVersion, Versioned};
@@ -401,6 +403,9 @@ impl DpfHelmChartIdentity {
 /// This is intentionally the NICo API contract rather than a representation of
 /// the DPUService CR.  NICo owns the remaining DPUService fields, including
 /// the release name and placement selector.
+///
+/// @TODO(Felicity): check whether add deny_unknown_fields to DpfHelmChartData
+/// for backward compatibility concerns
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DpfHelmChartServiceData {
@@ -416,6 +421,63 @@ pub struct DpfHelmChartServiceData {
     /// field is sent to DPF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub values: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "serviceDaemonSet"
+    )]
+    pub service_daemon_set: Option<DpfHelmChartServiceDaemonSet>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DpfHelmChartServiceDaemonSet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<BTreeMap<String, DpfHelmChartIntOrString>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "updateStrategy"
+    )]
+    pub update_strategy: Option<DpfHelmChartDaemonSetUpdateStrategy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DpfHelmChartDaemonSetUpdateStrategy {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "type")]
+    pub strategy_type: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "rollingUpdate"
+    )]
+    pub rolling_update: Option<DpfHelmChartDaemonSetRollingUpdate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DpfHelmChartDaemonSetRollingUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxSurge")]
+    pub max_surge: Option<DpfHelmChartIntOrString>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "maxUnavailable"
+    )]
+    pub max_unavailable: Option<DpfHelmChartIntOrString>,
+}
+
+/// Preserves the integer-or-string wire representation used by DPF fields
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum DpfHelmChartIntOrString {
+    Int(i32),
+    String(String),
 }
 
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
@@ -580,6 +642,47 @@ mod tests {
                 &required.replace("%VALUES%", r#"{"serviceDaemonSet":{"nodeSelector":{}}}"#)
             ),
             Err(DpfHelmChartServiceDataError::ReservedNodeSelector)
+        );
+    }
+
+    #[test]
+    fn dpf_helm_chart_data_validates_and_round_trips_service_daemon_set() {
+        let input = r#"{
+            "repoURL":"https://charts.example.com",
+            "chartName":"tenant-service",
+            "chartVersion":"1.2.3",
+            "security.privileged":true,
+            "values":{"serviceDaemonSet":{"labels":{"chart-path":"preserved"}}},
+            "serviceDaemonSet":{
+                "labels":{"app.kubernetes.io/name":"storage-client","svc.dpu.nvidia.com/custom-flows":"enabled"},
+                "annotations":{"example.com/owner":"storage"},
+                "resources":{"nvidia.com/bf_sf":1,"memory":"500Mi"},
+                "updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}
+            }
+        }"#;
+
+        let parsed = DpfHelmChartServiceData::parse(input).unwrap();
+        let daemon_set = parsed.service_daemon_set.as_ref().unwrap();
+        assert_eq!(
+            daemon_set.resources.as_ref().unwrap()["nvidia.com/bf_sf"],
+            DpfHelmChartIntOrString::Int(1)
+        );
+        assert_eq!(
+            daemon_set.resources.as_ref().unwrap()["memory"],
+            DpfHelmChartIntOrString::String("500Mi".to_owned())
+        );
+        assert_eq!(
+            daemon_set
+                .update_strategy
+                .as_ref()
+                .unwrap()
+                .strategy_type
+                .as_deref(),
+            Some("RollingUpdate")
+        );
+        assert_eq!(
+            DpfHelmChartServiceData::parse(&parsed.normalized_json().unwrap()).unwrap(),
+            parsed
         );
     }
 

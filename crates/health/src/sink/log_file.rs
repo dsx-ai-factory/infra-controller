@@ -296,7 +296,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap(),
+                mac: Some(MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap()),
             },
             collector_type: "test",
             metadata: None,

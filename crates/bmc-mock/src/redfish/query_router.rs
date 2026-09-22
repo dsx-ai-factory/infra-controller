@@ -388,7 +388,7 @@ mod tests {
     use super::*;
     use crate::bmc_state::BmcState;
     use crate::redfish::log_service::LogEntryDraft;
-    use crate::test_support::{NoopCallbacks, host_info};
+    use crate::test_support::{TestCallbacks, host_info};
     use crate::{HardwareType, MachineRouterOptions, machine_router};
 
     const SYSTEM: &str = "/redfish/v1/Systems/System.Embedded.1";
@@ -397,10 +397,10 @@ mod tests {
     /// `Created` of the Dell profile's seeded entry.
     const SEED: &str = "2026-02-12T02:06:58Z";
 
-    fn dell_router() -> (Router, BmcState<NoopCallbacks>) {
+    fn dell_router() -> (Router, BmcState<TestCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             String::new(),
             false,
             MachineRouterOptions::default(),

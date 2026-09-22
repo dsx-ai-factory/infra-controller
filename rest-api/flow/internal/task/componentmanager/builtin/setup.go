@@ -7,7 +7,9 @@ package builtin
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 
 	"github.com/rs/zerolog/log"
 
@@ -78,8 +80,13 @@ func LoadConfig(path string) (cmconfig.Config, error) {
 func NewProviderRegistry(
 	ctx context.Context,
 	config cmconfig.Config,
-) (*providerapi.ProviderRegistry, error) {
+) (_ *providerapi.ProviderRegistry, err error) {
 	providerRegistry := providerapi.NewProviderRegistry()
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, providerRegistry.Close())
+		}
+	}()
 
 	for name, providerConfig := range config.ProviderConfigs {
 		// LoadConfig builds ProviderConfigs through service decoders, but keep
@@ -105,12 +112,20 @@ func NewProviderRegistry(
 
 		providerName := provider.Name()
 		if providerName != name {
-			return nil, providerapi.ProviderNameMismatchError{
+			err = providerapi.ProviderNameMismatchError{
 				Name:         name,
 				ProviderName: providerName,
 			}
+			if closer, ok := provider.(io.Closer); ok {
+				err = errors.Join(err, closer.Close())
+			}
+			return nil, err
 		}
-		if err := providerRegistry.Register(provider); err != nil {
+		err = providerRegistry.Register(provider)
+		if err != nil {
+			if closer, ok := provider.(io.Closer); ok {
+				err = errors.Join(err, closer.Close())
+			}
 			return nil, err
 		}
 		log.Info().

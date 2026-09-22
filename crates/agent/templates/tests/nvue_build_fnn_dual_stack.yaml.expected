@@ -16,11 +16,6 @@
         type: swp
       pf0vf0_if:
         type: swp
-        acl: 
-          p0010_vpc_100_isolation_ipv4:
-            inbound: {}
-          p0010_vpc_100_isolation_ipv6:
-            inbound: {} 
         ip:
           address:
             10.0.1.0/31: {} 
@@ -330,6 +325,21 @@
             address:
               10.0.0.2/32: {}
         router:
+          static:
+            10.0.0.0/16:
+              address-family: ipv4-unicast
+              distance:
+                '250':
+                  via:
+                    blackhole:
+                      type: blackhole
+            fd00::/32:
+              address-family: ipv6-unicast
+              distance:
+                '250':
+                  via:
+                    blackhole:
+                      type: blackhole
           bgp:
             path-selection:
               multipath:
@@ -424,38 +434,5 @@
                 source-port:
                   '68': {}
         type: ipv4
-
-
-      p0010_vpc_100_isolation_ipv4:
-        type: ipv4
-        rule:
-          '10':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.0.1.0/24
-          '1000':
-            action:
-              deny: {}
-            match:
-              ip:
-                dest-ip: 10.0.0.0/16
-      p0010_vpc_100_isolation_ipv6:
-        type: ipv6
-        rule:
-          '10':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 2001:db8::/48
-          '1000':
-            action:
-              deny: {}
-            match:
-              ip:
-                dest-ip: fd00::/32
-
 
 

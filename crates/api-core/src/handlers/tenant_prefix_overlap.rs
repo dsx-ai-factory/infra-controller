@@ -15,16 +15,17 @@
  * limitations under the License.
  */
 
-//! Tenant prefix overlap checks shared by prefix, peering, VPC, NSG, and Instance writers.
+//! Tenant prefix overlap checks shared by prefix, peering, VPC, and Instance writers.
+//! NSG policies do not change route visibility and cannot bypass FNN null routes,
+//! so overlap safety depends on routing profiles and imports rather than ACL permits.
 
 mod instances;
 mod startup;
 
 use std::collections::HashSet;
 
+use carbide_network::ip::prefix::IpNet;
 use carbide_network::virtualization::VpcVirtualizationType;
-use carbide_uuid::instance::InstanceId;
-use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::vpc::VpcId;
 use db::ObjectColumnFilter;
 pub(super) use instances::validate_affected_instances;
@@ -35,9 +36,6 @@ use model::instance::config::network::InstanceNetworkConfig;
 use model::instance::snapshot::InstanceSnapshot;
 use model::machine::{
     InstanceState, LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot,
-};
-use model::network_security_group::{
-    NetworkSecurityGroup, NetworkSecurityGroupRule, NetworkSecurityGroupRuleAction,
 };
 use model::site_prefix::{
     SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState, SitePrefixRoutingScope,
@@ -121,6 +119,7 @@ pub(super) fn pair_is_eligible(
     candidate: VpcPrefixParticipant<'_>,
     existing: VpcPrefixParticipant<'_>,
 ) -> bool {
+    let isolation_routes = runtime_config.resolved_site_fabric_null_routes(&[]);
     runtime_config.tenant_prefix_overlap_enabled
         && !candidate.is_deleted
         && !existing.is_deleted
@@ -131,7 +130,7 @@ pub(super) fn pair_is_eligible(
                     .is_ok_and(|profile| profile.tenant_prefix_overlap_eligible)
             })
         })
-        && retained_pair_is_isolated(runtime_config, candidate, existing)
+        && retained_pair_is_isolated(runtime_config, &isolation_routes, candidate, existing)
 }
 
 /// `site_policy_is_isolated` checks the site-wide routes that could connect
@@ -152,15 +151,32 @@ fn site_policy_is_isolated(runtime_config: &CarbideConfig) -> bool {
         })
 }
 
+/// A broader or equal blackhole protects the reused prefix while allowing an authorized
+/// equal-length or more-specific imported route to win by distance or longest-prefix match.
+fn prefix_has_isolation_route(isolation_routes: &[IpNetwork], prefix: IpNetwork) -> bool {
+    let to_ip_net = |prefix: IpNetwork| {
+        IpNet::new(prefix.ip(), prefix.prefix())
+            .expect("IpNetwork guarantees a valid address-family prefix length")
+    };
+    let prefix = to_ip_net(prefix);
+    isolation_routes
+        .iter()
+        .copied()
+        .map(to_ip_net)
+        .any(|route| route.contains(&prefix))
+}
+
 /// `retained_pair_is_isolated` preserves routing checks during withdrawal.
 /// Admission opt-ins and deletion intent prevent additions, but do not make
 /// a safely isolated pair stop serving before its routes have drained.
 fn retained_pair_is_isolated(
     runtime_config: &CarbideConfig,
+    isolation_routes: &[IpNetwork],
     candidate: VpcPrefixParticipant<'_>,
     existing: VpcPrefixParticipant<'_>,
 ) -> bool {
     if !site_policy_is_isolated(runtime_config)
+        || !prefix_has_isolation_route(isolation_routes, candidate.prefix)
         || candidate.prefix != existing.prefix
         || candidate.vpc.id == existing.vpc.id
         || candidate.vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn
@@ -207,55 +223,6 @@ async fn vpc_uses_duplicate_space(
 ) -> CarbideResult<bool> {
     let sources = receiver_sources(&api.runtime_config, txn, vpc).await?;
     Ok(db::tenant_prefix_overlap::vpcs_use_duplicate_space(txn, &sources).await?)
-}
-
-/// `nsg_policy_is_safe` requires deny-only rules because permits run before
-/// SitePrefix isolation. Stateful egress also generates established-flow permits
-/// in the FNN template.
-pub(super) fn nsg_policy_is_safe(
-    rules: &[NetworkSecurityGroupRule],
-    stateful_egress: bool,
-    stateful_acls_enabled: bool,
-) -> bool {
-    !(stateful_egress && stateful_acls_enabled)
-        && rules
-            .iter()
-            .all(|rule| rule.action == NetworkSecurityGroupRuleAction::Deny)
-}
-
-/// Accepts a safe final policy or the existing rules with only permits removed.
-/// Keeping every remaining rule unchanged and in order preserves priority ties
-/// after the agent sorts them. Removing a deny could expose a later permit.
-pub(super) fn nsg_policy_is_nonexpanding(
-    previous: &NetworkSecurityGroup,
-    rules: &[NetworkSecurityGroupRule],
-    stateful_egress: bool,
-    stateful_acls_enabled: bool,
-) -> bool {
-    if nsg_policy_is_safe(rules, stateful_egress, stateful_acls_enabled) {
-        return true;
-    }
-    // Disabling statefulness also removes conntrack matches from egress
-    // rules, so it is not necessarily a restriction on remaining permits.
-    if (previous.stateful_egress && stateful_acls_enabled)
-        != (stateful_egress && stateful_acls_enabled)
-    {
-        return false;
-    }
-    let mut requested = rules.iter().peekable();
-    for rule in &previous.rules {
-        if requested.peek().is_some_and(|requested_rule| {
-            // IDs may be regenerated on update; they do not change ACL policy.
-            let mut previous_rule = rule.clone();
-            previous_rule.id = requested_rule.id.clone();
-            previous_rule == **requested_rule
-        }) {
-            requested.next();
-        } else if rule.action != NetworkSecurityGroupRuleAction::Permit {
-            return false;
-        }
-    }
-    requested.next().is_none()
 }
 
 /// Accepts a safe final profile or a restriction of its resolved routing
@@ -329,27 +296,6 @@ fn policy_error() -> CarbideError {
     )
 }
 
-async fn validate_effective_nsg(
-    api: &Api,
-    txn: &mut PgConnection,
-    id: &NetworkSecurityGroupId,
-) -> CarbideResult<()> {
-    let nsg = db::network_security_group::find_by_ids(txn, std::slice::from_ref(id), None, false)
-        .await?
-        .pop()
-        .ok_or_else(policy_error)?;
-    if !nsg_policy_is_safe(
-        &nsg.rules,
-        nsg.stateful_egress,
-        api.runtime_config
-            .network_security_group
-            .stateful_acls_enabled,
-    ) {
-        return Err(policy_error());
-    }
-    Ok(())
-}
-
 /// `validate_retained_host` checks the networks an admitted Instance can use
 /// without another API request, including a pending replacement. The caller
 /// holds the overlap lock before loading the host and through configuration
@@ -402,18 +348,8 @@ pub(super) async fn validate_retained_host(
             || !fnn
                 .resolve_vpc_routing_profile(&vpc.config)?
                 .is_isolated_for_tenant_prefixes()
-            || !nsg_policy_is_safe(
-                &api.runtime_config.network_security_group.policy_overrides,
-                false,
-                api.runtime_config
-                    .network_security_group
-                    .stateful_acls_enabled,
-            )
         {
             return Err(policy_error());
-        }
-        if let Some(nsg_id) = effective_nsg(host, vpc.config.network_security_group_id.as_ref()) {
-            validate_effective_nsg(api, txn, nsg_id).await?;
         }
     }
     Ok(())
@@ -434,21 +370,20 @@ pub(super) async fn receiver_sources(
     };
     let receiver_type = receiver.config.network_virtualization_type;
     let mut sources = match policy {
-        VpcPeeringPolicy::Exclusive => db::vpc_peering::get_vpc_peer_vnis(
-            txn,
-            receiver.id,
-            receiver_type.capabilities().peers_with.to_vec(),
-        )
-        .await?
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect::<Vec<_>>(),
-        VpcPeeringPolicy::Mixed => db::vpc_peering::get_vpc_peer_ids(txn, receiver.id).await?,
+        VpcPeeringPolicy::Exclusive | VpcPeeringPolicy::Mixed => {
+            db::vpc_peering::get_vpc_peer_vnis(
+                txn,
+                receiver.id,
+                receiver_type.capabilities().peers_with.to_vec(),
+            )
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+        }
         VpcPeeringPolicy::None => Vec::new(),
     };
-    // VNI imports are independent of prefix imports, including an explicit
-    // `VpcPeeringPolicy::None`.
-    if receiver_type.imports_peer_vnis_into_overlay() {
+    if policy != VpcPeeringPolicy::None && receiver_type.imports_peer_vnis_into_overlay() {
         let peer_types = ALL_VPC_VIRTUALIZATION_TYPES
             .iter()
             .copied()
@@ -513,14 +448,11 @@ pub(super) fn instance_network_is_nonexpanding(
 /// dependencies and keeps it through the Instance write. Allocation deliberately
 /// does not use the policy writers' active-host filter: this configuration has
 /// not started serving tenant traffic yet.
-/// `network_expands` is classified from caller intent before resource resolution;
-/// false permits a safe NSG replacement without requiring retained routes to drain.
 pub(crate) async fn validate_instance_network(
     api: &Api,
     txn: &mut PgConnection,
     candidate: &InstanceConfig,
     retained: Option<&InstanceSnapshot>,
-    network_expands: bool,
 ) -> CarbideResult<()> {
     let mut networks = vec![&candidate.network];
     if let Some(instance) = retained {
@@ -533,14 +465,12 @@ pub(crate) async fn validate_instance_network(
     let mut checked_vpcs = HashSet::new();
     let mut vpcs = Vec::new();
     for network in networks {
-        if network_expands {
-            crate::ethernet_virtualization::validate_instance_interface_routing_profiles(
-                txn,
-                network,
-                api.runtime_config.fnn.as_ref(),
-            )
-            .await?;
-        }
+        crate::ethernet_virtualization::validate_instance_interface_routing_profiles(
+            txn,
+            network,
+            api.runtime_config.fnn.as_ref(),
+        )
+        .await?;
         for interface in &network.interfaces {
             let segment_id = interface.network_segment_id.ok_or_else(policy_error)?;
             let vpc = db::vpc::find_by_segment(&mut *txn, segment_id)
@@ -558,7 +488,7 @@ pub(crate) async fn validate_instance_network(
     }
     let sources = sources.into_iter().collect::<Vec<_>>();
     let prefixes = db::vpc_peering::get_retained_prefixes_by_vpcs(&mut *txn, &sources).await?;
-    if network_expands && prefixes_overlap_across_vpcs(&prefixes) {
+    if prefixes_overlap_across_vpcs(&prefixes) {
         return Err(overlap_error());
     }
 
@@ -584,28 +514,11 @@ pub(crate) async fn validate_instance_network(
         if !duplicate_space {
             return Ok(());
         }
-        if network_expands {
-            return Err(overlap_error());
-        }
+        return Err(overlap_error());
     }
 
     for vpc in vpcs {
         if vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn {
-            continue;
-        }
-        // An Instance attachment replaces the VPC default. Apply the
-        // requested attachment to old interfaces too: they can remain active
-        // until the network update is acknowledged.
-        if let Some(nsg_id) = candidate
-            .network_security_group_id
-            .as_ref()
-            .or(vpc.config.network_security_group_id.as_ref())
-        {
-            validate_effective_nsg(api, txn, nsg_id).await?;
-        }
-        // A safe NSG replacement cannot add routing visibility. It remains
-        // available to restrict a retained configuration, including gate-off.
-        if !network_expands {
             continue;
         }
         let fnn = api.runtime_config.fnn.as_ref().ok_or_else(policy_error)?;
@@ -613,13 +526,6 @@ pub(crate) async fn validate_instance_network(
             .resolve_vpc_routing_profile(&vpc.config)?
             .is_eligible_for_tenant_prefix_overlap()
             || !site_policy_is_isolated(&api.runtime_config)
-            || !nsg_policy_is_safe(
-                &api.runtime_config.network_security_group.policy_overrides,
-                false,
-                api.runtime_config
-                    .network_security_group
-                    .stateful_acls_enabled,
-            )
         {
             return Err(policy_error());
         }
@@ -627,16 +533,13 @@ pub(crate) async fn validate_instance_network(
     Ok(())
 }
 
-/// `validate_vpc_policy` checks a changed VPC policy against the tenant
-/// interfaces that use it. Each flag identifies a policy change not proven
-/// safe or nonexpanding. The caller holds the overlap lock before locking
-/// the VPC and NSG, and keeps it through the write.
+/// `validate_vpc_policy` checks a changed routing profile against the tenant
+/// interfaces that use it. The caller holds the overlap lock before locking
+/// the VPC and keeps it through the write.
 pub(super) async fn validate_vpc_policy(
     api: &Api,
     txn: &mut PgConnection,
     candidate: &Vpc,
-    profile_requires_check: bool,
-    nsg_requires_check: bool,
 ) -> CarbideResult<()> {
     if candidate.config.network_virtualization_type != VpcVirtualizationType::Fnn
         || (!api.runtime_config.tenant_prefix_overlap_enabled
@@ -644,11 +547,7 @@ pub(super) async fn validate_vpc_policy(
     {
         return Ok(());
     }
-    if !profile_requires_check && !nsg_requires_check {
-        return Ok(());
-    }
-
-    for host in load_policy_hosts(txn, &[candidate.id], &[]).await? {
+    for host in load_policy_hosts(txn, &[candidate.id]).await? {
         if !needs_retained_policy_check(&host) {
             continue;
         }
@@ -656,46 +555,9 @@ pub(super) async fn validate_vpc_policy(
         if !vpcs.iter().any(|vpc| vpc.id == candidate.id) {
             continue;
         }
-        if profile_requires_check
-            || (nsg_requires_check
-                && host
-                    .instance
-                    .as_ref()
-                    .is_some_and(|instance| instance.config.network_security_group_id.is_none())
-                && effective_nsg(&host, candidate.config.network_security_group_id.as_ref())
-                    == candidate.config.network_security_group_id.as_ref())
-        {
-            tracing::warn!(vpc_id = %candidate.id, machine_id = %host.host_snapshot.id,
-                "VPC policy would make tenant prefix reuse unsafe");
-            return Err(policy_error());
-        }
-    }
-    Ok(())
-}
-
-/// `validate_nsg_policy` checks an unsafe NSG replacement only where that NSG
-/// is effective. The caller holds the overlap lock and the NSG row lock.
-pub(super) async fn validate_nsg_policy(
-    api: &Api,
-    txn: &mut PgConnection,
-    id: &NetworkSecurityGroupId,
-) -> CarbideResult<()> {
-    let attachments = db::network_security_group::find_retained_attachments(txn, id).await?;
-    for host in load_policy_hosts(txn, &attachments.vpc_ids, &attachments.instance_ids).await? {
-        if !needs_retained_policy_check(&host) {
-            continue;
-        }
-        for vpc in retained_policy_vpcs(txn, &host).await? {
-            if vpc.config.network_virtualization_type == VpcVirtualizationType::Fnn
-                && effective_nsg(&host, vpc.config.network_security_group_id.as_ref()) == Some(id)
-                && (api.runtime_config.tenant_prefix_overlap_enabled
-                    || vpc_uses_duplicate_space(api, txn, &vpc).await?)
-            {
-                tracing::warn!(network_security_group_id = %id, vpc_id = %vpc.id,
-                    "NSG policy would make tenant prefix reuse unsafe");
-                return Err(policy_error());
-            }
-        }
+        tracing::warn!(vpc_id = %candidate.id, machine_id = %host.host_snapshot.id,
+            "VPC routing policy would make tenant prefix reuse unsafe");
+        return Err(policy_error());
     }
     Ok(())
 }
@@ -717,31 +579,11 @@ fn needs_retained_policy_check(host: &ManagedHostStateSnapshot) -> bool {
             .is_some_and(|instance| instance.deleted.is_none() || !removing_tenant_network)
 }
 
-fn effective_nsg<'a>(
-    host: &'a ManagedHostStateSnapshot,
-    vpc_nsg: Option<&'a NetworkSecurityGroupId>,
-) -> Option<&'a NetworkSecurityGroupId> {
-    // Discovery still uses the tenant routing profile, but omits tenant NSGs.
-    if matches!(
-        host.managed_state,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::BootingWithDiscoveryImage { .. },
-        }
-    ) {
-        return None;
-    }
-    host.instance
-        .as_ref()
-        .and_then(|instance| instance.config.network_security_group_id.as_ref())
-        .or(vpc_nsg)
-}
-
 async fn load_policy_hosts(
     txn: &mut PgConnection,
     vpc_ids: &[VpcId],
-    instance_ids: &[InstanceId],
 ) -> CarbideResult<Vec<ManagedHostStateSnapshot>> {
-    let mut instance_ids: HashSet<_> = instance_ids.iter().copied().collect();
+    let mut instance_ids = HashSet::new();
     for vpc_id in vpc_ids {
         instance_ids.extend(
             db::instance::find_ids(
@@ -840,10 +682,6 @@ mod tests {
     use chrono::Utc;
     use config_version::ConfigVersion;
     use model::metadata::Metadata;
-    use model::network_security_group::{
-        NetworkSecurityGroupRuleDirection, NetworkSecurityGroupRuleNet,
-        NetworkSecurityGroupRuleProtocol,
-    };
     use model::site_prefix::{SitePrefixConfig, SitePrefixStatus};
     use model::vpc::{VpcConfig, VpcStatus};
 
@@ -902,6 +740,7 @@ mod tests {
         LegacyAnycastSitePrefixes,
         CommonInternalRouteTarget,
         AdditionalRouteTargetImport,
+        MissingIsolationRoute,
         NestedPrefix,
         SameVpc,
         SameTenant,
@@ -922,6 +761,10 @@ mod tests {
         let mut config = crate::test_support::default_config::get();
         config.tenant_prefix_overlap_enabled = true;
         config.vpc_isolation_behavior = VpcIsolationBehaviorType::MutualIsolation;
+        config.site_fabric_prefixes = vec![
+            "10.0.0.0/8".parse().unwrap(),
+            "192.0.2.0/24".parse().unwrap(),
+        ];
         config.fnn = Some(FnnConfig {
             admin_vpc: None,
             common_internal_route_target: None,
@@ -1050,74 +893,95 @@ mod tests {
             };
             let (a, b) = participants();
             assert!(!pair_is_eligible(&config, a, b));
+            let isolation_routes = config.resolved_site_fabric_null_routes(&[]);
             let (a, b) = participants();
             assert_eq!(
-                retained_pair_is_isolated(&config, a, b),
+                retained_pair_is_isolated(&config, &isolation_routes, a, b),
                 !matches!(reason, StopAdmission::ServiceVpcSlots)
             );
         }
     }
 
+    /// Checks coverage against the same resolved boundaries FNN renders, so
+    /// explicit child routes cannot accidentally authorize broader prefix reuse.
     #[test]
-    fn nsg_contractions_preserve_denies_and_stateful_matches() {
-        let rule = |id: &str, port, action| NetworkSecurityGroupRule {
-            id: Some(id.to_string()),
-            src_net: NetworkSecurityGroupRuleNet::Prefix("0.0.0.0/0".parse().unwrap()),
-            dst_net: NetworkSecurityGroupRuleNet::Prefix("0.0.0.0/0".parse().unwrap()),
-            direction: NetworkSecurityGroupRuleDirection::Egress,
-            ipv6: false,
-            src_port_start: None,
-            src_port_end: None,
-            dst_port_start: Some(port),
-            dst_port_end: Some(port),
-            protocol: NetworkSecurityGroupRuleProtocol::Tcp,
-            action,
-            priority: 100,
-        };
-        let permit_http = rule("http", 80, NetworkSecurityGroupRuleAction::Permit);
-        let deny_https = rule("deny-https", 443, NetworkSecurityGroupRuleAction::Deny);
-        let permit_https = rule("permit-https", 443, NetworkSecurityGroupRuleAction::Permit);
-        let previous = NetworkSecurityGroup {
-            id: "d1d2a22e-2472-4aab-8ea0-7eb3375e4739".parse().unwrap(),
-            tenant_organization_id: "policy-test".parse().unwrap(),
-            stateful_egress: true,
-            rules: vec![
-                permit_http.clone(),
-                deny_https.clone(),
-                permit_https.clone(),
-            ],
-            version: ConfigVersion::initial(),
-            created: Utc::now(),
-            deleted: None,
-            metadata: Metadata::default(),
-            created_by: None,
-            updated_by: None,
+    fn isolation_route_coverage_matches_resolved_rendered_routes() {
+        // Adjacent roots cover a parent only if inherited inventory is aggregated.
+        let adjacent_roots = || {
+            vec![
+                "10.0.0.0/9".parse().unwrap(),
+                "10.128.0.0/9".parse().unwrap(),
+            ]
         };
         check_values(
             [
+                // Explicit child boundaries must remain separate from an importable parent.
                 Check {
-                    scenario: "remove only a permit while another remains",
-                    input: (vec![deny_https.clone(), permit_https.clone()], true),
+                    scenario: "explicit boundaries remain distinct",
+                    input: Some(adjacent_roots()),
+                    expect: false,
+                },
+                // Inherited inventory is rendered as one parent that covers the reused prefix.
+                Check {
+                    scenario: "inherited roots use the rendered exact union",
+                    input: None,
                     expect: true,
                 },
-                Check {
-                    scenario: "removing a deny exposes the later permit",
-                    input: (vec![permit_http.clone(), permit_https.clone()], true),
-                    expect: false,
-                },
-                Check {
-                    scenario: "a priority tie preserves input order",
-                    input: (vec![permit_http, permit_https, deny_https], true),
-                    expect: false,
-                },
-                Check {
-                    scenario: "disabling statefulness broadens remaining egress matches",
-                    input: (previous.rules.clone(), false),
-                    expect: false,
-                },
             ],
-            |(rules, stateful)| nsg_policy_is_nonexpanding(&previous, &rules, stateful, true),
+            |null_routes| {
+                let mut config = eligible_config();
+                config.site_fabric_prefixes = adjacent_roots();
+                config.site_fabric_null_routes = null_routes;
+                let isolation_routes = config.resolved_site_fabric_null_routes(&[]);
+                prefix_has_isolation_route(&isolation_routes, "10.0.0.0/8".parse().unwrap())
+            },
         );
+    }
+
+    /// Proves a retiring operator root preserves already-admitted overlap
+    /// without authorizing new overlap after it leaves current configuration.
+    #[test]
+    fn retained_isolation_routes_do_not_expand_admission() {
+        // Remove current inventory while keeping a retiring root around duplicate tenant space.
+        let mut config = eligible_config();
+        config.site_fabric_prefixes.clear();
+        config.site_fabric_null_routes = None;
+        let retained_root = "10.0.0.0/8".parse().unwrap();
+        let prefix = "10.1.0.0/24".parse().unwrap();
+        let first = vpc("first", Some(100));
+        let second = vpc("second", Some(200));
+        let first_root = site_prefix("first", prefix);
+        let second_root = site_prefix("second", prefix);
+        let participants = || {
+            (
+                VpcPrefixParticipant {
+                    prefix,
+                    is_deleted: false,
+                    vpc: &first,
+                    site_prefix: &first_root,
+                },
+                VpcPrefixParticipant {
+                    prefix,
+                    is_deleted: false,
+                    vpc: &second,
+                    site_prefix: &second_root,
+                },
+            )
+        };
+
+        // Current configuration no longer authorizes an additional duplicate.
+        let (candidate, existing) = participants();
+        assert!(!pair_is_eligible(&config, candidate, existing));
+
+        // Retained validation follows the route still rendered to FNN.
+        let isolation_routes = config.resolved_site_fabric_null_routes(&[retained_root]);
+        let (candidate, existing) = participants();
+        assert!(retained_pair_is_isolated(
+            &config,
+            &isolation_routes,
+            candidate,
+            existing,
+        ));
     }
 
     #[test]
@@ -1268,6 +1132,11 @@ mod tests {
                     expect: false,
                 },
                 Check {
+                    scenario: "reused prefix has no isolation route",
+                    input: Variation::MissingIsolationRoute,
+                    expect: false,
+                },
+                Check {
                     scenario: "candidate CIDR is nested",
                     input: Variation::NestedPrefix,
                     expect: false,
@@ -1365,6 +1234,9 @@ mod tests {
                     Variation::AdditionalRouteTargetImport => {
                         config.fnn.as_mut().unwrap().additional_route_target_imports =
                             vec![crate::cfg::file::RouteTargetConfig { asn: 3, vni: 4 }];
+                    }
+                    Variation::MissingIsolationRoute => {
+                        config.site_fabric_null_routes = Some(vec![]);
                     }
                     Variation::NestedPrefix => {
                         candidate_prefix = "10.0.1.0/25".parse().unwrap();

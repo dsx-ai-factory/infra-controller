@@ -197,6 +197,11 @@ async fn test_add_remove_nvlink_domain_health_report_via_web_ui(pool: sqlx::PgPo
     assert!(aggregate_health.contains("NvLinkDomainWebHealth"));
     assert!(aggregate_health.contains("nvlink domain web health"));
     assert!(body.contains("web-nvlink-domain-health-test"));
+    assert!(
+        get_nvlink_domain_health_list(&app)
+            .await
+            .contains(domain_id)
+    );
 
     post_nvlink_domain_health_report(
         &app,
@@ -206,8 +211,12 @@ async fn test_add_remove_nvlink_domain_health_report_via_web_ui(pool: sqlx::PgPo
     )
     .await;
 
-    let body = get_nvlink_domain_health_page(&app, domain_id).await;
-    assert!(!body.contains("web-nvlink-domain-health-test"));
+    assert!(
+        !get_nvlink_domain_health_list(&app)
+            .await
+            .contains(domain_id)
+    );
+    verify_health_page_not_found(&app, &format!("/admin/nvlink-domain/{domain_id}/health")).await;
 }
 
 #[crate::sqlx_test]
@@ -920,6 +929,28 @@ async fn get_nvlink_domain_health_page(app: &axum::Router, domain_id: &str) -> S
         .collect()
         .await
         .expect("Empty response body?")
+        .to_bytes();
+    String::from_utf8_lossy(&body_bytes).into_owned()
+}
+
+async fn get_nvlink_domain_health_list(app: &axum::Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            web_request_builder()
+                .uri("/admin/nvlink-domain.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("failed to collect NVLink domain health list response body")
         .to_bytes();
     String::from_utf8_lossy(&body_bytes).into_owned()
 }

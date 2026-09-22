@@ -31,8 +31,8 @@ use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch, json_patch};
 use crate::redfish::Builder;
 use crate::{
-    BootOptionKind, Callbacks, MachineRouterOptions, MockPowerState, POWER_CYCLE_DELAY,
-    SetSystemPowerError, http, redfish,
+    ActionError, BootOptionKind, Callbacks, MachineRouterOptions, MockPowerState,
+    POWER_CYCLE_DELAY, http, redfish,
 };
 
 pub(super) fn collection() -> redfish::Collection<'static> {
@@ -922,7 +922,7 @@ async fn post_reset_system<C: Callbacks>(
     // introduce a deadlock if the API server holds a lock on the row for this machine
     // while issuing a redfish call, and MachineStateMachine is blocked waiting for the row lock
     // to be released.
-    match callbacks.set_power_state(reset_type) {
+    match callbacks.computer_system_reset(reset_type).await {
         Ok(_) => {
             state.record_event(redfish::log_service::LogEntryDraft::reset_requested(
                 &resource(&system_id).odata_id,
@@ -930,10 +930,8 @@ async fn post_reset_system<C: Callbacks>(
             ));
             json!({}).into_ok_response()
         }
-        Err(SetSystemPowerError::BadRequest(_)) => StatusCode::BAD_REQUEST.into_response(),
-        Err(SetSystemPowerError::CommandSendError(_)) => {
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        Err(ActionError::BadRequest(_)) => StatusCode::BAD_REQUEST.into_response(),
+        Err(ActionError::Internal(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -1438,6 +1436,8 @@ impl SystemBuilder {
         let power_state = match state {
             MockPowerState::On => "On",
             MockPowerState::Off => "Off",
+            MockPowerState::PoweringOn => "PoweringOn",
+            MockPowerState::PoweringOff => "PoweringOff",
             MockPowerState::PowerCycling { since } => {
                 if since.elapsed() < POWER_CYCLE_DELAY {
                     "Off"
@@ -1504,7 +1504,7 @@ mod tests {
     use tower_http::normalize_path::NormalizePathLayer;
 
     use super::*;
-    use crate::test_support::{NoopCallbacks, host_info};
+    use crate::test_support::{TestCallbacks, host_info};
     use crate::{HardwareType, MachineRouterOptions, machine_router};
 
     /// Reads one successful JSON response from the in-process mock router.
@@ -1523,7 +1523,7 @@ mod tests {
     async fn log_services_discovery_names_the_log_collection() {
         let (router, _) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             String::new(),
             false,
             MachineRouterOptions::default(),
@@ -1559,10 +1559,10 @@ mod tests {
             .status()
     }
 
-    fn dell_router() -> (Router, BmcState<NoopCallbacks>) {
+    fn dell_router() -> (Router, BmcState<TestCallbacks>) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             String::new(),
             false,
             MachineRouterOptions::default(),
@@ -1636,7 +1636,7 @@ mod tests {
     async fn storage_discovery_names_the_storage_collection() {
         let (router, _) = machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             String::new(),
             false,
             MachineRouterOptions::default(),
@@ -1661,7 +1661,7 @@ mod tests {
     async fn hpe_boot_order_is_persisted_separately_from_standard_boot_order() {
         let router = machine_router(
             &host_info(HardwareType::HpeProliantDl380aGen11),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions::default(),
@@ -1702,7 +1702,7 @@ mod tests {
     async fn simulated_ssh_port_can_be_added_without_profile_serial_console_data() {
         let (router, state) = machine_router(
             &host_info(HardwareType::LenovoGB300Nvl),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions::default(),

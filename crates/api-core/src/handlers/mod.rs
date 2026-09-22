@@ -40,6 +40,7 @@ mod expected_component_patch;
 pub(super) mod expected_machine;
 pub(super) mod expected_power_shelf;
 pub(super) mod expected_rack;
+pub(super) mod expected_rack_group;
 pub(super) mod expected_switch;
 pub(super) mod extension_service;
 pub(super) mod finder;

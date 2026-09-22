@@ -2163,13 +2163,13 @@ func ExecutePowerControlWorkflow(
 
 	var flowResponse flowv1.SubmitTaskResponse
 	proxyErr := ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		fullMethod,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return nil, proxyErr
+		return nil, cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	return &flowResponse, nil
@@ -2201,13 +2201,13 @@ func ExecuteBringUpRackWorkflow(
 
 	var flowResponse flowv1.SubmitTaskResponse
 	proxyErr := ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_BringUpRack_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return nil, proxyErr
+		return nil, cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	return &flowResponse, nil
@@ -2267,14 +2267,14 @@ func ExecuteFirmwareUpdateWorkflow(
 
 	var flowResponse flowv1.SubmitTaskResponse
 	proxyErr := ProxyFlowGRPCWithSecrets(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_UpgradeFirmware_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, conflictPolicy,
 		siteID, "authenticationData",
 	)
 	if proxyErr != nil {
-		return nil, proxyErr
+		return nil, cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	return &flowResponse, nil

@@ -2716,7 +2716,7 @@ fn managed_host_reset_needed(state: &ManagedHostStateSnapshot) -> bool {
         return false;
     }
 
-    // The API nulls `started_at` on every `set`, so a re-trigger restarts the reset.
+    // The API refuses a `set` once `started_at` is stamped, so only a fresh request fires here.
     state
         .host_snapshot
         .reset_requested

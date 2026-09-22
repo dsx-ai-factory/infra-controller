@@ -38,6 +38,18 @@ fn validate_managed_host_reset_request(
         )));
     }
 
+    // Replacing a started reset would restart its teardown midway.
+    if snapshot
+        .host_snapshot
+        .reset_requested
+        .as_ref()
+        .is_some_and(|request| request.started_at.is_some())
+    {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "reset for host {machine_id} is already in progress"
+        )));
+    }
+
     // Re-ingestion re-registers the host's DPF CRs, which only exist for DPF-ingested hosts.
     if !snapshot.host_snapshot.config.dpf.used_for_ingestion {
         return Err(CarbideError::FailedPrecondition(format!(
@@ -122,23 +134,19 @@ pub(crate) async fn trigger_managed_host_reset(
                 req.allow_reset_with_instance,
             )?;
 
-            // Re-requesting is allowed and restarts from scratch; the DB call clears `started_at`.
-            if let Some(previous) = &snapshot.host_snapshot.reset_requested {
-                tracing::warn!(
-                    %machine_id,
-                    previous_initiator = %previous.initiator,
-                    previous_requested_at = %previous.requested_at,
-                    previous_started = previous.started_at.is_some(),
-                    "Reset re-requested for a host that already had one; restarting it",
-                );
-            }
-
-            db::machine::trigger_managed_host_reset_request(
+            // The check above reads an earlier snapshot, so the hinge can start the reset first.
+            if !db::machine::trigger_managed_host_reset_request(
                 &mut txn,
                 req.initiator().as_str_name(),
                 &machine_id,
             )
-            .await?;
+            .await?
+            {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "reset for host {machine_id} is already in progress"
+                ))
+                .into());
+            }
         }
         Mode::Clear => {
             // Once teardown has begun there is nothing to withdraw to.
@@ -155,7 +163,7 @@ pub(crate) async fn trigger_managed_host_reset(
             }
 
             // The check above reads an earlier snapshot, so the update can still match no row.
-            if !db::machine::clear_managed_host_reset_request(&mut txn, &machine_id, None).await? {
+            if !db::machine::clear_managed_host_reset_request(&mut txn, &machine_id, true).await? {
                 return Err(CarbideError::FailedPrecondition(format!(
                     "no clearable reset request for host {machine_id}"
                 ))

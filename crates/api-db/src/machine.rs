@@ -2255,28 +2255,30 @@ pub async fn list_machines_requested_for_host_reprovisioning(
         .map_err(|e| DatabaseError::query(query.as_str(), e))
 }
 
-/// Records a reset request, replacing any previous one. Re-requesting is allowed and restarts
-/// the reset: the replacement clears `started_at`, so the controller hinge fires again.
+/// Records a reset request, replacing a pending one. Reports false if one has already started.
 pub async fn trigger_managed_host_reset_request(
     txn: &mut PgConnection,
     initiator: &str,
     machine_id: &MachineId,
-) -> Result<(), DatabaseError> {
+) -> Result<bool, DatabaseError> {
     let req = ResetRequest {
         requested_at: chrono::Utc::now(),
         initiator: initiator.to_string(),
         started_at: None,
     };
 
-    let query = "UPDATE machines SET reset_requested=$2 WHERE id=$1 RETURNING id";
-    let _id = sqlx::query_as::<_, MachineId>(query)
+    let query = "UPDATE machines SET reset_requested=$2
+                     WHERE id=$1
+                       AND (reset_requested IS NULL
+                            OR reset_requested->'started_at' = 'null'::jsonb) RETURNING id";
+    let requested = sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
         .bind(sqlx::types::Json(req))
-        .fetch_one(txn)
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    Ok(requested.is_some())
 }
 
 /// Marks the reset as started, which closes it to `Clear` and stops the hinge re-firing.
@@ -2299,32 +2301,21 @@ pub async fn update_managed_host_reset_start_time(
     Ok(())
 }
 
-/// Clears a reset request, reporting whether a row still matched. `None` refuses to withdraw a
-/// reset that has started; `Some` clears only the request carrying that `requested_at`, so a
-/// re-request that replaced it survives.
+/// Clears a reset request and reports whether a row matched, optionally sparing a started one.
 pub async fn clear_managed_host_reset_request(
     txn: &mut PgConnection,
     machine_id: &MachineId,
-    observed_requested_at: Option<DateTime<Utc>>,
+    only_if_not_started: bool,
 ) -> Result<bool, DatabaseError> {
-    let query = match observed_requested_at {
-        None => {
-            "UPDATE machines SET reset_requested=NULL
-                WHERE id=$1 AND reset_requested->'started_at' = 'null'::jsonb RETURNING id"
-        }
-        Some(_) => {
-            "UPDATE machines SET reset_requested=NULL
-                WHERE id=$1 AND reset_requested->'requested_at' = $2 RETURNING id"
-        }
+    let query = if only_if_not_started {
+        "UPDATE machines SET reset_requested=NULL
+            WHERE id=$1 AND reset_requested->'started_at' = 'null'::jsonb RETURNING id"
+    } else {
+        "UPDATE machines SET reset_requested=NULL WHERE id=$1 RETURNING id"
     };
 
-    let mut statement = sqlx::query_as::<_, MachineId>(query).bind(machine_id);
-    if let Some(requested_at) = observed_requested_at {
-        // Bound as jsonb so neither side takes a `timestamptz` cast that would round nanoseconds.
-        statement = statement.bind(sqlx::types::Json(requested_at));
-    }
-
-    let cleared = statement
+    let cleared = sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::new("clear reset_requested", e))?;

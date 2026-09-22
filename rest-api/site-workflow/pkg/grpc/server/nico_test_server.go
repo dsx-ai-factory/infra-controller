@@ -65,6 +65,12 @@ type NICoServerImpl struct {
 	// Per-org machine identity state.
 	identityState    map[string]*identityOrgState
 	tokenDelegations map[string]*corev1.TokenDelegationResponse
+
+	// KEK-rotation simulation state. currentEncryptionKeyID is the key id the mock treats as
+	// "current"; reencryptedOrgs records the key id each org's secrets were last re-wrapped to,
+	// so re-runs are idempotent (already-on-target rows are skipped).
+	currentEncryptionKeyID string
+	reencryptedOrgs        map[string]string
 }
 
 // identityKeyMaterial is a per-org ES256 keypair plus its derived kid.
@@ -1698,6 +1704,74 @@ func (f *NICoServerImpl) GetOpenIDConfiguration(ctx context.Context, req *corev1
 	}, nil
 }
 
+// mockCurrentEncryptionKeyID is the KEK id the mock reports as current for re-wrap. Seeded orgs
+// start un-stamped, so the first apply re-wraps them and subsequent runs report them skipped.
+const mockCurrentEncryptionKeyID = "mock-kek-1"
+
+// tenantIdentityEncryptedFieldCount returns how many at-rest encrypted fields the mock would
+// re-wrap for an org: one per populated signing-key slot plus optional token-delegation
+// credentials. This mirrors the real re-wrap surface (encrypted_signing_key_1/2 and
+// encrypted_auth_method_config).
+func (f *NICoServerImpl) tenantIdentityEncryptedFieldCount(orgID string, st *identityOrgState) uint32 {
+	var n uint32
+	if st.slot1 != nil {
+		n++
+	}
+	if st.slot2 != nil {
+		n++
+	}
+	if _, ok := f.tokenDelegations[orgID]; ok {
+		n++
+	}
+	return n
+}
+
+// ReencryptTenantIdentitySecrets implements interface NICoServer. It simulates a KEK-rotation
+// re-wrap over the in-memory identity state so the endpoint can be exercised in local/dev
+// environments where Core is not deployed. Rows already stamped with the current key id are
+// reported as skipped (idempotent); dry_run reports would-change counts without mutating state.
+func (f *NICoServerImpl) ReencryptTenantIdentitySecrets(ctx context.Context, req *corev1.ReencryptTenantIdentitySecretsRequest) (*corev1.ReencryptTenantIdentitySecretsResponse, error) {
+	if req == nil {
+		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
+	}
+	if f.reencryptedOrgs == nil {
+		f.reencryptedOrgs = make(map[string]string)
+	}
+	current := f.currentEncryptionKeyID
+	if current == "" {
+		current = mockCurrentEncryptionKeyID
+	}
+
+	resp := &corev1.ReencryptTenantIdentitySecretsResponse{
+		CurrentEncryptionKeyId: current,
+	}
+	orgFilter := strings.TrimSpace(req.GetOrganizationId())
+	if orgFilter != "" {
+		state, ok := f.identityState[orgFilter]
+		if !ok || state == nil {
+			return nil, status.Errorf(codes.NotFound, "Identity configuration not found for org %q", orgFilter)
+		}
+	}
+	for orgID, st := range f.identityState {
+		if st == nil || (orgFilter != "" && orgID != orgFilter) {
+			continue
+		}
+		resp.RowsExamined++
+		fieldCount := f.tenantIdentityEncryptedFieldCount(orgID, st)
+		if f.reencryptedOrgs[orgID] == current {
+			resp.RowsSkippedAllOnTarget++
+			resp.FieldsSkippedOnTarget += fieldCount
+			continue
+		}
+		resp.RowsUpdated++
+		resp.FieldsReencrypted += fieldCount
+		if !req.GetDryRun() {
+			f.reencryptedOrgs[orgID] = current
+		}
+	}
+	return resp, nil
+}
+
 // resolveSigningOrg returns the seeded org when exactly one identity is configured,
 // otherwise the empty string.
 func (f *NICoServerImpl) resolveSigningOrg(_ context.Context) string {
@@ -1824,18 +1898,20 @@ func NICoTest(secs int) {
 	reflection.Register(s)
 
 	nicoServer := &NICoServerImpl{
-		v:                make(map[string]*corev1.Vpc),
-		ns:               make(map[string]*corev1.NetworkSegment),
-		ins:              make(map[string]*corev1.Instance),
-		m:                make(map[string]*corev1.Machine),
-		tk:               make(map[string]*corev1.TenantKeyset),
-		ibp:              make(map[string]*corev1.IBPartition),
-		em:               make(map[string]*corev1.ExpectedMachine),
-		eps:              make(map[string]*corev1.ExpectedPowerShelf),
-		es:               make(map[string]*corev1.ExpectedSwitch),
-		er:               make(map[string]*corev1.ExpectedRack),
-		identityState:    make(map[string]*identityOrgState),
-		tokenDelegations: make(map[string]*corev1.TokenDelegationResponse),
+		v:                      make(map[string]*corev1.Vpc),
+		ns:                     make(map[string]*corev1.NetworkSegment),
+		ins:                    make(map[string]*corev1.Instance),
+		m:                      make(map[string]*corev1.Machine),
+		tk:                     make(map[string]*corev1.TenantKeyset),
+		ibp:                    make(map[string]*corev1.IBPartition),
+		em:                     make(map[string]*corev1.ExpectedMachine),
+		eps:                    make(map[string]*corev1.ExpectedPowerShelf),
+		es:                     make(map[string]*corev1.ExpectedSwitch),
+		er:                     make(map[string]*corev1.ExpectedRack),
+		identityState:          make(map[string]*identityOrgState),
+		tokenDelegations:       make(map[string]*corev1.TokenDelegationResponse),
+		currentEncryptionKeyID: mockCurrentEncryptionKeyID,
+		reencryptedOrgs:        make(map[string]string),
 	}
 	nicoServer.LoadTestMachines()
 	nicoServer.LoadTestIdentity()

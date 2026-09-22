@@ -22,7 +22,8 @@ Delete expected switch
 
 `--id <ID>`
 
-ID (UUID) of the expected switch to delete.
+ID (UUID) of the expected switch to delete. Provide exactly one of this
+ID or the BMC MAC address.
 
 `--extended`
 
@@ -48,7 +49,8 @@ Print help (see a summary with -h)
 
 [*BMC_MAC_ADDRESS*]
 
-BMC MAC address of expected switch to delete.
+BMC MAC address of the expected switch to delete. Provide exactly one of
+this address or --id.
 
 ## Examples
 

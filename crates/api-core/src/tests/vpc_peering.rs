@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 
 use carbide_uuid::machine::{DpuMachineId, MachineId};
+use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use carbide_uuid::vpc_peering::VpcPeeringId;
 use config_version::ConfigVersion;
@@ -524,28 +525,89 @@ async fn vpc_peering_overlap_gate_off_freezes_new_duplicate_source(
     Ok(())
 }
 
+/// Verifies an ETV receiver cannot become FNN when `exclusive` would activate
+/// legacy peerings whose imported VNIs expose overlapping address space.
 #[crate::sqlx_test]
-async fn vpc_peering_receiver_type_change_rejects_new_vni_imports(
+async fn active_peerings_block_receiver_vpc_type_changes(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    check_receiver_type_change_rejects_new_vni_imports(pool, true).await
-}
-
-#[crate::sqlx_test]
-async fn vpc_peering_overlap_gate_off_receiver_type_change_rejects_new_vni_imports(
-    pool: PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    check_receiver_type_change_rejects_new_vni_imports(pool, false).await
-}
-
-#[allow(deprecated)] // Preserve the existing ETV-to-NVUE update path.
-async fn check_receiver_type_change_rejects_new_vni_imports(
-    pool: PgPool,
-    gate_enabled: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+    // Build two FNN sources with the same retained prefix while their legacy
+    // ETV receiver does not import either VNI.
     let (env, vpcs) = create_peering_overlap_fixture(
         pool,
-        gate_enabled,
+        true,
+        Some(VpcPeeringPolicy::Exclusive),
+        VpcVirtualizationType::Fnn,
+    )
+    .await?;
+    let receiver_id = vpcs[0].id.unwrap();
+    let mut txn = env.pool.begin().await?;
+    retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
+
+    // Reconstruct legacy ETV/FNN rows that current creation admission rejects.
+    // They import no peer VNIs while the receiver is ETV, but both become
+    // active under `exclusive` if the receiver changes to FNN.
+    for source in &vpcs[1..] {
+        db::vpc_peering::create(
+            &mut txn,
+            receiver_id,
+            source.id.unwrap(),
+            VpcPeeringId::new(),
+        )
+        .await?;
+    }
+    txn.commit().await?;
+
+    // Becoming FNN would activate both imports, so admission must reject the
+    // change before the receiver exposes duplicate routes.
+    let error = env
+        .api
+        .update_vpc_virtualization(Request::new(rpc::forge::VpcUpdateVirtualizationRequest {
+            id: Some(receiver_id),
+            if_version_match: None,
+            network_virtualization_type: Some(VpcVirtualizationType::Fnn as i32),
+        }))
+        .await
+        .expect_err("active peerings must not expose overlapping peer VNIs");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        error.message(),
+        "the requested prefix overlaps address space that is not eligible for reuse"
+    );
+
+    // Read through the public API to prove the rejected update left the
+    // receiver on ETV rather than trusting the mutation response alone.
+    let persisted = env
+        .api
+        .find_vpcs_by_ids(Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![receiver_id],
+        }))
+        .await?
+        .into_inner()
+        .vpcs
+        .pop()
+        .expect("receiver VPC must remain persisted");
+    assert_eq!(
+        persisted
+            .config
+            .expect("receiver VPC config must be populated")
+            .network_virtualization_type,
+        Some(VpcVirtualizationType::EthernetVirtualizer as i32)
+    );
+    Ok(())
+}
+
+/// Verifies stored peerings do not block an ETV receiver from becoming FNN
+/// when the effective existing-peering policy keeps every import inactive.
+#[crate::sqlx_test]
+async fn inactive_peerings_do_not_block_vpc_type_changes(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Use the same overlapping FNN sources as the rejection case so `none` is
+    // the only reason this type change remains safe.
+    let (env, vpcs) = create_peering_overlap_fixture(
+        pool,
+        true,
         Some(VpcPeeringPolicy::None),
         VpcVirtualizationType::Fnn,
     )
@@ -555,52 +617,48 @@ async fn check_receiver_type_change_rejects_new_vni_imports(
     retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
     txn.commit().await?;
 
-    // ETV imports neither source under this policy. Becoming FNN would
-    // import both VNIs even though CIDR imports remain disabled.
+    // Preserve legacy cross-virtualizer rows without going through creation
+    // admission. The explicit `none` policy keeps every peer import inactive,
+    // so changing the receiver type cannot expose the overlapping sources.
+    let mut txn = env.pool.begin().await?;
     for source in &vpcs[1..] {
-        env.api
-            .create_vpc_peering(Request::new(VpcPeeringCreationRequest {
-                id: None,
-                vpc_id: Some(receiver_id),
-                peer_vpc_id: source.id,
-            }))
-            .await?;
+        db::vpc_peering::create(
+            &mut txn,
+            receiver_id,
+            source.id.unwrap(),
+            VpcPeeringId::new(),
+        )
+        .await?;
     }
-    let error = env
-        .api
+    txn.commit().await?;
+
+    // The mutation must succeed, and a subsequent public find must show FNN.
+    // This proves inactive legacy rows neither expand nor block address space.
+    env.api
         .update_vpc_virtualization(Request::new(rpc::forge::VpcUpdateVirtualizationRequest {
             id: Some(receiver_id),
             if_version_match: None,
             network_virtualization_type: Some(VpcVirtualizationType::Fnn as i32),
         }))
         .await
-        .expect_err("an empty receiver must not import overlapping peer VNIs");
-    assert_eq!(error.code(), tonic::Code::InvalidArgument);
-    assert_eq!(
-        error.message(),
-        "the requested prefix overlaps address space that is not eligible for reuse"
-    );
-    let persisted = db::vpc::find_by(
-        &env.pool,
-        db::ObjectColumnFilter::One(db::vpc::IdColumn, &receiver_id),
-    )
-    .await?
-    .pop()
-    .unwrap();
-    assert_eq!(
-        persisted.config.network_virtualization_type,
-        carbide_network::virtualization::VpcVirtualizationType::EthernetVirtualizer
-    );
-    env.api
-        .update_vpc_virtualization(Request::new(rpc::forge::VpcUpdateVirtualizationRequest {
-            id: Some(receiver_id),
-            if_version_match: None,
-            network_virtualization_type: Some(
-                VpcVirtualizationType::EthernetVirtualizerWithNvue as i32,
-            ),
+        .expect("inactive peerings must not expand the receiver's address space");
+    let persisted = env
+        .api
+        .find_vpcs_by_ids(Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![receiver_id],
         }))
-        .await
-        .expect("switching ETV renderers adds no peer imports");
+        .await?
+        .into_inner()
+        .vpcs
+        .pop()
+        .expect("receiver VPC must remain persisted");
+    assert_eq!(
+        persisted
+            .config
+            .expect("persisted VPC config must be populated")
+            .network_virtualization_type,
+        Some(VpcVirtualizationType::Fnn as i32)
+    );
     Ok(())
 }
 
@@ -802,8 +860,6 @@ async fn create_vpc_peering(
     let vpc_vni = vpc_vni.expect("Expected vpc_vni to be Some, but was None");
     let peer_vpc_vni = peer_vpc_vni.expect("Expected vpc_vni to be Some, but was None");
 
-    let mh = create_managed_host(env).await;
-
     // Creating VPC peering between two VPCs
     let vpc_peering_request = Request::new(VpcPeeringCreationRequest {
         vpc_id: Some(vpc_id),
@@ -811,6 +867,17 @@ async fn create_vpc_peering(
         id: None,
     });
     let _ = env.api.create_vpc_peering(vpc_peering_request).await?;
+
+    let dpu_machine_id = allocate_instance_on_segment(env, segment_id).await;
+
+    Ok((vpc_id, peer_vpc_id, vpc_vni, peer_vpc_vni, dpu_machine_id))
+}
+
+/// Attaches a tenant instance to the chosen segment so DPU configuration tests
+/// exercise the VPC's effective peering policy on an active tenant interface.
+async fn allocate_instance_on_segment(env: &TestEnv, segment_id: NetworkSegmentId) -> DpuMachineId {
+    // A managed host supplies the real DPU identity used by the config request.
+    let mh = create_managed_host(env).await;
 
     // Add an instance
     let instance_network = rpc::InstanceNetworkConfig {
@@ -830,12 +897,13 @@ async fn create_vpc_peering(
         auto_config: None,
     };
 
+    // Persist the attachment before returning the DPU that must render it.
     mh.instance_builer(env)
         .network(instance_network)
         .build()
         .await;
 
-    Ok((vpc_id, peer_vpc_id, vpc_vni, peer_vpc_vni, mh.dpu().id))
+    mh.dpu().id
 }
 
 #[crate::sqlx_test]
@@ -864,27 +932,186 @@ async fn test_vpc_peering_network_config(
     Ok(())
 }
 
-/// Verifies FNN and ETV VPCs reach and fail the virtualization compatibility boundary.
+/// Verifies an existing-peering override disables both prefix and VNI imports,
+/// so stored compatible peerings cannot bypass the operator's disabled policy.
 #[crate::sqlx_test]
-async fn test_vpc_peering_network_config_mixed(
+async fn existing_policy_none_disables_fnn_peer_imports(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Enable FNN so the helper creates the required tenants and valid FNN routing state.
-    let env =
-        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
-            .await;
+    // Permit peering creation while disabling activation of the stored row.
+    let mut config = crate::test_support::default_config::get();
+    config.vpc_peering_policy_on_existing = Some(VpcPeeringPolicy::None);
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_fnn_config(None),
+    )
+    .await;
 
+    // A real FNN peering and attached instance exercise public DPU response wiring.
+    let (_, _, _, _, dpu_machine_id) =
+        create_vpc_peering(&env, VpcVirtualizationType::Fnn, VpcVirtualizationType::Fnn).await?;
+    let response = env
+        .api
+        .get_managed_host_network_config(Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await?
+        .into_inner();
+    // The authoritative empty lists must disable imports without losing the interface.
+    assert_eq!(response.tenant_interfaces.len(), 1);
+    assert!(response.vpc_peer_vnis_authoritative);
+    assert!(response.tenant_interfaces[0].vpc_peer_prefixes.is_empty());
+    assert!(response.tenant_interfaces[0].vpc_peer_vnis.is_empty());
+
+    Ok(())
+}
+
+/// Verifies incompatible FNN/ETV creation uses the capability error contract,
+/// including when site policy could otherwise produce a different rejection.
+async fn assert_fnn_etv_peering_is_invalid(
+    env: &TestEnv,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Exercise public creation so the assertion protects validation precedence.
     let error = create_vpc_peering(
-        &env,
+        env,
         VpcVirtualizationType::Fnn,
         VpcVirtualizationType::EthernetVirtualizer,
     )
     .await
-    .expect_err("mixed virtualization types cannot be peered");
+    .expect_err("incompatible virtualization types cannot be peered");
+    // Check the gRPC classification rather than only the formatted error chain.
+    let status = error
+        .downcast_ref::<Status>()
+        .expect("peering rejection must be a gRPC status");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
     assert!(
-        error.to_string().contains("cannot be peered"),
-        "unexpected error: {error}"
+        status.message().contains("cannot be peered"),
+        "unexpected error: {status}"
     );
+    Ok(())
+}
+
+/// Verifies deprecated Mixed policy cannot bypass the FNN/ETV compatibility boundary.
+#[crate::sqlx_test]
+async fn mixed_policy_rejects_fnn_etv_peering(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Deprecated Mixed must use the same compatibility boundary as Exclusive.
+    let mut config = crate::test_support::default_config::get();
+    config.vpc_peering_policy = Some(VpcPeeringPolicy::Mixed);
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_fnn_config(None),
+    )
+    .await;
+
+    // An incompatible pair must fail before it can become a stored peering.
+    assert_fnn_etv_peering_is_invalid(&env).await?;
+
+    Ok(())
+}
+
+/// Verifies capability rejection takes precedence over disabled site policy,
+/// preserving InvalidArgument for an intrinsically incompatible VPC pair.
+#[crate::sqlx_test]
+async fn disabled_policy_rejects_fnn_etv_peering_as_invalid(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Make both rejection reasons applicable so their precedence is observable.
+    let mut config = crate::test_support::default_config::get();
+    config.vpc_peering_policy = Some(VpcPeeringPolicy::None);
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_fnn_config(None),
+    )
+    .await;
+
+    // The incompatible-pair error must win over the disabled-policy precondition.
+    assert_fnn_etv_peering_is_invalid(&env).await?;
+
+    Ok(())
+}
+
+/// Verifies a disabled site rejects an otherwise compatible peering as a precondition failure.
+#[crate::sqlx_test]
+async fn disabled_policy_rejects_compatible_peering_as_failed_precondition(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Use a compatible pair so only the disabled site policy can reject it.
+    let mut config = crate::test_support::default_config::get();
+    config.vpc_peering_policy = Some(VpcPeeringPolicy::None);
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    create_test_vpcs(&env, 2, None).await?;
+
+    // Public creation must report a policy precondition, not a capability error.
+    let error = env
+        .api
+        .create_vpc_peering(Request::new(VpcPeeringCreationRequest {
+            vpc_id: Some(find_vpc_id_by_name(&env, "test vpc 1").await?),
+            peer_vpc_id: Some(find_vpc_id_by_name(&env, "test vpc 2").await?),
+            id: None,
+        }))
+        .await
+        .expect_err("disabled peering must reject a compatible pair");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+    Ok(())
+}
+
+/// Verifies retained Mixed FNN/ETV peerings contribute no active route imports,
+/// so old admission rules cannot bypass the current compatibility boundary.
+#[crate::sqlx_test]
+async fn deprecated_mixed_policy_does_not_activate_existing_fnn_etv_peering(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Keep both policy settings on the deprecated value to exercise compatibility.
+    let mut config = crate::test_support::default_config::get();
+    config.vpc_peering_policy = Some(VpcPeeringPolicy::Mixed);
+    config.vpc_peering_policy_on_existing = Some(VpcPeeringPolicy::Mixed);
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_fnn_config(None),
+    )
+    .await;
+
+    // Build both virtualization types before inserting the legacy peering row.
+    let first_tenant = default_tenant_config().tenant_organization_id;
+    let second_tenant = "Tenant2";
+    create_fixture_tenant(&env, first_tenant.clone()).await?;
+    create_fixture_tenant(&env, second_tenant).await?;
+    let (fnn_vpc_id, _, fnn_segment_id, etv_vpc_id, _, _) = env
+        .create_vpc_and_peer_vpc_with_tenant_segments_for_tenants(
+            &first_tenant,
+            VpcVirtualizationType::Fnn,
+            second_tenant,
+            VpcVirtualizationType::EthernetVirtualizer,
+        )
+        .await;
+
+    // Simulate a row retained from a release where Mixed admitted this pair.
+    let mut txn = env.pool.begin().await?;
+    db::vpc_peering::create(
+        &mut txn,
+        fnn_vpc_id.unwrap(),
+        etv_vpc_id.unwrap(),
+        VpcPeeringId::new(),
+    )
+    .await?;
+    txn.commit().await?;
+
+    // Render a real tenant interface to prove the retained row stays inactive.
+    let dpu_machine_id = allocate_instance_on_segment(&env, fnn_segment_id).await;
+    let response = env
+        .api
+        .get_managed_host_network_config(Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await?
+        .into_inner();
+    // Neither the legacy prefix list nor the current VNI list may reactivate it.
+    assert_eq!(response.tenant_interfaces.len(), 1);
+    assert!(response.tenant_interfaces[0].vpc_peer_prefixes.is_empty());
+    assert!(response.tenant_interfaces[0].vpc_peer_vnis.is_empty());
 
     Ok(())
 }

@@ -24,8 +24,6 @@ use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::errors::CarbideCliError;
-
 #[derive(Parser, Debug, Serialize, Deserialize)]
 #[command(after_long_help = "\
 EXAMPLES:
@@ -43,6 +41,12 @@ Update an expected power shelf's serial number, selecting it by ID:
 "bmc_username",
 "bmc_password",
 "shelf_serial_number",
+"bmc_ip_address",
+"bmc_retain_credentials",
+"rack_id",
+"meta_name",
+"meta_description",
+"labels",
 ])))]
 pub(crate) struct Args {
     #[clap(
@@ -186,19 +190,9 @@ impl Args {
     }
 }
 
-impl TryFrom<Args> for rpc::forge::ExpectedPowerShelf {
-    type Error = CarbideCliError;
-
-    fn try_from(args: Args) -> Result<Self, Self::Error> {
-        if args.bmc_username.is_none()
-            && args.bmc_password.is_none()
-            && args.shelf_serial_number.is_none()
-        {
-            return Err(CarbideCliError::GenericError(
-                "One of the following options must be specified: bmc-user-name and bmc-password or shelf-serial-number".to_string(),
-            ));
-        }
-        Ok(rpc::forge::ExpectedPowerShelf {
+impl From<Args> for rpc::forge::ExpectedPowerShelf {
+    fn from(args: Args) -> Self {
+        rpc::forge::ExpectedPowerShelf {
             expected_power_shelf_id: args.id.map(|id| ::rpc::common::Uuid {
                 value: id.to_string(),
             }),
@@ -220,6 +214,123 @@ impl TryFrom<Args> for rpc::forge::ExpectedPowerShelf {
             }),
             rack_id: args.rack_id,
             bmc_retain_credentials: args.bmc_retain_credentials,
-        })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::{Case, check_cases};
+    use rpc::forge::{ExpectedPowerShelf, Label, Metadata};
+
+    use super::*;
+
+    const ID: &str = "12345678-1234-5678-90ab-cdef01234567";
+
+    #[test]
+    fn standalone_updates_select_only_the_supplied_field() {
+        let base = ExpectedPowerShelf {
+            expected_power_shelf_id: Some(rpc::common::Uuid {
+                value: ID.to_string(),
+            }),
+            metadata: Some(Metadata::default()),
+            ..Default::default()
+        };
+        check_cases(
+            [
+                Case {
+                    scenario: "standalone BMC IP address",
+                    input: ["--bmc-ip-address", "192.0.2.10"],
+                    expect: Yields((
+                        vec!["bmc_ip_address".to_string()],
+                        ExpectedPowerShelf {
+                            bmc_ip_address: "192.0.2.10".to_string(),
+                            ..base.clone()
+                        },
+                    )),
+                },
+                Case {
+                    scenario: "explicit false selects credential retention",
+                    input: ["--bmc-retain-credentials", "false"],
+                    expect: Yields((
+                        vec!["bmc_retain_credentials".to_string()],
+                        ExpectedPowerShelf {
+                            bmc_retain_credentials: Some(false),
+                            ..base.clone()
+                        },
+                    )),
+                },
+                Case {
+                    scenario: "standalone rack uses the existing underscore flag",
+                    input: ["--rack_id", "rack-42-us-west"],
+                    expect: Yields((
+                        vec!["rack_id".to_string()],
+                        ExpectedPowerShelf {
+                            rack_id: Some("rack-42-us-west".parse().unwrap()),
+                            ..base.clone()
+                        },
+                    )),
+                },
+                Case {
+                    scenario: "empty metadata name selects clearing",
+                    input: ["--meta-name", ""],
+                    expect: Yields((vec!["metadata.name".to_string()], base.clone())),
+                },
+                Case {
+                    scenario: "empty metadata description selects clearing",
+                    input: ["--meta-description", ""],
+                    expect: Yields((vec!["metadata.description".to_string()], base.clone())),
+                },
+                Case {
+                    scenario: "standalone labels select the replacement collection",
+                    input: ["--label", "team:power"],
+                    expect: Yields((
+                        vec!["metadata.labels".to_string()],
+                        ExpectedPowerShelf {
+                            metadata: Some(Metadata {
+                                labels: vec![Label {
+                                    key: "team".to_string(),
+                                    value: Some("power".to_string()),
+                                }],
+                                ..Default::default()
+                            }),
+                            ..base
+                        },
+                    )),
+                },
+            ],
+            |flags| -> Result<_, String> {
+                let args = Args::try_parse_from(["update", "--id", ID].into_iter().chain(flags))
+                    .map_err(|error| error.to_string())?;
+                args.validate().map_err(|error| error.to_string())?;
+                let paths = args.update_mask();
+                let shelf = ExpectedPowerShelf::from(args);
+                Ok((paths, shelf))
+            },
+        );
+    }
+
+    #[test]
+    fn updates_require_a_field_and_complete_credentials() {
+        check_cases(
+            [
+                Case {
+                    scenario: "selector alone is not an update",
+                    input: vec![],
+                    expect: FailsWith(ErrorKind::MissingRequiredArgument),
+                },
+                Case {
+                    scenario: "metadata does not bypass credential pairing",
+                    input: vec!["--meta-name", "shelf", "--bmc-username", "admin"],
+                    expect: FailsWith(ErrorKind::MissingRequiredArgument),
+                },
+            ],
+            |flags| {
+                Args::try_parse_from(["update", "--id", ID].into_iter().chain(flags))
+                    .map(|_| ())
+                    .map_err(|error| error.kind())
+            },
+        );
     }
 }

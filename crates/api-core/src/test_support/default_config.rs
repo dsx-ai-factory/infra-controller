@@ -181,6 +181,7 @@ pub fn get() -> CarbideConfig {
         enable_route_servers: false,
         deny_prefixes: vec![],
         site_fabric_prefixes: vec![],
+        site_fabric_null_routes: None,
         tenant_prefix_overlap_enabled: false,
         max_site_prefixes_per_tenant: default_max_site_prefixes_per_tenant(),
         anycast_site_prefixes: vec![],

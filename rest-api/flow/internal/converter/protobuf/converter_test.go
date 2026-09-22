@@ -588,6 +588,7 @@ func TestComponentConverter(t *testing.T) {
 		sourceP    *pb.Component
 		converted  *component.Component
 		convertedP *pb.Component
+		wantErr    string
 	}{
 		"valid": {
 			source:     &shared,
@@ -601,11 +602,30 @@ func TestComponentConverter(t *testing.T) {
 			converted:  nil,
 			convertedP: nil,
 		},
+		"malformed component ID": {
+			sourceP: &pb.Component{
+				Info: &pb.DeviceInfo{Id: &pb.UUID{Id: "not-a-uuid"}},
+			},
+			wantErr: "component info.id",
+		},
+		"malformed domain ID": {
+			sourceP: &pb.Component{
+				NvlDomainId: &pb.UUID{Id: "not-a-uuid"},
+			},
+			wantErr: "component nvl_domain_id",
+		},
 	}
 
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, testCase.converted, ComponentFrom(testCase.sourceP))
+			converted, err := ComponentFrom(testCase.sourceP)
+			if testCase.wantErr != "" {
+				require.ErrorContains(t, err, testCase.wantErr)
+				assert.Nil(t, converted)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, testCase.converted, converted)
 			assert.Equal(t, testCase.convertedP, ComponentTo(testCase.source))
 		})
 	}
@@ -654,6 +674,7 @@ func TestRackConverter(t *testing.T) {
 		sourceP    *pb.Rack
 		converted  *rack.Rack
 		convertedP *pb.Rack
+		wantErr    string
 	}{
 		"valid": {
 			source:     &shared,
@@ -667,11 +688,41 @@ func TestRackConverter(t *testing.T) {
 			converted:  nil,
 			convertedP: nil,
 		},
+		"malformed rack ID": {
+			sourceP: &pb.Rack{
+				Info: &pb.DeviceInfo{Id: &pb.UUID{Id: "not-a-uuid"}},
+			},
+			wantErr: "rack info.id",
+		},
+		"mixed valid and malformed domain IDs": {
+			sourceP: &pb.Rack{
+				NvlDomainIds: []*pb.UUID{
+					{Id: domainID.String()},
+					{Id: "not-a-uuid"},
+				},
+			},
+			wantErr: "rack nvl_domain_ids entry 1",
+		},
+		"malformed nested component ID": {
+			sourceP: &pb.Rack{
+				Components: []*pb.Component{
+					{Info: &pb.DeviceInfo{Id: &pb.UUID{Id: "not-a-uuid"}}},
+				},
+			},
+			wantErr: "rack component 0: component info.id",
+		},
 	}
 
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, testCase.converted, RackFrom(testCase.sourceP))
+			converted, err := RackFrom(testCase.sourceP)
+			if testCase.wantErr != "" {
+				require.ErrorContains(t, err, testCase.wantErr)
+				assert.Nil(t, converted)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, testCase.converted, converted)
 			assert.Equal(t, testCase.convertedP, RackTo(testCase.source))
 		})
 	}
@@ -682,7 +733,7 @@ func TestRackConverterPropagatesDomainToNestedComponents(t *testing.T) {
 	explicitComponentDomainID := uuid.New()
 	componentID := uuid.New()
 
-	fromProto := RackFrom(&pb.Rack{
+	fromProto, err := RackFrom(&pb.Rack{
 		Info:         &pb.DeviceInfo{Id: UUIDTo(uuid.New())},
 		NvlDomainIds: UUIDsTo([]uuid.UUID{domainID, uuid.New()}),
 		Components: []*pb.Component{
@@ -693,6 +744,7 @@ func TestRackConverterPropagatesDomainToNestedComponents(t *testing.T) {
 			},
 		},
 	})
+	require.NoError(t, err)
 	require.Len(t, fromProto.Components, 2)
 	assert.Equal(t, domainID, fromProto.NVLDomainID)
 	assert.Equal(t, domainID, fromProto.Components[0].NVLDomainID)
@@ -825,27 +877,82 @@ func TestOrderByConverter(t *testing.T) {
 
 func TestOptionalUUIDFrom(t *testing.T) {
 	testID := uuid.New()
+	tests := map[string]struct {
+		input   *pb.UUID
+		want    *uuid.UUID
+		wantErr bool
+	}{
+		"omitted": {},
+		"valid": {
+			input: &pb.UUID{Id: testID.String()},
+			want:  &testID,
+		},
+		"empty": {
+			input:   &pb.UUID{},
+			wantErr: true,
+		},
+		"malformed": {
+			input:   &pb.UUID{Id: "not-a-uuid"},
+			wantErr: true,
+		},
+		"zero": {
+			input:   &pb.UUID{Id: uuid.Nil.String()},
+			wantErr: true,
+		},
+	}
 
-	t.Run("nil input returns nil", func(t *testing.T) {
-		result := OptionalUUIDFrom(nil)
-		assert.Nil(t, result)
-	})
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			result, err := OptionalUUIDFrom(test.input)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, result)
+		})
+	}
+}
 
-	t.Run("valid UUID returns pointer", func(t *testing.T) {
-		result := OptionalUUIDFrom(&pb.UUID{Id: testID.String()})
-		assert.NotNil(t, result)
-		assert.Equal(t, testID, *result)
-	})
+func TestRequiredUUIDsFrom(t *testing.T) {
+	first := uuid.New()
+	second := uuid.New()
+	tests := map[string]struct {
+		input   []*pb.UUID
+		want    []uuid.UUID
+		wantErr string
+	}{
+		"empty": {
+			input: []*pb.UUID{},
+			want:  []uuid.UUID{},
+		},
+		"all valid": {
+			input: []*pb.UUID{{Id: first.String()}, {Id: second.String()}},
+			want:  []uuid.UUID{first, second},
+		},
+		"nil entry": {
+			input:   []*pb.UUID{{Id: first.String()}, nil},
+			wantErr: "entry 1",
+		},
+		"mixed valid and malformed": {
+			input:   []*pb.UUID{{Id: first.String()}, {Id: "not-a-uuid"}},
+			wantErr: "entry 1",
+		},
+	}
 
-	t.Run("empty string returns nil", func(t *testing.T) {
-		result := OptionalUUIDFrom(&pb.UUID{Id: ""})
-		assert.Nil(t, result)
-	})
-
-	t.Run("invalid UUID returns nil", func(t *testing.T) {
-		result := OptionalUUIDFrom(&pb.UUID{Id: "not-a-uuid"})
-		assert.Nil(t, result)
-	})
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			result, err := RequiredUUIDsFrom(test.input)
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, result)
+		})
+	}
 }
 
 func TestRackTargetFrom(t *testing.T) {

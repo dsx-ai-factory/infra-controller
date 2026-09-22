@@ -220,6 +220,7 @@ VIP requirements below apply to enabled external `LoadBalancer` Services.
 | `siteConfig.initial_domain_name` | `"examplesite.example.com"` | **Yes** | Base DNS domain for the site |
 | `siteConfig.dhcp_servers` | `["10.180.126.160"]` | **Yes** | DHCP service VIP(s) from your MetalLB internal pool |
 | `siteConfig.site_fabric_prefixes` | `["10.180.62.72/29"]` | **Yes** | CIDRs for site fabric (instance-to-instance traffic) |
+| `siteConfig.site_fabric_null_routes` | omitted | No | FNN isolation CIDRs. Omission inherits, retains, and collapses operator roots. Explicit lists preserve distinct prefix boundaries, while `[]` installs no null routes |
 | `siteConfig.deny_prefixes` | `["10.180.62.64/29", ...]` | **Yes** | CIDRs instances must not reach (OOB, mgmt, underlay) |
 | `siteConfig.[pools.lo-ip]` ranges | `{ start = "10.180.62.84", end = "10.180.62.86" }` | **Yes** | Loopback IP range for bare-metal hosts |
 | `siteConfig.[pools.vlan-id]` ranges | `{ start = "100", end = "501" }` | **Yes** | VLAN ID allocation range |
@@ -319,22 +320,44 @@ dependencies outside `setup.sh`. In particular, inspect custom Core values and
 configuration for `componentManager.nvSwitchBackend: nsm`,
 `componentManager.powerShelfBackend: psm`, `nv_switch_backend = "nsm"`, or
 `power_shelf_backend = "psm"`. Move those roles to
-[RMS](../docs/configuration/component-manager-rms.md) or to an externally
+[RMS](../docs/configuration/rms.md) or to an externally
 managed endpoint, and deploy and verify that Core change using the site's
 existing process. This release does not provide a Core or manager data
 migration. An external endpoint must not resolve to the `psm` or `nsm` Service
 removed by the Flow upgrade.
 
 After those dependencies are handled, upgrade only the existing Flow release
-from the repository root. Reusing the release values preserves site-specific
-image and registry settings; the explicit repository and tag select the target
-Flow image. This is a normal Helm rolling upgrade: do not use `--force` and do
-not patch the Deployment or upgrade `nico-prereqs` first.
+from the repository root. `--reset-then-reuse-values` (Helm 3.14 or newer)
+applies the new chart's defaults and keeps the site-specific values of the
+existing release, such as image and registry settings; the explicit repository
+and tag select the target Flow image. Do not use `--reuse-values` here: it also
+reuses the previous chart's defaults, so values added by the new chart are
+missing and the render fails. On Helm 4, also add `--force-conflicts`: Helm 4
+applies server-side, and the `flow` Namespace and the Certificates that
+`setup.sh` pre-applies are owned by other field managers, so the chart label
+change is otherwise rejected with `conflict occurred while applying object
+/flow /v1, Kind=Namespace`. This is a normal Helm rolling upgrade: do not use
+`--force` and do not patch the Deployment or upgrade `nico-prereqs` first.
 
 ```bash
 helm upgrade flow ./helm/charts/nico-flow \
   --namespace flow \
-  --reuse-values \
+  --reset-then-reuse-values \
+  --set global.image.repository="${NICO_IMAGE_REGISTRY}" \
+  --set global.image.tag="${NICO_REST_IMAGE_TAG}" \
+  --timeout 300s \
+  --wait
+
+kubectl rollout status deployment/flow -n flow --timeout=300s
+```
+
+On Helm 4, run the upgrade with the conflict flag instead:
+
+```bash
+helm upgrade flow ./helm/charts/nico-flow \
+  --namespace flow \
+  --reset-then-reuse-values \
+  --force-conflicts \
   --set global.image.repository="${NICO_IMAGE_REGISTRY}" \
   --set global.image.tag="${NICO_REST_IMAGE_TAG}" \
   --timeout 300s \

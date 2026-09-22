@@ -213,7 +213,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             metadata: None,
@@ -262,7 +262,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             metadata: None,
@@ -364,7 +364,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             labels: std::collections::BTreeMap::from([(
@@ -445,7 +445,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),
@@ -505,7 +505,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),

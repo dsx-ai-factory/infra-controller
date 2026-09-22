@@ -386,6 +386,8 @@ pub(crate) async fn find_state_histories(
 /// allocations, and creates every reverse-DNS zone derived from the persisted
 /// prefixes before the caller commits. The segment and its zones therefore
 /// become visible together, and a zone failure rolls the segment back as well.
+/// These rows support rollback to zone-backed DNS; derived PTR lookup ignores
+/// them and does not claim authority over their reverse zones.
 ///
 /// Startup uses [`save_without_reverse_zones`] instead. It persists every
 /// configured segment first, resolves config drift through the stored
