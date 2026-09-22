@@ -4,6 +4,7 @@
 ## Table of Contents
 
 - [flow.proto](#flow-proto)
+    - [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest)
     - [AddComponentRequest](#v1-AddComponentRequest)
     - [AddComponentResponse](#v1-AddComponentResponse)
     - [AddTaskScheduleScopeRequest](#v1-AddTaskScheduleScopeRequest)
@@ -239,6 +240,25 @@
 <p align="right"><a href="#top">Top</a></p>
 
 ## flow.proto
+
+
+
+<a name="v1-ACPowerCycleRackRequest"></a>
+
+### ACPowerCycleRackRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) |  | Target racks or NVLink domains with an optional type filter, or specific components |
+| description | [string](#string) |  | optional task description |
+| queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
+| rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
+| override_readiness_check | [bool](#bool) |  | When true, proceed with the AC power cycle even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+
+
+
 
 
 
@@ -4021,6 +4041,7 @@ RackOrderByField represents the supported order by field types for rack queries
 | PowerOnRack | [PowerOnRackRequest](#v1-PowerOnRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerOffRack | [PowerOffRackRequest](#v1-PowerOffRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerResetRack | [PowerResetRackRequest](#v1-PowerResetRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
+| ACPowerCycleRack | [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | GetComponentInfoByID | [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) | Component CRUD |
 | GetComponentInfoBySerial | [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) |  |
 | GetComponents | [GetComponentsRequest](#v1-GetComponentsRequest) | [GetComponentsResponse](#v1-GetComponentsResponse) |  |
