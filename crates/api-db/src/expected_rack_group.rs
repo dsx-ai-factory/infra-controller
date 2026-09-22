@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::rack::{RackGroupId, RackId};
-use model::expected_rack_group::{ExpectedRackGroup, ExpectedRackGroupMember, RackGroupTopology};
+use carbide_uuid::rack::RackGroupId;
+use model::expected_rack_group::{ExpectedRackGroup, ExpectedRackGroupRack, RackGroupTopology};
 use model::metadata::Metadata;
 use sqlx::{FromRow, PgConnection};
 
@@ -16,8 +16,7 @@ use crate::{DatabaseError, DatabaseResult};
 struct GroupRow {
     rack_group_id: RackGroupId,
     topology: String,
-    rack_ids: sqlx::types::Json<Vec<RackId>>,
-    members: sqlx::types::Json<Vec<ExpectedRackGroupMember>>,
+    racks: sqlx::types::Json<Vec<ExpectedRackGroupRack>>,
     metadata_name: String,
     metadata_description: String,
     metadata_labels: sqlx::types::Json<HashMap<String, String>>,
@@ -28,8 +27,7 @@ impl GroupRow {
         ExpectedRackGroup {
             rack_group_id: self.rack_group_id,
             topology: RackGroupTopology::new(self.topology),
-            rack_ids: self.rack_ids.0,
-            members: self.members.0,
+            racks: self.racks.0,
             metadata: Metadata {
                 name: self.metadata_name,
                 description: self.metadata_description,
@@ -43,7 +41,7 @@ pub async fn find_by_rack_group_id(
     txn: &mut PgConnection,
     rack_group_id: &RackGroupId,
 ) -> DatabaseResult<Option<ExpectedRackGroup>> {
-    let query = "SELECT * FROM expected_rack_groups WHERE rack_group_id=$1";
+    let query = "SELECT rack_group_id, topology, racks, metadata_name, metadata_description, metadata_labels FROM expected_rack_groups WHERE rack_group_id=$1";
     let Some(row): Option<GroupRow> = sqlx::query_as(query)
         .bind(rack_group_id)
         .fetch_optional(&mut *txn)
@@ -57,7 +55,7 @@ pub async fn find_by_rack_group_id(
 
 #[cfg(test)]
 async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedRackGroup>> {
-    let query = "SELECT * FROM expected_rack_groups ORDER BY rack_group_id";
+    let query = "SELECT rack_group_id, topology, racks, metadata_name, metadata_description, metadata_labels FROM expected_rack_groups ORDER BY rack_group_id";
     let rows: Vec<GroupRow> = sqlx::query_as(query)
         .fetch_all(&mut *txn)
         .await
@@ -78,8 +76,7 @@ pub async fn find_by_ids(
     txn: &mut PgConnection,
     ids: &[RackGroupId],
 ) -> DatabaseResult<Vec<ExpectedRackGroup>> {
-    let query =
-        "SELECT * FROM expected_rack_groups WHERE rack_group_id = ANY($1) ORDER BY rack_group_id";
+    let query = "SELECT rack_group_id, topology, racks, metadata_name, metadata_description, metadata_labels FROM expected_rack_groups WHERE rack_group_id = ANY($1) ORDER BY rack_group_id";
     let values: Vec<&str> = ids.iter().map(RackGroupId::as_str).collect();
     let rows: Vec<GroupRow> = sqlx::query_as(query)
         .bind(values)
@@ -94,13 +91,12 @@ pub async fn create(
     group: &ExpectedRackGroup,
 ) -> DatabaseResult<ExpectedRackGroup> {
     let query = "INSERT INTO expected_rack_groups
-        (rack_group_id, topology, rack_ids, members, metadata_name, metadata_description, metadata_labels)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)";
+        (rack_group_id, topology, racks, metadata_name, metadata_description, metadata_labels)
+        VALUES ($1, $2, $3, $4, $5, $6)";
     sqlx::query(query)
         .bind(&group.rack_group_id)
         .bind(group.topology.as_str())
-        .bind(sqlx::types::Json(&group.rack_ids))
-        .bind(sqlx::types::Json(&group.members))
+        .bind(sqlx::types::Json(&group.racks))
         .bind(&group.metadata.name)
         .bind(&group.metadata.description)
         .bind(sqlx::types::Json(&group.metadata.labels))
@@ -121,11 +117,10 @@ pub async fn create(
 }
 
 pub async fn update(txn: &mut PgConnection, group: &ExpectedRackGroup) -> DatabaseResult<()> {
-    let query = "UPDATE expected_rack_groups SET topology=$1, rack_ids=$2, members=$3, metadata_name=$4, metadata_description=$5, metadata_labels=$6 WHERE rack_group_id=$7";
+    let query = "UPDATE expected_rack_groups SET topology=$1, racks=$2, metadata_name=$3, metadata_description=$4, metadata_labels=$5 WHERE rack_group_id=$6";
     let result = sqlx::query(query)
         .bind(group.topology.as_str())
-        .bind(sqlx::types::Json(&group.rack_ids))
-        .bind(sqlx::types::Json(&group.members))
+        .bind(sqlx::types::Json(&group.racks))
         .bind(&group.metadata.name)
         .bind(&group.metadata.description)
         .bind(sqlx::types::Json(&group.metadata.labels))
