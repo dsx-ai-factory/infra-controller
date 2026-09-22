@@ -1025,7 +1025,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::machine_info::HostFirmwareVersions;
-    use crate::test_support::{NoopCallbacks, host_info};
+    use crate::test_support::{TestCallbacks, host_info};
     use crate::{HardwareType, MachineRouterOptions, machine_router};
 
     fn make_router(
@@ -1033,7 +1033,7 @@ mod tests {
         bmc_desired: &str,
     ) -> (
         axum::Router,
-        crate::bmc_state::BmcState<crate::test_support::NoopCallbacks>,
+        crate::bmc_state::BmcState<crate::test_support::TestCallbacks>,
     ) {
         make_router_with_uefi(bmc_current, bmc_desired, None, None)
     }
@@ -1045,7 +1045,7 @@ mod tests {
         uefi_desired: Option<&str>,
     ) -> (
         axum::Router,
-        crate::bmc_state::BmcState<crate::test_support::NoopCallbacks>,
+        crate::bmc_state::BmcState<crate::test_support::TestCallbacks>,
     ) {
         let info = host_info(HardwareType::GenericAmi);
         let info = if let crate::MachineInfo::Host(mut h) = info {
@@ -1063,7 +1063,7 @@ mod tests {
         };
         machine_router(
             &info,
-            StdArc::new(NoopCallbacks),
+            StdArc::new(TestCallbacks::default()),
             "test".into(),
             false,
             MachineRouterOptions::default(),

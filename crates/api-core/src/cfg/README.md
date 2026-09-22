@@ -189,9 +189,11 @@ field.
 NICo trims outer whitespace from `product_family` and vendor values and requires
 both to be non-empty. It does not validate either value against a fixed list.
 RMS determines whether each role/vendor/product-family combination is supported
-when a request is made. See
-[Supported RMS descriptor combinations](../../../../docs/configuration/component-manager-rms.md#supported-rms-descriptor-combinations),
-including VRNVL72.
+when a request is made. Refer to the
+[Hardware Compatibility List](https://docs.nvidia.com/rms/documentation/reference/hardware-compatibility-list)
+as a compatibility reference. The list includes hardware under development, and
+inclusion does not imply qualification, certification, or support. Confirm
+support for each combination against the deployed RMS release.
 
 For product families other than `gb200` and `gb300`, the `GetRackProfile`
 `product_family` enum is `UNSPECIFIED`. The configured string remains available
@@ -251,16 +253,17 @@ omitted. RMS records an asynchronous update failure when the document does not
 contain the required image. If `firmware_object` is omitted, NICo skips both
 automatic rack maintenance phases and the compute-tray pre-ingestion update. An
 explicit maintenance request can supply a firmware object instead. If no
-firmware object is available while a switch in the maintenance scope is already
-waiting for an NVOS update, the rack transitions to `Error` instead of skipping
-the NVOS phase. `fetch_timeout` defaults to `30s`.
+firmware object is available while a selected switch is in
+`WaitingForNVOSUpgrade` for a reprovision request whose initiator is
+`rack-{rack_id}`, the rack transitions to `Error` instead of skipping the NVOS
+phase. `fetch_timeout` defaults to `30s`.
 
 `access_token_credential` optionally names a credential that contains a
 firmware artifact access token. NICo reads the secret when compute-tray
 pre-ingestion starts. When the field is omitted, NICo sends the RMS no-auth
 sentinel.
 
-Example: GB300 rack with Lenovo compute trays and Delta power shelves:
+Example: GB300 rack with NVIDIA compute trays and Delta power shelves:
 
 ```toml
 [component_manager]
@@ -273,7 +276,7 @@ product_family = "gb300"
 rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
 
 [rack_profiles.NVL72_GB300.rack_capabilities.compute]
-vendor = "Lenovo"
+vendor = "NVIDIA"
 count = 18
 
 [rack_profiles.NVL72_GB300.rack_capabilities.switch]

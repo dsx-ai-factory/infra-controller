@@ -49,9 +49,20 @@ spec:
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          # The shipped image provides /busybox/sh. Keep the pod-specific bind;
+          # Rust socket addresses require brackets only for IPv6.
+          command:
+            - /busybox/sh
+            - -ec
+            - |
+              listen_host="$POD_IP"
+              case "$listen_host" in
+                *:*) listen_host="[$listen_host]" ;;
+              esac
+              exec "$1" "--grpc-listen-addr=${listen_host}:10079" "--metrics-listen-addr=${listen_host}:10080"
+            - --
           args:
-            - "--grpc-listen-addr=$(POD_IP):10079"
-            - "--metrics-listen-addr=$(POD_IP):10080"
+            - /var/support/forge-dhcp/bin/forge-dhcp-server
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with toYaml .Values.serviceDaemonSet.resources }}
           resources:

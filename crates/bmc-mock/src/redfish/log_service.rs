@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 use crate::json::{JsonExt, JsonPatch};
 use crate::redfish::Builder;
-use crate::{SystemPowerControl, redfish};
+use crate::{ResourceResetType, redfish};
 
 pub(super) fn manager_collection(manager_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Managers/{manager_id}/LogServices");
@@ -197,13 +197,13 @@ pub(crate) struct LogEntryDraft {
 
 impl LogEntryDraft {
     /// A `ComputerSystem.Reset` action the mock accepted.
-    pub(crate) fn reset_requested(system: &str, reset_type: SystemPowerControl) -> Self {
+    pub(crate) fn reset_requested(system: &str, reset_type: ResourceResetType) -> Self {
         let (message_id, message) = match reset_type {
-            SystemPowerControl::On | SystemPowerControl::ForceOn => (
+            ResourceResetType::On | ResourceResetType::ForceOn => (
                 "ResourceEvent.1.3.ResourcePoweredOn",
                 format!("The resource '{system}' has powered on."),
             ),
-            SystemPowerControl::GracefulShutdown | SystemPowerControl::ForceOff => (
+            ResourceResetType::GracefulShutdown | ResourceResetType::ForceOff => (
                 "ResourceEvent.1.3.ResourcePoweredOff",
                 format!("The resource '{system}' has powered off."),
             ),

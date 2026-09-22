@@ -355,6 +355,7 @@ impl InternalRBACRules {
         x.perm("RemoveRouteServers", vec![ForgeAdminCLI]);
         x.perm("ReplaceRouteServers", vec![]);
         x.perm("UpdateAgentReportedInventory", vec![Agent]);
+        x.perm("ReportLldpNeighbors", vec![Scout]);
         x.perm("UpdateInstancePhoneHomeLastContact", vec![Agent]);
         x.perm("SetHostUefiPassword", vec![ForgeAdminCLI]);
         x.perm("ClearHostUefiPassword", vec![ForgeAdminCLI]);
@@ -401,7 +402,10 @@ impl InternalRBACRules {
         x.perm("GetTokenDelegation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("SetTokenDelegation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteTokenDelegation", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("ReencryptTenantIdentitySecrets", vec![ForgeAdminCLI]);
+        x.perm(
+            "ReencryptTenantIdentitySecrets",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
         x.perm("GetJWKS", vec![Anonymous, Agent, ForgeAdminCLI, SiteAgent]);
         x.perm(
             "GetOpenIDConfiguration",
@@ -883,6 +887,38 @@ impl InternalRBACRules {
         );
         x.perm(
             "DeleteAllExpectedRacks",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "AddExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "DeleteExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "UpdateExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "GetExpectedRackGroup",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "FindExpectedRackGroupIds",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "FindExpectedRackGroupsByIds",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "ReplaceAllExpectedRackGroups",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "DeleteAllExpectedRackGroups",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"regexp"
-	"strings"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 
@@ -91,23 +90,17 @@ func (pr *PageRequest) Validate(orderByFields []string) error {
 			return fmt.Errorf("orderBy fields must be provided as an argument")
 		}
 
-		comps := strings.Split(*pr.OrderByStr, "_")
-		compsLen := len(comps)
-		if compsLen == 0 {
-			return fmt.Errorf("orderBy input %v is not valid", *pr.OrderByStr)
-		}
-		// last one should be directionality ASC/DESC and everything else is the name
-		order := comps[compsLen-1]
-		field := strings.ToLower(strings.Join(comps[:compsLen-1], "_"))
-
-		if !cdb.IsStrInSlice(field, orderByFields) {
-			return fmt.Errorf("orderBy field %v is not valid", field)
+		orderBy := &cdbp.OrderBy{}
+		err = orderBy.FromAPIRequest(*pr.OrderByStr)
+		if err != nil {
+			return err
 		}
 
-		pr.OrderBy = &cdbp.OrderBy{
-			Field: field,
-			Order: order,
+		if !cdb.IsStrInSlice(orderBy.Field, orderByFields) {
+			return fmt.Errorf("orderBy field %v is not valid", orderBy.Field)
 		}
+
+		pr.OrderBy = orderBy
 	}
 
 	return nil

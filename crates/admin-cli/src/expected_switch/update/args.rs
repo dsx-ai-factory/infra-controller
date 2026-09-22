@@ -24,8 +24,6 @@ use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::errors::CarbideCliError;
-
 #[derive(Parser, Debug, Serialize, Deserialize)]
 #[command(after_long_help = "\
 EXAMPLES:
@@ -50,6 +48,13 @@ Update an expected switch's NVOS credentials:
 "nvos_mac_addresses",
 "nvos_username",
 "nvos_password",
+"meta_name",
+"meta_description",
+"labels",
+"rack_id",
+"bmc_ip_address",
+"nvos_ip_address",
+"bmc_retain_credentials",
 ])))]
 pub(crate) struct Args {
     #[clap(short = 'a', long, help = "BMC MAC Address of the expected switch")]
@@ -167,21 +172,9 @@ impl Args {
     }
 }
 
-impl TryFrom<Args> for rpc::forge::ExpectedSwitch {
-    type Error = CarbideCliError;
-
-    fn try_from(args: Args) -> Result<Self, Self::Error> {
-        if args.bmc_username.is_none()
-            && args.bmc_password.is_none()
-            && args.switch_serial_number.is_none()
-            && args.nvos_username.is_none()
-            && args.nvos_password.is_none()
-        {
-            return Err(CarbideCliError::GenericError(
-                "One of the following options must be specified: bmc-user-name and bmc-password or switch-serial-number or nvos-username and nvos-password".to_string(),
-            ));
-        }
-        Ok(rpc::forge::ExpectedSwitch {
+impl From<Args> for rpc::forge::ExpectedSwitch {
+    fn from(args: Args) -> Self {
+        Self {
             expected_switch_id: args.id.map(|id| ::rpc::common::Uuid {
                 value: id.to_string(),
             }),
@@ -211,6 +204,55 @@ impl TryFrom<Args> for rpc::forge::ExpectedSwitch {
                 .unwrap_or_default(),
             nvos_ip_address: args.nvos_ip_address.map(|ip| ip.to_string()),
             bmc_retain_credentials: args.bmc_retain_credentials,
-        })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::scenarios;
+    use rpc::forge_api_client::{ExpectedSwitchUpdateField as Field, expected_switch_update_mask};
+
+    use super::*;
+    use crate::cfg::cli_options::{CliCommand, CliOptions};
+    use crate::expected_switch::Cmd;
+
+    #[test]
+    fn standalone_fields_select_only_the_requested_update() {
+        let parse_update = |fields: &[&str]| {
+            let options = CliOptions::try_parse_from(
+                [
+                    "nico-admin-cli",
+                    "expected-switch",
+                    "update",
+                    "--id",
+                    "12345678-1234-5678-90ab-cdef01234567",
+                ]
+                .into_iter()
+                .chain(fields.iter().copied()),
+            )
+            .map_err(|error| error.kind())?;
+            let Some(CliCommand::ExpectedSwitch(Cmd::Update(args))) = options.commands else {
+                panic!("expected switch update command");
+            };
+            Ok(expected_switch_update_mask(&args.into()))
+        };
+
+        scenarios!(parse_update:
+            "standalone update fields" {
+                ["--bmc-ip-address", "192.0.2.10"].as_slice() => Yields(vec![Field::BmcIpAddress]),
+                ["--nvos-ip-address", "192.0.2.20"].as_slice() => Yields(vec![Field::NvosIpAddress]),
+                ["--rack_id", "12345678-1234-5678-90ab-cdef01234567"].as_slice() => Yields(vec![Field::RackId]),
+                ["--bmc-retain-credentials", "false"].as_slice() => Yields(vec![Field::BmcRetainCredentials]),
+                ["--meta-name", "switch-1"].as_slice() => Yields(vec![Field::MetadataName]),
+                ["--meta-description", "rack switch"].as_slice() => Yields(vec![Field::MetadataDescription]),
+                ["--label", "rack:r1"].as_slice() => Yields(vec![Field::MetadataLabels]),
+            }
+
+            "an update field is required" {
+                [].as_slice() => FailsWith(ErrorKind::MissingRequiredArgument),
+            }
+        );
     }
 }

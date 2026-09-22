@@ -22,15 +22,23 @@ use super::zone::Fqdn;
 
 /// The classified result of one DNS question, before wire mapping.
 ///
-/// The three authoritative variants name the zone they were answered from so
-/// the zone SOA can go in the authority section.
+/// For forward queries, `NoData` (the name exists but not the requested record
+/// type) and `NxDomain` (the name does not exist) carry the held zone's SOA so
+/// resolvers can cache these authoritative negative answers.
+///
+/// A positive PTR sets the authoritative-answer (AA) bit for the known address.
+/// Its `Records::zone` identifies the forward domain containing the target
+/// hostname; it is internal ownership metadata, not an advertised reverse zone
+/// or a reverse SOA. Knowing one address's PTR does not establish authority over
+/// neighbouring addresses. Reverse queries without a supported PTR answer yield
+/// `NotAuthoritative`, not a reverse SOA or an authoritative negative answer.
 #[derive(Clone, Debug)]
 pub enum Answer {
     /// The name has records of the requested type. An empty list is still a
     /// positive answer (NOERROR with no RRs), never a negative; a negative is
     /// always `NoData` or `NxDomain`.
     Records {
-        /// The zone the records were answered from.
+        /// The owning forward domain for PTRs, otherwise the answering zone.
         zone: Fqdn,
         /// Records of the requested type at the name.
         records: Vec<ResourceRecord>,
@@ -51,13 +59,14 @@ pub enum Answer {
         /// That zone's SOA, for the authority section.
         soa: SoaRecord,
     },
-    /// No held zone contains the name. Never NXDOMAIN, because the name may
-    /// exist in a zone someone else serves.
+    /// No supported authority supplies an answer. Includes reverse queries for
+    /// types other than PTR and PTR queries without an unambiguous published
+    /// record. Never NXDOMAIN, because the name may exist elsewhere.
     NotAuthoritative,
 }
 
 impl Answer {
-    /// Whether the AA bit is set: true for every answer given from a held zone.
+    /// Whether the AA bit is set: true for published records and held-zone negatives.
     pub fn is_authoritative(&self) -> bool {
         !matches!(self, Self::NotAuthoritative)
     }

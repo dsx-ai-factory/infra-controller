@@ -49,6 +49,11 @@ message RackProfileId {
   string id = 1;
 }
 
+message RackGroupId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::rack::RackGroupId";
+  string id = 1;
+}
+
 message SwitchId {
   option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::switch::SwitchId";
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";

@@ -32,15 +32,53 @@ use crate::db_read::DbReader;
 #[cfg(test)]
 mod test_find_by_address;
 
-/// Returned when an address is already held by an interface.
+/// Returned when an address is already held by another owner.
+///
+/// The owner is normally an active interface, so `segment_id` and
+/// `interface_id` are populated. A reservation owns its address by MAC with no
+/// active interface row, so both are `None` and the MAC identifies the owner
+/// instead.
 #[derive(thiserror::Error, Debug)]
-#[error("address already in use: {0} by {1} in network segment {2} (interface: {3})")]
-pub struct AddressAlreadyInUseError(
-    pub IpAddr,
-    pub MacAddress,
-    pub NetworkSegmentId,
-    pub MachineInterfaceId,
-);
+pub struct AddressAlreadyInUseError {
+    pub address: IpAddr,
+    pub mac_address: MacAddress,
+    pub segment_id: Option<NetworkSegmentId>,
+    pub interface_id: Option<MachineInterfaceId>,
+}
+
+impl AddressAlreadyInUseError {
+    /// Build a conflict against an active interface owner.
+    pub fn active(
+        address: IpAddr,
+        mac_address: MacAddress,
+        segment_id: NetworkSegmentId,
+        interface_id: MachineInterfaceId,
+    ) -> Self {
+        Self {
+            address,
+            mac_address,
+            segment_id: Some(segment_id),
+            interface_id: Some(interface_id),
+        }
+    }
+}
+
+impl std::fmt::Display for AddressAlreadyInUseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "address already in use: {} by {}",
+            self.address, self.mac_address,
+        )?;
+        if let Some(segment_id) = self.segment_id {
+            write!(formatter, " in network segment {segment_id}")?;
+        }
+        match self.interface_id {
+            Some(interface_id) => write!(formatter, " (interface: {interface_id})"),
+            None => write!(formatter, " (reserved address)"),
+        }
+    }
+}
 
 #[derive(Debug, FromRow, Clone)]
 pub struct MachineInterfaceAddress {
@@ -85,6 +123,54 @@ pub async fn find_by_address(
         ";
     sqlx::query_as(query)
         .bind(address)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// The current owner of an address, whether an active interface or a MAC
+/// reservation. Unlike [`find_by_address`], this reports a parked owner so
+/// conflict handling can identify it without an active interface row.
+#[derive(Debug, FromRow)]
+struct AddressOwner {
+    interface_id: Option<MachineInterfaceId>,
+    mac_address: MacAddress,
+    segment_id: Option<NetworkSegmentId>,
+    allocation_type: AllocationType,
+}
+
+/// Look up which owner currently holds `address`, including a reservation that
+/// has no active interface row. Used by the insert paths to turn a
+/// unique-constraint conflict into an actionable owner.
+async fn find_address_owner(
+    txn: &mut PgConnection,
+    address: IpAddr,
+) -> Result<Option<AddressOwner>, DatabaseError> {
+    let query = "SELECT mia.interface_id,
+                COALESCE(mi.mac_address, mia.reserved_by_mac) AS mac_address,
+                mi.segment_id, mia.allocation_type
+            FROM machine_interface_addresses mia
+            LEFT JOIN machine_interfaces mi ON mi.id = mia.interface_id
+            WHERE mia.address = $1::inet";
+    sqlx::query_as(query)
+        .bind(address)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Return the address already reserved for a MAC in the given family, if any.
+/// A MAC may hold at most one reservation per family.
+async fn find_reserved_for_mac_family(
+    txn: &mut PgConnection,
+    reserved_by_mac: MacAddress,
+    family: IpAddressFamily,
+) -> Result<Option<IpAddr>, DatabaseError> {
+    let query = "SELECT address FROM machine_interface_addresses
+        WHERE reserved_by_mac = $1::macaddr AND family(address) = $2";
+    sqlx::query_scalar(query)
+        .bind(reserved_by_mac)
+        .bind(family.pg_family())
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
@@ -242,7 +328,7 @@ pub async fn insert(
         return Ok(());
     }
 
-    let Some(address_owner) = find_by_address(&mut *txn, address).await? else {
+    let Some(address_owner) = find_address_owner(&mut *txn, address).await? else {
         if let Some(existing_in_family) = find_for_interface(&mut *txn, interface_id)
             .await?
             .into_iter()
@@ -261,16 +347,81 @@ pub async fn insert(
             "address {address} could not be assigned to interface {interface_id}, and no conflicting assignment was found"
         )));
     };
-    if address_owner.id == interface_id && address_owner.allocation_type == allocation_type {
+    if address_owner.interface_id == Some(interface_id)
+        && address_owner.allocation_type == allocation_type
+    {
         return Ok(());
     }
-    Err(AddressAlreadyInUseError(
+    Err(AddressAlreadyInUseError {
         address,
-        address_owner.mac_address,
-        address_owner.segment_id,
-        address_owner.id,
-    )
+        mac_address: address_owner.mac_address,
+        segment_id: address_owner.segment_id,
+        interface_id: address_owner.interface_id,
+    }
     .into())
+}
+
+/// Insert a parked address reservation owned by a MAC with no active interface
+/// row.
+///
+/// The reservation still participates in the site-wide `UNIQUE (address)`
+/// ownership check, so a conflict with an active interface or another
+/// reservation returns [`AddressAlreadyInUseError`]. Re-inserting the same
+/// `(MAC, address)` reservation is idempotent. A MAC that already holds a
+/// reservation in the same family returns [`DatabaseError::FailedPrecondition`].
+/// Like [`insert`], this keeps the caller's transaction usable so the owner can
+/// be identified.
+pub async fn insert_reserved(
+    txn: &mut PgConnection,
+    reserved_by_mac: MacAddress,
+    address: IpAddr,
+    allocation_type: AllocationType,
+) -> Result<(), DatabaseError> {
+    let query =
+        "INSERT INTO machine_interface_addresses (address, allocation_type, reserved_by_mac)
+        VALUES ($1::inet, $2, $3::macaddr)
+        ON CONFLICT DO NOTHING";
+    let inserted = sqlx::query(query)
+        .bind(address)
+        .bind(allocation_type)
+        .bind(reserved_by_mac)
+        .execute(&mut *txn)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if inserted {
+        return Ok(());
+    }
+
+    // The address is already owned, or this MAC already reserves an address in
+    // the same family. Distinguish the two so callers get an actionable error.
+    if let Some(owner) = find_address_owner(&mut *txn, address).await? {
+        if owner.interface_id.is_none()
+            && owner.mac_address == reserved_by_mac
+            && owner.allocation_type == allocation_type
+        {
+            return Ok(());
+        }
+        return Err(AddressAlreadyInUseError {
+            address,
+            mac_address: owner.mac_address,
+            segment_id: owner.segment_id,
+            interface_id: owner.interface_id,
+        }
+        .into());
+    }
+
+    if let Some(existing) =
+        find_reserved_for_mac_family(&mut *txn, reserved_by_mac, address.address_family()).await?
+    {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "MAC {reserved_by_mac} already has a reserved address {existing} in the same family as {address}"
+        )));
+    }
+
+    Err(DatabaseError::internal(format!(
+        "reserved address {address} for MAC {reserved_by_mac} could not be inserted, and no conflicting reservation was found"
+    )))
 }
 
 /// Assign a static address to an interface. If the interface already
@@ -816,16 +967,16 @@ mod tests {
             results => panic!("expected one address owner and one conflict, got {results:?}"),
         };
         match conflict {
-            DatabaseError::AddressAlreadyInUse(AddressAlreadyInUseError(
-                conflict_address,
-                conflict_mac,
-                conflict_segment_id,
-                conflict_interface_id,
-            )) => {
+            DatabaseError::AddressAlreadyInUse(AddressAlreadyInUseError {
+                address: conflict_address,
+                mac_address: conflict_mac,
+                segment_id: conflict_segment_id,
+                interface_id: conflict_interface_id,
+            }) => {
                 assert_eq!(conflict_address, address);
                 assert_eq!(conflict_mac, owner_mac);
-                assert_eq!(conflict_segment_id, segment_id);
-                assert_eq!(conflict_interface_id, owner_id);
+                assert_eq!(conflict_segment_id, Some(segment_id));
+                assert_eq!(conflict_interface_id, Some(owner_id));
             }
             error => panic!("expected an address-in-use error, got {error:?}"),
         }
@@ -963,6 +1114,247 @@ mod tests {
                 Some("machine_interface_addresses_host_address_check"),
             ),
             error => panic!("expected a check-constraint error, got {error:?}"),
+        }
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// Old-shaped inserts that predate the reserved column keep working: an
+    /// interface-owned row needs no `reserved_by_mac`, and `allocation_type`
+    /// still defaults to `dhcp`.
+    #[crate::sqlx_test]
+    async fn active_interface_rows_insert_without_reserved_column(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('legacy-active-insert', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
+        let interface_id =
+            create_test_interface(&mut txn, segment_id, "02:00:00:00:00:20".parse()?, "legacy")
+                .await?;
+
+        // Old two-column shape (no allocation_type, no reserved_by_mac).
+        sqlx::query(
+            "INSERT INTO machine_interface_addresses (interface_id, address)
+             VALUES ($1, '192.0.2.51'::inet)",
+        )
+        .bind(interface_id)
+        .execute(&mut *txn)
+        .await?;
+
+        let addresses = find_for_interface(&mut txn, interface_id).await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A row that names neither an active interface nor a reserved MAC has no
+    /// owner and is rejected by the ownership check.
+    #[crate::sqlx_test]
+    async fn ownerless_unreserved_row_rejected(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let error = sqlx::query(
+            "INSERT INTO machine_interface_addresses (address, allocation_type)
+             VALUES ('192.0.2.52'::inet, 'static')",
+        )
+        .execute(&mut *txn)
+        .await
+        .expect_err("an address with no interface and no reserved MAC should be rejected");
+        match error {
+            sqlx::Error::Database(error) => assert_eq!(
+                error.constraint(),
+                Some("machine_interface_addresses_owner_check"),
+            ),
+            error => panic!("expected a check-constraint error, got {error:?}"),
+        }
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A reservation persists with no interface row, still reserves its address
+    /// against allocators, and stays out of active-interface and discovery-style
+    /// joins.
+    #[crate::sqlx_test]
+    async fn reserved_address_persists_without_interface(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let reserved_mac: MacAddress = "02:00:00:00:00:21".parse()?;
+        let address: IpAddr = "192.0.2.53".parse()?;
+        insert_reserved(&mut txn, reserved_mac, address, AllocationType::Static).await?;
+
+        // Re-inserting the identical reservation is idempotent.
+        insert_reserved(&mut txn, reserved_mac, address, AllocationType::Static).await?;
+
+        // It reserves the address against the address-keyed allocator set.
+        let owner_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM machine_interface_addresses WHERE address = $1::inet",
+        )
+        .bind(address)
+        .fetch_one(&mut *txn)
+        .await?;
+        assert_eq!(owner_count, 1);
+
+        // It is invisible to active-interface lookups and discovery-style joins.
+        assert!(find_by_address(txn.as_mut(), address).await?.is_none());
+        let active_join: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM machine_interface_addresses mia
+             JOIN machine_interfaces mi ON mi.id = mia.interface_id
+             WHERE mia.address = $1::inet",
+        )
+        .bind(address)
+        .fetch_one(&mut *txn)
+        .await?;
+        assert_eq!(active_join, 0);
+
+        // Conflict handling can still name the reserved MAC owner.
+        let owner = find_address_owner(&mut txn, address)
+            .await?
+            .expect("reserved owner should be found");
+        assert_eq!(owner.interface_id, None);
+        assert_eq!(owner.mac_address, reserved_mac);
+        assert_eq!(owner.segment_id, None);
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A MAC may hold at most one reservation per address family.
+    #[crate::sqlx_test]
+    async fn duplicate_reservation_for_mac_family_rejected(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let reserved_mac: MacAddress = "02:00:00:00:00:22".parse()?;
+        insert_reserved(
+            &mut txn,
+            reserved_mac,
+            "192.0.2.54".parse()?,
+            AllocationType::Static,
+        )
+        .await?;
+
+        let error = insert_reserved(
+            &mut txn,
+            reserved_mac,
+            "192.0.2.55".parse()?,
+            AllocationType::Static,
+        )
+        .await
+        .expect_err("a second reserved IPv4 address for the same MAC should be rejected");
+        match error {
+            DatabaseError::FailedPrecondition(message) => {
+                assert!(message.contains("192.0.2.54"), "{message}");
+                assert!(message.contains(&reserved_mac.to_string()), "{message}");
+            }
+            error => panic!("expected a failed-precondition error, got {error:?}"),
+        }
+
+        // A different family for the same MAC is allowed.
+        insert_reserved(
+            &mut txn,
+            reserved_mac,
+            "2001:db8::54".parse()?,
+            AllocationType::Static,
+        )
+        .await?;
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A reservation and an active interface cannot both own one address, in
+    /// either order, and the conflict names the other owner.
+    #[crate::sqlx_test]
+    async fn reserved_and_active_ownership_conflict(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('reserved-active-conflict', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
+        let interface_mac: MacAddress = "02:00:00:00:00:23".parse()?;
+        let interface_id =
+            create_test_interface(&mut txn, segment_id, interface_mac, "conflict-active").await?;
+
+        // Active first, then reserved: the reserved insert reports the active
+        // interface owner.
+        let active_address: IpAddr = "192.0.2.56".parse()?;
+        insert(
+            &mut txn,
+            interface_id,
+            active_address,
+            AllocationType::Static,
+        )
+        .await?;
+        let reserved_mac: MacAddress = "02:00:00:00:00:24".parse()?;
+        let error = insert_reserved(
+            &mut txn,
+            reserved_mac,
+            active_address,
+            AllocationType::Static,
+        )
+        .await
+        .expect_err("reserving an actively owned address should be rejected");
+        match error {
+            DatabaseError::AddressAlreadyInUse(AddressAlreadyInUseError {
+                address,
+                mac_address,
+                segment_id: conflict_segment,
+                interface_id: conflict_interface,
+            }) => {
+                assert_eq!(address, active_address);
+                assert_eq!(mac_address, interface_mac);
+                assert_eq!(conflict_segment, Some(segment_id));
+                assert_eq!(conflict_interface, Some(interface_id));
+            }
+            error => panic!("expected an address-in-use error, got {error:?}"),
+        }
+
+        // Reserved first, then active: the active insert reports the reserved
+        // MAC owner with no interface id.
+        let reserved_address: IpAddr = "192.0.2.57".parse()?;
+        insert_reserved(
+            &mut txn,
+            reserved_mac,
+            reserved_address,
+            AllocationType::Static,
+        )
+        .await?;
+        let error = insert(
+            &mut txn,
+            interface_id,
+            reserved_address,
+            AllocationType::Static,
+        )
+        .await
+        .expect_err("claiming a reserved address for an interface should be rejected");
+        match error {
+            DatabaseError::AddressAlreadyInUse(AddressAlreadyInUseError {
+                address,
+                mac_address,
+                segment_id: conflict_segment,
+                interface_id: conflict_interface,
+            }) => {
+                assert_eq!(address, reserved_address);
+                assert_eq!(mac_address, reserved_mac);
+                assert_eq!(conflict_segment, None);
+                assert_eq!(conflict_interface, None);
+            }
+            error => panic!("expected an address-in-use error, got {error:?}"),
         }
 
         txn.rollback().await?;

@@ -876,8 +876,11 @@ func (x *Domain) GetSoa() string {
 }
 
 type CreateDomainRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Reverse DNS serves inventory-derived PTRs, not managed zones. Names at or below
+	// in-addr.arpa or ip6.arpa are rejected with INVALID_ARGUMENT, ignoring case,
+	// surrounding whitespace, and trailing dots.
+	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -920,8 +923,10 @@ func (x *CreateDomainRequest) GetName() string {
 }
 
 type UpdateDomainRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Domain        *Domain                `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The replacement name must not be at or below in-addr.arpa or ip6.arpa;
+	// the same reverse-name validation as CreateDomainRequest applies.
+	Domain        *Domain `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

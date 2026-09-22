@@ -17,15 +17,14 @@
 use std::sync::Arc;
 
 use axum::Router;
-use tokio::sync::oneshot;
 
 use crate::auth_router::Authorizer;
 use crate::bmc_state::BmcState;
 use crate::injection::InjectionStore;
 use crate::redfish::manager::ManagerState;
 use crate::{
-    Callbacks, EventServiceConfig, HardwareType, MachineInfo, SystemPowerControl,
-    VirtualMediaDeviceConfig, auth_router, middleware_router, redfish,
+    Callbacks, EventServiceConfig, HardwareType, MachineInfo, VirtualMediaDeviceConfig,
+    auth_router, middleware_router, redfish,
 };
 
 /// Caller control over the hardware profile's EventService.
@@ -56,25 +55,6 @@ pub struct MachineRouterOptions {
     /// An enabled event service still closes streams and clears history on reset;
     /// with both features disabled, resets remain no-ops.
     pub bmc_reset_duration: Option<std::time::Duration>,
-}
-
-#[derive(Debug)]
-pub enum BmcCommand {
-    SetSystemPower {
-        request: SystemPowerControl,
-        reply: Option<oneshot::Sender<SetSystemPowerResult>>,
-    },
-    StateRefreshIndication,
-}
-
-pub type SetSystemPowerResult = Result<(), SetSystemPowerError>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum SetSystemPowerError {
-    #[error("mock BMC reported bad request when setting system power: {0}")]
-    BadRequest(String),
-    #[error("mock BMC failed to send power command: {0}")]
-    CommandSendError(String),
 }
 
 trait AddRoutes {
@@ -273,7 +253,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::test_support::{NoopCallbacks, host_info};
+    use crate::test_support::{TestCallbacks, host_info};
 
     #[tokio::test]
     async fn omitted_event_service_has_no_discovery_or_routes() {
@@ -293,7 +273,7 @@ mod tests {
         for (scenario, profile, event_service) in disabled {
             let (router, state) = machine_router_inner(
                 &host_info(crate::HardwareType::DellPowerEdgeR750),
-                Arc::new(NoopCallbacks),
+                Arc::new(TestCallbacks::default()),
                 "disabled-event-service".into(),
                 false,
                 Arc::new(InjectionStore::new()),

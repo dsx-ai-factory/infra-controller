@@ -137,6 +137,15 @@ Some registries use a fixed username with API-key auth — set `REGISTRY_PULL_US
 
 ## Cluster Prerequisites
 
+The chart can create the namespace, its `nico.nvidia.com/managed` label, and
+the image pull Secret itself. The `templates/namespace.yaml` template renders
+the Namespace when `global.namespaceOverride` is set and `createNamespace` is
+true (the default). Setting `imagePullSecret.create` to true renders the
+Secret. Refer to the
+[Helm-Only Deployment](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/charts/nico-machine-a-tron/README.md#helm-only-deployment)
+section of the chart README. The steps below create the same resources
+manually.
+
 ### Namespaces and secrets
 
 ```bash

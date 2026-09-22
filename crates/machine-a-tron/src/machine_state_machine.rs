@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::{
-    BmcCommand, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
-    SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
+    ActionError, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
+    ResourceResetType,
 };
 use carbide_network::virtualization::build_dual_stack_list;
 use carbide_uuid::machine::{DpuMachineId, InvalidMachineType, MachineId, MachineInterfaceId};
@@ -36,7 +36,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::api_client::{ClientApiError, DpuNetworkStatusArgs, MockDiscoveryData};
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{MachineATronContext, MachineConfig};
 use crate::dhcp_wrapper::{
     DhcpRelayError, DhcpRelayResult, DhcpRequestInfo, DhcpRequester, DhcpResponseInfo,
@@ -73,6 +73,8 @@ fn abandon_machine_actions_on_power_change(
         FsmAction::SetTimer(
             Timer::PowerCycle
             | Timer::MachineOn
+            | Timer::OsReady
+            | Timer::PowerOffGraceful
             | Timer::ScoutAgentControlPoll
             | Timer::DpuAgentControlPoll,
         )
@@ -139,6 +141,10 @@ pub(super) struct MachineStateMachine {
     bmc_injection: Arc<InjectionStore>,
     power_cycle_deadline: Option<Instant>,
     machine_on_deadline: Option<Instant>,
+    /// `Timer::OsReady`: the booting host asks for DHCP when this passes.
+    os_ready_deadline: Option<Instant>,
+    /// `Timer::PowerOffGraceful`: a graceful shutdown completes when this passes.
+    power_off_deadline: Option<Instant>,
     agent_polling_deadline: Option<(Instant, Timer)>,
     bmc_dhcp_info: Option<DhcpResponseInfo>,
     machine_dhcp_info: Option<DhcpResponseInfo>,
@@ -173,6 +179,16 @@ impl LiveStateCallbacks {
             command_channel,
         }
     }
+
+    pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        self.get_power_state().validate_reset_type(reset_type)?;
+        self.command_channel
+            .send(BmcCommand::SetSystemPower {
+                request: reset_type,
+                reply: None,
+            })
+            .map_err(|err| ActionError::Internal(err.into()))
+    }
 }
 
 impl Callbacks for LiveStateCallbacks {
@@ -180,16 +196,11 @@ impl Callbacks for LiveStateCallbacks {
         self.state.read().unwrap().power_state
     }
 
-    fn send_power_command(
+    async fn computer_system_reset(
         &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
-        self.command_channel
-            .send(BmcCommand::SetSystemPower {
-                request: reset_type,
-                reply: None,
-            })
-            .map_err(|err| SetSystemPowerError::CommandSendError(err.to_string()))
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.set_power_state(reset_type)
     }
 
     fn state_refresh_indication(&self) {
@@ -353,6 +364,7 @@ impl MachineStateMachine {
             has_overrides = overrides_for_role.is_some(),
             reboot = ?resolved.reboot,
             power_on_os_ready = ?resolved.power_on_os_ready,
+            power_off_graceful = ?resolved.power_off_graceful,
             power_off_force = ?resolved.power_off_force,
             bmc_reset = ?resolved.bmc_reset,
             "Resolved lifecycle timings"
@@ -391,6 +403,8 @@ impl MachineStateMachine {
             bmc_injection: Arc::new(InjectionStore::new()),
             power_cycle_deadline: None,
             machine_on_deadline: None,
+            os_ready_deadline: None,
+            power_off_deadline: None,
             agent_polling_deadline: None,
             bmc_dhcp_info: None,
             machine_dhcp_info: None,
@@ -444,6 +458,8 @@ impl MachineStateMachine {
             dhcp_retry_deadline: None,
             machine_discovery_result: None,
             machine_on_deadline: None,
+            os_ready_deadline: None,
+            power_off_deadline: None,
             agent_polling_deadline: None,
             power_cycle_deadline: None,
             installed_os,
@@ -476,6 +492,18 @@ impl MachineStateMachine {
                 self.machine_on_deadline = None;
                 self.fsm_event(Event::TimerAlert(Timer::MachineOn));
             }
+            if let Some(os_ready_deadline) = self.os_ready_deadline
+                && now > os_ready_deadline
+            {
+                self.os_ready_deadline = None;
+                self.fsm_event(Event::TimerAlert(Timer::OsReady));
+            }
+            if let Some(power_off_deadline) = self.power_off_deadline
+                && now > power_off_deadline
+            {
+                self.power_off_deadline = None;
+                self.fsm_event(Event::TimerAlert(Timer::PowerOffGraceful));
+            }
             if let Some((agent_polling_deadline, timer)) = self.agent_polling_deadline
                 && now > agent_polling_deadline
             {
@@ -494,6 +522,8 @@ impl MachineStateMachine {
             } else {
                 [
                     self.machine_on_deadline,
+                    self.os_ready_deadline,
+                    self.power_off_deadline,
                     self.power_cycle_deadline,
                     self.agent_polling_deadline.map(|v| v.0),
                     self.dhcp_retry_deadline,
@@ -546,6 +576,24 @@ impl MachineStateMachine {
                         "Timer armed: MachineOn (reboot)"
                     );
                     self.machine_on_deadline = Some(Instant::now() + self.resolved_timings.reboot);
+                    self.actions.pop_front();
+                }
+                FsmAction::SetTimer(Timer::OsReady) => {
+                    tracing::info!(
+                        duration = ?self.resolved_timings.power_on_os_ready,
+                        "Timer armed: OsReady (power_on_os_ready)"
+                    );
+                    self.os_ready_deadline =
+                        Some(Instant::now() + self.resolved_timings.power_on_os_ready);
+                    self.actions.pop_front();
+                }
+                FsmAction::SetTimer(Timer::PowerOffGraceful) => {
+                    tracing::info!(
+                        duration = ?self.resolved_timings.power_off_graceful,
+                        "Timer armed: PowerOffGraceful (power_off_graceful)"
+                    );
+                    self.power_off_deadline =
+                        Some(Instant::now() + self.resolved_timings.power_off_graceful);
                     self.actions.pop_front();
                 }
                 FsmAction::SetTimer(Timer::ScoutAgentControlPoll) => {
@@ -643,6 +691,8 @@ impl MachineStateMachine {
                         // after the FSM converges to the dormant BMC-only track.
                         self.actions.clear();
                         self.machine_on_deadline = None;
+                        self.os_ready_deadline = None;
+                        self.power_off_deadline = None;
                         self.power_cycle_deadline = None;
                         self.agent_polling_deadline = None;
                         // Let the FSM own the transition: it is returned by `event()`,
@@ -724,13 +774,18 @@ impl MachineStateMachine {
     }
 
     fn fsm_event(&mut self, event: Event) {
-        if matches!(event, Event::PowerCycle | Event::PowerOff) {
+        if matches!(
+            event,
+            Event::PowerCycle | Event::PowerOff | Event::PowerOffGraceful
+        ) {
             abandon_machine_actions_on_power_change(
                 &mut self.actions,
                 self.fsm.is_bmc_initializing(),
             );
 
             self.machine_on_deadline = None;
+            self.os_ready_deadline = None;
+            self.power_off_deadline = None;
             self.power_cycle_deadline = None;
             self.agent_polling_deadline = None;
         }
@@ -1296,16 +1351,25 @@ impl MachineStateMachine {
         Ok(())
     }
 
-    pub(super) fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
-        use SystemPowerControl::*;
+    pub(super) fn set_system_power(
+        &mut self,
+        request: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        use ResourceResetType::*;
         match request {
             On | ForceOn => self.fsm_event(Event::PowerOn),
-            GracefulRestart | ForceRestart | PowerCycle => self.fsm_event(Event::PowerCycle),
-            GracefulShutdown | ForceOff => self.fsm_event(Event::PowerOff),
-            PushPowerButton | Nmi | Suspend | Pause | Resume => {
-                let msg = format!("Machine-a-tron mock: unsupported power request {request:?}",);
+            GracefulRestart | ForceRestart | PowerCycle | FullPowerCycle => {
+                self.fsm_event(Event::PowerCycle)
+            }
+            GracefulShutdown => self.fsm_event(Event::PowerOffGraceful),
+            ForceOff => self.fsm_event(Event::PowerOff),
+            PushPowerButton | Nmi | Suspend | Pause | Resume | Sleep | Hibernate
+            | UnsupportedValue => {
                 tracing::warn!(?request, "unsupported machine-a-tron mock power request",);
-                return Err(SetSystemPowerError::BadRequest(msg));
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "machine-a-tron mock: unsupported power request {:?}",
+                    request
+                )));
             }
         };
         self.update_live_state();
@@ -1682,6 +1746,8 @@ mod tests {
                             FsmAction::Dhcp(DhcpType::Machine),
                             FsmAction::SetTimer(Timer::PowerCycle),
                             FsmAction::SetTimer(Timer::MachineOn),
+                            FsmAction::SetTimer(Timer::OsReady),
+                            FsmAction::SetTimer(Timer::PowerOffGraceful),
                             FsmAction::SetTimer(Timer::ScoutAgentControlPoll),
                             FsmAction::SetTimer(Timer::DpuAgentControlPoll),
                             FsmAction::PxeBootRequest,

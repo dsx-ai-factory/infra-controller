@@ -67,6 +67,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_url_supports_query() {
+        // Use a separate endpoint without changing `DATABASE_URL`, which SQLx
+        // also uses while compiling other crates.
+        let Ok(database_url) =
+            std::env::var("NICO_TEST_POSTGRES_URL").or_else(|_| std::env::var("DATABASE_URL"))
+        else {
+            eprintln!("Skipping PostgreSQL query test: no test database URL configured");
+            return;
+        };
+        let options = postgres_connect_options(&database_url).expect("parse PostgreSQL test URL");
+        let ipv6 = options.get_host().parse::<Ipv6Addr>().is_ok();
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut connection = PgConnection::connect_with(&options)
+                .await
+                .expect("connect to PostgreSQL");
+            let (value, family): (i32, Option<i32>) =
+                sqlx::query_as("SELECT 1, family(inet_server_addr())")
+                    .fetch_one(&mut connection)
+                    .await
+                    .expect("query PostgreSQL");
+            connection
+                .close()
+                .await
+                .expect("close PostgreSQL connection");
+
+            assert_eq!(value, 1);
+            if ipv6 {
+                assert_eq!(family, Some(6), "expected an IPv6 PostgreSQL connection");
+            }
+        })
+        .await
+        .expect("PostgreSQL query deadline");
+    }
+
+    #[tokio::test]
     async fn postgres_ipv6_url_reaches_tcp_listener() {
         let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
             .await

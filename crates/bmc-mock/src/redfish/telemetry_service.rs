@@ -255,7 +255,7 @@ mod tests {
 
     use super::{REPORT_ID, SENSING_INTERVAL_MS, STALE_REPORT_ID};
     use crate::test_support::axum_http_client::AxumRouterHttpClient;
-    use crate::test_support::{NoopCallbacks, TEST_MAC_POOL};
+    use crate::test_support::{TEST_MAC_POOL, TestCallbacks};
     use crate::{
         DpuMachineInfo, DpuSettings, HardwareType, HostMachineInfo, MachineInfo,
         MachineRouterOptions, machine_router,
@@ -277,7 +277,7 @@ mod tests {
                 &mut mac_pool,
                 ranges_config,
             )),
-            Arc::new(NoopCallbacks),
+            Arc::new(TestCallbacks::default()),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions::default(),

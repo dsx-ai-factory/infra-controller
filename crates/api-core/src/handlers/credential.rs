@@ -567,12 +567,13 @@ pub(crate) async fn get_bmc_credentals(
         .await
         .map_err(|err| match err {
             crate::credentials::BmcSessionError::AvoidLockout { .. }
-            | crate::credentials::BmcSessionError::NoSessionService { .. } => {
-                // Both are "we refuse to attempt session creation" outcomes
-                // that the operator can resolve (rotate creds, or flip the
-                // basic-auth-fallback flag). FailedPrecondition matches the
-                // gRPC semantics: the request is well-formed but the
-                // server-side state forbids it.
+            | crate::credentials::BmcSessionError::NoSessionService { .. }
+            | crate::credentials::BmcSessionError::MissingRootCredentials(_) => {
+                // These are "we refuse to attempt session creation" outcomes
+                // that the operator can resolve (configure/rotate creds, or
+                // flip the basic-auth-fallback flag). FailedPrecondition
+                // matches the gRPC semantics: the request is well-formed but
+                // the server-side state forbids it.
                 Status::failed_precondition(err.to_string())
             }
             crate::credentials::BmcSessionError::Store(_) => Status::internal(err.to_string()),

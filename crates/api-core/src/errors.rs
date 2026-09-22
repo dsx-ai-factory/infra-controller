@@ -761,7 +761,7 @@ fn test_permission_denied_error_maps_to_permission_denied_status() {
 #[test]
 fn test_address_already_in_use_maps_to_failed_precondition_status() {
     use std::str::FromStr;
-    let err = CarbideError::AddressAlreadyInUse(AddressAlreadyInUseError(
+    let err = CarbideError::AddressAlreadyInUse(AddressAlreadyInUseError::active(
         "10.0.0.1".parse().unwrap(),
         MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap(),
         uuid::Uuid::new_v4().into(),

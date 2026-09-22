@@ -24,7 +24,8 @@ use ::rpc::forge::{
     DpuExtensionServiceObservabilityConfigLogging,
 };
 use carbide_dpf::{
-    DetachedDpuServiceDefinition, DpfError, DpuServiceHelmChartObservation, DpuServiceObservation,
+    DetachedDpuServiceDefinition, DpfError, DpuServiceDaemonSetObservation,
+    DpuServiceHelmChartObservation, DpuServiceObservation,
 };
 use carbide_extension_service_controller::dpu_service::{
     dpu_service_mutable_patch, project_dpu_service,
@@ -56,14 +57,27 @@ const TEST_DPF_HELM_CHART_SERVICE_DATA: &str = r#"{
   "repoURL": "oci://registry.example.com/charts",
   "chartName": "tenant-service",
   "chartVersion": "1.2.3",
-  "security.privileged": false
+  "security.privileged": false,
+  "values": {"serviceDaemonSet": {"labels": {"chart-path": "preserved"}}},
+  "serviceDaemonSet": {
+    "labels": {"app.kubernetes.io/name": "tenant-service"},
+    "annotations": {"example.com/owner": "tenant"},
+    "resources": {"nvidia.com/bf_sf": 1},
+    "updateStrategy": {"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 1}}
+  }
 }"#;
 const TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2: &str = r#"{
   "repoURL": "oci://registry.example.com/charts",
   "chartName": "tenant-service",
   "chartVersion": "2.0.0",
   "security.privileged": true,
-  "values": {"replicas": 2}
+  "values": {"replicas": 2, "serviceDaemonSet": {"labels": {"chart-path": "still-preserved"}}},
+  "serviceDaemonSet": {
+    "labels": {"app.kubernetes.io/name": "tenant-service-v2"},
+    "annotations": {},
+    "resources": {"nvidia.com/bf_sf": "2"},
+    "updateStrategy": {"type": "OnDelete"}
+  }
 }"#;
 const CREDENTIAL_CLEANUP_FAILURE_METRIC: &str =
     "carbide_extension_service_credential_cleanup_failures_total";
@@ -178,15 +192,47 @@ fn dpu_service_observation(service: &DetachedDpuServiceDefinition) -> DpuService
         interfaces_present: false,
         paused: None,
         security_privileged: Some(service.security_privileged),
-        service_daemon_set_node_selector: Some(serde_json::json!({
-            "nodeSelectorTerms": [{
-                "matchExpressions": service.node_selector_labels.iter().map(|(key, value)| serde_json::json!({
-                    "key": key,
-                    "operator": "In",
-                    "values": [value],
-                })).collect::<Vec<_>>(),
-            }],
-        })),
+        service_daemon_set: service.service_daemon_set.as_ref().map(|daemon_set| {
+            DpuServiceDaemonSetObservation {
+                node_selector: daemon_set.node_selector_labels.as_ref().map(|labels| {
+                    serde_json::json!({
+                        "nodeSelectorTerms": [{
+                            "matchExpressions": labels.iter().map(|(key, value)| serde_json::json!({
+                                "key": key,
+                                "operator": "In",
+                                "values": [value],
+                            })).collect::<Vec<_>>(),
+                        }],
+                    })
+                }),
+                annotations: daemon_set.annotations.clone(),
+                labels: daemon_set.labels.clone(),
+                resources: daemon_set.resources.clone(),
+                update_strategy: daemon_set.update_strategy.as_ref().map(|strategy| {
+                    let mut value = serde_json::Map::new();
+                    if let Some(strategy_type) = &strategy.strategy_type {
+                        value.insert("type".to_string(), serde_json::json!(strategy_type));
+                    }
+                    if let Some(rolling_update) = &strategy.rolling_update {
+                        let mut rolling = serde_json::Map::new();
+                        if let Some(max_surge) = &rolling_update.max_surge {
+                            rolling.insert("maxSurge".to_string(), serde_json::json!(max_surge));
+                        }
+                        if let Some(max_unavailable) = &rolling_update.max_unavailable {
+                            rolling.insert(
+                                "maxUnavailable".to_string(),
+                                serde_json::json!(max_unavailable),
+                            );
+                        }
+                        value.insert(
+                            "rollingUpdate".to_string(),
+                            serde_json::Value::Object(rolling),
+                        );
+                    }
+                    serde_json::Value::Object(value)
+                }),
+            }
+        }),
         service_id: None,
         config_ports_present: false,
         is_deleting: false,
@@ -446,7 +492,13 @@ async fn test_dpf_helm_chart_create_persists_normalized_creating_state_without_d
         "security.privileged": false,
         "chartVersion": "1.2.3",
         "repoURL": "oci://registry.example.com/charts",
-        "chartName": "tenant-service"
+        "chartName": "tenant-service",
+        "serviceDaemonSet": {
+            "updateStrategy": {"rollingUpdate": {"maxUnavailable": 1}, "type": "RollingUpdate"},
+            "resources": {"nvidia.com/bf_sf": 1},
+            "annotations": {},
+            "labels": {"app.kubernetes.io/name": "tenant-service"}
+        }
     }"#;
     let response = env
         .api
@@ -531,10 +583,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     let updated_projection = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &updated_data);
     let existing = dpu_service_observation(&initial_projection);
     let expected_name = updated_projection.name.clone();
-    let expected_patch = dpu_service_mutable_patch(
-        &updated_projection,
-        initial_projection.helm_chart.values.as_ref(),
-    );
+    let expected_patch = dpu_service_mutable_patch(&updated_projection, Some(&existing));
 
     let mut mock = MockDpfOperations::new();
     mock.expect_create_dpu_service()
@@ -1166,6 +1215,28 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
                 "values":{"serviceDaemonSet":{"nodeSelector":{"tenant":"value"}}}
             }"#,
             "tenant values may not set NICo-owned field serviceDaemonSet.nodeSelector",
+        ),
+        (
+            "dpf-explicit-node-selector",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "security.privileged":false,
+                "serviceDaemonSet":{"nodeSelector":{}}
+            }"#,
+            "unknown field `nodeSelector`",
+        ),
+        (
+            "dpf-misspelled-upgrade-strategy",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "security.privileged":false,
+                "serviceDaemonSet":{"upgradeStrategy":{"type":"RollingUpdate"}}
+            }"#,
+            "unknown field `upgradeStrategy`",
         ),
     ] {
         let service_id = ExtensionServiceId::new();
