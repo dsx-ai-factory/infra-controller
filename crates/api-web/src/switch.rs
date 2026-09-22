@@ -347,8 +347,9 @@ impl super::Base for SwitchDetail {}
 
 #[cfg(test)]
 mod tests {
-    use super::switch_nvos_port_records;
     use rpc::forge;
+
+    use super::switch_nvos_port_records;
 
     fn address(address_family: forge::AddressFamily, address: &str) -> forge::IpAddress {
         forge::IpAddress {
