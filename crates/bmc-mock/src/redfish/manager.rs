@@ -32,6 +32,8 @@ use crate::json::{JsonExt, JsonPatch};
 use crate::redfish::Builder;
 use crate::{Callbacks, http, redfish};
 
+const INTEGRATED_EVENT_LOG: &str = "IEL";
+
 pub(super) fn collection() -> redfish::Collection<'static> {
     redfish::Collection {
         odata_id: Cow::Borrowed("/redfish/v1/Managers"),
@@ -220,7 +222,28 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
         )
         .route(
             &redfish::log_service::manager_collection(MGR_ID).odata_id,
-            get(get_log_services),
+            get(get_log_services::<C>),
+        )
+        .route(
+            &redfish::log_service::manager_resource(MGR_ID, INTEGRATED_EVENT_LOG).odata_id,
+            get(get_integrated_event_log::<C>),
+        )
+        .route(
+            &redfish::log_service::manager_entries_collection(MGR_ID, INTEGRATED_EVENT_LOG)
+                .odata_id,
+            get(get_integrated_event_log_entries::<C>),
+        )
+        .route(
+            &format!(
+                "{}/{{entry_id}}",
+                redfish::log_service::manager_entries_collection(MGR_ID, INTEGRATED_EVENT_LOG)
+                    .odata_id
+            ),
+            get(get_integrated_event_log_entry::<C>),
+        )
+        .route(
+            &redfish::log_service::manager_clear_log_target(MGR_ID, INTEGRATED_EVENT_LOG),
+            post(clear_integrated_event_log::<C>),
         )
 }
 
@@ -671,8 +694,103 @@ async fn post_reset_manager<C: Callbacks>(
     json!({}).into_ok_response()
 }
 
-async fn get_log_services() -> Response {
-    not_implemented()
+async fn get_log_services<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(manager_id): Path<String>,
+) -> Response {
+    if state.manager.find(&manager_id).is_none() {
+        return http::not_found();
+    }
+    if state.system_state.hpe_reset_log().is_none() {
+        return not_implemented();
+    }
+    redfish::log_service::manager_collection(&manager_id)
+        .with_members(&[
+            redfish::log_service::manager_resource(&manager_id, INTEGRATED_EVENT_LOG).entity_ref(),
+        ])
+        .into_ok_response()
+}
+
+async fn get_integrated_event_log<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(manager_id): Path<String>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|_| state.system_state.hpe_reset_log())
+        .map(|log| {
+            redfish::log_service::builder(&redfish::log_service::manager_resource(
+                &manager_id,
+                INTEGRATED_EVENT_LOG,
+            ))
+            .entries(&redfish::log_service::manager_entries_collection(
+                &manager_id,
+                INTEGRATED_EVENT_LOG,
+            ))
+            .capacity(
+                log.capacity(),
+                &redfish::log_service::manager_clear_log_target(&manager_id, INTEGRATED_EVENT_LOG),
+            )
+            .build()
+            .into_ok_response()
+        })
+        .unwrap_or_else(http::not_found)
+}
+
+async fn get_integrated_event_log_entries<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(manager_id): Path<String>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|_| state.system_state.hpe_reset_log())
+        .map(|log| {
+            let collection =
+                redfish::log_service::manager_entries_collection(&manager_id, INTEGRATED_EVENT_LOG);
+            collection
+                .with_members(&log.entries(&collection))
+                .patch(json!({"Description": "Completed backend reset commands"}))
+                .into_ok_response()
+        })
+        .unwrap_or_else(http::not_found)
+}
+
+async fn get_integrated_event_log_entry<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path((manager_id, entry_id)): Path<(String, String)>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|_| state.system_state.hpe_reset_log())
+        .and_then(|log| {
+            log.entry(
+                &redfish::log_service::manager_entries_collection(
+                    &manager_id,
+                    INTEGRATED_EVENT_LOG,
+                ),
+                &entry_id,
+            )
+        })
+        .map(JsonExt::into_ok_response)
+        .unwrap_or_else(http::not_found)
+}
+
+async fn clear_integrated_event_log<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(manager_id): Path<String>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|_| state.system_state.hpe_reset_log())
+        .map(|log| {
+            log.clear();
+            http::ok_no_content()
+        })
+        .unwrap_or_else(http::not_found)
 }
 
 fn not_implemented() -> Response {

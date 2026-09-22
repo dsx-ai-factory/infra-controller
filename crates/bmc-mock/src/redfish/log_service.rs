@@ -34,6 +34,38 @@ pub(super) fn manager_collection(manager_id: &str) -> redfish::Collection<'stati
     }
 }
 
+pub(super) fn manager_resource<'a>(manager_id: &str, service_id: &'a str) -> redfish::Resource<'a> {
+    redfish::Resource {
+        odata_id: Cow::Owned(format!(
+            "/redfish/v1/Managers/{manager_id}/LogServices/{service_id}"
+        )),
+        odata_type: Cow::Borrowed("#LogService.v1_2_0.LogService"),
+        name: Cow::Borrowed("Integrated Event Log"),
+        id: Cow::Borrowed(service_id),
+    }
+}
+
+pub(super) fn manager_entries_collection<'a>(
+    manager_id: &str,
+    service_id: &'a str,
+) -> redfish::Collection<'a> {
+    redfish::Collection {
+        odata_id: Cow::Owned(format!(
+            "{}/Entries",
+            manager_resource(manager_id, service_id).odata_id
+        )),
+        odata_type: Cow::Borrowed("#LogEntryCollection.LogEntryCollection"),
+        name: Cow::Borrowed("Log Entries"),
+    }
+}
+
+pub(super) fn manager_clear_log_target(manager_id: &str, service_id: &str) -> String {
+    format!(
+        "{}/Actions/LogService.ClearLog",
+        manager_resource(manager_id, service_id).odata_id
+    )
+}
+
 pub(super) fn system_collection(system_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Systems/{system_id}/LogServices");
     redfish::Collection {
@@ -196,6 +228,17 @@ pub(crate) struct LogEntryDraft {
 }
 
 impl LogEntryDraft {
+    /// A backend reset command completed successfully. This is distinct from
+    /// accepting a request and does not claim the guest OS has finished booting.
+    pub(crate) fn backend_reset_completed(system: &str) -> Self {
+        Self {
+            message_id: "ResourceEvent.1.3.ResourceStateChanged",
+            message: "Server reset.".to_owned(),
+            severity: Severity::Ok,
+            origin: system.to_owned(),
+        }
+    }
+
     /// A `ComputerSystem.Reset` action the mock accepted.
     pub(crate) fn reset_requested(system: &str, reset_type: ResourceResetType) -> Self {
         let (message_id, message) = match reset_type {

@@ -234,6 +234,7 @@ pub(crate) struct Config<C: Callbacks> {
 
 pub struct SystemState<C: Callbacks> {
     systems: Vec<SingleSystemState<C>>,
+    hpe_reset_log: Option<redfish::log_service::EventLog>,
 }
 
 #[derive(Default)]
@@ -285,6 +286,32 @@ impl<C: Callbacks> SystemState<C> {
         &self.systems
     }
 
+    pub(super) fn hpe_reset_log(&self) -> Option<&redfish::log_service::EventLog> {
+        self.hpe_reset_log.as_ref()
+    }
+
+    /// Record successful backend reset-command completion, not HTTP acceptance
+    /// or an independently observed guest boot.
+    pub(crate) fn record_backend_reset_completed(&self, reset_type: crate::ResourceResetType) {
+        use crate::ResourceResetType::{ForceRestart, FullPowerCycle, GracefulRestart, PowerCycle};
+        if !matches!(
+            reset_type,
+            GracefulRestart | ForceRestart | PowerCycle | FullPowerCycle
+        ) {
+            return;
+        }
+        let Some(log) = self.hpe_reset_log.as_ref() else {
+            return;
+        };
+        let Some(system) = self.primary_system_odata_id() else {
+            return;
+        };
+        log.append(
+            redfish::log_service::LogEntryDraft::backend_reset_completed(&system),
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        );
+    }
+
     pub(crate) fn find(&self, system_id: &str) -> Option<&SingleSystemState<C>> {
         self.systems
             .iter()
@@ -321,6 +348,17 @@ impl<C: Callbacks> SystemState<C> {
         configs: Vec<SingleSystemConfig<C>>,
         virtual_media_devices: Option<Vec<redfish::virtual_media::DeviceConfig>>,
     ) -> Self {
+        let hpe_reset_log = configs
+            .iter()
+            .any(|config| config.model.as_deref() == Some("ProLiant DL380a Gen11"))
+            .then(|| {
+                redfish::log_service::EventLog::new(
+                    "IEL",
+                    redfish::log_service::DEFAULT_MAX_RECORDS,
+                    None,
+                    [],
+                )
+            });
         let mut virtual_media =
             virtual_media_devices.map(redfish::virtual_media::VirtualMediaState::new);
         let systems = configs
@@ -334,7 +372,10 @@ impl<C: Callbacks> SystemState<C> {
                 SingleSystemState::new(config, virtual_media)
             })
             .collect();
-        Self { systems }
+        Self {
+            systems,
+            hpe_reset_log,
+        }
     }
 
     pub(crate) fn controlled_system(&self) -> Option<&SingleSystemState<C>> {
@@ -922,7 +963,15 @@ async fn post_reset_system<C: Callbacks>(
     // introduce a deadlock if the API server holds a lock on the row for this machine
     // while issuing a redfish call, and MachineStateMachine is blocked waiting for the row lock
     // to be released.
-    match callbacks.computer_system_reset(reset_type).await {
+    let backend_reset_type = if system_state.config.model.as_deref()
+        == Some("ProLiant DL380a Gen11")
+        && reset_type == crate::ResourceResetType::GracefulRestart
+    {
+        crate::ResourceResetType::ForceRestart
+    } else {
+        reset_type
+    };
+    match callbacks.computer_system_reset(backend_reset_type).await {
         Ok(_) => {
             state.record_event(redfish::log_service::LogEntryDraft::reset_requested(
                 &resource(&system_id).odata_id,
@@ -1436,6 +1485,7 @@ impl SystemBuilder {
         let power_state = match state {
             MockPowerState::On => "On",
             MockPowerState::Off => "Off",
+            MockPowerState::Unknown => return self.apply_patch(json!({"PowerState": null})),
             MockPowerState::PoweringOn => "PoweringOn",
             MockPowerState::PoweringOff => "PoweringOff",
             MockPowerState::PowerCycling { since } => {
@@ -1517,6 +1567,67 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn unavailable_physical_power_is_null_not_off() {
+        let (router, _) = machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            Arc::new(TestCallbacks::new(MockPowerState::Unknown)),
+            String::new(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let system = get_json(&router, "/redfish/v1/Systems/System.Embedded.1").await;
+        assert!(
+            system
+                .get("PowerState")
+                .is_some_and(serde_json::Value::is_null)
+        );
+    }
+
+    #[tokio::test]
+    async fn hpe_ilo6_restart_uses_warm_reset() {
+        for (hardware, action, expected) in [
+            (
+                HardwareType::HpeProliantDl380aGen11,
+                crate::ResourceResetType::GracefulRestart,
+                crate::ResourceResetType::ForceRestart,
+            ),
+            (
+                HardwareType::HpeProliantDl380aGen11,
+                crate::ResourceResetType::GracefulShutdown,
+                crate::ResourceResetType::GracefulShutdown,
+            ),
+            (
+                HardwareType::LenovoGB300Nvl,
+                crate::ResourceResetType::GracefulRestart,
+                crate::ResourceResetType::GracefulRestart,
+            ),
+        ] {
+            let callbacks = Arc::new(TestCallbacks::default());
+            let (router, state) = machine_router(
+                &host_info(hardware),
+                callbacks.clone(),
+                "test-host".to_string(),
+                false,
+                MachineRouterOptions::default(),
+            );
+            let system_id = &state.system_state.controlled_system().unwrap().config.id;
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(reset_target(system_id))
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(json!({"ResetType": action}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(*callbacks.commands.lock().unwrap(), vec![expected]);
+        }
     }
 
     #[tokio::test]

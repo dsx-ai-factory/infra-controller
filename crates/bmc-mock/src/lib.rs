@@ -244,6 +244,8 @@ pub enum MockPowerState {
     #[default]
     On,
     Off,
+    /// The backend has not obtained a valid physical power observation.
+    Unknown,
     /// Power-on accepted; the host is not yet `On` (POST has not begun).
     PoweringOn,
     /// Graceful shutdown accepted; the OS is going down but power is still applied.
@@ -287,6 +289,7 @@ impl fmt::Display for MockPowerState {
         match self {
             Self::On => "On".fmt(f),
             Self::Off => "Off".fmt(f),
+            Self::Unknown => "Unknown".fmt(f),
             Self::PoweringOn => "PoweringOn".fmt(f),
             Self::PoweringOff => "PoweringOff".fmt(f),
             Self::PowerCycling { since } => write!(f, "PowerCycling {:?}", since.elapsed()),

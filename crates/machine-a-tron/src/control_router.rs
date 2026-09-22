@@ -264,6 +264,7 @@ impl RmsInventory for ControlState {
     fn power_state(&self, bmc_mac: MacAddress) -> eyre::Result<SimPowerState> {
         Ok(match self.device_by_bmc_mac(bmc_mac)?.power_state() {
             MockPowerState::On => SimPowerState::On,
+            MockPowerState::Unknown => eyre::bail!("physical power state is unavailable"),
             // The Redfish mock reports a cycling device as off until the
             // cycle's delay has run, and RMS has no state in between.
             MockPowerState::Off | MockPowerState::PowerCycling { .. } => SimPowerState::Off,

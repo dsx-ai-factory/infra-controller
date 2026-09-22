@@ -43,6 +43,9 @@ const VIRSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Additional grace period for reaping after a kill request, independent of the command deadline.
 const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Refresh physical power after asynchronous actions and out-of-band changes.
+const POWER_STATE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub virsh_path: PathBuf,
@@ -54,7 +57,7 @@ pub struct Config {
 /// Backend handle that sends operations to one sequential libvirt actor.
 ///
 /// Commands use an unbounded mailbox. Refresh notifications coalesce into one pending signal.
-/// Power reads return the last observation, initially Off, updated at actor startup
+/// Power reads return the last observation, initially Unknown, refreshed periodically
 /// and after power commands, binding, and refresh notifications. Power commands
 /// return once enqueued; execution failures are logged by the actor.
 /// Dropping the handle cancels the actor. Once binding starts, it finishes even if
@@ -101,7 +104,7 @@ impl LibvirtCallbacks {
     /// The owner must observe task failures and shut down the set when stopping the BMC.
     pub fn new(config: Config, tasks: &mut JoinSet<()>) -> Self {
         let refresh_pending = Arc::new(AtomicBool::new(false));
-        let power_state = Arc::new(RwLock::new(MockPowerState::Off));
+        let power_state = Arc::new(RwLock::new(MockPowerState::Unknown));
         let (actor, mailbox) = Actor::new(
             LibvirtBackend {
                 config,
@@ -246,6 +249,20 @@ impl LibvirtBackend {
 
     async fn start(&mut self) -> eyre::Result<()> {
         self.domain_command("start").await?;
+        self.consume_once_boot_override().await
+    }
+
+    async fn restart(&mut self, command: &str) -> eyre::Result<()> {
+        self.domain_command(command).await?;
+        if self.config.uri == "vm:///system" {
+            // vmctl's completed command has recreated QEMU with the selected
+            // boot devices. Consume Once only after that command succeeds.
+            self.consume_once_boot_override().await?;
+        }
+        Ok(())
+    }
+
+    async fn consume_once_boot_override(&mut self) -> eyre::Result<()> {
         let restore_boot = std::mem::take(&mut self.restore_boot_after_power_on);
         if restore_boot {
             if let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) {
@@ -517,7 +534,11 @@ impl LibvirtBackend {
                 "running" | "idle" | "blocked" | "paused" | "in shutdown" | "pmsuspended" => {
                     MockPowerState::On
                 }
-                _ => MockPowerState::Off,
+                "shut off" | "crashed" => MockPowerState::Off,
+                state => {
+                    tracing::warn!(domain = %self.config.domain, state, "unrecognized libvirt domain power state");
+                    MockPowerState::Unknown
+                }
             },
             Err(error) => {
                 tracing::warn!(
@@ -525,7 +546,7 @@ impl LibvirtBackend {
                     error = ?error,
                     "could not read libvirt domain power state",
                 );
-                MockPowerState::Off
+                MockPowerState::Unknown
             }
         }
     }
@@ -540,9 +561,12 @@ impl LibvirtBackend {
         reset_type: ResourceResetType,
     ) -> Result<(), ActionError> {
         use ResourceResetType::*;
-        // Only a cold start loads the saved domain XML. Reboot and reset keep
-        // the running domain's boot configuration and their existing semantics.
-        if matches!(reset_type, On | ForceOn | PowerCycle) {
+        // vmctl recreates QEMU on restart and consumes its next-boot selection.
+        // Reapply persistent selection for that backend before every restart.
+        if matches!(reset_type, On | ForceOn | PowerCycle)
+            || (self.config.uri == "vm:///system"
+                && matches!(reset_type, GracefulRestart | ForceRestart))
+        {
             self.reapply_effective_boot_order().await?;
         }
         match reset_type {
@@ -555,14 +579,8 @@ impl LibvirtBackend {
                 .domain_command("destroy")
                 .await
                 .map_err(ActionError::Internal),
-            GracefulRestart => self
-                .domain_command("reboot")
-                .await
-                .map_err(ActionError::Internal),
-            ForceRestart => self
-                .domain_command("reset")
-                .await
-                .map_err(ActionError::Internal),
+            GracefulRestart => self.restart("reboot").await.map_err(ActionError::Internal),
+            ForceRestart => self.restart("reset").await.map_err(ActionError::Internal),
             PowerCycle | FullPowerCycle => {
                 self.domain_command("destroy")
                     .await
@@ -620,11 +638,20 @@ impl LibvirtBackend {
 impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
     async fn message(
         &mut self,
-        _mailbox: &ActorMailbox<LibvirtMessage>,
+        mailbox: &ActorMailbox<LibvirtMessage>,
         message: LibvirtMessage,
     ) -> ActorResult {
         match message {
-            LibvirtMessage::Run => self.refresh_power_state().await,
+            LibvirtMessage::Run => {
+                self.refresh_power_state().await;
+                // Slow backends must not accumulate polling messages or overlap reads.
+                if let Err(error) = mailbox.send_at(
+                    std::time::Instant::now() + POWER_STATE_POLL_INTERVAL,
+                    LibvirtMessage::Run,
+                ) {
+                    tracing::warn!(%error, "could not schedule libvirt power observation");
+                }
+            }
             LibvirtMessage::Bind { state, reply } => {
                 if !reply.is_closed() {
                     let result = self.bind_state(state).await;
@@ -640,8 +667,15 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                             since: Instant::now(),
                         };
                 }
-                if let Err(error) = self.send_power_command(reset_type).await {
-                    tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
+                match self.send_power_command(reset_type).await {
+                    Ok(()) => {
+                        if let Some(state) = self.system_state.as_ref().and_then(Weak::upgrade) {
+                            state.record_backend_reset_completed(reset_type);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
+                    }
                 }
                 self.refresh_power_state().await;
             }
@@ -845,6 +879,348 @@ mod tests {
     use carbide_test_support::{Case, check_cases};
 
     use super::*;
+
+    #[tokio::test]
+    async fn observes_async_power_changes_and_reports_read_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        async fn wait_for(callbacks: &LibvirtCallbacks, expected: fn(MockPowerState) -> bool) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !expected(callbacks.get_power_state()) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("periodic power observation did not converge");
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("power-state");
+        let virsh = directory.path().join("virsh");
+        std::fs::write(&state, "running\n").unwrap();
+        std::fs::write(
+            &virsh,
+            b"#!/bin/sh\nstate=$(cat \"$(dirname \"$0\")/power-state\")\n[ \"$state\" != fail ] || exit 1\nprintf '%s\\n' \"$state\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&virsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut tasks = JoinSet::new();
+        let callbacks = LibvirtCallbacks::new(
+            Config {
+                virsh_path: virsh,
+                uri: "test:///default".into(),
+                domain: "power-target".into(),
+                virtual_media_targets: BTreeMap::new(),
+            },
+            &mut tasks,
+        );
+        assert!(matches!(
+            callbacks.get_power_state(),
+            MockPowerState::Unknown
+        ));
+        wait_for(&callbacks, |state| matches!(state, MockPowerState::On)).await;
+        // The physical change occurs without a new BMC command or settings PATCH.
+        std::fs::write(&state, "shut off\n").unwrap();
+        wait_for(&callbacks, |state| matches!(state, MockPowerState::Off)).await;
+        std::fs::write(&state, "unrecognized\n").unwrap();
+        wait_for(&callbacks, |state| matches!(state, MockPowerState::Unknown)).await;
+        std::fs::write(&state, "running\n").unwrap();
+        wait_for(&callbacks, |state| matches!(state, MockPowerState::On)).await;
+        std::fs::write(&state, "fail\n").unwrap();
+        wait_for(&callbacks, |state| matches!(state, MockPowerState::Unknown)).await;
+        drop(callbacks);
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn integrated_event_log_records_only_successful_backend_resets() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use axum::Router;
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Method, Request, StatusCode};
+        use serde_json::{Value, json};
+        use tower::ServiceExt;
+
+        use crate::test_support::host_info;
+        use crate::{HardwareType, MachineRouterOptions, machine_router};
+
+        const ENTRIES: &str = "/redfish/v1/Managers/1/LogServices/IEL/Entries";
+
+        async fn read_json(router: &Router, path: &str) -> Value {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap()
+        }
+
+        async fn wait_for_file(path: &std::path::Path) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !path.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("backend command did not reach its checkpoint");
+        }
+
+        for (label, uri, exit_code, rearmed) in [
+            ("vm-success", "vm:///system", 0, true),
+            ("vm-failure", "vm:///system", 1, true),
+            ("libvirt-success", "qemu:///system", 0, false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path();
+            let virsh = path.join("virsh");
+            std::fs::write(path.join("exit-code"), exit_code.to_string()).unwrap();
+            std::fs::write(
+                &virsh,
+                br#"#!/bin/sh
+directory=$(dirname "$0")
+printf '%s\n' "$3" >> "$directory/commands"
+case "$3" in
+  domstate)
+    printf 'running\n'
+    [ ! -e "$directory/finished" ] || touch "$directory/observed-after"
+    ;;
+  dumpxml) printf '<domain><os><type>hvm</type><boot dev="hd"/></os></domain>\n' ;;
+  reset)
+    touch "$directory/started"
+    while [ ! -e "$directory/release" ]; do sleep 0.01; done
+    touch "$directory/finished"
+    exit "$(cat "$directory/exit-code")"
+    ;;
+esac
+exit 0
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&virsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut tasks = JoinSet::new();
+            let callbacks = Arc::new(LibvirtCallbacks::new(
+                Config {
+                    virsh_path: virsh,
+                    uri: uri.to_owned(),
+                    domain: "reset-target".to_owned(),
+                    virtual_media_targets: BTreeMap::new(),
+                },
+                &mut tasks,
+            ));
+            let (router, state) = machine_router(
+                &host_info(HardwareType::HpeProliantDl380aGen11),
+                callbacks.clone(),
+                String::new(),
+                false,
+                MachineRouterOptions::default(),
+            );
+            callbacks.bind_state(&state).await.unwrap();
+            std::fs::write(path.join("commands"), "").unwrap();
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/redfish/v1/Systems/1/Actions/ComputerSystem.Reset")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"ResetType": "GracefulRestart"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{label}: request accepted"
+            );
+            wait_for_file(&path.join("started")).await;
+            assert_eq!(
+                read_json(&router, ENTRIES).await["Members@odata.count"],
+                0,
+                "{label}: a blocked command has not completed"
+            );
+            let commands = std::fs::read_to_string(path.join("commands")).unwrap();
+            let relevant = commands
+                .lines()
+                .filter(|command| *command != "domstate")
+                .collect::<Vec<_>>();
+            let expected = if rearmed {
+                vec!["dumpxml", "define", "reset"]
+            } else {
+                vec!["reset"]
+            };
+            assert_eq!(
+                relevant, expected,
+                "{label}: boot re-arming must precede vmctl restart only"
+            );
+
+            let released_at = chrono::Utc::now().timestamp_millis();
+            std::fs::write(path.join("release"), "").unwrap();
+            // The post-command power observation happens after the actor has
+            // processed backend success or failure, avoiding a racy empty-log check.
+            wait_for_file(&path.join("observed-after")).await;
+            let entries = read_json(&router, ENTRIES).await;
+            if exit_code == 0 {
+                assert_eq!(entries["Members@odata.count"], 1, "{label}");
+                let entry = &entries["Members"][0];
+                assert_eq!(entry["Message"], "Server reset.");
+                let created =
+                    chrono::DateTime::parse_from_rfc3339(entry["Created"].as_str().unwrap())
+                        .unwrap();
+                assert!(
+                    created.timestamp_millis() >= released_at,
+                    "completion precedes backend release"
+                );
+                assert_eq!(
+                    read_json(&router, entry["@odata.id"].as_str().unwrap()).await,
+                    *entry
+                );
+                let filtered = read_json(
+                    &router,
+                    &format!("{ENTRIES}?$filter=Created%20ge%20%272999-01-01T00:00:00Z%27"),
+                )
+                .await;
+                assert_eq!(filtered["Members@odata.count"], 0);
+            } else {
+                assert_eq!(
+                    entries["Members@odata.count"], 0,
+                    "failed backend command is not a completed reset"
+                );
+            }
+            tasks.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn vmctl_restart_consumes_once_only_after_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use axum::body::Body;
+        use axum::http::{Method, Request, StatusCode};
+        use serde_json::json;
+        use tower::ServiceExt;
+
+        use crate::test_support::host_info;
+        use crate::{HardwareType, MachineRouterOptions, machine_router};
+
+        for (uri, reset_type) in [
+            ("vm:///system", ResourceResetType::GracefulRestart),
+            ("vm:///system", ResourceResetType::ForceRestart),
+            ("qemu:///system", ResourceResetType::ForceRestart),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path();
+            let virsh = path.join("virsh");
+            std::fs::write(path.join("count"), "0").unwrap();
+            std::fs::write(
+                path.join("domain.xml"),
+                "<domain><os><type>hvm</type></os></domain>",
+            )
+            .unwrap();
+            std::fs::write(
+                &virsh,
+                br#"#!/bin/sh
+set -e
+directory=$(dirname "$0")
+case "$3" in
+  domstate)
+    printf 'running\n'
+    touch "$directory/observed-$(cat "$directory/count")"
+    ;;
+  dumpxml) cat "$directory/domain.xml" ;;
+  define) cp "$4" "$directory/domain.xml" ;;
+  reboot|reset)
+    count=$(($(cat "$directory/count") + 1))
+    cp "$directory/domain.xml" "$directory/boot-$count.xml"
+    printf '%s' "$count" > "$directory/count"
+    exit "$(cat "$directory/exit-code")"
+    ;;
+esac
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&virsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut tasks = JoinSet::new();
+            let callbacks = Arc::new(LibvirtCallbacks::new(
+                Config {
+                    virsh_path: virsh,
+                    uri: uri.to_owned(),
+                    domain: "once-target".to_owned(),
+                    virtual_media_targets: BTreeMap::new(),
+                },
+                &mut tasks,
+            ));
+            let (router, state) = machine_router(
+                &host_info(HardwareType::HpeProliantDl380aGen11),
+                callbacks.clone(),
+                String::new(),
+                false,
+                MachineRouterOptions::default(),
+            );
+            callbacks.bind_state(&state).await.unwrap();
+            let system = state.system_state.controlled_system().unwrap();
+            let persistent_network =
+                system.resolve_persistent_boot_selection() == Some(BootOptionKind::Network);
+            let once_target = if persistent_network { "Hdd" } else { "Pxe" };
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method(Method::PATCH)
+                        .uri("/redfish/v1/Systems/1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"Boot": {
+                                "BootSourceOverrideEnabled": "Once",
+                                "BootSourceOverrideTarget": once_target
+                            }})
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            for (index, succeeds) in [false, true, true].into_iter().enumerate() {
+                let attempt = index + 1;
+                std::fs::write(path.join("exit-code"), if succeeds { "0" } else { "1" }).unwrap();
+                callbacks.computer_system_reset(reset_type).await.unwrap();
+                // Observation runs after reset handling, including any persistent
+                // order restoration, so checking Once here cannot race completion.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !path.join(format!("observed-{attempt}")).exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("reset was not processed");
+                let consumed = uri == "vm:///system" && succeeds;
+                assert_eq!(
+                    system.boot_source_override()["BootSourceOverrideEnabled"],
+                    if consumed { "Disabled" } else { "Once" },
+                    "{uri} {reset_type:?} attempt {attempt}"
+                );
+                let boot =
+                    std::fs::read_to_string(path.join(format!("boot-{attempt}.xml"))).unwrap();
+                let expected_network = if uri == "vm:///system" && attempt == 3 {
+                    persistent_network
+                } else {
+                    !persistent_network
+                };
+                assert_eq!(
+                    boot.contains("dev=\"network\""),
+                    expected_network,
+                    "{uri} {reset_type:?} attempt {attempt}: second successful reset must use persistent order"
+                );
+            }
+            tasks.shutdown().await;
+        }
+    }
 
     #[test]
     fn replaces_domain_boot_order() {
