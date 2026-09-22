@@ -314,7 +314,6 @@ impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
 
 /// The initial candidate attempt plus one retry after an overlap conflict.
 const PREFIX_ALLOCATION_TOTAL_ATTEMPTS: usize = 2;
-const NETWORK_PREFIX_OVERLAP_CONSTRAINT: &str = "network_prefixes_prefix_excl";
 
 /// Address-family component of a canonical allocation group.
 ///
@@ -512,7 +511,7 @@ fn is_network_prefix_overlap_conflict(error: &CarbideError) -> bool {
         CarbideError::DBError(db::AnnotatedSqlxError {
             source: sqlx::Error::Database(database_error),
             ..
-        }) if database_error.constraint() == Some(NETWORK_PREFIX_OVERLAP_CONSTRAINT)
+        }) if db::network_prefix::is_overlap_constraint(database_error.constraint())
     )
 }
 

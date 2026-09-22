@@ -510,8 +510,6 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
         ERRORS+=("NICO_DPF_DPU_INTERFACE is not set    (controller interface for the DPU cluster keepalived VIP; required unless --skip-dpf)")
     [[ -z "${NICO_DPF_DPU_CLUSTER_VIP:-}" ]] && \
         ERRORS+=("NICO_DPF_DPU_CLUSTER_VIP is not set    (VIP the DPUs use to reach their control plane; required unless --skip-dpf)")
-    [[ -z "${NICO_DPF_BMC_ROOT_PASSWORD:-}" ]] && \
-        WARNINGS+=("NICO_DPF_BMC_ROOT_PASSWORD is not set  (site-wide BMC root password; setup.sh will skip automated credential seeding — set it manually via nico-admin-cli after deploy before DPU provisioning will work)")
     if [[ -z "${NICO_DPF_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}" ]]; then
         WARNINGS+=("NICO_DPF_NGC_API_KEY / REGISTRY_PULL_SECRET not set — the DPF operator + public DOCA images still pull anonymously, but the Argo repo secrets are skipped, so the private NICo DPUService charts (carbide) won't authenticate unless you mirror/build them into your own registry")
     fi
@@ -522,18 +520,18 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
     # the whole DPF prereq stack. Without this, a --core-values file with a
     # missing/commented [dpf] block passes preflight and aborts only in phase 6,
     # after argo-cd, kamaji, NFD, the operator and its CRs are already installed,
-    # leaving a half-provisioned cluster. This mirrors the setup.sh two-phase
+    # leaving a half-provisioned cluster. This mirrors setup.sh's rendered-values
     # guard, but it is a pure function of the static file so it can run up front.
     if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
-        # Reproduce setup.sh's DPF-ON rendering: the default file ships the [dpf]
+        # Reproduce setup.sh's DPF rendering: the default file ships the [dpf]
         # block '#dpf# '-commented (uncomment it); a --core-values file is
         # expected to carry a live [dpf] block already.
         if [[ -n "${CORE_VALUES:-}" ]]; then
-            _dpf_on_src="$(cat "${_CORE_VALUES_CFG}")"
+            _dpf_values_src="$(cat "${_CORE_VALUES_CFG}")"
         else
-            _dpf_on_src="$(sed -E 's/^([[:space:]]*)#dpf# ?/\1/' "${_CORE_VALUES_CFG}")"
+            _dpf_values_src="$(sed -E 's/^([[:space:]]*)#dpf# ?/\1/' "${_CORE_VALUES_CFG}")"
         fi
-        _dpf_enabled_val="$(printf '%s\n' "${_dpf_on_src}" | awk '
+        _dpf_enabled_val="$(printf '%s\n' "${_dpf_values_src}" | awk '
             /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { indpf = ($0 ~ /^[[:space:]]*\[dpf\][[:space:]]*$/) ? 1 : 0 }
             indpf==1 && /^[[:space:]]*enabled[[:space:]]*=/ {
                 # Anchor to the FIRST "=" so a trailing comment (e.g. "# default=true")

@@ -1206,6 +1206,8 @@ pub(crate) async fn record_dpu_network_status(
         process_astra_config_status(api, &dpu_machine_id, astra_config_status).await?;
     }
 
+    // TODO Handle the LLDP report in the next PR.
+
     // If this all worked and the DPU is healthy, we shouldn't emit a log line
     // If there is any error the report, the logging of the follow-up report is
     // suppressed for a certain amount of time to reduce logging noise.

@@ -91,12 +91,10 @@ export NICO_REST_IMAGE_TAG=<nico-rest-image-tag>         # e.g. v2.0.0
 # --skip-dpf to setup.sh (sites with no DPUs / still on iPXE):
 export NICO_DPF_DPU_INTERFACE=<control-plane-nic>     # NIC facing the DPUs
 export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plane VIP
-# Optional: if provided, setup.sh seeds the site-wide BMC root credential
-# automatically during phase 6b so DPU provisioning starts immediately.
-# If omitted, set it after deploy via nico-admin-cli (carbide-api picks it
-# up within 60 s). Prompt to keep it out of shell history:
-read -r -s -p "Site-wide BMC root password (leave blank to set later): " NICO_DPF_BMC_ROOT_PASSWORD; echo
-export NICO_DPF_BMC_ROOT_PASSWORD
+# Optional: setup creates and mounts a persistent watched version-0 Secret.
+# export NICO_DPF_BMC_ROOT_PASSWORD=<existing-site-wide-password>
+# Otherwise configure it through the API after installation. DPU provisioning
+# waits for the credential; carbide-api startup does not in local_first mode.
 
 # RMS (Rack Management Service) installs by default. Set the image tag (there
 # is no safe default), or pass --skip-rms to setup.sh to opt out:
@@ -117,7 +115,7 @@ For authenticated NGC pulls, obtain an API key at [ngc.nvidia.com](https://ngc.n
 | `NICO_REST_IMAGE_TAG` | Unless `--skip-rest` | NICo REST image tag (e.g. `v2.0.0`). |
 | `KUBECONFIG` | No | Path to the target cluster kubeconfig. Omit when the current `kubectl` context is already correct. |
 | `NICO_DPF_DPU_INTERFACE`, `NICO_DPF_DPU_CLUSTER_VIP` | **Yes**, unless `--skip-dpf` | DPF DPU provisioning (default-on): the control-plane NIC facing the DPUs and a free DPU-routable VIP for the DPU cluster control plane. See [helm-prereqs → DPF](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf). |
-| `NICO_DPF_BMC_ROOT_PASSWORD` | No | Site-wide BMC root password. When provided, setup.sh seeds the credential via nico-admin-cli in phase 6b so DPU provisioning starts immediately. When omitted, carbide-api starts without it (the startup read is best-effort) and the credential can be set at any time via `nico-admin-cli credential add-bmc --kind=site-wide-root`; carbide-api picks it up within 60 s. |
+| `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password. After a DPF-enabled Core deployment is accepted, setup stores it in `nico-system/nico-bmc-v0-credentials` and makes that watched Secret the authoritative local version-0 source. When omitted on such a deployment, setup reuses its marked Secret or leaves version 0 backend-managed. Declining deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. A rerun rejects a different value, and using the variable with `--skip-core` or `--skip-dpf` is an error. |
 | `NICO_SITE_UUID` | No | Stable UUID for this site. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
 
 ### 3b. Set your Site Name
@@ -709,6 +707,10 @@ kubectl get svc nico-api -n nico-system -o jsonpath='{.status.loadBalancer.ingre
 
 Configure the credentials NICo will apply to BMCs and UEFI after ingestion. These commands write to the configured credential store: Vault by default, or Postgres when the site was set up as described in [Day 0 Credential Store](installation-options/day0-credential-store.md).
 
+If `nico-api.credentials.bmcSiteWideRootSource` is `local`, skip the first
+command: the local environment-then-file chain owns version 0 of the site-wide
+BMC root, and the API rejects attempts to write that credential to the backend.
+
 ```bash
 nico-admin-cli -a <api-url> credential add-bmc --kind=site-wide-root --password='<password>'
 nico-admin-cli -a <api-url> host generate-host-uefi-password
@@ -730,7 +732,8 @@ each iteration with `MissingCredentials` while any one is missing.
 When DPF is enabled, the site-wide BMC root credential is also mirrored into the
 DPF `bmc-shared-password` Secret; refer to
 [Set the site-wide BMC root credential](../manuals/dpf.md#36-set-the-site-wide-bmc-root-credential)
-for the DPF-specific details and for how to seed it ahead of time instead.
+for the DPF-specific details and for how to provide version 0 through a watched
+Kubernetes Secret before installation.
 
 ### Upload the Expected Machines Manifest
 

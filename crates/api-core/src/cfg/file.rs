@@ -945,9 +945,10 @@ pub struct CarbideConfig {
     /// Operator-managed static credential sources. These settings contain
     /// only source locations and reload policy; credential values stay in the
     /// referenced file or process environment. When a file is configured, the
-    /// local environment/file chain is read first for non-UFM credentials.
-    /// `credentials.ufm_source` exclusively selects local or persistent
-    /// backend ownership for all UFM credentials.
+    /// local environment/file chain is read first by default.
+    /// `credentials.ufm_source` selects ownership for all UFM credentials, and
+    /// `credentials.bmc_site_wide_root_source` selects ownership for the
+    /// unversioned (version 0) site-wide BMC root.
     #[serde(default)]
     pub credentials: CredentialsConfig,
 
@@ -1099,8 +1100,9 @@ pub struct CertificatesConfig {
 ///
 /// The file source is optional. When present, it takes precedence over the
 /// legacy environment-selected file source and is read before credential
-/// backends such as Vault or Postgres. `ufm_source` controls whether UFM reads
-/// preserve that local-first order or use one authoritative source.
+/// backends such as Vault or Postgres. The source-policy fields control whether
+/// selected credentials preserve that local-first order or use one
+/// authoritative source.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialsConfig {
@@ -1108,6 +1110,11 @@ pub struct CredentialsConfig {
     /// Defaults to local-first reads with persistent-backend fallback.
     #[serde(default)]
     pub ufm_source: UfmCredentialSource,
+
+    /// Selects the read precedence and mutation policy for version 0 of the
+    /// site-wide BMC root. Versioned BMC roots always use persistent backends.
+    #[serde(default)]
+    pub bmc_site_wide_root_source: BmcSiteWideRootSource,
 
     /// A watched file containing static credentials. Its contents are never
     /// embedded in `CarbideConfig`.
@@ -1150,6 +1157,29 @@ pub enum UfmCredentialSource {
     Local,
 }
 
+/// Read precedence and mutation policy for version 0 of the site-wide BMC root.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BmcSiteWideRootSource {
+    /// Preserve the existing local-first behavior: read the environment, then
+    /// the file entry, before the persistent backend and mutate the backend.
+    #[default]
+    LocalFirst,
+    /// Read and mutate version 0 in the configured persistent backend. Ignore
+    /// the local environment and file entries.
+    Backend,
+    /// Read version 0 from the environment and then the file source, without
+    /// persistent-backend fallback, and reject persistent-backend mutation. A
+    /// missing entry does not normally fail startup. When v0 is current, an
+    /// existing DPF site with shared-only DPUDevices requires the local value
+    /// before activating this mode, and Core startup fails until it is
+    /// supplied. The local value is a bootstrap/ingestion input; after devices
+    /// use it, coordinated rotation advances to a backend-managed version.
+    /// DPF's shared BMC Secret is not safe during mixed-version convergence; see
+    /// <https://github.com/NVIDIA/infra-controller/issues/6147>.
+    Local,
+}
+
 impl CredentialFileSourceConfig {
     /// Returns the polling interval used when `poll_interval` is omitted.
     pub const fn default_poll_interval() -> std::time::Duration {
@@ -1161,6 +1191,12 @@ impl CredentialsConfig {
     /// Returns whether local sources authoritatively own UFM credentials.
     pub fn uses_authoritative_local_ufm_credentials(&self) -> bool {
         self.ufm_source == UfmCredentialSource::Local
+    }
+
+    /// Returns whether local sources authoritatively own version 0 of the
+    /// site-wide BMC root.
+    pub fn uses_authoritative_local_bmc_site_wide_root(&self) -> bool {
+        self.bmc_site_wide_root_source == BmcSiteWideRootSource::Local
     }
 }
 
@@ -1554,11 +1590,12 @@ pub struct SecretsConfig {
 
     /// The credential *backend* read order, highest priority first (first match
     /// wins). Enabled local-override readers (env, file) are normally tried
-    /// ahead of these; `credentials.ufm_source` can suppress local UFM entries
-    /// or make them authoritative. This list only orders the persistent
-    /// backends. Order is the operator's choice -- list the backends you want,
-    /// in the priority you want. Defaults to `["vault"]` -- with the local
-    /// overrides, that is the env -> file -> vault chain.
+    /// ahead of these; the source-policy fields under `[credentials]` can
+    /// suppress selected local entries or make them authoritative. This list
+    /// only orders the persistent backends. Order is the operator's choice --
+    /// list the backends you want, in the priority you want. Defaults to
+    /// `["vault"]` -- with the local overrides, that is the env -> file ->
+    /// vault chain.
     ///
     /// For example, to roll Postgres in gradually, walk this list:
     ///
@@ -1583,8 +1620,9 @@ pub struct SecretsConfig {
     /// fresh site with nothing to import; unsupported values fail config
     /// parsing rather than silently skipping the import. Independent of
     /// `backends`/`writer` -- importing from vault is orthogonal to where
-    /// reads and writes flow. When `credentials.ufm_source = "local"`, UFM
-    /// paths are excluded so the import preserves local ownership.
+    /// reads and writes flow. Locally owned UFM paths and the locally owned
+    /// unversioned site-wide BMC root are excluded so the import preserves
+    /// their ownership.
     pub import_from: Option<ImportSource>,
 
     /// How to treat secrets that already exist in Postgres during import.
@@ -4829,12 +4867,14 @@ mod tests {
             "valid file source" {
                 r#"
 ufm_source = "local"
+bmc_site_wide_root_source = "local"
 
 [file]
 path = "/var/run/secrets/nico/ufm/credentials.yaml"
 poll_interval = "17s"
 "# => Yields(CredentialsConfig {
                     ufm_source: UfmCredentialSource::Local,
+                    bmc_site_wide_root_source: BmcSiteWideRootSource::Local,
                     file: Some(CredentialFileSourceConfig {
                         path: PathBuf::from("/var/run/secrets/nico/ufm/credentials.yaml"),
                         poll_interval: std::time::Duration::from_secs(17),
@@ -4848,6 +4888,7 @@ poll_interval = "17s"
 path = "credentials.yaml"
 "# => Yields(CredentialsConfig {
                     ufm_source: UfmCredentialSource::LocalFirst,
+                    bmc_site_wide_root_source: BmcSiteWideRootSource::LocalFirst,
                     file: Some(CredentialFileSourceConfig {
                         path: PathBuf::from("credentials.yaml"),
                         poll_interval: std::time::Duration::from_secs(60),
@@ -4866,6 +4907,10 @@ path = "credentials.yaml"
             "unknown UFM source" {
                 "ufm_source = \"fallback\"" => Fails,
             }
+
+            "unknown BMC site-wide root source" {
+                "bmc_site_wide_root_source = \"fallback\"" => Fails,
+            }
         );
     }
 
@@ -4874,12 +4919,27 @@ path = "credentials.yaml"
         value_scenarios!(
             run = |ufm_source| CredentialsConfig {
                 ufm_source,
-                file: None,
+                ..CredentialsConfig::default()
             }.uses_authoritative_local_ufm_credentials();
             "credential source modes" {
                 UfmCredentialSource::LocalFirst => false,
                 UfmCredentialSource::Backend => false,
                 UfmCredentialSource::Local => true,
+            }
+        );
+    }
+
+    #[test]
+    fn bmc_site_wide_root_source_contract() {
+        value_scenarios!(
+            run = |bmc_site_wide_root_source| CredentialsConfig {
+                bmc_site_wide_root_source,
+                ..CredentialsConfig::default()
+            }.uses_authoritative_local_bmc_site_wide_root();
+            "credential source modes" {
+                BmcSiteWideRootSource::LocalFirst => false,
+                BmcSiteWideRootSource::Backend => false,
+                BmcSiteWideRootSource::Local => true,
             }
         );
     }
@@ -6187,6 +6247,10 @@ path = "credentials.yaml"
                 r#""local_first""#,
             ),
             (
+                "{{ .Values.credentials.bmcSiteWideRootSource | quote }}",
+                r#""local_first""#,
+            ),
+            (
                 "{{ range $i, $cn := .Values.auth.additionalIssuerCns }}{{ if $i }}, {{ end }}{{ $cn | quote }}{{ end }}",
                 "",
             ),
@@ -6348,6 +6412,7 @@ path = "credentials.yaml"
                 config.credentials,
                 CredentialsConfig {
                     ufm_source: UfmCredentialSource::Backend,
+                    bmc_site_wide_root_source: BmcSiteWideRootSource::Local,
                     file: Some(CredentialFileSourceConfig {
                         path: PathBuf::from("/var/run/secrets/nico/ufm/credentials.yaml"),
                         poll_interval: std::time::Duration::from_secs(17),

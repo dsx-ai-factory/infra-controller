@@ -20,8 +20,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 | **5 — external-secrets + nico-prereqs** | `helmfile sync` upgrades both releases. Existing `ClusterSecretStore` and `ExternalSecret` objects are reconciled to their new definitions. The ESO controller re-syncs all secrets on the next poll cycle. |
 | **5b — DPF** | DPF components are upgraded via their Helm charts. The `DPFOperatorConfig`, `DPUCluster`, and `DPUService` objects are preserved. Refer to [DPF version update](#20--21-dpf-version-update). |
 | **5c - [RMS](https://docs.nvidia.com/rms/documentation/home/)** | Unless `--skip-rms` is passed: the rack-manager release is upgraded via `helm upgrade --install` from the pinned `helm-prereqs/nv-rms` submodule. The RMS database on `nico-pg-cluster`, the ESO-synced credentials, and the operator-edited state are preserved. Seeding is create-if-absent; re-runs never overwrite. RMS does not reload its TLS material - after a certificate renewal, restart with `kubectl rollout restart deployment/rms-api-server -n rack-manager`. |
-| **6 — NICo Core** | `helm upgrade --install nico` rolls out the new Core image tag. The PostgreSQL database schema is migrated by the pre-upgrade Job (uses the `imagepullsecret` Secret, which is upserted). NICo state (host records, machine state, firmware inventory) lives in PostgreSQL and is preserved. |
-| **6b — DPF enablement** | On DPF-enabled sites only: refreshes the BMC-root credential, then runs a **second** `helm upgrade` of Core with the `[dpf]` block enabled and restarts `nico-api`. Core therefore rolls out twice on a DPF site. |
+| **6 — NICo Core** | `helm upgrade --install nico` rolls out the new Core image tag. On DPF sites, the same deployment carries `[dpf].enabled = true`; there is no preliminary DPF-disabled deployment or second Core rollout. The chart hashes its ConfigMap inputs into the pod template, so a changed site config also rolls `nico-api` when the image is unchanged; an unchanged rerun does not restart it. The PostgreSQL database schema is migrated by the pre-upgrade Job (uses the `imagepullsecret` Secret, which is upserted). NICo state (host records, machine state, firmware inventory) lives in PostgreSQL and is preserved. |
 | **7a–7g — NICo REST** | REST components are upgraded via `helm upgrade --install`. The `nico_rest` PostgreSQL database is migrated in-place by the REST migration Job. Temporal workflow state is preserved. The Keycloak realm and client credentials are preserved. |
 | **7h — NICo Flow** | The Flow-only release is upgraded in place. A predecessor Deployment or active Pod that still contains PSM or NSM is rejected before setup changes the cluster. |
 | **7i — NICo REST site-agent** | The site-agent StatefulSet is upgraded. The site UUID (stored in the `site-registration` Secret) and REST site record are preserved. |
@@ -194,7 +193,63 @@ cd helm-prereqs/
 source ./preflight.sh
 ```
 
-Fix all errors before proceeding. Warnings about `NICO_DPF_BMC_ROOT_PASSWORD` being unset are safe to ignore on an upgrade (the credential is already in the credential store from the initial install).
+Fix all errors before proceeding. On DPF sites, registration of a new DPUDevice
+remains blocked until the site-wide BMC root is available from the configured
+credential sources and the 60-second refresh publishes the derived
+current-version `bmc-shared-password` Secret. NICo retains an existing Secret,
+but does not infer startup readiness from that retained value. This does not
+prevent a `local_first` or `backend` Core rollout; Core starts and retries the
+source. Authoritative `local` mode requires version 0 before Core starts when
+v0 is current or the current target cannot be resolved.
+
+### DPF BMC root ownership on upgrade
+
+The backward-compatible default is
+`nico-api.credentials.bmcSiteWideRootSource: local_first`. An existing
+backend-owned version 0 credential therefore remains in use without a new
+Secret when `NICO_DPF_BMC_ROOT_PASSWORD` is unset. When it is set, setup creates
+`nico-system/nico-bmc-v0-credentials`, configures authoritative local ownership,
+and deploys Core once with DPF enabled. A later DPF-enabled Core deployment
+reuses that Secret even if the variable is omitted. Declining deployment leaves
+it untouched. A later non-DPF Core deployment preserves the mount and local
+ownership only when the installed release already uses this exact configuration;
+a stray Secret is not adopted. A different supplied value fails rather than
+overwriting version 0. If
+coordinated BMC rotation has advanced the target to version 1 or
+later, that version remains backend-resolved. A rerun also removes the obsolete
+`dpf-set-bmc-root` Job and its `dpf-bmc-root-pw` and `dpf-admincli-cert` Secrets
+if an interrupted older setup left them behind.
+
+To opt into local ownership of version 0, first create a Kubernetes Secret whose
+sparse credential file contains the exact existing version 0 value. Then add
+both `nico-api.credentials.file.existingSecret` and
+`nico-api.credentials.bmcSiteWideRootSource: local` to the persistent Core
+values before rerunning `setup.sh`. As a shortcut when no other credential-file
+Secret is configured, export the exact existing value as
+`NICO_DPF_BMC_ROOT_PASSWORD`; setup creates and wires its dedicated Secret. Do
+not use that shortcut when the Core values name another credential-file Secret.
+Ensure the environment credential source does not also supply this entry,
+because it precedes the file. A Secret created without the values update is not
+mounted. With DPF enabled, carbide-api requires local v0 before starting on
+fresh and existing sites whenever v0 is current or the current target cannot be
+resolved. A target at version 1 or later does not require local v0 before
+startup. This prevents a rolling update from activating local ownership while
+an older replica can still register a DPU that uses the shared credential. A
+transient rotation-target read failure does not block startup when local v0 is
+present. After NICo accepts local v0, removing it retains the last accepted
+shared Secret and logs an error until the original value is restored.
+The default pinned DPF v26.4.0 does not support BMC credential rotation;
+adopting and validating supporting DPF behavior is tracked by
+[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). If the rotation
+target is already version 1 or later, the local
+version 0 entry does not become current. If devices still use version 0, keep
+the copied local value unchanged after this ownership migration; later password
+changes must use coordinated BMC rotation so hardware and convergence records
+advance together. Do not stage that rotation while DPF manages any DPU: its
+single shared BMC Secret cannot authenticate a mixed-version fleet. DPF
+credential rotation is tracked by
+[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). See
+[Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy).
 
 <Warning>
 `setup.sh -y` does **not** stop on preflight errors — with `-y` set, hard errors are printed and the run continues ("Things may fail"). The preflight gate is only enforced interactively, so genuinely resolve every error here rather than relying on the script to stop you.
@@ -225,7 +280,7 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | `--skip-rest` | Skip Phase 7 only. Prerequisites and NICo Core still upgrade; the REST stack is left untouched. |
 | `--skip-flow` | Skip the Flow upgrade (Phase 7h). It does not bypass the initial guard for bundled PSM/NSM containers or an incomplete Flow-only rollout. Follow the [preserve-or-overwrite guidance](../../helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm). |
 | `--skip-rms` | Skip the Rack Management Service upgrade (Phase 5c). RMS installs **by default** (like DPF); `NICO_RMS_IMAGE_TAG` is required unless this flag is passed. Skipping leaves an existing RMS release untouched. |
-| `--skip-dpf` | Use **only** if DPF is not enabled at this site. This is not a pure skip: it clears `INSTALL_DPF`, which drops phases 5b and 6b *and* redeploys NICo Core with the `[dpf]` block disabled — on a DPF-enabled site that is a config change, not a skip. |
+| `--skip-dpf` | Use **only** if DPF is not enabled at this site. This is not a pure skip: it clears `INSTALL_DPF`, which drops phase 5b and redeploys NICo Core with the `[dpf]` block disabled — on a DPF-enabled site that is a config change, not a skip. |
 | `--core-values <file>` | Use a per-site NICo Core values file (same as initial install). |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest or kustomize dir (same as initial install). |
 
@@ -239,7 +294,6 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | Phase 5b (DPF) | 3–10 min (depends on DPF version delta) |
 | Phase 5c (RMS - unless `--skip-rms`) | 1-3 min (certificate issuance + rollout) |
 | Phase 6 (NICo Core) | 3–8 min (includes DB migration Job) |
-| Phase 6b (DPF enablement — DPF sites only) | 2–5 min (second Core rollout + nico-api restart) |
 | Phases 7a–7i (NICo REST + site-agent) | 5–15 min (Temporal and DB migrations are the slowest steps) |
 
 Total: typically **15–45 minutes** for a full upgrade with DPF.
@@ -400,5 +454,8 @@ helm upgrade --install nico ./helm \
 <Warning>
 This skips the MetalLB CRD handling, DPF management, the `imagepullsecret` upsert the migration Job depends on, and the other prereq phases. Only do this when you are certain those components do not need updating.
 
-**Do not use this on a DPF-enabled site**. Core deploys in two phases with different values (`--set nico-api.dpf.rbacCreate=true` plus the `[dpf]`-enabled block), which is why `setup.sh` refuses to print a standalone command on the DPF path. Use `./setup.sh -y --skip-rest` instead.
+**Do not use this command unchanged on a DPF-enabled site**. It omits the
+rendered `[dpf]` block and `nico-api.dpf.rbacCreate=true` values that `setup.sh`
+adds to the single Core deployment. From the repository root, use
+`helm-prereqs/setup.sh -y --skip-rest` instead.
 </Warning>

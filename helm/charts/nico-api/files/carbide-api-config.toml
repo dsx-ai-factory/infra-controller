@@ -111,8 +111,12 @@ additional_issuer_cns = [{{ range $i, $cn := .Values.auth.additionalIssuerCns }}
 {{- if not (has .Values.credentials.ufmSource (list "local_first" "backend" "local")) }}
 {{- fail "nico-api.credentials.ufmSource must be one of local_first, backend, or local" }}
 {{- end }}
+{{- if not (has .Values.credentials.bmcSiteWideRootSource (list "local_first" "backend" "local")) }}
+{{- fail "nico-api.credentials.bmcSiteWideRootSource must be one of local_first, backend, or local" }}
+{{- end }}
 [credentials]
 ufm_source = {{ .Values.credentials.ufmSource | quote }}
+bmc_site_wide_root_source = {{ .Values.credentials.bmcSiteWideRootSource | quote }}
 
 {{- if .Values.credentials.file.existingSecret.name }}
 [credentials.file]

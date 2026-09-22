@@ -166,6 +166,13 @@ pub enum SecretsError {
     UfmCredentialMutationBlocked {
         fabric: String,
     },
+    /// A local source owns version 0 of the site-wide BMC root but has no entry;
+    /// callers should surface the configuration remediation without falling
+    /// through to a persistent backend.
+    BmcSiteWideRootV0CredentialReadBlocked,
+    /// A caller attempted to mutate version 0 of the site-wide BMC root in a
+    /// persistent backend while local sources own it.
+    BmcSiteWideRootV0CredentialMutationBlocked,
 }
 
 impl Display for SecretsError {
@@ -188,6 +195,20 @@ impl Display for SecretsError {
                 crate::chained_reader::UFM_LOCAL_CREDENTIAL_REMEDIATION,
                 crate::chained_reader::UFM_BACKEND_SOURCE_REMEDIATION
             ),
+            SecretsError::BmcSiteWideRootV0CredentialReadBlocked => write!(
+                f,
+                "secrets operation failed: site-wide BMC root version 0 is absent from the \
+                 configured local sources; {}; {}",
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_LOCAL_CREDENTIAL_REMEDIATION,
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_BACKEND_SOURCE_REMEDIATION
+            ),
+            SecretsError::BmcSiteWideRootV0CredentialMutationBlocked => write!(
+                f,
+                "persistent backend credential mutation is disabled for site-wide BMC root \
+                 version 0 because local sources own it; {}; {}",
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_LOCAL_CREDENTIAL_REMEDIATION,
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_BACKEND_SOURCE_REMEDIATION
+            ),
         }
     }
 }
@@ -204,6 +225,12 @@ impl From<SecretsError> for eyre::Report {
             SecretsError::GenericError(report) => report,
             value @ SecretsError::UfmCredentialReadBlocked { .. } => eyre::eyre!("{value}"),
             value @ SecretsError::UfmCredentialMutationBlocked { .. } => eyre::eyre!("{value}"),
+            value @ SecretsError::BmcSiteWideRootV0CredentialReadBlocked => {
+                eyre::eyre!("{value}")
+            }
+            value @ SecretsError::BmcSiteWideRootV0CredentialMutationBlocked => {
+                eyre::eyre!("{value}")
+            }
         }
     }
 }

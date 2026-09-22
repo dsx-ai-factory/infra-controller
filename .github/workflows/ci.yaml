@@ -1896,6 +1896,9 @@ jobs:
       - name: Test observability install summary
         run: bash helm-prereqs/tests/install-observability-summary_test.sh
 
+      - name: Test DPF single Core deployment
+        run: bash helm-prereqs/tests/setup-dpf-single-core-deploy_test.sh
+
   build-push-helm-prereqs-chart:
     needs:
       - prepare

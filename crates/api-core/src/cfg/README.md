@@ -931,6 +931,48 @@ Even when the application accepts an eligible pair, the existing `VpcPrefix`
 exclusion rejects overlapping `VpcPrefix` persistence until the cutover tracked
 by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892).
 
+**Stored Prefix Scope**
+
+`network_vpc_prefixes.overlap_vpc_id` and `network_prefixes.overlap_vpc_id` are
+internal database fields, not API or configuration settings. `NULL` means the
+row remains globally exclusive. Core sets a VPC ID only for a new IPv4
+`VpcPrefix` using an eligible tenant-managed SitePrefix and routing profile,
+with the site overlap gate enabled and the site-wide isolation policy described
+above. An explicit `site_fabric_null_routes` override must cover the prefix.
+Without an override, scope selection does not require containment in configured
+operator ranges. Scope does not authorize overlap: pair admission still checks
+effective route coverage and all other overlap requirements described above.
+Generated, non-stretched Tenant linknets inherit that ID from their exact
+parent. Direct segments remain global even when a VpcPrefix adopts them.
+
+Existing rows and inserts from older binaries remain global. An older binary
+can also create a global child beneath a scoped parent. The additive migration
+retains both original global exclusions, so application rollback does not allow
+overlap or require a database rollback. The four additional exclusions protect
+global rows from each other and scoped rows within the same VPC, including rows
+awaiting deletion. They do not compare a global row with a scoped row.
+
+The migration blocks reads and writes to these prefix tables while building
+the indexes. It releases the locks when it commits. Cached wildcard queries on
+the outgoing API's connections can still fail until that API is replaced.
+
+The following read-only query must return ten rows, all with `convalidated = t`.
+The scope checks and foreign key prove that each non-null key agrees with its
+stored VPC/parent relationship; the original exclusions still prevent overlap.
+This is a structural check, not approval to drop those exclusions: the
+[#3892 cutover](https://github.com/dsx-ai-factory/infra-controller/issues/3892)
+must also make every writer and allocation check respect global scope, including
+parented global children, and verify the supported application versions.
+Core's startup checks continue to validate runtime routing policy.
+
+```sql
+SELECT conname, convalidated
+FROM pg_catalog.pg_constraint
+WHERE conrelid IN ('public.network_vpc_prefixes'::regclass, 'public.network_prefixes'::regclass)
+  AND (conname LIKE '%overlap%' OR contype = 'x')
+ORDER BY conname;
+```
+
 ### `VpcDefinition`
 
 | Field | Type | Default | Description |
@@ -1199,14 +1241,15 @@ TOML section: `[machine_validation_config.attempt_logs]`.
 ### `CredentialsConfig`
 
 The optional `[credentials]` section configures non-secret locations from which
-NICo reads operator-managed credentials. Non-UFM credentials continue to read
-the local environment and file sources before the configured persistent
-backends. `ufm_source` controls the read precedence and mutation policy for UFM
-credentials.
+NICo reads operator-managed credentials. Most credentials continue to read the
+local environment and file sources before the configured persistent backends.
+`ufm_source` controls the policy for UFM credentials, and
+`bmc_site_wide_root_source` controls version 0 of the site-wide BMC root.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `ufm_source` | `UfmCredentialSource` | `local_first` | UFM credential policy. `local_first` reads environment/file entries before falling back to the persistent backend and writes to the backend. `backend` ignores local UFM entries. `local` makes environment/file entries authoritative and rejects persistent-backend UFM mutations. |
+| `bmc_site_wide_root_source` | `BmcSiteWideRootSource` | `local_first` | Version 0 site-wide BMC root policy. `local_first` reads environment, then file, before falling back to the persistent backend and writes to the backend. `backend` ignores the local v0 entry. `local` reads environment, then file, with no backend fallback and rejects backend v0 mutations. Versioned roots always use persistent backends. |
 | `file` | `Option<CredentialFileSourceConfig>` | — | Watched JSON or YAML static-credential file (see [CredentialFileSourceConfig](#credentialfilesourceconfig)). When present, it replaces the legacy file source selected by `CARBIDE_CREDENTIALS_FILE_*`; the environment source remains first when enabled. |
 
 When `ufm_source = "local"` and InfiniBand management is enabled, startup
@@ -1214,6 +1257,33 @@ requires a local `ufm_auth_by_fabric` entry for every configured fabric. The
 mode is all-or-nothing: NICo does not fall back to Vault or Postgres for a
 missing fabric. When `ufm_source` is omitted, `local_first` preserves the
 pre-existing local-override behavior.
+
+When `bmc_site_wide_root_source = "local"`, readers report a missing local
+version 0 as unavailable without falling back to a persistent backend. With
+DPF enabled, Core requires local v0 before startup on both fresh and existing
+sites whenever v0 is current or the current target cannot be resolved. This
+prevents a rolling update from activating local ownership while an older
+replica can still register a DPU that uses the shared credential. On a transient
+rotation-target read failure, a present local v0 permits startup and retry. After
+accepting local v0, NICo retains that last shared value and logs an error if the
+entry disappears. To recover, restore the local value unchanged. The default pinned DPF
+v26.4.0 does not support BMC credential rotation, so NICo retains the shared
+Secret. Adopting and validating supporting DPF behavior is tracked by
+[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other current
+BMC rotation targets follow the same retention rule when absent from their
+authoritative source. During background refresh, a transient source-read
+failure retains the last published Secret and is retried.
+The setting does not affect versioned site-wide BMC roots,
+per-device BMC credentials, or BMC rotation.
+
+Treat a local version 0 value as bootstrap and ingestion input. Watched reload
+may add or correct it before any managed device begins using version 0. After
+ingestion starts, keep it unchanged: changing only the read source does not
+update BMC hardware or credential-convergence records. Use coordinated BMC
+credential rotation to advance to a backend-managed version instead. On DPF
+sites, do not rotate while DPF manages any DPU: the shared BMC Secret cannot
+authenticate a fleet split between old and new passwords; see
+[#6147](https://github.com/NVIDIA/infra-controller/issues/6147).
 
 #### Environment credential source
 
@@ -1234,11 +1304,16 @@ export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=bearer-t
 ```
 
 Environment credentials are snapshotted at process startup. Changing them
-requires restarting `nico-api`; use the watched file source for runtime
-credential rotation. With `ufm_source = "local_first"`, an environment entry
+requires restarting `nico-api`; use the watched file source for supported
+live-reload workflows. The site-wide BMC root version 0 has the bootstrap-only
+boundary described above. With `ufm_source = "local_first"`, an environment entry
 overrides the corresponding file and persistent-backend entries. With
 `ufm_source = "local"`, every configured fabric must be present in the enabled
 environment/file sources.
+
+For version 0 of the site-wide BMC root, the environment entry likewise
+precedes the file entry in `local_first` and `local` modes. Versioned roots do
+not use either local source.
 
 ### `CredentialFileSourceConfig`
 
@@ -1259,15 +1334,31 @@ ufm_auth_by_fabric:
     password: bearer-token-or-empty
 ```
 
+A sparse file may instead contain only version 0 of the site-wide BMC root:
+
+```yaml
+bmc_site_wide_root:
+  username: root
+  password: example
+```
+
+With `bmc_site_wide_root_source = "local"`, the watched Kubernetes Secret may
+supply or correct this value before ingestion without restarting NICo. Do not
+change it after a managed device begins using version 0; use coordinated BMC
+rotation to advance to a backend-managed version instead. DPF sites must not
+rotate while DPUs rely on the shared BMC Secret; see
+[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Use a Secret
+rather than a ConfigMap for credential data.
+
 ### `SecretsConfig`
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `kms` | `KmsConfig` | **required** | KMS backend configuration (see [KmsConfig](#kmsconfig)). |
 | `routing` | `HashMap<String, String>` | **required** | Maps path prefixes to the `kek_id` that encrypts new writes under them, longest prefix winning. A `/` catch-all entry is required. Reads never consult routing — every stored row records the KEK that wrote it. |
-| `backends` | `Vec<CredentialBackend>` | `[vault]` | The persistent-backend read order, highest priority first (first match wins). Enabled local overrides are tried first for non-UFM credentials. UFM reads use these backends directly in `backend` mode and as fallback in `local_first` mode. |
-| `writer` | `CredentialBackend` | `vault` | Where new credential writes go. Set to `postgres` to send new writes to the journal; independent of `backends`. UFM mutations are rejected when `credentials.ufm_source = "local"`. |
-| `import_from` | `Option<ImportSource>` | — | A source backend to import secrets from at startup. Only `vault` is supported. When `credentials.ufm_source = "local"`, the import does not traverse or read `ufm/`; an import containing only excluded UFM entries still records completion. Unset means a fresh site with nothing to import. |
+| `backends` | `Vec<CredentialBackend>` | `[vault]` | The persistent-backend read order, highest priority first (first match wins). Enabled local overrides are normally tried first. Source policies may make selected local entries authoritative or suppress them. |
+| `writer` | `CredentialBackend` | `vault` | Where new credential writes go. Set to `postgres` to send new writes to the journal; independent of `backends`. Mutations are rejected for credentials whose source policy is `local`. |
+| `import_from` | `Option<ImportSource>` | — | A source backend to import secrets from at startup. Only `vault` is supported. The import excludes the `ufm/` subtree when `credentials.ufm_source = "local"`, and only the unversioned site-wide BMC root when `credentials.bmc_site_wide_root_source = "local"`. An excluded-only import still records completion. Unset means a fresh site with nothing to import. |
 | `import_approach` | `ImportApproach` | `missing_only` | How to treat secrets that already exist in Postgres during import. |
 
 ### `KmsConfig`

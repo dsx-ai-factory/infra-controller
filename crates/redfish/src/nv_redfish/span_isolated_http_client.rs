@@ -28,7 +28,7 @@ use url::Url;
 
 /// An nv-redfish Reqwest client whose transport work is detached from application spans.
 #[derive(Clone)]
-pub struct SpanIsolatedHttpClient {
+pub(super) struct SpanIsolatedHttpClient {
     inner: Client,
 }
 
