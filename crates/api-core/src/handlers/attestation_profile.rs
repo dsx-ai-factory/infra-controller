@@ -295,6 +295,7 @@ async fn attester_sets_by_class(
             .push(rpc::AttesterSet {
                 digest: set.attester_digest,
                 endpoints: set.endpoints as i32,
+                attesters: set.attesters,
             });
     }
     Ok(by_class)

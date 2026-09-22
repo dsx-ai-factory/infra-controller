@@ -7595,7 +7595,11 @@ type AttesterSet struct {
 	// Explored endpoints of this class last reporting this set. Sums to at most
 	// the entry's `endpoints`, since an endpoint explored before this was
 	// recorded carries no digest yet.
-	Endpoints     int32 `protobuf:"varint,2,opt,name=endpoints,proto3" json:"endpoints,omitempty"`
+	Endpoints int32 `protobuf:"varint,2,opt,name=endpoints,proto3" json:"endpoints,omitempty"`
+	// How many attesters the set holds. Zero where the BMC reported an SPDM
+	// collection with no SPDM members, which is a set in its own right and
+	// distinct from a class that has recorded none.
+	Attesters     int32 `protobuf:"varint,3,opt,name=attesters,proto3" json:"attesters,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -7640,6 +7644,13 @@ func (x *AttesterSet) GetDigest() string {
 func (x *AttesterSet) GetEndpoints() int32 {
 	if x != nil {
 		return x.Endpoints
+	}
+	return 0
+}
+
+func (x *AttesterSet) GetAttesters() int32 {
+	if x != nil {
+		return x.Attesters
 	}
 	return 0
 }
@@ -69081,10 +69092,11 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\bcoverage\x18\x03 \x01(\x0e2\x1a.forge.AttestationCoverageR\bcoverage\x125\n" +
 	"\x04mode\x18\x04 \x01(\x0e2\x1c.forge.AttesterSelectionModeH\x00R\x04mode\x88\x01\x01\x127\n" +
 	"\rattester_sets\x18\x05 \x03(\v2\x12.forge.AttesterSetR\fattesterSetsB\a\n" +
-	"\x05_mode\"C\n" +
+	"\x05_mode\"a\n" +
 	"\vAttesterSet\x12\x16\n" +
 	"\x06digest\x18\x01 \x01(\tR\x06digest\x12\x1c\n" +
-	"\tendpoints\x18\x02 \x01(\x05R\tendpoints\"\xbd\x01\n" +
+	"\tendpoints\x18\x02 \x01(\x05R\tendpoints\x12\x1c\n" +
+	"\tattesters\x18\x03 \x01(\x05R\tattesters\"\xbd\x01\n" +
 	"\x1eGetAttestationCoverageResponse\x129\n" +
 	"\aentries\x18\x01 \x03(\v2\x1f.forge.AttestationCoverageEntryR\aentries\x12K\n" +
 	"\x10any_profile_mode\x18\x02 \x01(\x0e2\x1c.forge.AttesterSelectionModeH\x00R\x0eanyProfileMode\x88\x01\x01B\x13\n" +

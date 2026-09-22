@@ -1392,6 +1392,10 @@ message AttesterSet {
   // the entry's `endpoints`, since an endpoint explored before this was
   // recorded carries no digest yet.
   int32 endpoints = 2;
+  // How many attesters the set holds. Zero where the BMC reported an SPDM
+  // collection with no SPDM members, which is a set in its own right and
+  // distinct from a class that has recorded none.
+  int32 attesters = 3;
 }
 
 message GetAttestationCoverageResponse {

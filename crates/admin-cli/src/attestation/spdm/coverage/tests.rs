@@ -90,25 +90,30 @@ fn entry(
     }
 }
 
-/// The two sets the profiled class spans: seventy-one trays reporting one and
-/// a single tray reporting another, which is the drift the column exists for.
+/// The two sets the profiled class spans: seventy-one trays reporting eight
+/// attesters and a single tray reporting seven, which is the drift the columns
+/// exist for. Listed with the larger set first, so the table is shown sorting
+/// the counts rather than echoing the order they arrive in.
 fn attester_sets() -> Vec<AttesterSet> {
     vec![
         AttesterSet {
             digest: "1e05c4".to_string(),
             endpoints: 71,
+            attesters: 8,
         },
         AttesterSet {
             digest: "9a7fb2".to_string(),
             endpoints: 1,
+            attesters: 7,
         },
     ]
 }
 
-const HEADERS: [&str; 5] = [
+const HEADERS: [&str; 6] = [
     "HARDWARE CLASS",
     "EXPLORED ENDPOINTS",
-    "ATTESTER SETS",
+    "ATTESTERS",
+    "VARIANTS",
     "OWN PROFILE",
     "WOULD USE",
 ];
@@ -147,13 +152,17 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
             vec![
                 UNPROFILED_CLASS,
                 "2",
+                "",
                 "0",
                 "no",
                 "nothing: no profile for this class and no any fallback"
             ],
+            // Two sets of differing size, so the class has no single attester
+            // count and the cell has to report both.
             vec![
                 PROFILED_CLASS,
                 "72",
+                "7, 8",
                 "2",
                 "yes",
                 "its own profile (allowlist)"
@@ -161,12 +170,14 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
             vec![
                 NO_CLASS_RECORDED,
                 "1",
+                "",
                 "0",
                 "n/a",
                 "nothing: no class recorded and no any profile"
             ],
             vec![
                 ANY_HARDWARE_CLASS,
+                NOT_APPLICABLE,
                 NOT_APPLICABLE,
                 NOT_APPLICABLE,
                 "no",
@@ -203,17 +214,19 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
         rows(&output),
         [
             HEADERS.to_vec(),
-            vec![UNPROFILED_CLASS, "2", "0", "no", "any (all)"],
+            vec![UNPROFILED_CLASS, "2", "", "0", "no", "any (all)"],
             vec![
                 PROFILED_CLASS,
                 "72",
+                "7, 8",
                 "2",
                 "yes",
                 "its own profile (allowlist)"
             ],
-            vec![NO_CLASS_RECORDED, "1", "0", "n/a", "any (all)"],
+            vec![NO_CLASS_RECORDED, "1", "", "0", "n/a", "any (all)"],
             vec![
                 ANY_HARDWARE_CLASS,
+                NOT_APPLICABLE,
                 NOT_APPLICABLE,
                 NOT_APPLICABLE,
                 "yes",
@@ -232,8 +245,8 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
     assert_eq!(
         reported[1]["attester_sets"],
         serde_json::json!([
-            {"digest": "1e05c4", "endpoints": 71},
-            {"digest": "9a7fb2", "endpoints": 1},
+            {"digest": "1e05c4", "endpoints": 71, "attesters": 8},
+            {"digest": "9a7fb2", "endpoints": 1, "attesters": 7},
         ])
     );
     assert_eq!(
