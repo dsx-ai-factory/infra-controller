@@ -42,10 +42,13 @@ the proxy's cache metrics. Callers cannot see or choose their class.
 
 ## Response cache
 
-A class with a `cache` policy stores the body and headers of every `200` a
-`GET` in that class receives, keyed by BMC, class, and request path, so two
-classes that match one path keep separate entries. The policy gives a stored
-response three windows, all counted from when it was stored.
+A class with a `cache` policy stores the body and headers of every eligible
+`200` a `GET` in that class receives, keyed by BMC, class, and request path
+with its query. A single trailing slash on the path is ignored; a different
+query is a different entry, and only requests whose query is empty or uses
+Redfish's own parameters are cached at all. Two classes that match one path
+keep separate entries. The policy gives a stored response three windows, all
+counted from when it was stored.
 
 ```mermaid
 flowchart LR
@@ -122,12 +125,12 @@ Metrics, all counters labeled by `class`:
 The store is in memory and per proxy replica; two replicas hold two stores and
 may each fetch a resource once. The cache runs at most four fetches against one
 BMC at a time and caches only requests whose query is empty or made of
-Redfish's own parameters. Only bodies of at most 8 MiB are stored, the
-store holds at most 256 MiB of bodies per replica, and a larger body in a
-cached class is forwarded to its caller unstored. A stored
-response is served to any principal whose ACL allows the request; every
-principal reaches the BMC through the same account, so nobody receives a body
-they could not fetch themselves.
+Redfish's own parameters. Only bodies of at most 8 MiB are stored, the store
+holds at most 256 MiB of bodies per replica, and a larger body in a cached
+class is forwarded to its caller unstored. A stored response is served to any
+principal whose ACL allows the request; every principal reaches the BMC
+through the same account, so nobody receives a body they could not fetch
+themselves, and a stored response never carries a `Set-Cookie`.
 
 ## Related work
 

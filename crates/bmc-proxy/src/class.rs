@@ -47,6 +47,11 @@ const DEFAULT_CLASS_NAME: &str = "default";
 /// not set one: the proxy's historical total-request timeout.
 pub(crate) const DEFAULT_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Longest upstream budget a class may set. A fetch the cache runs holds one
+/// of a BMC's few fetch slots for its whole budget, so a budget has to end.
+/// Streamed firmware uploads scale their own budget and are not bound here.
+const MAX_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 /// Longest class name the metric label accepts.
 const MAX_CLASS_NAME_LEN: usize = 32;
 
@@ -195,6 +200,8 @@ enum ClassTableError {
     DefaultWithCache,
     #[error("class {name:?} upstream_timeout must be greater than zero")]
     ZeroTimeout { name: String },
+    #[error("class {name:?} upstream_timeout exceeds the {MAX_UPSTREAM_TIMEOUT:?} maximum")]
+    TimeoutTooLarge { name: String },
     #[error("class {name:?} cache policy: {source}")]
     InvalidCache {
         name: String,
@@ -217,6 +224,11 @@ impl ClassTable {
             }
             if definition.upstream_timeout.is_zero() {
                 return Err(ClassTableError::ZeroTimeout {
+                    name: definition.name,
+                });
+            }
+            if definition.upstream_timeout > MAX_UPSTREAM_TIMEOUT {
+                return Err(ClassTableError::TimeoutTooLarge {
                     name: definition.name,
                 });
             }
@@ -421,6 +433,10 @@ mod tests {
                    name = "control"
                    match = ["/redfish/v1/**"]
                    upstream_timeout = "0s""# => Fails,
+                r#"[[class]]
+                   name = "control"
+                   match = ["/redfish/v1/**"]
+                   upstream_timeout = "31m""# => Fails,
                 r#"[[class]]
                    name = "control"
                    match = ["BOGUS /redfish/v1/**"]"# => Fails,

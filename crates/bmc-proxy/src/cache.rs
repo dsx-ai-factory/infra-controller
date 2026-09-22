@@ -645,7 +645,7 @@ impl ResponseCache {
                 _,
             ) if !is_encoded(&headers) => {
                 let entry = Arc::new(CachedResponse {
-                    headers,
+                    headers: storable_headers(headers),
                     body,
                     stored_at: now,
                     generation,
@@ -667,7 +667,7 @@ impl ResponseCache {
                 Some(previous),
             ) => {
                 let entry = Arc::new(CachedResponse {
-                    headers: merge_validated_headers(&previous.headers, &headers),
+                    headers: storable_headers(merge_validated_headers(&previous.headers, &headers)),
                     body: previous.body.clone(),
                     stored_at: now,
                     generation,
@@ -794,6 +794,13 @@ impl ResponseCache {
             });
         }
     }
+}
+
+/// The headers a stored entry keeps. `Set-Cookie` addresses the one caller
+/// the BMC answered; the store is shared by every caller, so it is dropped.
+fn storable_headers(mut headers: HeaderMap) -> HeaderMap {
+    headers.remove(header::SET_COOKIE);
+    headers
 }
 
 /// Whether the BMC applied a transfer encoding the store cannot hand to a
@@ -1272,6 +1279,41 @@ mod tests {
             .await;
         assert!(!joined, "nothing was left to join");
         assert_eq!(body_of(&outcome).as_deref(), Some("recovered"));
+    }
+
+    /// The store is shared by every caller, so a cookie the BMC set for the
+    /// caller whose request fetched the entry is not kept with it.
+    #[tokio::test]
+    async fn stored_entries_drop_set_cookie() {
+        let table = classes();
+        let inventory = class(&table, "inventory");
+        let cache = Arc::new(ResponseCache::new(MAX_BYTES));
+        let key = key(
+            BMC,
+            &inventory,
+            "/redfish/v1/UpdateService/FirmwareInventory",
+        );
+        let (outcome, _) = cache
+            .fetch(key.clone(), &inventory, None, || {
+                |_| async {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    );
+                    headers.append(header::SET_COOKIE, HeaderValue::from_static("sid=abc"));
+                    UpstreamReply::Response {
+                        status: StatusCode::OK,
+                        headers,
+                        body: Bytes::from_static(b"{}"),
+                    }
+                }
+            })
+            .await;
+        assert!(matches!(outcome, FetchOutcome::Fetched(_)));
+        let entry = cache.lookup(&key).await.expect("the stored entry");
+        assert!(entry.headers.contains_key(header::CONTENT_TYPE));
+        assert!(!entry.headers.contains_key(header::SET_COOKIE));
     }
 
     /// A refresh sends the stored `ETag`; a `304` keeps the body, adopts

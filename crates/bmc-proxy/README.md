@@ -148,7 +148,7 @@ upstream_timeout = "90s"
 | `name` | yes | — | Lowercase `snake_case`, at most 32 characters, unique. Appears as the `class` label on the proxy's cache metrics and as `bmc_proxy.class` on the request span. |
 | `match` | yes, except for `default` | — | Patterns in the `[VERB[,VERB...]] /path/pattern` form ACL entries use, without the leading `!`. Any pattern matching admits the request to the class. |
 | `principals` | no | any | Restricts the class to requests from these principal identifiers, for example `spiffe-service-id/nv-dps`. |
-| `upstream_timeout` | no | `60s` | Total budget for one upstream exchange, as a duration such as `30s` or `5m`. Streamed firmware uploads scale their own budget from the declared size and ignore it. |
+| `upstream_timeout` | no | `60s` | Total budget for one upstream exchange, as a duration such as `30s` or `5m`, at most `30m`. Streamed firmware uploads scale their own budget from the declared size and ignore it. |
 | `cache` | no | none | Response cache policy for `GET` requests in the class; see below. |
 
 The `default` class may be declared to change its budget, but it takes no
@@ -161,11 +161,13 @@ or choose their class.
 
 ## Response Cache
 
-A class with a `cache` table stores the body and headers of every `200` the
-BMC returns to a `GET` in that class, keyed by BMC, class, and request path
-(with its query, and with a single trailing slash ignored). Later `GET`s for
-the same resource are answered from the store according to three windows,
-all counted from the moment the response was stored:
+A class with a `cache` table stores the body and headers of every eligible
+`200` the BMC returns to a `GET` in that class: one whose query the cache keys
+and whose body is unencoded and within the size limit, as the rules below
+spell out. Entries are keyed by BMC, class, and request path (with its query,
+and with a single trailing slash ignored). Later `GET`s for the same resource
+are answered from the store according to three windows, all counted from the
+moment the response was stored:
 
 | Field | Required | Default | Meaning |
 | ----- | -------- | ------- | ------- |
@@ -228,6 +230,8 @@ Behavior that follows from the store:
   request for the caller that discovers it; for the hold-off that follows,
   requests for it are forwarded directly. A cache policy on resources with
   large payloads therefore adds BMC work instead of saving it.
+- Stored headers never include `Set-Cookie`. The store is shared by every
+  caller the ACL admits to the resource, and a cookie addresses one of them.
 - Non-`GET` requests and classes without a `cache` table are forwarded and
   streamed back exactly as before.
 
