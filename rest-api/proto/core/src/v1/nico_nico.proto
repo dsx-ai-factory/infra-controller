@@ -588,6 +588,18 @@ service Forge {
   // Delete all expected racks in site
   rpc DeleteAllExpectedRacks(google.protobuf.Empty) returns (google.protobuf.Empty);
 
+  // Expected Rack Group Management
+  rpc AddExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
+  rpc DeleteExpectedRackGroup(ExpectedRackGroupRequest) returns (google.protobuf.Empty);
+  // Replace the full record, including both lists and metadata.
+  rpc UpdateExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
+  rpc GetExpectedRackGroup(ExpectedRackGroupRequest) returns (ExpectedRackGroup);
+  rpc FindExpectedRackGroupIds(ExpectedRackGroupSearchFilter) returns (ExpectedRackGroupIdList);
+  rpc FindExpectedRackGroupsByIds(ExpectedRackGroupsByIdsRequest) returns (ExpectedRackGroupList);
+  // Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
+  rpc ReplaceAllExpectedRackGroups(ExpectedRackGroupList) returns (google.protobuf.Empty);
+  rpc DeleteAllExpectedRackGroups(google.protobuf.Empty) returns (google.protobuf.Empty);
+
   // Perform Attestation Procedure for Measured Boot
   rpc AttestQuote	(AttestQuoteRequest) returns (AttestQuoteResponse);
 
@@ -721,6 +733,12 @@ service Forge {
 
   // Machine-Validation attempt detail
   rpc GetMachineValidationAttempt(MachineValidationAttemptGetRequest) returns (MachineValidationAttempt);
+
+  // Append the next ordered stdout or stderr chunk while an attempt is active.
+  rpc AppendMachineValidationAttemptLog(MachineValidationAttemptLogAppendRequest) returns (MachineValidationAttemptLogAppendResponse);
+
+  // Read a cursor-based page of persisted attempt logs.
+  rpc GetMachineValidationAttemptLogs(MachineValidationAttemptLogGetRequest) returns (MachineValidationAttemptLogList);
 
   // Machine-Validation run and active attempt heartbeat
   rpc HeartbeatMachineValidationRun(MachineValidationHeartbeatRequest) returns (MachineValidationHeartbeatResponse);
@@ -1704,6 +1722,13 @@ message RuntimeConfig {
   bool svpc_enabled = 55;
   bool astra_enabled = 56;
   bool ewethers_enabled = 57;
+
+  // Effective FNN null-route set. When site_fabric_null_routes is omitted from
+  // site configuration, this includes site_fabric_prefixes and removed
+  // operator-managed roots while they contain a VpcPrefix or VPC-attached
+  // direct NetworkPrefix. Older Core versions omit this field; an empty items
+  // list is authoritative.
+  optional common.StringList site_fabric_null_routes = 58;
 }
 
 message EchoRequest {
@@ -2166,6 +2191,8 @@ message VpcPeeringList {
 }
 
 message VpcPeeringCreationRequest {
+  // ETV and FNN VPCs are incompatible. Requests that pair them return
+  // INVALID_ARGUMENT regardless of the configured VPC peering policy.
   common.VpcId vpc_id = 1;
   common.VpcId peer_vpc_id = 2;
 
@@ -2751,6 +2778,53 @@ message LinkedExpectedSwitch {
   optional common.UUID expected_switch_id = 4;
   optional string explored_endpoint_address = 5; // The explored BMC IP
   optional common.RackId rack_id = 6;
+}
+
+message ExpectedRackGroup {
+  // Required external identifier, non-blank and at most 128 characters.
+  optional common.RackGroupId rack_group_id = 1;
+  // External group-level NVLink topology identifier, non-blank and at most 128 characters.
+  string topology = 2;
+  // Non-blank, unique rack IDs, independent of device membership. Input order is preserved; may be empty.
+  repeated common.RackId rack_ids = 3;
+  // Descriptive attributes such as name, manufacturer, and location labels.
+  Metadata metadata = 4;
+  // Ordered device identities; (type, manufacturer, id) tuples must be unique. May be empty.
+  repeated ExpectedRackGroupMember members = 5;
+}
+
+message ExpectedRackGroupMember {
+  // Core rack capability spelling: Compute, Switch, or PowerShelf (case-sensitive).
+  string type = 1;
+  // Non-blank external manufacturer name.
+  string manufacturer = 2;
+  // Non-blank external inventory identifier.
+  string id = 3;
+}
+
+message ExpectedRackGroupRequest {
+  // Required external identifier, non-blank and at most 128 characters.
+  string rack_group_id = 1;
+}
+
+message ExpectedRackGroupList {
+  repeated ExpectedRackGroup expected_rack_groups = 1;
+}
+
+// Lists identifiers only; callers fetch complete records in bounded batches.
+message ExpectedRackGroupSearchFilter {
+}
+
+message ExpectedRackGroupIdList {
+  // Identifiers sorted lexicographically by the database.
+  repeated common.RackGroupId rack_group_ids = 1;
+}
+
+message ExpectedRackGroupsByIdsRequest {
+  // Non-empty batch, limited by the server's max_find_by_ids setting.
+  // Invalid identifiers are rejected; valid but absent identifiers are omitted.
+  // Results contain each existing record once, sorted by rack_group_id.
+  repeated common.RackGroupId rack_group_ids = 1;
 }
 
 message ExpectedRack {
@@ -4882,8 +4956,16 @@ message ManagedHostNetworkConfigResponse {
   // IP prefixes to be denied in the DPU ACL rules.
   repeated string deny_prefixes = 18;
 
-  // List of IP prefixes (in CIDR notation) that are assigned for tenant
-  // use within this site.
+  // Legacy site-prefix field. Core continues to send the configured
+  // site_fabric_prefixes here unchanged so older agents retain their existing
+  // behavior during a rolling upgrade. New FNN agents prefer the
+  // presence-bearing site_fabric_null_routes field below. When that field is
+  // absent in a response from an older Core, a new FNN agent reduces this list
+  // to its minimal exact union before rendering fallback blackhole routes.
+  // Other virtualizers consume this field directly. With mutual isolation,
+  // FNN installs floating blackhole routes while ETV enforces an IPv4
+  // isolation ACL only when the rendered configuration has no NSG. Open
+  // isolation installs neither form of enforcement.
   repeated string site_fabric_prefixes = 19;
 
   // Level of VPC isolation to apply
@@ -4897,6 +4979,18 @@ message ManagedHostNetworkConfigResponse {
   // site-level configured NTP server IPs
   // If empty, the agent may fall back to resolving nico-ntp.nico for compatibility.
   repeated string ntp_servers = 22;
+
+  // True when Core authoritatively applied its stored-peering activation
+  // policy to every FlatInterfaceConfig.vpc_peer_vnis list in this response.
+  // Agents must ignore those lists when this is false. Older Core versions do
+  // not send this field, so rolling upgrades fail closed.
+  bool vpc_peer_vnis_authoritative = 23;
+
+  // Final FNN blackhole routes resolved by Core. Presence is authoritative,
+  // including a present empty list, and each distinct prefix boundary must be
+  // rendered. New agents fall back to site_fabric_prefixes only when this is
+  // absent in a response from an older Core. Non-FNN responses omit it.
+  optional common.StringList site_fabric_null_routes = 24;
 
   // Enable nico DHCP on HBN.
   // Deprecated: It is always enabled now.
@@ -4975,8 +5069,8 @@ message ManagedHostNetworkConfigResponse {
 
   // Due to limitations in Cumulus Linux route-leaking,
   // some sites may require all VRFs to use the same VNI.
-  // Isolation is still possible via ACLs, and route-imports
-  // will still use the dynamically allocated VNI for deriving
+  // FNN isolation still uses per-VRF site-fabric null routes, and
+  // route-imports still use the dynamically allocated VNI for deriving
   // route-targets.
   optional uint32 site_global_vpc_vni = 117;
 
@@ -5136,7 +5230,11 @@ message FlatInterfaceConfig {
   // Is this interface using L2 or L3.
   bool is_l2_segment = 15;
 
+  // Peer prefixes retained for ETV and older DPU agents. Current FNN agents
+  // establish peering only by importing the peer VNIs below.
   repeated string vpc_peer_prefixes = 16;
+  // Peer VNIs imported as EVPN route targets by FNN. Empty when stored VPC
+  // peerings are disabled by vpc_peering_policy_on_existing.
   repeated uint32 vpc_peer_vnis = 17;
 
   // MTU size
@@ -7404,6 +7502,8 @@ message MachineValidationPlugin {
   string parameters_json = 3;
   bool privileged = 4;
   bool host_access_full = 5;
+  // Plugin implementation type. `container` is the currently supported type.
+  string type = 6;
 }
 
 message MachineValidationTestFullHostApprovalRequest {
@@ -10734,4 +10834,63 @@ message PatchExpectedMachinesRequest {
   // succeed together or no row changes. No resource or credentials are echoed
   // in the response. An empty list is invalid.
   repeated PatchExpectedMachineRequest patches = 1;
+}
+
+// The source stream for a Machine Validation attempt-log chunk.
+enum MachineValidationAttemptLogStream {
+  MACHINE_VALIDATION_ATTEMPT_LOG_STREAM_UNSPECIFIED = 0;
+  MACHINE_VALIDATION_ATTEMPT_LOG_STREAM_STDOUT = 1;
+  MACHINE_VALIDATION_ATTEMPT_LOG_STREAM_STDERR = 2;
+}
+
+// One stdout or stderr chunk emitted by a running validation attempt. Sequence
+// numbers start at one, are contiguous within an attempt, and are assigned by
+// the producer. Retrying an accepted sequence with identical stream and content
+// succeeds without adding a duplicate; reusing it with different data fails.
+// Timestamps are set by the server when the chunk is first accepted.
+message MachineValidationAttemptLogChunk {
+  common.UUID attempt_id = 1;
+  uint32 sequence = 2;
+  MachineValidationAttemptLogStream stream = 3;
+  google.protobuf.Timestamp created_at = 4;
+  string content = 5;
+}
+
+message MachineValidationAttemptLogAppendRequest {
+  common.UUID attempt_id = 1;
+  // The next positive, contiguous sequence number for this attempt.
+  uint32 sequence = 2;
+  // The stdout or stderr source stream. UNSPECIFIED is invalid.
+  MachineValidationAttemptLogStream stream = 3;
+  // Non-empty UTF-8 content within the site's configured chunk limit.
+  string content = 4;
+}
+
+message MachineValidationAttemptLogAppendResponse {
+  // True when the chunk was accepted, including an idempotent retry.
+  // False when logging is disabled, the attempt is no longer active, or the
+  // per-attempt size limit was reached. Disabled storage and inactive attempts
+  // both return accepted=false and truncated=false. Invalid input returns an
+  // RPC error.
+  bool accepted = 1;
+  // True only when the per-attempt size limit prevented acceptance.
+  bool truncated = 2;
+}
+
+message MachineValidationAttemptLogGetRequest {
+  common.UUID attempt_id = 1;
+  // Return chunks with a sequence strictly greater than this value. Use zero
+  // for the first page and the last returned sequence for the next page.
+  uint32 after_sequence = 2;
+  // Maximum chunks to return. Zero defaults to 100; values from 1 through 100
+  // are accepted and larger values return INVALID_ARGUMENT, even when storage
+  // is disabled. Disabled storage otherwise returns an empty page.
+  uint32 limit = 3;
+}
+
+message MachineValidationAttemptLogList {
+  // Chunks in ascending sequence order.
+  repeated MachineValidationAttemptLogChunk chunks = 1;
+  // True when more chunks remain after this page's last sequence.
+  bool has_more = 2;
 }

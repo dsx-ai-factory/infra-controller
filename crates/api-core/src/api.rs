@@ -122,7 +122,7 @@ impl Forge for Api {
         &self,
         request: Request<rpc::VersionRequest>,
     ) -> Result<Response<rpc::BuildInfo>, Status> {
-        crate::handlers::api::version(self, request)
+        crate::handlers::api::version(self, request).await
     }
 
     async fn create_domain(
@@ -2026,6 +2026,62 @@ impl Forge for Api {
         crate::handlers::expected_rack::delete_all_expected_racks(self, request).await
     }
 
+    async fn add_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroup>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::add_expected_rack_group(self, request).await
+    }
+
+    async fn delete_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroupRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::delete_expected_rack_group(self, request).await
+    }
+
+    async fn update_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroup>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::update_expected_rack_group(self, request).await
+    }
+
+    async fn get_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroupRequest>,
+    ) -> Result<Response<rpc::ExpectedRackGroup>, Status> {
+        crate::handlers::expected_rack_group::get_expected_rack_group(self, request).await
+    }
+
+    async fn find_expected_rack_group_ids(
+        &self,
+        request: Request<rpc::ExpectedRackGroupSearchFilter>,
+    ) -> Result<Response<rpc::ExpectedRackGroupIdList>, Status> {
+        crate::handlers::expected_rack_group::find_ids(self, request).await
+    }
+
+    async fn find_expected_rack_groups_by_ids(
+        &self,
+        request: Request<rpc::ExpectedRackGroupsByIdsRequest>,
+    ) -> Result<Response<rpc::ExpectedRackGroupList>, Status> {
+        crate::handlers::expected_rack_group::find_by_ids(self, request).await
+    }
+
+    async fn replace_all_expected_rack_groups(
+        &self,
+        request: Request<rpc::ExpectedRackGroupList>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::replace_all_expected_rack_groups(self, request).await
+    }
+
+    async fn delete_all_expected_rack_groups(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::delete_all_expected_rack_groups(self, request).await
+    }
+
     async fn find_connected_devices_by_dpu_machine_ids(
         &self,
         request: Request<::rpc::common::DpuMachineIdList>,
@@ -2553,6 +2609,22 @@ impl Forge for Api {
         request: Request<rpc::MachineValidationAttemptGetRequest>,
     ) -> Result<Response<rpc::MachineValidationAttempt>, Status> {
         crate::handlers::machine_validation::get_machine_validation_attempt(self, request).await
+    }
+
+    async fn append_machine_validation_attempt_log(
+        &self,
+        request: Request<rpc::MachineValidationAttemptLogAppendRequest>,
+    ) -> Result<Response<rpc::MachineValidationAttemptLogAppendResponse>, Status> {
+        crate::handlers::machine_validation::append_machine_validation_attempt_log(self, request)
+            .await
+    }
+
+    async fn get_machine_validation_attempt_logs(
+        &self,
+        request: Request<rpc::MachineValidationAttemptLogGetRequest>,
+    ) -> Result<Response<rpc::MachineValidationAttemptLogList>, Status> {
+        crate::handlers::machine_validation::get_machine_validation_attempt_logs(self, request)
+            .await
     }
 
     async fn heartbeat_machine_validation_run(

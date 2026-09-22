@@ -125,3 +125,8 @@ func (p *Provider) Name() string {
 func (p *Provider) Client() nicoapi.Client {
 	return p.client
 }
+
+// Close releases the provider's Core client after component managers have stopped.
+func (p *Provider) Close() error {
+	return p.client.Close()
+}

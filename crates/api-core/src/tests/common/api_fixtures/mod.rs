@@ -1487,12 +1487,17 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
                         .machine_validation_config
                         .approved_plugin_registries
                         .clone(),
+                    allowed_plugin_types: config
+                        .machine_validation_config
+                        .allowed_plugin_types
+                        .clone(),
                     allow_privileged_plugins: config
                         .machine_validation_config
                         .allow_privileged_plugins,
                     allow_full_host_plugins: config
                         .machine_validation_config
                         .allow_full_host_plugins,
+                    attempt_logs: config.machine_validation_config.attempt_logs.clone(),
                 })
                 .bom_validation(config.bom_validation)
                 .instance_autoreboot_period(

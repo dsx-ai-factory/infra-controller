@@ -37,19 +37,32 @@ const DEFAULT_BMC_REQUEST_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturati
 const ENDPOINT_SOURCES_CONFIG_KEY: &str = "endpoint_sources";
 const NICO_API_CONFIG_KEY: &str = "nico_api";
 const CARBIDE_API_CONFIG_ALIAS: &str = "carbide_api";
+/// Label names the Prometheus and OTLP sinks emit themselves; a custom label
+/// with one of these names would collide with the sink-owned value.
 const RESERVED_ENDPOINT_LABELS: &[&str] = &[
+    "bmc_endpoint",
+    "bmc_ip",
     "collector_type",
+    "component_type",
+    "driver_version",
     "endpoint_ip",
     "endpoint_key",
     "endpoint_mac",
     "machine_id",
+    "machine_serial",
     "machine_slot_number",
     "machine_tray_index",
     "nvlink_domain_uuid",
     "power_shelf_id",
+    "power_shelf_serial_number",
     "rack_id",
     "serial_number",
+    "switch_endpoint",
+    "switch_endpoint_role",
     "switch_id",
+    "switch_ip",
+    "switch_is_primary",
+    "switch_serial_number",
     "switch_slot_number",
     "switch_tray_index",
     "system_uuid",
@@ -2361,8 +2374,12 @@ pub struct NvueGnmiPaths {
     pub interfaces_enabled: bool,
     pub platform_general_enabled: bool,
 
-    /// Collect leak sensor state from the NVOS platform-general gNMI tree.
+    /// Collect leak sensor state from an independent NVOS gNMI SAMPLE stream.
+    ///
     /// Disabled by default because path support depends on the NVOS release.
+    /// When enabled, failures on the leak-sensor path do not interrupt the
+    /// primary component, interface, or platform-general SAMPLE stream; the
+    /// leak-sensor stream retries independently.
     pub leak_sensors_enabled: bool,
 }
 
@@ -2450,7 +2467,8 @@ impl Default for NvueRestPaths {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetricsConfig {
-    /// Metrics listener.
+    /// Metrics listener (default `[::]:9009`).
+    /// The default listener falls back to IPv4 when IPv6 socket setup is unavailable.
     pub endpoint: String,
     /// Prefix for all metrics, defaults to carbide_hardware_health
     pub prefix: String,
@@ -2477,7 +2495,7 @@ impl Default for RateLimitConfig {
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            endpoint: "0.0.0.0:9009".to_string(),
+            endpoint: "[::]:9009".to_string(),
             prefix: "carbide_hardware_health".to_string(),
             enable_bmc_latency_metrics: false,
             bmc_latency_attributes: default_bmc_latency_attributes(),
@@ -4118,7 +4136,7 @@ reload_interval = "30s"
         assert_eq!(config.shards_count, 1);
         assert_eq!(config.cache_size, 100);
         assert_eq!(config.bmc_request_concurrency.get(), 4);
-        assert_eq!(config.metrics.endpoint, "0.0.0.0:9009");
+        assert_eq!(config.metrics.endpoint, "[::]:9009");
         assert!(!config.metrics.enable_bmc_latency_metrics);
         assert_eq!(
             config.metrics.bmc_latency_attributes,

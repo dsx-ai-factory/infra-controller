@@ -42,7 +42,7 @@ indexmap = { workspace = true }
 itertools = { workspace = true }
 lazy_static = { workspace = true }
 mac_address = { features = ["serde"], workspace = true }
-nv-redfish = { workspace = true, features = ["bmc-http", "event-service"] }
+nv-redfish = { workspace = true, features = ["bmc-http", "computer-systems", "event-service"] }
 nix = { features = ["fs"], workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }

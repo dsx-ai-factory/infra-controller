@@ -14,8 +14,10 @@ certsDir: /opt/forge
 rootCaFile: forge_root.pem
 
 ### Service specific values ###
-# Prometheus receiver port; must match DPUServiceConfiguration configPorts (dpf_services).
+# Prometheus exporter and Service port; must match DPUServiceConfiguration configPorts (dpf_services).
 prometheusPort: 9999
+# Opt in to unauthenticated metrics on all DPU host interfaces for remote Service scraping.
+prometheusRemoteAccess: false
 # Host:port for prometheus scrape targets (see otel_config.yaml). DPF sets these via nico-api.
 nico_dpu_agent: ""
 nico_fmds: ""

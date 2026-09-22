@@ -29,26 +29,29 @@ use crate::Callbacks;
 use crate::availability::BmcAvailabilityState;
 use crate::injection::InjectionStore;
 
-pub(super) fn append(
+pub(super) fn append<C: Callbacks>(
     mat_host_id: String,
     router: Router,
     injection: Arc<InjectionStore>,
     availability: Option<Arc<BmcAvailabilityState>>,
-    callbacks: Arc<dyn Callbacks>,
+    callbacks: Arc<C>,
 ) -> Router {
     Router::new()
-        .route("/{*all}", any(process))
-        .with_state(Middleware {
+        .route("/{*all}", any(process::<C>))
+        .with_state(Arc::new(Middleware {
             mat_host_id,
             inner: router,
             injection,
             availability,
             callbacks,
-        })
+        }))
 }
 
 #[instrument(skip_all, fields(mat_host_id = %state.mat_host_id))]
-async fn process(State(mut state): State<Middleware>, request: Request<Body>) -> Response {
+async fn process<C: Callbacks>(
+    State(state): State<Arc<Middleware<C>>>,
+    request: Request<Body>,
+) -> Response {
     let is_safe = request.method().is_safe();
     let method = request.method().clone();
     let path = request.uri().path().to_string();
@@ -91,17 +94,16 @@ async fn process(State(mut state): State<Middleware>, request: Request<Body>) ->
     response
 }
 
-#[derive(Clone)]
-struct Middleware {
+struct Middleware<C: Callbacks> {
     mat_host_id: String,
     inner: Router,
     injection: Arc<InjectionStore>,
     availability: Option<Arc<BmcAvailabilityState>>,
-    callbacks: Arc<dyn Callbacks>,
+    callbacks: Arc<C>,
 }
 
-impl Middleware {
-    async fn call_inner_router(&mut self, request: Request<Body>) -> axum::response::Response {
-        call_router_with_new_request(&mut self.inner, request).await
+impl<C: Callbacks> Middleware<C> {
+    async fn call_inner_router(&self, request: Request<Body>) -> axum::response::Response {
+        call_router_with_new_request(&mut self.inner.clone(), request).await
     }
 }

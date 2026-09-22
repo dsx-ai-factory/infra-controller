@@ -89,7 +89,7 @@ Dependencies:
 | ID | Requirement |
 | :--- | :--- |
 | FR-1 | Site admins can create plugin revisions, verify, approve full-host access, enable, disable, and view plugin definitions through the Machine Validation API and CLI. |
-| FR-2 | A plugin definition states when the plugin applies, which container image to run, and its timeout and permission settings. |
+| FR-2 | A plugin definition states its type, when it applies, which container image to run, and its timeout and permission settings. |
 | FR-3 | Machine Validation selects plugins using existing context, platform, and tag rules. |
 | FR-4 | Scout gives every plugin a standard JSON input file. |
 | FR-5 | Every plugin writes a versioned, schema-validated JSON result file with `pass`, `fail`, or `error`. |
@@ -136,7 +136,7 @@ Machine Validation remains the system of record. The plugin only performs its si
 | Component | Responsibility |
 | :--- | :--- |
 | Site admin | Creates, verifies, approves, enables, disables, and views site plugins through the Machine Validation catalog API and CLI. |
-| Site configuration | Defines guardrails: approved registries and whether privileged or full-host plugins are permitted. |
+| Site configuration | Defines guardrails: allowed plugin types, approved registries, and whether privileged or full-host plugins are permitted. |
 | Machine Validation API | Stores immutable plugin revisions, applies site-config guardrails, selects plugins, records results, and owns run state. |
 | Scout | Downloads, starts, monitors, and stops the plugin container. |
 | Plugin | Performs one site-specific validation check and writes a result. |
@@ -146,9 +146,10 @@ Machine Validation remains the system of record. The plugin only performs its si
 
 ## **3.1 Plugin Definition**
 
-A plugin definition is a site-scoped, immutable catalog revision. It contains
-selection criteria, a digest-pinned OCI image, entrypoint, timeout, non-secret
-parameters, and requested runtime profile. The Machine Validation API validates
+A plugin definition is a site-scoped, immutable catalog revision. It contains a
+plugin type, selection criteria, a digest-pinned OCI image, entrypoint, timeout,
+non-secret parameters, and requested runtime profile. The only supported type is
+`container`. Site configuration controls which supported types are allowed. The Machine Validation API validates
 the revision against site configuration guardrails, including approved registries
 and permitted access. Scout receives only the selected, frozen revision.
 
@@ -228,8 +229,12 @@ host filesystem through `/host`.
 
 Scout should use a streaming container runner. While the container is running,
 it streams its stdout and stderr through the Machine Validation attempt-log
-pipeline. Scout redacts sensitive values, applies chunk and retention limits,
-and sends ordered log chunks associated with the run, run item, and attempt.
+pipeline and sends ordered log chunks associated with the run, run item, and
+attempt. NICo applies the site-wide storage size and retention limits, and
+removes retained chunks after the configured retention period.
+Diagnostic log delivery must not delay or change plugin execution. If the
+bounded log pipeline cannot keep up, Scout drops further chunks for that stream
+and continues to drain the container output.
 The result file remains separate: it is the structured final `pass`, `fail`, or
 `error` outcome, while stdout and stderr provide live diagnostic detail.
 
@@ -237,8 +242,11 @@ Plugin authors write normal progress and diagnostics to stdout and warnings or
 errors to stderr. They should flush output promptly because plugins do not run
 with an interactive terminal, and must not print credentials, tokens, passwords,
 or private configuration values. Plugins do not call Scout or use a logging SDK.
-Scout may redact, chunk, truncate, and retain logs for only a limited time; logs
-never determine the final validation outcome.
+NICo stores plugin logs as emitted and does not inspect or redact them; chunk,
+size, retention, and access limits still apply. The site admin is responsible
+for enabling only properly tested and certified plugins, including verifying
+that their logs do not expose sensitive data. Logs never determine the final
+validation outcome.
 
 A verified revision may request privileged hardware access. Full-host access is
 a separate, explicit request and requires separate approval for the exact
@@ -263,17 +271,22 @@ and resource-class locking will control eligibility and protect shared hardware.
 
 ## **3.6 Admin UI and CLI Design**
 
-Operators can see plugin configuration and execution details through the existing API and CLI. The framework reports why a plugin definition is rejected or excluded from selection. Additional UI, audit detail, and output-redaction work remains part of later milestones.
+Operators can see plugin configuration and execution details through the existing API and CLI. The framework reports why a plugin definition is rejected or excluded from selection. Additional UI and audit detail work remains part of later milestones.
 
 The plugin-aware CLI creates plugin definitions. The existing
 `nico-admin-cli machine-validation tests add` command creates a legacy test
-request and cannot create a plugin.
+request and cannot create a plugin. `plugins create` accepts `--type container`
+and defaults to `container`; no other type is accepted.
 
 ## **3.7 Compatibility and Migration**
 
 Existing built-in validation tests continue to work unchanged through the legacy runner. They continue to use the existing command and result behavior, while sharing the existing run-item lifecycle, timeout handling, status tracking, and reporting.
 
 New site plugins are created in the site-scoped plugin catalog and selected only for machines in that site. They are selected alongside built-in tests, but use the separate container-plugin runner. Only container plugins receive the standard input and result files.
+
+Older plugin revisions that do not record a type are treated as `container`.
+The API accepts only `container` for new or updated plugin definitions, and
+returns the explicit type when a definition is read.
 
 Moving a built-in test to a separately packaged plugin is optional and can happen gradually. It is not required to introduce this framework.
 
@@ -295,8 +308,10 @@ The API accepts only digest-pinned images from approved registries and keeps
 registry credentials out of plugin definitions, input, output, logs, and process
 arguments. Verification, enablement, and full-host approval are server-managed
 state bound to the exact revision and image digest. Plugin output is untrusted:
-it is size-limited, redacted before persistence or display, access-controlled,
-and recorded with the run, revision, and digest. Operators can distinguish a
+it is size-limited, access-controlled, and recorded with the run, revision, and
+digest. NICo does not redact plugin logs; plugin owners must ensure their
+containers never emit sensitive values, and site admins are responsible for
+approving only tested and certified plugins. Operators can distinguish a
 validation `fail`, plugin `error`, and framework failure.
 
 ## **4.2 Acceptance Criteria**
@@ -324,12 +339,28 @@ health tool.
    policy permits privileged and full-host plugins for the intended Discovery
    machines. Because the registry is private, the site configuration contains:
 
-   ```toml
-   [machine_validation_config]
-   approved_plugin_registries = ["registry.example.com"]
-   allow_privileged_plugins = true
-   allow_full_host_plugins = true
-   ```
+    ```toml
+    [machine_validation_config]
+    allowed_plugin_types = ["container"]
+    approved_plugin_registries = ["registry.example.com"]
+    allow_privileged_plugins = true
+    allow_full_host_plugins = true
+
+    [machine_validation_config.attempt_logs]
+    enabled = true
+    max_chunk_bytes = 16384
+    max_attempt_bytes = 1048576
+    retention = "30d"
+    ```
+
+   `attempt_logs` is a site-wide storage policy, not a plugin setting. Its
+   defaults are enabled, `16384` bytes per chunk, `1048576` bytes per attempt,
+   and `30d` retention. When enabled, both size limits must be greater than
+   zero, `max_chunk_bytes` must not exceed `max_attempt_bytes`, and the maximum
+   allowed values are `16384` and `1048576` bytes respectively. Retention
+   accepts a non-negative duration. A site can set `enabled = false` to discard
+   all plugin log chunks without storing or showing them. NICo removes stored
+   chunks after the configured retention period.
 
    The site applies this through its normal configuration rollout, then stores
    its pull credential once. The hidden prompt and standard-input form keeps the
@@ -350,6 +381,7 @@ health tool.
    ```sh
    nico-admin-cli machine-validation plugins create \
      --name host-gpu-health \
+     --type container \
      --context Discovery \
      --platform HGX-B200 \
      --image registry.example.com/example-ai-west-prod/host-gpu-health@sha256:<digest> \

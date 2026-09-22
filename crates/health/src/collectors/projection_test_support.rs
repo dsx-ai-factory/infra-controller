@@ -755,7 +755,7 @@ impl ProjectionFixture {
             .expect("processors should load")
             .expect("processors link should exist")
             .into_iter()
-            .map(|entity| (entity.raw().base.id.clone(), Arc::new(entity)))
+            .map(|entity| (entity.raw().id.clone(), Arc::new(entity)))
             .collect();
         let memory = system
             .memory_modules()
@@ -763,7 +763,7 @@ impl ProjectionFixture {
             .expect("memory should load")
             .expect("memory link should exist")
             .into_iter()
-            .map(|entity| (entity.raw().base.id.clone(), Arc::new(entity)))
+            .map(|entity| (entity.raw().id.clone(), Arc::new(entity)))
             .collect();
         let storage = Arc::new(
             system
@@ -781,7 +781,7 @@ impl ProjectionFixture {
             .expect("drives should load")
             .expect("drives should exist")
             .into_iter()
-            .map(|entity| (entity.raw().base.id.clone(), Arc::new(entity)))
+            .map(|entity| (entity.raw().id.clone(), Arc::new(entity)))
             .collect();
 
         let chassis: HashMap<_, _> = root
@@ -793,7 +793,7 @@ impl ProjectionFixture {
             .await
             .expect("chassis members should load")
             .into_iter()
-            .map(|entity| (entity.raw().base.id.clone(), Arc::new(entity)))
+            .map(|entity| (entity.raw().id.clone(), Arc::new(entity)))
             .collect();
         let parent_chassis = chassis
             .get("CH0")
@@ -804,7 +804,7 @@ impl ProjectionFixture {
             .await
             .expect("power supplies should load")
             .into_iter()
-            .map(|entity| (entity.raw().base.id.clone(), Arc::new(entity)))
+            .map(|entity| (entity.raw().id.clone(), Arc::new(entity)))
             .collect();
 
         Self {

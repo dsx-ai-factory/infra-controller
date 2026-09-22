@@ -28,6 +28,8 @@ type TaskRunFirmwareOperation struct {
 	Version string `json:"version"`
 	// Operation Rule to pin for each target's firmware Task. Null to let Flow's default rule resolution pick one.
 	RuleId NullableString `json:"ruleId,omitempty"`
+	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. It does not bypass readiness checks or state-controller routing.
+	OverrideVersionCheck *bool `json:"overrideVersionCheck,omitempty"`
 	// Skip the pre-flight readiness check when true.
 	OverrideReadinessCheck *bool `json:"overrideReadinessCheck,omitempty"`
 	// Optional subset of firmware sub-parts to update within each targeted tray, using the same lowercase names as the Tray firmware endpoint's `targets` (e.g. `bmc`, `bios`). Omitted or empty means update everything in the bundle. Unknown names are rejected.
@@ -43,6 +45,8 @@ type _TaskRunFirmwareOperation TaskRunFirmwareOperation
 func NewTaskRunFirmwareOperation(version string) *TaskRunFirmwareOperation {
 	this := TaskRunFirmwareOperation{}
 	this.Version = version
+	var overrideVersionCheck bool = false
+	this.OverrideVersionCheck = &overrideVersionCheck
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
@@ -53,6 +57,8 @@ func NewTaskRunFirmwareOperation(version string) *TaskRunFirmwareOperation {
 // but it doesn't guarantee that properties required by API are set
 func NewTaskRunFirmwareOperationWithDefaults() *TaskRunFirmwareOperation {
 	this := TaskRunFirmwareOperation{}
+	var overrideVersionCheck bool = false
+	this.OverrideVersionCheck = &overrideVersionCheck
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
@@ -123,6 +129,38 @@ func (o *TaskRunFirmwareOperation) SetRuleIdNil() {
 // UnsetRuleId ensures that no value is present for RuleId, not even an explicit nil
 func (o *TaskRunFirmwareOperation) UnsetRuleId() {
 	o.RuleId.Unset()
+}
+
+// GetOverrideVersionCheck returns the OverrideVersionCheck field value if set, zero value otherwise.
+func (o *TaskRunFirmwareOperation) GetOverrideVersionCheck() bool {
+	if o == nil || IsNil(o.OverrideVersionCheck) {
+		var ret bool
+		return ret
+	}
+	return *o.OverrideVersionCheck
+}
+
+// GetOverrideVersionCheckOk returns a tuple with the OverrideVersionCheck field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *TaskRunFirmwareOperation) GetOverrideVersionCheckOk() (*bool, bool) {
+	if o == nil || IsNil(o.OverrideVersionCheck) {
+		return nil, false
+	}
+	return o.OverrideVersionCheck, true
+}
+
+// HasOverrideVersionCheck returns a boolean if a field has been set.
+func (o *TaskRunFirmwareOperation) HasOverrideVersionCheck() bool {
+	if o != nil && !IsNil(o.OverrideVersionCheck) {
+		return true
+	}
+
+	return false
+}
+
+// SetOverrideVersionCheck gets a reference to the given bool and assigns it to the OverrideVersionCheck field.
+func (o *TaskRunFirmwareOperation) SetOverrideVersionCheck(v bool) {
+	o.OverrideVersionCheck = &v
 }
 
 // GetOverrideReadinessCheck returns the OverrideReadinessCheck field value if set, zero value otherwise.
@@ -202,6 +240,9 @@ func (o TaskRunFirmwareOperation) ToMap() (map[string]interface{}, error) {
 	toSerialize["version"] = o.Version
 	if o.RuleId.IsSet() {
 		toSerialize["ruleId"] = o.RuleId.Get()
+	}
+	if !IsNil(o.OverrideVersionCheck) {
+		toSerialize["overrideVersionCheck"] = o.OverrideVersionCheck
 	}
 	if !IsNil(o.OverrideReadinessCheck) {
 		toSerialize["overrideReadinessCheck"] = o.OverrideReadinessCheck

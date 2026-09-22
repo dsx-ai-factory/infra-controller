@@ -559,6 +559,11 @@ message UpgradeFirmwareRequest {
     // not supported for DPU-only updates or by the legacy NICo compute
     // firmware controller.
     FirmwareAuthenticationData authentication_data = 10;
+    // Overrides firmware version-based checks when deciding whether to apply
+    // the update. This allows same-version reapplication and downgrade when
+    // the selected component backend supports those operations. It does not
+    // bypass readiness checks or state-controller routing.
+    bool override_version_check = 11;
 }
 
 // FirmwareAuthenticationData selects either one value shared by every target
@@ -899,6 +904,9 @@ message FirmwareControlTaskOperation {
     repeated string sub_targets = 5;
     // Bypasses the component readiness gate when the task executes.
     bool override_readiness_check = 6;
+    // Overrides firmware version-based checks when the selected component
+    // backend applies the update.
+    bool override_version_check = 7;
 }
 
 message OperationRule {

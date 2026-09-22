@@ -1,0 +1,62 @@
+# Reject unsafe values at render time, before Kea can start with bad configuration.
+suite: DHCPv6 value validation
+templates: [configmap-v6.yaml]
+tests:
+  # Replacing a pod must not replace an implicitly generated server identity.
+  - it: requires an explicit server identifier when DHCPv6 is enabled
+    set:
+      dhcp.v6Enabled: true
+    asserts: &invalidIdentifier
+      - failedTemplate:
+          errorPattern: 'dhcp.v6ServerIdentifier'
+  # A hexadecimal identifier still needs the Ethernet address width.
+  - it: rejects a short server identifier
+    set:
+      dhcp.v6Enabled: true
+      dhcp.v6ServerIdentifier: "0200"
+    asserts: *invalidIdentifier
+  # Correct length alone does not make an identifier valid hexadecimal.
+  - it: rejects non-hexadecimal server identifiers
+    set:
+      dhcp.v6Enabled: true
+      dhcp.v6ServerIdentifier: "zz0000000001"
+    asserts: *invalidIdentifier
+  # Helm must not interpret a quoted false as a truthy Rapid Commit value.
+  - it: rejects string Rapid Commit values
+    set:
+      dhcp.v6RapidCommit: "false"
+    asserts:
+      - failedTemplate:
+          errorPattern: 'dhcp.v6RapidCommit'
+  # Integer validation must reject numbers that cannot identify a port.
+  - it: rejects fractional metrics ports
+    set:
+      metrics.port: 1089.5
+    asserts: &invalidPort
+      - failedTemplate:
+          errorPattern: 'metrics.port'
+  # Port zero selects an ephemeral port, which cannot back a fixed Service.
+  - it: rejects metrics port zero
+    set:
+      metrics.port: 0
+    asserts: *invalidPort
+  # A valid port must also fit the transport's upper bound.
+  - it: rejects metrics ports above 65535
+    set:
+      metrics.port: 65536
+    asserts: *invalidPort
+  # String ports need their own lower bound because numeric bounds do not apply.
+  - it: rejects quoted metrics port zero
+    set:
+      metrics.port: "0"
+    asserts: *invalidPort
+  # A quoted port must still fit the transport's upper bound.
+  - it: rejects quoted metrics ports above 65535
+    set:
+      metrics.port: "65536"
+    asserts: *invalidPort
+  # Admitting strings must not admit fractional port syntax.
+  - it: rejects quoted fractional metrics ports
+    set:
+      metrics.port: "1089.5"
+    asserts: *invalidPort

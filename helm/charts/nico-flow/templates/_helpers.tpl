@@ -88,21 +88,46 @@ secretName: {{ .name }}
 {{- end -}}
 
 {{/*
-Reject the chart 0.2.x raw-string flowConfig before any field access.
+Resolve the flowConfig block. A release upgraded with --reuse-values carries the
+previous chart's values, so the block may be absent (chart 0.1.0) or the 0.2.x
+empty-string default; both mean "chart defaults". A non-empty string is the
+0.2.x raw file and is rejected. Missing keys take the defaults below, which
+match values.yaml and rest-api/flow/internal/config/config.go; a null key
+takes its default too, since --set key=null removes the key.
 */}}
-{{- define "nico-flow.flowConfigMap" -}}
-{{- if not (kindIs "map" .Values.flowConfig) -}}
+{{- define "nico-flow.flowConfig" -}}
+{{- $cfg := .Values.flowConfig -}}
+{{- if or (kindIs "invalid" $cfg) (and (kindIs "string" $cfg) (eq (trim $cfg) "")) -}}
+{{- $cfg = dict -}}
+{{- else if not (kindIs "map" $cfg) -}}
 {{- fail "flowConfig must be a map of settings such as flowConfig.leakDetectionInterval, not the chart 0.2.x raw file string; see the nico-flow README section \"Upgrading from 0.2.x\"" -}}
 {{- end -}}
+{{- $defaults := dict "inventoryRunFrequency" "1m" "disableInventory" false "leakDetectionInterval" "1m" "disableLeakDetection" false -}}
+{{- range $k, $v := $defaults -}}
+{{- if or (not (hasKey $cfg $k)) (kindIs "invalid" (index $cfg $k)) -}}
+{{- $_ := set $cfg $k $v -}}
+{{- end -}}
+{{- end -}}
+{{- toYaml $cfg -}}
+{{- end -}}
+
+{{/*
+Data encryption key settings, nil-safe for releases whose reused values predate
+the dataEncryption block (chart 0.1.0).
+*/}}
+{{- define "nico-flow.dataEncryptionExistingSecret" -}}
+{{- $key := default dict (get (default dict .Values.dataEncryption) "key") -}}
+{{- trim (default "" (get $key "existingSecret")) -}}
+{{- end -}}
+{{- define "nico-flow.dataEncryptionKeyValue" -}}
+{{- $key := default dict (get (default dict .Values.dataEncryption) "key") -}}
+{{- trim (default "" (get $key "value")) -}}
 {{- end -}}
 
 {{/*
 Render a flowConfig interval: Go time.ParseDuration syntax, greater than zero.
 */}}
 {{- define "nico-flow.flowConfigInterval" -}}
-{{- if kindIs "invalid" .value -}}
-{{- fail (printf "flowConfig.%s must be a Go duration string such as 30s, 1m, or 1h30m; the key is missing or null" .key) -}}
-{{- end -}}
 {{- $value := toString .value -}}
 {{- if not (regexMatch "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$" $value) -}}
 {{- fail (printf "flowConfig.%s must be a Go duration string with a unit, such as 30s, 1m, or 1h30m; got %q" .key $value) -}}
@@ -117,9 +142,6 @@ Render a flowConfig interval: Go time.ParseDuration syntax, greater than zero.
 Render a flowConfig toggle: must be a YAML boolean, not a string.
 */}}
 {{- define "nico-flow.flowConfigBool" -}}
-{{- if kindIs "invalid" .value -}}
-{{- fail (printf "flowConfig.%s must be true or false; the key is missing or null" .key) -}}
-{{- end -}}
 {{- if not (kindIs "bool" .value) -}}
 {{- fail (printf "flowConfig.%s must be a boolean (true or false); got %q" .key (toString .value)) -}}
 {{- end -}}

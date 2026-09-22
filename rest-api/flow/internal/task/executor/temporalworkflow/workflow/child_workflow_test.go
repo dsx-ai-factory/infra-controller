@@ -98,8 +98,8 @@ func TestGenericComponentStepWorkflow_ActionBased(t *testing.T) {
 	}
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"test-powershelf-1"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"test-powershelf-1"},
 	}
 
 	allTargets := map[devicetypes.ComponentType]common.Target{
@@ -153,8 +153,8 @@ func TestGenericComponentStepWorkflow_WithSleepAction(t *testing.T) {
 	}
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"test-powershelf-1"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"test-powershelf-1"},
 	}
 
 	allTargets := map[devicetypes.ComponentType]common.Target{
@@ -214,8 +214,8 @@ func TestGenericComponentStepWorkflow_VerificationFailure(t *testing.T) {
 	}
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"test-powershelf-1"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"test-powershelf-1"},
 	}
 
 	allTargets := map[devicetypes.ComponentType]common.Target{
@@ -271,8 +271,8 @@ func TestGenericComponentStepWorkflow_PreOperation(t *testing.T) {
 	}
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"test-powershelf-1"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"test-powershelf-1"},
 	}
 
 	allTargets := map[devicetypes.ComponentType]common.Target{
@@ -335,8 +335,8 @@ func TestGenericComponentStepWorkflow_VerifyReachabilityRequireAll(t *testing.T)
 	}
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"ps-1"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"ps-1"},
 	}
 	allTargets := map[devicetypes.ComponentType]common.Target{
 		devicetypes.ComponentTypePowerShelf: target,
@@ -393,8 +393,8 @@ func TestGenericComponentStepWorkflow_BringUpAndWait(t *testing.T) {
 	}
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"compute-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"compute-1"},
 	}
 	allTargets := map[devicetypes.ComponentType]common.Target{
 		devicetypes.ComponentTypeCompute: target,
@@ -451,8 +451,8 @@ func TestGenericComponentStepWorkflow_FirmwareControlAction(t *testing.T) {
 	}
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"compute-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"compute-1"},
 	}
 	allTargets := map[devicetypes.ComponentType]common.Target{
 		devicetypes.ComponentTypeCompute: target,
@@ -498,8 +498,8 @@ func TestGenericComponentStepWorkflow_PowerControlWithParamOperation(t *testing.
 	}
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"compute-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"compute-1"},
 	}
 	allTargets := map[devicetypes.ComponentType]common.Target{
 		devicetypes.ComponentTypeCompute: target,
@@ -551,8 +551,8 @@ func TestGenericComponentStepWorkflow_InjectExpectationAction(t *testing.T) {
 	}
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypePowerShelf,
-		ComponentIDs: []string{"ps-1", "ps-2"},
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"ps-1", "ps-2"},
 	}
 	allTargets := map[devicetypes.ComponentType]common.Target{
 		devicetypes.ComponentTypePowerShelf: target,
@@ -596,8 +596,8 @@ func TestGenericComponentStepWorkflow_InjectExpectationFailure(t *testing.T) {
 	}
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"compute-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"compute-1"},
 	}
 	allTargets := map[devicetypes.ComponentType]common.Target{
 		devicetypes.ComponentTypeCompute: target,

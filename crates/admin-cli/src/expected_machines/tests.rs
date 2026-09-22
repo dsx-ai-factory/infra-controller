@@ -26,6 +26,7 @@
 
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
+use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use mac_address::MacAddress;
 
@@ -226,6 +227,72 @@ fn parse_patch() {
     .expect("should parse patch");
 
     assert_eq!(raw_value(&matches, "sku_id").as_deref(), Some("new_sku"));
+}
+
+#[test]
+fn metadata_only_patches_parse_and_validate() {
+    scenarios!(
+        run = |fields: &[&str]| {
+            let cmd = Cmd::try_parse_from(
+                [
+                    "expected-machine",
+                    "patch",
+                    "--id",
+                    "12345678-1234-5678-90ab-cdef01234567",
+                ]
+                .into_iter()
+                .chain(fields.iter().copied()),
+            )
+            .map_err(|error| error.kind())?;
+            let Cmd::Patch(args) = cmd else {
+                panic!("expected Patch variant");
+            };
+            args.validate_for_test().map_err(|error| error.kind())
+        };
+        "each metadata field supplies an update, including empty strings" {
+            &["--meta-name", ""][..] => Yields(()),
+            &["--meta-description", ""][..] => Yields(()),
+            &["--label", "env:prod"][..] => Yields(()),
+        }
+    );
+}
+
+#[test]
+fn patch_requires_one_selector_and_an_update() {
+    scenarios!(
+        run = |fields: &[&str]| {
+            let cmd = Cmd::try_parse_from(
+                ["expected-machine", "patch"]
+                    .into_iter()
+                    .chain(fields.iter().copied()),
+            )
+            .map_err(|error| error.kind())?;
+            let Cmd::Patch(args) = cmd else {
+                panic!("expected Patch variant");
+            };
+            args.validate_for_test().map_err(|error| error.kind())
+        };
+        "a selector alone supplies no update" {
+            &["--id", "12345678-1234-5678-90ab-cdef01234567"][..]
+                => FailsWith(ErrorKind::MissingRequiredArgument),
+        }
+
+        "metadata still requires a selector" {
+            &["--meta-name", "worker-1"][..]
+                => FailsWith(ErrorKind::MissingRequiredArgument),
+        }
+
+        "metadata does not permit conflicting selectors" {
+            &[
+                "--id",
+                "12345678-1234-5678-90ab-cdef01234567",
+                "--bmc-mac-address",
+                "00:11:22:33:44:55",
+                "--meta-name",
+                "worker-1",
+            ][..] => FailsWith(ErrorKind::ArgumentConflict),
+        }
+    );
 }
 
 // parse_update ensures update parses with filename.
@@ -459,6 +526,32 @@ fn has_duplicate_dpu_serials_flags_repeats() {
     );
 }
 
+#[test]
+fn standalone_boolean_patches_preserve_explicit_false() {
+    scenarios!(
+        run = |(flag, field): (&str, &str)| -> Result<Option<bool>, ErrorKind> {
+            let matches = parse_leaf::<Cmd>(
+                &[
+                    "expected-machine",
+                    "patch",
+                    "--bmc-mac-address",
+                    "00:11:22:33:44:55",
+                    flag,
+                    "false",
+                ],
+                &["patch"],
+            )
+            .map_err(|error| error.kind())?;
+            Ok(matches.get_one::<bool>(field).copied())
+        };
+        "each boolean is a complete patch" {
+            ("--bmc-retain-credentials", "bmc_retain_credentials") => Yields(Some(false)),
+            ("--default_pause_ingestion_and_poweron", "default_pause_ingestion_and_poweron") => Yields(Some(false)),
+            ("--disable-lockdown", "disable_lockdown") => Yields(Some(false)),
+        }
+    );
+}
+
 // validate_patch_with_dpu_serials ensures patch validate()
 // passes with unique DPU serials.
 #[test]
@@ -647,9 +740,6 @@ fn parse_add_rejects_invalid_dpu_policy() {
     );
 }
 
-// `patch --dpu-policy nic`
-// alone (no other patchable fields) satisfies clap's ArgGroup and the
-// `Args::validate()` "at least one field" check.
 #[test]
 fn validate_patch_with_dpu_policy_only() {
     let cmd = Cmd::try_parse_from([
@@ -816,9 +906,6 @@ fn parse_add_rejects_invalid_bmc_ip_allocation() {
     );
 }
 
-// `patch --bmc-ip-allocation retained` alone (no other patchable fields) must
-// satisfy clap's ArgGroup and `Args::validate()`'s "at least one field" check.
-// A patch that sets only this field.
 #[test]
 fn validate_patch_with_bmc_ip_allocation_only() {
     let cmd = Cmd::try_parse_from([

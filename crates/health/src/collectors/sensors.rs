@@ -297,7 +297,7 @@ impl<B: Bmc + 'static> SensorCollector<B> {
             Ok(projection) => projection,
             Err(SensorProjectionError::NoHealth) => {
                 tracing::debug!(
-                    sensor_id = %sensor.base.id,
+                    sensor_id = %sensor.id,
                     entity_type = entity.entity_type(),
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
                     "Sensor does not have health status field, skipping"
@@ -306,7 +306,7 @@ impl<B: Bmc + 'static> SensorCollector<B> {
             }
             Err(SensorProjectionError::IncompleteReading) => {
                 tracing::warn!(
-                    sensor_id = %sensor.base.id,
+                    sensor_id = %sensor.id,
                     entity_type = entity.entity_type(),
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
                     "Sensor missing required fields (reading, reading_type, or units)"
@@ -349,7 +349,7 @@ fn project_sensor(
 
     let mut attributes = base_attributes;
     attributes.reserve(6);
-    attributes.push((Cow::Borrowed("sensor_name"), sensor.base.id.clone()));
+    attributes.push((Cow::Borrowed("sensor_name"), sensor.id.clone()));
 
     // An absent threshold is omitted rather than written as `0`: a zero upper
     // bound would read as "every positive value is critical".
@@ -422,7 +422,7 @@ fn project_sensor(
         labels: attributes.clone(),
         context: Some(SensorThresholdContext {
             entity_type: entity_type.to_string(),
-            sensor_id: sensor.base.id.clone(),
+            sensor_id: sensor.id.clone(),
             upper_fatal,
             lower_fatal,
             upper_critical,

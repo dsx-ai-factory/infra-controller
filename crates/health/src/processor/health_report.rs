@@ -252,7 +252,7 @@ impl EventProcessor for HealthReportProcessor {
                 };
 
                 tracing::info!(
-                    endpoint = %context.addr.mac,
+                    endpoint = context.endpoint_key(),
                     success_count = report.successes.len(),
                     alert_count = report.alerts.len(),
                     "Sending hardware health report"
@@ -292,7 +292,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),

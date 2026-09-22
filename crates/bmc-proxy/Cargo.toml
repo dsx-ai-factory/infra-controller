@@ -43,6 +43,7 @@ libc = { workspace = true }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 
 #these are alphabetized
+async-trait = { workspace = true }
 axum-extra = { workspace = true, features = ["cookie", "cookie-private"] }
 axum = { workspace = true, features = ["http2"] }
 bytes = { workspace = true }

@@ -17,13 +17,13 @@
 
 use carbide_utils::has_duplicates;
 use carbide_uuid::rack::RackId;
-use clap::{ArgGroup, Parser};
+use clap::error::ErrorKind;
+use clap::{ArgGroup, CommandFactory, Parser};
 use mac_address::MacAddress;
 use rpc::forge::BmcIpAllocationType;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::errors::CarbideCliError;
 use crate::expected_machines::common::HostDpuPolicy;
 
 /// Patch expected machine (partial update, preserves unprovided fields).
@@ -44,14 +44,20 @@ use crate::expected_machines::common::HostDpuPolicy;
 #[clap(group(ArgGroup::new("group").required(true).multiple(true).args(&[
 "bmc_username",
 "bmc_password",
+"bmc_retain_credentials",
 "chassis_serial_number",
 "fallback_dpu_serial_numbers",
+"meta_name",
+"meta_description",
+"labels",
 "sku_id",
 "bmc_ip_address",
 "dpu_policy",
 "bmc_ip_allocation",
 "dpf_enabled",
+"default_pause_ingestion_and_poweron",
 "interfaces",
+"disable_lockdown",
 ])))]
 #[command(after_long_help = "\
 EXAMPLES:
@@ -232,48 +238,42 @@ pub(crate) struct Args {
 }
 
 impl Args {
-    pub(super) fn validate(&self) -> Result<(), CarbideCliError> {
+    pub(super) fn validate(&self) -> Result<(), clap::Error> {
+        let error = |kind, message: &str| {
+            Self::command()
+                .bin_name("nico-admin-cli expected-machine patch")
+                .error(kind, message)
+        };
         match (&self.bmc_mac_address, &self.id) {
             (Some(_), Some(_)) => {
-                return Err(CarbideCliError::ChooseOneError("--bmc-mac-address", "--id"));
+                return Err(error(
+                    ErrorKind::ArgumentConflict,
+                    "cannot specify both --bmc-mac-address and --id; provide only one",
+                ));
             }
             (None, None) => {
-                return Err(CarbideCliError::RequireOneError(
-                    "--bmc-mac-address",
-                    "--id",
+                return Err(error(
+                    ErrorKind::MissingRequiredArgument,
+                    "must specify either --bmc-mac-address or --id",
                 ));
             }
             _ => {}
-        }
-        // TODO: It is possible to do these checks by clap itself, via arg groups
-        if self.bmc_username.is_none()
-            && self.bmc_password.is_none()
-            && self.chassis_serial_number.is_none()
-            && self.fallback_dpu_serial_numbers.is_none()
-            && self.sku_id.is_none()
-            && self.rack_id.is_none()
-            && self.dpf_enabled.is_none()
-            && self.bmc_ip_address.is_none()
-            && self.dpu_policy.is_none()
-            && self.bmc_ip_allocation.is_none()
-            && self.interfaces.is_none()
-        {
-            return Err(CarbideCliError::GenericError("one of the following options must be specified: bmc-username and bmc-password or chassis-serial-number or fallback-dpu-serial-number or sku-id or rack-id or bmc-ip-address or dpu-policy or bmc-ip-allocation or dpf-enabled or interfaces".to_string()));
         }
         if self
             .fallback_dpu_serial_numbers
             .as_ref()
             .is_some_and(has_duplicates)
         {
-            return Err(CarbideCliError::GenericError(
-                "Duplicate dpu serial numbers found".to_string(),
+            return Err(error(
+                ErrorKind::ValueValidation,
+                "duplicate --fallback-dpu-serial-number values; supply each serial number only once",
             ));
         }
         Ok(())
     }
 
     #[cfg(test)]
-    pub(in crate::expected_machines) fn validate_for_test(&self) -> Result<(), CarbideCliError> {
+    pub(in crate::expected_machines) fn validate_for_test(&self) -> Result<(), clap::Error> {
         self.validate()
     }
 }

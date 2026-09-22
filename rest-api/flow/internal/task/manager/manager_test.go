@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/bmc"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 )
@@ -277,6 +279,25 @@ func TestManagerImpl_SubmitTask(t *testing.T) {
 		require.ErrorContains(t, err, "selected components not linked to actual inventory (1)")
 		require.Zero(t, store.createTaskCalls)
 	})
+}
+
+func TestManagerImpl_CancelTask(t *testing.T) {
+	taskID := uuid.New()
+	store := &managerTaskStore{tasksByID: map[uuid.UUID]*taskdef.Task{
+		taskID: {
+			ID:     taskID,
+			Status: taskcommon.TaskStatusFailed,
+		},
+	}}
+	executor := &managerExecutor{}
+	manager := &ManagerImpl{taskStore: store, executor: executor}
+
+	err := manager.CancelTask(context.Background(), taskID)
+
+	require.ErrorIs(t, err, ErrTaskNotCancellable)
+	require.ErrorContains(t, err, "status failed")
+	require.Zero(t, executor.terminateCalls)
+	require.Empty(t, store.statusUpdates)
 }
 
 func TestValidateSubmissionRackTargets_InjectExpectationNeedsNoRule(t *testing.T) {
@@ -869,6 +890,7 @@ func TestValidateResolvedRackTargets(t *testing.T) {
 		op           operation.Wrapper
 		ruleDef      *operationrules.RuleDefinition
 		componentIDs []string
+		macAddresses []string
 		wantError    string
 	}{
 		{
@@ -880,7 +902,16 @@ func TestValidateResolvedRackTargets(t *testing.T) {
 			componentIDs: []string{"machine-1", "machine-2"},
 		},
 		{
-			name: "unlinked component rejects a disruptive operation",
+			name: "unlinked component with MAC allows firmware operation",
+			op: operation.Wrapper{
+				Type: taskcommon.TaskTypeFirmwareControl,
+				Code: taskcommon.OpCodeFirmwareControlUpgrade,
+			},
+			componentIDs: []string{"machine-1", ""},
+			macAddresses: []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+		},
+		{
+			name: "unlinked component without MAC rejects firmware operation",
 			op: operation.Wrapper{
 				Type: taskcommon.TaskTypeFirmwareControl,
 				Code: taskcommon.OpCodeFirmwareControlUpgrade,
@@ -944,6 +975,11 @@ func TestValidateResolvedRackTargets(t *testing.T) {
 					fmt.Sprintf("compute-%d", i),
 				)
 				comp.ComponentID = externalID
+				if i < len(test.macAddresses) && test.macAddresses[i] != "" {
+					mac, parseErr := net.ParseMAC(test.macAddresses[i])
+					require.NoError(t, parseErr)
+					comp.AddBMC(devicetypes.BMCTypeHost, bmc.BMC{MAC: bmc.MACAddress{HardwareAddr: mac}})
+				}
 				resolvedRack.AddComponent(comp)
 			}
 
@@ -964,6 +1000,22 @@ func TestValidateResolvedRackTargets(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestWorkflowComponentsFrom(t *testing.T) {
+	rackID := uuid.New()
+	comp := newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeCompute, "compute-1")
+	comp.ComponentID = "machine-1"
+	mac, err := net.ParseMAC("aa:bb:cc:dd:ee:ff")
+	require.NoError(t, err)
+	comp.AddBMC(devicetypes.BMCTypeHost, bmc.BMC{MAC: bmc.MACAddress{HardwareAddr: mac}})
+	resolvedRack := newTestRack(rackID, "rack-1")
+	resolvedRack.AddComponent(comp)
+
+	components := workflowComponentsFrom(resolvedRack)
+	require.Len(t, components, 1)
+	require.Equal(t, "machine-1", components[0].ComponentID)
+	require.Equal(t, "aa:bb:cc:dd:ee:ff", components[0].MACAddress)
 }
 
 func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {

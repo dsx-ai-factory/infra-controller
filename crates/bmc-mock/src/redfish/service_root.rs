@@ -25,8 +25,8 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
-use crate::redfish;
 use crate::redfish::Builder;
+use crate::{Callbacks, redfish};
 
 pub(crate) fn resource<'a>() -> redfish::Resource<'a> {
     redfish::Resource {
@@ -37,8 +37,8 @@ pub(crate) fn resource<'a>() -> redfish::Resource<'a> {
     }
 }
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
-    r.route(&resource().odata_id, get(get_service_root))
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
+    r.route(&resource().odata_id, get(get_service_root::<C>))
 }
 
 fn builder(resource: &redfish::Resource) -> ServiceRootBuilder {
@@ -53,7 +53,7 @@ fn builder(resource: &redfish::Resource) -> ServiceRootBuilder {
     }
 }
 
-async fn get_service_root(State(state): State<BmcState>) -> Response {
+async fn get_service_root<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let builder = builder(&resource())
         .redfish_version(state.bmc_redfish_version)
         .protocol_features()

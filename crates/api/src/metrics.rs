@@ -31,9 +31,8 @@ pub(crate) struct Metrics {
 }
 
 pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::Result<Metrics> {
-    // This sets the global meter provider
-    // Note: This configures metrics bucket between 5.0 and 10000.0, which are best suited
-    // for tracking milliseconds
+    // Histograms without a matching view use OpenTelemetry's default boundaries.
+    // Unit-specific and count-oriented histograms register explicit views below.
     // See https://github.com/open-telemetry/opentelemetry-rust/blob/495330f63576cfaec2d48946928f3dc3332ba058/opentelemetry-sdk/src/metrics/reader.rs#L155-L158
     use opentelemetry::KeyValue;
 
@@ -52,6 +51,7 @@ pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::
     let meter_provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
         .with_reader(exporter)
         .with_resource(service_telemetry_attributes)
+        .with_view(admission_duration_histogram_view()?)
         .with_view(retry_histogram_view("*_attempts_*")?)
         .with_view(retry_histogram_view("*_retries_*")?)
         .with_view(ApiMetricsEmitter::machine_reboot_duration_view()?)
@@ -76,6 +76,20 @@ pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::
         meter,
         _meter_provider: meter_provider,
     })
+}
+
+fn admission_duration_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
+    carbide_metrics_utils::new_view(
+        "carbide_api_admission_*_duration",
+        Some(opentelemetry_sdk::metrics::InstrumentKind::Histogram),
+        opentelemetry_sdk::metrics::Aggregation::ExplicitBucketHistogram {
+            boundaries: vec![
+                0.0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5,
+                10.0,
+            ],
+            record_min_max: true,
+        },
+    )
 }
 
 /// Configures a View for Histograms that describe retries or attempts for operations
@@ -131,6 +145,7 @@ mod tests {
             .unwrap();
         let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
             .with_reader(exporter)
+            .with_view(admission_duration_histogram_view().unwrap())
             .with_view(retry_histogram_view("*_attempts_*").unwrap())
             .with_view(retry_histogram_view("*_retries_*").unwrap())
             .with_view(ApiMetricsEmitter::machine_reboot_duration_view().unwrap())
@@ -189,5 +204,42 @@ mod tests {
                 assert!(!encoded.contains(r#"mygauge{error="ErrC",state="mystate"} 1"#));
             }
         }
+    }
+
+    #[test]
+    fn admission_duration_histograms_use_seconds_buckets() {
+        let registry = prometheus::Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .without_scope_info()
+            .without_target_info()
+            .build()
+            .unwrap();
+        let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
+            .with_reader(exporter)
+            .with_view(admission_duration_histogram_view().unwrap())
+            .build();
+        provider
+            .meter("test")
+            .f64_histogram("carbide_api_admission_handler_execution_duration")
+            .with_unit("s")
+            .build()
+            .record(0.02, &[]);
+
+        let mut buffer = vec![];
+        TextEncoder::new()
+            .encode(&registry.gather(), &mut buffer)
+            .unwrap();
+        let encoded = String::from_utf8(buffer).unwrap();
+
+        assert!(encoded.contains(
+            "carbide_api_admission_handler_execution_duration_seconds_bucket{le=\"0.005\"} 0"
+        ));
+        assert!(encoded.contains(
+            "carbide_api_admission_handler_execution_duration_seconds_bucket{le=\"0.025\"} 1"
+        ));
+        assert!(!encoded.contains(
+            "carbide_api_admission_handler_execution_duration_seconds_bucket{le=\"25\"}"
+        ));
     }
 }

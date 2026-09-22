@@ -166,6 +166,7 @@ fn tenant_prefix_overlap_overrides(site_gate_enabled: bool) -> TestEnvOverrides 
     let mut config = crate::test_support::default_config::get();
     config.tenant_prefix_overlap_enabled = site_gate_enabled;
     config.vpc_isolation_behavior = VpcIsolationBehaviorType::MutualIsolation;
+    config.site_fabric_prefixes = vec!["10.0.0.0/8".parse().unwrap()];
 
     let mut overrides = TestEnvOverrides::with_config(config).with_fnn_config(Some(FnnConfig {
         admin_vpc: None,
@@ -591,9 +592,9 @@ async fn eligible_exact_overlap_requires_isolation_and_database_cutover(
         );
     }
 
-    // FNN still imports peer VNIs when prefix imports are disabled. Hold the
-    // new peering until the prefix request waits, then prove it sees that
-    // peering and rejects reuse before reaching the database exclusion.
+    // Stored peerings are inactive when imports are disabled. Hold the new
+    // peering until the prefix request waits, then prove it sees and ignores
+    // that peering before the legacy database exclusion rejects exact reuse.
     let mut peering_txn = env.pool.begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut peering_txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -616,11 +617,13 @@ async fn eligible_exact_overlap_requires_isolation_and_database_cutover(
     };
     let (prefix_result, release_result) = tokio::join!(create_prefix, release_peering);
     release_result?;
-    let error = prefix_result.expect_err("peered VPCs cannot reuse the same prefix");
+    let error = prefix_result.expect_err("the legacy database exclusion should block exact reuse");
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
-    assert_eq!(
-        error.message(),
-        "the requested prefix overlaps address space that is not eligible for reuse"
+    assert!(
+        error
+            .message()
+            .contains("overlaps an existing or deleting VPC prefix"),
+        "inactive peerings must not reject reuse before persistence: {error}"
     );
     assert_eq!(stored_vpc_prefix_count(&env, rejected_id).await, 0);
     let peering_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vpc_peerings WHERE id = $1")
@@ -2424,6 +2427,80 @@ async fn exact_site_prefix_attachment_enforces_lineage_and_round_trips(
     Ok(())
 }
 
+/// Proves a rootless VpcPrefix admitted after the final operator root retires
+/// does not make the next authoritative Core startup fail lineage preflight.
+#[crate::sqlx_test]
+async fn rootless_vpc_prefix_after_operator_root_retirement_survives_startup(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let retiring_root: IpNetwork = "10.90.0.0/16".parse()?;
+    let null_route: IpNetwork = "198.19.0.0/16".parse()?;
+    let vpc_prefix: IpNetwork = "198.19.1.0/24".parse()?;
+    let mut config = api_fixtures::get_config();
+    config.site_fabric_prefixes.clear();
+    config.site_fabric_null_routes = Some(vec![null_route]);
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(Vec::new()),
+            create_network_segments: Some(false),
+            ..TestEnvOverrides::with_config(config).with_fnn_config(None)
+        },
+    )
+    .await;
+    let tenant = "post-retirement-rootless-prefix";
+    create_fixture_tenant(&env, tenant).await?;
+    let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "rootless prefix VPC", None).await;
+
+    // Reconstruct retirement of the final configured operator root before the
+    // new prefix is admitted outside its historical address space.
+    let mut retirement = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut retirement, &[retiring_root]).await?;
+    db::site_prefix::reconcile_configured(&mut retirement, &[]).await?;
+    retirement.commit().await?;
+
+    // Exercise public admission and then re-read the row through the API to
+    // prove the accepted prefix intentionally has no exact SitePrefix parent.
+    let vpc_prefix_id = VpcPrefixId::new();
+    let created = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            vpc_prefix_id,
+            vpc_id,
+            None,
+            &vpc_prefix.to_string(),
+        )))
+        .await?
+        .into_inner();
+    assert_eq!(created.site_prefix_id, None);
+    let persisted = find_vpc_prefix(&env, vpc_prefix_id)
+        .await
+        .expect("admitted rootless VpcPrefix must remain visible through the public API");
+    assert_eq!(persisted.site_prefix_id, None);
+
+    // Repeat the authoritative startup reconciliation and lineage preflight.
+    // Missing parentage is valid because the configured root boundary is off;
+    // the explicit null-route set remains an independent routing policy.
+    let mut startup = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut startup, &env.config.site_fabric_prefixes).await?;
+    let lineage = db::site_prefix::backfill_vpc_prefix_site_prefix_lineage(&mut startup).await?;
+    assert_eq!(
+        lineage.missing_vpc_prefix_ids,
+        vec![vpc_prefix_id],
+        "startup must classify the unrelated prefix as rootless"
+    );
+    let require_parent_for_every_vpc_prefix = !env.config.site_fabric_prefixes.is_empty();
+    assert!(
+        lineage.is_safe_for_startup(require_parent_for_every_vpc_prefix),
+        "rootless prefixes must not block startup when no operator roots are configured"
+    );
+    startup.commit().await?;
+
+    Ok(())
+}
+
+/// Proves legacy rootless admission remains scoped to the VPC's own tenant,
+/// because another tenant's SitePrefix must neither attach nor block it.
 #[crate::sqlx_test]
 async fn omitted_site_prefix_id_checks_only_the_vpc_tenant(
     pool: PgPool,

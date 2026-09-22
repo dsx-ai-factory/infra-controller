@@ -791,6 +791,50 @@ func TestIpamer_AcquireChildPrefixIPv6(t *testing.T) {
 	})
 }
 
+func TestIpamer_AcquireSpecificChildPrefix(t *testing.T) {
+	tests := []struct {
+		name          string
+		parentCIDR    string
+		requestedCIDR string
+		wantCIDR      string
+	}{
+		{
+			name:          "IPv4 child with host bits set",
+			parentCIDR:    "192.0.2.0/24",
+			requestedCIDR: "192.0.2.1/28",
+			wantCIDR:      "192.0.2.0/28",
+		},
+		{
+			name:          "IPv6 child with host bits set",
+			parentCIDR:    "2001:db8::/120",
+			requestedCIDR: "2001:db8::1/124",
+			wantCIDR:      "2001:db8::/124",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			ipam := New(ctx)
+			parent, err := ipam.NewPrefix(ctx, tt.parentCIDR)
+			require.NoError(t, err)
+
+			child, err := ipam.AcquireSpecificChildPrefix(ctx, parent.Cidr, tt.requestedCIDR)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantCIDR, child.Cidr)
+
+			err = ipam.ReleaseChildPrefix(ctx, child)
+			require.NoError(t, err)
+			parent = ipam.PrefixFrom(ctx, parent.Cidr)
+			require.NotNil(t, parent)
+			require.Zero(t, parent.Usage().AcquiredPrefixes)
+
+			child, err = ipam.AcquireSpecificChildPrefix(ctx, parent.Cidr, tt.wantCIDR)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantCIDR, child.Cidr)
+		})
+	}
+}
+
 func TestIpamer_AcquireSpecificChildPrefixIPv4(t *testing.T) {
 	ctx := context.Background()
 	testWithBackends(t, func(t *testing.T, ipam *ipamer) {

@@ -20,7 +20,10 @@ use std::sync::Arc;
 use axum::Router;
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::ipmi_sim::{ConsoleOutputStreamFactory, IpmiSimConfig, IpmiSimHandle};
-use bmc_mock::{BmcState, Callbacks, CombinedServer, HardwareType, HostnameQuerying, MachineInfo};
+use bmc_mock::{
+    ActionError, BmcState, Callbacks, CombinedServer, HardwareType, HostnameQuerying, MachineInfo,
+    ResourceResetType,
+};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -30,13 +33,22 @@ use crate::machine_state_machine::MachineStateError;
 use crate::mock_ssh_server;
 use crate::mock_ssh_server::{MockSshServerHandle, PromptBehavior};
 
+#[derive(Debug)]
+pub(crate) enum BmcCommand {
+    SetSystemPower {
+        request: ResourceResetType,
+        reply: Option<tokio::sync::oneshot::Sender<Result<(), ActionError>>>,
+    },
+    StateRefreshIndication,
+}
+
 /// BmcMockWrapper launches a single instance of bmc-mock, configured to mock a single BMC for
 /// either a DPU or a Host. It will rewrite certain responses to customize them for the machines
 /// machine-a-tron is mocking.
-pub(super) struct BmcMockWrapper {
+pub(super) struct BmcMockWrapper<C: Callbacks> {
     app_context: Arc<MachineATronContext>,
     bmc_mock_router: Router,
-    bmc_mock_state: BmcState,
+    bmc_mock_state: BmcState<C>,
     hostname: Arc<dyn HostnameQuerying>,
     needs_ipmi_console: bool,
     requires_ssh_console: bool,
@@ -44,11 +56,11 @@ pub(super) struct BmcMockWrapper {
     ssh_prompt_behavior: PromptBehavior,
 }
 
-impl BmcMockWrapper {
+impl<C: Callbacks> BmcMockWrapper<C> {
     pub(super) fn new(
         machine_info: &MachineInfo,
         app_context: Arc<MachineATronContext>,
-        callbacks: Arc<dyn Callbacks>,
+        callbacks: Arc<C>,
         hostname: Arc<dyn HostnameQuerying>,
         host_id: Uuid,
         injection: Arc<InjectionStore>,
@@ -158,7 +170,7 @@ impl BmcMockWrapper {
         &self.bmc_mock_router
     }
 
-    pub(super) fn state(&self) -> &BmcState {
+    pub(super) fn state(&self) -> &BmcState<C> {
         &self.bmc_mock_state
     }
 

@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-mod actor;
 pub mod api_client;
 pub mod api_throttler;
 mod bmc_mock_wrapper;
@@ -41,6 +40,7 @@ mod mock_ssh_server;
 mod power_shelf_fsm;
 mod power_shelf_simulator;
 mod rack;
+mod scout_stream;
 mod simulator_registry;
 mod status;
 mod switch_fsm;
