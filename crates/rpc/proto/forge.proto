@@ -11184,7 +11184,7 @@ message PatchExpectedMachineRequest {
   // nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
   // only the mask selects interface replacement.
   //
-  // A selected `chassis_serial_number` must contain 4-64 ASCII letters,
+  // A selected `chassis_serial_number` must contain 4-32 ASCII letters,
   // digits, hyphens, or underscores. Selected `fallback_dpu_serial_numbers`
   // must not contain duplicate strings.
   //
