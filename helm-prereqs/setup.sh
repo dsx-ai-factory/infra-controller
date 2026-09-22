@@ -1795,8 +1795,26 @@ echo "=== [7b/7] NICo REST CA issuer ClusterIssuer ==="
 # forge, temporal, temporal_visibility, keycloak.
 # Lives alongside nico-pg-cluster in the postgres namespace — different
 # service name ("postgres") so Temporal and NICo values work without changes.
+#
+# Kubernetes rejects updates to a StatefulSet's volumeClaimTemplates (2.2 raised
+# the data request from 1Gi to 10Gi). When the server dry-run reports that
+# rejection, delete the StatefulSet with --cascade=orphan so the pod and PVC
+# survive, then let the regular apply recreate it and adopt the pod. The PVC of
+# an upgraded site keeps its original size; see docs/manuals/upgrade.md.
+_recreate_rest_postgres_statefulset() {
+    local dry_run_output
+    if dry_run_output="$(kubectl apply -k deploy/kustomize/base/postgres --dry-run=server 2>&1)"; then
+        return 0
+    fi
+    if ! grep -q 'updates to statefulset spec for fields other than' <<< "${dry_run_output}"; then
+        return 0
+    fi
+    echo "postgres StatefulSet has immutable spec changes; recreating it with --cascade=orphan (pod and PVC are kept)"
+    kubectl delete statefulset postgres -n postgres --cascade=orphan
+}
 _SETUP_PHASE="[7c/7] NICo REST postgres"
 echo "=== [7c/7] NICo REST postgres ==="
+(cd "${NICO_REST_DIR}" && _recreate_rest_postgres_statefulset)
 (cd "${NICO_REST_DIR}" && kubectl apply -k deploy/kustomize/base/postgres)
 kubectl rollout status statefulset/postgres -n postgres --timeout=180s
 echo "NICo REST postgres ready"
