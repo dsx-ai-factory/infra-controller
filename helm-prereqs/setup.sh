@@ -1140,7 +1140,7 @@ echo "Vault AppRole credentials ready"
 #   $1 submodule name under helm-prereqs/
 _pinned_submodule_commit() {
     local _name="$1" _pin
-    _pin="$(git -C "${SCRIPT_DIR}/.." rev-parse ":helm-prereqs/${_name}" 2>/dev/null || true)"
+    _pin="$(git -C "${SCRIPT_DIR}/.." ls-files -s -- "helm-prereqs/${_name}" 2>/dev/null | awk '$1 == "160000" { print $2 }')"
     [[ -n "${_pin}" ]] || \
         _pin="$(grep -E -m1 '^[0-9a-f]{40}$' "${SCRIPT_DIR}/${_name}.pin" 2>/dev/null || true)"
     printf '%s' "${_pin}"
@@ -1149,8 +1149,9 @@ _pinned_submodule_commit() {
 # Align a pinned helm-prereqs/<name> submodule to the commit this repo records.
 # The pin is the supply-chain boundary: the commit is pinned and reviewed here
 # and git verifies the hash on checkout, so setup.sh never clones a mutable
-# ref. In a git checkout the submodule is initialized; from the packaged chart
-# (no .git, no gitlink) the commit in <name>.pin is cloned shallowly instead.
+# ref. In a checkout of this repository (the gitlink is recorded) the submodule
+# is initialized; otherwise (packaged chart, or unpacked inside an unrelated
+# repository) the commit in <name>.pin is cloned shallowly instead.
 # A dirty checkout is refused so the pin stays meaningful.
 #   $1 submodule name under helm-prereqs/   $2 upstream URL (airgap hint)
 #   $3 override to set on an airgapped host, e.g. NICO_RMS_CHART=<clone>/helm
@@ -1164,7 +1165,7 @@ _sync_pinned_submodule() {
         echo "    ${_override%%=*} at your modified checkout explicitly."
         return 1
     fi
-    if git -C "${SCRIPT_DIR}/.." rev-parse --git-dir &>/dev/null; then
+    if git -C "${SCRIPT_DIR}/.." ls-files -s -- "helm-prereqs/${_name}" 2>/dev/null | grep -q '^160000 '; then
         echo "Syncing the ${_name} submodule to the pinned commit..."
         if ! git -C "${SCRIPT_DIR}/.." submodule update --init --checkout --depth 1 -- "helm-prereqs/${_name}"; then
             echo "Error: could not sync the ${_name} submodule to the pinned commit."
@@ -1177,7 +1178,7 @@ _sync_pinned_submodule() {
     fi
     _pin="$(_pinned_submodule_commit "${_name}")"
     if [[ -z "${_pin}" ]]; then
-        echo "Error: ${SCRIPT_DIR}/.. is not a git checkout and ${SCRIPT_DIR}/${_name}.pin is missing, so the ${_name} source cannot be synced."
+        echo "Error: ${SCRIPT_DIR}/.. is not a git checkout of this repository and ${SCRIPT_DIR}/${_name}.pin is missing, so the ${_name} source cannot be synced."
         echo "  → Run setup.sh from a git clone of this repository or the packaged"
         echo "    nico-prereqs chart, or clone ${_url} at the pinned commit and set ${_override}."
         return 1
@@ -1248,7 +1249,26 @@ if "${INSTALL_DPF}"; then
     _SETUP_PHASE="[5b] DPF operator stack"
     echo "=== [5b] DPF (DOCA Platform Framework) ==="
 
-    # 5b.1 Prerequisite operators (Argo CD, Kamaji, maintenance-operator, NFD),
+    # 5b.1 Resolve the doca-platform source before anything touches the cluster,
+    #      so a missing or unfetchable pin cannot leave a partial install: an
+    #      explicit NICO_DPF_SRC override, or the pinned helm-prereqs/doca-platform
+    #      commit (the submodule in a git checkout, a clone of doca-platform.pin
+    #      from the packaged chart; same contract as the nv-rms submodule in 5c).
+    if [[ -n "${NICO_DPF_SRC}" ]]; then
+        _DPF_SRC="${NICO_DPF_SRC}"
+        echo "Using local doca-platform source: ${_DPF_SRC}"
+    else
+        _sync_pinned_submodule doca-platform https://github.com/NVIDIA/doca-platform \
+            'NICO_DPF_SRC=<clone>'
+        _DPF_SRC="${SCRIPT_DIR}/doca-platform"
+    fi
+    if [[ ! -d "${_DPF_SRC}/deploy/charts/dpf-operator" ]]; then
+        echo "Error: '${_DPF_SRC}' has no deploy/charts/dpf-operator - not a doca-platform checkout."
+        exit 1
+    fi
+    _warn_dpf_source_mismatch "${_DPF_SRC}"
+
+    # 5b.2 Prerequisite operators (Argo CD, Kamaji, maintenance-operator, NFD),
     #      pinned from doca-platform deploy/helmfiles/prereqs.yaml. All land in
     #      dpf-operator-system, same as upstream.
     helmfile sync -l name=argo-cd
@@ -1311,7 +1331,7 @@ if "${INSTALL_DPF}"; then
     kubectl rollout status statefulset -n dpf-operator-system \
         -l app.kubernetes.io/name=argocd-application-controller --timeout=300s
 
-    # 5b.2 Pull + repo secrets. Idempotent (apply of a dry-run render).
+    # 5b.3 Pull + repo secrets. Idempotent (apply of a dry-run render).
     #      The dpu.nvidia.com/image-pull-secret label makes DPF propagate the
     #      Secret into DPUService image-pull secrets on the DPU cluster.
     if [[ -n "${NICO_DPF_NGC_API_KEY}" ]]; then
@@ -1379,7 +1399,7 @@ if "${INSTALL_DPF}"; then
     kubectl label secret hbn-user-password -n dpf-operator-system \
         dpu.nvidia.com/image-pull-secret="" --overwrite
 
-    # 5b.3 cert-manager approver policy. Only needed (and only appliable) when
+    # 5b.4 cert-manager approver policy. Only needed (and only appliable) when
     #      the cluster runs approver-policy; our stock cert-manager does not
     #      (built-in approver auto-approves — operators/values/cert-manager.yaml).
     if kubectl get crd certificaterequestpolicies.policy.cert-manager.io &>/dev/null; then
@@ -1388,24 +1408,6 @@ if "${INSTALL_DPF}"; then
     else
         echo "approver-policy not installed — built-in cert-manager approver auto-approves; skipping CertificateRequestPolicy."
     fi
-
-    # 5b.4 Resolve the doca-platform source: an explicit NICO_DPF_SRC override,
-    #      or the pinned helm-prereqs/doca-platform commit (the submodule in a
-    #      git checkout, a clone of doca-platform.pin from the packaged chart;
-    #      same contract as the nv-rms submodule in 5c).
-    if [[ -n "${NICO_DPF_SRC}" ]]; then
-        _DPF_SRC="${NICO_DPF_SRC}"
-        echo "Using local doca-platform source: ${_DPF_SRC}"
-    else
-        _sync_pinned_submodule doca-platform https://github.com/NVIDIA/doca-platform \
-            'NICO_DPF_SRC=<clone>'
-        _DPF_SRC="${SCRIPT_DIR}/doca-platform"
-    fi
-    if [[ ! -d "${_DPF_SRC}/deploy/charts/dpf-operator" ]]; then
-        echo "Error: '${_DPF_SRC}' has no deploy/charts/dpf-operator - not a doca-platform checkout."
-        exit 1
-    fi
-    _warn_dpf_source_mismatch "${_DPF_SRC}"
 
     # 5b.5 DPF operator chart from the source. NICo overrides (docs/manuals/dpf.md
     #      §2): NodeFeatureRules off because NFD labels nodes via its own config
@@ -1519,13 +1521,26 @@ if "${INSTALL_RMS}"; then
     echo ""
     echo "=== [5c] RMS (Rack Manager Service) ==="
 
-    # 5c.1 Namespace. Created here (not by the chart) so the pull secret and
+    # 5c.1 Resolve the chart before anything touches the cluster: an explicit
+    #      NICO_RMS_CHART override, or the pinned helm-prereqs/nv-rms git
+    #      submodule. Airgapped hosts clone nv-rms out-of-band and point
+    #      NICO_RMS_CHART at it.
+    if [[ -n "${NICO_RMS_CHART}" ]]; then
+        _RMS_CHART="${NICO_RMS_CHART}"
+        echo "Using local rack-manager chart: ${_RMS_CHART}"
+    else
+        _sync_pinned_submodule nv-rms https://github.com/dsx-ai-factory/nv-rms \
+            'NICO_RMS_CHART=<clone>/helm'
+        _RMS_CHART="${SCRIPT_DIR}/nv-rms/helm"
+    fi
+
+    # 5c.2 Namespace. Created here (not by the chart) so the pull secret and
     #      the ESO credential sync have somewhere to land before helm runs.
     #      The rms-db-eso ClusterExternalSecret selects it by metadata.name.
     kubectl create namespace "${_RMS_NS}" --dry-run=client -o yaml \
         | kubectl apply -f -
 
-    # 5c.2 Image pull secret. Same off-argv construction as the DPF secrets:
+    # 5c.3 Image pull secret. Same off-argv construction as the DPF secrets:
     #      the NGC key must never appear in an exec argument.
     if [[ -n "${NICO_RMS_NGC_API_KEY}" ]]; then
         # Scope the credential to the registry the image actually pulls from
@@ -1546,18 +1561,6 @@ if "${INSTALL_RMS}"; then
         unset _rms_auth
     else
         echo "NICO_RMS_NGC_API_KEY not set - skipping rms-pull-secret (mirror or pre-loaded registry)."
-    fi
-
-    # 5c.3 Resolve the chart: an explicit NICO_RMS_CHART override, or the
-    #      pinned helm-prereqs/nv-rms git submodule. Airgapped hosts clone
-    #      nv-rms out-of-band and point NICO_RMS_CHART at it.
-    if [[ -n "${NICO_RMS_CHART}" ]]; then
-        _RMS_CHART="${NICO_RMS_CHART}"
-        echo "Using local rack-manager chart: ${_RMS_CHART}"
-    else
-        _sync_pinned_submodule nv-rms https://github.com/dsx-ai-factory/nv-rms \
-            'NICO_RMS_CHART=<clone>/helm'
-        _RMS_CHART="${SCRIPT_DIR}/nv-rms/helm"
     fi
 
     # 5c.4 Wait for the ESO-synced DB credentials. The rms database/user are

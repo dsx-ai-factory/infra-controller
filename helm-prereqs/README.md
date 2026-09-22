@@ -563,8 +563,10 @@ each also need `git` and a record of their pinned commit: a git checkout of
 this repository that records the submodule (`helm-prereqs/doca-platform` for
 DPF, `helm-prereqs/nv-rms` for RMS), or, for DPF only, the
 `helm-prereqs/doca-platform.pin` file that ships with the packaged
-`nico-prereqs` chart. A source tarball has neither, and RMS has no pin file,
-so `preflight.sh` rejects those cases before any phase runs. A phase drops
+`nico-prereqs` chart. A source tarball of this repository also carries
+`doca-platform.pin`, so it satisfies DPF; RMS has no pin file, so a tarball
+(or a tarball from a revision before the pin file existed, for DPF) fails
+`preflight.sh` before any phase runs. A phase drops
 that requirement only when its local source override is set
 (`NICO_DPF_SRC=<clone>` for DPF, `NICO_RMS_CHART=<clone>/helm` for RMS) or it
 is skipped (`--skip-dpf` / `--skip-rms`). Per-host enablement is

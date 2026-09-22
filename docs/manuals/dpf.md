@@ -382,23 +382,34 @@ helm upgrade --install -n dpf-operator-system \
   dpf-operator dpf-repository/dpf-operator --version=$TAG
 
 # Or from the helm-prereqs/doca-platform submodule at its pinned commit
-# (what setup.sh does by default; run from the repository root):
+# (what setup.sh does by default; run from the repository root). The source
+# chart ships an empty controllerManager.image, so the image must be set:
+NICO_DPF_IMAGE_REPO="nvcr.io/nvidia/doca/dpf-system"
+NICO_DPF_IMAGE_TAG="v26.4.0"
 helm upgrade --install -n dpf-operator-system \
   --set "enableNodeFeatureRules=false" \
+  --set "controllerManager.image.repository=$NICO_DPF_IMAGE_REPO" \
+  --set "controllerManager.image.tag=$NICO_DPF_IMAGE_TAG" \
   dpf-operator ./helm-prereqs/doca-platform/deploy/charts/dpf-operator
 ```
 
 The public `nvcr.io/nvidia/doca` operator image pulls anonymously, so no pull
 secret is set by default (matching `setup.sh`). Add
-`--set "imagePullSecrets[0].name=dpf-pull-secret"` **only** when pulling the
-operator image from a private registry or mirror — a registry-scoped secret
-without `nvidia/doca` entitlement turns a working public pull into a 403.
+`--set "imagePullSecrets[0].name=<secret>"` (what `setup.sh` does when
+`NICO_DPF_IMAGE_PULL_SECRET` is set) **only** when pulling the operator image
+from a private registry or mirror - a registry-scoped secret without
+`nvidia/doca` entitlement turns a working public pull into a 403.
 
 NICo-specific notes on the parameters:
 
 - `enableNodeFeatureRules=false` — the chart's bundled `NodeFeatureRule`
   resources are disabled because nodes are labeled via NFD's own configuration
   (relying on PCI class `0200`).
+- `controllerManager.image.repository` / `.tag` - the in-repo source chart
+  leaves the operator image empty (CI stamps it when publishing to NGC), so
+  `setup.sh` sets them from `NICO_DPF_IMAGE_REPO` (default
+  `nvcr.io/nvidia/doca/dpf-system`) and `NICO_DPF_IMAGE_TAG` (default
+  `v26.4.0`, the pinned release). The published NGC chart already carries them.
 
 Adjust `REGISTRY` and `TAG` to the version of DPF you are deploying.
 

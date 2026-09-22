@@ -40,7 +40,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 - CRD schemas are updated to their new versions via server-side apply.
 - ConfigMaps and Secrets produced by Helm are updated to reflect new chart values.
 - The NICo Core and REST database schemas are migrated forward by their respective pre-upgrade Jobs.
-- DPF operator and DPUService images are updated to the release the `helm-prereqs/doca-platform` submodule is pinned to.
+- The DPF operator chart is reinstalled from the `helm-prereqs/doca-platform` commit the new `setup.sh` pins, with the operator image tag from `NICO_DPF_IMAGE_TAG` (default: that release). The DPUServices (`dts`, `doca_hbn`, and NICo's `dpu_agent`, `dhcp_server`, `fmds`, `otel`) are versioned independently by `[dpf.services.*]` in the NICo site config ([dpf.md §3.5](dpf.md#35-enable-dpf-in-the-nico-site-config)); the pin does not change them.
 
 ## Pre-upgrade checklist
 
