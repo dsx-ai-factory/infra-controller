@@ -256,6 +256,13 @@ pub enum MockPowerState {
 }
 
 impl MockPowerState {
+    /// Checks whether the current power state permits a reset request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActionError::Internal`] for every request when the state is
+    /// [`Self::Unknown`], because power state is unavailable. Returns
+    /// [`ActionError::BadRequest`] when a known state prevents the request.
     pub fn validate_reset_type(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
         type C = ResourceResetType;
         match (reset_type, self) {

@@ -944,12 +944,21 @@ printf '%s\n' "$state"
             .await
             .unwrap_or_else(|_| panic!("observation {observation:?} did not become {expected}"));
             if expected.is_null() {
-                assert!(matches!(
-                    callbacks
-                        .computer_system_reset(ResourceResetType::ForceOff)
-                        .await,
-                    Err(ActionError::Internal(_))
-                ));
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset")
+                            .header("content-type", "application/json")
+                            .body(Body::from(r#"{"ResetType":"ForceOff"}"#))
+                            .unwrap(),
+                    )
+                    .await;
+                assert_eq!(
+                    response.unwrap().status(),
+                    StatusCode::INTERNAL_SERVER_ERROR
+                );
             }
         }
         drop(router);
