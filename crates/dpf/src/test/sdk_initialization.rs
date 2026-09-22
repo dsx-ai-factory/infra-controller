@@ -30,7 +30,7 @@ use tokio::sync::Notify;
 use crate::crds::bfbs_generated::BFB;
 use crate::crds::bluefieldsoftwares_generated::BlueFieldSoftware;
 use crate::crds::dpudeployments_generated::DPUDeployment;
-use crate::crds::dpuflavors_generated::DPUFlavor;
+use crate::crds::dpuflavors_generated::{DPUFlavor, DpuFlavorServiceReadinessGate};
 use crate::crds::dpuflavortemplates_generated::DPUFlavorTemplate;
 use crate::crds::dpus_generated::{DPU, DpuStatusPhase};
 use crate::crds::dpuserviceconfigurations_generated::DPUServiceConfiguration;
@@ -1339,7 +1339,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .spec
             .service_readiness
             .and_then(|readiness| readiness.gate),
-        Some(crate::crds::dpuflavors_generated::DpuFlavorServiceReadinessGate::OperationalReady)
+        Some(DpuFlavorServiceReadinessGate::DpuServiceCriticalPodsReady)
     ));
     assert!(
         !astra_flavor

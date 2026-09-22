@@ -149,7 +149,7 @@ pub struct InitDpfResourcesConfig {
     /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning the deployment's
     /// DPUs.
     pub(crate) extra_bfcfg_parameters: Vec<String>,
-    /// Delays host initialization until the DPU is operationally ready.
+    /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
     pub(crate) enable_delay_host_init: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
     pub(crate) deployment_type: DpuDeploymentType,

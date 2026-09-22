@@ -51,7 +51,7 @@ const OVN_ENCAP_SCRIPT_PATH: &str = "/usr/local/sbin/nico-configure-ovn-encap-ip
 
 fn host_service_readiness() -> DpuFlavorServiceReadiness {
     DpuFlavorServiceReadiness {
-        gate: Some(DpuFlavorServiceReadinessGate::OperationalReady),
+        gate: Some(DpuFlavorServiceReadinessGate::DpuServiceCriticalPodsReady),
     }
 }
 
@@ -2139,11 +2139,11 @@ mod tests {
                         })
                     })
                 });
-                let waits_for_operational_ready = matches!(
+                let waits_for_critical_pods = matches!(
                     spec.service_readiness.and_then(|readiness| readiness.gate),
-                    Some(DpuFlavorServiceReadinessGate::OperationalReady)
+                    Some(DpuFlavorServiceReadinessGate::DpuServiceCriticalPodsReady)
                 );
-                Ok::<_, ()>((host_hold_enabled, waits_for_operational_ready))
+                Ok::<_, ()>((host_hold_enabled, waits_for_critical_pods))
             },
         );
     }

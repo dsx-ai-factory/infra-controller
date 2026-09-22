@@ -2284,8 +2284,9 @@ pub struct DpfDeploymentConfig {
     /// DPUs.
     #[serde(default)]
     pub extra_bfcfg_parameters: Vec<String>,
-    /// Delays host initialization until DPF reports the DPU operationally ready. Defaults to
-    /// `true` when omitted; setting it to `false` restores immediate host initialization.
+    /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
+    /// Defaults to `true` when omitted; setting it to `false` restores immediate host
+    /// initialization.
     #[serde(default = "default_to_true")]
     pub enable_delay_host_init: bool,
 }
