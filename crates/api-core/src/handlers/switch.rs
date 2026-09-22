@@ -745,8 +745,9 @@ async fn remove_switch_health_report_by_source(
 
 #[cfg(test)]
 mod switch_nvos_info_tests {
-    use super::legacy_switch_nvos_info;
     use ::rpc::forge as rpc;
+
+    use super::legacy_switch_nvos_info;
 
     fn address(address_family: rpc::AddressFamily, address: &str) -> rpc::IpAddress {
         rpc::IpAddress {
