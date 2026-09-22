@@ -557,7 +557,7 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Scout],
         );
         x.perm("HeartbeatMachineValidationRun", vec![Scout, SiteAgent]);
-        x.perm("AdminBmcReset", vec![ForgeAdminCLI]);
+        x.perm("AdminBmcReset", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("AdminPowerControl", vec![ForgeAdminCLI, SiteAgent, Flow]);
         x.perm("AdminChassisReset", vec![ForgeAdminCLI, SiteAgent, Flow]);
         x.perm("DisableSecureBoot", vec![ForgeAdminCLI]);
@@ -1335,6 +1335,7 @@ mod rbac_rule_tests {
 
         // REST admin operations proxy to Core as the site agent (issue #4597).
         for method in [
+            "AdminBmcReset",
             "AdminPowerControl",
             "TriggerDpuReprovisioning",
             "AdminChassisReset",
