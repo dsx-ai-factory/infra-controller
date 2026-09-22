@@ -400,6 +400,15 @@ DPF manages DPU provisioning state in `DPUCluster`, `DPUService`, and `DPF` CRs,
 
 NICo 2.1 requires `startupProbe` to be explicitly configured in the machine-a-tron deployment (issue #4298). The chart now validates this at render time and fails with a clear error if `startupProbe` is absent.
 
+### 2.1 → 2.2: NICo REST postgres volume size
+
+NICo 2.2 raises the `postgres` StatefulSet's `volumeClaimTemplates` storage request from 1Gi to 10Gi. Kubernetes forbids changing that field on an existing StatefulSet, so phase 7c of `setup.sh` deletes the StatefulSet with `--cascade=orphan` and re-applies it; the `postgres-0` pod and its `postgres-data-postgres-0` PVC are kept. The PVC of an upgraded site stays at 1Gi. It can be left as is, or, if the StorageClass has `allowVolumeExpansion: true`, grown in place:
+
+```bash
+kubectl patch pvc postgres-data-postgres-0 -n postgres \
+    -p '{"spec":{"resources":{"requests":{"storage":"10Gi"}}}}'
+```
+
 ### 2.2 → 2.3: Machine-a-Tron startupProbe Default
 
 NICo 2.3 raises the default `startupProbe.failureThreshold` from 20 to 120 (60 minutes), sized for a 250-rack site spread over ten pods ([issue 5968](https://github.com/dsx-ai-factory/infra-controller/issues/5968)). The threshold applies to each pod on its own, so size it for the pod that registers the most records. For larger sites, raise `startupProbe.failureThreshold` following the sizing rule in the chart's `values.yaml`, as `helm-prereqs/values/machine-a-tron-scale.yaml` does.

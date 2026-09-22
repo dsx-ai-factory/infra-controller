@@ -1884,6 +1884,9 @@ jobs:
       - name: Test legacy Flow manager cleanup
         run: bash helm-prereqs/tests/cleanup-legacy-flow-managers_test.sh
 
+      - name: Test REST postgres StatefulSet recreation
+        run: bash helm-prereqs/tests/setup-rest-postgres-statefulset-recreate_test.sh
+
       - name: Test Vault Kubernetes URLs
         run: bash helm-prereqs/tests/vault-kubernetes-url_test.sh
 
