@@ -79,6 +79,8 @@ navigation:
               path: architecture/redfish_workflow.md
             - page: Redfish Endpoints Reference
               path: architecture/redfish/endpoints_reference.md
+            - page: BMC Proxy Request Classes and Cache
+              path: architecture/redfish/bmc_proxy_classes_and_cache.md
         - page: Reliable State Handling
           path: architecture/state_handling.md
         - page: Networking Integrations

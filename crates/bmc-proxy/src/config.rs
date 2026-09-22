@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::acl::AclConfig;
+use crate::class::ClassTable;
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ConfigError {
@@ -57,6 +58,10 @@ pub(crate) struct Config {
     pub(crate) bmc_proxy: Option<HostPortPair>,
     #[serde(default)]
     pub(crate) tracing: TracingConfig,
+    /// Request classes, written as `[[class]]` tables. Absent keeps every
+    /// request in the implicit default class.
+    #[serde(rename = "class", default)]
+    pub(crate) classes: ClassTable,
 }
 
 /// OpenTelemetry trace export settings for proxied BMC requests.
@@ -442,5 +447,58 @@ mod tests {
                 },
             }
         );
+    }
+
+    /// The class table is wired under the `[[class]]` key, proven on the
+    /// configuration the Helm chart ships: template expressions aside, it
+    /// must parse with this binary's parser and carry the firmware inventory
+    /// class with the windows the chart documents. Without a table the proxy
+    /// keeps its historical single-class behavior.
+    #[test]
+    fn shipped_helm_config_parses_with_the_inventory_class() {
+        const SHIPPED: &str =
+            include_str!("../../../helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml");
+        // Replace each `{{ ... }}` Helm expression with a plain token; every
+        // one of them sits inside a quoted string in the shipped file.
+        let mut rendered = String::new();
+        let mut rest = SHIPPED;
+        while let Some(start) = rest.find("{{") {
+            rendered.push_str(&rest[..start]);
+            rendered.push_str("templated");
+            let end = rest[start..]
+                .find("}}")
+                .expect("every Helm expression closes");
+            rest = &rest[start + end + 2..];
+        }
+        rendered.push_str(rest);
+
+        let config = Config::parse(&rendered).expect("shipped proxy config parses");
+        let class = config.classes.classify(
+            &http::Method::GET,
+            "/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0",
+            &["spiffe-service-id/nv-dps".to_string()],
+        );
+        assert_eq!(class.name.as_str(), "inventory");
+        assert_eq!(class.upstream_timeout, std::time::Duration::from_secs(300));
+        let hour = std::time::Duration::from_secs(3600);
+        assert_eq!(
+            class
+                .cache
+                .as_ref()
+                .expect("inventory is cached")
+                .windows_for_test(),
+            [hour, 6 * hour, 24 * hour, hour / 2],
+        );
+
+        let write = config.classes.classify(
+            &http::Method::PATCH,
+            "/redfish/v1/Chassis/HGX_Chassis_0/EnvironmentMetrics",
+            &[],
+        );
+        assert_eq!(write.name.as_str(), "default");
+        assert!(write.cache.is_none());
+
+        let without = Config::parse(MINIMAL_TLS).expect("minimal config parses");
+        assert_eq!(without.classes.cached_classes().count(), 0);
     }
 }

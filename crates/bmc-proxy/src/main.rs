@@ -21,9 +21,12 @@ use std::sync::Arc;
 
 mod acl;
 mod bmc_proxy;
+mod cache;
+mod class;
 mod config;
 mod metrics;
 mod net;
+mod pattern;
 mod setup;
 mod span_isolation;
 

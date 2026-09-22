@@ -29,6 +29,8 @@ use metrics_endpoint::{MetricsEndpointConfig, MetricsSetup};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::class::ClassName;
+
 pub(crate) async fn start(
     address: SocketAddr,
     metrics_setup: MetricsSetup,
@@ -302,6 +304,105 @@ pub(crate) struct UpstreamRequestCompleted {
     pub(crate) status: UpstreamStatus,
     #[observation]
     pub(crate) took: Duration,
+}
+
+/// How the response cache answered a cacheable `GET`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+pub(crate) enum CacheOutcome {
+    /// Served a stored response within its `ttl`.
+    Hit,
+    /// Served a stored response past its `ttl` and started a refresh.
+    Stale,
+    /// Nothing usable was stored; this request started the upstream fetch.
+    Miss,
+    /// Nothing usable was stored; this request waited on a fetch another
+    /// request had started.
+    Coalesced,
+    /// The caller sent `Cache-Control: no-cache`, so the stored response was
+    /// skipped and the fetch went upstream.
+    Bypass,
+    /// The upstream fetch failed and a stored response within its
+    /// `stale_if_error` window stood in for it.
+    StaleIfError,
+    /// A recent write to the BMC holds the class off the cache, so the
+    /// request was forwarded uncached.
+    Held,
+    /// The request carries a query the cache does not key, so it was
+    /// forwarded uncached.
+    Uncacheable,
+}
+
+/// The response cache answered a cacheable `GET`. Metric-only: the outcome
+/// is also on the response's `X-Nico-Cache` header, and the forward the
+/// miss triggers records its own duration.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_cache_lookup_completed",
+    metric_name = "carbide_bmc_proxy_cache_lookups_total",
+    component = "nico-bmc-proxy",
+    log = off,
+    metric = counter,
+    describe = "Number of GET requests in cached request classes the proxy answered, by request class and cache outcome (hit, stale, miss, coalesced, bypass, stale_if_error, held, uncacheable)"
+)]
+pub(crate) struct CacheLookupCompleted {
+    #[label]
+    pub(crate) class: ClassName,
+    #[label]
+    pub(crate) outcome: CacheOutcome,
+}
+
+/// What an upstream fetch the cache issued produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+pub(crate) enum RefreshResult {
+    /// A `200` response was stored.
+    Stored,
+    /// The BMC answered `304` to the cache's conditional request; the stored
+    /// response was kept and its age restarted.
+    Revalidated,
+    /// Any other response, handed to the waiting callers and not stored.
+    Uncacheable,
+    /// The forward produced no response.
+    Failed,
+}
+
+/// An upstream fetch the response cache issued completed. Metric-only: the
+/// forward itself is already recorded, and a failure's detail reaches the
+/// caller in the response body.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_cache_refresh_completed",
+    metric_name = "carbide_bmc_proxy_cache_refreshes_total",
+    component = "nico-bmc-proxy",
+    log = off,
+    metric = counter,
+    describe = "Number of upstream fetches the response cache issued for misses and refreshes, by request class and result (stored, revalidated, uncacheable, failed)"
+)]
+pub(crate) struct CacheRefreshCompleted {
+    #[label]
+    pub(crate) class: ClassName,
+    #[label]
+    pub(crate) result: RefreshResult,
+}
+
+/// A write to a BMC that the BMC did not reject invalidated a class's stored
+/// responses for that BMC, whether or not any were stored at the time.
+/// Logged at debug so an operator can trace why a resource was refetched;
+/// the BMC stays off the metric.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_cache_invalidated",
+    metric_name = "carbide_bmc_proxy_cache_invalidations_total",
+    component = "nico-bmc-proxy",
+    log = debug,
+    metric = counter,
+    message = "write to BMC invalidated cached responses",
+    describe = "Number of times a write to a BMC that the BMC did not reject invalidated the response cache of a request class for that BMC, whether or not entries were stored, by request class"
+)]
+pub(crate) struct CacheInvalidated {
+    #[label]
+    pub(crate) class: ClassName,
+    #[context]
+    pub(crate) bmc_ip_address: String,
 }
 
 #[cfg(test)]
@@ -629,6 +730,28 @@ mod tests {
                 UpstreamStatus::Http4xx.label_value() => "http4xx".to_string(),
                 UpstreamStatus::Http5xx.label_value() => "http5xx".to_string(),
                 UpstreamStatus::Error.label_value() => "error".to_string(),
+            }
+
+            "request class passes through verbatim" {
+                ClassName::for_test("dps_metrics").label_value() => "dps_metrics".to_string(),
+            }
+
+            "cache outcome" {
+                CacheOutcome::Hit.label_value() => "hit".to_string(),
+                CacheOutcome::Stale.label_value() => "stale".to_string(),
+                CacheOutcome::Miss.label_value() => "miss".to_string(),
+                CacheOutcome::Coalesced.label_value() => "coalesced".to_string(),
+                CacheOutcome::Bypass.label_value() => "bypass".to_string(),
+                CacheOutcome::StaleIfError.label_value() => "stale_if_error".to_string(),
+                CacheOutcome::Held.label_value() => "held".to_string(),
+                CacheOutcome::Uncacheable.label_value() => "uncacheable".to_string(),
+            }
+
+            "cache refresh result" {
+                RefreshResult::Stored.label_value() => "stored".to_string(),
+                RefreshResult::Revalidated.label_value() => "revalidated".to_string(),
+                RefreshResult::Uncacheable.label_value() => "uncacheable".to_string(),
+                RefreshResult::Failed.label_value() => "failed".to_string(),
             }
         );
     }

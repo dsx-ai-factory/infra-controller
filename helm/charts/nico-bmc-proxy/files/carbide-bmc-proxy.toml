@@ -74,3 +74,31 @@ additional_issuer_cns = []
   "GET /redfish/v1/TelemetryService/MetricReports/NvidiaNMMetrics_0",
   "GET /redfish/v1/TaskService/Tasks/*",
 ]
+
+# Request classes group proxied requests that share an upstream budget and a
+# cache policy. Classes are evaluated in order and the first whose `match`
+# patterns fit the request wins. A request no class matches belongs to the
+# implicit `default` class: a 60s upstream budget and nothing cached. The
+# format is documented in crates/bmc-proxy/README.md.
+
+# Firmware inventory takes minutes to assemble on some BMCs (DGX H100 with
+# CX7 NICs) and changes only when firmware is updated or the BMC resets, so
+# the proxy serves it from its cache and refreshes it behind the callers.
+# While the BMC fails to answer a refresh, the last inventory keeps being
+# served for a day. A firmware update is accepted with 202 and applied
+# later by a Task, so for half an hour after one the inventory is read from
+# the BMC every time and nothing is stored.
+[[class]]
+name = "inventory"
+match = ["GET /redfish/v1/UpdateService/FirmwareInventory/**"]
+upstream_timeout = "300s"
+
+[class.cache]
+ttl = "1h"
+stale_while_revalidate = "6h"
+stale_if_error = "24h"
+invalidated_by = [
+  "POST /redfish/v1/UpdateService/**",
+  "POST /redfish/v1/Managers/*/Actions/Manager.Reset",
+]
+hold_after_write = "30m"
