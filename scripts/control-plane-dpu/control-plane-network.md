@@ -202,7 +202,8 @@ the admin VPC and the control-plane VNI. All of them must be datacenter-unique. 
 the L2VNIs as the number of admin segments the site may ever declare. Each site should
 take at least ten, which covers a fleet that grows in bursts and needs more admin
 segments. Add headroom to both counts. A site planning for 200 concurrent VPCs with up
-to ten profile changes in flight needs roughly 210 L3VNIs and ten L2VNIs.
+to ten profile changes in flight needs 212 L3VNIs before headroom (200 + 10 + the two
+site-wide) and ten L2VNIs.
 
 ##### 1.1.2.2. One block, several sites
 
