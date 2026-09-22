@@ -176,6 +176,7 @@
             <h3 class="modal-title">Register NV-Switches</h3>
             <button class="modal-close" onclick="closeModal('registerModal')">&times;</button>
         </div>
+        <p style="padding: 0 16px; font-size: 12px; color: #8b949e;">MAC addresses are autofilled for IPv4. Enter a MAC address for each IPv6 endpoint.</p>
         <div id="switchEntries" style="overflow-y: auto; flex: 1;">
             <!-- Switch entries will be added here -->
         </div>
@@ -272,8 +273,8 @@
   ]
 }</pre>
             <p style="font-size: 12px; color: #8b949e; margin-top: 8px;">
-                Only <code>ip</code> is required. MAC addresses are auto-generated from IPs.<br>
-                Optional fields: <code>mac</code> (override), <code>port</code>, <code>user</code>, <code>password</code>, <code>rack_id</code>.
+                Each BMC and NVOS endpoint requires <code>ip</code>. Include <code>mac</code> for IPv6; IPv4 addresses can generate a MAC if omitted.<br>
+                Optional endpoint fields: <code>port</code>, <code>user</code>, <code>password</code>. Each switch can also include <code>rack_id</code>.
             </p>
         </details>
         
@@ -296,7 +297,7 @@
     let switchEntryCount = 0;
     
     // === MAC Address Generation ===
-    // Generates a locally administered MAC address from an IP address
+    // Generates a locally administered MAC address from an IPv4 address
     // Format: 02:TT:XX:XX:XX:XX where TT is type (00=BMC, 01=NVOS) and XX:XX:XX:XX is IP in hex
     function generateMacFromIP(ip, type) {
         if (!ip) return '';
@@ -309,14 +310,16 @@
         return `02:${typeHex}:${ipHex}`;
     }
     
-    // Update MAC display when IP changes
     function updateGeneratedMac(entry, type) {
         const ipInput = entry.querySelector(`.sw-${type}-ip`);
-        const macDisplay = entry.querySelector(`.sw-${type}-mac-display`);
-        if (ipInput && macDisplay) {
+        const macInput = entry.querySelector(`.sw-${type}-mac`);
+        if (ipInput && macInput) {
             const mac = generateMacFromIP(ipInput.value, type);
-            macDisplay.value = mac || '(enter valid IP)';
-            macDisplay.style.color = mac ? '#8b949e' : '#f85149';
+            // IP edits should update autofill without replacing an entered MAC.
+            if (!macInput.value || macInput.value === macInput.dataset.generatedMac) {
+                macInput.value = mac;
+                macInput.dataset.generatedMac = mac;
+            }
         }
     }
     
@@ -486,15 +489,15 @@
                         <div style="color: #58a6ff; font-weight: 500; margin-bottom: 8px;">BMC</div>
                         <input type="text" class="sw-bmc-ip" placeholder="IP Address *" style="margin-bottom: 6px;" required
                                oninput="updateGeneratedMac(this.closest('.switch-entry'), 'bmc')">
-                        <input type="text" class="sw-bmc-mac-display" placeholder="Generated MAC" readonly
-                               style="margin-bottom: 6px; background: #161b22; color: #8b949e; cursor: not-allowed;">
+                        <input type="text" class="sw-bmc-mac" placeholder="MAC Address *" aria-label="BMC MAC address" style="margin-bottom: 6px;" required
+                               oninput="delete this.dataset.generatedMac">
                     </div>
                     <div>
                         <div style="color: #58a6ff; font-weight: 500; margin-bottom: 8px;">NVOS</div>
                         <input type="text" class="sw-nvos-ip" placeholder="IP Address *" style="margin-bottom: 6px;" required
                                oninput="updateGeneratedMac(this.closest('.switch-entry'), 'nvos')">
-                        <input type="text" class="sw-nvos-mac-display" placeholder="Generated MAC" readonly
-                               style="margin-bottom: 6px; background: #161b22; color: #8b949e; cursor: not-allowed;">
+                        <input type="text" class="sw-nvos-mac" placeholder="MAC Address *" aria-label="NVOS MAC address" style="margin-bottom: 6px;" required
+                               oninput="delete this.dataset.generatedMac">
                     </div>
                 </div>
                 <div style="margin-top: 12px;">
@@ -543,8 +546,8 @@
         // Build array of switches
         const switches = [];
         for (const entry of entries) {
-            const bmcIP = entry.querySelector('.sw-bmc-ip').value;
-            const nvosIP = entry.querySelector('.sw-nvos-ip').value;
+            const bmcIP = entry.querySelector('.sw-bmc-ip').value.trim();
+            const nvosIP = entry.querySelector('.sw-nvos-ip').value.trim();
             
             // Validate required fields
             if (!bmcIP || !nvosIP) {
@@ -552,12 +555,11 @@
                 return;
             }
             
-            // Generate MACs from IPs
-            const bmcMAC = generateMacFromIP(bmcIP, 'bmc');
-            const nvosMAC = generateMacFromIP(nvosIP, 'nvos');
+            const bmcMAC = entry.querySelector('.sw-bmc-mac').value.trim() || generateMacFromIP(bmcIP, 'bmc');
+            const nvosMAC = entry.querySelector('.sw-nvos-mac').value.trim() || generateMacFromIP(nvosIP, 'nvos');
             
             if (!bmcMAC || !nvosMAC) {
-                showToast('Invalid IP address format', true);
+                showToast('Provide BMC and NVOS MAC addresses, or valid IPv4 addresses for autofill.', true);
                 return;
             }
             
@@ -580,7 +582,11 @@
             if (resp.ok) {
                 const result = await resp.json();
                 let registered = 0, updated = 0;
-                for (const r of (result.responses || [])) {
+                for (const [i, r] of (result.responses || []).entries()) {
+                    if (!r.uuid) {
+                        showToast(`Switch ${i + 1}: ${r.error || 'Registration failed'}`, true);
+                        return;
+                    }
                     // isNew is camelCase from protobuf JSON
                     if (r.isNew || r.is_new) registered++;
                     else updated++;
@@ -675,14 +681,14 @@
             if (!sw.bmc.mac) {
                 sw.bmc.mac = generateMacFromIP(sw.bmc.ip, 'bmc');
                 if (!sw.bmc.mac) {
-                    showToast(`Switch ${i + 1}: Invalid BMC IP address`, true);
+                    showToast(`Switch ${i + 1}: BMC requires mac when ip is not an IPv4 address`, true);
                     return;
                 }
             }
             if (!sw.nvos.mac) {
                 sw.nvos.mac = generateMacFromIP(sw.nvos.ip, 'nvos');
                 if (!sw.nvos.mac) {
-                    showToast(`Switch ${i + 1}: Invalid NVOS IP address`, true);
+                    showToast(`Switch ${i + 1}: NVOS requires mac when ip is not an IPv4 address`, true);
                     return;
                 }
             }
