@@ -3806,6 +3806,15 @@ func promptInstanceInterfaces(s *Session, networkConfig instanceNetworkConfig) (
 			networkConfig.selectorKey: picked.ID,
 			"isPhysical":              isPhysical,
 		}
+		if networkConfig.selectorKey == "vpcPrefixId" {
+			ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			if ipAddress != "" {
+				iface["ipAddress"] = ipAddress
+			}
+		}
 		if !isPhysical {
 			virtualFunctionID, promptErr := promptVirtualFunctionID(
 				"Virtual function ID (0-15)",
@@ -3815,15 +3824,6 @@ func promptInstanceInterfaces(s *Session, networkConfig instanceNetworkConfig) (
 				return ifaces, promptErr
 			}
 			iface["virtualFunctionId"] = virtualFunctionID
-		}
-		if networkConfig.selectorKey == "vpcPrefixId" {
-			ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
-			if promptErr != nil {
-				return ifaces, promptErr
-			}
-			if ipAddress != "" {
-				iface["ipAddress"] = ipAddress
-			}
 		}
 		ifaces = append(ifaces, iface)
 	}
@@ -3934,19 +3934,11 @@ func promptMultiDPUInstanceInterfaces(s *Session, networkConfig instanceNetworkC
 			if selectErr != nil {
 				return ifaces, selectErr
 			}
-			virtualFunctionID, promptErr := promptVirtualFunctionID(
-				fmt.Sprintf("Virtual function ID for DPU %d (0-15)", deviceInstance),
-				vfIDs.used,
-			)
-			if promptErr != nil {
-				return ifaces, promptErr
-			}
 			iface := map[string]interface{}{
 				networkConfig.selectorKey: virtual.ID,
 				"device":                  capability.name,
 				"deviceInstance":          deviceInstance,
 				"isPhysical":              false,
-				"virtualFunctionId":       virtualFunctionID,
 			}
 			ipAddress, promptErr := promptOptionalInstanceInterfaceIPAddress()
 			if promptErr != nil {
@@ -3955,6 +3947,14 @@ func promptMultiDPUInstanceInterfaces(s *Session, networkConfig instanceNetworkC
 			if ipAddress != "" {
 				iface["ipAddress"] = ipAddress
 			}
+			virtualFunctionID, promptErr := promptVirtualFunctionID(
+				fmt.Sprintf("Virtual function ID for DPU %d (0-15)", deviceInstance),
+				vfIDs.used,
+			)
+			if promptErr != nil {
+				return ifaces, promptErr
+			}
+			iface["virtualFunctionId"] = virtualFunctionID
 			ifaces = append(ifaces, iface)
 		}
 	}
