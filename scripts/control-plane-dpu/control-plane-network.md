@@ -130,13 +130,19 @@ column so that their numbers agree with each other; substitute your own ranges i
 files and in the route-target table of 1.4. Every number is configurable, and changing
 them before the site exists is far cheaper than moving a live datacenter VRF.
 
+**Size each VPC pool for its peak allocation, not for the VPCs that exist at once.** A
+VPC that changes routing profile between the internal and the external pool holds a VNI
+in both pools until the operator releases the old one, so the peak is the concurrent VPCs
+in a pool, plus every VPC that may be changing into it at the same time, plus headroom.
+1.1.2.1 gives the count.
+
 | Use | What the range must cover | Example layout used by the samples |
 |---|---|---|
 | common route-target numbers (`:50100`…`:50500`) | reserved; never used as a VNI (see below) | `50000–50999` |
-| external tenant VPCs (`[pools.external-vpc-vni]`) | one L3VNI per external VPC that may exist at the same time; individual VNIs need no registration with the datacenter (1.7.1) | `51000–55999` |
+| external tenant VPCs (`[pools.external-vpc-vni]`) | one L3VNI per external VPC that may exist at the same time, plus one for each VPC that may be changing its routing profile into this pool at the same time (a changing VPC holds a VNI in both pools until the old one is released, 1.1.2.1); individual VNIs need no registration with the datacenter (1.7.1) | `51000–55999` |
 | L2VNIs of the admin segments (`[pools.vni]`) | one per admin segment, ten per site (1.1.2.1) | `56000–56999` |
 | control-plane VNI (`fnn.controlPlaneVni`) | one per NICo site | `60000–60099` |
-| internal tenant VPCs (`[pools.vpc-vni]`) | one L3VNI per internal VPC that may exist at the same time, plus the admin VPC (`[fnn.admin_vpc].vpc_vni`) | `60100–65000` |
+| internal tenant VPCs (`[pools.vpc-vni]`) | one L3VNI per internal VPC that may exist at the same time, plus one for each VPC that may be changing its routing profile into this pool at the same time (a changing VPC holds a VNI in both pools until the old one is released, 1.1.2.1), plus the admin VPC (`[fnn.admin_vpc].vpc_vni`) | `60100–65000` |
 
 `helm-prereqs/values/nico-core.yaml` and the minimal Helm example show `1024500–1024800` for `[pools.vni]`; treat it as an example to replace with a range from
 your block, not a value to keep.
@@ -184,12 +190,19 @@ admin segments.
 
 ##### 1.1.2.1. How to size the block
 
-Count the L3VNIs as the number of tenant VPCs that may exist at the same time plus two
-(the admin VPC and the control-plane VNI); all of them must be datacenter-unique. Count
+Count the L3VNIs per pool as the number of tenant VPCs that may exist at the same time in
+that pool, plus one for each VPC that may be changing its routing profile into that pool
+at the same time. A VPC that changes profile is given a new VNI in the destination pool
+while its old VNI stays allocated in the source pool until the operator releases it, so
+for that window the VPC holds one VNI in each pool ([Changing a VPC Routing
+Profile](../../docs/manuals/vpc/changing_vpc_routing_profiles.md), [VNI Resource Pools →
+Sizing pools](../../docs/manuals/vpc/vni_resource_pools.md#sizing-pools)). Add two
+site-wide,
+the admin VPC and the control-plane VNI. All of them must be datacenter-unique. Count
 the L2VNIs as the number of admin segments the site may ever declare. Each site should
 take at least ten, which covers a fleet that grows in bursts and needs more admin
-segments. Add headroom to both counts. A site planning for 200 concurrent VPCs needs
-roughly 200 L3VNIs and ten L2VNIs.
+segments. Add headroom to both counts. A site planning for 200 concurrent VPCs with up
+to ten profile changes in flight needs roughly 210 L3VNIs and ten L2VNIs.
 
 ##### 1.1.2.2. One block, several sites
 
@@ -507,8 +520,12 @@ trusted (1.8.1).
 
 An **external** VPC serves users outside the site operator's organization, that is, the
 site operator's customers. An **internal** VPC serves the site operator's own users.
-Mechanically the difference is the routing profile's `internal` flag, which selects the
-VNI pool and the export tags ([VPC Routing
+Mechanically a routing profile carries two independent settings. `internal` selects the
+VNI pool the VPC draws from (`[pools.vpc-vni]` or `[pools.external-vpc-vni]`) and the
+tenant access tier. `route_targets_on_exports` lists the tags the VPC's routes carry; the
+common tag the datacenter VRF imports for the return path (`:50500` for external, `:50200`
+for internal, 1.4) must be in that list, or the VPC is reachable from nowhere outside the
+overlay regardless of the flag ([VPC Routing
 Profiles](../../docs/manuals/vpc/vpc_routing_profiles.md), [VNI Resource
 Pools](../../docs/manuals/vpc/vni_resource_pools.md)). Tenant VPCs reach destinations
 outside the overlay through a default route that a datacenter VRF injects into the VPC
@@ -588,7 +605,8 @@ Pools](../../docs/manuals/networking/ip_resource_pools.md) and [IP and Network
 Configuration](../../docs/provisioning/ip-and-network-configuration.md).
 
 Fictional example values. The datacenter provides the left column; the site operator
-copies each row into both files.
+copies each value into the file whose column names a field for it. An em dash means that
+file has no field for the item.
 
 | Fabric item | What to agree | Example | DPU site file | Site config TOML |
 |---|---|---|---|---|
@@ -602,13 +620,13 @@ copies each row into both files.
 | 1.1.4 | admin network | `10.10.64.0/22` | — | `[networks.admin]` |
 | 1.1.4.1 | tenant address space (external, internal, maintenance aggregates) | `10.30.0.0/16`, `10.31.0.0/16` | — | `site_fabric_prefixes` = the aggregates; `deny_prefixes` = admin network, out-of-band prefixes, and the control-plane prefixes the site decides to withhold |
 | 1.1.4 | per-rack out-of-band prefixes (in the SMN) | `10.20.<rack>.0/24` | — | DHCP scopes are selected by the relay addresses ([IP and Network Configuration](../../docs/provisioning/ip-and-network-configuration.md#22-dhcp-configuration-for-physical-machine-interfaces)) |
-| 1.5.1 | SMN RT, managed hosts | `:900` | `fnn.commonManagedNodeBmcRouteTarget: 900` | `PRIVILEGED_INTERNAL` import |
+| 1.5.1 | SMN RT, managed hosts | `:900` | `fnn.commonManagedNodeBmcRouteTarget: 900` | — (the site controllers import it through the DPU site file; the shipped `PRIVILEGED_INTERNAL` profile also imports it, for NICo's own services only, 1.8.1) |
 | 1.5.2 | site controllers' own OOB segment (datacenter's; SMN companion RT if it has one) | `:901`, or a plain VLAN | not imported | — |
 | 1.6.1 | NICo control-plane RT | `:50100` | `fnn.commonSiteControllerRouteTarget: 50100` | `[fnn].additional_route_target_imports` (site-wide), or every profile's `route_target_imports` |
 | 1.6.2 | NICo admin RT | `:50400` | `fnn.commonAdminNetworkTarget: 50400` | admin VPC export |
 | 1.7.1 | external tenant VNI range | `51000–51255` for up to 256 concurrent tenant VPCs, inside the block; no per-VNI registration under Mechanism 1 | — | `[pools.external-vpc-vni]` = that range; tenants default to `EXTERNAL` |
 | 1.7.1 | default-route target for external VPCs (Mechanism 1) | agreed value, `<datacenterAsn>:<n>`; exported by the internet gateway VRF, which also imports `:50500` | — | `[fnn.routing_profiles.EXTERNAL].route_target_imports` = that target |
-| 1.4 | other SMN segments the site controllers must reach | jump hosts `:101`, power shelves `:1003` | `fnn.routeTargetsToImport` | `PRIVILEGED_INTERNAL` imports |
+| 1.4 | other SMN segments the site controllers must reach | jump hosts `:101`, power shelves `:1003` | `fnn.routeTargetsToImport` | — (DPU site file only; `PRIVILEGED_INTERNAL` may import them for NICo's own services) |
 | 1.4.3 | routing profiles in use (common tags the site controllers must import) | `EXTERNAL` only → `:50500` | `fnn.routeTargetsToImport` | `[fnn.routing_profiles.<name>]` definitions ([VPC Routing Profiles](../../docs/manuals/vpc/vpc_routing_profiles.md)) |
 
 The `vni = N` field of every route-target entry in the site config TOML is a
