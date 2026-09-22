@@ -455,6 +455,9 @@ pub mod profile {
     }
 
     impl AttesterSelection {
+        /// Rejects a selection whose mode and patterns disagree, and any
+        /// empty pattern. Allowlist and denylist require at least one
+        /// pattern; all and none take none.
         pub fn validate(&self) -> Result<(), ConfigValidationError> {
             let patterned = matches!(
                 self.mode,
@@ -576,6 +579,8 @@ pub mod profile {
     }
 
     impl AttestationPolicyDocument {
+        /// Wraps a selection in a document stamped with the schema version
+        /// this build writes.
         pub fn new(selection: AttesterSelection) -> Self {
             Self {
                 schema_version: POLICY_SCHEMA_VERSION,
@@ -583,6 +588,9 @@ pub mod profile {
             }
         }
 
+        /// Rejects a document at a schema version this build does not write,
+        /// then validates the selection it carries. Called on the way into
+        /// storage, so a document that fails here is never persisted.
         pub fn validate(&self) -> Result<(), ConfigValidationError> {
             if self.schema_version != POLICY_SCHEMA_VERSION {
                 return Err(ConfigValidationError::invalid_value(format!(
