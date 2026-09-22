@@ -45,11 +45,9 @@ The following are broken into tasks:
   in the dev environment
   to work correctly. Requests are made through the client object and passed a one-shot channel for the response (
   avoiding a lookup to find the machine for a response).
-* tui - a service that handles the UI (when enabled). It simply handles user input (up and down arrows, esc, and q only)
-  as well as receives status updates for display.
-* machine-a-tron - the application level that starts all the services and waits for the UI to tell it to stop.
-* host_machine - each host gets a task that runs through states and making API requests. periodically sends status
-  updates to the UI and runs the DPU states owned by the host.
+* machine-a-tron - the application-level task that starts all services and waits for a shutdown signal.
+* host_machine - a task for each host that progresses through states, makes API requests, and periodically runs the
+  DPU state machines owned by the host.
 * bmc - runs a bmc-mock that responds to redfish calls using templates in the configured directory
 
 ## How to run against a development instance
@@ -117,7 +115,7 @@ setup with the appropriate overrides for redfish so that it will send all reques
 
 > Note: If you follow the above steps to configure nico and machine-a-tron in your cluster, then running
 > machine-a-tron locally will not work, because nico will be configured to always use the in-cluster machine-a-tron
-> for all libredfish calls. If you want to go back to running the TUI locally, you'll want to manually edit the
+> for all libredfish calls. If you want to go back to running locally, you'll want to manually edit the
 > generated nico-api-site-config.toml and drop the `override_target_host` line. You may also want to edit the
 > `mat.toml` in the same directory and set the host_count to 0 so that the in-cluster machine-a-tron doesn't run any
 > mock machines.

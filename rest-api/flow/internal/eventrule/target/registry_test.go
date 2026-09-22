@@ -36,8 +36,9 @@ func TestRegistry_Lookup(t *testing.T) {
 				},
 			),
 			want: []Target{{
-				Kind: eventrule.ResourceKindComponent,
-				ID:   componentID,
+				Kind:   eventrule.ResourceKindComponent,
+				ID:     componentID,
+				RackID: rackID,
 			}},
 		},
 		{
@@ -63,7 +64,7 @@ func TestRegistry_Lookup(t *testing.T) {
 					ComponentType: flowtypes.ComponentTypeCompute,
 				},
 			),
-			want: []Target{{Kind: eventrule.ResourceKindRack, ID: rackID}},
+			want: []Target{{Kind: eventrule.ResourceKindRack, ID: rackID, RackID: rackID}},
 		},
 		{
 			name: "affected components from component",
@@ -76,7 +77,7 @@ func TestRegistry_Lookup(t *testing.T) {
 					ComponentType: flowtypes.ComponentTypeCompute,
 				},
 			),
-			want: []Target{{Kind: eventrule.ResourceKindComponent, ID: componentID}},
+			want: []Target{{Kind: eventrule.ResourceKindComponent, ID: componentID, RackID: rackID}},
 		},
 		{
 			name: "affected components from rack",
@@ -88,7 +89,7 @@ func TestRegistry_Lookup(t *testing.T) {
 					RackID: rackID,
 				},
 			),
-			want: []Target{{Kind: eventrule.ResourceKindRack, ID: rackID}},
+			want: []Target{{Kind: eventrule.ResourceKindRack, ID: rackID, RackID: rackID}},
 		},
 		{
 			name: "invalid strategy",
@@ -122,7 +123,7 @@ func TestRegistry_Lookup(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			resolver, err := registry.Lookup(
-				test.request.Envelope.Type,
+				test.request.EventType,
 				test.request.Strategy,
 			)
 			if test.wantLookupErr != "" {
@@ -144,7 +145,10 @@ func TestRegistry_Lookup(t *testing.T) {
 	}
 
 	t.Run("event-specific resolver overrides generic resolver", func(t *testing.T) {
-		want := []Target{{Kind: eventrule.ResourceKindRack, ID: uuid.New()}}
+		specificRackID := uuid.New()
+		want := []Target{{
+			Kind: eventrule.ResourceKindRack, ID: specificRackID, RackID: specificRackID,
+		}}
 		registry := New()
 		require.NoError(t, registry.Register(
 			"hardware.leak.detected",
@@ -161,7 +165,7 @@ func TestRegistry_Lookup(t *testing.T) {
 				ComponentType: flowtypes.ComponentTypeCompute,
 			},
 		)
-		resolver, err := registry.Lookup(request.Envelope.Type, request.Strategy)
+		resolver, err := registry.Lookup(request.EventType, request.Strategy)
 		require.NoError(t, err)
 		require.NotNil(t, resolver)
 		resolved, err := resolver.Resolve(context.Background(), request)
@@ -289,9 +293,9 @@ func targetRequest(
 	resource eventrule.ResolvedResource,
 ) ResolveRequest {
 	return ResolveRequest{
-		Envelope: eventrule.Envelope{Type: "hardware.leak.detected"},
-		Resource: resource,
-		Strategy: strategy,
+		EventType: "hardware.leak.detected",
+		Resource:  resource,
+		Strategy:  strategy,
 	}
 }
 

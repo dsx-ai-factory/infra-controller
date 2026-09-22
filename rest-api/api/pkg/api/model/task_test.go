@@ -16,6 +16,44 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 )
 
+func TestAPITaskStats_FromProto(t *testing.T) {
+	tests := []struct {
+		name    string
+		initial APITaskStats
+		stats   *flowv1.TaskStats
+		want    APITaskStats
+	}{
+		{
+			name: "nil stats clear counts",
+			initial: APITaskStats{
+				PendingTaskCount: 2,
+				ActiveTaskCount:  3,
+			},
+			want: APITaskStats{},
+		},
+		{
+			name: "combines waiting and pending counts",
+			stats: &flowv1.TaskStats{
+				WaitingTaskCount: 2,
+				PendingTaskCount: 3,
+				RunningTaskCount: 4,
+			},
+			want: APITaskStats{
+				PendingTaskCount: 5,
+				ActiveTaskCount:  4,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.initial
+			got.FromProto(tt.stats)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestNewAPITask(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -123,14 +161,14 @@ func TestNewAPITask(t *testing.T) {
 			},
 		},
 		{
-			name: "task with waiting status",
+			name: "task with waiting status is pending in REST",
 			task: &flowv1.Task{
 				Id:     &flowv1.UUID{Id: "task-006"},
 				Status: flowv1.TaskStatus_TASK_STATUS_WAITING,
 			},
 			expected: &APITask{
 				ID:     "task-006",
-				Status: "Waiting",
+				Status: "Pending",
 			},
 		},
 	}

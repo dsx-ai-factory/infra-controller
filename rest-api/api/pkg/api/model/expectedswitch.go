@@ -266,7 +266,7 @@ type APIExpectedSwitch struct {
 	// HostID is the optional host identifier
 	HostID *int32 `json:"hostId"`
 	// Labels is the labels of the expected switch
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// Created indicates the ISO datetime string for when the ExpectedSwitch was created
 	Created time.Time `json:"created"`
 	// Updated indicates the ISO datetime string for when the ExpectedSwitch was last updated
@@ -290,7 +290,7 @@ func NewAPIExpectedSwitch(dbModel *cdbm.ExpectedSwitch) *APIExpectedSwitch {
 		SlotID:             dbModel.SlotID,
 		TrayIdx:            dbModel.TrayIdx,
 		HostID:             dbModel.HostID,
-		Labels:             dbModel.Labels,
+		Labels:             APILabels(dbModel.Labels),
 		Created:            dbModel.Created,
 		Updated:            dbModel.Updated,
 	}

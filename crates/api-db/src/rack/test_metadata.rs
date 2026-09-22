@@ -41,6 +41,7 @@ async fn test_rack_metadata_defaults(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     assert_eq!(rack.metadata.description, "");
     assert!(rack.metadata.labels.is_empty());
     assert_eq!(rack.version.version_nr(), 1);
+    assert_eq!(rack.controller_state.version, rack.version);
 
     txn.rollback().await?;
     Ok(())

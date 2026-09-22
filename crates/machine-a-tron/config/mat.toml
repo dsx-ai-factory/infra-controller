@@ -22,23 +22,12 @@
 
 carbide_api_url = "https://carbide-api.forge:443"
 
-# tui_enabled enables a TUI view of machine-a-tron. If set to true, you need to
-# specify log_file to redirect logs.
-#
-# tui_enabled = true
-
-# Logs will be written here, because machine-a-tron shows a TUI by default. You
-# can omit this if tui_enabled = false
+# Logs will be written here.
 log_file = "/tmp/mat.log"
 
 # Log format can be "compact" (the default) or "logfmt". Kubernetes deployments
 # use logfmt on stdout so log collectors can preserve structured tracing fields.
 log_format = "compact"
-
-# Network interface to bind to when creating addresses for BMC mocks. BMC mocks
-# will be configured with whatever IP address carbide assigns them, so they will
-# assign new addresses to this interface via `ip address add`.
-interface = "cni0"
 
 # DHCP uses the Carbide API directly by default. To exercise the DHCP server's
 # relayed packet path, select udp_relay and configure its destination, local
@@ -101,9 +90,7 @@ enable_ipmi_simulation = false
 # atomic racks declared above.
 # rack_id = "rack-001"
 host_count = 3
-vpc_count = 10
 dpu_per_host_count = 1
-subnets_per_vpc = 2
 dpu_reboot_delay = 20  # in units of seconds
 host_reboot_delay = 20 # in units of seconds
 

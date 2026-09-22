@@ -17,6 +17,7 @@
 
 use std::time::Duration;
 
+use carbide_uuid::rack::RackId;
 use tokio_stream::StreamExt;
 use tonic::metadata::MetadataMap;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
@@ -29,10 +30,17 @@ use super::proto::{
     SubscriptionMode,
 };
 use crate::HealthError;
-use crate::config::{MtlsProfileConfig, NvueGnmiPaths};
+use crate::config::{
+    MtlsProfileConfig, NvueGnmiEncoding, NvueGnmiPaths, NvueGnmiSubscriptionConfig,
+    NvueGnmiSubscriptionMode,
+};
 
+const GNMI_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(300);
+const GNMI_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Builds the paths for the primary NVUE gNMI SAMPLE stream.
 pub(super) fn nvue_subscribe_paths(paths_config: &NvueGnmiPaths) -> Vec<Path> {
-    let mut paths = Vec::with_capacity(5);
+    let mut paths = Vec::with_capacity(4);
 
     if paths_config.components_enabled {
         paths.push(Path {
@@ -98,40 +106,42 @@ pub(super) fn nvue_subscribe_paths(paths_config: &NvueGnmiPaths) -> Vec<Path> {
         });
     }
 
-    if paths_config.leak_sensors_enabled {
-        paths.push(Path {
-            elem: vec![
-                PathElem {
-                    name: "platform-general".into(),
-                    key: Default::default(),
-                },
-                PathElem {
-                    name: "leak-sensors".into(),
-                    key: Default::default(),
-                },
-                PathElem {
-                    name: "leak-sensor".into(),
-                    key: Default::default(),
-                },
-                PathElem {
-                    name: "state".into(),
-                    key: Default::default(),
-                },
-                PathElem {
-                    name: "state".into(),
-                    key: Default::default(),
-                },
-            ],
-            ..Default::default()
-        });
-    }
-
     paths
+}
+
+/// Builds the path for the independent leak-sensor SAMPLE stream.
+pub(super) fn nvue_leak_sensor_subscribe_path() -> Path {
+    Path {
+        elem: vec![
+            PathElem {
+                name: "platform-general".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "leak-sensors".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "leak-sensor".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "state".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "state".into(),
+                key: Default::default(),
+            },
+        ],
+        ..Default::default()
+    }
 }
 
 #[derive(Clone)]
 pub(super) struct GnmiClient {
     switch_id: String,
+    rack_id: Option<RackId>,
     host: String,
     port: u16,
     username: Option<String>,
@@ -146,6 +156,9 @@ pub(super) struct GnmiClientConfig {
     /// Switch identifier used in logs and error messages.
     pub switch_id: String,
 
+    /// Optional rack identifier added to endpoint-scoped logs.
+    pub rack_id: Option<RackId>,
+
     /// Switch host or IP address used for the gNMI channel.
     pub host: String,
 
@@ -158,7 +171,7 @@ pub(super) struct GnmiClientConfig {
     /// Optional password sent as gNMI `password` metadata.
     pub password: Option<String>,
 
-    /// Timeout applied to gNMI connection and RPC operations.
+    /// Timeout applied independently to connection establishment and RPC opening.
     pub request_timeout: Duration,
 
     /// Whether legacy non-mTLS connections accept invalid switch certificates.
@@ -204,6 +217,7 @@ impl GnmiClient {
     pub(super) fn new(config: GnmiClientConfig) -> Self {
         Self {
             switch_id: config.switch_id,
+            rack_id: config.rack_id,
             host: config.host,
             port: config.port,
             username: config.username,
@@ -237,7 +251,12 @@ impl GnmiClient {
         )
         .await?
         .connect_timeout(self.request_timeout)
-        .timeout(self.request_timeout);
+        .timeout(self.request_timeout)
+        // Periodic HTTP/2 PINGs make transport loss observable when a peer
+        // stops acknowledging frames without closing the Subscribe stream.
+        .http2_keep_alive_interval(GNMI_HTTP2_KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(GNMI_HTTP2_KEEPALIVE_TIMEOUT)
+        .keep_alive_while_idle(true);
 
         let channel = endpoint.connect().await.map_err(|e| {
             HealthError::GnmiError(format!(
@@ -250,12 +269,14 @@ impl GnmiClient {
             tracing::debug!(
                 switch_id = %self.switch_id,
                 target = %target,
+                rack_id = self.rack_id.as_ref().map(tracing::field::display),
                 "gNMI TLS channel established with certificate verification disabled"
             );
         } else {
             tracing::debug!(
                 switch_id = %self.switch_id,
                 target = %target,
+                rack_id = self.rack_id.as_ref().map(tracing::field::display),
                 "gNMI TLS channel established"
             );
         }
@@ -269,28 +290,17 @@ impl GnmiClient {
         paths: &[Path],
         sample_interval_nanos: u64,
     ) -> Result<tonic::Streaming<proto::SubscribeResponse>, HealthError> {
-        let mut client = self.connect().await?;
-
         let subscribe_request = build_sample_subscribe_request(paths, sample_interval_nanos);
-
-        let auth = build_auth_metadata(&self.username, &self.password)?;
-
-        let stream = tokio_stream::once(subscribe_request).chain(tokio_stream::pending());
-
-        let request = Request::from_parts(auth, Extensions::default(), stream);
-
-        let response = client
-            .subscribe(request)
-            .await
-            .map_err(HealthError::GnmiStatus)?;
+        let response = self.subscribe_request(subscribe_request).await?;
 
         tracing::debug!(
             switch_id = %self.switch_id,
             sample_interval_nanoseconds = sample_interval_nanos,
+            rack_id = self.rack_id.as_ref().map(tracing::field::display),
             "gNMI SAMPLE stream opened"
         );
 
-        Ok(response.into_inner())
+        Ok(response)
     }
 
     /// open a gNMI ON_CHANGE streaming subscription
@@ -299,25 +309,31 @@ impl GnmiClient {
         prefix: &Path,
         paths: &[Path],
     ) -> Result<tonic::Streaming<proto::SubscribeResponse>, HealthError> {
-        let mut client = self.connect().await?;
-
         let subscribe_request = build_on_change_subscribe_request(prefix, paths);
+        let response = self.subscribe_request(subscribe_request).await?;
 
+        tracing::debug!(
+            switch_id = %self.switch_id,
+            rack_id = self.rack_id.as_ref().map(tracing::field::display),
+            "gNMI ON_CHANGE stream opened"
+        );
+
+        Ok(response)
+    }
+
+    pub(super) async fn subscribe_request(
+        &self,
+        subscribe_request: SubscribeRequest,
+    ) -> Result<tonic::Streaming<proto::SubscribeResponse>, HealthError> {
+        let mut client = self.connect().await?;
         let auth = build_auth_metadata(&self.username, &self.password)?;
-
         let stream = tokio_stream::once(subscribe_request).chain(tokio_stream::pending());
-
         let request = Request::from_parts(auth, Extensions::default(), stream);
 
         let response = client
             .subscribe(request)
             .await
             .map_err(HealthError::GnmiStatus)?;
-
-        tracing::debug!(
-            switch_id = %self.switch_id,
-            "gNMI ON_CHANGE stream opened"
-        );
 
         Ok(response.into_inner())
     }
@@ -391,6 +407,93 @@ fn build_sample_subscribe_request(paths: &[Path], sample_interval_nanos: u64) ->
         )),
         extension: vec![],
     }
+}
+
+/// Builds a fixed-STREAM request from one validated additional subscription.
+pub(super) fn build_extended_subscribe_request(
+    config: &NvueGnmiSubscriptionConfig,
+) -> Result<SubscribeRequest, HealthError> {
+    let prefix = Path {
+        origin: config.origin.clone(),
+        elem: path_elements(&config.prefix),
+        target: config.target.clone(),
+        ..Default::default()
+    };
+
+    let subscription = config
+        .paths
+        .iter()
+        .map(|path| {
+            Ok(Subscription {
+                path: Some(Path {
+                    elem: path_elements(path),
+                    ..Default::default()
+                }),
+                mode: match config.mode {
+                    NvueGnmiSubscriptionMode::TargetDefined => SubscriptionMode::TargetDefined,
+                    NvueGnmiSubscriptionMode::OnChange => SubscriptionMode::OnChange,
+                    NvueGnmiSubscriptionMode::Sample => SubscriptionMode::Sample,
+                }
+                .into(),
+                sample_interval: duration_nanos(
+                    config.sample_interval,
+                    "sample_interval",
+                    &config.name,
+                )?,
+                suppress_redundant: config.suppress_redundant,
+                heartbeat_interval: duration_nanos(
+                    config.heartbeat_interval,
+                    "heartbeat_interval",
+                    &config.name,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, HealthError>>()?;
+
+    Ok(SubscribeRequest {
+        request: Some(proto::subscribe_request::Request::Subscribe(
+            SubscriptionList {
+                prefix: Some(prefix),
+                subscription,
+                mode: SubscriptionListMode::Stream.into(),
+                encoding: match config.encoding {
+                    NvueGnmiEncoding::Json => Encoding::Json,
+                    NvueGnmiEncoding::Ascii => Encoding::Ascii,
+                    NvueGnmiEncoding::JsonIetf => Encoding::JsonIetf,
+                }
+                .into(),
+                updates_only: config.updates_only,
+                ..Default::default()
+            },
+        )),
+        extension: Vec::new(),
+    })
+}
+
+fn path_elements(elements: &[String]) -> Vec<PathElem> {
+    elements
+        .iter()
+        .map(|name| PathElem {
+            name: name.clone(),
+            key: Default::default(),
+        })
+        .collect()
+}
+
+fn duration_nanos(
+    duration: Option<Duration>,
+    field: &str,
+    subscription_name: &str,
+) -> Result<u64, HealthError> {
+    let Some(duration) = duration else {
+        return Ok(0);
+    };
+
+    u64::try_from(duration.as_nanos()).map_err(|_| {
+        HealthError::GnmiError(format!(
+            "extended gNMI subscription {subscription_name:?} {field} does not fit in u64 nanoseconds"
+        ))
+    })
 }
 
 fn build_auth_metadata(
@@ -778,74 +881,87 @@ mod tests {
     }
 
     #[test]
-    fn nvue_subscribe_path_cases() {
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        enum Group {
-            Components,
-            Interfaces,
-            PlatformGeneral,
-            LeakSensors,
-        }
+    fn primary_subscribe_paths_exclude_leak_sensors() {
+        check_values(
+            [
+                Check {
+                    scenario: "no primary paths",
+                    input: NvueGnmiPaths {
+                        components_enabled: false,
+                        interfaces_enabled: false,
+                        platform_general_enabled: false,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: String::new(),
+                },
+                Check {
+                    scenario: "components only",
+                    input: NvueGnmiPaths {
+                        components_enabled: true,
+                        interfaces_enabled: false,
+                        platform_general_enabled: false,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: "components/component".to_string(),
+                },
+                Check {
+                    scenario: "interfaces only",
+                    input: NvueGnmiPaths {
+                        components_enabled: false,
+                        interfaces_enabled: true,
+                        platform_general_enabled: false,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: "interfaces/interface".to_string(),
+                },
+                Check {
+                    scenario: "platform general only",
+                    input: NvueGnmiPaths {
+                        components_enabled: false,
+                        interfaces_enabled: false,
+                        platform_general_enabled: true,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: "platform-general/state,platform-general/versions".to_string(),
+                },
+                Check {
+                    scenario: "all primary paths",
+                    input: NvueGnmiPaths {
+                        leak_sensors_enabled: true,
+                        ..Default::default()
+                    },
+                    expect: "components/component,interfaces/interface,platform-general/state,platform-general/versions".to_string(),
+                },
+            ],
+            |config| {
+                nvue_subscribe_paths(&config)
+                    .into_iter()
+                    .map(|path| {
+                        path.elem
+                            .into_iter()
+                            .map(|elem| elem.name)
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+        );
+    }
 
-        use Group::{Components, Interfaces, LeakSensors, PlatformGeneral};
+    #[test]
+    fn leak_sensor_path_is_built_separately() {
+        let actual = nvue_leak_sensor_subscribe_path()
+            .elem
+            .into_iter()
+            .map(|elem| elem.name)
+            .collect::<Vec<_>>()
+            .join("/");
 
-        const COMPONENTS: &str = "components/component";
-        const INTERFACES: &str = "interfaces/interface";
-        const PLATFORM_STATE: &str = "platform-general/state";
-        const PLATFORM_VERSIONS: &str = "platform-general/versions";
-        const LEAKS: &str = "platform-general/leak-sensors/leak-sensor/state/state";
-
-        let cases = [
-            &[][..],
-            &[Components][..],
-            &[Interfaces][..],
-            &[Components, Interfaces][..],
-            &[PlatformGeneral][..],
-            &[Components, PlatformGeneral][..],
-            &[Interfaces, PlatformGeneral][..],
-            &[Components, Interfaces, PlatformGeneral][..],
-            &[LeakSensors][..],
-            &[Components, LeakSensors][..],
-            &[Interfaces, LeakSensors][..],
-            &[Components, Interfaces, LeakSensors][..],
-            &[PlatformGeneral, LeakSensors][..],
-            &[Components, PlatformGeneral, LeakSensors][..],
-            &[Interfaces, PlatformGeneral, LeakSensors][..],
-            &[Components, Interfaces, PlatformGeneral, LeakSensors][..],
-        ];
-
-        for groups in cases {
-            let config = NvueGnmiPaths {
-                components_enabled: groups.contains(&Components),
-                interfaces_enabled: groups.contains(&Interfaces),
-                platform_general_enabled: groups.contains(&PlatformGeneral),
-                leak_sensors_enabled: groups.contains(&LeakSensors),
-            };
-
-            let actual = nvue_subscribe_paths(&config)
-                .into_iter()
-                .map(|path| {
-                    path.elem
-                        .into_iter()
-                        .map(|elem| elem.name)
-                        .collect::<Vec<_>>()
-                        .join("/")
-                })
-                .collect::<Vec<_>>();
-
-            let expected = groups
-                .iter()
-                .flat_map(|group| match group {
-                    Components => &[COMPONENTS][..],
-                    Interfaces => &[INTERFACES][..],
-                    PlatformGeneral => &[PLATFORM_STATE, PLATFORM_VERSIONS][..],
-                    LeakSensors => &[LEAKS][..],
-                })
-                .copied()
-                .collect::<Vec<_>>();
-
-            assert_eq!(actual, expected, "enabled groups: {groups:?}");
-        }
+        assert_eq!(
+            actual,
+            "platform-general/leak-sensors/leak-sensor/state/state"
+        );
     }
 
     #[test]
@@ -931,5 +1047,61 @@ mod tests {
                 .is_some_and(|path| path.elem.is_empty()),
             "empty path subscribes to all events under prefix"
         );
+    }
+
+    #[test]
+    fn extended_subscribe_request_preserves_subscription_contract() {
+        let config = NvueGnmiSubscriptionConfig {
+            name: "external_metrics".to_string(),
+            target: "switch".to_string(),
+            origin: "openconfig".to_string(),
+            prefix: vec!["interfaces".to_string()],
+            encoding: NvueGnmiEncoding::JsonIetf,
+            updates_only: true,
+            mode: NvueGnmiSubscriptionMode::Sample,
+            sample_interval: Some(Duration::from_secs(10)),
+            suppress_redundant: true,
+            heartbeat_interval: Some(Duration::from_secs(60)),
+            paths: vec![
+                vec!["interface".to_string(), "state".to_string()],
+                vec!["interface".to_string(), "counter".to_string()],
+            ],
+            metrics: Vec::new(),
+        };
+
+        let request = build_extended_subscribe_request(&config)
+            .expect("validated extended request should build");
+
+        let Some(proto::subscribe_request::Request::Subscribe(list)) = request.request else {
+            panic!("extended request should contain a subscription list");
+        };
+
+        assert_eq!(list.mode, i32::from(SubscriptionListMode::Stream));
+        assert_eq!(list.encoding, i32::from(Encoding::JsonIetf));
+        assert!(list.updates_only);
+
+        let prefix = list
+            .prefix
+            .expect("extended request should contain a prefix");
+
+        assert_eq!(prefix.target, "switch");
+        assert_eq!(prefix.origin, "openconfig");
+        assert_eq!(prefix.elem[0].name, "interfaces");
+
+        assert_eq!(list.subscription.len(), 2);
+
+        for subscription in &list.subscription {
+            assert_eq!(subscription.mode, i32::from(SubscriptionMode::Sample));
+            assert_eq!(subscription.sample_interval, 10_000_000_000);
+            assert!(subscription.suppress_redundant);
+            assert_eq!(subscription.heartbeat_interval, 60_000_000_000);
+        }
+
+        assert!(list.subscription.iter().all(|subscription| {
+            subscription
+                .path
+                .as_ref()
+                .is_some_and(|path| path.elem.iter().all(|element| element.key.is_empty()))
+        }));
     }
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -20,6 +21,23 @@ import (
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
+
+func TestDpuExtensionServiceDpuTargetFromProto(t *testing.T) {
+	allActive := corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE
+	target, err := DpuExtensionServiceDpuTargetFromProto(&allActive)
+	require.NoError(t, err)
+	require.NotNil(t, target)
+	assert.Equal(t, DpuExtensionServiceDpuTargetAllActive, *target)
+
+	target, err = DpuExtensionServiceDpuTargetFromProto(nil)
+	require.NoError(t, err)
+	assert.Nil(t, target)
+
+	unknown := corev1.DpuExtensionServiceDpuTarget(99)
+	target, err = DpuExtensionServiceDpuTargetFromProto(&unknown)
+	assert.Error(t, err)
+	assert.Nil(t, target)
+}
 
 func TestDpuExtensionServiceVersionInfo_FromProto(t *testing.T) {
 	fallbackTime := db.GetCurTime()
@@ -89,6 +107,72 @@ func TestDpuExtensionServiceVersionInfo_FromProto(t *testing.T) {
 					got.Observability.Configs[0].GetPrometheus().GetEndpoint(),
 				)
 			}
+		})
+	}
+}
+
+func TestDpuExtensionServiceStatusFromLifecycleStatus(t *testing.T) {
+	tests := []struct {
+		name            string
+		lifecycleStatus *corev1.LifecycleStatus
+		expectedStatus  string
+		expectError     bool
+	}{
+		{
+			name:        "absent lifecycle status errors",
+			expectError: true,
+		},
+		{
+			name:            "undecodable lifecycle state errors",
+			lifecycleStatus: &corev1.LifecycleStatus{State: "ready"},
+			expectError:     true,
+		},
+		{
+			name:            "unrecognized lifecycle state errors",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"unknown"}`},
+			expectError:     true,
+		},
+		{
+			name:            "creating maps to pending",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"creating"}`},
+			expectedStatus:  DpuExtensionServiceStatusPending,
+		},
+		{
+			name:            "ready maps to ready",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"ready"}`},
+			expectedStatus:  DpuExtensionServiceStatusReady,
+		},
+		{
+			name:            "updating maps to updating",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"updating"}`},
+			expectedStatus:  DpuExtensionServiceStatusUpdating,
+		},
+		{
+			name:            "deleting maps to deleting",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"deleting"}`},
+			expectedStatus:  DpuExtensionServiceStatusDeleting,
+		},
+		{
+			name:            "deleted maps to deleting",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"deleted"}`},
+			expectedStatus:  DpuExtensionServiceStatusDeleting,
+		},
+		{
+			name:            "failed maps to error",
+			lifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"failed"}`},
+			expectedStatus:  DpuExtensionServiceStatusError,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			status, err := DpuExtensionServiceStatusFromLifecycleStatus(tc.lifecycleStatus)
+			if tc.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tc.expectedStatus, status)
 		})
 	}
 }
@@ -167,7 +251,8 @@ func TestDpuExtensionServiceSQLDAO_Create(t *testing.T) {
 					DpuExtensionServiceID: cutil.GetPtr(uuid.New()),
 					Name:                  "test-service-1",
 					Description:           &description,
-					ServiceType:           DpuExtensionServiceServiceTypeKubernetesPod,
+					ServiceType:           DpuExtensionServiceServiceTypeDpfHelmChart,
+					DpuTarget:             cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
 					SiteID:                site.ID,
 					TenantID:              tenant.ID,
 					Version:               &version,
@@ -240,6 +325,7 @@ func TestDpuExtensionServiceSQLDAO_Create(t *testing.T) {
 					assert.Equal(t, input.Name, des.Name)
 					assert.Equal(t, input.Description, des.Description)
 					assert.Equal(t, input.ServiceType, des.ServiceType)
+					assert.Equal(t, input.DpuTarget, des.DpuTarget)
 					assert.Equal(t, input.SiteID, des.SiteID)
 					assert.Equal(t, input.TenantID, des.TenantID)
 					assert.Equal(t, input.Status, des.Status)

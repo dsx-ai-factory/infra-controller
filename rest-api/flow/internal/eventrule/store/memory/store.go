@@ -13,11 +13,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// Store implements rule, binding, and execution persistence in memory.
+// Store implements all event-rule persistence in memory.
 type Store struct {
 	mu              sync.RWMutex
 	rules           map[uuid.UUID]dbmodel.EventRule
 	bindings        map[uuid.UUID]dbmodel.EventRuleBinding
+	events          map[uuid.UUID]dbmodel.Event
+	eventsByKey     map[eventrule.EventKey]uuid.UUID
 	executions      map[uuid.UUID]*memoryExecution
 	executionsByKey map[eventrule.ExecutionKey]uuid.UUID
 	now             func() time.Time
@@ -37,14 +39,12 @@ func NewWithClock(now func() time.Time) *Store {
 	return &Store{
 		rules:           make(map[uuid.UUID]dbmodel.EventRule),
 		bindings:        make(map[uuid.UUID]dbmodel.EventRuleBinding),
+		events:          make(map[uuid.UUID]dbmodel.Event),
+		eventsByKey:     make(map[eventrule.EventKey]uuid.UUID),
 		executions:      make(map[uuid.UUID]*memoryExecution),
 		executionsByKey: make(map[eventrule.ExecutionKey]uuid.UUID),
 		now:             now,
 	}
 }
 
-var (
-	_ eventrule.RuleStore      = (*Store)(nil)
-	_ eventrule.BindingStore   = (*Store)(nil)
-	_ eventrule.ExecutionStore = (*Store)(nil)
-)
+var _ eventrule.Store = (*Store)(nil)

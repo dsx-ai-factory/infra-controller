@@ -185,15 +185,53 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 			activeVersions = controllerDpuExtensionService.ActiveVersions
 		}
 
+		var dpuTarget *string
+		if dpuExtensionService.ServiceType == cdbm.DpuExtensionServiceServiceTypeDpfHelmChart {
+			controllerDpuTarget, targetErr := cdbm.DpuExtensionServiceDpuTargetFromProto(controllerDpuExtensionService.DpuTarget)
+			if targetErr != nil {
+				slogger.Error().Err(targetErr).Msg("failed to map DPU Extension Service DPU target")
+			} else if controllerDpuTarget != nil &&
+				(dpuExtensionService.DpuTarget == nil || *dpuExtensionService.DpuTarget != *controllerDpuTarget) {
+				dpuTarget = controllerDpuTarget
+			}
+		}
+
+		// Core reconciles a DPF Helm chart asynchronously, so its lifecycle state owns the
+		// status and supersedes the presence-based status above. Without a usable state the
+		// stored status is kept rather than inferred from the service being reported.
+		if dpuExtensionService.ServiceType == cdbm.DpuExtensionServiceServiceTypeDpfHelmChart {
+			status = nil
+			statusMessage = nil
+
+			updatedStatus, cerr := cdbm.DpuExtensionServiceStatusFromLifecycleStatus(controllerDpuExtensionService.LifecycleStatus)
+			if cerr != nil {
+				slogger.Error().Err(cerr).Msg("failed to derive DPU Extension Service status from Core lifecycle status")
+			} else if updatedStatus != dpuExtensionService.Status {
+				status = cutil.GetPtr(updatedStatus)
+				statusMessage = cutil.GetPtr(fmt.Sprintf("Core reports DPU Extension Service in %s status", updatedStatus))
+			}
+		}
+
 		needsUpdate := status != nil ||
 			isMissingOnSite != nil ||
+			dpuTarget != nil ||
 			version != nil ||
 			versionInfo != nil ||
 			activeVersions != nil
 
+		// VersionInfo carries the Data, Credentials and Observability an API update sets, so a
+		// row written since the Site collected this inventory holds changes the snapshot cannot
+		// know about and writing the reported values over them would lose those edits.
+		if needsUpdate && site.IsTimeWithinStaleInventoryThreshold(dpuExtensionService.Updated) {
+			slogger.Info().Msg("not updating DpuExtensionService yet because it changed more recently than the inventory interval")
+
+			continue
+		}
+
 		if needsUpdate {
 			_, err := dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{
 				DpuExtensionServiceID: dpuExtensionService.ID,
+				DpuTarget:             dpuTarget,
 				Version:               version,
 				VersionInfo:           versionInfo,
 				ActiveVersions:        activeVersions,
@@ -233,11 +271,11 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 		slogger := logger.With().Str("DPU Extension Service ID", dpuExtensionService.ID.String()).Logger()
 
 		// Avoid these actions if the object was updated since the inventory was received
-		if util.IsTimeWithinStaleInventoryThreshold(dpuExtensionService.Updated) {
+		if site.IsTimeWithinStaleInventoryThreshold(dpuExtensionService.Updated) {
 			continue
 		}
 
-		// If the DPU Extension Service was already being deleted, we can proceed with removing it from the DB
+		// If the DPU Extension Service was already deleting, we can proceed with removing it from the DB
 		if dpuExtensionService.Status == cdbm.DpuExtensionServiceStatusDeleting {
 			// The DPU Extension Service was being deleted, so delete it from DB
 			err := dpuExtensionServiceDAO.Delete(ctx, nil, dpuExtensionService.ID)

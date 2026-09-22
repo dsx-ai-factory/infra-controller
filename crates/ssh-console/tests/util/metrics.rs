@@ -69,7 +69,7 @@ pub(super) async fn assert_metrics(
             "ssh_console_client_auth_failures_total",
             vec![ExpectedObservation {
                 attribute_key_value: Some(("auth_type", Cow::Borrowed("public_key"))),
-                value: Some(3u64),
+                value: Some(mock_hosts.len() as u64),
             }],
         ),
         (

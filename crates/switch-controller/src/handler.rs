@@ -28,6 +28,7 @@ use crate::bom_validating::handle_bom_validating;
 use crate::configuring::handle_configuring;
 use crate::context::SwitchStateHandlerContextObjects;
 use crate::created::handle_created;
+use crate::decommissioning::handle_decommissioning;
 use crate::deleting::handle_deleting;
 use crate::error_state::handle_error;
 use crate::fetch_info::handle_fetch_info;
@@ -109,6 +110,9 @@ impl SwitchStateHandler {
                 handle_maintenance(switch_id, state, ctx).await
             }
             SwitchControllerState::Ready => handle_ready(switch_id, state, ctx).await,
+            SwitchControllerState::Decommissioning {
+                decommissioning_state,
+            } => handle_decommissioning(switch_id, state, decommissioning_state, ctx).await,
             SwitchControllerState::RotatingBmc { retry_count } => {
                 handle_rotating_bmc(switch_id, state, *retry_count, ctx).await
             }

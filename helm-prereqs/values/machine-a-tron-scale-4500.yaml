@@ -36,7 +36,6 @@ machineATron:
   nicoApiUrl: "https://nico-api.nico-system.svc.cluster.local:1079"
   configureBmcProxyHost: ""
   registerExpectedMachines: true
-  useSingleBmcMock: true
 
 macAddressPool:
   enabled: true
@@ -103,17 +102,14 @@ pods:
         hwType: dell_poweredge_r750
         hostCount: 1350
         dpuPerHostCount: 2
-        vpcCount: 0
-        subnetsPerVpc: 0
         dpuRebootDelay: 1
         hostRebootDelay: 1
         scoutRunInterval: "300s"
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        oobDhcpRelayAddress: "10.233.16.1"
-        adminDhcpRelayAddress: "10.102.0.1"
-        networkVirtualizationType: ""
+        bmcDhcpRelayAddress: "10.233.16.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
         dpusInNicMode: false
   mat-1:
     machines:
@@ -121,17 +117,14 @@ pods:
         hwType: dell_poweredge_r750
         hostCount: 2700
         dpuPerHostCount: 2
-        vpcCount: 0
-        subnetsPerVpc: 0
         dpuRebootDelay: 1
         hostRebootDelay: 1
         scoutRunInterval: "300s"
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        oobDhcpRelayAddress: "10.233.32.1"
-        adminDhcpRelayAddress: "10.102.0.1"
-        networkVirtualizationType: ""
+        bmcDhcpRelayAddress: "10.233.32.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
         dpusInNicMode: false
   mat-2:
     machines:
@@ -139,17 +132,14 @@ pods:
         hwType: dell_poweredge_r750
         hostCount: 450
         dpuPerHostCount: 2
-        vpcCount: 0
-        subnetsPerVpc: 0
         dpuRebootDelay: 1
         hostRebootDelay: 1
         scoutRunInterval: "300s"
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        oobDhcpRelayAddress: "10.233.8.1"
-        adminDhcpRelayAddress: "10.102.0.1"
-        networkVirtualizationType: ""
+        bmcDhcpRelayAddress: "10.233.8.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
         dpusInNicMode: false
 
 extraEnv:

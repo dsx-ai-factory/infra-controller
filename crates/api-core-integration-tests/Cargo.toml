@@ -1,0 +1,84 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+[package]
+name = "carbide-api-core-integration-tests"
+version = "0.0.0"
+edition.workspace = true
+description = "In-process integration tests for carbide-api-core"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[package.metadata.cargo-machete]
+# Referenced by the expansion of the sqlx_test attribute macro.
+ignored = ["carbide-sqlx-testing"]
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
+[dev-dependencies]
+# Internal dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+carbide-api-core = { path = "../api-core", default-features = false, features = [
+  "test-support",
+] }
+carbide-api-db = { path = "../api-db", default-features = false, features = [
+  "test-support",
+] }
+carbide-api-model = { path = "../api-model", default-features = false }
+carbide-authn = { path = "../authn" }
+carbide-health-report = { path = "../health-report" }
+carbide-ib-fabric = { path = "../ib-fabric", features = ["test-support"] }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-rpc = { path = "../rpc", features = ["model", "sqlx", "test-support"] }
+carbide-secrets = { path = "../secrets", features = ["test-support"] }
+carbide-site-explorer = { path = "../site-explorer", features = [
+  "test-support",
+] }
+carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
+carbide-test-harness = { path = "../test-harness" }
+carbide-uuid = { path = "../uuid", features = ["sqlx"] }
+carbide-version = { path = "../version" }
+component-manager = { path = "../component-manager" }
+config-version = { path = "../config-version", features = ["sqlx"] }
+
+# External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+chrono = { workspace = true }
+const_format = { workspace = true }
+data-encoding = { workspace = true }
+eyre = { workspace = true }
+http = { workspace = true }
+itertools = { workspace = true }
+mac_address = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true, features = ["postgres"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tokio-util = { workspace = true }
+toml = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+uuid = { workspace = true, features = ["v4"] }
+
+[build-dependencies]
+carbide-version = { path = "../version" }
+
+[lints]
+workspace = true

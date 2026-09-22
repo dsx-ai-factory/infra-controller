@@ -29,7 +29,7 @@ func (flowgrpc *API) Init() {
 	ManagerAccess.Data.EB.Log.Info().Msg("Flow: Initializing Flow gRPC client manager")
 
 	gauge := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Namespace: "elektra_site_agent",
+		Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
 		Name:      MetricFlowStatus,
 		Help:      "Flow gRPC health status",
 	},

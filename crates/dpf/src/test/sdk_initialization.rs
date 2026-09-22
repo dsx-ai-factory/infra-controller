@@ -20,15 +20,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 use kube::Resource;
+use tokio::sync::Notify;
 
 use crate::crds::bfbs_generated::BFB;
 use crate::crds::bluefieldsoftwares_generated::BlueFieldSoftware;
 use crate::crds::dpudeployments_generated::DPUDeployment;
 use crate::crds::dpuflavors_generated::DPUFlavor;
+use crate::crds::dpuflavortemplates_generated::DPUFlavorTemplate;
 use crate::crds::dpus_generated::{DPU, DpuStatusPhase};
 use crate::crds::dpuserviceconfigurations_generated::DPUServiceConfiguration;
 use crate::crds::dpuserviceinterfaces_generated::DPUServiceInterface;
@@ -37,9 +40,9 @@ use crate::crds::dpuservicetemplates_generated::DPUServiceTemplate;
 use crate::error::DpfError;
 use crate::repository::{
     BfbRepository, BlueFieldSoftwareRepository, DpfOperatorConfigRepository,
-    DpuDeploymentRepository, DpuFlavorRepository, DpuRepository, DpuServiceConfigurationRepository,
-    DpuServiceInterfaceRepository, DpuServiceNADRepository, DpuServiceTemplateRepository,
-    K8sConfigRepository,
+    DpuDeploymentRepository, DpuFlavorRepository, DpuFlavorTemplateRepository, DpuRepository,
+    DpuServiceConfigurationRepository, DpuServiceInterfaceRepository, DpuServiceNADRepository,
+    DpuServiceTemplateRepository, K8sConfigRepository,
 };
 use crate::sdk::ResourceLabeler;
 use crate::types::*;
@@ -64,12 +67,16 @@ struct InitializationMock {
     bfbs: Arc<DashMap<String, BFB>>,
     bluefield_softwares: Arc<DashMap<String, BlueFieldSoftware>>,
     flavors: Arc<DashMap<String, DPUFlavor>>,
+    flavor_templates: Arc<DashMap<String, DPUFlavorTemplate>>,
     dpus: Arc<DashMap<String, DPU>>,
     deployments: Arc<DashMap<String, DPUDeployment>>,
     service_templates: Arc<DashMap<String, DPUServiceTemplate>>,
     service_configs: Arc<DashMap<String, DPUServiceConfiguration>>,
     nads: Arc<DashMap<String, DPUServiceNAD>>,
     service_interfaces: Arc<DashMap<String, DPUServiceInterface>>,
+    blocked_service_interface_deletes: Arc<DashMap<String, ()>>,
+    service_interface_delete_started: Arc<Notify>,
+    service_interface_delete_release: Arc<Notify>,
     configs: Arc<DashMap<String, BTreeMap<String, String>>>,
     secrets: Arc<DashMap<String, BTreeMap<String, Vec<u8>>>>,
 }
@@ -88,6 +95,7 @@ impl ResourceLabeler for InitializationLabeler {
         // on a particular production deployment-label spelling.
         let deployment_label = match deployment_type {
             DpuDeploymentType::Bf3 => "test.nvidia.com/bf3",
+            DpuDeploymentType::Bf3Gb200 => "test.nvidia.com/bf3gb200",
             DpuDeploymentType::Bf4Generic => "test.nvidia.com/bf4",
             DpuDeploymentType::Bf4Astra => "test.nvidia.com/astra",
         };
@@ -135,7 +143,10 @@ fn unscoped_astra_config() -> InitDpfResourcesConfig {
     InitDpfResourcesConfig {
         bluefield_software: Some(BlueFieldSoftwareParams {
             os_iso: "http://example.com/astra.iso".to_string(),
-            pldm_fw_bundle: Some("http://example.com/astra.pldm".to_string()),
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "pldmid001".to_string(),
+                "http://example.com/astra.pldm".to_string(),
+            )])),
         }),
         deployment_name: "astra-deployment".to_string(),
         deployment_type: DpuDeploymentType::Bf4Astra,
@@ -229,6 +240,21 @@ impl DpuFlavorRepository for InitializationMock {
 }
 
 #[async_trait]
+impl DpuFlavorTemplateRepository for InitializationMock {
+    async fn get(&self, name: &str, ns: &str) -> Result<Option<DPUFlavorTemplate>, DpfError> {
+        Ok(self
+            .flavor_templates
+            .get(&ns_key(ns, name))
+            .map(|r| r.clone()))
+    }
+    async fn create(&self, template: &DPUFlavorTemplate) -> Result<DPUFlavorTemplate, DpfError> {
+        self.flavor_templates
+            .insert(resource_key(template), template.clone());
+        Ok(template.clone())
+    }
+}
+
+#[async_trait]
 impl DpuRepository for InitializationMock {
     async fn get(&self, name: &str, ns: &str) -> Result<Option<DPU>, DpfError> {
         Ok(self.dpus.get(&ns_key(ns, name)).map(|dpu| dpu.clone()))
@@ -256,6 +282,20 @@ impl DpuRepository for InitializationMock {
     async fn delete(&self, name: &str, ns: &str) -> Result<(), DpfError> {
         self.dpus.remove(&ns_key(ns, name));
         Ok(())
+    }
+
+    async fn delete_if_uid(&self, name: &str, ns: &str, uid: &str) -> Result<(), DpfError> {
+        let current_uid = self
+            .dpus
+            .get(&ns_key(ns, name))
+            .map(|dpu| dpu.metadata.uid.clone())
+            .ok_or_else(|| DpfError::not_found("DPU", name))?;
+        if current_uid.as_deref() != Some(uid) {
+            return Err(DpfError::InvalidState(format!(
+                "DPU {name} no longer has UID {uid}"
+            )));
+        }
+        DpuRepository::delete(self, name, ns).await
     }
 
     fn watch<F, Fut>(
@@ -395,6 +435,16 @@ impl DpuServiceInterfaceRepository for InitializationMock {
             .insert(resource_key(iface), iface.clone());
         Ok(iface.clone())
     }
+
+    async fn delete(&self, name: &str, ns: &str) -> Result<(), DpfError> {
+        let key = ns_key(ns, name);
+        if self.blocked_service_interface_deletes.contains_key(&key) {
+            self.service_interface_delete_started.notify_one();
+            self.service_interface_delete_release.notified().await;
+        }
+        self.service_interfaces.remove(&key);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -452,19 +502,58 @@ impl K8sConfigRepository for InitializationMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for InitializationMock {
+    async fn get(
+        &self,
+        _name: &str,
+        _ns: &str,
+    ) -> Result<Option<crate::crds::dpfoperatorconfigs_generated::DPFOperatorConfig>, DpfError>
+    {
+        Ok(None)
+    }
+
     async fn patch(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), DpfError> {
         Ok(())
     }
+}
+
+/// A conditional delete must preserve a replacement DPU whose UID differs
+/// from the stale object observed by the migration reconciler.
+#[tokio::test]
+async fn conditional_dpu_delete_rejects_uid_mismatch() {
+    let mock = InitializationMock::default();
+    let dpu_name = "node-host-device-dpu";
+    let mut replacement = super::helpers::make_dpu(
+        TEST_NS,
+        dpu_name,
+        "device-dpu",
+        "node-host",
+        DpuStatusPhase::Ready,
+    );
+    replacement.metadata.uid = Some("replacement-uid".to_string());
+    mock.dpus.insert(resource_key(&replacement), replacement);
+
+    let error = DpuRepository::delete_if_uid(&mock, dpu_name, TEST_NS, "stale-uid")
+        .await
+        .expect_err("a stale UID must not delete the replacement DPU");
+
+    assert!(matches!(error, DpfError::InvalidState(_)));
+    assert!(
+        DpuRepository::get(&mock, dpu_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_some(),
+        "the replacement DPU must remain after the rejected delete"
+    );
 }
 
 #[tokio::test]
 async fn test_create_initialization_objects() {
     let mock = InitializationMock::default();
 
-    let config = InitDpfResourcesConfig {
-        bfb_url: "http://example.com/test.bfb".to_string(),
-        ..Default::default()
-    };
+    let config = InitDpfResourcesConfigBuilder::default()
+        .bfb_url("http://example.com/test.bfb")
+        .build()
+        .expect("BF3 initialization test configuration must be valid");
     let deployment_name = config.deployment_name.clone();
 
     let sdk = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
@@ -528,9 +617,7 @@ async fn sf_overflow_fails_before_initialization_writes() {
         .await;
     assert!(matches!(result, Err(DpfError::ConfigError(_))));
     assert!(mock.secrets.is_empty());
-    assert!(mock.bfbs.is_empty());
-    assert!(mock.flavors.is_empty());
-    assert!(mock.deployments.is_empty());
+    assert_no_initialization_crs(&mock);
 }
 
 /// Verifies one-shot Astra initialization rejects global interfaces before its first write.
@@ -588,19 +675,144 @@ async fn unscoped_astra_split_initialization_writes_no_resources() {
     assert_no_initialization_crs(&mock);
 }
 
+/// Verifies the public initialization path rejects split HBN topology and emits matching
+/// configuration and chain references when the SDK-generated service interface is supplied.
+#[tokio::test]
+async fn service_vpc_initialization_keeps_hbn_configuration_and_chain_aligned() {
+    let mock = InitializationMock::default();
+    let slots = crate::ServiceVpcSlots::new(1).unwrap();
+    let interfaces = crate::build_effective_dpu_interfaces(crate::DEFAULT_DPU_NUM_OF_VFS, None);
+    let mut hbn_interfaces = interfaces
+        .iter()
+        .filter_map(|interface| {
+            interface.chained_svc_if.as_ref().and_then(|chains| {
+                chains
+                    .iter()
+                    .find(|(service, _)| service == DOCA_HBN_SERVICE_NAME)
+                    .map(|(_, name)| ServiceInterface {
+                        name: name.clone(),
+                        network: DOCA_HBN_SERVICE_NETWORK.to_string(),
+                    })
+            })
+        })
+        .collect();
+    slots.append_hbn_interfaces(&mut hbn_interfaces);
+    let hbn = ServiceDefinition {
+        interfaces: hbn_interfaces,
+        ..ServiceDefinition::new(DOCA_HBN_SERVICE_NAME, "repo", "chart", "1")
+    };
+    let config = InitDpfResourcesConfigBuilder::default()
+        .services(vec![hbn])
+        .service_vpc_slots(slots)
+        .interfaces(interfaces)
+        .build()
+        .expect("service-VPC initialization test configuration must be valid");
+
+    crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+        .initialize(&config)
+        .await
+        .unwrap();
+
+    let hbn_config = DpuServiceConfigurationRepository::get(&mock, DOCA_HBN_SERVICE_NAME, TEST_NS)
+        .await
+        .unwrap()
+        .expect("HBN service configuration must exist");
+    let hbn_interfaces = hbn_config.spec.interfaces.unwrap();
+    assert!(hbn_interfaces.iter().any(|interface| {
+        interface.name == "iface_svc_0" && interface.network == DOCA_HBN_SERVICE_NETWORK
+    }));
+
+    let deployment = DpuDeploymentRepository::get(&mock, "dpu-deployment", TEST_NS)
+        .await
+        .unwrap()
+        .expect("DPU deployment must exist");
+    let slot_switch = deployment
+        .spec
+        .service_chains
+        .unwrap()
+        .switches
+        .into_iter()
+        .find(|switch| {
+            switch.ports.iter().any(|port| {
+                port.service
+                    .as_ref()
+                    .is_some_and(|service| service.interface == "iface_svc_0")
+            })
+        })
+        .expect("service-VPC chain must reference the HBN interface");
+    assert!(slot_switch.ports.iter().any(|port| {
+        port.service_interface.as_ref().is_some_and(|interface| {
+            interface.match_labels.get("interface").map(String::as_str)
+                == Some("service-vpc-slot-0")
+        })
+    }));
+}
+
+#[test]
+fn service_vpc_config_rejects_missing_hbn_interface() {
+    let result = InitDpfResourcesConfigBuilder::default()
+        .services(vec![ServiceDefinition::new(
+            DOCA_HBN_SERVICE_NAME,
+            "repo",
+            "chart",
+            "1",
+        )])
+        .service_vpc_slots(crate::ServiceVpcSlots::new(1).unwrap())
+        .build();
+
+    assert!(matches!(result, Err(DpfError::ConfigError(_))));
+}
+
+#[test]
+fn config_rejects_sf_overflow() {
+    let result = InitDpfResourcesConfigBuilder::default()
+        .intercept_bridging(configured_intercept_bridging())
+        .pf_total_sf_reserved(u32::MAX)
+        .build();
+    assert!(matches!(result, Err(DpfError::ConfigError(_))));
+}
+
+#[test]
+fn config_rejects_unscoped_astra() {
+    let result = InitDpfResourcesConfigBuilder::default()
+        .bluefield_software(BlueFieldSoftwareParams {
+            os_iso: "http://example.com/astra.iso".to_string(),
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "pldmid001".to_string(),
+                "http://example.com/astra.pldm".to_string(),
+            )])),
+        })
+        .deployment_name("astra-deployment")
+        .deployment_type(DpuDeploymentType::Bf4Astra)
+        .build();
+
+    let Err(error) = result else {
+        panic!("unscoped Astra initialization must fail");
+    };
+    assert!(matches!(&error, DpfError::ConfigError(_)));
+    assert!(
+        error
+            .to_string()
+            .contains("BF4 Astra requires deployment_scoped_service_interfaces=true")
+    );
+}
+
 #[tokio::test]
 async fn test_create_initialization_objects_bluefield_software() {
     let mock = InitializationMock::default();
 
-    let config = InitDpfResourcesConfig {
-        bluefield_software: Some(BlueFieldSoftwareParams {
+    let config = InitDpfResourcesConfigBuilder::default()
+        .bluefield_software(BlueFieldSoftwareParams {
             os_iso: "http://example.com/os.iso".to_string(),
-            pldm_fw_bundle: Some("http://example.com/fw.pldm".to_string()),
-        }),
-        deployment_name: "bf4-dep".to_string(),
-        deployment_type: DpuDeploymentType::Bf4Generic,
-        ..Default::default()
-    };
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "pldmid001".to_string(),
+                "http://example.com/astra.pldm".to_string(),
+            )])),
+        })
+        .deployment_name("bf4-dep")
+        .deployment_type(DpuDeploymentType::Bf4Generic)
+        .build()
+        .expect("BF4 initialization test configuration must be valid");
 
     let sdk = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
         .initialize(&config)
@@ -619,8 +831,10 @@ async fn test_create_initialization_objects_bluefield_software() {
     assert_eq!(bfsw.len(), 1);
     assert_eq!(bfsw[0].spec.os_iso, "http://example.com/os.iso");
     assert_eq!(
-        bfsw[0].spec.pldm_fw_bundle.as_deref(),
-        Some("http://example.com/fw.pldm")
+        bfsw[0].spec.pldm_fw_bundle,
+        Some(serde_json::json!({
+            "pldmid001": "http://example.com/astra.pldm"
+        }))
     );
 
     // The DPUDeployment references the BlueFieldSoftware CR, not a BFB.
@@ -637,11 +851,11 @@ async fn test_create_initialization_objects_bluefield_software() {
     drop(sdk);
 }
 
-/// Verifies configured BF3 and generic BF4 coexist with scoped Astra while flavors, Patch
-/// interfaces, service chains, and selectors retain one deployment-specific inventory view.
+/// Verifies ordinary and GB200 BF3, generic BF4, and Astra coexist while each
+/// deployment retains its own flavor, interfaces, service chains, and selectors.
 #[tokio::test]
-async fn scoped_bf3_bf4_and_astra_initialization_coexists() {
-    // Build one SDK so all three deployment classes share the production namespace.
+async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
+    // Build one SDK so all four deployment classes share the production namespace.
     let mock = InitializationMock::default();
     let sdk = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
         .with_labeler(InitializationLabeler)
@@ -664,59 +878,85 @@ async fn scoped_bf3_bf4_and_astra_initialization_coexists() {
     let topology = configured_intercept_bridging();
     let configs = [
         // BF3 proves the configured topology through the BFB flavor path.
-        InitDpfResourcesConfig {
-            bfb_url: "http://example.com/bf3.bfb".to_string(),
-            deployment_name: "bf3-deployment".to_string(),
-            flavor_name: "bf3-flavor".to_string(),
-            services: services.clone(),
-            deployment_scoped_service_interfaces: true,
-            intercept_bridging: Some(topology.clone()),
-            deployment_type: DpuDeploymentType::Bf3,
-            ..Default::default()
-        },
+        InitDpfResourcesConfigBuilder::default()
+            .bfb_url("http://example.com/bf3.bfb")
+            .deployment_name("bf3-deployment")
+            .flavor_name("bf3-flavor")
+            .services(services.clone())
+            .deployment_scoped_service_interfaces(true)
+            .intercept_bridging(topology.clone())
+            .deployment_type(DpuDeploymentType::Bf3)
+            .build()
+            .expect("scoped BF3 test configuration must be valid"),
+        // GB200 BF3 reuses the BF3 source and services but owns a distinct flavor and selector.
+        InitDpfResourcesConfigBuilder::default()
+            .bfb_url("http://example.com/bf3.bfb")
+            .deployment_name("bf3-gb200-deployment")
+            .flavor_name("bf3-gb200-flavor")
+            .services(services.clone())
+            .deployment_scoped_service_interfaces(true)
+            .intercept_bridging(topology.clone())
+            .deployment_type(DpuDeploymentType::Bf3Gb200)
+            .build()
+            .expect("scoped GB200 test configuration must be valid"),
         // Generic BF4 proves the same topology through its BlueFieldSoftware path.
-        InitDpfResourcesConfig {
-            bluefield_software: Some(BlueFieldSoftwareParams {
+        InitDpfResourcesConfigBuilder::default()
+            .bluefield_software(BlueFieldSoftwareParams {
                 os_iso: "http://example.com/bf4.iso".to_string(),
-                pldm_fw_bundle: Some("http://example.com/bf4.pldm".to_string()),
-            }),
-            deployment_name: "bf4-deployment".to_string(),
-            flavor_name: "bf4-flavor".to_string(),
-            services: services.clone(),
-            deployment_scoped_service_interfaces: true,
-            intercept_bridging: Some(topology),
-            deployment_type: DpuDeploymentType::Bf4Generic,
-            ..Default::default()
-        },
+                pldm_fw_bundle: Some(BTreeMap::from([(
+                    "pldmid001".to_string(),
+                    "http://example.com/bf4.pldm".to_string(),
+                )])),
+            })
+            .deployment_name("bf4-deployment")
+            .flavor_name("bf4-flavor")
+            .services(services.clone())
+            .deployment_scoped_service_interfaces(true)
+            .intercept_bridging(topology)
+            .deployment_type(DpuDeploymentType::Bf4Generic)
+            .build()
+            .expect("scoped generic BF4 test configuration must be valid"),
         // Astra proves its fixed BF4+CX9 inventory remains isolated from both configured classes.
-        InitDpfResourcesConfig {
-            bluefield_software: Some(BlueFieldSoftwareParams {
+        InitDpfResourcesConfigBuilder::default()
+            .bluefield_software(BlueFieldSoftwareParams {
                 os_iso: "http://example.com/astra.iso".to_string(),
-                pldm_fw_bundle: Some("http://example.com/astra.pldm".to_string()),
-            }),
-            deployment_name: "astra-deployment".to_string(),
-            flavor_name: "astra-flavor".to_string(),
-            services,
-            deployment_scoped_service_interfaces: true,
-            deployment_type: DpuDeploymentType::Bf4Astra,
-            ..Default::default()
-        },
+                pldm_fw_bundle: Some(BTreeMap::from([(
+                    "pldmid001".to_string(),
+                    "http://example.com/astra.pldm".to_string(),
+                )])),
+            })
+            .deployment_name("astra-deployment")
+            .flavor_name("astra-flavor")
+            .services(services)
+            .deployment_scoped_service_interfaces(true)
+            .deployment_type(DpuDeploymentType::Bf4Astra)
+            .build()
+            .expect("scoped Astra test configuration must be valid"),
     ];
+
+    mock.configs.insert(
+        ns_key(TEST_NS, "ra2.2-runtime"),
+        BTreeMap::from([(
+            "RA2.2-runtime.yaml".to_string(),
+            "runtimeConfig:\n  roce: []\n".to_string(),
+        )]),
+    );
 
     // Apply every class through the public split-initialization path used by multi-deployment setup.
     for config in &configs {
         sdk.create_initialization_objects(config).await.unwrap();
     }
 
-    // All immutable flavors and deployments must coexist without overwrite.
+    // All immutable flavors/templates and deployments must coexist without overwrite.
     assert_eq!(
         DpuDeploymentRepository::list(&mock, TEST_NS)
             .await
             .unwrap()
             .len(),
-        3
+        4
     );
     assert_eq!(mock.flavors.len(), 3);
+    assert_eq!(mock.flavor_templates.len(), 1);
 
     // The effective inventories must produce exact, non-overlapping scoped resource names.
     let interfaces = DpuServiceInterfaceRepository::list(&mock, TEST_NS)
@@ -727,18 +967,28 @@ async fn scoped_bf3_bf4_and_astra_initialization_coexists() {
         .map(|interface| interface.metadata.name.clone().unwrap())
         .collect::<BTreeSet<_>>();
     let mut expected_interface_names = BTreeSet::new();
-    for suffix in ["bf3", "bf4"] {
+    for suffix in ["bf3", "bf3gb200", "bf4"] {
         for logical_name in ["p0", "p1", "c2pf3", "c2pf3vf4"] {
             expected_interface_names.insert(format!("{logical_name}-{suffix}"));
         }
     }
-    // Astra ignores configured intercept topology and retains its static physical, PF, and VF
-    // logical inventory.
-    let mut astra_logical_names = ["p0", "p1", "pf0hpf", "pf1hpf"]
+    // Astra ignores configured intercept topology and retains its static BF4+CX logical inventory.
+    let mut astra_chainable_logical_names = ["p0", "p1", "pf0hpf", "pf1hpf"]
         .into_iter()
         .map(|name| name.to_string())
         .collect::<BTreeSet<_>>();
-    astra_logical_names.extend((0..14).map(|vf_id| format!("pf0vf{vf_id}")));
+    astra_chainable_logical_names.extend((0..14).map(|vf_id| format!("pf0vf{vf_id}")));
+    let mut astra_logical_names = astra_chainable_logical_names.clone();
+    let astra_xplane_group_ids = [
+        "r0swpln0", "r1swpln0", "r0swpln1", "r1swpln1", "r2swpln0", "r3swpln0", "r2swpln1",
+        "r3swpln1",
+    ];
+    astra_logical_names.extend(astra_xplane_group_ids.into_iter().flat_map(|group_id| {
+        [
+            format!("p-brcx-{group_id}-to-br-sfc"),
+            format!("p-br-xplane-{group_id}-to-br-sfc"),
+        ]
+    }));
     expected_interface_names.extend(
         astra_logical_names
             .iter()
@@ -750,6 +1000,7 @@ async fn scoped_bf3_bf4_and_astra_initialization_coexists() {
     // management-plane class labels used by DPUNode selectors do not exist in the DPU cluster.
     for (suffix, deployment_name) in [
         ("bf3", "bf3-deployment"),
+        ("bf3gb200", "bf3-gb200-deployment"),
         ("bf4", "bf4-deployment"),
         ("astra", "astra-deployment"),
     ] {
@@ -779,8 +1030,8 @@ async fn scoped_bf3_bf4_and_astra_initialization_coexists() {
         }
     }
 
-    // Both configured classes must serialize the same exact DPF-owned Patch pairs.
-    for suffix in ["bf3", "bf4"] {
+    // All three configured classes must serialize the same exact DPF-owned Patch pairs.
+    for suffix in ["bf3", "bf3gb200", "bf4"] {
         for (logical_name, peer_bridge, peer_patch_name) in [
             ("c2pf3", "br-pf3", "p-pf3"),
             ("c2pf3vf4", "br-vf4", "p-vf4"),
@@ -816,23 +1067,75 @@ async fn scoped_bf3_bf4_and_astra_initialization_coexists() {
         }
     }
 
+    // Astra's CX patch resources must serialize the xplane peer metadata while staying scoped to
+    // only the Astra deployment.
+    let astra_interface = |logical_name: &str| {
+        let resource_name = format!("{logical_name}-astra");
+        interfaces
+            .iter()
+            .find(|interface| interface.metadata.name.as_deref() == Some(resource_name.as_str()))
+            .unwrap_or_else(|| panic!("Astra scoped interface {resource_name} must exist"))
+    };
+    let cx_patch = astra_interface("p-brcx-r0swpln0-to-br-sfc")
+        .spec
+        .template
+        .spec
+        .template
+        .spec
+        .patch
+        .as_ref()
+        .expect("Astra CX bridge interface must be Patch-backed");
+    assert_eq!(cx_patch.peer_bridge, "brcx-r0swpln0");
+    assert!(cx_patch.peer_patch_name.is_none());
+    assert!(cx_patch.peer_external_i_ds.is_none());
+    let xplane_patch = astra_interface("p-br-xplane-r3swpln1-to-br-sfc")
+        .spec
+        .template
+        .spec
+        .template
+        .spec
+        .patch
+        .as_ref()
+        .expect("Astra xplane interface must be Patch-backed");
+    assert_eq!(xplane_patch.peer_bridge, "br-xplane");
+    assert!(xplane_patch.peer_patch_name.is_none());
+    assert_eq!(
+        xplane_patch.peer_external_i_ds.as_ref(),
+        Some(&BTreeMap::from([
+            ("xplane".to_string(), "true".to_string()),
+            ("xplane-group-id".to_string(), "r3swpln1".to_string()),
+            ("xplane-downlink".to_string(), "patch".to_string()),
+        ]))
+    );
+
     let configured_deployments = [
         // BF3 must render the selected raw PF while consuming the shared topology inventory.
         (
             "bf3-deployment",
             DpuDeploymentType::Bf3,
             "host_representor='pf3hpf'",
+            false,
+        ),
+        // GB200 BF3 shares BF3 networking while carrying the specialized NVConfig profile.
+        (
+            "bf3-gb200-deployment",
+            DpuDeploymentType::Bf3Gb200,
+            "host_representor='pf3hpf'",
+            true,
         ),
         // Generic BF4 must resolve the selected PF by its exact semantic identity.
         (
             "bf4-deployment",
             DpuDeploymentType::Bf4Generic,
             "resolve_dpf_pf 'c2pf3'",
+            false,
         ),
     ];
     // Each tuple identifies the deployment to inspect, the class-label source, and one
     // platform-specific OVS fragment proving that deployment received the correct flavor.
-    for (deployment_name, deployment_type, expected_ovs_marker) in configured_deployments {
+    for (deployment_name, deployment_type, expected_ovs_marker, expects_gb200_profile) in
+        configured_deployments
+    {
         // The deployment-referenced flavor must contain the configured topology and SF total.
         let deployment = DpuDeploymentRepository::get(&mock, deployment_name, TEST_NS)
             .await
@@ -847,10 +1150,21 @@ async fn scoped_bf3_bf4_and_astra_initialization_coexists() {
             .parameters
             .as_ref()
             .unwrap();
+        let expected_pf_total_sf = match deployment_type {
+            DpuDeploymentType::Bf3Gb200 => "PF_TOTAL_SF=128",
+            DpuDeploymentType::Bf3 | DpuDeploymentType::Bf4Generic => "PF_TOTAL_SF=37",
+            DpuDeploymentType::Bf4Astra => unreachable!("Astra is checked separately"),
+        };
         assert!(
             nvconfig
                 .iter()
-                .any(|parameter| parameter == "PF_TOTAL_SF=37")
+                .any(|parameter| parameter == expected_pf_total_sf)
+        );
+        assert_eq!(
+            nvconfig
+                .iter()
+                .any(|parameter| parameter == "OFF_BOARD_SERIALIZER=1"),
+            expects_gb200_profile
         );
         let ovs_script = flavor
             .spec
@@ -939,15 +1253,12 @@ async fn scoped_bf3_bf4_and_astra_initialization_coexists() {
             .and_then(|selector| selector.match_labels.as_ref()),
         Some(&expected_astra_labels)
     );
-    // Astra service chains must select the static logical names constructed above, not the
-    // configured BF3/BF4 `c2pf3` topology.
-    let astra_chain_interfaces = astra
-        .spec
-        .service_chains
-        .as_ref()
-        .unwrap()
-        .switches
+    let astra_switches = &astra.spec.service_chains.as_ref().unwrap().switches;
+    // Astra service-to-service chains must select the static logical names constructed above, not
+    // the configured BF3/BF4 `c2pf3` topology.
+    let astra_chain_interfaces = astra_switches
         .iter()
+        .filter(|switch| switch.ports.iter().any(|port| port.service.is_some()))
         .map(|switch| {
             switch.ports[0]
                 .service_interface
@@ -957,20 +1268,63 @@ async fn scoped_bf3_bf4_and_astra_initialization_coexists() {
                 .clone()
         })
         .collect::<BTreeSet<_>>();
-    assert_eq!(astra_chain_interfaces, astra_logical_names);
-    // Astra's fixed flavor retains PF_TOTAL_SF=30 and must not render configured peer bridges.
-    let astra_flavor =
-        DpuFlavorRepository::get(&mock, astra.spec.dpus.flavor.as_deref().unwrap(), TEST_NS)
-            .await
-            .unwrap()
-            .expect("Astra deployment-referenced flavor must exist");
+    assert_eq!(astra_chain_interfaces, astra_chainable_logical_names);
+    let astra_patch_chain_pairs = astra_switches
+        .iter()
+        .filter_map(|switch| {
+            let ports = switch
+                .ports
+                .iter()
+                .filter_map(|port| port.service_interface.as_ref())
+                .map(|service_interface| service_interface.match_labels["interface"].clone())
+                .collect::<Vec<_>>();
+            (ports.len() == 2).then(|| (ports[0].clone(), ports[1].clone()))
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        astra_patch_chain_pairs,
+        astra_xplane_group_ids
+            .into_iter()
+            .map(|group_id| {
+                (
+                    format!("p-brcx-{group_id}-to-br-sfc"),
+                    format!("p-br-xplane-{group_id}-to-br-sfc"),
+                )
+            })
+            .collect::<BTreeSet<_>>()
+    );
+    // Astra's flavor derives PF_TOTAL_SF from static service endpoints and the DOCA Weave DHCP
+    // Agent PF allocation, and must not render configured peer bridges.
+    assert!(astra.spec.dpus.flavor.is_none());
+    let astra_template = DpuFlavorTemplateRepository::get(
+        &mock,
+        astra.spec.dpus.flavor_template.as_deref().unwrap(),
+        TEST_NS,
+    )
+    .await
+    .unwrap()
+    .expect("Astra deployment-referenced flavor template must exist");
+    assert!(astra_template.spec.template.starts_with("spec:\n"));
+    let astra_flavor = DPUFlavor {
+        metadata: Default::default(),
+        spec: {
+            let body: serde_yaml::Value =
+                serde_yaml::from_str(&astra_template.spec.template).unwrap();
+            serde_yaml::from_value(body["spec"].clone()).unwrap()
+        },
+    };
+    let astra_interfaces = crate::sdk::build_astra_dpu_interfaces_vec();
+    let expected_astra_pf_total_sf =
+        crate::sdk::calculate_astra_pf_total_sf(astra_interfaces.as_slice())
+            .expect("canonical Astra inventory must have valid SF capacity");
+    let expected_astra_pf_total_sf_parameter = format!("PF_TOTAL_SF={expected_astra_pf_total_sf}");
     assert!(
         astra_flavor.spec.nvconfig.as_ref().unwrap()[0]
             .parameters
             .as_ref()
             .unwrap()
             .iter()
-            .any(|parameter| parameter == "PF_TOTAL_SF=30")
+            .any(|parameter| parameter == &expected_astra_pf_total_sf_parameter)
     );
     assert!(
         !astra_flavor
@@ -981,90 +1335,168 @@ async fn scoped_bf3_bf4_and_astra_initialization_coexists() {
             .unwrap()
             .contains("br-pf3")
     );
-    // Static Astra interfaces are Physical/PF/VF definitions, never topology-backed Patch pairs.
-    assert!(
-        interfaces
-            .iter()
-            .filter(|interface| interface
-                .metadata
-                .name
-                .as_deref()
-                .is_some_and(|name| name.ends_with("-astra")))
-            .all(|interface| interface.spec.template.spec.template.spec.patch.is_none())
-    );
-
     drop(sdk);
 }
 
-/// Verifies unrelated ServiceInterfaces with NICo-like names or labels cannot block either
-/// initialization mode and remain untouched because shape alone is not ownership evidence.
 #[tokio::test]
-async fn existing_service_interfaces_do_not_block_or_get_deleted() {
-    let cases = [
-        // A matching name and logical label must not be treated as NICo-owned legacy state.
-        ("vendor-uplink", "vendor-uplink", true),
-        // A deployment-like suffix must not be treated as NICo-owned scoped state.
-        ("vendor-uplink-bf3", "vendor-uplink", false),
-    ];
+async fn scoped_initialization_prunes_unscoped_interfaces() {
+    let definitions = crate::sdk::build_dpu_interfaces_vec();
 
-    for (existing_name, logical_name, desired_scoped) in cases {
-        // Seed a foreign-managed resource whose name and inner label resemble one NICo mode.
-        let mock = InitializationMock::default();
-        let mut existing = crate::sdk::build_service_interface(
-            &crate::sdk::build_dpu_interfaces_vec()[0],
-            TEST_NS,
-        );
-        existing.metadata.name = Some(existing_name.to_string());
-        existing.metadata.labels = Some(BTreeMap::from([(
-            "app.kubernetes.io/managed-by".to_string(),
-            "vendor-dpf-operator".to_string(),
-        )]));
-        existing
-            .spec
-            .template
-            .spec
-            .template
-            .metadata
-            .as_mut()
-            .unwrap()
-            .labels
-            .as_mut()
-            .unwrap()
-            .insert("interface".to_string(), logical_name.to_string());
-        let existing_snapshot = serde_json::to_value(&existing).unwrap();
-        mock.service_interfaces
-            .insert(resource_key(&existing), existing);
-
-        // Initialize the opposite shape in both directions through the complete SDK path.
-        let config = InitDpfResourcesConfig {
+    // Legacy-to-scoped: legacy interfaces are pruned, including stale interfaces from a
+    // previously configured intercept inventory.
+    let mock = InitializationMock::default();
+    let stale_p1 = crate::sdk::build_service_interface(
+        definitions
+            .iter()
+            .find(|definition| definition.name == "p1")
+            .expect("static test inventory must contain p1"),
+        TEST_NS,
+    );
+    mock.service_interfaces
+        .insert(resource_key(&stale_p1), stale_p1);
+    let old_intercept_interfaces = crate::sdk::build_effective_dpu_interfaces(
+        DEFAULT_DPU_NUM_OF_VFS,
+        Some(&configured_intercept_bridging()),
+    );
+    let stale_c2pf3 = crate::sdk::build_service_interface(
+        old_intercept_interfaces
+            .iter()
+            .find(|definition| definition.name == "c2pf3")
+            .expect("configured test inventory must contain c2pf3"),
+        TEST_NS,
+    );
+    mock.service_interfaces
+        .insert(resource_key(&stale_c2pf3), stale_c2pf3);
+    let sdk = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+        .with_labeler(InitializationLabeler)
+        .initialize(&InitDpfResourcesConfig {
             bfb_url: "http://example.com/test.bfb".to_string(),
-            deployment_scoped_service_interfaces: desired_scoped,
+            deployment_scoped_service_interfaces: true,
             ..Default::default()
-        };
-        // `InitializationMock` clones share Arc-backed stores, so assertions through `mock`
-        // observe the exact writes performed through the repository clone held by the SDK.
-        let sdk =
-            crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
-                .with_labeler(InitializationLabeler)
-                .initialize(&config)
-                .await
-                .unwrap();
-
-        // Initialization must apply its own resources without mutating or pruning the existing one.
-        assert!(!mock.bfbs.is_empty());
-        assert!(!mock.flavors.is_empty());
-        assert!(!mock.deployments.is_empty());
-        let existing_after = DpuServiceInterfaceRepository::get(&mock, existing_name, TEST_NS)
+        })
+        .await
+        .unwrap();
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, "p1", TEST_NS)
             .await
             .unwrap()
-            .expect("pre-existing ServiceInterface must remain");
-        assert_eq!(
-            serde_json::to_value(existing_after).unwrap(),
-            existing_snapshot
-        );
+            .is_none()
+    );
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, "p1-bf3", TEST_NS)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, "c2pf3", TEST_NS)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(sdk);
+}
 
-        drop(sdk);
-    }
+#[tokio::test]
+async fn scoped_initialization_waits_for_legacy_interface_deletion() {
+    let definitions = crate::sdk::build_dpu_interfaces_vec();
+    let mock = InitializationMock::default();
+    let stale_p1 = crate::sdk::build_service_interface(
+        definitions
+            .iter()
+            .find(|definition| definition.name == "p1")
+            .expect("static test inventory must contain p1"),
+        TEST_NS,
+    );
+    mock.service_interfaces
+        .insert(resource_key(&stale_p1), stale_p1);
+    mock.blocked_service_interface_deletes
+        .insert(ns_key(TEST_NS, "p1"), ());
+
+    let sdk = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+        .with_labeler(InitializationLabeler)
+        .build_without_resources()
+        .await
+        .unwrap();
+    let delete_started = mock.service_interface_delete_started.notified();
+    let initialization = tokio::spawn(async move {
+        sdk.create_initialization_objects(&InitDpfResourcesConfig {
+            bfb_url: "http://example.com/test.bfb".to_string(),
+            deployment_scoped_service_interfaces: true,
+            ..Default::default()
+        })
+        .await
+    });
+
+    delete_started.await;
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, "p1-bf3", TEST_NS)
+            .await
+            .unwrap()
+            .is_none(),
+        "scoped replacement must not be created before legacy deletion completes"
+    );
+
+    mock.blocked_service_interface_deletes
+        .remove(&ns_key(TEST_NS, "p1"));
+    mock.service_interface_delete_release.notify_one();
+    initialization.await.unwrap().unwrap();
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, "p1-bf3", TEST_NS)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn scoped_initialization_keeps_waiting_when_legacy_interface_delete_hangs() {
+    let definitions = crate::sdk::build_dpu_interfaces_vec();
+    let mock = InitializationMock::default();
+    let stale_p1 = crate::sdk::build_service_interface(
+        definitions
+            .iter()
+            .find(|definition| definition.name == "p1")
+            .expect("static test inventory must contain p1"),
+        TEST_NS,
+    );
+    mock.service_interfaces
+        .insert(resource_key(&stale_p1), stale_p1);
+    mock.blocked_service_interface_deletes
+        .insert(ns_key(TEST_NS, "p1"), ());
+
+    let sdk = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+        .with_labeler(InitializationLabeler)
+        .build_without_resources()
+        .await
+        .unwrap();
+    let delete_started = mock.service_interface_delete_started.notified();
+    let initialization = tokio::spawn(async move {
+        sdk.create_initialization_objects(&InitDpfResourcesConfig {
+            bfb_url: "http://example.com/test.bfb".to_string(),
+            deployment_scoped_service_interfaces: true,
+            ..Default::default()
+        })
+        .await
+    });
+
+    delete_started.await;
+    tokio::time::advance(Duration::from_secs(10 * 60 + 1)).await;
+    assert!(
+        !initialization.is_finished(),
+        "a blocked migration must continue waiting after the operator-error log"
+    );
+    mock.blocked_service_interface_deletes
+        .remove(&ns_key(TEST_NS, "p1"));
+    mock.service_interface_delete_release.notify_one();
+    initialization.await.unwrap().unwrap();
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, "p1-bf3", TEST_NS)
+            .await
+            .unwrap()
+            .is_some(),
+        "scoped replacements must be created after the blocked cleanup completes"
+    );
 }
 
 /// Verifies a missing referenced template fails the complete inventory lookup
@@ -1154,17 +1586,20 @@ async fn reinitialization_preserves_operator_extra_scripts() {
     .into_iter()
     .map(|name| ServiceDefinition::new(name, "repo", "chart", "1.0.0"))
     .collect::<Vec<_>>();
-    let config = InitDpfResourcesConfig {
-        bluefield_software: Some(BlueFieldSoftwareParams {
+    let config = InitDpfResourcesConfigBuilder::default()
+        .bluefield_software(BlueFieldSoftwareParams {
             os_iso: "http://example.com/bf4.iso".to_string(),
-            pldm_fw_bundle: Some("http://example.com/bf4.pldm".to_string()),
-        }),
-        deployment_name: "bf4-deployment".to_string(),
-        flavor_name: "bf4-flavor".to_string(),
-        services,
-        deployment_type: DpuDeploymentType::Bf4Generic,
-        ..Default::default()
-    };
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "pldmid001".to_string(),
+                "http://example.com/bf4.pldm".to_string(),
+            )])),
+        })
+        .deployment_name("bf4-deployment")
+        .flavor_name("bf4-flavor")
+        .services(services)
+        .deployment_type(DpuDeploymentType::Bf4Generic)
+        .build()
+        .expect("extra-script test configuration must be valid");
 
     sdk.create_initialization_objects(&config).await.unwrap();
 

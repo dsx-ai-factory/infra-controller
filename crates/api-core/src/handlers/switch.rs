@@ -15,16 +15,40 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
+
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, HealthReportEntry};
+use carbide_uuid::machine::MachineInterfaceId;
 use db::{ObjectColumnFilter, switch as db_switch};
 use health_report::HealthReportApplyMode;
+use mac_address::MacAddress;
+use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::metadata::Metadata;
+use model::switch::{Switch, SwitchControllerState};
+use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 use crate::auth::AuthContext;
+
+/// BMC and declared NVOS MACs associated with a switch, used for optional
+/// force-delete cleanup of interfaces and suppressions.
+async fn associated_switch_macs(
+    txn: &mut PgConnection,
+    switch: &Switch,
+) -> Result<Vec<MacAddress>, CarbideError> {
+    let Some(bmc_mac) = switch.bmc_mac_address else {
+        return Ok(Vec::new());
+    };
+
+    let mut macs = vec![bmc_mac];
+    if let Some(expected) = db::expected_switch::find_by_bmc_mac_address(txn, bmc_mac).await? {
+        macs.extend(expected.nvos_mac_addresses);
+    }
+    Ok(macs)
+}
 
 fn switch_nvos_info_from_endpoint_row(
     row: &db_switch::SwitchEndpointRow,
@@ -246,6 +270,83 @@ pub(crate) async fn find_switch_state_histories(
     Ok(tonic::Response::new(response))
 }
 
+pub(crate) async fn decommission_switch(
+    api: &Api,
+    request: Request<rpc::DecommissionSwitchRequest>,
+) -> Result<Response<rpc::DecommissionSwitchResponse>, Status> {
+    log_request_data(&request);
+    let switch_id = request
+        .into_inner()
+        .switch_id
+        .ok_or_else(|| CarbideError::InvalidArgument("switch_id is required".to_string()))?;
+
+    let component_manager = api.component_manager.as_ref().ok_or_else(|| {
+        CarbideError::FailedPrecondition(
+            "managed-switch decommissioning requires the RMS component-manager backend".to_string(),
+        )
+    })?;
+    if component_manager.nv_switch.name() != "rms" {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "managed-switch decommissioning requires the RMS component-manager backend (configured backend: {})",
+            component_manager.nv_switch.name()
+        ))
+        .into());
+    }
+
+    let mut txn = api.txn_begin().await?;
+    let switch = db::switch::find_by_id(&mut txn, &switch_id)
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "switch",
+            id: switch_id.to_string(),
+        })?;
+    if !matches!(switch.controller_state.value, SwitchControllerState::Ready) {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "switch {switch_id} must be in the ready state to be decommissioned (current state: {})",
+            serde_json::to_string(&switch.controller_state.value).unwrap_or_default()
+        ))
+        .into());
+    }
+
+    if let Some(rack_id) = switch.rack_id.as_ref() {
+        let assigned_hosts =
+            db::managed_host::find_assigned_hosts_in_rack(&mut txn, rack_id).await?;
+        if !assigned_hosts.is_empty() {
+            let assignments = assigned_hosts
+                .iter()
+                .map(|(machine_id, instance_id)| format!("{machine_id} ({instance_id})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(CarbideError::FailedPrecondition(format!(
+                "switch {switch_id} cannot be decommissioned while managed hosts in rack {rack_id} are assigned to instances: {assignments}"
+            ))
+            .into());
+        }
+    }
+
+    db_switch::set_decommission_requested(&mut txn, switch_id).await?;
+    txn.commit().await?;
+
+    Ok(Response::new(rpc::DecommissionSwitchResponse {}))
+}
+
+pub(crate) async fn find_switch_health_histories(
+    api: &Api,
+    request: Request<rpc::SwitchHealthHistoriesRequest>,
+) -> Result<Response<rpc::HealthHistories>, Status> {
+    log_request_data(&request);
+    let request = request.into_inner();
+
+    crate::handlers::health::find_health_histories(
+        api,
+        request.switch_ids,
+        db::health_history::HealthHistoryTableId::Switch,
+        request.start_time,
+        request.end_time,
+    )
+    .await
+}
+
 // TODO: block if switch is in use (firmware update, etc.)
 pub(crate) async fn delete_switch(
     api: &Api,
@@ -323,26 +424,53 @@ pub(crate) async fn admin_force_delete_switch(
     .await
     .map_err(CarbideError::from)?;
 
-    if switch_list.is_empty() {
-        return Err(CarbideError::NotFoundError {
+    let switch = switch_list
+        .into_iter()
+        .next()
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "switch",
             id: switch_id.to_string(),
-        }
-        .into());
-    }
+        })?;
+
+    let needs_mac_cleanup = request.delete_interfaces || request.delete_bmc_suppressions;
+    let macs = if needs_mac_cleanup {
+        associated_switch_macs(&mut txn, &switch).await?
+    } else {
+        Vec::new()
+    };
 
     // Optionally delete associated machine interfaces.
     let mut interfaces_deleted: u32 = 0;
     if request.delete_interfaces {
-        let interface_ids = db::machine_interface::find_ids_by_switch_id(&mut txn, &switch_id)
-            .await
-            .map_err(CarbideError::from)?;
+        let mut interface_ids: HashSet<MachineInterfaceId> =
+            db::machine_interface::find_ids_by_switch_id(&mut txn, &switch_id)
+                .await
+                .map_err(CarbideError::from)?
+                .into_iter()
+                .collect();
+        for &mac in &macs {
+            for interface in db::machine_interface::find_by_mac_address(&mut txn, mac)
+                .await
+                .map_err(CarbideError::from)?
+            {
+                interface_ids.insert(interface.id);
+            }
+        }
         for interface_id in &interface_ids {
             db::machine_interface::delete(interface_id, &mut txn)
                 .await
                 .map_err(CarbideError::from)?;
         }
         interfaces_deleted = interface_ids.len() as u32;
+    }
+
+    if request.delete_bmc_suppressions {
+        db::bmc_suppression::delete_many(&mut txn, &macs, BmcSuppressionSubsystem::Dhcp)
+            .await
+            .map_err(CarbideError::from)?;
+        db::bmc_suppression::delete_many(&mut txn, &macs, BmcSuppressionSubsystem::SiteExplorer)
+            .await
+            .map_err(CarbideError::from)?;
     }
 
     // Hard-delete the switch.

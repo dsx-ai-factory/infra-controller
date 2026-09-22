@@ -48,12 +48,26 @@ pub(crate) struct MachineInterface {
 pub(crate) struct AppState {
     pub(super) engine: Engine<Tera>,
     // pub request_metrics: RequestMetrics,
+    /// The directory served under `/public`, as given on the command line.
+    pub(super) static_dir: String,
     pub(super) runtime_config: RuntimeConfig,
     pub(super) prometheus_handle: PrometheusHandle,
     /// The registry behind the global OTel meter, where the instrumentation
     /// framework's events record; `/metrics` renders it alongside the
     /// `metrics-exporter-prometheus` recorder above.
     pub(super) otel_registry: prometheus::Registry,
+}
+
+/// An [`AppState`] whose template engine is loaded from the real
+/// `pxe/templates` directory, for tests that assert on rendered bytes rather
+/// than on the template context.
+#[cfg(test)]
+pub(crate) fn test_app_state_with_templates() -> AppState {
+    let template_glob = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pxe/templates/**/*");
+    AppState {
+        engine: Engine::from(Tera::new(template_glob).expect("failed to load pxe templates")),
+        ..test_app_state()
+    }
 }
 
 /// An [`AppState`] for handler tests: an empty template engine, a local
@@ -64,6 +78,7 @@ pub(crate) fn test_app_state() -> AppState {
 
     AppState {
         engine: Engine::from(Tera::default()),
+        static_dir: String::new(),
         runtime_config: RuntimeConfig {
             internal_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079".to_string(),
             client_facing_api_url: "https://carbide-api.forge".to_string(),

@@ -29,19 +29,51 @@ pub enum DpuEnumerationError {
     Cmd(#[from] CmdError),
     #[error("DPU enumeration failed reading '{0}': {1}")]
     Read(&'static str, String),
+    #[error("no BlueField device found under /dev/mst")]
+    NoBlueField,
 }
 
 fn get_flint_query() -> Result<String, DpuEnumerationError> {
     if cfg!(test) {
         const TEST_DATA: &str = "test/flint_query.txt";
-        std::fs::read_to_string(TEST_DATA)
-            .map_err(|x| DpuEnumerationError::Read(TEST_DATA, x.to_string()))
-    } else {
-        Cmd::new("bash")
-            .args(vec!["-c", "flint -d /dev/mst/mt*_pciconf0 q full"])
-            .output()
-            .map_err(DpuEnumerationError::from)
+        return std::fs::read_to_string(TEST_DATA)
+            .map_err(|x| DpuEnumerationError::Read(TEST_DATA, x.to_string()));
     }
+
+    // Query each mst device on its own and keep only the BlueField ones,
+    // stopping at the first match since the parser below takes the first
+    // occurrence of each field regardless.
+    //
+    // Exiting non-zero when nothing could be queried is what keeps the two
+    // failures apart. `flint` missing, the mst driver not started, and
+    // /dev/mst unreadable all yield no output, and reporting those as "this
+    // host has no BlueField" would send diagnosis after the wrong thing. Only
+    // an empty result from devices that did answer means that.
+    const FLINT_QUERY: &str = r#"
+shopt -s nullglob
+queried=0
+for dev in /dev/mst/*_pciconf0; do
+    if out=$(flint -d "$dev" q full 2>&1); then
+        queried=1
+        if echo "$out" | grep -q "Description:.*BlueField"; then
+            echo "$out"
+            exit 0
+        fi
+    else
+        echo "$dev: $out" >&2
+    fi
+done
+[ "$queried" -eq 1 ] || exit 1
+"#;
+    let output = Cmd::new("bash").args(vec!["-c", FLINT_QUERY]).output()?;
+
+    // Devices answered and none of them is a BlueField. Reported here rather
+    // than left to the field parsing below, which would blame the empty output
+    // on a missing firmware version.
+    if output.trim().is_empty() {
+        return Err(DpuEnumerationError::NoBlueField);
+    }
+    Ok(output)
 }
 
 pub fn get_dpu_info() -> Result<DpuData, DpuEnumerationError> {

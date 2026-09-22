@@ -19,7 +19,7 @@
 
 use carbide_uuid::switch::SwitchId;
 use db::switch as db_switch;
-use model::switch::{ConfiguringState, Switch, SwitchControllerState};
+use model::switch::{ConfiguringState, Switch, SwitchControllerState, SwitchDecommissioningState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -47,6 +47,17 @@ pub async fn handle_ready(
         ));
     }
 
+    if state.decommission_requested {
+        let mut txn = ctx.services.db_pool.begin().await?;
+        db_switch::clear_decommission_requested(&mut txn, *switch_id).await?;
+        return Ok(
+            StateHandlerOutcome::transition(SwitchControllerState::Decommissioning {
+                decommissioning_state: SwitchDecommissioningState::SuppressingSiteExplorer,
+            })
+            .with_txn(txn),
+        );
+    }
+
     if let Some(req) = state.switch_maintenance_requested.as_ref() {
         tracing::info!(
             operation = ?req.operation,
@@ -54,7 +65,7 @@ pub async fn handle_ready(
             "Switch maintenance requested; transitioning to Maintenance"
         );
         return Ok(StateHandlerOutcome::transition(
-            SwitchControllerState::maintenance_for_operation(req.operation),
+            SwitchControllerState::maintenance_for_request(req.clone()),
         ));
     }
 

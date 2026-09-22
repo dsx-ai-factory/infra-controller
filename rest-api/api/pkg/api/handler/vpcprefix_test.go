@@ -179,6 +179,10 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	vpc6 := testVpcPrefixBuildVpc(t, dbSession, ip, tenant2, site, tnOrg1, "testVPC", cutil.GetPtr(cdbm.VpcFNN), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 	vpc7 := testVpcPrefixBuildVpc(t, dbSession, ip, tenant2, site4, tnOrg2, "testVPC", cutil.GetPtr(cdbm.VpcFNN), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 	vpc8 := testVpcPrefixBuildVpc(t, dbSession, ip, tenant2, site4, tnOrg2, "testVPC8", cutil.GetPtr(cdbm.VpcEthernetVirtualizer), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
+	vpcSLAAC := testVpcPrefixBuildVpc(t, dbSession, ip, tenant1, site, tnOrg1, "testVPCSLAAC", cutil.GetPtr(cdbm.VpcFNN), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
+	vpcDAO := cdbm.NewVpcDAO(dbSession)
+	_, err := vpcDAO.Update(ctx, nil, cdbm.VpcUpdateInput{VpcID: vpcSLAAC.ID, SlaacEnabled: cutil.GetPtr(true)})
+	require.NoError(t, err)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -227,6 +231,14 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPref1)
 
+	ipbV6 := testIPBlockBuildIPBlock(t, dbSession, "testipbv6", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8:100::", 48, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, ipu)
+	parentPrefV6, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbV6.Prefix, ipbV6.PrefixLength, ipbV6.RoutingType, ipbV6.InfrastructureProviderID.String(), ipbV6.SiteID.String())
+	assert.Nil(t, err)
+	assert.NotNil(t, parentPrefV6)
+
+	ipbPending := testIPBlockBuildIPBlock(t, dbSession, "testipbpending", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.172.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusPending, ipu)
+	ipbInvalidProtocol := testIPBlockBuildIPBlock(t, dbSession, "testipbinvalidprotocol", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.173.0.0", 16, "invalid", false, cdbm.IPBlockStatusReady, ipu)
+
 	ipb2 := testIPBlockBuildIPBlock(t, dbSession, "testipb", site2, ip2, &tenant2.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	parentPref2, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipb2.Prefix, ipb2.PrefixLength, ipb2.RoutingType, ipb2.InfrastructureProviderID.String(), ipb2.SiteID.String())
 	assert.Nil(t, err)
@@ -249,6 +261,9 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	parentPrefFG, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbFG.Prefix, ipbFG.PrefixLength, ipbFG.RoutingType, ipbFG.InfrastructureProviderID.String(), ipbFG.SiteID.String())
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPrefFG)
+	// This record belongs to the same tenant as the valid block. SitePrefixID is
+	// what makes it a SitePrefix rather than an Allocation IPBlock.
+	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tenant1, "192.171.0.0", 16, cdbm.IPBlockStatusReady, ipu)
 
 	okBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 24})
 	assert.Nil(t, err)
@@ -260,6 +275,17 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 
 	errBodySlash32, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "err32", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: 32})
+	assert.Nil(t, err)
+
+	okBodyIPv6, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok-v6", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbV6.ID.String()), PrefixLength: 64})
+	assert.Nil(t, err)
+
+	errBodySLAAC64, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "err-slaac-64", VpcID: vpcSLAAC.ID.String(), IPBlockID: cutil.GetPtr(ipbV6.ID.String()), PrefixLength: 64})
+	assert.Nil(t, err)
+
+	errBodyPendingIPBlock, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "err-pending-ip-block", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbPending.ID.String()), PrefixLength: 24})
+	assert.Nil(t, err)
+	errBodyInvalidIPBlockProtocol, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "err-invalid-ip-block-protocol", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbInvalidProtocol.ID.String()), PrefixLength: 24})
 	assert.Nil(t, err)
 
 	okBodyNameClash, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc2.ID.String(), IPBlockID: cutil.GetPtr(ipb3.ID.String()), PrefixLength: 24})
@@ -277,7 +303,9 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 	errBodyBadIPBlockID, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: 24})
 	assert.Nil(t, err)
-	errBodyNoIPv4, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), PrefixLength: 25})
+	errBodyTenantSitePrefixID, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "private-prefix", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(tenantSitePrefix.ID.String()), PrefixLength: 24})
+	assert.Nil(t, err)
+	errBodyNoIPBlock, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), PrefixLength: 25})
 	assert.Nil(t, err)
 
 	errBodyBadIPBlockIDTenantMismatch, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb2.ID.String()), PrefixLength: 24})
@@ -306,7 +334,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		expectedErr        bool
 		expectedStatus     int
 		expectedIpam       bool
-		expectedIpamErrMsg string
+		expectedErrMsg     string
 		expectedPrefix     string
 		verifyChildSpanner bool
 	}{
@@ -385,7 +413,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when ipblock is not present in request",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNoIPv4),
+			reqBody:        string(errBodyNoIPBlock),
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -397,6 +425,33 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "Tenant SitePrefix cannot be the source IP Block for a VPC Prefix",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyTenantSitePrefixID),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "Could not find a Ready tenant IP Block specified by ipBlockId",
+		},
+		{
+			name:           "error when IP Block is not Ready",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyPendingIPBlock),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "Could not find a Ready tenant IP Block specified by ipBlockId",
+		},
+		{
+			name:           "error when IP Block protocol version is unsupported",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyInvalidIPBlockProtocol),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusInternalServerError,
+			expectedErrMsg: "Could not determine VPC Prefix length limit",
 		},
 		{
 			name:           "error when ipblock in request is not derived for tenant",
@@ -415,13 +470,13 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
-			name:               "error when ipam creation for vpcprefix fails",
-			reqOrgName:         tnOrg1,
-			reqBody:            string(errBodyIpamFail),
-			user:               tnu,
-			expectedErr:        true,
-			expectedIpamErrMsg: "Could not create IPAM entry for VPC prefix. Details: given length:15 must be greater than prefix length:16",
-			expectedStatus:     http.StatusBadRequest,
+			name:           "error when ipam creation for vpcprefix fails",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyIpamFail),
+			user:           tnu,
+			expectedErr:    true,
+			expectedErrMsg: "Could not create IPAM entry for VPC prefix. Details: given length:15 must be greater than prefix length:16",
+			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "success case",
@@ -452,12 +507,30 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			expectedPrefix: "192.168.1.0/31",
 		},
 		{
+			name:           "success case with IPv6 prefix",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(okBodyIPv6),
+			user:           tnu,
+			expectedErr:    false,
+			expectedStatus: http.StatusCreated,
+			expectedPrefix: "2001:db8:100::/64",
+		},
+		{
 			name:           "error case with /32",
 			reqOrgName:     tnOrg1,
 			reqBody:        string(errBodySlash32),
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "error when SLAAC IPv6 prefix is /64",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodySLAAC64),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "prefixLength must be at most 63",
 		},
 		{
 			name:           "error when vpcprefix with same name already exists",
@@ -535,8 +608,8 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			require.Equal(t, tc.expectedStatus, rec.Code, rec.Body.String())
 
 			if tc.expectedErr {
-				if tc.expectedIpamErrMsg != "" {
-					assert.Contains(t, rec.Body.String(), tc.expectedIpamErrMsg)
+				if tc.expectedErrMsg != "" {
+					assert.Contains(t, rec.Body.String(), tc.expectedErrMsg)
 				}
 
 				return
@@ -1137,6 +1210,15 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 	require.NoError(t, err)
 	vpcprefixWithIfaceWorkload := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(ifaceWorkloadBody))
 
+	ipbV6 := testIPBlockBuildIPBlock(t, dbSession, "testipbv6", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8:200::", 48, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, ipu)
+	parentPrefV6, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbV6.Prefix, ipbV6.PrefixLength, ipbV6.RoutingType, ipbV6.InfrastructureProviderID.String(), ipbV6.SiteID.String())
+	require.NoError(t, err)
+	require.NotNil(t, parentPrefV6)
+	ipv6Body, err := json.Marshal(model.APIVpcPrefixCreateRequest{
+		Name: "ipv6-usage-stats", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbV6.ID.String()), PrefixLength: 64})
+	require.NoError(t, err)
+	vpcprefixIPv6 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(ipv6Body))
+
 	alWorkload := common.TestBuildAllocation(t, dbSession, site, tenant1, "get-vpfx-usage-iface-alloc", ipu)
 	itWorkload := common.TestBuildInstanceType(t, dbSession, "get-vpfx-iface-it", cutil.GetPtr(uuid.New()), site, nil, ipu)
 	common.TestBuildAllocationConstraint(t, dbSession, alWorkload, itWorkload, nil, 5, ipu)
@@ -1177,6 +1259,7 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 		expectedVpcName                 *string
 		expectetIPName                  *string
 		expectUsageStatsNonNil          bool
+		expectUsageStatsNil             bool
 		verifyUsageAcquisitionFromIface bool
 		verifyChildSpanner              bool
 	}{
@@ -1287,6 +1370,16 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 			expectUsageStatsNonNil:          true,
 			verifyUsageAcquisitionFromIface: true,
 		},
+		{
+			name:                   "success case when includeUsageStats true for IPv6 prefix",
+			reqOrgName:             tnOrg1,
+			user:                   tnu,
+			id:                     vpcprefixIPv6.ID,
+			expectedErr:            false,
+			expectedStatus:         http.StatusOK,
+			queryIncludeUsageStats: cutil.GetPtr("true"),
+			expectUsageStatsNil:    true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1339,7 +1432,7 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 				// validate response fields
 				assert.Equal(t, 1, len(rsp.StatusHistory))
 
-				expanded := tc.queryIncludeRelations1 != nil || tc.queryIncludeRelations2 != nil || tc.queryIncludeRelations3 != nil || tc.expectUsageStatsNonNil
+				expanded := tc.queryIncludeRelations1 != nil || tc.queryIncludeRelations2 != nil || tc.queryIncludeRelations3 != nil || tc.expectUsageStatsNonNil || tc.expectUsageStatsNil
 				if expanded {
 					if tc.expectedVpcName != nil {
 						assert.Equal(t, *tc.expectedVpcName, rsp.Vpc.Name)
@@ -1350,6 +1443,10 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 					if tc.expectUsageStatsNonNil {
 						require.NotNil(t, rsp.IPBlock)
 						require.NotNil(t, rsp.UsageStats)
+					}
+					if tc.expectUsageStatsNil {
+						require.NotNil(t, rsp.IPBlock)
+						assert.Nil(t, rsp.UsageStats)
 					}
 					if tc.verifyUsageAcquisitionFromIface {
 						require.NotNil(t, rsp.UsageStats)

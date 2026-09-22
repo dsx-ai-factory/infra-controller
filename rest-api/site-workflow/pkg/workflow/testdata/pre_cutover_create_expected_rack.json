@@ -1,0 +1,324 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2026-08-26T07:14:17.224782626Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "taskId": "1049240",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "CreateExpectedRack"
+        },
+        "taskQueue": {
+          "name": "expected-inventory-pre-cutover-capture",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wcm90b2J1Zg==",
+                "messageType": "Zm9yZ2UuRXhwZWN0ZWRSYWNr"
+              },
+              "data": "eyJyYWNrSWQiOnsiaWQiOiJwcmUtY3V0b3Zlci1yYWNrLTAwMSJ9LCAicmFja1Byb2ZpbGVJZCI6eyJpZCI6InByZS1jdXRvdmVyLXJhY2stcHJvZmlsZS0wMDEifX0="
+            }
+          ]
+        },
+        "workflowExecutionTimeout": "0s",
+        "workflowRunTimeout": "0s",
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "01a03ceb-6e08-7bef-98f6-8924dac8d6fd",
+        "identity": "expected-inventory-history-capture",
+        "firstExecutionRunId": "01a03ceb-6e08-7bef-98f6-8924dac8d6fd",
+        "attempt": 1,
+        "firstWorkflowTaskBackoff": "0s",
+        "header": {},
+        "workflowId": "pre-cutover-create-expected-rack"
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2026-08-26T07:14:17.224816588Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1049241",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "expected-inventory-pre-cutover-capture",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2026-08-26T07:14:17.273426012Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1049248",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "expected-inventory-history-capture",
+        "requestId": "c60d2d4f-fe03-46f5-bb92-eb0080d9a6f0",
+        "historySizeBytes": "996",
+        "workerVersion": {
+          "buildId": "b3faa49c6f6d9d9bdffc9566fd6ba5ec"
+        }
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2026-08-26T07:14:17.322578005Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1049252",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "2",
+        "startedEventId": "3",
+        "identity": "expected-inventory-history-capture",
+        "workerVersion": {
+          "buildId": "b3faa49c6f6d9d9bdffc9566fd6ba5ec"
+        },
+        "sdkMetadata": {
+          "langUsedFlags": [
+            3
+          ],
+          "sdkName": "temporal-go",
+          "sdkVersion": "1.39.0"
+        },
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2026-08-26T07:14:17.322601140Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1049253",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "5",
+        "activityType": {
+          "name": "CreateExpectedRackOnSite"
+        },
+        "taskQueue": {
+          "name": "expected-inventory-pre-cutover-capture",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wcm90b2J1Zg==",
+                "messageType": "Zm9yZ2UuRXhwZWN0ZWRSYWNr"
+              },
+              "data": "eyJyYWNrSWQiOnsiaWQiOiJwcmUtY3V0b3Zlci1yYWNrLTAwMSJ9LCAicmFja1Byb2ZpbGVJZCI6eyJpZCI6InByZS1jdXRvdmVyLXJhY2stcHJvZmlsZS0wMDEifX0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "120s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "4",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "10s",
+          "maximumAttempts": 2
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2026-08-26T07:14:17.355353328Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1049259",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "5",
+        "identity": "expected-inventory-history-capture",
+        "requestId": "d0e7bee4-293d-4cdf-895a-e9c4c45825d8",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "b3faa49c6f6d9d9bdffc9566fd6ba5ec"
+        }
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2026-08-26T07:14:17.389814075Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1049260",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "5",
+        "startedEventId": "6",
+        "identity": "expected-inventory-history-capture"
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2026-08-26T07:14:17.389819563Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1049261",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "temporal-dev-server",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "expected-inventory-pre-cutover-capture"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2026-08-26T07:14:17.422277678Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1049265",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "8",
+        "identity": "expected-inventory-history-capture",
+        "requestId": "77dc280c-50c4-493b-84a0-c84ecfb61918",
+        "historySizeBytes": "1909",
+        "workerVersion": {
+          "buildId": "b3faa49c6f6d9d9bdffc9566fd6ba5ec"
+        }
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2026-08-26T07:14:17.455404922Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1049269",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "8",
+        "startedEventId": "9",
+        "identity": "expected-inventory-history-capture",
+        "workerVersion": {
+          "buildId": "b3faa49c6f6d9d9bdffc9566fd6ba5ec"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "11",
+      "eventTime": "2026-08-26T07:14:17.455429268Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1049270",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "11",
+        "activityType": {
+          "name": "CreateExpectedRackOnFlow"
+        },
+        "taskQueue": {
+          "name": "expected-inventory-pre-cutover-capture",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wcm90b2J1Zg==",
+                "messageType": "Zm9yZ2UuRXhwZWN0ZWRSYWNr"
+              },
+              "data": "eyJyYWNrSWQiOnsiaWQiOiJwcmUtY3V0b3Zlci1yYWNrLTAwMSJ9LCAicmFja1Byb2ZpbGVJZCI6eyJpZCI6InByZS1jdXRvdmVyLXJhY2stcHJvZmlsZS0wMDEifX0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "120s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "10",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "10s",
+          "maximumAttempts": 2
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "12",
+      "eventTime": "2026-08-26T07:14:17.486913063Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1049275",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "11",
+        "identity": "expected-inventory-history-capture",
+        "requestId": "6188af6d-3374-4175-b1ec-a18e715a70ca",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "b3faa49c6f6d9d9bdffc9566fd6ba5ec"
+        }
+      }
+    },
+    {
+      "eventId": "13",
+      "eventTime": "2026-08-26T07:14:17.502889128Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1049276",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "11",
+        "startedEventId": "12",
+        "identity": "expected-inventory-history-capture"
+      }
+    },
+    {
+      "eventId": "14",
+      "eventTime": "2026-08-26T07:14:17.502893755Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1049277",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "temporal-dev-server",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "expected-inventory-pre-cutover-capture"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "15",
+      "eventTime": "2026-08-26T07:14:17.534388917Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1049281",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "14",
+        "identity": "expected-inventory-history-capture",
+        "requestId": "7e8163ff-1ad4-4201-bedf-cd60b78a3c88",
+        "historySizeBytes": "2798",
+        "workerVersion": {
+          "buildId": "b3faa49c6f6d9d9bdffc9566fd6ba5ec"
+        }
+      }
+    },
+    {
+      "eventId": "16",
+      "eventTime": "2026-08-26T07:14:17.567386365Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1049285",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "14",
+        "startedEventId": "15",
+        "identity": "expected-inventory-history-capture",
+        "workerVersion": {
+          "buildId": "b3faa49c6f6d9d9bdffc9566fd6ba5ec"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "17",
+      "eventTime": "2026-08-26T07:14:17.567413356Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED",
+      "taskId": "1049286",
+      "workflowExecutionCompletedEventAttributes": {
+        "workflowTaskCompletedEventId": "16"
+      }
+    }
+  ]
+}

@@ -32,6 +32,8 @@ clusterApiServer: ""
 ## ---------------------------------------------------------------------------
 vault:
   address: "https://vault.vault.svc.cluster.local:8200"
+  ## Optional Vault Enterprise/HCP Vault Dedicated namespace. This is not a Kubernetes namespace.
+  namespace: ""
   ## setup.sh/helmfile supplies this dynamically from vaultroottoken.
   ## Direct Helm users should set this when tokenSecret.create=true, or
   ## pre-create nico-system/nico-vault-token and set tokenSecret.create=false.
@@ -81,18 +83,19 @@ vault:
         UsernamePassword:
           username: "root"
           password: "0penBmc"
-    ## Per-model DPU BMC factory-default OVERRIDES (optional).
+    ## Per-model DPU BMC factory-default entries.
     ##
-    ## Not seeded by default: site-explorer already falls back to each model's
-    ## publicly-documented factory default in code (DpuModel::default_factory_credentials
-    ## — BlueField-4 = admin/0penBmc, earlier generations = root/0penBmc, matching the
-    ## "root" catch-all above). Only add a per-model entry here to override that default
-    ## for a site whose DPUs ship with a non-standard factory password.
+    ## site-explorer checks a model-specific entry, then the catch-all above,
+    ## then its per-model code fallback. A standard BF4 site therefore needs
+    ## the `bf4` entry below; uncomment this block to seed it with the shown
+    ## factory credentials.
+    ## Change the values only when a site's BF4 DPUs ship with non-standard
+    ## factory credentials.
     # - path: "machines/all_dpus/factory_default/bmc-metadata-items/bf4"
     #   data:
     #     UsernamePassword:
     #       username: "admin"
-    #       password: ""          # SITE SECRET: this site's BF4 factory password
+    #       password: "0penBmc"
     - path: "machines/all_dpus/factory_default/uefi-metadata-items/auth"
       data:
         UsernamePassword:
@@ -158,27 +161,63 @@ rest:
   namespace: nico-rest
 
 ## ---------------------------------------------------------------------------
-## flow — NICo Flow (rack lifecycle orchestrator, formerly RLA).
+## flow — NICo Flow task, policy, and automation service.
 ##
 ## This toggle controls only the helm-prereqs side of Flow:
-##   - per-component databases (flow / psm / nsm) on nico-pg-cluster
-##   - ClusterExternalSecrets that sync those DB credentials into the flow
+##   - the Flow database on nico-pg-cluster
+##   - the ClusterExternalSecret that syncs its credentials into the flow
 ##     namespace (eso-external-secrets.yaml)
-##   - psm/nsm Vault tokens (flow-vault-tokens-job post-install hook)
 ##
 ## The flow Deployment itself ships as a separate helm release from
-## helm/charts/nico-flow, installed by setup.sh phase 7i. That phase is NOT
+## helm/charts/nico-flow, installed by setup.sh phase 7h. That phase is NOT
 ## driven by this value — it is unconditionally invoked unless setup.sh is
 ## passed --skip-flow. If you set flow.enabled=false here you should also
-## pass --skip-flow on the setup.sh command line, otherwise phase 7i will
-## try to install a chart whose prerequisites (DB creds, Vault tokens) are
-## missing and fail.
+## pass --skip-flow on the setup.sh command line, otherwise phase 7h will
+## try to install a chart whose database credentials are missing and fail.
 ## ---------------------------------------------------------------------------
+## ---------------------------------------------------------------------------
+## rms — NVIDIA Rack Manager Service (rack-manager chart) prerequisites.
+##
+## This toggle controls only the helm-prereqs side of RMS:
+##   - the rms database and rms.nico user on nico-pg-cluster (postgresql.yaml)
+##   - the rms-db-eso ClusterExternalSecret that syncs the credentials into
+##     the rack-manager namespace (eso-external-secrets.yaml)
+##
+## The rack-manager chart itself is installed by setup.sh phase 5c, by
+## DEFAULT (opt out with --skip-rms). Deliberately NOT driven by that flag:
+## --skip-rms skips only the chart install and never deprovisions these
+## prerequisites — removing them would strand a running rack-manager release
+## (same contract as --skip-flow). To skip the prerequisites too, set
+## enabled: false here, paired with --skip-rms.
+## ---------------------------------------------------------------------------
+rms:
+  enabled: true
+
 flow:
   enabled: true
   ## Namespace flow runs in — must match the helm install -n flag for the
-  ## flow release.  ESO and the vault-config-job target this namespace.
+  ## flow release. ESO targets this namespace.
   namespace: flow
+
+## ---------------------------------------------------------------------------
+## temporal / keycloak — opt-in Temporal/Keycloak database consolidation onto
+## nico-pg-cluster (the shared, HA Zalando-managed cluster), instead of each
+## staying on the legacy standalone postgres.postgres StatefulSet. Disabled
+## by default; both targets are supported side by side, and existing sites
+## need no changes.
+##
+## Full story (what gets provisioned, migration steps, namespace caveats):
+## see "Consolidating Temporal/Keycloak onto nico-pg-cluster" in README.md.
+## ---------------------------------------------------------------------------
+temporal:
+  useHaPostgres: false
+
+keycloak:
+  useHaPostgres: false
+  ## Namespace Keycloak deploys into — must stay in sync with
+  ## values/nico-rest.yaml's nico-rest-api.config.keycloak.baseURL host.
+  ## See README.md.
+  namespace: nico-rest
 
 ## ---------------------------------------------------------------------------
 ## PostgreSQL — Zalando postgres-operator HA cluster (3-node Patroni)

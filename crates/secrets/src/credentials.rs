@@ -19,6 +19,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::Engine;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
 use mac_address::MacAddress;
@@ -237,6 +238,62 @@ impl<T: CredentialWriter + ?Sized> CredentialWriter for Arc<T> {
     }
 }
 
+/// Blocks persistent UFM credential mutations while local sources own all UFM
+/// credentials, and delegates every other writer operation.
+pub struct UfmCredentialMutationBlocker {
+    writer: Arc<dyn CredentialWriter>,
+}
+
+impl UfmCredentialMutationBlocker {
+    /// Wraps a writer with the policy that rejects UFM mutations and delegates
+    /// every other credential operation.
+    pub fn new(writer: Arc<dyn CredentialWriter>) -> Self {
+        Self { writer }
+    }
+
+    fn ensure_mutation_allowed(key: &CredentialKey) -> Result<(), SecretsError> {
+        let CredentialKey::UfmAuth { fabric } = key else {
+            return Ok(());
+        };
+        Err(SecretsError::UfmCredentialMutationBlocked {
+            fabric: fabric.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl CredentialWriter for UfmCredentialMutationBlocker {
+    async fn get_credentials_from_writer(
+        &self,
+        key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError> {
+        self.writer.get_credentials_from_writer(key).await
+    }
+
+    async fn set_credentials(
+        &self,
+        key: &CredentialKey,
+        credentials: &Credentials,
+    ) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.set_credentials(key, credentials).await
+    }
+
+    async fn create_credentials(
+        &self,
+        key: &CredentialKey,
+        credentials: &Credentials,
+    ) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.create_credentials(key, credentials).await
+    }
+
+    async fn delete_credentials(&self, key: &CredentialKey) -> Result<(), SecretsError> {
+        Self::ensure_mutation_allowed(key)?;
+        self.writer.delete_credentials(key).await
+    }
+}
+
 pub trait CredentialManager: CredentialReader + CredentialWriter {}
 
 pub struct CompositeCredentialManager<R, W> {
@@ -335,11 +392,27 @@ pub enum BmcCredentialType {
     BmcForgeAdmin {
         bmc_mac_address: MacAddress,
     },
-    /// Site-wide DPU BMC `service` account password
+    /// Site-wide DPU BMC `service` account password, version 0
     /// (`machines/bmc/site/dpu_service`). Written on first ingestion of a DPU
     /// BMC that exposes a factory `service` account (currently BF4 only; BF3
-    /// has none). Distinct from the site-wide BMC root password.
+    /// has none). Distinct from the site-wide BMC root password. Under credential
+    /// rotation this is simply version 0; the *current* version is recorded in
+    /// `sitewide_credential_rotation`'s `target_version` for the `dpu_bmc_service`
+    /// family and resolved via [`BmcCredentialType::site_wide_dpu_bmc_service`].
+    /// It is never overwritten by a rotation -- once the site has rotated, this
+    /// path still holds the v0 value while the live credential is at
+    /// [`SiteWideDpuBmcServiceVersioned`].
     SiteWideDpuBmcService,
+    /// Site-wide DPU BMC `service` account password at a specific rotation
+    /// version `N >= 1` (`machines/bmc/site/dpu_service/v{N}`), written by
+    /// `RotateCredential`. Immutable per version. The "current" version is
+    /// whichever `sitewide_credential_rotation.target_version` names for the
+    /// `dpu_bmc_service` family; consumers resolve it with
+    /// [`BmcCredentialType::site_wide_dpu_bmc_service`]. Version 0 lives at the
+    /// unversioned [`SiteWideDpuBmcService`] path instead.
+    SiteWideDpuBmcServiceVersioned {
+        version: u32,
+    },
 }
 
 impl BmcCredentialType {
@@ -354,6 +427,19 @@ impl BmcCredentialType {
         match version {
             0 => Self::SiteWideRoot,
             version => Self::SiteWideRootVersioned { version },
+        }
+    }
+
+    /// Resolve the site-wide DPU BMC `service` credential key for `version`,
+    /// mirroring [`site_wide_root`](Self::site_wide_root): version 0 is the
+    /// legacy unversioned path ([`SiteWideDpuBmcService`]); later versions are
+    /// version-addressed ([`SiteWideDpuBmcServiceVersioned`]). This is the single
+    /// place that encodes "v0 lives at the unversioned path" for the service
+    /// account, so consumers never branch on it themselves.
+    pub fn site_wide_dpu_bmc_service(version: u32) -> Self {
+        match version {
+            0 => Self::SiteWideDpuBmcService,
+            version => Self::SiteWideDpuBmcServiceVersioned { version },
         }
     }
 }
@@ -459,6 +545,16 @@ pub enum CredentialKey {
     RackMaintenanceAccessToken {
         rack_id: RackId,
     },
+
+    /// Firmware artifact access token addressed by a non-secret, operator-defined name.
+    ///
+    /// [`CredentialKey::to_key_str`] encodes the name as one path segment, preserving
+    /// its UTF-8 bytes without giving separators or traversal segments path semantics.
+    FirmwareArtifactAccessToken {
+        /// Opaque lookup name supplied through the credential API.
+        name: String,
+    },
+
     ContainerRegistry {
         registry: String,
     },
@@ -504,6 +600,10 @@ pub enum CredentialPrefix {
     MqttAuth,
     MachineIdentityEncryptionKey,
     RackMaintenanceAccessToken,
+
+    /// Prefix used to list all named firmware artifact access tokens.
+    FirmwareArtifactAccessToken,
+
     ContainerRegistry,
 }
 
@@ -528,6 +628,7 @@ impl CredentialPrefix {
             Self::MqttAuth => "mqtt/",
             Self::MachineIdentityEncryptionKey => "machine_identity/",
             Self::RackMaintenanceAccessToken => "racks/",
+            Self::FirmwareArtifactAccessToken => "firmware_artifacts/",
             Self::ContainerRegistry => "container_registries/",
         }
     }
@@ -551,6 +652,7 @@ impl CredentialPrefix {
             Self::MqttAuth,
             Self::MachineIdentityEncryptionKey,
             Self::RackMaintenanceAccessToken,
+            Self::FirmwareArtifactAccessToken,
             Self::ContainerRegistry,
         ]
     }
@@ -629,6 +731,9 @@ impl CredentialKey {
                 CredentialPrefix::MachineIdentityEncryptionKey
             }
             Self::RackMaintenanceAccessToken { .. } => CredentialPrefix::RackMaintenanceAccessToken,
+            Self::FirmwareArtifactAccessToken { .. } => {
+                CredentialPrefix::FirmwareArtifactAccessToken
+            }
             Self::ContainerRegistry { .. } => CredentialPrefix::ContainerRegistry,
         }
     }
@@ -704,6 +809,9 @@ impl CredentialKey {
                 BmcCredentialType::SiteWideDpuBmcService => {
                     Cow::from("machines/bmc/site/dpu_service")
                 }
+                BmcCredentialType::SiteWideDpuBmcServiceVersioned { version } => {
+                    Cow::from(format!("machines/bmc/site/dpu_service/v{version}"))
+                }
             },
             CredentialKey::NicLockdownIkm { credential_type } => match credential_type {
                 NicLockdownIkm::SiteWide { version } => {
@@ -747,6 +855,12 @@ impl CredentialKey {
             CredentialKey::RackMaintenanceAccessToken { rack_id } => {
                 Cow::from(format!("racks/{rack_id}/maintenance/access-token"))
             }
+            CredentialKey::FirmwareArtifactAccessToken { name } => {
+                let encoded_name =
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(name.as_bytes());
+
+                Cow::from(format!("firmware_artifacts/{encoded_name}/access-token"))
+            }
             CredentialKey::ContainerRegistry { registry } => {
                 Cow::from(format!("container_registries/{registry}/auth"))
             }
@@ -786,6 +900,17 @@ mod tests {
         assert!(password.chars().any(|c| c.is_lowercase()));
         assert!(password.chars().any(|c| c.is_ascii_digit()));
         assert!(password.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn firmware_artifact_credential_name_is_encoded_in_store_path() {
+        assert_eq!(
+            CredentialKey::FirmwareArtifactAccessToken {
+                name: "../repo/name".to_string(),
+            }
+            .to_key_str(),
+            "firmware_artifacts/Li4vcmVwby9uYW1l/access-token"
+        );
     }
 
     #[test]
@@ -972,6 +1097,65 @@ mod tests {
             .expect("writer readback");
 
         assert_eq!(writer_readback, Some(write_cred));
+    }
+
+    #[tokio::test]
+    async fn ufm_mutation_blocker_rejects_every_writer_mutation() {
+        let backend: Arc<dyn CredentialWriter> = Arc::new(TestCredentialManager::default());
+        let key = CredentialKey::UfmAuth {
+            fabric: "test-fabric".to_string(),
+        };
+        let credentials = Credentials::UsernamePassword {
+            username: "ufm-user".to_string(),
+            password: "ufm-password".to_string(),
+        };
+        let blocker = UfmCredentialMutationBlocker::new(backend);
+
+        let results = [
+            blocker.set_credentials(&key, &credentials).await,
+            blocker.create_credentials(&key, &credentials).await,
+            blocker.delete_credentials(&key).await,
+        ];
+
+        for result in results {
+            assert!(matches!(
+                result,
+                Err(SecretsError::UfmCredentialMutationBlocked { .. })
+            ));
+        }
+        assert_eq!(
+            blocker
+                .get_credentials_from_writer(&key)
+                .await
+                .expect("read writer after blocked mutations"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn ufm_mutation_blocker_delegates_non_ufm_mutations() {
+        let backend = Arc::new(TestCredentialManager::default());
+        let blocker = UfmCredentialMutationBlocker::new(backend.clone());
+        let key = CredentialKey::DpuUefi {
+            credential_type: CredentialType::SiteDefault,
+        };
+        let credentials = Credentials::UsernamePassword {
+            username: "dpu-user".to_string(),
+            password: "dpu-password".to_string(),
+        };
+
+        blocker
+            .set_credentials(&key, &credentials)
+            .await
+            .expect("write non-UFM credential");
+
+        assert_eq!(
+            backend
+                .get_credentials_from_writer(&key)
+                .await
+                .expect("read delegated credential"),
+            Some(credentials)
+        );
     }
 
     #[tokio::test]
@@ -1292,6 +1476,16 @@ mod tests {
                     expect: PathChecks::all_hold(),
                 },
                 Check {
+                    scenario: "firmware artifact access token",
+                    input: Row {
+                        key: CredentialKey::FirmwareArtifactAccessToken {
+                            name: "repository-a".to_string(),
+                        },
+                        expected_prefix: "firmware_artifacts/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
                     scenario: "rack maintenance access token",
                     input: Row {
                         key: CredentialKey::RackMaintenanceAccessToken { rack_id },
@@ -1384,6 +1578,9 @@ mod tests {
                 key_id: "k".to_string(),
             },
             CredentialKey::RackMaintenanceAccessToken { rack_id },
+            CredentialKey::FirmwareArtifactAccessToken {
+                name: "repository-a".to_string(),
+            },
             CredentialKey::ContainerRegistry {
                 registry: "nvcr.io".to_string(),
             },
@@ -1406,6 +1603,7 @@ mod tests {
     #[test]
     fn prefix_all_is_complete() {
         let all = CredentialPrefix::all();
-        assert_eq!(all.len(), 17);
+
+        assert_eq!(all.len(), 18);
     }
 }

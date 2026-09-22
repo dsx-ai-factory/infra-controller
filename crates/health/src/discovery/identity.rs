@@ -55,6 +55,7 @@ pub(super) async fn ensure_primary_system_uuid(endpoint: &BmcEndpoint) -> Result
             let Some(systems) = root.systems().await? else {
                 tracing::warn!(
                     bmc_address = ?endpoint.addr,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                     "BMC does not expose a ComputerSystem collection"
                 );
                 return Ok(None);
@@ -65,7 +66,7 @@ pub(super) async fn ensure_primary_system_uuid(endpoint: &BmcEndpoint) -> Result
                 .map(|system| {
                     let raw = system.raw();
                     SystemIdentity {
-                        id: raw.base.id.clone(),
+                        id: raw.id.clone(),
                         uuid: raw.uuid.flatten(),
                         bios_version: raw.bios_version.clone().flatten(),
                     }
@@ -74,6 +75,7 @@ pub(super) async fn ensure_primary_system_uuid(endpoint: &BmcEndpoint) -> Result
             let Some(primary) = select_primary_system(&identities) else {
                 tracing::warn!(
                     bmc_address = ?endpoint.addr,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                     "BMC exposes an empty ComputerSystem collection"
                 );
                 return Ok(None);
@@ -82,6 +84,7 @@ pub(super) async fn ensure_primary_system_uuid(endpoint: &BmcEndpoint) -> Result
                 tracing::warn!(
                     bmc_address = ?endpoint.addr,
                     system_id = %primary.id,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                     "Primary ComputerSystem does not expose a UUID"
                 );
             }

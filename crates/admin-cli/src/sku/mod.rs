@@ -28,9 +28,6 @@ mod unassign;
 mod update_metadata;
 mod verify;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;

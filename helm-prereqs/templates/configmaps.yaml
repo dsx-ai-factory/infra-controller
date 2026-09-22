@@ -10,6 +10,9 @@ metadata:
   namespace: {{ .Values.namespace }}
 data:
   VAULT_SERVICE: {{ .Values.vault.address | quote }}
+  {{- with .Values.vault.namespace }}
+  VAULT_NAMESPACE: {{ . | quote }}
+  {{- end }}
   NICO_VAULT_MOUNT: {{ .Values.vault.kvMount | quote }}
   NICO_VAULT_PKI_MOUNT: {{ .Values.vault.pkiMount | quote }}
 ---

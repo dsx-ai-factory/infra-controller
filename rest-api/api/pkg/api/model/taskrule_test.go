@@ -361,3 +361,221 @@ func TestAPIOperationRule_FromProto_NilSafe(t *testing.T) {
 }
 
 func stringPtr(s string) *string { return &s }
+
+// TestRequestRuleIDValidation exercises the ruleId field across the rack,
+// tray, and domain operation request models. Their validation paths converge
+// on the same "nil or valid UUID" contract.
+func TestRequestRuleIDValidation(t *testing.T) {
+	validUUID := "550e8400-e29b-41d4-a716-446655440000"
+	badUUID := "not-a-uuid"
+
+	tests := []struct {
+		name        string
+		validate    func() error
+		wantErr     bool
+		errContains string
+	}{
+		// ---- power.go ----
+		{
+			name: "APIUpdatePowerStateRequest - bad ruleId",
+			validate: func() error {
+				return (&APIUpdatePowerStateRequest{SiteID: "s", State: "on", RuleID: &badUUID}).Validate()
+			},
+			wantErr:     true,
+			errContains: "UUID",
+		},
+		{
+			name: "APIUpdatePowerStateRequest - valid ruleId",
+			validate: func() error {
+				return (&APIUpdatePowerStateRequest{SiteID: "s", State: "on", RuleID: &validUUID}).Validate()
+			},
+		},
+		{
+			name: "APIBatchUpdateRackPowerStateRequest - bad ruleId",
+			validate: func() error {
+				return (&APIBatchUpdateRackPowerStateRequest{SiteID: "s", State: "on", RuleID: &badUUID}).Validate()
+			},
+			wantErr:     true,
+			errContains: "UUID",
+		},
+		{
+			name: "APIBatchUpdateRackPowerStateRequest - valid ruleId",
+			validate: func() error {
+				return (&APIBatchUpdateRackPowerStateRequest{SiteID: "s", State: "on", RuleID: &validUUID}).Validate()
+			},
+		},
+		{
+			name: "APIBatchUpdateTrayPowerStateRequest - bad ruleId",
+			validate: func() error {
+				return (&APIBatchUpdateTrayPowerStateRequest{SiteID: "s", State: "on", RuleID: &badUUID}).Validate()
+			},
+			wantErr:     true,
+			errContains: "UUID",
+		},
+		{
+			name: "APIBatchUpdateTrayPowerStateRequest - valid ruleId",
+			validate: func() error {
+				return (&APIBatchUpdateTrayPowerStateRequest{SiteID: "s", State: "on", RuleID: &validUUID}).Validate()
+			},
+		},
+		{
+			name: "APIBatchUpdateNVLinkDomainPowerStateRequest - bad ruleId",
+			validate: func() error {
+				return (&APIBatchUpdateNVLinkDomainPowerStateRequest{
+					SiteID:          validUUID,
+					NVLinkDomainIDs: []string{validUUID},
+					State:           "on",
+					RuleID:          &badUUID,
+				}).Validate()
+			},
+			wantErr:     true,
+			errContains: "UUID",
+		},
+		{
+			name: "APIBatchUpdateNVLinkDomainPowerStateRequest - valid ruleId",
+			validate: func() error {
+				return (&APIBatchUpdateNVLinkDomainPowerStateRequest{
+					SiteID:          validUUID,
+					NVLinkDomainIDs: []string{validUUID},
+					State:           "on",
+					RuleID:          &validUUID,
+				}).Validate()
+			},
+		},
+		// ---- firmware.go ----
+		{
+			name: "APIUpdateFirmwareRequest - bad ruleId",
+			validate: func() error {
+				return (&APIUpdateFirmwareRequest{SiteID: "s", RuleID: &badUUID}).Validate()
+			},
+			wantErr:     true,
+			errContains: "UUID",
+		},
+		{
+			name: "APIUpdateFirmwareRequest - valid ruleId",
+			validate: func() error {
+				return (&APIUpdateFirmwareRequest{SiteID: "s", RuleID: &validUUID}).Validate()
+			},
+		},
+		{
+			name: "APIBatchRackFirmwareUpdateRequest - bad ruleId",
+			validate: func() error {
+				return (&APIBatchRackFirmwareUpdateRequest{SiteID: "s", RuleID: &badUUID}).Validate()
+			},
+			wantErr:     true,
+			errContains: "UUID",
+		},
+		{
+			name: "APIBatchRackFirmwareUpdateRequest - valid ruleId",
+			validate: func() error {
+				return (&APIBatchRackFirmwareUpdateRequest{SiteID: "s", RuleID: &validUUID}).Validate()
+			},
+		},
+		{
+			name: "APIBatchTrayFirmwareUpdateRequest - bad ruleId",
+			validate: func() error {
+				return (&APIBatchTrayFirmwareUpdateRequest{SiteID: "s", RuleID: &badUUID}).Validate()
+			},
+			wantErr:     true,
+			errContains: "UUID",
+		},
+		{
+			name: "APIBatchTrayFirmwareUpdateRequest - valid ruleId",
+			validate: func() error {
+				return (&APIBatchTrayFirmwareUpdateRequest{SiteID: "s", RuleID: &validUUID}).Validate()
+			},
+		},
+		{
+			name: "APINVLinkDomainFirmwareUpdateRequest - bad ruleId",
+			validate: func() error {
+				return (&APINVLinkDomainFirmwareUpdateRequest{SiteID: validUUID, RuleID: &badUUID}).Validate()
+			},
+			wantErr:     true,
+			errContains: "UUID",
+		},
+		{
+			name: "APINVLinkDomainFirmwareUpdateRequest - valid ruleId",
+			validate: func() error {
+				return (&APINVLinkDomainFirmwareUpdateRequest{SiteID: validUUID, RuleID: &validUUID}).Validate()
+			},
+		},
+		{
+			name: "APIBatchNVLinkDomainFirmwareUpdateRequest - bad ruleId",
+			validate: func() error {
+				return (&APIBatchNVLinkDomainFirmwareUpdateRequest{
+					SiteID:          validUUID,
+					NVLinkDomainIDs: []string{validUUID},
+					RuleID:          &badUUID,
+				}).Validate()
+			},
+			wantErr:     true,
+			errContains: "UUID",
+		},
+		{
+			name: "APIBatchNVLinkDomainFirmwareUpdateRequest - valid ruleId",
+			validate: func() error {
+				return (&APIBatchNVLinkDomainFirmwareUpdateRequest{
+					SiteID:          validUUID,
+					NVLinkDomainIDs: []string{validUUID},
+					RuleID:          &validUUID,
+				}).Validate()
+			},
+		},
+		// ---- rack.go (bring-up) ----
+		{
+			name: "APIBringUpRackRequest - bad ruleId",
+			validate: func() error {
+				return (&APIBringUpRackRequest{SiteID: "s", RuleID: &badUUID}).Validate()
+			},
+			wantErr:     true,
+			errContains: "UUID",
+		},
+		{
+			name: "APIBringUpRackRequest - valid ruleId",
+			validate: func() error {
+				return (&APIBringUpRackRequest{SiteID: "s", RuleID: &validUUID}).Validate()
+			},
+		},
+		{
+			name: "APIBatchBringUpRackRequest - bad ruleId",
+			validate: func() error {
+				return (&APIBatchBringUpRackRequest{SiteID: "s", RuleID: &badUUID}).Validate()
+			},
+			wantErr:     true,
+			errContains: "UUID",
+		},
+		{
+			name: "APIBatchBringUpRackRequest - valid ruleId",
+			validate: func() error {
+				return (&APIBatchBringUpRackRequest{SiteID: "s", RuleID: &validUUID}).Validate()
+			},
+		},
+		// ---- nil vs empty pointer (all types share the same optional-UUID semantics) ----
+		{
+			name: "APIBringUpRackRequest - nil ruleId is ok",
+			validate: func() error {
+				return (&APIBringUpRackRequest{SiteID: "s"}).Validate()
+			},
+		},
+		{
+			name: "APIBringUpRackRequest - empty-string ruleId is ok (treated as unset)",
+			validate: func() error {
+				empty := ""
+				return (&APIBringUpRackRequest{SiteID: "s", RuleID: &empty}).Validate()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.validate()
+			if tt.wantErr {
+				if assert.Error(t, err) && tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}

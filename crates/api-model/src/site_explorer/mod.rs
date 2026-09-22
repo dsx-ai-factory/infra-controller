@@ -23,14 +23,14 @@ use std::sync::Arc;
 use carbide_network::BaseMac;
 use carbide_utils::arch::CpuArchitecture;
 use carbide_utils::none_if_empty::NoneIfEmpty;
-use carbide_uuid::machine::{MachineId, MachineType};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineType};
 use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
 use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use itertools::Itertools;
-use lazy_static::lazy_static;
 use mac_address::MacAddress;
+#[cfg(test)]
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -44,11 +44,16 @@ use crate::machine::machine_id::{MissingHardwareInfo, from_hardware_info_with_ty
 use crate::machine_boot_interface::{
     BootInterfaceSelectionSource, MachineBootInterface, MachineBootInterfaceTarget,
 };
+use crate::pci::{UefiPciOrderingKey, UefiPciOrderingKeyParseError, normalize_uefi_device_path};
 use crate::power_shelf::power_shelf_id;
 use crate::switch::switch_id;
 
+/// Filters explored endpoints by values in their exploration reports.
 #[derive(Clone, Debug, Default)]
-pub struct ExploredEndpointSearchFilter {}
+pub struct ExploredEndpointSearchFilter {
+    /// Match this machine ID; `None` includes reports with any or no machine ID.
+    pub machine_id: Option<MachineId>,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ExploredManagedHostSearchFilter {}
@@ -383,36 +388,16 @@ impl EndpointExplorationReport {
             })
             .collect::<Vec<&EthernetInterface>>();
 
-        // If any of the interface does not contain pci path, return None.
-        if interfaces.iter().any(|x| x.uefi_device_path.is_none()) {
-            return None;
-        }
-
-        let Some(first) = interfaces.first() else {
-            // PCI path is missing from all interfaces, can't sort based on pci path.
-            return None;
-        };
-
-        let interface_with_min_pci = interfaces.iter().fold(first, |acc, x| {
-            // It can never be none as verified above.
-            if let (Some(pci_path), Some(existing_path)) =
-                (&x.uefi_device_path, &acc.uefi_device_path)
-            {
-                let path = &pci_path.0;
-                let existing_path = &existing_path.0;
-
-                if let Ok(res) =
-                    version_compare::compare_to(path, existing_path, version_compare::Cmp::Lt)
-                    && res
-                {
-                    return x;
-                }
-
-                return acc;
-            }
-
-            acc
-        });
+        let interfaces = interfaces
+            .into_iter()
+            .map(|interface| {
+                let ordering_key = interface.uefi_device_path.as_ref()?.ordering_key().ok()?;
+                Some((interface, ordering_key))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let (interface_with_min_pci, _) = interfaces
+            .into_iter()
+            .min_by(|(_, left), (_, right)| left.cmp(right))?;
 
         // If we know the bootable interface name, find the MAC address associated with it.
         interface_with_min_pci
@@ -490,6 +475,17 @@ pub enum PreingestionState {
         /// before this field existed still deserialize.
         #[serde(default)]
         attempt: u32,
+    },
+
+    /// RMS firmware submission or its resulting job is pending for one rack
+    /// compute tray.
+    ///
+    /// `None` is persisted before dispatch. If NICo restarts before replacing it
+    /// with the RMS job ID, the submission outcome is ambiguous and preingestion
+    /// fails closed instead of submitting the update again.
+    RackFirmwareUpdateWait {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backend_job_id: Option<String>,
     },
     UpgradeFirmwareWait {
         task_id: String,
@@ -619,8 +615,8 @@ pub struct ExploredDpu {
 }
 
 impl ExploredDpu {
-    pub fn machine_id_if_valid_report(&self) -> ModelResult<&MachineId> {
-        let Some(machine_id) = self.report.machine_id.as_ref() else {
+    pub fn machine_id_if_valid_report(&self) -> ModelResult<DpuMachineId> {
+        let Some(machine_id) = self.report.machine_id else {
             return Err(ModelError::MissingArgument("Missing Machine ID"));
         };
 
@@ -636,7 +632,7 @@ impl ExploredDpu {
             return Err(ModelError::MissingArgument("Missing Service Info"));
         }
 
-        Ok(machine_id)
+        Ok(machine_id.try_into()?)
     }
 
     pub fn bmc_firmware_version(&self) -> Option<String> {
@@ -1082,15 +1078,47 @@ impl EndpointExplorationReport {
         Ok(Some(self.power_shelf_id.insert(power_shelf_id)))
     }
 
+    /// Returns whether `chassis` reports a serial number usable for switch ID
+    /// generation.
+    ///
+    /// The serial is trimmed first; an empty or whitespace-only serial and the
+    /// literal `"NA"` are all treated the same as a missing serial because some
+    /// switch BMCs return these placeholders in error situations (see
+    /// [`switch_id::from_hardware_info_with_type`]). Rejecting them here lets
+    /// chassis selection fall through to a subsystem that reports a real serial.
+    fn is_switch_chassis_valid(chassis: &Chassis) -> bool {
+        matches!(
+            chassis.serial_number.as_deref().map(str::trim),
+            Some(serial) if !serial.is_empty() && serial != "NA"
+        )
+    }
+
+    /// Returns the chassis reported under the `id` subsystem (matched
+    /// case-insensitively) only when it carries a serial number usable for
+    /// switch ID generation, per [`Self::is_switch_chassis_valid`].
+    fn query_switch_chassis_subsystem(&self, id: &str) -> Option<&Chassis> {
+        let id = id.to_lowercase();
+        self.chassis
+            .iter()
+            .find(|c| c.id.to_lowercase() == id)
+            .filter(|c| Self::is_switch_chassis_valid(c))
+    }
+
     //TODO: refactor for common code with generate_power_shelf_id
     /// Tries to generate and store a MachineId for the discovered endpoint if
     /// enough data for generation is available
     pub fn generate_switch_id(&mut self) -> ModelResult<Option<SwitchId>> {
+        // On GB200 (N5200_LD) the switch serial is reported by the
+        // `MGX_NVSwitch_0` chassis. On Vera Rubin (N6100_LD) that chassis
+        // reports `"NA"` and the usable serial is surfaced by `Chassis_0`
+        // instead, so fall back to it when the primary chassis has no valid
+        // serial.
         let chassis = self
-            .chassis
-            .iter()
-            .find(|c| c.id.to_string().to_lowercase() == "mgx_nvswitch_0")
-            .unwrap();
+            .query_switch_chassis_subsystem("mgx_nvswitch_0")
+            .or_else(|| self.query_switch_chassis_subsystem("chassis_0"))
+            .ok_or(ModelError::HardwareInfo(
+                HardwareInfoError::MissingHardwareInfo(MissingHardwareInfo::Serial),
+            ))?;
         let serial_number = chassis.serial_number.clone();
         let manufacturer = chassis.manufacturer.clone().unwrap_or("NVIDIA".to_string());
         let model = "Switch".to_string();
@@ -1131,6 +1159,32 @@ impl EndpointExplorationReport {
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default()
+    }
+
+    /// BMC firmware observed directly from the exact `BMC` inventory entry.
+    pub fn observed_host_bmc_version(&self) -> Option<&str> {
+        self.service
+            .iter()
+            .find(|service| service.id == "FirmwareInventory")
+            .and_then(|service| {
+                service
+                    .inventories
+                    .iter()
+                    .find(|inventory| inventory.id == "BMC")
+            })
+            .and_then(|inventory| inventory.version.as_deref())
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+    }
+
+    /// Host BIOS/UEFI version observed on the `System_0` resource.
+    pub fn system_bios_version(&self) -> Option<&str> {
+        self.systems
+            .iter()
+            .find(|system| system.id == "System_0")
+            .and_then(|system| system.bios_version.as_deref())
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
     }
 
     pub fn dpu_component_version(&self, component: FirmwareComponentType) -> Option<String> {
@@ -1494,6 +1548,9 @@ pub struct ComputerSystem {
     pub sku: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_order: Option<BootOrder>,
+    /// Version reported by the Redfish `ComputerSystem.BiosVersion` property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bios_version: Option<String>,
     /// SSH port for the system's Redfish serial-console service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_console_ssh_port: Option<u16>,
@@ -1575,58 +1632,19 @@ pub struct EthernetInterface {
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize, Clone)]
 pub struct UefiDevicePath(String);
 
-lazy_static! {
-    // Not anchored at start: GB300/Grace UEFI device paths prefix the PciRoot
-    // node with vendor/MMIO nodes, e.g.
-    // VenHw(<guid>)/MemoryMapped(0xB,...)/PciRoot(0x16)/Pci(0x0,0x0)/Pci(0x0,0x0)
-    // An `^PciRoot` anchor never matches those and aborts the whole exploration
-    // (`Could not match regex in PCI Device Path`). Match PciRoot wherever it appears.
-    static ref PCI_ROOT_REGEX: Regex =
-        Regex::new(r"PciRoot\(([^)]*)\)").expect("must always compile");
-    static ref PCI_NODE_REGEX: Regex = Regex::new(r"/Pci\(([^)]*)\)").expect("must always compile");
+impl UefiDevicePath {
+    fn ordering_key(&self) -> Result<UefiPciOrderingKey, UefiPciOrderingKeyParseError> {
+        UefiPciOrderingKey::from_normalized_uefi_path(&self.0)
+    }
 }
 
 impl FromStr for UefiDevicePath {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // UEFI 2.10 §10.3.4: PciRoot followed by one or more Pci nodes,
-        // e.g. PciRoot(0x8)/Pci(0x2,0xa)/Pci(0x0,0x0) (NIC behind a bridge) or
-        //      PciRoot(0x7)/Pci(0x0,0x0)            (NIC on a root port).
-        // Trailing /MAC(...) is optional and discarded.
-
-        let st = s.rsplit_once("/MAC").map(|x| x.0).unwrap_or(s);
-
-        let mut pci = vec![];
-        let mut push_group = |group: &str| -> Result<(), String> {
-            for hex in group.split(',') {
-                let hex_int = u32::from_str_radix(&hex.to_lowercase().replace("0x", ""), 16)
-                    .map_err(|e| {
-                        format!("Can't convert pci address to int {hex}, error: {e} for pci: {s}")
-                    })?;
-                pci.push(hex_int.to_string());
-            }
-            Ok(())
-        };
-
-        let root = PCI_ROOT_REGEX
-            .captures(st)
-            .and_then(|c| c.get(1))
-            .ok_or_else(|| format!("Could not match regex in PCI Device Path {s}."))?;
-        push_group(root.as_str())?;
-
-        let mut had_pci = false;
-        for cap in PCI_NODE_REGEX.captures_iter(st) {
-            if let Some(g) = cap.get(1) {
-                had_pci = true;
-                push_group(g.as_str())?;
-            }
-        }
-        if !had_pci {
-            return Err(format!("Could not match regex in PCI Device Path {s}."));
-        }
-
-        Ok(UefiDevicePath(pci.join(".")))
+        normalize_uefi_device_path(s)
+            .map(UefiDevicePath)
+            .map_err(|error| format!("could not parse PCI device path {s}: {error}"))
     }
 }
 
@@ -3555,6 +3573,7 @@ mod tests {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
                 serial_console_ssh_port: None,
             }],
             chassis: vec![Chassis {
@@ -3602,6 +3621,96 @@ mod tests {
     }
 
     #[test]
+    fn observed_host_bmc_version_requires_exact_non_blank_inventory() {
+        let report_with_inventory = |id: &str, version: &str| EndpointExplorationReport {
+            service: vec![Service {
+                id: "FirmwareInventory".to_string(),
+                inventories: vec![Inventory {
+                    id: id.to_string(),
+                    version: Some(version.to_string()),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            report_with_inventory("BMC-Primary", "1.0.0").observed_host_bmc_version(),
+            None,
+            "only the exact Lenovo GB300 BMC inventory ID is accepted"
+        );
+        assert_eq!(
+            report_with_inventory("BMC", " \t ").observed_host_bmc_version(),
+            None,
+            "blank BMC versions are treated as absent"
+        );
+        assert_eq!(
+            report_with_inventory("BMC", " 1.0.0 ").observed_host_bmc_version(),
+            Some("1.0.0"),
+            "the exact BMC inventory version is trimmed"
+        );
+    }
+
+    #[test]
+    fn system_bios_version_selects_system_0_and_rejects_blank_values() {
+        let report = EndpointExplorationReport {
+            systems: vec![
+                ComputerSystem {
+                    id: "HGX_Baseboard_0".to_string(),
+                    bios_version: Some("wrong-system-version".to_string()),
+                    ..Default::default()
+                },
+                ComputerSystem {
+                    id: "System_0".to_string(),
+                    bios_version: Some(" GBHC01A_01.05.0 ".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            report.system_bios_version(),
+            Some("GBHC01A_01.05.0"),
+            "System_0 must be selected even when the HGX baseboard appears first"
+        );
+
+        let blank_report = EndpointExplorationReport {
+            systems: vec![ComputerSystem {
+                id: "System_0".to_string(),
+                bios_version: Some("  ".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            blank_report.system_bios_version(),
+            None,
+            "blank System_0 BIOS versions are treated as absent"
+        );
+    }
+
+    #[test]
+    fn computer_system_bios_version_is_json_compatible() {
+        let system = ComputerSystem {
+            id: "System_0".to_string(),
+            bios_version: Some("GBHC01A_01.05.0".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&system).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ComputerSystem>(&json).unwrap(),
+            system,
+            "BiosVersion must round-trip through the exploration-report JSON"
+        );
+
+        let without_bios = serde_json::from_str::<ComputerSystem>(r#"{"Id":"System_0"}"#).unwrap();
+        assert_eq!(
+            without_bios.bios_version, None,
+            "older JSON without BiosVersion must remain deserializable"
+        );
+    }
+
+    #[test]
     fn generate_machine_id_for_dpu() {
         let mut report = EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
@@ -3628,6 +3737,7 @@ mod tests {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
                 serial_console_ssh_port: None,
             }],
             chassis: vec![Chassis {
@@ -3703,7 +3813,7 @@ mod tests {
             [
                 Case {
                     scenario: "two Pci nodes",
-                    input: "PciRoot(0x2)/Pci(0x1,0x0)/Pci(0x0,0x1)",
+                    input: "PciRoot(0X2)/Pci(0x1,0X0)/Pci(0X0,0x1)",
                     expect: Yields("2.1.0.0.1".to_string()),
                 },
                 Case {
@@ -3724,9 +3834,19 @@ mod tests {
                     expect: Yields("0.1.0.0.0.0.0".to_string()),
                 },
                 Case {
+                    scenario: "vendor and memory-mapped prefix",
+                    input: "VenHw(1E5A432C-0466-4D31-B009-D4D9239271D3)/MemoryMapped(0xB,0x14140000,0x14141FFF)/PciRoot(0x16)/Pci(0x0,0x0)/Pci(0x0,0x0)",
+                    expect: Yields("22.0.0.0.0".to_string()),
+                },
+                Case {
                     // PciRoot without any Pci node should fail.
                     scenario: "PciRoot without any Pci node",
                     input: "PciRoot(0x7)/MAC(525400A8282F,0x1)",
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "embedded hexadecimal prefix",
+                    input: "PciRoot(0x10x2)/Pci(0x0,0x0)",
                     expect: Fails,
                 },
             ],
@@ -3734,6 +3854,25 @@ mod tests {
             // errors, so discard it; yield the dotted address on success.
             |path| UefiDevicePath::from_str(path).map(|u| u.0).map_err(drop),
         );
+
+        let malformed = "PciRoot(0x7)/Pci(not-hex,0x0)";
+        assert!(
+            UefiDevicePath::from_str(malformed)
+                .unwrap_err()
+                .contains(malformed)
+        );
+    }
+
+    #[test]
+    fn uefi_device_path_json_remains_a_normalized_string() {
+        let path = UefiDevicePath::from_str(
+            "PciRoot(0x11)/Pci(0x1,0x0)/Pci(0x0,0xa)/MAC(A088C20C87C6,0x1)",
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&path).unwrap();
+        assert_eq!(json, r#""17.1.0.0.10""#);
+        assert_eq!(serde_json::from_str::<UefiDevicePath>(&json).unwrap(), path);
     }
 
     #[test]
@@ -3863,6 +4002,68 @@ mod tests {
                     id: "chassis",
                     manufacturer: None,
                 } => false,
+            }
+        );
+    }
+
+    // `generate_switch_id` prefers the `MGX_NVSwitch_0` chassis serial (GB200)
+    // and otherwise falls back to `Chassis_0` (Vera Rubin). A primary serial
+    // that is missing, the `"NA"` placeholder, empty, or whitespace-only is
+    // unusable and must not block the fallback. Each row varies only the
+    // primary serial; `Chassis_0` always carries a real one, so the resulting
+    // `SwitchId` reveals which chassis was selected.
+    #[test]
+    fn generate_switch_id_falls_back_when_primary_serial_unusable() {
+        fn expected_switch_id(serial: &str) -> SwitchId {
+            switch_id::from_hardware_info_with_type(
+                serial,
+                "NVIDIA",
+                "Switch",
+                SwitchIdSource::ProductBoardChassisSerial,
+                SwitchType::NvLink,
+            )
+            .unwrap()
+        }
+
+        value_scenarios!(
+            run = |primary_serial: Option<&'static str>| {
+                EndpointExplorationReport {
+                    chassis: vec![
+                        Chassis {
+                            id: "MGX_NVSwitch_0".to_string(),
+                            serial_number: primary_serial.map(str::to_string),
+                            ..Default::default()
+                        },
+                        Chassis {
+                            id: "Chassis_0".to_string(),
+                            serial_number: Some("CHASSIS0".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }
+                .generate_switch_id()
+                .unwrap()
+                .unwrap()
+            };
+            "valid primary serial is used" {
+                Some("MGX0") => expected_switch_id("MGX0"),
+            }
+
+            "missing primary serial falls back to Chassis_0" {
+                None => expected_switch_id("CHASSIS0"),
+            }
+
+            "NA primary serial falls back to Chassis_0" {
+                Some("NA") => expected_switch_id("CHASSIS0"),
+            }
+
+            "empty primary serial falls back to Chassis_0" {
+                Some("") => expected_switch_id("CHASSIS0"),
+            }
+
+            "whitespace-only primary serial falls back to Chassis_0" {
+                Some("   ") => expected_switch_id("CHASSIS0"),
             }
         );
     }

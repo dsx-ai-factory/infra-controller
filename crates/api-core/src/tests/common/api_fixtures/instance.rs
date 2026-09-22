@@ -29,8 +29,8 @@ use model::instance::snapshot::InstanceSnapshot;
 use model::instance::status::network::InstanceNetworkStatusObservation;
 use model::machine::health_override::HARDWARE_HEALTH_OVERRIDE_PREFIX;
 use model::machine::{
-    CleanupContext, CleanupState, Machine, MachineState, MachineValidatingState, ManagedHostState,
-    ValidationState,
+    CleanupContext, CleanupState, MachineState, MachineValidatingState, ManagedHostState,
+    StableHostMachine, ValidationState,
 };
 use rpc::forge::InstanceDpuExtensionServicesConfig;
 use rpc::forge::forge_server::Forge;
@@ -366,7 +366,7 @@ pub(in crate::tests) fn config_for_nvlink_config(
 pub(in crate::tests) async fn advance_created_instance_into_state(
     env: &TestEnv,
     mh: &TestManagedHost,
-    state_check_fn: impl Fn(&Machine) -> bool,
+    state_check_fn: impl Fn(&StableHostMachine) -> bool,
 ) {
     // Run network state machine here.
     env.run_network_segment_controller_iteration().await;
@@ -659,6 +659,7 @@ pub(in crate::tests) async fn handle_delete_post_bootingwithdiscoveryimage(
     .await;
 }
 
+#[allow(dead_code)]
 pub(in crate::tests) async fn update_instance_network_status_observation(
     dpu_id: &MachineId,
     obs: &InstanceNetworkStatusObservation,

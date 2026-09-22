@@ -1,4 +1,4 @@
-# Flat VPCs and Zero-DPU Hosts <Badge intent="info">v2.0</Badge> <Badge intent="launch" minimal>New</Badge>
+# Flat VPCs and Zero-DPU Hosts <Badge intent="info">v2.0</Badge>
 
 `Flat` is a VPC virtualization type for tenant instances that run on hosts
 **without a NICo-managed DPU** — either hosts with no DPU hardware at all, or
@@ -148,18 +148,13 @@ JSON vocabulary rather than Forge protobuf symbols. Responses translate
 non-default policies back through `dpu_mode`; the default `manage` policy might
 leave that field unset.
 
-Two related Day-0 settings matter for zero-DPU sites:
+The related `[site_explorer] admin_segment_type_non_dpu` Day-0 setting defaults
+to `false`. When `true`, non-DPU hosts use the `HostInband` admin segment type
+instead of the regular `Admin` segment type for their admin-network attachment.
 
-- **`[site_explorer] admin_segment_type_non_dpu`** (default `false`). When
-  `true`, non-DPU hosts use the `HostInband` admin segment type instead of the
-  regular `Admin` segment type for their admin-network attachment.
-- **`rack_management_enabled`** (top-level, default `false`). This is the
-  standalone / air-gapped rack-manager mode for GB200/GB300/VR144 deployments.
-  It is not a DPU-policy override: rack-manager deployments that run DPUs as
-  NICs must also set `[site_explorer] dpu_policy = "nic"` (or set that
-  policy per host). The resulting `nic` policy produces zero-DPU hosts;
-  the rack-management flag alone does not. Enable the flag only when running
-  NICo with Rack Manager for those platforms.
+Rack management does not override DPU policy. Rack-manager deployments that run
+DPUs as NICs must set `[site_explorer] dpu_policy = "nic"` or set that policy
+per host.
 
 Because a zero-DPU host has no DPU to DHCP and identify host NICs for it, the
 host's data-NIC **MAC addresses must be registered** on its `ExpectedMachine`
@@ -197,8 +192,20 @@ prefix = "10.40.9.0/24"      # CIDR of the underlay subnet
 gateway = "10.40.9.1"        # usually the first usable address
 mtu = 1500
 reserve_first = 2            # addresses to skip before allocating
-# allocation_strategy = "dynamic"   # or "static" for reservation-only DHCP
+# allocation_strategy = "dynamic"   # or "reserved" for reservation-only DHCP
 ```
+
+<Note>
+A zero-DPU host's BMC and host OS NIC may share this physical subnet/VLAN. Give
+the two interfaces distinct addresses from **one** `HostInband` segment; do not
+declare an overlapping `Underlay` segment for the same prefix.
+`bmc_ip_address` is optional: the default allocation retains the BMC's first
+DHCP address for the machine-interface row's lifetime. This is also supported
+when `dpu_policy = "nic"`, but it does not place the DPU BMC or DPU OOB
+interface on HostInband. See
+[Shared HostInband for a Host BMC and Host OS](../../provisioning/ip-and-network-configuration.md#15-shared-hostinband-for-a-host-bmc-and-host-os)
+for relay selection, DNS-subdomain, allocation, and isolation requirements.
+</Note>
 
 The same `[networks.<name>]` mechanism is used for `admin` and `underlay`
 segments; `hostinband` is the third config-declarable type. (Tenant segments are
@@ -309,10 +316,12 @@ Flat VPCs:
   the operator's network responsibility; NICo stores the association but does not
   program a DPU ACL for a zero-DPU host.
 
-> As noted in the operations matrix, the `nicocli` wrapper does not currently
-> send `networkVirtualizationType` on `vpc create`, and its
-> `vpc virtualization update` accepts only `ETHERNET_VIRTUALIZER` / `FNN`. Use
-> the REST API for this step until that gap is closed.
+> The generated `nicocli vpc create` command accepts
+> `--network-virtualization-type FLAT`. The specialized `nicocli tui` VPC
+> creation flow does not prompt for a type and uses the Site default instead.
+> Its `vpc virtualization update` request only supports changing to `FNN` and
+> is rejected while the VPC contains any Subnets or Instances. Create a Flat
+> VPC with the generated command or the REST API.
 
 ### 2. Find the HostInband segment backing the VPC
 
@@ -363,9 +372,10 @@ Rules enforced at allocation:
 - **No DPU extension services.** Extension services run on DPU agents; a zero-DPU
   host has none, so an instance config that requests them is rejected.
 
-> As with VPC creation, `nicocli` does not yet expose `autoNetwork` on
-> `instance create`; use the REST API for this step and file a bug for the
-> wrapper.
+> The generated `nicocli instance create` command accepts
+> `--auto-network=true`. The specialized `nicocli tui` flow sets
+> `autoNetwork: true` automatically when the selected VPC is `FLAT` and skips
+> the interface prompts.
 
 ### 4. Check instance status
 
@@ -466,5 +476,5 @@ operator SDN integration can tie its switch-side configuration to the VPC.
 | Instance allocation fails: segment "is not bound to a Flat VPC" | The host's `HostInband` segment has no VPC; the tenant/operator must bind it to a Flat VPC first |
 | Instance allocation fails: segment bound to a VPC whose `fabric_interface_type` is not `nic` | The `HostInband` segment is attached to a non-Flat VPC; only Flat VPCs may own `HostInband` segments |
 | Instance allocation fails: extension services on a zero-DPU host | Remove `dpu_extension_services` from the instance config; a zero-DPU host cannot run them |
-| `nicocli` won't let me choose `FLAT` / set `autoNetwork` | Known wrapper gap; use the REST API and file a bug against `nicocli` |
+| The specialized TUI does not offer `FLAT` during VPC creation | Use generated `nicocli vpc create --network-virtualization-type FLAT` or the REST API; the TUI uses the Site default |
 | Instance is `Ready` but cannot reach another host | Expected from NICo's side — Flat data-plane reachability is the operator's fabric responsibility, not something NICo programs or verifies |

@@ -18,7 +18,7 @@
 //! Tests for batch instance allocation API
 
 use ::rpc::forge::forge_server::Forge;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, StableHostMachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use common::api_fixtures::instance::{
     default_os_config, default_tenant_config, single_interface_network_config,
@@ -83,7 +83,7 @@ async fn test_batch_allocate_instances_success(_: PgPoolOptions, options: PgConn
         assert!(snapshot.instance.is_some());
 
         let instance_snapshot = snapshot.instance.unwrap();
-        assert_eq!(instance_snapshot.machine_id, machine_id);
+        assert_eq!(instance_snapshot.machine_id, machine_id.into());
         assert!(!instance_snapshot.config.network.interfaces.is_empty());
     }
 }
@@ -104,7 +104,9 @@ async fn test_batch_allocate_instances_rollback_on_failure(
 
     // Create an invalid machine ID that doesn't exist
     #[allow(deprecated)]
-    let invalid_machine_id = MachineId::default();
+    let invalid_machine_id: StableHostMachineId = MachineId::default()
+        .try_into()
+        .expect("default test ID should identify a stable host");
 
     let batch_request = rpc::forge::BatchInstanceAllocationRequest {
         instance_requests: vec![
@@ -179,31 +181,6 @@ async fn test_batch_allocate_instances_rollback_on_failure(
     assert!(
         snapshot2.instance.is_none(),
         "Instance should not exist - transaction should have rolled back"
-    );
-}
-
-/// Send an empty batch request with no instances.
-/// Expect an error indicating at least one instance is required.
-#[crate::sqlx_test]
-async fn test_batch_allocate_instances_empty_request(_: PgPoolOptions, options: PgConnectOptions) {
-    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
-
-    let batch_request = rpc::forge::BatchInstanceAllocationRequest {
-        instance_requests: vec![],
-    };
-
-    let result = env
-        .api
-        .allocate_instances(tonic::Request::new(batch_request))
-        .await;
-
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        err.message().contains("at least one instance"),
-        "Expected error about empty request, got: {}",
-        err.message()
     );
 }
 

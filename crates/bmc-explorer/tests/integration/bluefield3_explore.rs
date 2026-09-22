@@ -52,6 +52,7 @@ async fn explore_bluefield3_baseline() {
 #[test]
 async fn explore_bluefield3_uses_dynamic_system_console_port_not_manager_ssh() {
     let h = test_support::dell_poweredge_r750_bluefield3_bmc(DpuSettings::default()).await;
+    assert!(h.state.has_enabled_ssh_serial_console());
     assert!(h.state.set_serial_console_ssh_port(Some(3222)));
     h.state.injection.put(vec![bmc_mock::injection::Rule {
         id: "manager_ssh_port".into(),

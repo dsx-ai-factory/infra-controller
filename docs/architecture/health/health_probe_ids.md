@@ -1,7 +1,7 @@
 # Health probe IDs
 
-This page provides a list of health probes provided by NVIDIA Infra Controller (NICo), along with their IDs.
-Health reports will contain these IDs in the `alerts` section in case the associated check or validation has failed.
+NICo health reports identify each check with a stable probe ID. Failed checks
+appear in `alerts`; successful checks can appear in `successes`.
 
 ## Machine validation health probe identifiers
 
@@ -60,6 +60,7 @@ Indicates that an already-ingested Managed Host's BMC MAC is no longer listed in
 Indicates that a BMC sensor reported a warning/critical/failure condition.
 
 Details:
+
 - `target` is set to the BMC sensor ID (for example, a fan/temperature/power sensor name).
 - The alert `message` contains the entity type, reading, unit, and threshold ranges used for evaluation.
 - Classifications are documented in [Health alert classifications](health_alert_classifications.md), including `Hardware`, `SensorWarning`, `SensorCritical`, and `SensorFailure`.
@@ -76,11 +77,35 @@ Example:
 power_supply 'PSU0_OutputPower': Critical - reading 1320.00W (power), valid range: 0.0 to 1500.0, caution: 1200.0 to 1300.0, critical: 0.0 to 1310.0
 ```
 
+## NVLink domain health probe identifiers
+
+### `NmxControllerHealth`
+
+Indicates that NMX-C reported `Unhealthy` or `UnhealthyDbCorrupted` controller
+health for an NVLink domain. A `Healthy` report clears the probe. `Degraded` and
+`Unknown` do not generate a domain health report.
+
 ## DPU related health probe identifiers
 
 ### `BgpPeeringTor`
 
-Indicates that a BGP session with a top-of-rack (TOR) switch could not be established by a host/DPU.
+Reports a DPU top-of-rack (ToR) uplink problem. For a finding on one expected
+uplink, the `target` identifies p0 or p1 and the message identifies the failed
+condition. On the NVUE path, a request failure or a minimum greater than two
+uses an untargeted critical alert.
+
+Both NVUE and FRR use this ID when a BGP transport session is unavailable. A p0
+transport alert includes `PreventAllocations` because normal PXE boot requires
+p0. A lone p1 transport failure is unclassified or suppressed, depending on
+`min_dpu_functioning_links`. With a positive minimum, both unavailable sessions
+produce alerts with `PreventAllocations` and `PreventHostStateChanges`.
+
+For FNN configurations with an IPv6 loopback, the FRR path also uses this ID
+when an established transport session did not negotiate IPv6 unicast. A single
+address family warning is unclassified and does not indicate a transport
+failure. Refer to
+[DPU ToR Uplink Health](../../dpu-management/dpu_configuration.md#dpu-tor-uplink-health)
+for the complete policy and transport state matrix.
 
 ### `BgpPeeringRouteServer`
 
@@ -88,7 +113,9 @@ Indicates that a BGP session with the route server that is part of the NICo cont
 
 ### `BgpStats`
 
-Indicates that BGP statistics could not be extacted by `dpu-agent`
+Indicates that `dpu-agent` could not collect or validate FRR BGP statistics.
+The FRR path also uses this critical alert when
+`min_dpu_functioning_links` is greater than the two expected uplinks.
 
 ### `BgpDaemonEnabled`
 
@@ -121,12 +148,20 @@ Indicates an issue with retrieving the list of running services
 
 ### `ServiceRunning`
 
-Indicates that an expected service on the DPU is not runnning
+Indicates that an expected service on the DPU is not running.
 
 ### `PostConfigCheckWait`
 
-The alert is placed on a host for a few seconds after a configuration change by dpu-agent in order to allow the configuration changes to "settle" before doing the health assessment.
-That avoids the host to move between states even though the new configuration might be  problematic.
+`dpu-agent` adds this critical alert to one health report after it changes HBN
+or reloads local DHCP in ContainerExec mode. The alert includes
+`PreventAllocations` and `PreventHostStateChanges`. NICo waits for the next
+health report before it uses the newly acknowledged configuration version.
+
+This is not a fixed timer. The alert clears from the next report when the agent
+does not apply another configuration change. If it continues across multiple
+reports, check whether the agent repeatedly applies the configuration. Refer to
+[Health Sampling After Configuration Changes](../../dpu-management/dpu_configuration.md#health-sampling-after-configuration-changes)
+for behavior on each path.
 
 ### `RestrictedMode`
 
@@ -146,6 +181,7 @@ Indicates that the dpu-agent disk utilization on the DPU is above a critical thr
 
 The alert indicates that no health report was received, where health report
 was expected. It is different from `HeartbeatTimeout` in the following sense
+
 - `HeartbeatTimeout` alerts can be emitted if data is available, but stale.
   `MissingReport` is only emitted if data has never been received.
 - `MissingReport` is mainly used on the NICo client side. It has no impact on

@@ -27,8 +27,35 @@ namespaceOverride: ""
 
 replicas: 1
 
-## Soft open-file limit applied before startup. Must not exceed the runtime hard limit.
+## Container resource requests and limits. Empty by default.
+resources: {}
+
+## Soft open-file limit applied before startup. Clamped to the runtime hard
+## limit when it exceeds it. null falls back to 65536; non-null values must be
+## a positive integer (validated at render).
 fileDescriptorLimit: 65536
+
+## Additional containers appended verbatim to the pod spec after the
+## nico-hardware-health container, for example a telemetry collector sidecar.
+## The chart sets no pod-level securityContext, so each extra container runs
+## with only the securityContext it declares itself and is not covered by any
+## chart hardening. Set securityContext on every extra container.
+extraContainers: []
+# extraContainers:
+#   - name: collector
+#     image: <your-registry>/collector:<tag>
+#     args: ["--config=/etc/collector/config.yaml"]
+#     volumeMounts:
+#       - name: collector-config
+#         mountPath: /etc/collector
+#         readOnly: true
+
+## Additional volumes appended verbatim to the pod spec after the spiffe volume.
+extraVolumes: []
+# extraVolumes:
+#   - name: collector-config
+#     configMap:
+#       name: collector-config
 
 service:
   port: 9009
@@ -50,6 +77,8 @@ env:
   RUST_BACKTRACE: "full"
   RUST_LIB_BACKTRACE: "0"
   NICO_HEALTH__COLLECTORS__LOGS__ENABLED: "true"
+  ## Keep direct Prometheus collection independent of optional OTLP analyzer targets.
+  CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED: "true"
 
 livenessProbe:
   httpGet:
@@ -61,7 +90,8 @@ livenessProbe:
   failureThreshold: 3
   successThreshold: 1
 
-## Scrapes /metrics: service operational metrics (discovery, collectors, components).
+## Scrapes /metrics: service operational metrics (discovery, collectors, components,
+## including the optional BMC latency histogram).
 serviceMonitor:
   enabled: false
   interval: 30s
@@ -69,7 +99,8 @@ serviceMonitor:
 
 ## Scrapes /telemetry: hardware sensor samples exported by the Prometheus sink
 ## (temperature, power, fans, and other Redfish-derived gauge readings per endpoint).
-## High cardinality; enable only when Prometheus retention and scrape budget allow it.
+## Requires CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED=true. High cardinality;
+## enable only when Prometheus retention and scrape budget allow it.
 telemetryServiceMonitor:
   enabled: false
   interval: 30s

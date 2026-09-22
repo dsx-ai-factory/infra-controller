@@ -27,13 +27,16 @@ repository.workspace = true
 # [local-dependencies]
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 carbide-machine-a-tron = { path = "../machine-a-tron" }
+carbide-rpc = { path = "../rpc" }
 carbide-uuid = { path = "../uuid" }
 carbide-utils = { path = "../utils", features = ["sqlx"] }
 carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-kms-provider = { path = "../kms-provider" }
 carbide-secrets = { path = "../secrets" }
 carbide-api-core = { path = "../api-core", default-features = false }
-carbide-api-db = { path = "../api-db", default-features = false }
+carbide-api-db = { path = "../api-db", default-features = false, features = [
+  "test-support",
+] }
 carbide-api-model = { path = "../api-model", default-features = false }
 bmc-mock = { path = "../bmc-mock" }
 bmc-vendor = { path = "../bmc-vendor" }

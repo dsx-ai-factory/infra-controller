@@ -27,10 +27,12 @@ use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 /// `record` records the exact membership in the transaction that retires it.
-// The first production caller, which retires the membership in the same
-// transaction, is tracked by https://github.com/NVIDIA/infra-controller/issues/5147.
-#[allow(dead_code)]
-async fn record(txn: &mut PgConnection, membership: &IbMembership) -> DatabaseResult<()> {
+///
+/// The caller must serialize the authoritative live `Instance` transition and
+/// use the same transaction for both changes. Repeated records for the exact
+/// membership are idempotent. Callers that process multiple memberships must
+/// acquire retired-membership locks in stable fabric, PKey, and GUID order.
+pub async fn record(txn: &mut PgConnection, membership: &IbMembership) -> DatabaseResult<()> {
     let query = "INSERT INTO retired_ib_memberships (fabric, pkey, guid)
         VALUES ($1, $2, $3)
         ON CONFLICT (fabric, pkey, guid) DO NOTHING";
@@ -109,14 +111,12 @@ fn membership_from_row(
 /// `remove_for_reuse` removes the retired record in the transaction that
 /// assigns the exact membership to a live `Instance`.
 ///
-/// Callers must hold the lock that serializes membership changes and verify the
-/// current `Instance` after locking its owning `Machine` row `FOR UPDATE` in
-/// this transaction. Removing the membership from UFM is not enough to delete
-/// the record. Returns `true` when the exact record existed and was deleted.
-// The first production caller, which assigns the exact membership in the same
-// transaction, is tracked by https://github.com/NVIDIA/infra-controller/issues/5147.
-#[allow(dead_code)]
-async fn remove_for_reuse(
+/// Callers must hold the locks that serialize assignment and verify the current
+/// `Instance` in this transaction. Removing the membership from UFM is not
+/// enough to delete the record. Callers that process multiple memberships must
+/// acquire retired-membership locks in stable fabric, PKey, and GUID order.
+/// Returns `true` when the exact record existed and was deleted.
+pub async fn remove_for_reuse(
     txn: &mut PgConnection,
     membership: &IbMembership,
 ) -> DatabaseResult<bool> {

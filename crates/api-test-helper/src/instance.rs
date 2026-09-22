@@ -16,15 +16,52 @@
  */
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, StableHostMachineId};
+use eyre::{ContextCompat, WrapErr};
+use rpc::forge::instance_interface_config::NetworkDetails;
+use rpc::forge::instance_operating_system_config::Variant as OperatingSystemVariant;
+use rpc::forge::{
+    InlineIpxe, Instance, InstanceAllocationRequest, InstanceConfig, InstanceInterfaceConfig,
+    InstanceInterfaceIpv6Config, InstanceList, InstanceNetworkAutoConfig, InstanceNetworkConfig,
+    InstanceOperatingSystemConfig, InstancePhoneHomeLastContactRequest, InstanceReleaseRequest,
+    InstancesByIdsRequest, InterfaceFunctionType, Metadata, TenantConfig, TenantState,
+};
 
-use super::grpcurl::{grpcurl, grpcurl_id};
-use super::machine::wait_for_state;
+use super::machine::{get_by_id as get_machine_by_id, wait_for_state};
+use crate::api_client;
+
+const POWERED_OFF_ALERT_CLEAR_RETRIES: usize = 60;
+
+async fn wait_for_powered_off_alert_to_clear(
+    addrs: &[SocketAddr],
+    host_machine_id: &StableHostMachineId,
+) -> eyre::Result<()> {
+    let machine_id = MachineId::from(host_machine_id);
+
+    for _ in 0..POWERED_OFF_ALERT_CLEAR_RETRIES {
+        let machine = get_machine_by_id(addrs, &machine_id).await?;
+
+        let powered_off = machine
+            .status
+            .as_ref()
+            .and_then(|status| status.health.as_ref())
+            .is_some_and(|health| health.alerts.iter().any(|alert| alert.id == "PoweredOff"));
+
+        if !powered_off {
+            return Ok(());
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    eyre::bail!("machine {host_machine_id} still has a PoweredOff health alert")
+}
 
 pub async fn create(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     segment_id: &str,
     hostname: Option<&str>,
     phone_home_enable: bool,
@@ -37,12 +74,14 @@ pub async fn create(
         "Creating instance",
     );
 
-    let network = serde_json::json!({
-        "interfaces": [{
-            "function_type": "PHYSICAL",
-            "network_segment_id": {"value": segment_id}
-        }]
-    });
+    let network = InstanceNetworkConfig {
+        interfaces: vec![InstanceInterfaceConfig {
+            function_type: InterfaceFunctionType::Physical as i32,
+            network_segment_id: Some(segment_id.parse()?),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
 
     create_with_network(
         addrs,
@@ -60,7 +99,7 @@ pub async fn create(
 /// within the requested Flat VPC.
 pub async fn create_with_auto_host_inband_networking(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     flat_vpc_id: &str,
 ) -> eyre::Result<String> {
     tracing::info!(
@@ -69,61 +108,55 @@ pub async fn create_with_auto_host_inband_networking(
         "Creating automatically-networked instance",
     );
 
-    let network = serde_json::json!({
-        "interfaces": [],
-        "auto": true,
-        "auto_config": {
-            "vpc_id": {"value": flat_vpc_id}
-        }
-    });
+    let network = InstanceNetworkConfig {
+        interfaces: Vec::new(),
+        auto_config: Some(InstanceNetworkAutoConfig {
+            vpc_id: Some(flat_vpc_id.parse()?),
+        }),
+        ..Default::default()
+    };
 
     create_with_network(addrs, host_machine_id, network, None, false, false, &[]).await
 }
 
 async fn create_with_network(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
-    network: serde_json::Value,
+    host_machine_id: &StableHostMachineId,
+    network: InstanceNetworkConfig,
     hostname: Option<&str>,
     phone_home_enable: bool,
     wait_until_ready: bool,
     keyset_ids: &[&str],
 ) -> eyre::Result<String> {
-    let mut tenant = serde_json::json!({
-        "tenant_organization_id": "tenant_organization",
-        "tenantKeysetIds": keyset_ids,
-    });
+    wait_for_powered_off_alert_to_clear(addrs, host_machine_id).await?;
 
-    if let Some(hostname) = hostname {
-        tenant
-            .as_object_mut()
-            .unwrap()
-            .insert("hostname".to_string(), serde_json::json!(hostname));
-    }
-
-    let os = serde_json::json!({
-        "ipxe": {
-            "ipxe_script": "chain --autofree https://boot.netboot.xyz"
-        },
-        "phone_home_enabled": phone_home_enable,
-        "user_data": "hello",
-    });
-
-    let instance_config = serde_json::json!({
-        "tenant": tenant,
-        "network": network,
-        "os": os,
-    });
-
-    let data = serde_json::json!({
-        "machine_id": {"id": host_machine_id},
-        "config": instance_config,
-        "metadata": {
-             "name": "test_instance",
-             "description": "tests/integration/instance"
-        },
-    });
-    let instance_id = grpcurl_id(addrs, "AllocateInstance", &data.to_string()).await?;
+    let request = InstanceAllocationRequest {
+        machine_id: Some(*host_machine_id),
+        config: Some(InstanceConfig {
+            tenant: Some(TenantConfig {
+                tenant_organization_id: "tenant_organization".to_string(),
+                hostname: hostname.map(str::to_string),
+                tenant_keyset_ids: keyset_ids.iter().map(ToString::to_string).collect(),
+            }),
+            os: Some(inline_ipxe_config(phone_home_enable)),
+            network: Some(network),
+            ..Default::default()
+        }),
+        metadata: Some(Metadata {
+            name: "test_instance".to_string(),
+            description: "tests/integration/instance".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let instance = api_client::call(addrs, "AllocateInstance", |mut client| async move {
+        client.allocate_instance(request).await
+    })
+    .await?;
+    let instance_id = instance
+        .id
+        .context("AllocateInstance response has no instance ID")?
+        .to_string();
     tracing::info!(
         instance_id = %instance_id,
         "Instance created",
@@ -162,7 +195,7 @@ async fn create_with_network(
 /// Takes a primary (v4) VPC prefix ID and an optional v6 VPC prefix ID.
 pub async fn create_with_vpc_prefixes(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     tenant_organization_id: &str,
     vpc_prefix_ids: &[&str],
 ) -> eyre::Result<String> {
@@ -176,39 +209,53 @@ pub async fn create_with_vpc_prefixes(
         .first()
         .ok_or_else(|| eyre::eyre!("at least one VPC prefix ID required"))?;
 
-    let mut iface = serde_json::json!({
-        "function_type": "PHYSICAL",
-        "vpc_prefix_id": {"value": v4_id},
-    });
+    let ipv6_interface_config = vpc_prefix_ids
+        .get(1)
+        .map(|v6_id| v6_id.parse::<carbide_uuid::vpc::VpcPrefixId>())
+        .transpose()
+        .wrap_err("invalid IPv6 VPC prefix ID")?
+        .map(|vpc_prefix_id| InstanceInterfaceIpv6Config {
+            vpc_prefix_id: Some(vpc_prefix_id),
+            ip_address: None,
+        });
+    let interface = InstanceInterfaceConfig {
+        function_type: InterfaceFunctionType::Physical as i32,
+        network_details: Some(NetworkDetails::VpcPrefixId(v4_id.parse()?)),
+        ipv6_interface_config,
+        ..Default::default()
+    };
 
-    if let Some(v6_id) = vpc_prefix_ids.get(1) {
-        iface["ipv6_interface_config"] = serde_json::json!({"vpc_prefix_id": {"value": v6_id}});
-    }
+    wait_for_powered_off_alert_to_clear(addrs, host_machine_id).await?;
 
-    let data = serde_json::json!({
-        "machine_id": {"id": host_machine_id},
-        "config": {
-            "tenant": {
-                "tenant_organization_id": tenant_organization_id,
-            },
-            "network": {
-                "interfaces": [iface]
-            },
-            "os": {
-                "ipxe": {
-                    "ipxe_script": "chain --autofree https://boot.netboot.xyz"
-                },
-                "phone_home_enabled": false,
-                "user_data": "hello",
-            },
-        },
-        "metadata": {
-             "name": "test_instance_dual_stack",
-             "description": "tests/integration/dual_stack_instance"
-        },
-    });
-
-    let instance_id = grpcurl_id(addrs, "AllocateInstance", &data.to_string()).await?;
+    let request = InstanceAllocationRequest {
+        machine_id: Some(*host_machine_id),
+        config: Some(InstanceConfig {
+            tenant: Some(TenantConfig {
+                tenant_organization_id: tenant_organization_id.to_string(),
+                ..Default::default()
+            }),
+            network: Some(InstanceNetworkConfig {
+                interfaces: vec![interface],
+                ..Default::default()
+            }),
+            os: Some(inline_ipxe_config(false)),
+            ..Default::default()
+        }),
+        metadata: Some(Metadata {
+            name: "test_instance_dual_stack".to_string(),
+            description: "tests/integration/dual_stack_instance".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let instance = api_client::call(addrs, "AllocateInstance", |mut client| async move {
+        client.allocate_instance(request).await
+    })
+    .await?;
+    let instance_id = instance
+        .id
+        .context("AllocateInstance response has no instance ID")?
+        .to_string();
     tracing::info!(
         instance_id = %instance_id,
         ?vpc_prefix_ids,
@@ -229,14 +276,15 @@ pub async fn release(
         "Releasing instance",
     );
 
-    let data = serde_json::json!({
-        "id": {"value": instance_id}
-    });
-    let resp = grpcurl(addrs, "ReleaseInstance", Some(data)).await?;
-    tracing::info!(
-        release_instance_response = %resp,
-        "ReleaseInstance response",
-    );
+    let request = InstanceReleaseRequest {
+        id: Some(instance_id.parse()?),
+        ..Default::default()
+    };
+    api_client::call(addrs, "ReleaseInstance", |mut client| async move {
+        client.release_instance(request).await
+    })
+    .await?;
+    tracing::info!("ReleaseInstance response received");
 
     if !wait_until_ready {
         return Ok(());
@@ -245,21 +293,17 @@ pub async fn release(
     wait_for_instance_state(addrs, instance_id, "TERMINATING").await?;
     wait_for_state(addrs, host_machine_id, "Assigned/BootingWithDiscoveryImage").await?;
 
-    let data = serde_json::json!({
-        "instance_ids": [{"value": instance_id}]
-    });
-    let response = grpcurl(addrs, "FindInstancesByIds", Some(&data)).await?;
-    let resp: serde_json::Value = serde_json::from_str(&response)?;
-    let ip_address = resp["instances"]
-        .as_array()
-        .and_then(|instances| instances.first())
-        .and_then(|instance| instance["status"]["network"]["interfaces"].as_array())
-        .and_then(|interfaces| {
-            interfaces.iter().find_map(|interface| {
-                interface["addresses"]
-                    .as_array()
-                    .and_then(|addresses| addresses.iter().find_map(|address| address.as_str()))
-            })
+    let instances = find_instances_by_ids(addrs, instance_id).await?;
+    let ip_address = instances
+        .instances
+        .first()
+        .and_then(|instance| instance.status.as_ref())
+        .and_then(|status| status.network.as_ref())
+        .and_then(|network| {
+            network
+                .interfaces
+                .iter()
+                .find_map(|interface| interface.addresses.first())
         });
     if let Some(ip_address) = ip_address {
         tracing::info!(instance_id, ip_address, "Instance is terminating",);
@@ -268,16 +312,15 @@ pub async fn release(
     }
 
     wait_for_state(addrs, host_machine_id, "WaitingForCleanup/HostCleanup").await?;
-    let data = serde_json::json!({
-        "instance_ids": [{"value": instance_id}]
-    });
-    let response = grpcurl(addrs, "FindInstancesByIds", Some(&data)).await?;
-    let resp: serde_json::Value = serde_json::from_str(&response)?;
+    let instances = find_instances_by_ids(addrs, instance_id).await?;
     tracing::info!(
-        find_instances_response = %resp,
-        "FindInstancesByIds Response",
+        instance_count = instances.instances.len(),
+        "FindInstancesByIds response received",
     );
-    assert!(resp["instances"].as_array().unwrap().is_empty());
+    eyre::ensure!(
+        instances.instances.is_empty(),
+        "FindInstancesByIds returned released instance {instance_id}"
+    );
 
     tracing::info!(instance_id, "Instance is released",);
 
@@ -289,31 +332,40 @@ pub async fn phone_home(
     instance_id: &str,
     host_machine_id: &MachineId,
 ) -> eyre::Result<()> {
-    let data = serde_json::json!({
-        "instance_id": {"value": instance_id},
-    });
-
     tracing::info!(
         %host_machine_id,
         instance_id,
         "Phoning home",
     );
 
-    grpcurl(addrs, "UpdateInstancePhoneHomeLastContact", Some(&data)).await?;
+    let request = InstancePhoneHomeLastContactRequest {
+        instance_id: Some(instance_id.parse()?),
+    };
+    api_client::call(
+        addrs,
+        "UpdateInstancePhoneHomeLastContact",
+        |mut client| async move {
+            client
+                .update_instance_phone_home_last_contact(request)
+                .await
+        },
+    )
+    .await?;
 
     Ok(())
 }
 
 pub async fn get_instance_state(addrs: &[SocketAddr], instance_id: &str) -> eyre::Result<String> {
-    let data = serde_json::json!({
-        "instance_ids": [{"value": instance_id}]
-    });
-
-    let response = grpcurl(addrs, "FindInstancesByIds", Some(&data)).await?;
-    let resp: serde_json::Value = serde_json::from_str(&response)?;
-    let state = resp["instances"][0]["status"]["tenant"]["state"]
-        .as_str()
-        .unwrap()
+    let instance = get_by_id(addrs, instance_id).await?;
+    let state = instance
+        .status
+        .context("instance has no status")?
+        .tenant
+        .context("instance has no tenant status")?
+        .state;
+    let state = TenantState::try_from(state)
+        .wrap_err("instance has an unknown tenant state")?
+        .as_str_name()
         .to_string();
     tracing::info!(
         instance_state = %state,
@@ -323,29 +375,48 @@ pub async fn get_instance_state(addrs: &[SocketAddr], instance_id: &str) -> eyre
     Ok(state)
 }
 
-pub async fn get_instance_json_by_machine_id(
+pub async fn get_by_machine_id(
     addrs: &[SocketAddr],
     machine_id: &str,
-) -> eyre::Result<serde_json::Value> {
-    let data = serde_json::json!({ "id": machine_id });
-    let response = grpcurl(addrs, "FindInstanceByMachineID", Some(&data)).await?;
-    Ok(serde_json::from_str(&response)?)
+) -> eyre::Result<InstanceList> {
+    let machine_id: MachineId = machine_id.parse()?;
+    api_client::call(addrs, "FindInstanceByMachineID", |mut client| async move {
+        client.find_instance_by_machine_id(machine_id).await
+    })
+    .await
 }
 
-pub async fn get_instance_json_by_id(
+pub async fn get_by_id(addrs: &[SocketAddr], instance_id: &str) -> eyre::Result<Instance> {
+    find_instances_by_ids(addrs, instance_id)
+        .await?
+        .instances
+        .into_iter()
+        .next()
+        .ok_or_else(|| eyre::eyre!("instance {instance_id} was not returned by FindInstancesByIds"))
+}
+
+async fn find_instances_by_ids(
     addrs: &[SocketAddr],
     instance_id: &str,
-) -> eyre::Result<serde_json::Value> {
-    let data = serde_json::json!({
-        "instance_ids": [{"value": instance_id}]
-    });
-    let response = grpcurl(addrs, "FindInstancesByIds", Some(&data)).await?;
-    let response: serde_json::Value = serde_json::from_str(&response)?;
-    response["instances"]
-        .as_array()
-        .and_then(|instances| instances.first())
-        .cloned()
-        .ok_or_else(|| eyre::eyre!("instance {instance_id} was not returned by FindInstancesByIds"))
+) -> eyre::Result<InstanceList> {
+    let request = InstancesByIdsRequest {
+        instance_ids: vec![instance_id.parse()?],
+    };
+    api_client::call(addrs, "FindInstancesByIds", |mut client| async move {
+        client.find_instances_by_ids(request).await
+    })
+    .await
+}
+
+fn inline_ipxe_config(phone_home_enabled: bool) -> InstanceOperatingSystemConfig {
+    InstanceOperatingSystemConfig {
+        variant: Some(OperatingSystemVariant::Ipxe(InlineIpxe {
+            ipxe_script: "chain --autofree https://boot.netboot.xyz".to_string(),
+        })),
+        phone_home_enabled,
+        user_data: Some("hello".to_string()),
+        ..Default::default()
+    }
 }
 
 /// Waits for an instance to reach a certain state
@@ -370,7 +441,7 @@ pub async fn wait_for_instance_state(
             instance_state = %latest_state,
             "Current instance state",
         );
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
     eyre::bail!(

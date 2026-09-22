@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{MachineInterfaceId, StableHostMachineId};
 use clap::Parser;
 use rpc::forge as forgerpc;
 
@@ -35,17 +35,17 @@ Tip: list a host's interface ids with 'managed-host show <HOST_MACHINE_ID>'.
 ")]
 pub(crate) struct Args {
     #[clap(help = "ID of the host machine")]
-    host_machine_id: MachineId,
+    host_machine_id: StableHostMachineId,
     #[clap(help = "ID of the machine interface to make primary (the boot device)")]
     interface_id: MachineInterfaceId,
     #[clap(
         long,
-        help = "Request a fresh machine-controller reconciliation even when this interface is already selected"
+        help = "Request a fresh machine-controller reconciliation even when this interface is already selected. Sends only force_reconcile=true; servers without force_reconcile support ignore it, while supporting servers leave any required restart to machine-controller"
     )]
     force_reconcile: bool,
     #[clap(
         long,
-        help = "Deprecated compatibility alias; use --force-reconcile with current servers"
+        help = "Deprecated compatibility option for servers without force_reconcile support. Sends reboot=true and force_reconcile=true; supporting servers treat it as reconciliation, while older servers force-restart the host after changing the target"
     )]
     reboot: bool,
 }

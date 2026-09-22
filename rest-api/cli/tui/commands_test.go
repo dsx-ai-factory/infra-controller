@@ -16,11 +16,60 @@ import (
 	"testing"
 
 	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // --- Upstream tests ---
+
+func TestCmdSiteCreateRejectsResponseWithoutID(t *testing.T) {
+	for _, response := range []string{"null", "{}"} {
+		t.Run(response, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, response)
+			}))
+			defer server.Close()
+
+			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+			_, err := withStdin(t, "site-name\n\n\n\n\n\n\n", func() (string, error) {
+				return "", cmdSiteCreate(session, nil)
+			})
+
+			require.EqualError(t, err, "parsing created site response: missing id")
+		})
+	}
+}
+
+func TestParseMutationResponseRequiringID(t *testing.T) {
+	tests := []struct {
+		name      string
+		response  string
+		wantID    string
+		wantError string
+	}{
+		{name: "malformed JSON", response: "[", wantError: "parsing created site response:"},
+		{name: "null", response: "null", wantError: "parsing created site response: missing id"},
+		{name: "empty object", response: "{}", wantError: "parsing created site response: missing id"},
+		{name: "blank id", response: `{"id":"  "}`, wantError: "parsing created site response: missing id"},
+		{name: "valid object", response: `{"id":"site-1","name":"Site One"}`, wantID: "site-1"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := parseMutationResponseRequiringID([]byte(test.response), "created site")
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				assert.Nil(t, parsed)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.wantID, str(parsed, "id"))
+		})
+	}
+}
 
 func TestAppendScopeFlags_NoSession(t *testing.T) {
 	got := appendScopeFlags(nil, []string{"machine", "list"})
@@ -131,6 +180,83 @@ func TestLogCmd_NoScope(t *testing.T) {
 	}
 }
 
+func TestCmdInstanceListRendersIPAddresses(t *testing.T) {
+	cache := NewCache()
+	cache.Set("vpc", []NamedItem{{Name: "VPC One", ID: "vpc-1"}})
+	cache.Set("site", []NamedItem{{Name: "Site One", ID: "site-1"}})
+	cache.Set("instance", []NamedItem{
+		{
+			Name: "with-addresses", ID: "instance-1", Status: "Ready",
+			Extra: map[string]string{"vpcId": "vpc-1", "siteId": "site-1"},
+			Raw: map[string]interface{}{
+				"interfaces": []interface{}{
+					map[string]interface{}{"ipAddresses": []interface{}{"192.0.2.10"}},
+					map[string]interface{}{"ipAddresses": []interface{}{"2001:db8::10"}},
+				},
+			},
+		},
+		{
+			Name: "without-addresses", ID: "instance-2", Status: "Ready",
+			Extra: map[string]string{"vpcId": "vpc-1", "siteId": "site-1"},
+			Raw:   map[string]interface{}{"interfaces": []interface{}{}},
+		},
+		{
+			Name: "auto-network", ID: "instance-3", Status: "Ready",
+			Extra: map[string]string{"vpcId": "vpc-1", "siteId": "site-1"},
+			Raw: map[string]interface{}{
+				"interfaces": []interface{}{},
+				"status": map[string]interface{}{
+					"network": map[string]interface{}{
+						"interfaces": []interface{}{
+							map[string]interface{}{"ipAddresses": []interface{}{"198.51.100.10"}},
+						},
+					},
+				},
+			},
+		},
+	})
+	session := &Session{Cache: cache}
+	session.Resolver = NewResolver(cache)
+
+	var runErr error
+	output := captureStdout(func() {
+		runErr = cmdInstanceList(session, nil)
+	})
+	require.NoError(t, runErr)
+
+	lines := strings.Split(output, "\n")
+	var header, populated, empty, autoNetwork string
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "NAME"):
+			header = line
+		case strings.HasPrefix(line, "with-addresses"):
+			populated = line
+		case strings.HasPrefix(line, "without-addresses"):
+			empty = line
+		case strings.HasPrefix(line, "auto-network"):
+			autoNetwork = line
+		}
+	}
+	require.NotEmpty(t, header)
+	require.NotEmpty(t, populated)
+	require.NotEmpty(t, empty)
+	require.NotEmpty(t, autoNetwork)
+
+	ipAddressesColumn := strings.Index(header, "IP ADDRESSES")
+	statusColumn := strings.Index(header, "STATUS")
+	require.Greater(t, ipAddressesColumn, 0)
+	require.Greater(t, statusColumn, ipAddressesColumn)
+	assert.Equal(t, "192.0.2.10, 2001:db8::10", strings.TrimSpace(populated[ipAddressesColumn:statusColumn]))
+	assert.Equal(t, "-", strings.TrimSpace(empty[ipAddressesColumn:statusColumn]))
+	assert.Equal(t, "198.51.100.10", strings.TrimSpace(autoNetwork[ipAddressesColumn:statusColumn]))
+}
+
+func TestShellQuoteCLIArg(t *testing.T) {
+	assert.Equal(t, `'simple'`, shellQuoteCLIArg("simple"))
+	assert.Equal(t, `'tenant'\''s instance'`, shellQuoteCLIArg("tenant's instance"))
+}
+
 func TestFirstMachineIPAddress(t *testing.T) {
 	tests := []struct {
 		name string
@@ -231,6 +357,54 @@ func TestCmdMachineListRendersIPAddresses(t *testing.T) {
 	require.Greater(t, statusColumn, ipAddressColumn)
 	assert.Equal(t, "192.0.2.10", strings.TrimSpace(populated[ipAddressColumn:statusColumn]))
 	assert.Empty(t, strings.TrimSpace(blank[ipAddressColumn:statusColumn]))
+}
+
+func TestCmdOSListRendersType(t *testing.T) {
+	cache := NewCache()
+	cache.Set("operating-system", []NamedItem{
+		{
+			Name:   "template-os",
+			ID:     "os-1",
+			Status: "Ready",
+			Extra: map[string]string{
+				"type": "Templated iPXE",
+			},
+		},
+	})
+	session := &Session{
+		Cache: cache,
+	}
+	session.Resolver = NewResolver(cache)
+
+	var runErr error
+	output := captureStdout(func() {
+		runErr = cmdOSList(session, nil)
+	})
+	require.NoError(t, runErr)
+
+	lines := strings.Split(output, "\n")
+	var header string
+	var row string
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "NAME"):
+			header = line
+		case strings.HasPrefix(line, "template-os"):
+			row = line
+		}
+	}
+	require.NotEmpty(t, header)
+	require.NotEmpty(t, row)
+
+	statusColumn := strings.Index(header, "STATUS")
+	typeColumn := strings.Index(header, "TYPE")
+	idColumn := strings.Index(header, "ID")
+	require.Greater(t, statusColumn, 0)
+	require.Greater(t, typeColumn, statusColumn)
+	require.Greater(t, idColumn, typeColumn)
+	assert.Equal(t, "Ready", strings.TrimSpace(row[statusColumn:typeColumn]))
+	assert.Equal(t, "Templated iPXE", strings.TrimSpace(row[typeColumn:idColumn]))
+	assert.Equal(t, "os-1", strings.TrimSpace(row[idColumn:]))
 }
 
 // --- VPC scope coverage tests ---
@@ -814,6 +988,20 @@ func TestParseLabelArgs(t *testing.T) {
 		_, _, _, err := parseLabelArgs([]string{"--sort-label"})
 		assert.Error(t, err)
 	})
+	t.Run("sort-label rejects another option", func(t *testing.T) {
+		remaining, labels, sortKey, err := parseLabelArgs([]string{"--sort-label", "--label", "env=prod"})
+		require.Error(t, err)
+		assert.Nil(t, remaining)
+		assert.Nil(t, labels)
+		assert.Empty(t, sortKey)
+	})
+	t.Run("label rejects another option", func(t *testing.T) {
+		remaining, labels, sortKey, err := parseLabelArgs([]string{"--label", "--sort-label", "rack"})
+		require.Error(t, err)
+		assert.Nil(t, remaining)
+		assert.Nil(t, labels)
+		assert.Empty(t, sortKey)
+	})
 	t.Run("dangling label flag", func(t *testing.T) {
 		_, _, _, err := parseLabelArgs([]string{"--label"})
 		assert.Error(t, err)
@@ -947,6 +1135,206 @@ func TestVPCFilteringDoesNotMutateCachedSlice(t *testing.T) {
 	assert.Equal(t, "m3", cached[2].Name)
 }
 
+func TestValidateIPv4SubnetPrefixLength(t *testing.T) {
+	// Keep these client-side bounds aligned with SubnetCreateRequest in
+	// openapi/spec.yaml.
+	tests := []struct {
+		name         string
+		prefixLength int
+		wantError    bool
+	}{
+		{name: "below minimum", prefixLength: 7, wantError: true},
+		{name: "minimum", prefixLength: 8},
+		{name: "maximum", prefixLength: 30},
+		{name: "above maximum", prefixLength: 31, wantError: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateIPv4SubnetPrefixLength(test.prefixLength)
+			if test.wantError {
+				require.EqualError(t, err, "prefix length must be between 8 and 30")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestFilterSubnetVPCs(t *testing.T) {
+	tests := []struct {
+		name         string
+		vpc          NamedItem
+		wantIncluded bool
+	}{
+		{
+			name: "Ready ETHERNET_VIRTUALIZER included",
+			vpc: NamedItem{
+				Name:   "Ethernet virtualizer VPC",
+				ID:     "vpc-etv",
+				Status: "Ready",
+				Extra:  map[string]string{"networkVirtualizationType": "ETHERNET_VIRTUALIZER"},
+			},
+			wantIncluded: true,
+		},
+		{
+			name: "Ready FNN excluded",
+			vpc: NamedItem{
+				Name:   "FNN VPC",
+				ID:     "vpc-fnn",
+				Status: "Ready",
+				Extra:  map[string]string{"networkVirtualizationType": "FNN"},
+			},
+		},
+		{
+			name: "pending ETHERNET_VIRTUALIZER excluded",
+			vpc: NamedItem{
+				Name:   "Pending Ethernet virtualizer VPC",
+				ID:     "vpc-pending",
+				Status: "Pending",
+				Extra:  map[string]string{"networkVirtualizationType": "ETHERNET_VIRTUALIZER"},
+			},
+		},
+		{
+			name: "Ready legacy VPC without type included",
+			vpc: NamedItem{
+				Name:   "Legacy VPC",
+				ID:     "vpc-legacy",
+				Status: "Ready",
+				Extra:  map[string]string{},
+			},
+			wantIncluded: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := filterSubnetVPCs([]NamedItem{test.vpc})
+			if !test.wantIncluded {
+				assert.Empty(t, got)
+				return
+			}
+			require.Equal(t, []NamedItem{test.vpc}, got)
+		})
+	}
+}
+
+func TestBuildSubnetIPBlockSelectItems(t *testing.T) {
+	tests := []struct {
+		name         string
+		block        NamedItem
+		siteID       string
+		wantIncluded bool
+	}{
+		{
+			name: "same-site current-tenant IPv4 included",
+			block: NamedItem{
+				Name:   "IPv4 block",
+				ID:     "ipv4-same-site",
+				Status: "Ready",
+				Extra:  map[string]string{"siteId": "site-1", "tenantId": "tenant-1", "protocolVersion": "IPv4"},
+			},
+			siteID:       "site-1",
+			wantIncluded: true,
+		},
+		{
+			name: "same-site current-tenant IPv6 excluded",
+			block: NamedItem{
+				Name:   "IPv6 block",
+				ID:     "ipv6-same-site",
+				Status: "Ready",
+				Extra:  map[string]string{"siteId": "site-1", "tenantId": "tenant-1", "protocolVersion": "IPv6"},
+			},
+			siteID: "site-1",
+		},
+		{
+			name: "other-site current-tenant IPv4 excluded",
+			block: NamedItem{
+				Name:   "Other site IPv4 block",
+				ID:     "ipv4-other-site",
+				Status: "Ready",
+				Extra:  map[string]string{"siteId": "site-2", "tenantId": "tenant-1", "protocolVersion": "IPv4"},
+			},
+			siteID: "site-1",
+		},
+		{
+			name: "provider-owned IPv4 excluded",
+			block: NamedItem{
+				Name:   "Provider IPv4 block",
+				ID:     "ipv4-provider",
+				Status: "Ready",
+				Extra:  map[string]string{"siteId": "site-1", "protocolVersion": "IPv4"},
+			},
+			siteID: "site-1",
+		},
+		{
+			name: "other-tenant IPv4 excluded",
+			block: NamedItem{
+				Name:   "Other tenant IPv4 block",
+				ID:     "ipv4-other-tenant",
+				Status: "Ready",
+				Extra:  map[string]string{"siteId": "site-1", "tenantId": "tenant-2", "protocolVersion": "IPv4"},
+			},
+			siteID: "site-1",
+		},
+		{
+			name: "pending current-tenant IPv4 excluded",
+			block: NamedItem{
+				Name:   "Pending IPv4 block",
+				ID:     "ipv4-pending",
+				Status: "Pending",
+				Extra:  map[string]string{"siteId": "site-1", "tenantId": "tenant-1", "protocolVersion": "IPv4"},
+			},
+			siteID: "site-1",
+		},
+		{
+			name: "empty site scope accepts current-tenant IPv4",
+			block: NamedItem{
+				Name:   "IPv4 block",
+				ID:     "ipv4-without-site-scope",
+				Status: "Ready",
+				Extra:  map[string]string{"siteId": "site-1", "tenantId": "tenant-1", "protocolVersion": "IPv4"},
+			},
+			wantIncluded: true,
+		},
+		{
+			name: "missing name uses ID as label",
+			block: NamedItem{
+				ID:     "ipv4-unnamed",
+				Status: "Ready",
+				Extra:  map[string]string{"siteId": "site-1", "tenantId": "tenant-1", "protocolVersion": "IPv4"},
+			},
+			siteID:       "site-1",
+			wantIncluded: true,
+		},
+		{
+			name: "missing ID excluded",
+			block: NamedItem{
+				Name:   "ID-less IPv4 block",
+				Status: "Ready",
+				Extra:  map[string]string{"siteId": "site-1", "tenantId": "tenant-1", "protocolVersion": "IPv4"},
+			},
+			siteID: "site-1",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			items := buildSubnetIPBlockSelectItems([]NamedItem{test.block}, test.siteID, "tenant-1")
+			if !test.wantIncluded {
+				assert.Empty(t, items)
+				return
+			}
+			require.Len(t, items, 1)
+			label := test.block.Name
+			if label == "" {
+				label = test.block.ID
+			}
+			assert.Equal(t, SelectItem{Label: label, ID: test.block.ID}, items[0])
+		})
+	}
+}
+
 func TestBuildIPBlockCreateBody_UsesAPIFieldNames(t *testing.T) {
 	body := buildIPBlockCreateBody(
 		"ip-block-0",
@@ -1046,6 +1434,52 @@ func TestPromptSequenceDoesNotConsumeLaterPipedLines(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "value:true", got)
+}
+
+func TestPromptOptionalBool(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		expected    bool
+		hasExpected bool
+	}{
+		{
+			name:        "blank keeps existing value",
+			input:       "\n",
+			expected:    false,
+			hasExpected: false,
+		},
+		{
+			name:        "yes updates to true",
+			input:       "y\n",
+			expected:    true,
+			hasExpected: true,
+		},
+		{
+			name:        "no updates to false",
+			input:       "n\n",
+			expected:    false,
+			hasExpected: true,
+		},
+		{
+			name:        "invalid input retries",
+			input:       "maybe\nyes\n",
+			expected:    true,
+			hasExpected: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := withStdin(t, test.input, func() (string, error) {
+				value, hasValue, promptErr := PromptOptionalBool("Update value?")
+				return fmt.Sprintf("%t:%t", value, hasValue), promptErr
+			})
+
+			require.NoError(t, err)
+			assert.Equal(t, fmt.Sprintf("%t:%t", test.expected, test.hasExpected), result)
+		})
+	}
 }
 
 func TestReadPromptLinePreservesNonEOFReadError(t *testing.T) {
@@ -1368,7 +1802,8 @@ func captureStdout(f func()) string {
 	w.Close()
 	os.Stdout = old
 	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, r); err != nil {
+	_, err := io.Copy(&buf, r)
+	if err != nil {
 		panic(err)
 	}
 	return buf.String()
@@ -1626,117 +2061,193 @@ func TestResolverResourceForAllocationResourceType(t *testing.T) {
 	}
 }
 
-func TestBuildAllocationConstraint_ValidInput(t *testing.T) {
-	got, err := buildAllocationConstraint("IPBlock", "block-1", "Reserved", "  28 ")
-	require.NoError(t, err)
-	assert.Equal(t, "IPBlock", got["resourceType"])
-	assert.Equal(t, "block-1", got["resourceTypeId"])
-	assert.Equal(t, "Reserved", got["constraintType"])
-	assert.Equal(t, 28, got["constraintValue"], "value must be an int, not a string")
-}
-
-func TestBuildAllocationConstraint_RejectsNonInteger(t *testing.T) {
-	_, err := buildAllocationConstraint("IPBlock", "block-1", "Reserved", "not-a-number")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "integer")
-}
-
-func TestBuildAllocationConstraint_RejectsOutOfRangeIPBlockPrefix(t *testing.T) {
-	_, err := buildAllocationConstraint("IPBlock", "block-1", "Reserved", "0")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "prefix length")
-
-	_, err = buildAllocationConstraint("IPBlock", "block-1", "Reserved", "33")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "prefix length")
-}
-
-func TestBuildAllocationConstraint_AcceptsBoundaryIPBlockPrefix(t *testing.T) {
-	_, err := buildAllocationConstraint("IPBlock", "block-1", "Reserved", "1")
-	require.NoError(t, err)
-	_, err = buildAllocationConstraint("IPBlock", "block-1", "Reserved", "32")
-	require.NoError(t, err)
-}
-
-func TestBuildAllocationConstraint_RejectsNonPositiveInstanceTypeCount(t *testing.T) {
-	_, err := buildAllocationConstraint("InstanceType", "type-1", "Reserved", "0")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "at least 1")
-
-	_, err = buildAllocationConstraint("InstanceType", "type-1", "Reserved", "-5")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "at least 1")
-}
-
-func TestBuildAllocationConstraint_MarshalShape(t *testing.T) {
-	c, err := buildAllocationConstraint("InstanceType", "type-1", "Reserved", "4")
-	require.NoError(t, err)
-	encoded, err := json.Marshal(c)
-	require.NoError(t, err)
-	var decoded map[string]interface{}
-	require.NoError(t, json.Unmarshal(encoded, &decoded))
-	assert.Equal(t, "InstanceType", decoded["resourceType"])
-	assert.Equal(t, "type-1", decoded["resourceTypeId"])
-	assert.Equal(t, "Reserved", decoded["constraintType"])
-	assert.InDelta(t, 4, decoded["constraintValue"], 0.0001,
-		"constraintValue must round-trip through JSON as a number, not a string")
+func TestBuildAllocationConstraint(t *testing.T) {
+	tests := []struct {
+		name            string
+		resourceType    string
+		protocolVersion string
+		valueText       string
+		wantValue       int
+		wantError       string
+	}{
+		{name: "IPv4 trims whitespace", resourceType: "IPBlock", protocolVersion: "IPv4", valueText: "  28 ", wantValue: 28},
+		{name: "IPv6 accepts 64", resourceType: "IPBlock", protocolVersion: "IPv6", valueText: "64", wantValue: 64},
+		{name: "IPv4 rejects 64", resourceType: "IPBlock", protocolVersion: "IPv4", valueText: "64", wantError: "prefix length must be between 1 and 32 for IPv4"},
+		{name: "IPv6 rejects 129", resourceType: "IPBlock", protocolVersion: "IPv6", valueText: "129", wantError: "prefix length must be between 1 and 128 for IPv6"},
+		{name: "IP Block requires protocol version", resourceType: "IPBlock", valueText: "28", wantError: "unsupported protocol version"},
+		{name: "noninteger rejected", resourceType: "IPBlock", protocolVersion: "IPv4", valueText: "not-a-number", wantError: "constraint value must be an integer"},
+		{name: "machine count needs no protocol version", resourceType: "InstanceType", valueText: "4", wantValue: 4},
+		{name: "machine count must be positive", resourceType: "InstanceType", valueText: "0", wantError: "must be at least 1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			constraint, err := buildAllocationConstraint(test.resourceType, "resource-1", test.protocolVersion, "Reserved", test.valueText)
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				assert.Nil(t, constraint)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.wantValue, constraint["constraintValue"])
+			encoded, err := json.Marshal(constraint)
+			require.NoError(t, err)
+			assert.JSONEq(t, fmt.Sprintf(`{"resourceType":%q,"resourceTypeId":"resource-1","constraintType":"Reserved","constraintValue":%d}`, test.resourceType, test.wantValue), string(encoded))
+		})
+	}
 }
 
 func TestAllocationConstraintValueHint(t *testing.T) {
-	assert.Contains(t, allocationConstraintValueHint("IPBlock"), "prefix")
-	assert.Contains(t, allocationConstraintValueHint("InstanceType"), "machine")
-	assert.NotEmpty(t, allocationConstraintValueHint("Unknown"), "unknown types still get a generic hint")
+	tests := []struct {
+		name            string
+		resourceType    string
+		protocolVersion string
+		want            string
+	}{
+		{name: "IPv4", resourceType: "IPBlock", protocolVersion: "IPv4", want: "prefix length, e.g. 28"},
+		{name: "IPv6", resourceType: "IPBlock", protocolVersion: "IPv6", want: "prefix length, e.g. 56"},
+		{name: "machine count", resourceType: "InstanceType", want: "machine count, e.g. 4"},
+		{name: "unknown resource", resourceType: "Unknown", want: "integer"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, allocationConstraintValueHint(test.resourceType, test.protocolVersion))
+		})
+	}
 }
 
 // --- VPC prefix create IP block picker tests (NVBug 6105076) ---
 
-func TestBuildIPBlockSelectItems_MapsBlocksAndAppendsManualSentinel(t *testing.T) {
-	blocks := []NamedItem{
-		{Name: "block-a", ID: "id-a", Status: "Ready", Extra: map[string]string{"tenantId": "tenant-a"}},
-		{Name: "block-b", ID: "id-b", Status: "ready", Extra: map[string]string{"tenantId": "tenant-a"}},
+// TestValidateVPCPrefixLength rejects values outside the shared minimum and
+// the maximum resolved by the caller.
+func TestValidateVPCPrefixLength(t *testing.T) {
+	tests := []struct {
+		name          string
+		maximumLength int
+		prefixLength  int
+		wantError     string
+	}{
+		{name: "IPv4 maximum", maximumLength: vpcprefix.IPv4PrefixLengthMaximum, prefixLength: 31},
+		{name: "IPv4 above maximum", maximumLength: vpcprefix.IPv4PrefixLengthMaximum, prefixLength: 32, wantError: "prefix length must be between 8 and 31"},
+		{name: "manual block uses request maximum", maximumLength: vpcprefix.PrefixLengthMaximum, prefixLength: 126},
+		{name: "below shared minimum", maximumLength: vpcprefix.PrefixLengthMaximum, prefixLength: 7, wantError: "prefix length must be between 8 and 126"},
 	}
 
-	items := buildIPBlockSelectItems(blocks, "tenant-a")
-
-	require.Len(t, items, 3, "two IP blocks plus the manual-entry sentinel")
-	assert.Equal(t, "id-a", items[0].ID, "select ID must be the IP block UUID")
-	assert.Contains(t, items[0].Label, "block-a")
-	assert.Contains(t, items[0].Label, "Ready", "status should be surfaced in the label")
-	assert.Equal(t, "id-b", items[1].ID)
-	assert.Equal(t, ipBlockManualEntrySentinel, items[2].ID)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateVPCPrefixLength(test.maximumLength, test.prefixLength)
+			if test.wantError != "" {
+				require.EqualError(t, err, test.wantError)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
-func TestBuildIPBlockSelectItems_ExcludesProviderAndNonReadyBlocks(t *testing.T) {
-	blocks := []NamedItem{
-		{Name: "provider-block", ID: "provider-id", Status: "Ready"},
-		{Name: "pending-tenant-block", ID: "pending-id", Status: "Pending", Extra: map[string]string{"tenantId": "tenant-a"}},
-		{Name: "ready-tenant-block", ID: "ready-id", Status: "Ready", Extra: map[string]string{"tenantId": "tenant-a"}},
-		{Name: "other-tenant-block", ID: "other-tenant-id", Status: "Ready", Extra: map[string]string{"tenantId": "tenant-b"}},
+// TestVPCPrefixSlaacEnabled verifies the TUI requires the selected VPC's
+// address mode only when it affects a known IPv6 block.
+func TestVPCPrefixSlaacEnabled(t *testing.T) {
+	tests := []struct {
+		name      string
+		family    vpcprefix.IPFamily
+		vpc       *NamedItem
+		want      bool
+		wantError string
+	}{
+		{name: "IPv6 SLAAC enabled", family: vpcprefix.IPFamilyIPv6, vpc: &NamedItem{Raw: map[string]interface{}{"slaacEnabled": true}}, want: true},
+		{name: "IPv6 SLAAC disabled", family: vpcprefix.IPFamilyIPv6, vpc: &NamedItem{Raw: map[string]interface{}{"slaacEnabled": false}}},
+		{name: "IPv6 mode absent", family: vpcprefix.IPFamilyIPv6, vpc: &NamedItem{Name: "vpc-one", Raw: map[string]interface{}{}}, wantError: "could not determine whether VPC \"vpc-one\" uses SLAAC"},
+		{name: "IPv4 does not need SLAAC mode", family: vpcprefix.IPFamilyIPv4},
+		{name: "manual block does not need SLAAC mode"},
 	}
 
-	items := buildIPBlockSelectItems(blocks, "tenant-a")
-
-	require.Len(t, items, 2, "one Ready tenant block plus the manual-entry sentinel")
-	assert.Equal(t, "ready-id", items[0].ID)
-	assert.Equal(t, ipBlockManualEntrySentinel, items[1].ID)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := vpcPrefixSlaacEnabled(test.family, test.vpc)
+			if test.wantError != "" {
+				require.EqualError(t, err, test.wantError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
+		})
+	}
 }
 
-func TestBuildIPBlockSelectItems_EmptyListReturnsOnlySentinel(t *testing.T) {
-	items := buildIPBlockSelectItems(nil, "tenant-a")
-	require.Len(t, items, 1, "an empty list still offers manual entry")
-	assert.Equal(t, ipBlockManualEntrySentinel, items[0].ID)
-}
-
-func TestBuildIPBlockSelectItems_SkipsBlocksWithoutIDAndFallsBackLabelToID(t *testing.T) {
-	blocks := []NamedItem{
-		{Name: "no-id", ID: "  "},
-		{Name: "  ", ID: "id-x", Status: "Ready", Extra: map[string]string{"tenantId": "tenant-x"}},
+// TestBuildIPBlockSelectItems verifies only eligible tenant IP Blocks are
+// presented while manual ID entry remains available.
+func TestBuildIPBlockSelectItems(t *testing.T) {
+	// expectedItem captures the observable selector fields for one row.
+	type expectedItem struct {
+		id         string
+		labelParts []string
+		protocol   string
+	}
+	tests := []struct {
+		name     string
+		blocks   []NamedItem
+		tenantID string
+		want     []expectedItem
+	}{
+		{
+			name: "maps blocks and appends the manual sentinel",
+			blocks: []NamedItem{
+				{Name: "block-a", ID: "id-a", Status: "Ready", Extra: map[string]string{"tenantId": "tenant-a", "protocolVersion": "IPv4"}},
+				{Name: "block-b", ID: "id-b", Status: "ready", Extra: map[string]string{"tenantId": "tenant-a", "protocolVersion": "IPv6"}},
+			},
+			tenantID: "tenant-a",
+			want: []expectedItem{
+				{id: "id-a", labelParts: []string{"block-a", "IPv4", "Ready"}, protocol: "IPv4"},
+				{id: "id-b", labelParts: []string{"block-b", "IPv6", "ready"}, protocol: "IPv6"},
+				{id: ipBlockManualEntrySentinel, labelParts: []string{"Enter IP block ID manually"}},
+			},
+		},
+		{
+			name: "excludes provider, blocks that are not Ready, and other tenant blocks",
+			blocks: []NamedItem{
+				{Name: "provider-block", ID: "provider-id", Status: "Ready"},
+				{Name: "pending-tenant-block", ID: "pending-id", Status: "Pending", Extra: map[string]string{"tenantId": "tenant-a"}},
+				{Name: "ready-tenant-block", ID: "ready-id", Status: "Ready", Extra: map[string]string{"tenantId": "tenant-a"}},
+				{Name: "other-tenant-block", ID: "other-tenant-id", Status: "Ready", Extra: map[string]string{"tenantId": "tenant-b"}},
+			},
+			tenantID: "tenant-a",
+			want: []expectedItem{
+				{id: "ready-id", labelParts: []string{"ready-tenant-block", "Ready"}},
+				{id: ipBlockManualEntrySentinel, labelParts: []string{"Enter IP block ID manually"}},
+			},
+		},
+		{
+			name:     "empty input returns only the manual sentinel",
+			tenantID: "tenant-a",
+			want: []expectedItem{
+				{id: ipBlockManualEntrySentinel, labelParts: []string{"Enter IP block ID manually"}},
+			},
+		},
+		{
+			name: "skips blocks without IDs and uses the ID for a blank name",
+			blocks: []NamedItem{
+				{Name: "no-id", ID: "  "},
+				{Name: "  ", ID: "id-x", Status: "Ready", Extra: map[string]string{"tenantId": "tenant-x"}},
+			},
+			tenantID: "tenant-x",
+			want: []expectedItem{
+				{id: "id-x", labelParts: []string{"id-x", "Ready"}},
+				{id: ipBlockManualEntrySentinel, labelParts: []string{"Enter IP block ID manually"}},
+			},
+		},
 	}
 
-	items := buildIPBlockSelectItems(blocks, "tenant-x")
-
-	require.Len(t, items, 2, "one usable block (id-x) plus the manual-entry sentinel")
-	assert.Equal(t, "id-x", items[0].ID)
-	assert.Contains(t, items[0].Label, "id-x", "blank name must fall back to the ID")
-	assert.Equal(t, ipBlockManualEntrySentinel, items[1].ID)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			items := buildIPBlockSelectItems(test.blocks, test.tenantID)
+			require.Len(t, items, len(test.want))
+			for index := range items {
+				assert.Equal(t, test.want[index].id, items[index].ID)
+				for _, labelPart := range test.want[index].labelParts {
+					assert.Contains(t, items[index].Label, labelPart)
+				}
+				assert.Equal(t, test.want[index].protocol, items[index].Extra["protocolVersion"])
+			}
+		})
+	}
 }

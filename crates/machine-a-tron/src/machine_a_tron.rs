@@ -14,37 +14,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use bmc_mock::HostMachineInfo;
 use bmc_mock::mac_address_pool::PoolConfig as MacAddressPoolConfig;
 use futures::future::try_join_all;
 use model::expected_machine::HostDpuPolicy;
-use rpc::forge::{ExpectedInterface, NetworkSegmentType, VpcVirtualizationType};
+use rpc::forge::{ExpectedInterface, NetworkSegmentType};
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
 use crate::PersistedDevice;
+use crate::api_client::ExpectedRecord;
 use crate::config::MachineATronContext;
 use crate::device_simulator::{
     DeviceSimulator, MachineSimulator, PowerShelfSimulator, SimulatorLifecycle, SwitchSimulator,
 };
+use crate::expected_inventory::{CONCURRENCY, ExpectedInventorySummary, register_all};
 use crate::host_machine::HostMachine;
-use crate::machine_utils::get_next_free_machine;
 use crate::power_shelf_simulator::PowerShelfActor;
 use crate::simulator_registry::SimulatorRegistry;
 use crate::status::DeviceKind;
-use crate::subnet::Subnet;
 use crate::switch_simulator::SwitchActor;
-use crate::tui::UiUpdate;
-use crate::vpc::Vpc;
-
-#[derive(PartialEq, Eq)]
-pub enum AppEvent {
-    Quit,
-    AllocateInstance,
-}
 
 pub struct MachineATron {
     app_context: Arc<MachineATronContext>,
@@ -85,7 +75,14 @@ impl MachineATron {
         Self { app_context }
     }
 
-    pub async fn make_devices(&self, paused: bool) -> eyre::Result<SimulatorRegistry> {
+    /// Builds the simulators and, when `register_expected_machines` is set,
+    /// registers their expected inventory records, failing if any record
+    /// cannot be registered. The summary counts are all zero when
+    /// registration is disabled.
+    pub async fn make_devices(
+        &self,
+        paused: bool,
+    ) -> eyre::Result<(SimulatorRegistry, ExpectedInventorySummary)> {
         let resolved_configs = self.app_context.app_config.resolved_device_configs()?;
 
         for (machine_group, machine) in &resolved_configs.machines {
@@ -262,11 +259,23 @@ impl MachineATron {
         };
 
         if self.app_context.app_config.register_expected_machines {
-            for rack in &resolved_configs.racks {
-                self.app_context
-                    .api_client()
-                    .ensure_expected_rack(rack.rack_id.clone(), rack.rack_profile_id.clone())
-                    .await?;
+            let racks = resolved_configs
+                .racks
+                .iter()
+                .map(|rack| ExpectedRecord::Rack {
+                    rack_id: rack.rack_id.clone(),
+                    rack_profile_id: rack.rack_profile_id.clone(),
+                })
+                .collect();
+            let api_client = self.app_context.api_client();
+            let failed = register_all(racks, CONCURRENCY, |record| {
+                let api_client = api_client.clone();
+                async move { api_client.add_expected_record(record).await }
+            })
+            .await
+            .failed_identifiers;
+            if !failed.is_empty() {
+                eyre::bail!("failed to register expected {}", failed.join(", "));
             }
         }
 
@@ -275,267 +284,142 @@ impl MachineATron {
             .racks(resolved_configs.racks)
             .build()?;
 
-        if self.app_context.app_config.register_expected_machines {
-            for device in simulators.devices() {
-                let machine = device.handle();
-                let host_info = machine.host_info();
-                let machine_config = resolved_configs
-                    .machines
-                    .get(machine.machine_config_section())
-                    .expect("machine was constructed from a configured machine group");
-                let rack_id = machine_config.rack_id.clone();
-                let result = match device {
-                    DeviceSimulator::PowerShelf(_) => {
-                        self.app_context
-                            .api_client()
-                            .add_expected_power_shelf(
-                                host_info.bmc_mac_address.to_string(),
-                                host_info.serial.clone(),
-                                rack_id,
-                            )
-                            .await
-                    }
-                    DeviceSimulator::Switch(_) => {
-                        self.app_context
-                            .api_client()
-                            .add_expected_switch(
-                                host_info.bmc_mac_address.to_string(),
-                                host_info
-                                    .switch_serial_number
-                                    .clone()
-                                    .unwrap_or_else(|| host_info.serial.clone()),
-                                host_info
-                                    .nvos_mac_addresses
-                                    .iter()
-                                    .map(|mac| mac.to_string())
-                                    .collect(),
-                                rack_id,
-                            )
-                            .await
-                    }
-                    DeviceSimulator::Machine(_) => {
-                        // Derive the expected `dpu_policy` from the machine's
-                        // MachineConfig: zero-DPU hosts declare `Ignore`, hosts
-                        // running their DPUs as NICs declare `Nic`, and
-                        // everything else defers to the default (`Manage`).
-                        // Site-explorer's ingestion gate requires this explicit
-                        // declaration for any host without DPU PCIe devices.
-                        let dpu_policy = if machine_config.dpu_per_host_count == 0 {
-                            Some(HostDpuPolicy::Ignore)
-                        } else if machine_config.dpus_in_nic_mode {
-                            Some(HostDpuPolicy::Nic)
-                        } else {
-                            None
-                        };
-                        let interfaces = expected_interfaces(host_info, dpu_policy);
-                        self.app_context
-                            .api_client()
-                            .add_expected_machine(
-                                host_info.bmc_mac_address.to_string(),
-                                host_info.serial.clone(),
+        let summary = if self.app_context.app_config.register_expected_machines {
+            let records = simulators
+                .devices()
+                .iter()
+                .map(|device| {
+                    let machine = device.handle();
+                    let host_info = machine.host_info();
+                    let machine_config = resolved_configs
+                        .machines
+                        .get(machine.machine_config_section())
+                        .expect("machine was constructed from a configured machine group");
+                    let rack_id = machine_config.rack_id.clone();
+                    match device {
+                        DeviceSimulator::PowerShelf(_) => ExpectedRecord::PowerShelf {
+                            bmc_mac_address: host_info.bmc_mac_address.to_string(),
+                            shelf_serial_number: host_info.serial.clone(),
+                            rack_id,
+                        },
+                        DeviceSimulator::Switch(_) => ExpectedRecord::Switch {
+                            bmc_mac_address: host_info.bmc_mac_address.to_string(),
+                            switch_serial_number: host_info
+                                .switch_serial_number
+                                .clone()
+                                .unwrap_or_else(|| host_info.serial.clone()),
+                            nvos_mac_addresses: host_info
+                                .nvos_mac_addresses
+                                .iter()
+                                .map(|mac| mac.to_string())
+                                .collect(),
+                            rack_id,
+                        },
+                        DeviceSimulator::Machine(_) => {
+                            // Derive the expected `dpu_policy` from the machine's
+                            // MachineConfig: zero-DPU hosts declare `Ignore`, hosts
+                            // running their DPUs as NICs declare `Nic`, and
+                            // everything else defers to the default (`Manage`).
+                            // Site-explorer's ingestion gate requires this explicit
+                            // declaration for any host without DPU PCIe devices.
+                            let dpu_policy = if machine_config.dpu_per_host_count == 0 {
+                                Some(HostDpuPolicy::Ignore)
+                            } else if machine_config.dpus_in_nic_mode {
+                                Some(HostDpuPolicy::Nic)
+                            } else {
+                                None
+                            };
+                            ExpectedRecord::Machine {
+                                bmc_mac_address: host_info.bmc_mac_address.to_string(),
+                                chassis_serial_number: host_info.serial.clone(),
                                 rack_id,
                                 dpu_policy,
-                                interfaces,
-                            )
-                            .await
+                                dpf_enabled: machine_config.dpf_enabled,
+                                interfaces: expected_interfaces(host_info, dpu_policy),
+                            }
+                        }
                     }
-                };
+                })
+                .collect::<Vec<_>>();
 
-                result
-                    .inspect_err(|e| {
-                        tracing::warn!(
-                            error=?e,
-                            hardware_type = %host_info.hw_type,
-                            "error adding expected inventory record, likely already ingested"
-                        );
-                    })
-                    .ok();
+            let api_client = self.app_context.api_client();
+            let summary = register_all(records, CONCURRENCY, |record| {
+                let api_client = api_client.clone();
+                async move { api_client.add_expected_record(record).await }
+            })
+            .await;
+            summary.log();
+            if !summary.failed_identifiers.is_empty() {
+                let failed = &summary.failed_identifiers;
+                let mut listed = failed.iter().take(20).cloned().collect::<Vec<_>>();
+                if failed.len() > listed.len() {
+                    listed.push(format!("and {} more", failed.len() - listed.len()));
+                }
+                eyre::bail!(
+                    "failed to register {} expected device records: {}",
+                    failed.len(),
+                    listed.join(", ")
+                );
             }
+            summary
         } else {
             tracing::info!(
                 device_count = simulators.devices().len(),
                 "register_expected_machines=false; skipping auto-registration of mock host(s)",
             );
-        }
+            ExpectedInventorySummary::default()
+        };
 
-        Ok(simulators)
+        Ok((simulators, summary))
     }
 
     pub async fn run(
         &mut self,
         simulators: SimulatorRegistry,
-        tui_event_tx: Option<mpsc::Sender<UiUpdate>>,
-        mut app_rx: mpsc::Receiver<AppEvent>,
+        mut stop_rx: mpsc::Receiver<()>,
     ) -> eyre::Result<()> {
-        let provisionable_handles = simulators.provisionable_handles();
-        let mut vpc_handles: Vec<Vpc> = Vec::new();
-        let mut subnet_handles: Vec<Subnet> = Vec::new();
-        // Represents the mat_id of machines which are Assigned to a forge Instance
-        let mut assigned_mat_ids: HashSet<Uuid> = HashSet::new();
-
-        if let Some(host_str) = self
-            .app_context
-            .app_config
-            .configure_carbide_bmc_proxy_host
-            .as_ref()
-        {
-            let host_port_str =
-                format!("{}:{}", host_str, self.app_context.app_config.bmc_mock_port);
+        if let Some(bmc_proxy_address) = self.app_context.app_config.bmc_proxy_address() {
             tracing::info!(
-                bmc_proxy_address = %host_port_str,
+                %bmc_proxy_address,
                 "Configuring carbide API to use as bmc_proxy",
             );
             _ = self
                 .app_context
                 .api_client()
-                .configure_bmc_proxy_host(host_port_str)
+                .configure_bmc_proxy_host(bmc_proxy_address)
                 .await
                 .inspect_err(
                     |e| tracing::warn!(error = ?e, "Could not configure carbide bmc_proxy"),
                 )
         }
 
-        for config in self.app_context.app_config.machines.values() {
-            let network_virtualization_type =
-                parse_network_virtualization_type(config.network_virtualization_type.as_deref());
-            for _ in 0..config.vpc_count {
-                let app_context = self.app_context.clone();
-                let vpc = Vpc::new(
-                    app_context,
-                    tui_event_tx.clone(),
-                    network_virtualization_type,
-                )
-                .await;
-
-                for _ in 0..config.subnets_per_vpc {
-                    let app_context = self.app_context.clone();
-
-                    match Subnet::new(app_context, tui_event_tx.clone(), &vpc).await {
-                        Ok(subnet) => {
-                            subnet_handles.push(subnet);
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "Error creating network segment",
-                            );
-                        }
-                    }
-                }
-                vpc_handles.push(vpc);
-            }
-        }
-
         for simulator in simulators.devices() {
-            simulator.attach_to_tui(tui_event_tx.clone())?;
             simulator.resume()?;
         }
 
         tracing::info!("Machine construction complete");
 
-        while let Some(msg) = app_rx.recv().await {
-            match msg {
-                AppEvent::Quit => {
-                    tracing::info!("quit");
-                    let cleanup_on_quit = self.app_context.app_config.cleanup_on_quit;
-                    let persisted_devices =
-                        try_join_all(simulators.devices().iter().cloned().map(|simulator| {
-                            let api_client = self.app_context.api_client();
-                            let persisted = simulator.persisted();
-                            async move {
-                                simulator.shutdown().await?;
-                                if cleanup_on_quit {
-                                    simulator.delete_from_api(api_client).await?;
-                                }
-                                Ok::<PersistedDevice, eyre::Report>(persisted)
-                            }
-                        }))
-                        .await?;
-
-                    // Persist the current state of the machines before quitting
-                    self.app_context
-                        .app_config
-                        .write_persisted_devices(&persisted_devices)?;
-
-                    break;
+        let _ = stop_rx.recv().await;
+        tracing::info!("quit");
+        let cleanup_on_quit = self.app_context.app_config.cleanup_on_quit;
+        let persisted_devices =
+            try_join_all(simulators.devices().iter().cloned().map(|simulator| {
+                let api_client = self.app_context.api_client();
+                let persisted = simulator.persisted();
+                async move {
+                    simulator.shutdown().await?;
+                    if cleanup_on_quit {
+                        simulator.delete_from_api(api_client).await?;
+                    }
+                    Ok::<PersistedDevice, eyre::Report>(persisted)
                 }
+            }))
+            .await?;
 
-                AppEvent::AllocateInstance => {
-                    tracing::info!("Allocating an instance.");
-
-                    let Some(free_machine) =
-                        get_next_free_machine(&provisionable_handles, &assigned_mat_ids).await
-                    else {
-                        tracing::error!("No available machines.");
-                        continue;
-                    };
-
-                    let Some(hid_for_instance) = free_machine.observed_machine_id() else {
-                        tracing::error!("Machine in state Ready but with no machine ID?");
-                        continue;
-                    };
-
-                    // TODO: Remove the hardcoded subnet_0 to be user specified through CLI.
-                    match self
-                        .app_context
-                        .api_client()
-                        .allocate_instance(hid_for_instance, "subnet_0")
-                        .await
-                    {
-                        Ok(_) => {
-                            assigned_mat_ids.insert(free_machine.mat_id());
-                            tracing::info!("allocate_instance was successful. ");
-                        }
-                        Err(e) => {
-                            tracing::info!(
-                                error = %e,
-                                "allocate_instance failed",
-                            );
-                        }
-                    };
-                }
-            }
-        }
-
-        // Following block does not remove the entries from the VPC table due to possible references by other places.
-        // It rather soft deletes the VPCs by updating the deleted column of a vpc.
-        if self.app_context.app_config.cleanup_on_quit {
-            for vpc in vpc_handles {
-                tracing::info!(
-                    vpc_id = %vpc.vpc_id,
-                    "Attempting to delete VPC from database",
-                );
-                if let Err(e) = self
-                    .app_context
-                    .forge_api_client
-                    .delete_vpc(vpc.vpc_id)
-                    .await
-                {
-                    tracing::error!(
-                        error = %e,
-                        "Delete VPC API call failed",
-                    )
-                }
-            }
-
-            for subnet in subnet_handles {
-                tracing::info!(
-                    network_segment_id = %subnet.segment_id,
-                    "Attempting to delete network segment from database",
-                );
-                if let Err(e) = self
-                    .app_context
-                    .forge_api_client
-                    .delete_network_segment(subnet.segment_id)
-                    .await
-                {
-                    tracing::error!(
-                        error = %e,
-                        "Delete network segment API call failed",
-                    )
-                }
-            }
-        }
+        // Persist the current state of the machines before quitting
+        self.app_context
+            .app_config
+            .write_persisted_devices(&persisted_devices)?;
 
         if self
             .app_context
@@ -556,23 +440,6 @@ impl MachineATron {
 
         tracing::info!("machine-a-tron finished");
         Ok(())
-    }
-}
-
-fn parse_network_virtualization_type(s: Option<&str>) -> Option<VpcVirtualizationType> {
-    match s {
-        Some("etv") => Some(VpcVirtualizationType::EthernetVirtualizer),
-        #[allow(deprecated)]
-        Some("etv_nvue") => Some(VpcVirtualizationType::EthernetVirtualizerWithNvue),
-        Some("fnn") => Some(VpcVirtualizationType::Fnn),
-        Some(other) => {
-            tracing::warn!(
-                network_virtualization_type = other,
-                "Unknown network_virtualization_type, defaulting to None (ETV)"
-            );
-            None
-        }
-        None => None,
     }
 }
 

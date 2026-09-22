@@ -84,6 +84,11 @@ spec:
               containerPort: {{ $root.Values.machineATron.mockBmcSshPort }}
               protocol: TCP
             {{- end }}
+            {{- if include "nico-machine-a-tron.dhcpRelayEnabled" $root }}
+            - name: dhcp-relay
+              containerPort: {{ $root.Values.dhcpRelay.listenPort | default 67 }}
+              protocol: UDP
+            {{- end }}
           {{- with $root.Values.startupProbe }}
           startupProbe:
             {{- toYaml . | nindent 12 }}

@@ -18,12 +18,11 @@
 use std::net::IpAddr;
 
 use carbide_uuid::rack::RackId;
-use clap::{ArgGroup, Parser};
+use clap::error::ErrorKind;
+use clap::{ArgGroup, CommandFactory, Parser};
 use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-use crate::errors::CarbideCliError;
 
 #[derive(Parser, Debug, Serialize, Deserialize)]
 #[command(after_long_help = "\
@@ -145,33 +144,30 @@ pub(crate) struct Args {
     bmc_retain_credentials: Option<bool>,
 }
 
-impl TryFrom<Args> for rpc::forge::ExpectedSwitch {
-    type Error = CarbideCliError;
+impl Args {
+    pub(super) fn validate(&self) -> Result<(), clap::Error> {
+        let error = |kind, message: &str| {
+            Self::command()
+                .bin_name("nico-admin-cli expected-switch update")
+                .error(kind, message)
+        };
+        match (&self.bmc_mac_address, &self.id) {
+            (Some(_), Some(_)) => Err(error(
+                ErrorKind::ArgumentConflict,
+                "cannot specify both --bmc-mac-address and --id; provide only one",
+            )),
+            (None, None) => Err(error(
+                ErrorKind::MissingRequiredArgument,
+                "must specify either --bmc-mac-address or --id",
+            )),
+            _ => Ok(()),
+        }
+    }
+}
 
-    fn try_from(args: Args) -> Result<Self, Self::Error> {
-        match (&args.bmc_mac_address, &args.id) {
-            (Some(_), Some(_)) => {
-                return Err(CarbideCliError::ChooseOneError("--bmc-mac-address", "--id"));
-            }
-            (None, None) => {
-                return Err(CarbideCliError::RequireOneError(
-                    "--bmc-mac-address",
-                    "--id",
-                ));
-            }
-            _ => {}
-        }
-        if args.bmc_username.is_none()
-            && args.bmc_password.is_none()
-            && args.switch_serial_number.is_none()
-            && args.nvos_username.is_none()
-            && args.nvos_password.is_none()
-        {
-            return Err(CarbideCliError::GenericError(
-                "One of the following options must be specified: bmc-user-name and bmc-password or switch-serial-number or nvos-username and nvos-password".to_string(),
-            ));
-        }
-        Ok(rpc::forge::ExpectedSwitch {
+impl From<Args> for rpc::forge::ExpectedSwitch {
+    fn from(args: Args) -> Self {
+        Self {
             expected_switch_id: args.id.map(|id| ::rpc::common::Uuid {
                 value: id.to_string(),
             }),
@@ -201,6 +197,6 @@ impl TryFrom<Args> for rpc::forge::ExpectedSwitch {
                 .unwrap_or_default(),
             nvos_ip_address: args.nvos_ip_address.map(|ip| ip.to_string()),
             bmc_retain_credentials: args.bmc_retain_credentials,
-        })
+        }
     }
 }

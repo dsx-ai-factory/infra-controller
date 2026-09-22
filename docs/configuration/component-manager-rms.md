@@ -1,6 +1,6 @@
-# Component Manager RMS Backends (Day 1) <Badge intent="info">v2.0</Badge> <Badge intent="launch" minimal>New</Badge>
+# Component Manager RMS Backends (Day 1) <Badge intent="info">v2.0</Badge>
 
-Operator guide for configuring **Rack Manager Service (RMS)** backends in the
+Operator guide for configuring **[Rack Management Service (RMS)](https://docs.nvidia.com/rms/documentation/home/)** backends in the
 `[component_manager]` section of `nico-api` site config, and the **rack profile**
 data those backends require for node descriptors.
 
@@ -12,9 +12,29 @@ the rack profile. If a configured rack profile is missing required fields,
 at runtime when an RMS operation runs (refer to
 [Startup validation](#startup-validation)).
 
-Canonical field reference: [`crates/api-core/src/cfg/README.md`](https://github.com/NVIDIA/infra-controller/blob/main/crates/api-core/src/cfg/README.md).
+For the upstream Flow service’s implementation selection, see [Flow Component Managers](flow-component-manager.md).
+
+Canonical field reference: [`crates/api-core/src/cfg/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md).
 Configure the `[rms]` block (mTLS connectivity to the external RMS) separately;
 the examples on this page cover the component-manager and rack-profile fields.
+The `nsm` and `psm` backend values require externally managed services; the
+NICo deployment charts do not install NSM or PSM.
+
+`setup.sh` deploys RMS in-cluster by default (phase 5c, opt out with `--skip-rms`): it installs the
+[nv-rms](https://github.com/dsx-ai-factory/nv-rms) rack-manager chart with an
+mTLS certificate issued from `vault-nico-issuer`, matching the `[rms]` defaults
+NICo Core's chart already renders (`rms-api-server.rack-manager.svc.cluster.local:8801`).
+An externally managed RMS remains supported - point `[rms] api_url` at it and
+pass `--skip-rms`.
+
+For predecessor Flow deployments that still bundle PSM/NSM, the setup.sh path
+is intentionally unreachable: the upgrade guard exits before any phase runs,
+because a prerequisites sync would strand the bundled managers' credentials.
+To move Core backends to RMS *before* that Flow upgrade, use an externally
+managed RMS, or install the rack-manager chart manually from the
+`helm-prereqs/nv-rms` submodule with a database the guard cannot touch
+(`databaseMode: standalone`, or an external PostgreSQL). Once the Flow-only
+upgrade completes, re-run `setup.sh` and phase 5c adopts RMS management.
 
 ---
 
@@ -32,6 +52,14 @@ NICo trims outer whitespace from product-family and vendor values and requires
 both to be non-empty. Case and internal punctuation are preserved after
 trimming. NICo does not map these values to a supported-hardware list. RMS
 validates each role/vendor/product-family combination when a request is made.
+
+Each `rack_capabilities.<role>` section also requires a `count` field. This
+field is independent of RMS: it tells the rack state machine how many devices
+with that role the rack must have before it can progress. A rack stays in
+`Created` until all three roles have at least `count` devices registered; it
+stays in `Discovering` until all three roles have at least `count` devices in
+`Ready` state. All three roles — `compute`, `switch`, and `power_shelf` —
+require a `count` regardless of which backends are set to `rms`.
 
 For product families other than `gb200` and `gb300`, the `GetRackProfile`
 `product_family` enum is `UNSPECIFIED`. The configured string remains available
@@ -110,12 +138,15 @@ rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
 
 [rack_profiles.NVL72.rack_capabilities.compute]
 vendor = "NVIDIA"
+count = 18
 
 [rack_profiles.NVL72.rack_capabilities.switch]
 vendor = "NVIDIA"
+count = 9
 
 [rack_profiles.NVL72.rack_capabilities.power_shelf]
 vendor = "LiteOn"
+count = 8
 ```
 
 ### GB300 rack, Lenovo compute trays and Delta power shelves
@@ -132,12 +163,15 @@ rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
 
 [rack_profiles.NVL72_GB300.rack_capabilities.compute]
 vendor = "Lenovo"
+count = 18
 
 [rack_profiles.NVL72_GB300.rack_capabilities.switch]
 vendor = "nvidia"
+count = 9
 
 [rack_profiles.NVL72_GB300.rack_capabilities.power_shelf]
 vendor = "delta"
+count = 6
 ```
 
 ### Power shelf backend uses RMS; compute and switch do not
@@ -159,8 +193,15 @@ url = "http://nsm.example.internal:50052"
 product_family = "gb200"
 rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
 
+[rack_profiles.NVL72_POWER.rack_capabilities.compute]
+count = 18
+
+[rack_profiles.NVL72_POWER.rack_capabilities.switch]
+count = 9
+
 [rack_profiles.NVL72_POWER.rack_capabilities.power_shelf]
 vendor = "Lite-On"
+count = 8
 ```
 
 ---
@@ -174,6 +215,7 @@ vendor = "Lite-On"
 | Compute profile vendor, when `compute_tray_backend = "rms"` | Non-empty string; RMS validates support at request time |
 | Switch profile vendor, when `nv_switch_backend = "rms"` | Non-empty string; RMS validates support at request time |
 | Power shelf profile vendor, when `power_shelf_backend = "rms"` | Non-empty string; RMS validates support at request time |
+| `rack_capabilities.<role>.count` (all three roles, always required) | Non-negative integer. Minimum devices of that role that must be registered before the rack leaves `Created`, and in `Ready` state before it leaves `Discovering`. Independent of RMS backend selection. |
 
 ## Machine ingestion note
 

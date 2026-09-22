@@ -10,7 +10,7 @@ and Golang that provides site-local, zero-trust, bare-metal lifecycle
 management with DPU-enforced isolation. It automates the complexity of the
 bare-metal lifecycle to fast-track building next-generation AI Cloud offerings.
 
-> **Status:** Experimental/Preview. APIs, configurations, and features may
+> **Status:** Active development. APIs, configurations, and features may
 > change without notice between releases.
 
 ### Key Responsibilities
@@ -111,12 +111,39 @@ cargo test
 cargo make correctly-execute-tests
 ```
 
-When writing tests, prefer the **table-driven** style — see the [Testing section in `STYLE_GUIDE.md`](STYLE_GUIDE.md#testing).
-Enumerating a function's input variants as grouped `carbide-test-support` scenarios (`scenarios!` / `value_scenarios!`)
-or explicit cases (`check_cases` / `check_values`) is the easiest way to reach thorough coverage of parsers, validators,
-conversions, and the like.
-For functions that map multiple booleans or enums to state and action outputs,
-enumerate every input combination in one table before requesting review.
+When writing tests, prefer the **table-driven** style and helpers from
+`carbide-test-support`; use the [Testing section in `STYLE_GUIDE.md`](STYLE_GUIDE.md#testing)
+for table structure and API details. Use grouped `scenarios!` / `value_scenarios!`
+or explicit `check_cases` / `check_values` when cases share one operation and
+assertion form. When cases share setup but require different assertions, use a
+local case table that keeps each case's check next to its inputs.
+
+Before adding coverage, inventory the relevant unit, database, controller, and
+integration tests. Each new test should have one reason to exist: an observable
+contract or distinct failure boundary that no retained test protects. Use the
+smallest set of cases that exercise different behavior. Do not enumerate a
+Cartesian product merely because inputs are booleans or enums; enumerate a
+combination only when it is reachable and protects distinct observable behavior
+or a distinct failure boundary, including precedence between conflicting inputs.
+
+Place each proof at the narrowest layer that can exercise the contract.
+Higher-level tests should prove wiring, persistence, transaction behavior,
+concurrency, or external effects that lower-level tests cannot; do not repeat a
+lower-level case matrix at higher layers. For every new test or row, ask:
+**What regression does this catch that no retained test catches?** If there is
+no concrete answer, merge it into existing coverage or delete it.
+
+`STYLE_GUIDE.md` remains the source for helper APIs and table layout. For
+changes written by agents, the rules above for choosing cases replace its
+recommendation to enumerate every branch and input variant.
+
+For state-machine branch tests, reload persisted state after the controller
+iteration and assert the branch-owned fields or counters. An unchanged visible
+state or absence of an external action does not prove which branch ran.
+For retry tests, inject the claimed transient failure and assert that a later
+iteration retries it while preserving the expected externally visible state. A
+simulator's default unsupported response does not prove transient recovery.
+
 For user-visible CLI table changes, exercise the public command in a test and
 assert the rendered headers plus populated and empty cell values. Helper-only
 tests do not prove the table contract.
@@ -136,6 +163,7 @@ cargo make clippy              # Clippy linter (warnings = errors)
 cargo make carbide-lints       # Custom lints (requires nightly setup)
 cargo make check-format-nightly # Check rustfmt formatting
 cargo make check-event-names    # Validate production Event identity uniqueness
+cargo make check-metric-docs    # Check production Event metric catalogue coverage
 cargo make check-workspace-deps # Validate dependency declarations in Cargo.toml
 cargo make check-licenses      # Validate no restricted licenses introduced
 cargo make check-bans          # Check for banned dependencies
@@ -162,7 +190,7 @@ services. It delegates to cargo-make or `rest-api/Makefile`.
 make help                # default goal: list available targets
 make core/check-isolated-package-builds # optional independent default-feature builds
 make rest-build          # build rest-api Go binaries
-make rest-test           # run rest-api unit tests
+make rest-test           # run rest-api unit tests (starts Postgres and mock gRPC servers)
 make rest-lint           # lint rest-api
 make rest-fmt            # go fmt check on rest-api
 make rest-helm-lint      # helm lint rest charts
@@ -170,6 +198,13 @@ make rest-docker-build-local
 make rest-kind-reset     # spin up the local kind dev cluster (~10 min)
 make rest-api/<target>   # pass any target through to rest-api/Makefile
 ```
+
+Test the `rest-api/` Go services through these targets or the `rest-api/Makefile` ones they
+delegate to, not by calling `go test` yourself. The targets start the PostgreSQL container and
+the mock Core and Flow gRPC servers the tests connect to, and skipping that setup does not fail
+fast: the `site-agent` tests retry on a `40s` backoff until the `10m` test timeout. See the
+[Testing section in `rest-api/AGENTS.md`](rest-api/AGENTS.md#testing) for which target covers
+which module.
 
 Published container artifacts must pin external base images by immutable
 digest. When architecture-specific targets share a base image, define one
@@ -269,11 +304,17 @@ The decision rule:
   #[derive(carbide_instrument::Event)]
   #[event(event_name = "power_control_failed",
           metric_name = "carbide_power_control_total", component = "component_manager",
-          log = warn, metric = counter, message = "power control failed")]
+          log = warn, metric = counter, message = "power control failed",
+          describe = "Number of power control operations that failed")]
   struct PowerControlFailed {
       #[label]   backend: Backend,  // bounded via LabelValue — enums, usually
       #[context] error: String,     // high-cardinality — log line only
   }
+
+  carbide_instrument::emit(PowerControlFailed {
+      backend: Backend::Rms,
+      error: "deadline exceeded".to_string(),
+  });
   ```
 
   `log = off, metric = counter` counts a hot-path event with no log line at
@@ -293,9 +334,9 @@ logs. A metric-backed Event also declares `metric_name`; when that Event logs,
 both names are present so operators can pivot directly between the metric and its
 diagnostic records. Plain `tracing::` calls do not invent an `event_name`.
 
-New metric names are validated at compile time (`carbide_` prefix, `_total`
-counters, unit-suffixed histograms) and `metric_name` is the exposed name,
-verbatim. Existing metric names never change. The full standard lives in
+New metric names are checked at compile time (`carbide_` prefix, `_total`
+counters, unit-suffixed histograms), and a checked `metric_name` is exposed
+verbatim. Existing metric contracts never change. The full standard lives in
 [`docs/observability/instrumentation.md`](docs/observability/instrumentation.md).
 
 ## Documentation review
@@ -314,6 +355,8 @@ check before requesting review.
     - global versus subcommand position and required order
     - omission or fallback behavior
     - observable output, side effects, errors, and unsupported paths
+    - for repeated or list fields, membership, ordering, and whether omitted and
+      empty values have the same meaning
   - Exercise each changed CLI example at the PR revision on an authorized local
     or test target and compare it with real `--help` output. Verify changed API,
     configuration, environment-variable, and state contracts through schemas,
@@ -332,9 +375,8 @@ check before requesting review.
   - For REST, use `rest-api/openapi/spec.yaml` for the contract and inspect the
     handler or model for conditional behavior the schema cannot express. When
     the spec changes, run `make rest-api/lint-openapi`,
-    `make rest-api/generate-sdk`, `make rest-api/publish-openapi`, and
-    `make openapi-breaking`; do not edit `rest-api/sdk/standard/` or
-    `rest-api/docs/index.html`.
+    `make rest-api/generate-sdk`, and `make openapi-breaking`; do not edit
+    `rest-api/sdk/standard/`.
 
 - **Workflow parity:** Make the documentation match the workflow that actually runs.
 
@@ -372,7 +414,7 @@ check before requesting review.
     `fern docs md check` and `fern check` from the repository root. Neither
     command needs a Fern token, but without one, `fern check` skips the
     published-state `missing-redirects` check.
-  - `docs/release-notes.md` owns current unified releases;
+  - `fern/changelog/` owns current unified releases;
     do not modify `rest-api/CHANGELOG.md`, as it is legacy history whose
     published entry order must be preserved.
 

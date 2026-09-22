@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -197,6 +199,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 	tests := []struct {
 		name             string
 		requestBody      model.APIExpectedMachineCreateRequest
+		requestBodyJSON  string
 		setupContext     func(c echo.Context)
 		expectedStatus   int
 		expectedErrorMsg *string
@@ -212,6 +215,16 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				FallbackDPUSerialNumbers: []string{"DPU001", "DPU002"},
 				Labels:                   map[string]string{"env": "test"},
 			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name:            "successful creation with omitted collections",
+			requestBodyJSON: fmt.Sprintf(`{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:56","chassisSerialNumber":"CHASSIS-EMPTY"}`, site.ID.String()),
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
 				c.SetParamNames("orgName")
@@ -379,7 +392,11 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create request
-			reqBody, _ := json.Marshal(tt.requestBody)
+			reqBody, err := json.Marshal(tt.requestBody)
+			require.NoError(t, err)
+			if tt.requestBodyJSON != "" {
+				reqBody = []byte(tt.requestBodyJSON)
+			}
 			req := httptest.NewRequest(http.MethodPost, "/v2/org/test-org/nico/expected-machine", bytes.NewReader(reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			req = req.WithContext(context.Background())
@@ -391,7 +408,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			tt.setupContext(c)
 
 			// Execute
-			err := handler.Handle(c)
+			err = handler.Handle(c)
 
 			// Assert
 			assert.Nil(t, err)
@@ -405,9 +422,19 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				var response model.APIExpectedMachine
 				err := json.Unmarshal(rec.Body.Bytes(), &response)
 				assert.Nil(t, err)
+				var fields map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &fields))
+				assert.Equal(t, "true", string(fields["isDpfEnabled"]))
+				stored, err := emDAO.Get(ctx, nil, response.ID, nil, false)
+				require.NoError(t, err)
+				assert.Nil(t, stored.IsDpfEnabled, "response default must not change the stored optional value")
+				if tt.requestBodyJSON != "" {
+					assert.JSONEq(t, `{}`, string(fields["labels"]))
+					assert.JSONEq(t, `[]`, string(fields["fallbackDPUSerialNumbers"]))
+				}
 				if tt.requestBody.Labels != nil {
 					assert.NotNil(t, response.Labels, "Labels should not be nil in response")
-					assert.Equal(t, tt.requestBody.Labels, response.Labels, "Labels in response should match request")
+					assert.Equal(t, tt.requestBody.Labels, map[string]string(response.Labels), "Labels in response should match request")
 				}
 				if tt.requestBody.RackID != nil {
 					if assert.NotNil(t, response.RackID, "RackID should not be nil in response") {
@@ -2314,13 +2341,11 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 					Labels:                   map[string]string{"env": "test"},
 				},
 				{
-					SiteID:                   site.ID.String(),
-					BmcMacAddress:            "00:11:22:33:44:02",
-					DefaultBmcUsername:       cutil.GetPtr("admin"),
-					DefaultBmcPassword:       cutil.GetPtr("password"),
-					ChassisSerialNumber:      "BATCH-CHASSIS-002",
-					FallbackDPUSerialNumbers: []string{"DPU002"},
-					Labels:                   map[string]string{"env": "test"},
+					SiteID:              site.ID.String(),
+					BmcMacAddress:       "00:11:22:33:44:02",
+					DefaultBmcUsername:  cutil.GetPtr("admin"),
+					DefaultBmcPassword:  cutil.GetPtr("password"),
+					ChassisSerialNumber: "BATCH-CHASSIS-002",
 				},
 			},
 			setupContext: func(c echo.Context) {
@@ -2333,7 +2358,16 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 				var response []model.APIExpectedMachine
 				err := json.Unmarshal(body, &response)
 				assert.Nil(t, err)
-				assert.Equal(t, 2, len(response))
+				require.Len(t, response, 2)
+				assert.Equal(t, "BATCH-CHASSIS-001", response[0].ChassisSerialNumber)
+				assert.Equal(t, "BATCH-CHASSIS-002", response[1].ChassisSerialNumber)
+				var fields []map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(body, &fields))
+				assert.JSONEq(t, `{"env":"test"}`, string(fields[0]["labels"]))
+				assert.JSONEq(t, `{}`, string(fields[1]["labels"]))
+				assert.JSONEq(t, `[]`, string(fields[1]["fallbackDPUSerialNumbers"]))
+				assert.Contains(t, fields[0], "id")
+				assert.NotContains(t, fields[0], "Labels")
 			},
 		},
 		{
@@ -2617,9 +2651,7 @@ func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T
 	var apiResponse model.APIExpectedMachine
 	err = json.Unmarshal(rec.Body.Bytes(), &apiResponse)
 	assert.Nil(t, err)
-	if assert.NotNil(t, apiResponse.IsDpfEnabled) {
-		assert.False(t, *apiResponse.IsDpfEnabled)
-	}
+	assert.False(t, apiResponse.IsDpfEnabled)
 }
 
 // TestUpdateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow is a regression test for the
@@ -2714,16 +2746,180 @@ func TestUpdateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow(t *testi
 	}
 }
 
-// TestUpdateExpectedMachinesHandler_Handle tests the batch update handler
+func TestExpectedMachineUpdateFields(t *testing.T) {
+	t.Run("tracks every request field except ID and BMC IP address", func(t *testing.T) {
+		requestFieldCount := reflect.TypeOf(model.APIExpectedMachineUpdateRequest{}).NumField()
+		updateFieldCount := reflect.TypeOf(expectedMachineUpdateFieldSet{}).NumField()
+		assert.Equal(t, requestFieldCount-2, updateFieldCount)
+	})
+
+	fieldPresenceTests := []struct {
+		name      string
+		setField  func(*model.APIExpectedMachineUpdateRequest)
+		wantEqual bool
+	}{
+		{
+			name:      "ID identifies the target instead of an update field",
+			setField:  func(req *model.APIExpectedMachineUpdateRequest) { req.ID = cutil.GetPtr(uuid.NewString()) },
+			wantEqual: true,
+		},
+		{
+			name:      "BMC IP address may vary per machine",
+			setField:  func(req *model.APIExpectedMachineUpdateRequest) { req.BmcIpAddress = cutil.GetPtr("192.0.2.10") },
+			wantEqual: true,
+		},
+		{
+			name: "empty host lifecycle profile is an omitted update",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) {
+				req.HostLifecycleProfile = &model.APIHostLifecycleProfile{}
+			},
+			wantEqual: true,
+		},
+		{
+			name: "BMC MAC address",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) {
+				req.BmcMacAddress = cutil.GetPtr("00:11:22:33:44:55")
+			},
+		},
+		{
+			name:     "default BMC username",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.DefaultBmcUsername = cutil.GetPtr("admin") },
+		},
+		{
+			name:     "default BMC password",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.DefaultBmcPassword = cutil.GetPtr("password") },
+		},
+		{
+			name:     "chassis serial number",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.ChassisSerialNumber = cutil.GetPtr("SERIAL") },
+		},
+		{
+			name:     "empty fallback DPU serial numbers",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.FallbackDPUSerialNumbers = []string{} },
+		},
+		{
+			name:     "SKU ID",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.SkuID = cutil.GetPtr(uuid.NewString()) },
+		},
+		{
+			name:     "rack ID",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.RackID = cutil.GetPtr("rack-1") },
+		},
+		{
+			name:     "name",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.Name = cutil.GetPtr("machine") },
+		},
+		{
+			name:     "manufacturer",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.Manufacturer = cutil.GetPtr("NVIDIA") },
+		},
+		{
+			name:     "model",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.Model = cutil.GetPtr("test") },
+		},
+		{
+			name:     "description",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.Description = cutil.GetPtr("test") },
+		},
+		{
+			name:     "slot ID",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.SlotID = cutil.GetPtr(int32(1)) },
+		},
+		{
+			name:     "tray index",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.TrayIdx = cutil.GetPtr(int32(1)) },
+		},
+		{
+			name:     "host ID",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.HostID = cutil.GetPtr(int32(1)) },
+		},
+		{
+			name:     "DPF enablement",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.IsDpfEnabled = cutil.GetPtr(true) },
+		},
+		{
+			name:     "empty labels",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.Labels = map[string]string{} },
+		},
+		{
+			name: "host lifecycle profile setting",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) {
+				req.HostLifecycleProfile = &model.APIHostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)}
+			},
+		},
+	}
+
+	emptyFields := expectedMachineUpdateFields(model.APIExpectedMachineUpdateRequest{})
+	for _, tt := range fieldPresenceTests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := model.APIExpectedMachineUpdateRequest{}
+			tt.setField(&request)
+			assert.Equal(t, tt.wantEqual, expectedMachineUpdateFields(request) == emptyFields)
+		})
+	}
+
+	t.Run("values may differ when field presence matches", func(t *testing.T) {
+		first := model.APIExpectedMachineUpdateRequest{
+			Name:                     cutil.GetPtr("first"),
+			FallbackDPUSerialNumbers: []string{"DPU-1"},
+			Labels:                   map[string]string{"machine": "first"},
+			HostLifecycleProfile:     &model.APIHostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+		}
+		second := model.APIExpectedMachineUpdateRequest{
+			Name:                     cutil.GetPtr("second"),
+			FallbackDPUSerialNumbers: []string{},
+			Labels:                   map[string]string{},
+			HostLifecycleProfile:     &model.APIHostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
+		}
+		assert.Equal(t, expectedMachineUpdateFields(first), expectedMachineUpdateFields(second))
+	})
+}
+
 func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 	// Setup
 	e := echo.New()
+	cfg := common.GetTestConfig()
+
+	fieldSetTests := []struct {
+		name        string
+		requestBody string
+	}{
+		{
+			name: "rejects differing ordinary field sets before database access",
+			requestBody: `[
+				{"id":"00000000-0000-0000-0000-000000000001","fallbackDPUSerialNumbers":[]},
+				{"id":"00000000-0000-0000-0000-000000000002","labels":{}}
+			]`,
+		},
+		{
+			name: "rejects differing host lifecycle profile field sets before database access",
+			requestBody: `[
+				{"id":"00000000-0000-0000-0000-000000000001","name":"first"},
+				{"id":"00000000-0000-0000-0000-000000000002","name":"second","hostLifecycleProfile":{"disableLockdown":true}}
+			]`,
+		},
+	}
+	for _, tt := range fieldSetTests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPatch, "/v2/org/test-org/nico/expected-machine/batch", strings.NewReader(tt.requestBody))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+			c.Set("user", &cdbm.User{})
+			c.SetParamNames("orgName")
+			c.SetParamValues("test-org")
+
+			handler := NewUpdateExpectedMachinesHandler(nil, nil, cfg)
+			err := handler.Handle(c)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), "same set of fields")
+		})
+	}
 
 	// Initialize test database
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
-
-	cfg := common.GetTestConfig()
 
 	// Prepare client pool for workflow calls
 	tcfg, _ := cfg.GetTemporalConfig()
@@ -2900,7 +3096,7 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 				{
 					ID:                  cutil.GetPtr(testEM2.ID.String()),
 					ChassisSerialNumber: cutil.GetPtr("UPDATED-BATCH-002"),
-					Labels:              map[string]string{"env": "updated"},
+					Labels:              map[string]string{},
 				},
 			},
 			setupContext: func(c echo.Context) {
@@ -2913,7 +3109,13 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 				var response []model.APIExpectedMachine
 				err := json.Unmarshal(body, &response)
 				assert.Nil(t, err)
-				assert.Equal(t, 2, len(response))
+				require.Len(t, response, 2)
+				var fields []map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(body, &fields))
+				assert.JSONEq(t, `{"env":"updated"}`, string(fields[0]["labels"]))
+				assert.JSONEq(t, `{}`, string(fields[1]["labels"]))
+				assert.Contains(t, fields[0], "id")
+				assert.NotContains(t, fields[0], "Labels")
 			},
 		},
 		{
@@ -2966,13 +3168,17 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 		},
 		{
 			name: "BMC MAC address change rejects the whole batch",
+			// Keep both requests on the same field set so this case reaches the
+			// BMC MAC immutability check.
 			requestBody: []model.APIExpectedMachineUpdateRequest{
 				{
-					ID:            cutil.GetPtr(testEM1.ID.String()),
-					BmcMacAddress: cutil.GetPtr("AA:BB:CC:DD:EE:FF"),
+					ID:                  cutil.GetPtr(testEM1.ID.String()),
+					BmcMacAddress:       cutil.GetPtr("AA:BB:CC:DD:EE:FF"),
+					ChassisSerialNumber: cutil.GetPtr("REJECTED-BATCH-COMPANION"),
 				},
 				{
 					ID:                  cutil.GetPtr(testEM2.ID.String()),
+					BmcMacAddress:       cutil.GetPtr(testEM2.BmcMacAddress),
 					ChassisSerialNumber: cutil.GetPtr("REJECTED-BATCH-CHANGE"),
 				},
 			},

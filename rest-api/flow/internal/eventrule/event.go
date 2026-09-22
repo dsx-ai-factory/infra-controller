@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	flowtypes "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	"github.com/google/uuid"
@@ -22,9 +23,10 @@ type EventKey struct {
 
 // Validate checks the canonical event identity.
 func (k EventKey) Validate() error {
-	if err := validateIdentifier("event source name", k.SourceName); err != nil {
+	if err := ValidateIdentifier("event source name", k.SourceName); err != nil {
 		return err
 	}
+
 	return validateRequiredString("event source key", k.SourceKey)
 }
 
@@ -101,11 +103,20 @@ type Envelope struct {
 	ObservedAt time.Time       // Records when the source event was observed.
 }
 
+// Clone returns an independent copy of the envelope and its opaque payload.
+func (e Envelope) Clone() Envelope {
+	cloned := e
+	cloned.Payload = append(json.RawMessage(nil), e.Payload...)
+
+	return cloned
+}
+
 // Validate checks the normalized envelope contract.
 func (e *Envelope) Validate() error {
 	if e == nil {
 		return fmt.Errorf("event envelope is nil")
 	}
+
 	if err := e.Key.Validate(); err != nil {
 		return err
 	}
@@ -121,6 +132,7 @@ func (e *Envelope) Validate() error {
 	if len(e.Payload) > 0 && !json.Valid(e.Payload) {
 		return fmt.Errorf("event payload must be valid JSON")
 	}
+
 	return nil
 }
 
@@ -164,6 +176,126 @@ type ResolvedResource struct {
 	ComponentType flowtypes.ComponentType
 }
 
+// ResourceIdentity is the durable canonical identity of the resource an event
+// concerns. Planning captures required topology attributes in immutable
+// execution plans rather than storing them on the event.
+type ResourceIdentity struct {
+	Kind ResourceKind
+	ID   uuid.UUID
+}
+
+// Validate checks the durable resource identity.
+func (r ResourceIdentity) Validate() error {
+	if err := r.Kind.Validate(); err != nil {
+		return err
+	}
+	if r.ID == uuid.Nil {
+		return fmt.Errorf("event resource id is required")
+	}
+
+	return nil
+}
+
+const maxEventSummaryRunes = 1024
+
+// Event is one deduplicated, enriched, rule-matched observation. It owns the
+// immutable information shared by all action executions.
+type Event struct {
+	ID              uuid.UUID
+	Key             EventKey
+	Type            Type
+	Resource        ResourceIdentity
+	AppliedRuleID   uuid.UUID
+	EffectivePolicy Policy
+	Summary         string
+	Observations    int
+	CreatedAt       time.Time
+	LastObservedAt  time.Time
+}
+
+// Clone returns an independent event snapshot.
+func (e Event) Clone() Event {
+	cloned := e
+	cloned.EffectivePolicy = e.EffectivePolicy.Clone()
+
+	return cloned
+}
+
+// ValidateDefinition checks the immutable content supplied when creating an
+// event. Persistence-owned identity, timestamps, and observation counts are
+// intentionally excluded.
+func (e Event) ValidateDefinition() error {
+	if err := e.Key.Validate(); err != nil {
+		return err
+	}
+	if err := e.Type.Validate(); err != nil {
+		return err
+	}
+	if err := e.Resource.Validate(); err != nil {
+		return err
+	}
+	if e.AppliedRuleID == uuid.Nil {
+		return fmt.Errorf("applied event rule id is required")
+	}
+	if err := e.EffectivePolicy.Validate(); err != nil {
+		return fmt.Errorf("effective policy: %w", err)
+	}
+	if err := validateRequiredString("event summary", e.Summary); err != nil {
+		return err
+	}
+	if utf8.RuneCountInString(e.Summary) > maxEventSummaryRunes {
+		return fmt.Errorf("event summary exceeds %d characters", maxEventSummaryRunes)
+	}
+
+	return nil
+}
+
+// Validate checks the complete durable event aggregate.
+func (e *Event) Validate() error {
+	if e == nil {
+		return fmt.Errorf("event is nil")
+	}
+
+	if e.ID == uuid.Nil {
+		return fmt.Errorf("event id is required")
+	}
+	if err := e.ValidateDefinition(); err != nil {
+		return err
+	}
+	if e.Observations <= 0 {
+		return fmt.Errorf("event observations must be positive")
+	}
+	if e.CreatedAt.IsZero() {
+		return fmt.Errorf("event creation time is required")
+	}
+	if e.LastObservedAt.IsZero() {
+		return fmt.Errorf("event last-observed time is required")
+	}
+	if e.LastObservedAt.Before(e.CreatedAt) {
+		return fmt.Errorf("event last-observed time cannot precede creation time")
+	}
+
+	return nil
+}
+
+// NewEvent constructs a durable event using the store's authoritative time.
+func NewEvent(definition Event, now time.Time) (*Event, error) {
+	if err := definition.ValidateDefinition(); err != nil {
+		return nil, err
+	}
+	if now.IsZero() {
+		return nil, fmt.Errorf("event creation time is required")
+	}
+
+	event := definition.Clone()
+	event.ID = uuid.New()
+	event.Observations = 1
+	event.CreatedAt = now
+	event.LastObservedAt = now
+
+	return &event, nil
+}
+
 // Validate checks the canonical identity and attributes established during
 // enrichment.
 func (r ResolvedResource) Validate() error {
@@ -176,6 +308,7 @@ func (r ResolvedResource) Validate() error {
 	if r.RackID == uuid.Nil {
 		return fmt.Errorf("resolved resource rack id is required")
 	}
+
 	if r.Kind == ResourceKindComponent {
 		if err := r.ComponentType.Validate(); err != nil {
 			return fmt.Errorf("resolved resource component type: %w", err)
@@ -185,5 +318,6 @@ func (r ResolvedResource) Validate() error {
 			return fmt.Errorf("resolved rack resource id must equal rack id")
 		}
 	}
+
 	return nil
 }

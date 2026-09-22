@@ -1,236 +1,243 @@
-# `WaitingForNetworkConfig` and DPU health
+# Waiting for Network Configuration and DPU Health
 
-Whenever the configuration of a ManagedHost changes (Instance gets created,
-Instance gets deleted, Provisioning), NICo requires the `nico-dpu-agent` to
-acknowledge that the desired DPU configuration is applied and that the DPU and
-services running on it (like `HBN`) are in a healthy state.
+Use this playbook when an assigned managed host waits in
+`WaitingForNetworkConfig` or `WaitingForRebootToReady`. These states protect the
+normal PXE boot path during initial instance provisioning.
 
-This feedback mechanism works in the following fashion:
-1. `nico-dpu-agent` periodically calls `GetManagedHostNetworkConfig`. It thereby
-   obtains the latest configuration for all interfaces, including the configuration
-   which states whether the Host should get attached to an admin or tenant network.
-   The configuration includes Version numbers, which increase whenever the
-   configuration changes.
-2. `nico-dpu-agent` reports the version numbers of the currently applied
-   configurations back to NICo using the `RecordDpuNetworkStatus` API.
-   This report also includes the DPUs health in the form of a `HealthReport`.
+## Readiness Checks
 
-If the DPU has not recently reported that it is up, healthy and that the latest
-desired configuration is applied, the state will not be advanced.
+`WaitingForNetworkConfig` evaluates these conditions before provisioning can
+continue:
 
-If a ManagedHost is stuck due to this check, you can inspect which condition is
-not met by inspecting the last report from the Host and DPUs
-- via nico-admin-cli:
-  - ```
-    nico-admin-cli managed-host show fm100psa0aqpqvll7vi4jfrvtqv058mo8ifb0vtg761j06sqhq466b0slmg
-    ```
-  - ```
-    nico-admin-cli machine show fm100psa0aqpqvll7vi4jfrvtqv058mo8ifb0vtg761j06sqhq466b0slmg
-    ```
-  - ```
-    nico-admin-cli machine show fm100dsa0aqpqvll7vi4jfrvtqv058mo8ifb0vtg761j06sqhq466b0slmg
-    ```
-  - ```
-    nico-admin-cli machine network status
-    ```
+1. The DPU agents acknowledge the current managed host network configuration.
+1. Enabled DPA interfaces acknowledge their current configuration.
+1. Each required DPU reports an instance network observation with the desired
+   version.
+1. For a host with associated DPUs, the aggregate health report has no alert
+   that prevents host state changes.
+1. The primary p0 ToR session has no `BgpPeeringTor` alert with
+   `PreventAllocations`.
+1. The required InfiniBand and NVLink configurations are synchronized.
 
-E.g. in the following report
-```
-/opt/nico/nico-admin-cli managed-host show fm100psa0aqpqvll7vi4jfrvtqv058mo8ifb0vtg761j06sqhq466b0slmg
-Hostname    : 192-168-18-95
-State       : DPUInitializing/WaitingForNetworkConfig
-    Time in State : 296 days and 29 minutes
-    State SLA     : 30 minutes
-    In State > SLA: true
-    Reason        : The object is in the state for longer than defined by the SLA. Handler outcome: Wait("Waiting for DPU agent to apply network config and report healthy network for DPU fm100dsa0aqpqvll7vi4jfrvtqv058mo8ifb0vtg761j06sqhq466b0slmg")
+`WaitingForRebootToReady` repeats the aggregate health and primary p0 checks
+immediately before the normal PXE `ForceRestart`. This second check catches a
+health change that occurs after the network configuration check.
 
-Host:
-----------------------------------------
-  ID                    : fm100psa0aqpqvll7vi4jfrvtqv058mo8ifb0vtg761j06sqhq466b0slmg
-  Memory                : Unknown
-  Admin IP              : 192.168.18.95
-  Admin MAC             : B8:3F:D2:B7:70:64
-  Health
-    Probe Alerts        : HeartbeatTimeout [Target: nico-dpu-agent]:
-    Overrides
-  BMC
-    Version             : Unknown
-    Firmware Version    : Unknown
-    IP                  : Unknown
-    MAC                 : Unknown
+The following paths have different behavior:
 
-DPU0:
-----------------------------------------
-  ID                    : fm100dsa0aqpqvll7vi4jfrvtqv058mo8ifb0vtg761j06sqhq466b0slmg
-  State                 : DPUInitializing/WaitingForNetworkConfig
-  Primary               : true
-  Failure details       : Unknown
-  Last reboot           : 2023-12-13 16:38:08.180734 UTC
-  Last reboot requested : Unknown/
-  Last seen             : 2023-12-13 17:24:15.454965 UTC
-  Serial Number         : MT2244XZ022R
-  BIOS Version          : BlueField:3.9.3-7-g8f2d8ca
-  Admin IP              : 192.168.134.233
-  Admin MAC             : B8:3F:D2:B7:70:72
-  BMC
-    Version             : 1
-    Firmware Version    : 2.08
-    IP                  : 192.168.134.234
-    MAC                 : B8:3F:D2:B7:70:66
-  Health
-    Probe Alerts        : HeartbeatTimeout [Target: nico-dpu-agent]: No health data was received from DPU
+- A host without associated DPUs skips DPU observations and aggregate health in
+  `WaitingForNetworkConfig`. It still receives the aggregate health check before
+  the normal restart.
+- Instance deletion bypasses the network wait and both final readiness checks.
+- An explicit custom iPXE request bypasses both final readiness checks.
+- A live network update uses `NetworkConfigUpdate/WaitingForConfigSynced`. A
+  host with associated DPUs waits for current observations and aggregate
+  health. A host without associated DPUs skips both checks. This path does not
+  apply the p0 PXE gate or restart the host.
+
+Refer to
+[DPU ToR Uplink Health](../../dpu-management/dpu_configuration.md#dpu-tor-uplink-health)
+for the uplink threshold, alert visibility, and classifications.
+
+## Inspect the Wait Condition
+
+Collect the managed host state, network observations, and effective health
+reports:
+
+```bash
+nico-admin-cli managed-host show <host-machine-id>
+nico-admin-cli dpu network status
+nico-admin-cli dpu network config --machine-id <dpu-machine-id>
+nico-admin-cli dpu health-report show <dpu-machine-id>
+nico-admin-cli machine health-report show <host-machine-id>
 ```
 
-- The `Health` field indicates whether any of the health checks failed. In this case we can see an alert of the `HeartbeatTimeout` probe - with target `nico-dpu-agent`. That indicates no
-  `HealthReport` had been received from `nico-dpu-agent` via a `RecordDpuNetworkStatus`
-  API call for a certain amount of time.
-- The aggregate `Health` of a Host is the aggregation of Health states from
-  monitoring by `nico-dpu-agent`, out of band BMC monitoring (`hardware-health`),
-  and the results of validation tests. If the health check failure also shows up
-  in the `Health` field of the DPU, then the failure is related to the DPU,
-  and/or has been reported by `nico-dpu-agent`.
-  If a health-check has failed, then the root-caused for the failed health-check
-  needs to be remediated.
-- "Last seen" indicates whether the DPU (and `nico-dpu-agent`) is up and running.
-  If the timestamp is too old, it might indicate the DPU agent has crashed or the
-  whole DPU is no longer online. In such a case a `HeartbeatTimeout` alert on the
-  DPU and Host would be raised too.
+The DPU network configuration shows the desired managed host and instance
+versions. The status view shows the last observed versions and DPU agent health.
+The health report commands show the sources and whether each uses `Merge` or
+`Replace`.
 
-The network status details show:
-```
-/opt/nico/nico-admin-cli machine network status
-+-------------------------+-------------------------------------------------------------+------------------------+----------+--------------------------------------------+---------------------------------+
-| Observed at             | DPU machine ID                                              | Network config version | Healthy? | Health Probe Alerts                        | Agent version                   |
-+=========================+=============================================================+========================+==========+============================================+=================================+
-| 2023-12-13 17:24:15.454 | fm100dsa0aqpqvll7vi4jfrvtqv058mo8ifb0vtg761j06sqhq466b0slmg | V2-T1702485344893918   | false    | HeartbeatTimeout [Target: nico-dpu-agent] | v2023.12-rc1-43-g3322d125f      |
-+-------------------------+-------------------------------------------------------------+------------------------+----------+--------------------------------------------+---------------------------------+
-```
+The persisted handler reason identifies the active gate:
 
-In this case we learn that the DPU was alive before, and acknowledged network config version `V2-T1702485344893918`. This is still the desired network configuration version for
-this DPU. The target configuration for a DPU can be found on the `Network Config` block the DPU page in the admin Web UI.
+| Wait Reason | Interpretation |
+|---|---|
+| `Waiting for DPU agent(s) to apply network config and report healthy network` | A managed host configuration version has not synchronized. |
+| `Waiting for DPU agents to apply initial network config for DPUs: <comma-separated DPU IDs>` | One or more required DPU observations are missing. |
+| `Waiting for DPU agent to apply most recent network config for DPUs: <comma-separated DPU IDs>` | A DPU observation reports an older version. |
+| `Waiting for lifecycle-blocking host health alerts to clear before PXE reboot` | An effective alert has `PreventHostStateChanges`. |
+| `Waiting for the primary DPU p0 BGP session to be established` | The effective primary p0 alert has `PreventAllocations`. |
 
-The summary for this example is that the Machine is stuck because the DPU
-- is either not healthy at all (e.g. not booted)
-- is not running `nico-dpu-agent`
-- `nico-dpu-agent` is not reporting back to NICo
+Check these fields together:
 
-## Follow-up investigation steps
+- `Last seen` shows when NICo last received a DPU agent report.
+- The desired and observed configuration versions show whether the agent has
+  acknowledged current intent.
+- The alert ID, target, message, and classifications show whether health blocks
+  the current transition.
+- Health report sources and apply modes show which report is effective.
 
-### Checking DPU liveliness
+The PXE gate matches the `BgpPeeringTor` probe ID together with
+`PreventAllocations`; it does not inspect the target. The agent uses that
+combination for a p0 transport failure. A host `Replace` report overrides all
+DPU reports for this check. Without a host `Replace` report, the primary DPU
+`Replace` report overrides its `Merge` reports. If no `Replace` report exists,
+any primary DPU `Merge` report can add the signal. In
+`WaitingForNetworkConfig`, a host `Replace` report can supply it even on a host
+without managed DPUs. `WaitingForRebootToReady` skips this special check on a
+host without managed DPUs, but still checks aggregate `PreventHostStateChanges`.
+Refer to
+[Health Report Overrides](../../architecture/health_aggregation.md#health-report-overrides)
+before changing an override.
 
-Operators can try SSHing to the DPU, using the DPU OOB address that is shown
-on ManagedHost pages and DPU details pages.
-If SSH fails, the DPU might not be up and running.
+## Diagnose Health Alerts
 
-If directly SSHing to the DPU does not work, it can be accessed via its BMC
-and rshim to investigate its state.
+### `BgpPeeringTor`
 
-{/* TODO: Document the BMC path */}
+A targeted `BgpPeeringTor` alert identifies an unavailable or unusable physical
+ToR uplink. The target identifies p0 or p1. Depending on the HBN version, the
+target uses `p0_if` and `p1_if` or the legacy `p0_sf` and `p1_sf` names. An
+untargeted alert on the NVUE path indicates a neighbor retrieval failure or a
+minimum link configuration greater than the two expected uplinks. Follow its
+message before investigating a physical link.
 
-### Checking DPU agent logs
+When uplink checking is enabled, a primary p0 transport failure with
+`PreventAllocations` blocks normal PXE even when p1 is established. When p0
+remains established, a secondary p1 alert can remain visible without blocking
+provisioning. If both transport sessions are unavailable, the alerts also
+prevent host state changes.
 
-In case the DPU is running, `nico-dpu-agent` logs can be inspected in order to
-learn why it can not communicate with nico, or why the configuration application
-might have failed. There are various options for this.
+For an FNN configuration with an IPv6 loopback, the FRR health path can use the
+same probe for an IPv6 unicast negotiation warning. This warning is distinct
+from a transport session failure. Inspect the message and classifications
+instead of relying on the probe ID alone.
 
-#### Checking logs via Grafana & Loki
+Inspect HBN session state on the DPU:
 
-nico-dpu-agent logs are forwarded via OpenTelemetry to the site controller logging
-infrastructure. They can be queried from there via Loki.
-
-Search strings for DPU can be:
-```
-{systemd_unit="nico-dpu-agent.service", machine_id="fm100ds006eliqt3u4h65ou9ebrqfq9th2jf39qqki68k9ueu2amearv47g"}
-{systemd_unit="nico-dpu-agent.service", host_name="192-168-155-135.nico.example.org"}
-```
-
-**Note that the query using the MachineId will only work if the DPU once had been fully ingested
-and is aware of its Machine ID. Otherwise only searches by `host_name` will work.**
-
-In case the DPU problem affects log forwarding, DPU logs need to be checked directly on the DPU.
-
-#### Checking logs on the DPU:
-
-The dpu agent logs are stored in the systemd journal on the DPU.
-They can be queried using
-```
-journalctl -u nico-dpu-agent.service -e --no-pager
+```bash
+sudo crictl ps
+sudo crictl exec -ti <doca-hbn-container-id> vtysh -c 'show bgp summary'
 ```
 
-### Checking additional logs
+Restore the p0 session before retrying normal PXE provisioning. Setting the
+minimum healthy link count to `1` does not remove the p0 dependency.
 
-Depending on the problems that are found in dpu-agent logs, it can be useful
-to check other logs that are available on the DPU. Examples are
-- `nl2doca` logs: `{machine_id="fm100ds02e5g65099ov37rmho1gnge0c99ihdisvluo4fls1ba3br9bksg0", log_file_path="/var/log/doca/hbn/nl2docad.log"}`
-- `syslog`: `{machine_id="fm100ds02e5g65099ov37rmho1gnge0c99ihdisvluo4fls1ba3br9bksg0", log_file_path="/var/log/doca/hbn/syslog"}`
-- `nvue` logs
-- `frr` logs
+### `BgpPeeringRouteServer` and `BgpStats`
 
-## Potential Mitigations
+`BgpPeeringRouteServer` identifies a route server session that is not
+established. Check route server reachability, peer configuration, and the HBN
+session state.
 
-### Power Cycling the Host
-
-**⚠️ Note that while a tenant uses a Machine as an instance, powercycling the Host will interrupt
-their workloads. Only perform these step if its clear that the Tenant no longer requires the Machine (is stuck in termination), or if the Tenant agrees with this action.**
-
-If the DPU is unresponsive, powering off the Host and back on can help. This will
-restart the DPU.
-
-The Host can be powercycled using the Explored-Endpoint view in the Admin Web UI, The DPU Machine details page will link to the explored endpoint by clicking on the DPU BMC IP.
-
-### Restarting nico-dpu-agent
-
-If nico-dpu-agent is not even started, then it needs to be started (`systemctl enable nico-dpu-agent.service`).
-This should however never be necessary, since the agent gets restarted on all
-crashes.
-
-If `nico-dpu-agent` should just be restarted, use
-```
-systemctl restart nico-dpu-agent.service
-```
-
-### Reloading nico-dpu-agent configurations
-
-In rare situations, it might be useful to restart nico-dpu-agent using latest
-dpu-agent systemd config files. To do so:
-```
-systemctl daemon-reload
-systemctl restart nico-dpu-agent.service
-```
-
-## Mitigations for specific Health Probe Alerts
-
-### `BgpStats`
-
-The BgpStats health probe indicates that BGP peering with the TOR or route server
-is not successful. This might either indicate a link issue or a configuration issue.
-The BGP details can be checked on the DPU using
-```
-sudo crictl exec -ti $(sudo crictl ps |grep doca-hbn |awk '{print $1}') vtysh -c 'show bgp summary'
-```
-
-{/* TODO: Provide more details on the next steps here */}
-
-### `ServiceRunning`
-
-Indicates that mandatory DPU services are not running. Next steps in the investigation
-can be to check whether the HBN container is running on the DPU (`crictl ps` should
-show `doca-hbn` container), and to search for associated logs.
-
-### `DhcpRelay`/`DhcpServer`
-
-Indicates that the DHCP Relay or Server that NICo deploys on the DPU in order
-to respond to the DHCP requests from the Host are not running as intended.
-In these conditions, the Host would not be able to boot since nothing would respond
-to the DHCP request.
-
-Next steps in the investigation would be to check `nico-dpu-agent` logs for details.
+`BgpStats` means the FRR health path found a collection, parsing, configuration,
+or summary validation error that is not represented by a targeted peer alert.
+It does not identify a specific ToR session failure. Check the alert message,
+HBN container, FRR command output, and `min_dpu_functioning_links` value.
 
 ### `PostConfigCheckWait`
 
-This alert is only raised for a brief time after each configuration change in order
-to wait for the configuration to settle on the DPU. The alert should always settle
-down after less than a minute. In case the alert keeps raised, it can indicate
-that new configurations are applied in every dpu-agent eventloop iteration. In this
-case it would need to be debugged what in the configurations changed, and the
-source of the unnecessary configuration changes would need to be fixed.
+The DPU agent adds `PostConfigCheckWait` to one health report when it applies a
+changed HBN configuration. The agent publishes the acknowledged configuration
+version with that report. The immediate BGP sample can still reflect the state
+from before the HBN change has converged.
+
+The alert has `PreventAllocations` and `PreventHostStateChanges`, which makes
+NICo wait for the next health report. It is not a timer with a fixed duration.
+
+The default active agent loop is 10 seconds, so the fresh report usually arrives
+on the following loop. The DPF path uses NVUE and triggers this alert only for
+an actual HBN change. The ContainerExec path also triggers it after an actual
+local HBN change or DHCP reload.
+
+If the alert appears in consecutive reports, check whether the agent repeatedly
+applies HBN configuration or, in ContainerExec mode, reloads local DHCP.
+Compare desired and observed versions, then inspect the DPU agent log around
+each configuration operation.
+
+### `HeartbeatTimeout`
+
+`HeartbeatTimeout` means NICo has not received recent DPU agent health. Compare
+`Last seen` with the current time. Then check DPU power, agent status, and
+connectivity to `nico-api`.
+
+### `ServiceRunning`, `DhcpRelay`, and `DhcpServer`
+
+`ServiceRunning` identifies a required DPU service that is not running. Inspect
+systemd and the HBN container. `DhcpRelay` and `DhcpServer` identify failures on
+the host DHCP path, which can prevent PXE from receiving boot instructions.
+
+## Inspect DPU Logs
+
+Search the DPU agent logs in Loki with the DPU machine ID or hostname. The
+systemd deployment uses `forge-dpu-agent.service`; the DPF container uses
+`nico-dpu-agent`:
+
+```logql
+{systemd_unit="forge-dpu-agent.service", machine_id="<dpu-machine-id>"}
+{systemd_unit="nico-dpu-agent", machine_id="<dpu-machine-id>"}
+{systemd_unit="forge-dpu-agent.service", host_name="<dpu-hostname>"}
+{systemd_unit="nico-dpu-agent", host_name="<dpu-hostname>"}
+```
+
+The machine ID query works only after the DPU has completed enough ingestion to
+learn its ID. Use the hostname query earlier in ingestion.
+
+Use the HBN log that matches the failed path:
+
+| Path | DPU log | What to inspect |
+|---|---|---|
+| DPF and NVUE | `/var/log/doca/hbn/nvued.log` | NVUE requests, revisions, and neighbor data. |
+| FRR | `/var/log/doca/hbn/frr/frr.log` | Session transitions and peer errors. |
+| Netlink to DOCA | `/var/log/doca/hbn/nl2docad.log` | Interface and route programming failures. |
+| HBN system log | `/var/log/doca/hbn/syslog` | Service startup and shared HBN errors. |
+
+These files are also available in Loki. Filter the DPU stream by its
+`log_file_path` label, or use `{component="hbn"}` and search for the subsystem
+name. For example:
+
+```logql
+{component="hbn", log_file_path="/var/log/doca/hbn/nl2docad.log"}
+```
+
+If log forwarding is unavailable, connect to the DPU using SSH, its BMC, or
+rshim. On a systemd deployment, inspect the local service and container state:
+
+```bash
+systemctl status forge-dpu-agent.service
+journalctl -u forge-dpu-agent.service -e --no-pager
+sudo crictl ps
+```
+
+## Apply a Mitigation
+
+Use the least disruptive action that corrects the observed failure. On a
+systemd deployment, enable a stopped and disabled agent, restart an unresponsive
+agent, or reload changed unit files:
+
+```bash
+# Start the agent now and on subsequent boots.
+sudo systemctl enable --now forge-dpu-agent.service
+
+# Restart an agent that is running but unresponsive.
+sudo systemctl restart forge-dpu-agent.service
+
+# Load changed unit files before restarting the agent.
+sudo systemctl daemon-reload
+sudo systemctl restart forge-dpu-agent.service
+```
+
+For other failures:
+
+- Restore the failed p0 link or BGP session before normal PXE provisioning.
+- Power cycle the host only after confirming the workload impact with the
+  tenant or operator. Use the host BMC UI or the following command:
+
+  ```bash
+  nico-admin-cli redfish --address <host-bmc-ip> ac-power-cycle
+  ```
+
+- Use a health `Replace` override only with incident context. Remove it after
+  recovery because it masks the reports that it replaces.
+
+Do not change `min_dpu_functioning_links` as a substitute for repairing p0. A
+value of `1` changes redundant p1 reporting, but p0 remains required for normal
+PXE. A value of `0` disables ToR uplink health checks, including the p0 readiness
+signal.

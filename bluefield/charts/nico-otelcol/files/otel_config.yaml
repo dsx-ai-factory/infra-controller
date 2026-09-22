@@ -5,6 +5,12 @@ extensions:
     fsync: true
 
 receivers:
+  # OTLP receiver for DPU workloads to emit tracing spans
+  otlp/workloads:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+
   filelog/doca:
     include:
       - /var/log/doca/hbn/frr/frr.log
@@ -243,8 +249,11 @@ processors:
   batch/metrics-disk:
     send_batch_size: 8192
     timeout: 75s
+  batch/traces:
+    send_batch_size: 8192
+    timeout: 5s
   fileresource:
-    file_paths: 
+    file_paths:
       - /run/otelcol-contrib/machine-id
       - /run/otelcol-contrib/host-machine-id
     poll_interval: 5s
@@ -325,6 +334,11 @@ processors:
       - key: component
         value: transceiver-exporter
         action: upsert
+  resource/traces-workloads:
+    attributes:
+      - key: component
+        value: dpu-workloads
+        action: upsert
   resourcedetection:
     # Add hostname at the resource level
     detectors: ["system"]
@@ -399,6 +413,15 @@ exporters:
 
 service:
   pipelines:
+    traces/workloads:
+      receivers: [otlp/workloads]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - fileresource
+        - resource/traces-workloads
+        - batch/traces
+      exporters: [otlp/site]
     logs/nico-dpu-agent:
       receivers: [filelog/nico-dpu-agent]
       processors:

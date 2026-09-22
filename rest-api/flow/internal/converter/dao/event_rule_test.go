@@ -15,6 +15,7 @@ import (
 
 func TestEventRuleRoundTrip(t *testing.T) {
 	now := time.Now().UTC()
+	local := time.FixedZone("PDT", -7*60*60)
 	rule := &eventrule.Rule{
 		ID:          uuid.New(),
 		Origin:      eventrule.RuleOriginPersisted,
@@ -31,6 +32,8 @@ func TestEventRuleRoundTrip(t *testing.T) {
 
 	dbRule, err := EventRuleTo(rule)
 	require.NoError(t, err)
+	dbRule.CreatedAt = dbRule.CreatedAt.In(local)
+	dbRule.UpdatedAt = dbRule.UpdatedAt.In(local)
 	roundTripped, err := EventRuleFrom(dbRule)
 	require.NoError(t, err)
 	require.Equal(t, rule, roundTripped)

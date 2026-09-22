@@ -24,6 +24,7 @@ use crate::common;
 #[test]
 async fn explore_dell_poweredge_r750() {
     let h = test_support::dell_poweredge_r750_bmc().await;
+    assert!(!h.state.has_enabled_ssh_serial_console());
     assert!(!h.state.set_serial_console_ssh_port(Some(3222)));
     let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
         .await

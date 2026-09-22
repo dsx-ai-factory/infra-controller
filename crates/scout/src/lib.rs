@@ -18,6 +18,7 @@
 use std::num::ParseIntError;
 
 use carbide_utils::cmd::CmdError;
+use carbide_uuid::machine::InvalidMachineType;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CarbideClientError {
@@ -33,9 +34,6 @@ pub enum CarbideClientError {
     #[error("regex error {0}")]
     RegexError(#[from] regex::Error),
 
-    #[error("pwhash error {0}")]
-    PwHash(#[from] pwhash::error::Error),
-
     #[error("StdIo error {0}")]
     StdIo(#[from] std::io::Error),
 
@@ -47,9 +45,6 @@ pub enum CarbideClientError {
     #[error("registration error: {0}")]
     RegistrationError(#[from] carbide_host_support::registration::RegistrationError),
 
-    #[error("error decoding gRPC enum value: {0}")]
-    RpcDecodeError(String), // This should be '#[from] prost::DecodeError)' but don't work
-
     #[error("subprocess failed: {0}")]
     SubprocessError(#[from] CmdError),
 
@@ -58,9 +53,12 @@ pub enum CarbideClientError {
 
     #[error("TPM error: {0}")]
     TpmError(String),
-
-    #[error("MlxFwManagerError: {0}")]
-    MlxFwManagerError(String),
 }
 
 pub type CarbideClientResult<T> = Result<T, CarbideClientError>;
+
+impl From<InvalidMachineType> for CarbideClientError {
+    fn from(value: InvalidMachineType) -> Self {
+        Self::GenericError(format!("invalid machine type: {value}"))
+    }
+}

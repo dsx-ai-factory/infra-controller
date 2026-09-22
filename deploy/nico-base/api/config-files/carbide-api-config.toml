@@ -34,7 +34,7 @@ bypass_rbac = true
 [dpu_config]
 dpu_nic_firmware_initial_update_enabled = false
 dpu_nic_firmware_reprovision_update_enabled = true
-dpu_nic_firmware_update_versions = ["24.47.2682", "32.47.2682"]
+dpu_nic_firmware_update_versions = ["24.47.3576", "32.47.3576"]
 
 [host_health]
 hardware_health_reports = "MonitorOnly"
@@ -91,14 +91,14 @@ failure_retry_time = "90m"
 vpc_prefix_drain_time = "5m"
 
 [network_security_group]
-# Controls whether additional config to support
-# stateful/reflexive ACLs will be inserted into
-# the HBN config.
-# This is expected to remain off at least until all sites
-# are running HBN 2.3 or higher.  The reflexive-acl
-# implementation in earlier versions exposes a way for
-# users to accidentally permit-all in both directions
-# with a single rule in one direction.
+# Controls whether NSGs may enable stateful egress and whether
+# stateful/reflexive ACL support is inserted into HBN configuration.
+# When false, Core rejects stateful NSG creation and updates from
+# stateless to stateful. Existing stateful NSGs remain editable but
+# are applied statelessly.
+# Leave disabled until every DPU in the site runs HBN 2.3 or later.
+# Earlier reflexive-ACL implementations allow one directional rule
+# to unintentionally permit traffic in both directions.
 stateful_acls_enabled = false
 
 # Maximum number of security groups rules
@@ -118,12 +118,14 @@ test_selection_mode = "EnableAll"
 # Per-site [component_manager] configures switch and power shelf backends.
 
 # Optional per-site mTLS certificate bindings:
-# - [switch_state_controller].switch_mtls_services applies to each switch and
-#   defaults to all four SwitchMtlsService values.
-# - [rack_state_controller].nmx_cluster_switch_mtls_services applies to the
-#   primary switch and defaults to scale_up_fabric_manager and
-#   scale_up_fabric_telemetry_interface.
-# A non-empty list replaces its default; an omitted or empty list uses it.
+# - [switch_state_controller].switch_mtls_services applies to switch state
+#   controller operations and direct ComponentConfigureSwitchCertificate RPC
+#   calls. It defaults to all four SwitchMtlsService values.
+# - [rack_state_controller].nmx_cluster_switch_mtls_services is accepted and
+#   ignored. Rack ConfigureNmxCluster uses a fixed nvue_api binding before RMS
+#   V2 selects and configures the primary switch.
+# A non-empty switch_mtls_services list replaces its default. An omitted or
+# empty list uses the default.
 # Service selection does not enable the underlying service. See
 # docs/architecture/state_machines/switch_configure_certificate.md for service
 # values and workflow scope.

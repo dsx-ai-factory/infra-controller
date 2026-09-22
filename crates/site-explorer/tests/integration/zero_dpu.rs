@@ -78,11 +78,13 @@ async fn init(pool: PgPool) -> ZeroDpuEnv {
             },
             test_harness.test_meter.meter(),
             endpoint_exploration_service,
+            endpoint_explorer.clone(),
             api.common_pools().clone(),
             api.work_lock_manager_handle(),
             api.runtime_config.rack_profiles.clone(),
             None,
             api.credential_manager().clone(),
+            false,
         ),
         endpoint_explorer,
     );
@@ -250,9 +252,12 @@ async fn test_predicted_interface_hands_boot_interface_id_to_real_row(
         Some("NIC.Embedded.1-1-1"),
         "predicted interface should hold the report-derived boot interface id"
     );
-    let desired = db::machine_desired_boot_interface::get(txn.as_mut(), &predicted.machine_id)
-        .await?
-        .expect("site-explorer should initialize the host's desired boot interface");
+    let desired = db::machine_desired_boot_interface::get(
+        txn.as_mut(),
+        &predicted.machine_id.try_into().unwrap(),
+    )
+    .await?
+    .expect("site-explorer should initialize the host's desired boot interface");
     assert_eq!(
         desired.value,
         MachineBootInterfaceTarget::Pair(MachineBootInterface {
@@ -685,9 +690,12 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
         predicted.boot_interface_id.is_none(),
         "an id-less report can't give the prediction a boot interface id"
     );
-    let desired = db::machine_desired_boot_interface::get(txn.as_mut(), &predicted.machine_id)
-        .await?
-        .expect("site-explorer should initialize a MAC-only desired target");
+    let desired = db::machine_desired_boot_interface::get(
+        txn.as_mut(),
+        &predicted.machine_id.try_into().unwrap(),
+    )
+    .await?
+    .expect("site-explorer should initialize a MAC-only desired target");
     assert_eq!(
         desired.value,
         MachineBootInterfaceTarget::MacOnly(inband_mac),
@@ -712,9 +720,12 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
         Some("NIC.Embedded.1-1-1"),
         "the next exploration that resolves the id refreshes the prediction"
     );
-    let desired = db::machine_desired_boot_interface::get(txn.as_mut(), &predicted.machine_id)
-        .await?
-        .expect("the desired target should still exist");
+    let desired = db::machine_desired_boot_interface::get(
+        txn.as_mut(),
+        &predicted.machine_id.try_into().unwrap(),
+    )
+    .await?
+    .expect("the desired target should still exist");
     assert_eq!(
         desired.value,
         MachineBootInterfaceTarget::Pair(MachineBootInterface {
@@ -740,9 +751,12 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
 
     env.site_explorer.run_single_iteration().await?;
 
-    let desired = db::machine_desired_boot_interface::get(&env.pool, &predicted.machine_id)
-        .await?
-        .expect("the existing host should be reinitialized without an ExpectedMachine");
+    let desired = db::machine_desired_boot_interface::get(
+        &env.pool,
+        &predicted.machine_id.try_into().unwrap(),
+    )
+    .await?
+    .expect("the existing host should be reinitialized without an ExpectedMachine");
     assert_eq!(
         desired.value,
         MachineBootInterfaceTarget::Pair(MachineBootInterface {
@@ -840,7 +854,7 @@ async fn test_exploration_refresh_adds_declared_adapter_port_to_predicted_host(
             .all(|prediction| !prediction.primary_interface)
     );
     assert!(
-        db::machine_desired_boot_interface::get(txn.as_mut(), &machine_id)
+        db::machine_desired_boot_interface::get(txn.as_mut(), &machine_id.try_into().unwrap())
             .await?
             .is_none(),
         "several non-primary System candidates do not identify a boot NIC",
@@ -895,9 +909,10 @@ async fn test_exploration_refresh_adds_declared_adapter_port_to_predicted_host(
             .all(|prediction| prediction.mac_address != unrelated_port_mac),
         "an undeclared supplemental Port must not become a Host prediction",
     );
-    let desired = db::machine_desired_boot_interface::get(txn.as_mut(), &machine_id)
-        .await?
-        .expect("the declared Port prediction should settle the boot target");
+    let desired =
+        db::machine_desired_boot_interface::get(txn.as_mut(), &machine_id.try_into().unwrap())
+            .await?
+            .expect("the declared Port prediction should settle the boot target");
     assert_eq!(
         desired.value,
         MachineBootInterfaceTarget::MacOnly(declared_port_mac),
@@ -1025,157 +1040,6 @@ async fn test_zero_dpu_multi_nic_no_declaration_adopts_without_primary_collision
     assert!(
         primary_count <= 1,
         "at most one interface may be primary after adoption, got {primary_count}"
-    );
-
-    Ok(())
-}
-
-/// A zero-DPU host that declares one of its NICs `primary` refreshes the
-/// endpoint-level boot-interface pair and mints that intent onto the
-/// prediction. DHCP promotion then lands the declared NIC as primary and the
-/// other as non-primary -- even when the non-declared NIC leases first.
-#[sqlx_test]
-async fn test_zero_dpu_declared_primary_promotes_as_primary(
-    pool: PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let env = init(pool).await;
-    let primary_nic = MacAddress::from_str("d4:04:e6:84:21:01").unwrap();
-    let other_nic = MacAddress::from_str("d4:04:e6:84:21:02").unwrap();
-    let mock_host = ManagedHostConfig {
-        dpus: vec![],
-        non_dpu_macs: vec![primary_nic, other_nic],
-        ..ManagedHostConfig::default()
-    };
-
-    // Register the host declaring `primary_nic` as its boot interface.
-    let mut txn = env.pool.begin().await?;
-    db::expected_machine::create(
-        &mut txn,
-        ExpectedMachine {
-            id: None,
-            bmc_mac_address: mock_host.bmc_mac_address,
-            data: ExpectedMachineData {
-                serial_number: mock_host.serial.clone(),
-                dpu_policy: HostDpuPolicy::Ignore,
-                interfaces: vec![
-                    ExpectedInterface {
-                        mac_address: primary_nic,
-                        primary: Some(true),
-                        ..Default::default()
-                    },
-                    ExpectedInterface {
-                        mac_address: other_nic,
-                        primary: None,
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            },
-        },
-    )
-    .await?;
-    txn.commit().await?;
-
-    // Ingest before either NIC leases, so both get predictions carrying the
-    // declared intent.
-    let host_bmc_response = env
-        .api()
-        .discover_dhcp(
-            rpc::forge::DhcpDiscovery::builder(
-                mock_host.bmc_mac_address,
-                env.underlay_segment.relay_address,
-            )
-            .vendor_string("SomeVendor")
-            .tonic_request(),
-        )
-        .await?
-        .into_inner();
-    let host_bmc_ip = host_bmc_response.address.parse()?;
-    env.site_explorer.insert_endpoints(
-        mock_host
-            .exploration_results(Some(host_bmc_ip), &[])?
-            .into_endpoints(),
-    );
-    env.site_explorer.run_single_iteration().await?;
-    let mut txn = env.pool.begin().await?;
-    db::explored_endpoints::set_boot_interface(
-        host_bmc_ip,
-        &MachineBootInterface {
-            mac_address: other_nic,
-            interface_id: "NIC.Embedded.2-1-1".to_string(),
-        },
-        &mut txn,
-    )
-    .await?;
-    db::explored_endpoints::set_preingestion_complete(host_bmc_ip, &mut txn).await?;
-    txn.commit().await?;
-    env.site_explorer.run_single_iteration().await?;
-
-    let mut txn = env.pool.begin().await?;
-    let endpoint = db::explored_endpoints::find_all_by_ip(host_bmc_ip, &mut txn)
-        .await?
-        .into_iter()
-        .next()
-        .expect("the host endpoint should still exist after ingestion");
-    assert_eq!(
-        endpoint.boot_interface(),
-        Some(MachineBootInterface {
-            mac_address: primary_nic,
-            interface_id: "NIC.Embedded.1-1-1".to_string(),
-        }),
-        "Ignore policy should refresh a stale endpoint pair from the explicitly declared primary NIC",
-    );
-    let predicted_primary =
-        db::predicted_machine_interface::find_by_mac_address(&mut txn, primary_nic)
-            .await?
-            .expect("the declared NIC should have a prediction");
-    assert!(
-        predicted_primary.primary_interface,
-        "the declared NIC's prediction should carry the primary intent"
-    );
-    let predicted_other = db::predicted_machine_interface::find_by_mac_address(&mut txn, other_nic)
-        .await?
-        .expect("the non-declared NIC should have a prediction");
-    assert!(
-        !predicted_other.primary_interface,
-        "the non-declared NIC's prediction should be non-primary"
-    );
-    txn.rollback().await?;
-
-    // Promote with the non-declared NIC leasing first.
-    for nic in [other_nic, primary_nic] {
-        env.api()
-            .discover_dhcp(
-                rpc::forge::DhcpDiscovery::builder(nic, env.host_inband_segment.relay_address)
-                    .vendor_string("Bluefield")
-                    .tonic_request(),
-            )
-            .await?;
-    }
-
-    let mut txn = env.pool.begin().await?;
-    let primary_row = db::machine_interface::find_by_mac_address(txn.as_mut(), primary_nic)
-        .await?
-        .into_iter()
-        .next()
-        .expect("the declared NIC should be promoted to a row");
-    let other_row = db::machine_interface::find_by_mac_address(txn.as_mut(), other_nic)
-        .await?
-        .into_iter()
-        .next()
-        .expect("the non-declared NIC should be promoted to a row");
-    txn.rollback().await?;
-    assert!(
-        primary_row.primary_interface,
-        "the declared NIC should promote as the primary interface"
-    );
-    assert!(
-        !other_row.primary_interface,
-        "the non-declared NIC should promote as non-primary"
-    );
-    assert_eq!(
-        primary_row.machine_id, other_row.machine_id,
-        "both NICs should belong to the same host"
     );
 
     Ok(())

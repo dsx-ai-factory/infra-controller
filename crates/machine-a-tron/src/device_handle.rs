@@ -18,10 +18,9 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bmc_mock::HostMachineInfo;
 use bmc_mock::injection::InjectionStore;
+use bmc_mock::{HostMachineInfo, MockPowerState, SetSystemPowerError, SystemPowerControl};
 use carbide_uuid::machine::MachineId;
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::api_client::ApiClient;
@@ -30,7 +29,6 @@ use crate::host_machine::MachineHandle;
 use crate::power_shelf_simulator::PowerShelfHandle;
 use crate::status::{DeviceKind, DeviceStatus, DeviceStatusConfig};
 use crate::switch_simulator::SwitchHandle;
-use crate::tui::UiUpdate;
 use crate::{Guid, InfinibandPortState, PersistedDevice};
 
 #[derive(Debug, Clone)]
@@ -73,6 +71,25 @@ impl DeviceHandle {
         }
     }
 
+    pub(crate) fn set_system_power(
+        &self,
+        request: SystemPowerControl,
+    ) -> Result<(), SetSystemPowerError> {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.set_system_power(request),
+            DeviceHandleInner::Switch(handle) => handle.set_system_power(request),
+            DeviceHandleInner::PowerShelf(handle) => handle.set_system_power(request),
+        }
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.power_state(),
+            DeviceHandleInner::Switch(handle) => handle.power_state(),
+            DeviceHandleInner::PowerShelf(handle) => handle.power_state(),
+        }
+    }
+
     pub fn observed_machine_id(&self) -> Option<MachineId> {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.observed_machine_id(),
@@ -103,14 +120,6 @@ impl DeviceHandle {
             DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
                 eyre::bail!("cannot wait for machine state on {}", self.kind())
             }
-        }
-    }
-
-    pub fn attach_to_tui(&self, tui_event_tx: Option<mpsc::Sender<UiUpdate>>) -> eyre::Result<()> {
-        match &self.0 {
-            DeviceHandleInner::Machine(handle) => handle.attach_to_tui(tui_event_tx),
-            DeviceHandleInner::Switch(handle) => handle.attach_to_tui(tui_event_tx),
-            DeviceHandleInner::PowerShelf(handle) => handle.attach_to_tui(tui_event_tx),
         }
     }
 
@@ -231,12 +240,19 @@ impl DeviceHandle {
         }
     }
 
+    /// The address of the device's host-side endpoint: a switch's NVOS
+    /// management address once it has one. Hosts and power shelves have no
+    /// host endpoint that RMS addresses.
+    pub fn host_ip(&self) -> Option<Ipv4Addr> {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => handle.nvos_ip(),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => None,
+        }
+    }
+
     #[cfg(test)]
-    pub(crate) fn for_control_test(
-        dpus: Vec<DpuMachineHandle>,
-        ipmi_endpoint: Option<bmc_mock::ipmi_sim::IpmiEndpoint>,
-    ) -> Self {
-        Self::machine(MachineHandle::for_control_test(dpus, ipmi_endpoint))
+    pub(crate) fn for_control_test(dpus: Vec<DpuMachineHandle>, ipmi_port: Option<u16>) -> Self {
+        Self::machine(MachineHandle::for_control_test(dpus, ipmi_port))
     }
 
     #[cfg(test)]
@@ -247,6 +263,16 @@ impl DeviceHandle {
             }
             DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
                 unreachable!("control-test SSH endpoint is only configured for machines")
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_control_test_bmc_ip(&self, ip: Option<Ipv4Addr>) {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.set_control_test_bmc_ip(ip),
+            DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
+                unreachable!("control-test BMC addresses are only set on machines")
             }
         }
     }

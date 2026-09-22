@@ -127,7 +127,7 @@ type APIInstanceType struct {
 	// Site is the summary of the Site
 	Site *APISiteSummary `json:"site,omitempty"`
 	// Labels is the labels of the Instance Type
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// MachineCapabilities is the list of capabilities that are supported by the Machine's of this Instance Type
 	MachineCapabilities []APIMachineCapability `json:"machineCapabilities"`
 	// MachineInstanceTypes is the list of machines that are associated to this Instance Type
@@ -159,7 +159,7 @@ func NewAPIInstanceType(dbit *cdbm.InstanceType, dbsds []cdbm.StatusDetail, mcs 
 		ControllerMachineType:    dbit.ControllerMachineType,
 		InfrastructureProviderID: dbit.InfrastructureProviderID.String(),
 		SiteID:                   dbit.SiteID.String(),
-		Labels:                   dbit.Labels,
+		Labels:                   APILabels(dbit.Labels),
 		Status:                   dbit.Status,
 		Created:                  dbit.Created,
 		Updated:                  dbit.Updated,

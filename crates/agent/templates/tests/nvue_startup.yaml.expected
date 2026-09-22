@@ -252,18 +252,6 @@
             match:
               ip:
                 dest-ip: 10.217.5.168/29
-          '20':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.217.5.160/30
-          '21':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.217.5.168/29
           '1001':
             action:
               deny: {}
@@ -286,18 +274,6 @@
               ip:
                 dest-ip: 10.217.5.160/30
           '11':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.217.5.168/29
-          '20':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.217.5.160/30
-          '21':
             action:
               permit: {}
             match:

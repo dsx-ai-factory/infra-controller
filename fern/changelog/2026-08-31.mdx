@@ -1,0 +1,75 @@
+---
+tags: ["current", "deployment", "dpu", "machine-a-tron", "networking", "provisioning", "rack-level-administration", "rest-api", "security", "telemetry", "validation", "zero-dpu"]
+---
+
+## NVIDIA Infra Controller v2.1 <Badge intent="launch">Current</Badge>
+
+NICo v2.1 adds Lenovo GB300 NVL72 support, runtime firmware management, site-scale rack operations, expanded REST and CLI administration, and new operator visibility into lifecycle progress. It also strengthens credential management and delivers a packaged bare-metal simulator for repeatable large-scale testing.
+
+### Hardware platform and host lifecycle support
+
+- Lenovo GB300 NVL72 systems now support BMC detection, lifecycle controls, hardware discovery, leak-sensor monitoring, and chassis-based BlueField DPU discovery and pairing.
+- Multi-node NVLink capability detection now covers GB300, VR, and future platforms without relying on vendor-specific DMI product names.
+- Missing GPUs produce health alerts based on expected SKU inventory.
+- [Expected Machine interface declarations](../../docs/provisioning/expected-machine-interfaces.md) persist managed-host boot-interface selection as durable desired state and synchronize it across DPU, SuperNIC, integrated-NIC, and zero-DPU hosts.
+- Zero-DPU administration now includes CLI creation of flat VPCs and network segments, plus in-place updates to expected-machine host NICs.
+- The [managed-host decommission command](../../docs/manuals/nico-admin-cli/commands/managed-host/managed-host-decommission.md) can mark BMC MAC addresses as ignored so DHCP and Site Explorer do not immediately rediscover or reingest removed hardware during tenant-release and decommissioning workflows.
+- [DPU LLDP collection](../../docs/dpu-management/dpu_configuration.md#dpu-lldp-collection) now configures LLDP-MED for systemd-managed DPUs and uses a bounded, freshness-checked sidecar snapshot for DPF-managed DPUs, keeping physical uplink discovery available in both deployment modes.
+- [Scout boot NIC selection](../../docs/playbooks/stuck_objects/network_connectivity.md#scout-boot-nic-selection) now keeps discovery networking on the interface named by NICo's boot MAC and removes DHCP, router advertisements, global addresses, and routes from other default-managed Ethernet interfaces. The selection is MAC-based, fail-open, and does not depend on NIC vendor.
+- [Image-based operating systems](../../docs/configuration/image-based-operating-systems.md) can select `smallest`, an NVMe or SCSI whole-disk path, or a stable `/dev/disk/by-id/` target. Imaging rejects ambiguous filesystem identities on other disks, selects architecture-appropriate EFI shims deterministically, and exposes the disk selector through REST create/update and `nico-admin-cli os-image create`.
+
+### Rack, power, and firmware operations
+
+- NICo can form NMX-C clusters during rack ingestion through RMS and record the active switch.
+- Site-wide Flow operations can roll out changes such as firmware updates in controlled phases, limiting each phase to a configurable portion of eligible racks.
+- Power-shelf on and off requests can run asynchronously through the power-shelf state controller with lifecycle tracking and per-shelf results.
+- Operators can use the [runtime firmware catalog](../../docs/operations/firmware-updates/configuration.md) to create, update, and delete host firmware configuration. Firmware objects carry artifact metadata, including URLs and optional checksums, without requiring a NICo redeployment.
+- The Core Helm chart now includes the BMC proxy and the defaults described in [Component Manager RMS backends](../../docs/configuration/component-manager-rms.md) for rack and DPS-based power operations.
+
+### REST API, networking, and administration
+
+- The REST API can create, update, and delete SKUs, configure targeted instance creation for tenants, and expose the operations in the [site setup API parity guide](../../docs/provisioning/site-setup-api-parity.md) through `nicocli`.
+- For FNN VPCs, callers can omit the VPC prefix when creating an instance interface. NICo selects a prefix with available capacity and returns a distinct exhaustion error when capacity must be added.
+- Instances can use interfaces from multiple VPCs, and per-interface routing profiles can further restrict anycast advertisements within the VPC-level policy.
+- Managed-host state is periodically republished on the DSX exchange so consumers can reconcile state after missing an event.
+- `nico-admin-cli` adds a [BIOS factory reset command](../../docs/manuals/nico-admin-cli/commands/redfish/redfish-reset-bios.md) for use before ingestion and supports creating VPCs and network segments.
+- Integrated MDS and standalone FMDS now expose `/latest/meta-data/instance-name` from the instance metadata name. The endpoint returns HTTP 404 when no nonempty name is available without changing the existing hostname value.
+
+### Observability and operator experience
+
+- The [metrics and dashboards guide](../../docs/observability/metrics.md) documents an opt-in per-object metrics endpoint that reports machine lifecycle state, state age, SLA status, and manual-intervention signals for fleet-scale troubleshooting.
+- A unified instrumentation framework can emit correlated structured logs and bounded-cardinality metrics from the same event. The generated metric catalogue and contract checks cover the new instrumentation, and the [instrumentation guide](../../docs/observability/instrumentation.md) documents how contributors declare and emit events.
+- The Admin UI configuration page shows the effective runtime configuration, whether each value is a default or override, and the source of an override.
+- Managed hosts can be filtered by an exact active health alert, and large machine and instance lists include an **All** pagination option.
+- Control-plane steady-state work has been reduced through batched database queries, connection reuse, concurrent independent requests, and bounded metric growth.
+
+### Credentials and Admin UI security
+
+- NICo can rotate managed BMC and UEFI passwords while a machine is unallocated, and per-model factory-default credentials support mixed BlueField generations at one site.
+- NVOS password rotation is a backend-independent, asynchronous workflow with versioned credentials, durable per-switch convergence state, and safe recovery after restarts. Refer to [NVOS password rotation](../../docs/operations/nvos-password-rotation.md) for prerequisites and operating procedures.
+- The Admin UI uses authentication by default. Helm deployments generate a password in a Kubernetes Secret when basic authentication is selected and no password is supplied.
+- Admin UI state-changing requests now include cross-site request forgery protection.
+
+### DPU ToR health and PXE readiness
+
+NICo now waits for a new health report after an HBN configuration change and checks the primary p0 session again immediately before the normal PXE restart. This prevents the premature host restart seen in `v2.1.0-rc.8` while p0 was still recovering. A failed redundant p1 session no longer blocks host state changes.
+
+At the default `min_dpu_functioning_links = 2`, a failed p1 session remains visible but does not prevent allocation or block host state changes. A failed p0 session prevents allocation and normal PXE provisioning. Loss of both sessions prevents allocation and blocks host state changes.
+
+No configuration change is required. An existing value of `1` can remain to suppress the redundant p1 alert, or operators can remove it to restore the default alert visibility. Refer to [DPU ToR uplink health](../../docs/dpu-management/dpu_configuration.md#dpu-tor-uplink-health) for the full policy.
+
+### Validation and testing
+
+**machine-a-tron** is a bare-metal simulator that runs end-to-end NICo provisioning flows — Site Explorer, DHCP, PXE, ingestion, and state machines — against mock Redfish BMC endpoints without physical servers or DPUs. It supports standalone hosts and GB300 rack lifecycles and has been validated at 4,500 simulated hosts with two DPUs each (13,500 endpoints) in one unattended run.
+
+It ships as the `nico-machine-a-tron` Helm subchart, enabled with `nico-machine-a-tron.enabled=true`. The `helm-prereqs/setup-machine-a-tron.sh` workflow handles namespace creation, credential seeding, BMC proxy configuration, and verification. Refer to the [machine-a-tron deployment guide](../../docs/development/machine-a-tron-deployment.md) for build and deployment instructions.
+
+machine-a-tron is intended for simulation-only clusters and must not run alongside real hardware. v2.1 is the first release that includes it.
+
+### Known issues
+
+- The NVLink Manager certificate monitor cannot automatically rotate an NVLink switch certificate that has already expired because it cannot establish the TLS connection needed to inspect the certificate. It logs the connection error without starting rotation. Track the fix in [GitHub issue #4568](https://github.com/dsx-ai-factory/infra-controller/issues/4568).
+
+<br /><br />
+
+<Button large intent="primary" rightIcon="arrow-right" href="/infra-controller/documentation/getting-started/quick-start-guide">Deploy NVIDIA Infra Controller</Button>

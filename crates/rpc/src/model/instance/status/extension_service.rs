@@ -15,11 +15,15 @@
  * limitations under the License.
  */
 
+use std::time::SystemTime;
+
 use carbide_uuid::extension_service::ExtensionServiceId;
+use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use model::instance::status::extension_service::{
     ExtensionServiceComponent, ExtensionServiceDeploymentStatus, ExtensionServiceStatusObservation,
-    InstanceExtensionServiceStatus, InstanceExtensionServicesStatus, MachineExtensionServiceStatus,
+    InstanceExtensionServiceStatus, InstanceExtensionServiceStatusObservation,
+    InstanceExtensionServicesStatus, MachineExtensionServiceStatus,
 };
 
 use crate::errors::RpcDataConversionError;
@@ -181,6 +185,7 @@ impl TryFrom<rpc::DpuExtensionServiceStatusObservation> for ExtensionServiceStat
         })?;
 
         Ok(Self {
+            dpu_target: None,
             service_id,
             service_type,
             service_name: observation.service_name,
@@ -189,6 +194,55 @@ impl TryFrom<rpc::DpuExtensionServiceStatusObservation> for ExtensionServiceStat
             overall_state,
             components,
             message: observation.message,
+        })
+    }
+}
+
+/// Converts the legacy DPU-agent extension-service report into the standard
+/// instance extension-service observation. The caller determines whether an
+/// observation exists from `dpu_extension_service_version`; an omitted version
+/// deliberately remains an absent observation rather than a parse error.
+impl TryFrom<&rpc::DpuNetworkStatus> for InstanceExtensionServiceStatusObservation {
+    type Error = RpcDataConversionError;
+
+    fn try_from(observation: &rpc::DpuNetworkStatus) -> Result<Self, Self::Error> {
+        let version_string = observation.dpu_extension_service_version.as_ref().ok_or(
+            Self::Error::MissingArgument("dpu_extension_service_version"),
+        )?;
+        let config_version = version_string.as_str().parse().map_err(|_| {
+            RpcDataConversionError::InvalidConfigVersion(format!(
+                "applied_config.extension_service_version: {version_string}"
+            ))
+        })?;
+        let instance_config_version = observation
+            .instance_config_version
+            .as_ref()
+            .map(|version_string| {
+                version_string.as_str().parse().map_err(|_| {
+                    RpcDataConversionError::InvalidConfigVersion(format!(
+                        "applied_config.instance_config_version: {version_string}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let observed_at = match observation.observed_at {
+            Some(timestamp) => DateTime::from(
+                SystemTime::try_from(timestamp)
+                    .map_err(|_| RpcDataConversionError::InvalidTimestamp(timestamp.to_string()))?,
+            ),
+            None => Utc::now(),
+        };
+
+        Ok(Self {
+            config_version,
+            instance_config_version,
+            extension_service_statuses: observation
+                .dpu_extension_services
+                .iter()
+                .cloned()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            observed_at,
         })
     }
 }

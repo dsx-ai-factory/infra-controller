@@ -115,3 +115,42 @@ selector:
   matchLabels:
     app.kubernetes.io/metrics: {{ .name }}
 {{- end }}
+
+{{/*
+Calculate DHCP relay ClusterIP for a pod.
+Adds podIndex to the base IP's last octet.
+Usage: include "nico-machine-a-tron.dhcpRelayIP" (dict "baseIP" "10.96.127.10" "podIndex" 0)
+Returns: "10.96.127.10" for podIndex 0, "10.96.127.11" for podIndex 1, etc.
+*/}}
+{{- define "nico-machine-a-tron.dhcpRelayIP" -}}
+{{- $parts := splitList "." .baseIP -}}
+{{- $lastOctet := index $parts 3 | int -}}
+{{- $newLastOctet := add $lastOctet .podIndex -}}
+{{- if gt $newLastOctet 255 -}}
+{{- fail (printf "DHCP relay IP overflow: base %s + pod index %d exceeds .255" .baseIP .podIndex) -}}
+{{- end -}}
+{{- printf "%s.%s.%s.%d" (index $parts 0) (index $parts 1) (index $parts 2) $newLastOctet -}}
+{{- end }}
+
+{{/*
+Check if DHCP relay mode is enabled.
+Returns "true" if dhcpRelay.baseIP is set.
+*/}}
+{{- define "nico-machine-a-tron.dhcpRelayEnabled" -}}
+{{- if and .Values.dhcpRelay .Values.dhcpRelay.baseIP -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Get DHCP server address.
+Uses dhcpRelay.serverAddress if set, otherwise defaults to nico-dhcp.nico-system.
+Returns: "<host>:<port>"
+*/}}
+{{- define "nico-machine-a-tron.dhcpServerAddress" -}}
+{{- if and .Values.dhcpRelay .Values.dhcpRelay.serverAddress -}}
+{{- .Values.dhcpRelay.serverAddress -}}
+{{- else -}}
+{{- print "nico-dhcp.nico-system.svc.cluster.local:67" -}}
+{{- end -}}
+{{- end }}

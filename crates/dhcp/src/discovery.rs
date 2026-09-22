@@ -479,7 +479,7 @@ unsafe fn discovery_fetch_machine_at(
                     // Since we don't have any API to invalidate the KEA cache we restart
                     // the process. This will happen very rarely, since Interface deletions
                     // in Forge are not common.
-                    // See https://nvbugspro.nvidia.com/bug/4792034 for details
+                    // See https://github.com/NVIDIA/infra-controller/issues/5557 for details
                     if let Some(last_invalidation) = machine.inner.last_invalidation_time.as_ref() {
                         let startup_time = CONFIG.read().unwrap().startup_time;
 

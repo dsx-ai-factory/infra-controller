@@ -56,6 +56,7 @@ impl DataSink for TracingSink {
                 tracing::info!(
                     endpoint = %context.endpoint_key(),
                     collector = %context.collector_type,
+                    rack_id = context.rack_id().map(tracing::field::display),
                     system_uuid = context.system_uuid().map(tracing::field::display),
                     labels = ?context.labels(),
                     "Metric collection start"
@@ -65,6 +66,7 @@ impl DataSink for TracingSink {
                 tracing::info!(
                     endpoint = %context.endpoint_key(),
                     collector = %context.collector_type,
+                    rack_id = context.rack_id().map(tracing::field::display),
                     system_uuid = context.system_uuid().map(tracing::field::display),
                     labels = ?context.labels(),
                     metric = %metric.name,
@@ -79,6 +81,7 @@ impl DataSink for TracingSink {
                 tracing::info!(
                     endpoint = %context.endpoint_key(),
                     collector = %context.collector_type,
+                    rack_id = context.rack_id().map(tracing::field::display),
                     system_uuid = context.system_uuid().map(tracing::field::display),
                     labels = ?context.labels(),
                     "Metric collection end"
@@ -88,6 +91,7 @@ impl DataSink for TracingSink {
                 tracing::info!(
                     endpoint = %context.endpoint_key(),
                     collector = %context.collector_type,
+                    rack_id = context.rack_id().map(tracing::field::display),
                     system_uuid = context.system_uuid().map(tracing::field::display),
                     labels = ?context.labels(),
                     "Collector removed"
@@ -101,6 +105,7 @@ impl DataSink for TracingSink {
                     endpoint = %context.endpoint_key(),
                     collector = %context.collector_type,
                     machine_id = context.machine_id().map(tracing::field::display),
+                    rack_id = context.rack_id().map(tracing::field::display),
                     system_uuid = context.system_uuid().map(tracing::field::display),
                     machine_serial = context.machine_serial(),
                     driver_version = context.driver_version(),
@@ -117,6 +122,7 @@ impl DataSink for TracingSink {
                 tracing::info!(
                     endpoint = %context.endpoint_key(),
                     collector = %context.collector_type,
+                    rack_id = context.rack_id().map(tracing::field::display),
                     system_uuid = context.system_uuid().map(tracing::field::display),
                     labels = ?context.labels(),
                     firmware_name = %info.component,
@@ -129,6 +135,7 @@ impl DataSink for TracingSink {
                     endpoint = %context.endpoint_key(),
                     collector = %context.collector_type,
                     machine_id = ?context.machine_id(),
+                    rack_id = context.rack_id().map(tracing::field::display),
                     system_uuid = context.system_uuid().map(tracing::field::display),
                     labels = ?context.labels(),
                     success_count = report.successes.len(),
@@ -150,6 +157,7 @@ mod tests {
     use std::borrow::Cow;
 
     use carbide_instrument::testing::capture_logs;
+    use carbide_uuid::rack::RackId;
 
     use super::*;
     use crate::endpoint::test_support::{mac, test_endpoint};
@@ -189,6 +197,28 @@ mod tests {
             log.field("attributes"),
             Some(r#"[("gentime", "2026-07-05 12:34:56"), ("user", "admin")]"#)
         );
+    }
+
+    #[test]
+    fn tracing_sink_includes_optional_rack_id() {
+        let sink = TracingSink::new(&TracingSinkConfig {
+            include_diagnostics: false,
+        });
+
+        for (rack_id, expected_rack_id) in
+            [(Some(RackId::new("RACK_1")), Some("RACK_1")), (None, None)]
+        {
+            let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+            endpoint.rack_id = rack_id;
+            let context = EventContext::from_endpoint(&endpoint, "test_collector");
+
+            let logs = capture_logs(|| {
+                sink.handle_event(&context, &CollectorEvent::MetricCollectionStart)
+            });
+
+            assert_eq!(logs.len(), 1);
+            assert_eq!(logs[0].field("rack_id"), expected_rack_id);
+        }
     }
 
     #[test]

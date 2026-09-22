@@ -238,8 +238,8 @@ impl fmt::Display for VpcVirtualizationType {
 
 /// Concatenate IPv4 and IPv6 values in family order. Empty strings and `None`
 /// represent absent families and are omitted.
-pub fn build_dual_stack_list(v4: String, v6: Option<String>) -> Vec<String> {
-    std::iter::once(v4)
+pub fn build_dual_stack_list(v4: Option<String>, v6: Option<String>) -> Vec<String> {
+    v4.into_iter()
         .chain(v6)
         .filter(|value| !value.is_empty())
         .collect()
@@ -544,27 +544,27 @@ mod tests {
         value_scenarios!(
             run = |(v4, v6)| build_dual_stack_list(v4, v6);
             "v4 only when v6 is absent" {
-                ("10.0.0.1".to_string(), None) => vec!["10.0.0.1".to_string()],
+                (Some("10.0.0.1".to_string()), None) => vec!["10.0.0.1".to_string()],
             }
 
             "v4 then v6 when both present" {
-                ("10.0.0.1".to_string(), Some("2001:db8::1".to_string())) => vec!["10.0.0.1".to_string(), "2001:db8::1".to_string()],
+                (Some("10.0.0.1".to_string()), Some("2001:db8::1".to_string())) => vec!["10.0.0.1".to_string(), "2001:db8::1".to_string()],
             }
 
             "empty v6 string is filtered out" {
-                ("10.0.0.1".to_string(), Some(String::new())) => vec!["10.0.0.1".to_string()],
+                (Some("10.0.0.1".to_string()), Some(String::new())) => vec!["10.0.0.1".to_string()],
             }
 
             "both families absent" {
-                (String::new(), None) => vec![],
+                (None, None) => vec![],
             }
 
             "v6 only when v4 is absent" {
-                (String::new(), Some("2001:db8::1".to_string())) => vec!["2001:db8::1".to_string()],
+                (None, Some("2001:db8::1".to_string())) => vec!["2001:db8::1".to_string()],
             }
 
             "empty strings for both families are absent" {
-                (String::new(), Some(String::new())) => vec![],
+                (Some(String::new()), Some(String::new())) => vec![],
             }
         );
     }

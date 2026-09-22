@@ -30,7 +30,7 @@ pub const DEFAULT_IB_FABRIC_NAME: &str = "default";
 
 /// `IbMembership` identifies one PKey membership through its fabric and port
 /// GUID.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct IbMembership {
     /// Fabric containing the membership.
     pub fabric: String,

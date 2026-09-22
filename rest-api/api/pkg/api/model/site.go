@@ -57,10 +57,11 @@ type APISiteCapabilitiesUpdateRequest struct {
 	NativeNetworking          *bool `json:"nativeNetworking"`
 	NetworkSecurityGroup      *bool `json:"networkSecurityGroup"`
 	NVLinkPartition           *bool `json:"nvLinkPartition"`
-	Flow                      *bool `json:"flow"`
 	ImageBasedOperatingSystem *bool `json:"imageBasedOperatingSystem"`
-	// VpcSlaac is accepted by the binder so update attempts can be rejected
-	// explicitly. Site config inventory is the only writer for this field.
+	DPSPowerManagement        *bool `json:"dpsPowerManagement"`
+	// Flow and VpcSlaac are accepted by the binder so update attempts can be rejected
+	// explicitly. Site config inventory is the only writer for these fields.
+	Flow     *bool `json:"flow"`
 	VpcSlaac *bool `json:"vpcSlaac"`
 }
 
@@ -82,12 +83,12 @@ func (ascur APISiteCapabilitiesUpdateRequest) ToSiteConfig(existing *cdbm.SiteCo
 		cfg.NVLinkPartition = *ascur.NVLinkPartition
 	}
 
-	if ascur.Flow != nil {
-		cfg.Flow = *ascur.Flow
-	}
-
 	if ascur.ImageBasedOperatingSystem != nil {
 		cfg.ImageBasedOperatingSystem = *ascur.ImageBasedOperatingSystem
+	}
+
+	if ascur.DPSPowerManagement != nil {
+		cfg.DPSPowerManagement = *ascur.DPSPowerManagement
 	}
 
 	return cfg
@@ -136,6 +137,7 @@ func (asur APISiteUpdateRequest) Validate(isProvider bool, isTenant bool) error 
 		)
 		if err == nil && asur.Capabilities != nil {
 			err = validation.ValidateStruct(asur.Capabilities,
+				validation.Field(&asur.Capabilities.Flow, validation.Nil.Error(ErrMsgNotConfigurableByProvider)),
 				validation.Field(&asur.Capabilities.VpcSlaac, validation.Nil.Error(ErrMsgNotConfigurableByProvider)),
 			)
 		}
@@ -327,6 +329,7 @@ type APISiteCapabilities struct {
 	Flow                      bool `json:"flow"`
 	ImageBasedOperatingSystem bool `json:"imageBasedOperatingSystem"`
 	VpcSlaac                  bool `json:"vpcSlaac"`
+	DPSPowerManagement        bool `json:"dpsPowerManagement"`
 }
 
 func siteConfigToAPISiteCapabilities(cfg *cdbm.SiteConfig) *APISiteCapabilities {
@@ -339,6 +342,7 @@ func siteConfigToAPISiteCapabilities(cfg *cdbm.SiteConfig) *APISiteCapabilities 
 		apiCaps.Flow = cfg.Flow
 		apiCaps.ImageBasedOperatingSystem = cfg.ImageBasedOperatingSystem
 		apiCaps.VpcSlaac = cfg.VpcSlaac
+		apiCaps.DPSPowerManagement = cfg.DPSPowerManagement
 	}
 
 	return apiCaps

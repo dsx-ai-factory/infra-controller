@@ -45,6 +45,14 @@ type MachinePosition struct {
 	TopologyID       *int32
 }
 
+// ObservedControllerDevice is the actual-inventory identity shared by Core
+// switches and power shelves. The resource-specific runtime ID is matched to a
+// Flow component through its normalized BMC controller MAC.
+type ObservedControllerDevice struct {
+	ID     string
+	BmcMac string
+}
+
 func machineDetailFromPb(machine *corev1.Machine) MachineDetail {
 	config := machine.GetConfig()
 	status := machine.GetStatus()

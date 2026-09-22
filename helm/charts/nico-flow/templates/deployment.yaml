@@ -16,9 +16,10 @@ spec:
     metadata:
       labels:
         {{- include "nico-flow.labels" . | nindent 8 }}
-        {{- include "nico-flow.selectorLabels" . | nindent 8 }}
+        app: flow
       annotations:
         kubectl.kubernetes.io/default-container: flow
+        checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
       serviceAccountName: {{ .Values.serviceAccountName }}
@@ -28,7 +29,7 @@ spec:
       {{- end }}
       containers:
         ## -------------------------------------------------------------
-        ## flow — main orchestrator container (gRPC 50051)
+        ## flow — task, policy, and automation service (gRPC 50051)
         ## -------------------------------------------------------------
         - name: flow
           image: {{ include "nico-flow.image" (dict "component" "flow" "Values" .Values) | quote }}
@@ -74,10 +75,6 @@ spec:
               value: {{ .Values.temporal.serverName | quote }}
             - name: FLOW_DATA_ENCRYPTION_KEY_PATH
               value: /var/run/secrets/flow-data-encryption/encryption-key
-            - name: PSM_API_URL
-              value: {{ printf "psm.%s.svc.cluster.local:%d" (include "nico-flow.namespace" .) (int .Values.ports.psm) | quote }}
-            - name: NSM_API_URL
-              value: {{ printf "nsm.%s.svc.cluster.local:%d" (include "nico-flow.namespace" .) (int .Values.ports.nsm) | quote }}
             {{- with .Values.extraEnv.flow }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -90,128 +87,22 @@ spec:
             - name: spiffe
               mountPath: /var/run/secrets/spiffe.io
               readOnly: true
-            {{- if .Values.flowConfig }}
             - name: flow-config-files
               mountPath: /etc/flow
               readOnly: true
-            {{- end }}
             - name: temporal-client-certs
               mountPath: {{ .Values.temporal.certPath }}
               readOnly: true
             - name: data-encryption-key
               mountPath: /var/run/secrets/flow-data-encryption
               readOnly: true
-        ## -------------------------------------------------------------
-        ## psm — power-shelf manager (gRPC 50052)
-        ## -------------------------------------------------------------
-        - name: psm
-          image: {{ include "nico-flow.image" (dict "component" "psm" "Values" .Values) | quote }}
-          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
-          env:
-            - name: PSM_PORT
-              value: {{ .Values.ports.psm | quote }}
-            - name: FW_DIR
-              value: {{ .Values.firmware.psm.mountPath | quote }}
-            - name: DB_NAME
-              value: {{ .Values.database.psm.name | quote }}
-            - name: DB_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.database.psm.credentialsSecret }}
-                  key: username
-            - name: DB_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.database.psm.credentialsSecret }}
-                  key: password
-            - name: DB_HOST
-              value: {{ .Values.database.host | quote }}
-            - name: DB_PORT
-              value: {{ .Values.database.port | quote }}
-            - name: DB_CERT_PATH
-              value: {{ .Values.database.certPath | quote }}
-            - name: VAULT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.vault.psmTokenSecret }}
-                  key: token
-            - name: VAULT_ADDR
-              value: {{ .Values.vault.address | quote }}
-            {{- with .Values.extraEnv.psm }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
-          ports:
-            - name: grpc-psm
-              containerPort: {{ .Values.ports.psm }}
-          resources:
-            {{- toYaml .Values.resources.psm | nindent 12 }}
-          volumeMounts:
-            - name: spiffe
-              mountPath: /var/run/secrets/spiffe.io
-              readOnly: true
-            - name: psm-firmware
-              mountPath: {{ .Values.firmware.psm.mountPath }}
-        ## -------------------------------------------------------------
-        ## nsm — NVLink switch manager (gRPC 50053)
-        ## -------------------------------------------------------------
-        - name: nsm
-          image: {{ include "nico-flow.image" (dict "component" "nsm" "Values" .Values) | quote }}
-          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
-          env:
-            - name: NSM_PORT
-              value: {{ .Values.ports.nsm | quote }}
-            - name: DB_DATABASE
-              value: {{ .Values.database.nsm.name | quote }}
-            - name: DB_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.database.nsm.credentialsSecret }}
-                  key: username
-            - name: DB_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.database.nsm.credentialsSecret }}
-                  key: password
-            - name: DB_ADDR
-              value: {{ .Values.database.host | quote }}
-            - name: DB_PORT
-              value: {{ .Values.database.port | quote }}
-            - name: DB_CERT_PATH
-              value: {{ .Values.database.certPath | quote }}
-            - name: VAULT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.vault.nsmTokenSecret }}
-                  key: token
-            - name: VAULT_ADDR
-              value: {{ .Values.vault.address | quote }}
-            - name: FW_FIRMWARE_DIR
-              value: {{ printf "%s/firmware" .Values.firmware.nsm.mountPath | quote }}
-            - name: FW_BUNDLES_DIR
-              value: {{ printf "%s/bundles" .Values.firmware.nsm.mountPath | quote }}
-            {{- with .Values.extraEnv.nsm }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
-          ports:
-            - name: grpc-nsm
-              containerPort: {{ .Values.ports.nsm }}
-          resources:
-            {{- toYaml .Values.resources.nsm | nindent 12 }}
-          volumeMounts:
-            - name: spiffe
-              mountPath: /var/run/secrets/spiffe.io
-              readOnly: true
-            - name: nsm-scratch
-              mountPath: {{ .Values.firmware.nsm.mountPath }}
       volumes:
         - name: spiffe
           secret:
             secretName: {{ .Values.certificate.name }}
-        {{- if .Values.flowConfig }}
         - name: flow-config-files
           configMap:
             name: flow-config-files
-        {{- end }}
         - name: temporal-client-certs
           secret:
             secretName: {{ .Values.temporalCert.secretName }}
@@ -221,7 +112,3 @@ spec:
             items:
               - key: flow-data-encryption-key
                 path: encryption-key
-        - name: psm-firmware
-          {{- toYaml .Values.firmware.psm.volume | nindent 10 }}
-        - name: nsm-scratch
-          {{- toYaml .Values.firmware.nsm.volume | nindent 10 }}

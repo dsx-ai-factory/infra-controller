@@ -32,6 +32,19 @@ pub(crate) async fn trigger_machine_attestation(
 ) -> Result<Response<rpc::SpdmMachineAttestationTriggerResponse>, Status> {
     log_request_data(&request);
 
+    // `spdm.enabled` decides whether the SPDM state controller is spawned at
+    // all, so with it off there is nothing to process the rows this would
+    // insert. Scheduling anyway strands the machine as permanently
+    // "under attestation".
+    if !api.runtime_config.spdm.enabled {
+        return Err(CarbideError::UnavailableError(
+            "SPDM attestation is disabled for this site, so no attestation \
+             controller is running to carry the request out"
+                .to_string(),
+        )
+        .into());
+    }
+
     let request_payload = request.get_ref();
     let machine_id = request_payload
         .machine_id
@@ -253,7 +266,7 @@ pub(crate) async fn attest_quote(
 
     // TODO: consider if this code can be turned into a templated function and reused
     // in bind_attest_key
-    let machine_id =
+    let machine_id: MachineId =
         crate::handlers::utils::convert_and_log_machine_id(request.machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;

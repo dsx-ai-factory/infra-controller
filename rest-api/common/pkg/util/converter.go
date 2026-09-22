@@ -46,6 +46,29 @@ func GetPtr[T any](v T) *T {
 	return &v
 }
 
+// GetPtrIfNotZero returns nil for a type's zero value or a pointer to a copy
+// of v otherwise.
+func GetPtrIfNotZero[T comparable](v T) *T {
+	var zero T
+	if v == zero {
+		return nil
+	}
+
+	return &v
+}
+
+// GetValueOrZero returns a type's zero value for nil or the dereferenced value
+// otherwise.
+func GetValueOrZero[T any](v *T) T {
+	if v == nil {
+		var zero T
+
+		return zero
+	}
+
+	return *v
+}
+
 // StrPtrToProtoTimePtr converts a string pointer to a protobuf timestamp pointer
 func StrPtrToProtoTimePtr(s *string) *timestamppb.Timestamp {
 	if s == nil {

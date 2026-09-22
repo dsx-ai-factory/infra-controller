@@ -65,8 +65,8 @@ func TestInjectExpectation(t *testing.T) {
 			m := New(tc.client, nil)
 
 			target := common.Target{
-				Type:         devicetypes.ComponentTypeNVSwitch,
-				ComponentIDs: []string{"switch-1"},
+				Type:        devicetypes.ComponentTypeNVSwitch,
+				Identifiers: []string{"switch-1"},
 			}
 
 			err := m.InjectExpectation(context.Background(), target, tc.info)
@@ -82,12 +82,46 @@ func TestInjectExpectation(t *testing.T) {
 	}
 }
 
+func TestNormalizeDecommissionState(t *testing.T) {
+	testCases := map[string]struct {
+		raw  string
+		want string
+	}{
+		"terminal state": {
+			raw:  `{"state":"decommissioning","decommissioning_state":{"state":"decommissioned"}}`,
+			want: "Decommissioned",
+		},
+		"in-progress state": {
+			raw:  `{"state":"decommissioning","decommissioning_state":{"state":"factoryresetbmc"}}`,
+			want: "Decommissioning/factoryresetbmc",
+		},
+		"unrelated state remains unchanged": {
+			raw:  `{"state":"ready"}`,
+			want: `{"state":"ready"}`,
+		},
+		"malformed state remains unchanged": {
+			raw:  "Ready",
+			want: "Ready",
+		},
+		"decommissioning state without substate remains unchanged": {
+			raw:  `{"state":"decommissioning"}`,
+			want: `{"state":"decommissioning"}`,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, normalizeDecommissionState(tc.raw))
+		})
+	}
+}
+
 func TestPowerControl(t *testing.T) {
 	m := New(nicoapi.NewMockClient(), nil)
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"switch-1", "switch-2"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"switch-1", "switch-2"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -96,20 +130,51 @@ func TestPowerControl(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestMACTargetRequests(t *testing.T) {
+	client := nicoapi.NewMockClient()
+	m := New(client, nil)
+	macs := []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}
+	target := common.Target{
+		Type:           devicetypes.ComponentTypeNVSwitch,
+		IdentifierType: common.IdentifierTypeMACAddress,
+		Identifiers:    macs,
+	}
+
+	require.NoError(t, m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+		Operation: operations.PowerOperationPowerOn,
+	}))
+	assert.Equal(t, macs, client.LastComponentPowerControlRequest().GetSwitchBmcMacs().GetMacAddresses())
+
+	_, err := m.GetPowerStatus(context.Background(), target)
+	require.NoError(t, err)
+	assert.Equal(t, macs, client.LastGetComponentInventoryRequest().GetSwitchBmcMacs().GetMacAddresses())
+
+	require.NoError(t, m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
+		TargetVersion: "2.0.0",
+	}))
+	assert.Equal(t, macs, client.LastUpdateComponentFirmwareRequest().GetSwitches().GetBmcMacs().GetMacAddresses())
+
+	_, err = m.GetFirmwareStatus(context.Background(), target)
+	require.NoError(t, err)
+	assert.Equal(t, macs, client.LastGetComponentFirmwareStatusRequest().GetSwitchBmcMacs().GetMacAddresses())
+}
+
 func TestFirmwareControl(t *testing.T) {
 	client := nicoapi.NewMockClient()
 	m := New(client, nil)
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"switch-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"switch-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
-		TargetVersion: "2.0.0",
-		AccessToken:   "switch-token",
+		TargetVersion:        "2.0.0",
+		AccessToken:          "switch-token",
+		OverrideVersionCheck: true,
 	})
 	assert.NoError(t, err)
+	assert.True(t, client.LastUpdateComponentFirmwareRequest().GetForceUpdate())
 	assert.Equal(
 		t,
 		"switch-token",
@@ -121,8 +186,8 @@ func TestGetFirmwareStatus(t *testing.T) {
 	m := New(nicoapi.NewMockClient(), nil)
 
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"switch-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"switch-1"},
 	}
 
 	statuses, err := m.GetFirmwareStatus(context.Background(), target)
@@ -134,7 +199,7 @@ func TestAggregateNICoStatuses(t *testing.T) {
 	mkStatus := func(compID string, state corev1.FirmwareUpdateState, errMsg string) *corev1.FirmwareUpdateStatus {
 		return &corev1.FirmwareUpdateStatus{
 			Result: &corev1.ComponentResult{
-				ComponentId: compID,
+				ComponentId: &compID,
 				Error:       errMsg,
 			},
 			State: state,
@@ -246,8 +311,8 @@ func TestPowerControl_RefusesWhenRackHostInUse(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"sw-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"sw-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -269,8 +334,8 @@ func TestPowerControl_AllowsWhenRackHostsReady(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"sw-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"sw-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
@@ -289,8 +354,8 @@ func TestFirmwareControl_RefusesWhenRackHostInUse(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"sw-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"sw-1"},
 	}
 
 	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
@@ -317,8 +382,8 @@ func TestPowerControl_OverrideBypassesReadinessCheck(t *testing.T) {
 
 	m := newManagerForReadinessTest(t, client, reader)
 	target := common.Target{
-		Type:         devicetypes.ComponentTypeNVSwitch,
-		ComponentIDs: []string{"sw-1"},
+		Type:        devicetypes.ComponentTypeNVSwitch,
+		Identifiers: []string{"sw-1"},
 	}
 
 	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{

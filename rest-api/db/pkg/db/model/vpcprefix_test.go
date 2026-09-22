@@ -51,6 +51,62 @@ func TestVpcPrefix_ToProto(t *testing.T) {
 	})
 }
 
+// TestVpcPrefix_GetCIDR verifies stored IPv4 and IPv6 prefixes parse into the
+// netip.Prefix used by the usage calculation.
+func TestVpcPrefix_GetCIDR(t *testing.T) {
+	tests := []struct {
+		name      string
+		prefix    string
+		prefixLen int
+		want      string
+		wantErr   bool
+	}{
+		{
+			name: "unset prefix",
+		},
+		{
+			name:      "IPv4 address uses the stored prefix length",
+			prefix:    "192.0.2.0",
+			prefixLen: 24,
+			want:      "192.0.2.0/24",
+		},
+		{
+			name:   "IPv4 CIDR is masked to its network",
+			prefix: "192.0.2.1/24",
+			want:   "192.0.2.0/24",
+		},
+		{
+			name:   "IPv6 CIDR is preserved",
+			prefix: "2001:db8::/64",
+			want:   "2001:db8::/64",
+		},
+		{
+			name:    "malformed CIDR returns an error",
+			prefix:  "not-a-prefix",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			vp := VpcPrefix{Prefix: tc.prefix, PrefixLength: tc.prefixLen}
+			got, err := vp.GetCIDR()
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.False(t, got.IsValid())
+				return
+			}
+			require.NoError(t, err)
+			if tc.want == "" {
+				assert.False(t, got.IsValid())
+				return
+			}
+			require.True(t, got.IsValid())
+			assert.Equal(t, tc.want, got.String())
+		})
+	}
+}
+
 func TestVpcPrefix_FromProto(t *testing.T) {
 	t.Run("nil proto is a no-op", func(t *testing.T) {
 		original := VpcPrefix{ID: uuid.New(), Name: "original", Prefix: "10.0.0.0/16"}
@@ -925,4 +981,435 @@ func testVpcPrefixSQLDAO_Delete(t *testing.T) {
 			}
 		})
 	}
+}
+
+//nolint:funlen // Cases stay inline so each usage invariant is visible at the call site.
+func TestVpcPrefixUsageFromInterfaces(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                              string
+		cidr                              string
+		ifcCountWithoutIPs                uint64
+		ips                               []string
+		expectedAvailableIPs              uint64
+		expectedAcquiredIPs               uint64
+		expectedAvailableSmallestPrefixes uint64
+		expectedAcquiredPrefixes          uint64
+	}{
+		{
+			name:                              "pending interfaces reserve one /31 each",
+			cidr:                              "10.0.0.0/28",
+			ifcCountWithoutIPs:                3,
+			ips:                               nil,
+			expectedAvailableIPs:              16,
+			expectedAcquiredIPs:               6,
+			expectedAvailableSmallestPrefixes: 4,
+			expectedAcquiredPrefixes:          0,
+		},
+		{
+			name:                              "duplicate acquired prefix and pending interfaces are counted once each",
+			cidr:                              "10.0.0.0/28",
+			ifcCountWithoutIPs:                2,
+			ips:                               []string{"10.0.0.1", "10.0.0.3", "10.0.0.1"},
+			expectedAvailableIPs:              16,
+			expectedAcquiredIPs:               8,
+			expectedAvailableSmallestPrefixes: 3,
+			expectedAcquiredPrefixes:          2,
+		},
+		{
+			name:                              "prefix without interfaces is fully available",
+			cidr:                              "10.0.0.0/28",
+			ifcCountWithoutIPs:                0,
+			ips:                               nil,
+			expectedAvailableIPs:              16,
+			expectedAcquiredIPs:               0,
+			expectedAvailableSmallestPrefixes: 4,
+			expectedAcquiredPrefixes:          0,
+		},
+		{
+			name:                              "acquired IPs clamp to prefix capacity",
+			cidr:                              "10.0.0.0/30",
+			ifcCountWithoutIPs:                1,
+			ips:                               []string{"10.0.0.1", "10.0.0.3"},
+			expectedAvailableIPs:              4,
+			expectedAcquiredIPs:               4,
+			expectedAvailableSmallestPrefixes: 0,
+			expectedAcquiredPrefixes:          2,
+		},
+		{
+			name:                              "non-empty invalid or inapplicable addresses are not pending reservations",
+			cidr:                              "10.0.0.0/28",
+			ifcCountWithoutIPs:                0,
+			ips:                               []string{"invalid", "10.0.0.1/31", "2001:db8::1", "192.0.2.1"},
+			expectedAvailableIPs:              16,
+			expectedAcquiredIPs:               0,
+			expectedAvailableSmallestPrefixes: 4,
+			expectedAcquiredPrefixes:          0,
+		},
+		{
+			// A /31 is the smallest prefix length the API accepts and cannot yield a /31
+			// child, so usage must still be reported rather than failing the request.
+			name:                              "/31 prefix with one assigned IP does not error",
+			cidr:                              "10.0.0.0/31",
+			ifcCountWithoutIPs:                0,
+			ips:                               []string{"10.0.0.1"},
+			expectedAvailableIPs:              2,
+			expectedAcquiredIPs:               2,
+			expectedAvailableSmallestPrefixes: 0,
+			expectedAcquiredPrefixes:          1,
+		},
+		{
+			name:                              "/31 prefix with both addresses of the same /31 counts once",
+			cidr:                              "10.0.0.0/31",
+			ifcCountWithoutIPs:                0,
+			ips:                               []string{"10.0.0.0", "10.0.0.1"},
+			expectedAvailableIPs:              2,
+			expectedAcquiredIPs:               2,
+			expectedAvailableSmallestPrefixes: 0,
+			expectedAcquiredPrefixes:          1,
+		},
+		{
+			name:                              "/31 prefix with duplicate Ready and Deleting IP counts once",
+			cidr:                              "10.0.0.0/31",
+			ifcCountWithoutIPs:                0,
+			ips:                               []string{"10.0.0.1", "10.0.0.1"},
+			expectedAvailableIPs:              2,
+			expectedAcquiredIPs:               2,
+			expectedAvailableSmallestPrefixes: 0,
+			expectedAcquiredPrefixes:          1,
+		},
+		{
+			name:                              "/31 prefix without interfaces is fully available",
+			cidr:                              "10.0.0.0/31",
+			ifcCountWithoutIPs:                0,
+			ips:                               nil,
+			expectedAvailableIPs:              2,
+			expectedAcquiredIPs:               0,
+			expectedAvailableSmallestPrefixes: 0,
+			expectedAcquiredPrefixes:          0,
+		},
+		{
+			name:                              "/31 prefix with one pending interface reserves the prefix",
+			cidr:                              "10.0.0.0/31",
+			ifcCountWithoutIPs:                1,
+			ips:                               nil,
+			expectedAvailableIPs:              2,
+			expectedAcquiredIPs:               2,
+			expectedAvailableSmallestPrefixes: 0,
+			expectedAcquiredPrefixes:          0,
+		},
+		{
+			name:                              "/31 prefix ignores out-of-range IP",
+			cidr:                              "10.0.0.0/31",
+			ifcCountWithoutIPs:                0,
+			ips:                               []string{"192.0.2.1"},
+			expectedAvailableIPs:              2,
+			expectedAcquiredIPs:               0,
+			expectedAvailableSmallestPrefixes: 0,
+			expectedAcquiredPrefixes:          0,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			usage, err := vpcPrefixUsageFromInterfaces(context.Background(), testCase.cidr, testCase.ifcCountWithoutIPs, testCase.ips)
+			require.NoError(t, err)
+			require.NotNil(t, usage)
+			assert.Equal(t, testCase.expectedAvailableIPs, usage.AvailableIPs)
+			assert.Equal(t, testCase.expectedAcquiredIPs, usage.AcquiredIPs)
+			assert.Equal(t, testCase.expectedAvailableSmallestPrefixes, usage.AvailableSmallestPrefixes)
+			assert.Equal(t, testCase.expectedAcquiredPrefixes, usage.AcquiredPrefixes)
+		})
+	}
+
+	t.Run("unexpected child prefix acquisition error is propagated", func(t *testing.T) {
+		t.Parallel()
+
+		usage, err := vpcPrefixUsageFromInterfaces(context.Background(), "10.0.0.1/32", 0, []string{"10.0.0.1"})
+		require.Error(t, err)
+		assert.Nil(t, usage)
+	})
+}
+
+//nolint:funlen,paralleltest // Cases and fixtures stay inline; model tests share a PostgreSQL schema.
+func TestVpcPrefixSQLDAO_GetPrefixUsage(t *testing.T) {
+	dao := NewVpcPrefixDAO(nil)
+	t.Run("IPv6 prefix returns no usage entry", func(t *testing.T) {
+		usageByID, err := dao.GetPrefixUsage(context.Background(), nil, &VpcPrefix{
+			ID:     uuid.New(),
+			Prefix: "2001:db8::/64",
+		})
+		require.NoError(t, err)
+		assert.Empty(t, usageByID)
+	})
+
+	t.Run("malformed stored prefix returns an error", func(t *testing.T) {
+		prefixID := uuid.New()
+		usageByID, err := dao.GetPrefixUsage(context.Background(), nil, &VpcPrefix{
+			ID:     prefixID,
+			Prefix: "not-a-prefix",
+		})
+		require.Error(t, err)
+		assert.Nil(t, usageByID)
+		assert.ErrorContains(t, err, prefixID.String())
+		assert.ErrorContains(t, err, "not-a-prefix")
+	})
+
+	type interfaceFixture struct {
+		status    string
+		ipAddress *string
+	}
+
+	// prefixLength selects the VpcPrefix size under test; zero means the default /28.
+	const defaultPrefixLength = 28
+
+	tests := []struct {
+		name                       string
+		prefixLength               int
+		interfaces                 []interfaceFixture
+		expectedAvailableIPs       uint64
+		expectedAcquiredIPs        uint64
+		expectedAcquiredPrefixes   uint64
+		expectedAvailableSmallest  uint64
+		expectedFreeInterfaceSlots uint64
+		expectedAdmissionAllowed   bool
+	}{
+		{
+			name: "stale deleting rows do not exhaust prefix issue 4908",
+			// Deleting rows still hold capacity; duplicate /31 addresses are de-duplicated by prefix.
+			interfaces: []interfaceFixture{
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.1")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.3")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.5")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.7")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.9")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.13")},
+				{status: InterfaceStatusDeleting, ipAddress: cutil.GetPtr("10.0.0.1")},
+				{status: InterfaceStatusDeleting, ipAddress: cutil.GetPtr("10.0.0.3")},
+				{status: InterfaceStatusDeleting, ipAddress: cutil.GetPtr("10.0.0.9")},
+				{status: InterfaceStatusDeleting, ipAddress: cutil.GetPtr("10.0.0.13")},
+			},
+			expectedAvailableIPs:       16,
+			expectedAcquiredIPs:        12,
+			expectedAcquiredPrefixes:   6,
+			expectedAvailableSmallest:  0,
+			expectedFreeInterfaceSlots: 2,
+			expectedAdmissionAllowed:   true,
+		},
+		{
+			name: "deleting interface with a distinct IP still consumes capacity",
+			interfaces: []interfaceFixture{
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.1")},
+				{status: InterfaceStatusDeleting, ipAddress: cutil.GetPtr("10.0.0.3")},
+			},
+			expectedAvailableIPs:       16,
+			expectedAcquiredIPs:        4,
+			expectedAcquiredPrefixes:   2,
+			expectedAvailableSmallest:  3,
+			expectedFreeInterfaceSlots: 6,
+			expectedAdmissionAllowed:   true,
+		},
+		{
+			name: "pending interfaces without IPs reserve one /31 each",
+			interfaces: []interfaceFixture{
+				{status: InterfaceStatusPending, ipAddress: nil},
+				{status: InterfaceStatusPending, ipAddress: nil},
+				{status: InterfaceStatusPending, ipAddress: nil},
+			},
+			expectedAvailableIPs:       16,
+			expectedAcquiredIPs:        6,
+			expectedAcquiredPrefixes:   0,
+			expectedAvailableSmallest:  4,
+			expectedFreeInterfaceSlots: 5,
+			expectedAdmissionAllowed:   true,
+		},
+		{
+			name: "mixed duplicate and pending interfaces reserve unique /31s",
+			interfaces: []interfaceFixture{
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.1")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.3")},
+				{status: InterfaceStatusDeleting, ipAddress: cutil.GetPtr("10.0.0.1")},
+				{status: InterfaceStatusPending, ipAddress: nil},
+				{status: InterfaceStatusPending, ipAddress: nil},
+			},
+			expectedAvailableIPs:       16,
+			expectedAcquiredIPs:        8,
+			expectedAcquiredPrefixes:   2,
+			expectedAvailableSmallest:  3,
+			expectedFreeInterfaceSlots: 4,
+			expectedAdmissionAllowed:   true,
+		},
+		{
+			name: "usage clamps when acquired and pending interfaces exceed capacity",
+			interfaces: []interfaceFixture{
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.1")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.3")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.5")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.7")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.9")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.11")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.13")},
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.15")},
+				{status: InterfaceStatusPending, ipAddress: nil},
+			},
+			expectedAvailableIPs:       16,
+			expectedAcquiredIPs:        16,
+			expectedAcquiredPrefixes:   8,
+			expectedAvailableSmallest:  0,
+			expectedFreeInterfaceSlots: 0,
+			expectedAdmissionAllowed:   false,
+		},
+		{
+			// A /31 is the smallest VpcPrefix the API accepts and holds exactly one
+			// Interface, so a single Ready row consumes it without erroring.
+			name:         "/31 prefix with one Ready interface is fully acquired issue 4908 follow-up",
+			prefixLength: 31,
+			interfaces: []interfaceFixture{
+				{status: InterfaceStatusReady, ipAddress: cutil.GetPtr("10.0.0.1")},
+			},
+			expectedAvailableIPs:       2,
+			expectedAcquiredIPs:        2,
+			expectedAcquiredPrefixes:   1,
+			expectedAvailableSmallest:  0,
+			expectedFreeInterfaceSlots: 0,
+			expectedAdmissionAllowed:   false,
+		},
+		{
+			name:                       "/31 prefix without interfaces admits one interface",
+			prefixLength:               31,
+			interfaces:                 nil,
+			expectedAvailableIPs:       2,
+			expectedAcquiredIPs:        0,
+			expectedAcquiredPrefixes:   0,
+			expectedAvailableSmallest:  0,
+			expectedFreeInterfaceSlots: 1,
+			expectedAdmissionAllowed:   true,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			dbSession := testVpcPrefixInitDB(t)
+			t.Cleanup(func() {
+				dbSession.Close()
+			})
+			testInterfaceSetupSchema(t, dbSession)
+
+			infrastructureProvider := testInstanceBuildInfrastructureProvider(t, dbSession, "issue-4908-provider")
+			site := testInstanceBuildSite(t, dbSession, infrastructureProvider, "issue-4908-site")
+			tenant := testInstanceBuildTenant(t, dbSession, "issue-4908-tenant")
+			vpc := testInstanceBuildVpc(t, dbSession, infrastructureProvider, site, tenant, "issue-4908-vpc")
+			user := testInstanceBuildUser(t, dbSession, "issue-4908-user")
+			instanceType := testInstanceBuildInstanceType(t, dbSession, infrastructureProvider, "issue-4908-instance-type")
+			machine := testMachineBuildMachine(t, dbSession, infrastructureProvider.ID, site.ID, &instanceType.ID, cutil.GetPtr("issue-4908-machine-type"))
+			operatingSystem := testInstanceBuildOperatingSystem(t, dbSession, "issue-4908-os")
+			instance := TestBuildInstance(t, dbSession, "issue-4908-instance", tenant, infrastructureProvider, site, instanceType, vpc, machine, operatingSystem)
+			instance.Status = InstanceStatusConfiguring
+			_, err := dbSession.DB.NewUpdate().Model(instance).Column("status").Where("id = ?", instance.ID).Exec(context.Background())
+			require.NoError(t, err)
+
+			prefixLength := testCase.prefixLength
+			if prefixLength == 0 {
+				prefixLength = defaultPrefixLength
+			}
+
+			vpcPrefix, err := NewVpcPrefixDAO(dbSession).Create(context.Background(), nil, VpcPrefixCreateInput{
+				VpcPrefixID:  nil,
+				Name:         "issue-4908-prefix",
+				TenantOrg:    tenant.Org,
+				SiteID:       site.ID,
+				VpcID:        vpc.ID,
+				TenantID:     tenant.ID,
+				IpBlockID:    nil,
+				Prefix:       fmt.Sprintf("10.0.0.0/%d", prefixLength),
+				PrefixLength: prefixLength,
+				Status:       VpcPrefixStatusReady,
+				CreatedBy:    user.ID,
+			})
+			require.NoError(t, err)
+
+			for _, interfaceFixture := range testCase.interfaces {
+				ifc := TestBuildInterface(t, dbSession, instance, nil, &vpcPrefix.ID, true, interfaceFixture.status)
+				if interfaceFixture.ipAddress != nil {
+					ifc.IPAddresses = []string{*interfaceFixture.ipAddress}
+					_, err = dbSession.DB.NewUpdate().Model(ifc).Column("ip_addresses").Where("id = ?", ifc.ID).Exec(context.Background())
+					require.NoError(t, err)
+				}
+			}
+
+			usageByID, err := NewVpcPrefixDAO(dbSession).GetPrefixUsage(context.Background(), nil, vpcPrefix)
+			require.NoError(t, err)
+
+			usage := usageByID[vpcPrefix.ID]
+			require.NotNil(t, usage)
+			assert.Equal(t, testCase.expectedAvailableIPs, usage.AvailableIPs)
+			assert.Equal(t, testCase.expectedAcquiredIPs, usage.AcquiredIPs)
+			assert.Equal(t, testCase.expectedAcquiredPrefixes, usage.AcquiredPrefixes)
+			assert.Equal(t, testCase.expectedAvailableSmallest, usage.AvailableSmallestPrefixes)
+			assert.Equal(t, testCase.expectedFreeInterfaceSlots, (usage.AvailableIPs-usage.AcquiredIPs)/vpcPrefixIPsPerInterface)
+
+			admissionAllowed := usage.AcquiredIPs+vpcPrefixIPsPerInterface <= usage.AvailableIPs
+			assert.Equal(t, testCase.expectedAdmissionAllowed, admissionAllowed)
+		})
+	}
+}
+
+func TestVpcPrefixSQLDAO_ClearDeleted(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testVpcPrefixInitDB(t)
+	defer dbSession.Close()
+	testVpcPrefixSetupSchema(t, dbSession)
+
+	ip := testVpcPrefixBuildInfrastructureProvider(t, dbSession, "testIP")
+	site := testVpcPrefixBuildSite(t, dbSession, ip, "testSite")
+	tenant := testVpcPrefixBuildTenant(t, dbSession, "testTenant")
+	user := testVpcPrefixBuildUser(t, dbSession, "testUser")
+	ipBlock := testVpcPrefixBuildIPBlock(t, dbSession, &site.ID, &ip.ID, "ipBlock", &user.ID)
+	vpc := testVpcPrefixBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
+	vpcPrefixDAO := NewVpcPrefixDAO(dbSession)
+
+	vpcPrefix, err := vpcPrefixDAO.Create(ctx, nil, VpcPrefixCreateInput{
+		Name:         "test-clear-deleted",
+		TenantOrg:    "test",
+		SiteID:       site.ID,
+		VpcID:        vpc.ID,
+		TenantID:     tenant.ID,
+		IpBlockID:    &ipBlock.ID,
+		Prefix:       "192.0.2.0/24",
+		PrefixLength: 24,
+		Status:       VpcPrefixStatusError,
+		CreatedBy:    user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, vpcPrefixDAO.Delete(ctx, nil, vpcPrefix.ID))
+
+	t.Run("clears soft-delete marker", func(t *testing.T) {
+		cleared, clearErr := vpcPrefixDAO.Clear(ctx, nil, VpcPrefixClearInput{
+			VpcPrefixID: vpcPrefix.ID,
+			Deleted:     true,
+		})
+		require.NoError(t, clearErr)
+		require.NotNil(t, cleared)
+		assert.Nil(t, cleared.Deleted)
+
+		updated, updateErr := vpcPrefixDAO.Update(ctx, nil, VpcPrefixUpdateInput{
+			VpcPrefixID:     vpcPrefix.ID,
+			Status:          cutil.GetPtr(VpcPrefixStatusReady),
+			IsMissingOnSite: cutil.GetPtr(false),
+		})
+		require.NoError(t, updateErr)
+		assert.Equal(t, VpcPrefixStatusReady, updated.Status)
+		assert.False(t, updated.IsMissingOnSite)
+	})
+
+	t.Run("returns not found for unknown VPC Prefix", func(t *testing.T) {
+		_, clearErr := vpcPrefixDAO.Clear(ctx, nil, VpcPrefixClearInput{
+			VpcPrefixID: uuid.New(),
+			Deleted:     true,
+		})
+		assert.ErrorIs(t, clearErr, db.ErrDoesNotExist)
+	})
 }

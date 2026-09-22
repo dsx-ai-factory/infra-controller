@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::ops::DerefMut;
 
 use ::rpc::forge as rpc;
+use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use model::firmware::FirmwareComponentType;
+use model::site_explorer::{EndpointExplorationReport, EndpointType};
 use rpc::forge_server::Forge;
 use tonic::Code;
 
@@ -29,28 +31,81 @@ use crate::tests::common::api_fixtures::{create_managed_host, create_test_env};
 async fn test_find_explored_endpoint_ids(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::{Case, check_cases_async};
+
     let env = create_test_env(pool.clone()).await;
+    let [machine_id, other_machine_id, missing_machine_id] =
+        [1, 2, 3].map(|hash| MachineId::new(MachineIdSource::Tpm, [hash; 32], MachineType::Host));
 
     let mut txn = env.pool.begin().await?;
-    for i in 1..6 {
-        common::endpoint::insert_endpoint_version(
+    for (address, report_machine_id) in [
+        ("141.219.24.1", Some(machine_id)),
+        ("141.219.24.2", Some(machine_id)),
+        ("141.219.24.3", Some(other_machine_id)),
+        ("141.219.24.4", None),
+    ] {
+        db::explored_endpoints::insert(
+            address.parse()?,
+            &EndpointExplorationReport {
+                endpoint_type: EndpointType::Bmc,
+                machine_id: report_machine_id,
+                ..Default::default()
+            },
+            false,
             &mut txn,
-            format!("141.219.24.{i}").as_str(),
-            "1.0",
         )
         .await?;
     }
     txn.commit().await?;
 
-    let id_list = env
-        .api
-        .find_explored_endpoint_ids(tonic::Request::new(
-            ::rpc::site_explorer::ExploredEndpointSearchFilter {},
-        ))
-        .await
-        .map(|response| response.into_inner())
-        .unwrap();
-    assert_eq!(id_list.endpoint_ids.len(), 5);
+    let api = &env.api;
+    check_cases_async(
+        [
+            Case {
+                scenario: "unfiltered includes reports without a machine ID",
+                input: None,
+                expect: Yields(
+                    [
+                        "141.219.24.1",
+                        "141.219.24.2",
+                        "141.219.24.3",
+                        "141.219.24.4",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                ),
+            },
+            Case {
+                scenario: "machine filter excludes other and absent machine IDs",
+                input: Some(machine_id.to_string()),
+                expect: Yields(["141.219.24.1", "141.219.24.2"].map(String::from).to_vec()),
+            },
+            Case {
+                scenario: "unmatched machine returns no endpoints",
+                input: Some(missing_machine_id.to_string()),
+                expect: Yields(vec![]),
+            },
+            Case {
+                scenario: "malformed machine ID is rejected",
+                input: Some("not-a-machine-id".to_string()),
+                expect: FailsWith(Code::InvalidArgument),
+            },
+        ],
+        |machine_id| async move {
+            let mut endpoint_ids = api
+                .find_explored_endpoint_ids(tonic::Request::new(
+                    ::rpc::site_explorer::ExploredEndpointSearchFilter { machine_id },
+                ))
+                .await
+                .map_err(|error| error.code())?
+                .into_inner()
+                .endpoint_ids;
+            endpoint_ids.sort();
+            Ok(endpoint_ids)
+        },
+    )
+    .await;
 
     Ok(())
 }
@@ -75,7 +130,7 @@ async fn test_find_explored_endpoints_by_ids(
     let id_list = env
         .api
         .find_explored_endpoint_ids(tonic::Request::new(
-            ::rpc::site_explorer::ExploredEndpointSearchFilter {},
+            ::rpc::site_explorer::ExploredEndpointSearchFilter::default(),
         ))
         .await
         .map(|response| response.into_inner())
@@ -109,12 +164,15 @@ async fn test_find_explored_endpoints_by_ids(
 // shared API-layer code, proven once across representative RPCs in
 // `tests::find_by_ids_guards`.
 
+// This test intentionally exercises the deprecated top-level `machine_id`
+// field to prove it is still accepted alongside the new `device_id` target.
+#[allow(deprecated)]
 #[crate::sqlx_test]
 async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     // Setup
     let env = create_test_env(db_pool.clone()).await;
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
-    let host_machine = env.find_machine(host_machine_id).await.remove(0);
+    let host_machine = env.find_machine(&host_machine_id).await.remove(0);
 
     let bmc_ip = host_machine.bmc_info.as_ref().unwrap().ip();
 
@@ -124,8 +182,8 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
             ip_address: bmc_ip.to_string(),
             mac_address: None,
         }),
-        machine_id: None,
         use_ipmitool: false,
+        ..Default::default()
     });
     let api_result = env.api.admin_bmc_reset(req).await;
     assert!(api_result.is_ok());
@@ -135,6 +193,7 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
         bmc_endpoint_request: None,
         machine_id: Some(host_machine_id.to_string()),
         use_ipmitool: false,
+        ..Default::default()
     });
     let api_result = env.api.admin_bmc_reset(req).await;
     assert!(api_result.is_ok());
@@ -145,8 +204,8 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
             ip_address: bmc_ip.to_string(),
             mac_address: Some("00:DE:AD:BE:EF:00".to_string()),
         }),
-        machine_id: None,
         use_ipmitool: false,
+        ..Default::default()
     });
     let api_result = env.api.admin_bmc_reset(req).await;
     let e = api_result.unwrap_err();
@@ -161,8 +220,8 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
             ip_address: "0.0.0.0".to_string(),
             mac_address: None,
         }),
-        machine_id: None,
         use_ipmitool: false,
+        ..Default::default()
     });
     let api_result = env.api.admin_bmc_reset(req).await;
     let e = api_result.unwrap_err();
@@ -190,6 +249,7 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
         bmc_endpoint_request: None,
         machine_id: Some(host_machine_id.to_string()),
         use_ipmitool: false,
+        ..Default::default()
     });
     let api_result = env.api.admin_bmc_reset(req).await;
     assert!(api_result.is_ok());
@@ -210,6 +270,7 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
         bmc_endpoint_request: None,
         machine_id: Some(host_machine_id.to_string()),
         use_ipmitool: false,
+        ..Default::default()
     });
     let api_result = env.api.admin_bmc_reset(req).await;
     assert!(api_result.is_ok());
@@ -242,7 +303,7 @@ async fn test_find_explored_endpoint_firmware_versions(
     let id_list = env
         .api
         .find_explored_endpoint_ids(tonic::Request::new(
-            ::rpc::site_explorer::ExploredEndpointSearchFilter {},
+            ::rpc::site_explorer::ExploredEndpointSearchFilter::default(),
         ))
         .await
         .map(|response| response.into_inner())
@@ -283,8 +344,8 @@ async fn test_admin_bmc_reset_rejects_malformed_ip_address(
             ip_address: "not-an-ip".to_string(),
             mac_address: None,
         }),
-        machine_id: None,
         use_ipmitool: false,
+        ..Default::default()
     });
 
     let err = env

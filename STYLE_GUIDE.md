@@ -376,20 +376,20 @@ the type system. See [Instrumentation](docs/observability/instrumentation.md) fo
 
 The canonical pattern, checked at compile time by the derive:
 
-- **`carbide_` prefix** on every metric name. The name in the attribute is the exposed name, verbatim, so a dashboard
+- **`carbide_` prefix** on every new metric name. A checked name in the attribute is exposed verbatim, so a dashboard
   greps straight back to the source line.
 - **`_total` suffix for counters** (never a doubled `_total_total` -- the Prometheus exporter appends the suffix), and a
   **unit suffix for histograms** (`_seconds`, `_milliseconds`, `_microseconds`, `_bytes`).
 - **A counter's `describe` opens with "Number of ..."**. That HELP text is the row the
-  [core metrics catalogue](docs/observability/core_metrics.md) records, and every framework counter and histogram --
-  apart from a `name_unchecked` one, whose exposed name is an OTel-sanitized transform -- must appear there, enforced by
-  `cargo xtask check-metric-docs`. When it flags a missing row, run `cargo xtask check-metric-docs --fix` to add it
-  automatically, in sorted position -- no hand-editing the catalogue.
+  [core metrics catalogue](docs/observability/core_metrics.md) records, and every production checked-name framework
+  counter and histogram must appear there, enforced by `cargo xtask check-metric-docs`. When the check flags a missing
+  row, run `cargo xtask check-metric-docs --fix` to add it automatically, in sorted position -- no hand-editing the
+  catalogue.
 - **Bounded `#[label]` fields; high-cardinality detail in `#[context]`**. Labels come from `LabelValue` enums; machine
   IDs, IPs, and error text stay on the log line only.
 
-`name_unchecked` and `describe_unchecked` are the greppable escape hatches for grandfathered metrics; new metrics use
-the standard form.
+`metric_name_unchecked` and `describe_unchecked` are the greppable escape hatches for grandfathered metrics. Unchecked
+names are exempt from the source catalogue check; new metrics use the standard form.
 
 ## Logging
 
@@ -413,11 +413,11 @@ domain-specific key such as `configured_log_level` or `error_location` instead. 
 metric-only labels with these names remain allowed because renaming them would change the metric contract.
 
 Typed Events declare a globally unique, flat `lower_snake_case` `event_name` that identifies the reusable event
-category, not an individual occurrence. A metric-backed Event separately declares the exact Prometheus
-`metric_name`. Event-generated log lines include `event_name` and, when applicable, `metric_name`; ordinary
-`tracing::` calls do not add either field. Keep `message` as a stable human-readable description on Events that log,
-even when it resembles the machine-facing `event_name`. See
-[`docs/observability/instrumentation.md`](docs/observability/instrumentation.md) for the declaration and naming rules.
+category, not an individual occurrence. A metric-backed Event separately declares `metric_name`. Event-generated log
+lines include `event_name` and, when applicable, `metric_name`; ordinary `tracing::` calls do not add either field.
+Keep `message` as a stable human-readable description on Events that log, even when it resembles the machine-facing
+`event_name`. See [`docs/observability/instrumentation.md`](docs/observability/instrumentation.md) for the declaration
+and naming rules.
 
 Field names are part of the operational interface: dashboards, alerts, and ad hoc searches depend on them. The table
 below defines the common vocabulary. It is not an exhaustive schema -- event-specific fields should still describe

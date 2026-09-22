@@ -218,6 +218,9 @@ spec:
             - name: hw-cache
               mountPath: /data
               readOnly: true
+            - name: host-grpc-socket-dir
+              mountPath: /var/run/dpf/weave/grpc
+              readOnly: true
         - name: nico-lldp-sidecar
           securityContext:
             privileged: false
@@ -309,6 +312,10 @@ spec:
           hostPath:
             path: /etc/resolv.conf
             type: File
+        - name: host-grpc-socket-dir
+          hostPath:
+            path: /var/run/dpf/weave/grpc
+            type: DirectoryOrCreate
         {{- if eq $bootstrapCaSource "mounted" }}
         - name: bootstrap-ca-source
           {{- if eq $bootstrapCaObjectKind "Secret" }}

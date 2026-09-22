@@ -17,7 +17,10 @@
 
 use clap::Parser;
 
-use crate::component_manager::common::{PowerActionArg, PowerControlTargetArgs};
+use crate::component_manager::common::{
+    ComputeTraySelection, PowerActionArg, PowerControlTargetArgs, PowerShelfSelection,
+    SwitchSelection,
+};
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
@@ -27,13 +30,25 @@ Power on a switch:
     $ nico-admin-cli component-manager component-power-control switch \
     --switch-id 12345678-1234-5678-90ab-cdef01234567 --action on
 
+Power on a switch by BMC MAC (targets the switch before ingestion):
+    $ nico-admin-cli component-manager component-power-control switch \
+    --mac-address 00:11:22:33:44:55 --action on
+
 Force off a compute tray:
     $ nico-admin-cli component-manager component-power-control compute-tray \
     --machine-id 12345678-1234-5678-90ab-cdef01234567 --action force-off
 
+Force off a compute tray by BMC MAC (targets the tray before ingestion):
+    $ nico-admin-cli component-manager component-power-control compute-tray \
+    --mac-address 00:11:22:33:44:55 --action force-off
+
 AC power-cycle a power shelf:
     $ nico-admin-cli component-manager component-power-control power-shelf \
     --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --action ac-powercycle
+
+AC power-cycle a power shelf by PMC MAC (targets the power shelf before ingestion):
+    $ nico-admin-cli component-manager component-power-control power-shelf \
+    --mac-address 00:11:22:33:44:55 --action ac-powercycle
 
 ")]
 pub(crate) struct Args {
@@ -59,29 +74,51 @@ impl From<Args> for rpc::forge::ComponentPowerControlRequest {
         let action = ::rpc::common::SystemPowerControl::from(args.action) as i32;
         let bypass_state_controller = args.bypass_state_controller;
         match args.target {
-            PowerControlTargetArgs::Switch(target) => Self {
-                target: Some(
-                    rpc::forge::component_power_control_request::Target::SwitchIds(target.into()),
-                ),
-                action,
-                bypass_state_controller,
-            },
-            PowerControlTargetArgs::PowerShelf(target) => Self {
-                target: Some(
-                    rpc::forge::component_power_control_request::Target::PowerShelfIds(
-                        target.into(),
-                    ),
-                ),
-                action,
-                bypass_state_controller,
-            },
-            PowerControlTargetArgs::ComputeTray(target) => Self {
-                target: Some(
-                    rpc::forge::component_power_control_request::Target::MachineIds(target.into()),
-                ),
-                action,
-                bypass_state_controller,
-            },
+            PowerControlTargetArgs::Switch(target) => {
+                let target = match target.into_selection() {
+                    SwitchSelection::SwitchIds(list) => {
+                        rpc::forge::component_power_control_request::Target::SwitchIds(list)
+                    }
+                    SwitchSelection::Macs(macs) => {
+                        rpc::forge::component_power_control_request::Target::SwitchBmcMacs(macs)
+                    }
+                };
+                Self {
+                    target: Some(target),
+                    action,
+                    bypass_state_controller,
+                }
+            }
+            PowerControlTargetArgs::PowerShelf(target) => {
+                let target = match target.into_selection() {
+                    PowerShelfSelection::PowerShelfIds(list) => {
+                        rpc::forge::component_power_control_request::Target::PowerShelfIds(list)
+                    }
+                    PowerShelfSelection::Macs(macs) => {
+                        rpc::forge::component_power_control_request::Target::PowerShelfPmcMacs(macs)
+                    }
+                };
+                Self {
+                    target: Some(target),
+                    action,
+                    bypass_state_controller,
+                }
+            }
+            PowerControlTargetArgs::ComputeTray(target) => {
+                let target = match target.into_selection() {
+                    ComputeTraySelection::MachineIds(list) => {
+                        rpc::forge::component_power_control_request::Target::MachineIds(list)
+                    }
+                    ComputeTraySelection::Macs(macs) => {
+                        rpc::forge::component_power_control_request::Target::ComputeBmcMacs(macs)
+                    }
+                };
+                Self {
+                    target: Some(target),
+                    action,
+                    bypass_state_controller,
+                }
+            }
         }
     }
 }

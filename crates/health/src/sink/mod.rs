@@ -24,6 +24,7 @@ pub mod event_mapper;
 mod events;
 mod health_report;
 mod log_file;
+mod nvlink_domain_health_report;
 pub(crate) mod otlp;
 mod power_shelf_health_report;
 mod prometheus;
@@ -35,10 +36,11 @@ pub use composite::CompositeDataSink;
 pub use events::{
     Classification, CollectorEvent, DiagnosticLogRecord, EventContext, FirmwareInfo, HealthReport,
     HealthReportAlert, HealthReportSuccess, HealthReportTarget, LogRecord, LogSeverity,
-    MetricSample, Probe, ReportSource, SensorThresholdContext,
+    MetricSample, Probe, ReportSource, SensorAttribution, SensorThresholdContext,
 };
 pub use health_report::HealthReportSink;
 pub use log_file::LogFileSink;
+pub use nvlink_domain_health_report::NvLinkDomainHealthReportSink;
 pub use power_shelf_health_report::PowerShelfHealthReportSink;
 pub use prometheus::PrometheusSink;
 pub use rack_health_report::RackHealthReportSink;
@@ -96,7 +98,8 @@ pub(crate) struct HealthReportSubmitted {
     pub target: HealthReportTarget,
     #[label]
     pub outcome: carbide_instrument::Outcome,
-    /// The machine, rack, switch, or power shelf the report describes.
+
+    /// The machine, NVLink domain, rack, switch, or power shelf the report describes.
     #[context]
     pub id: String,
     #[context]
@@ -210,7 +213,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             metadata: None,
@@ -259,7 +262,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             metadata: None,
@@ -361,7 +364,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "test",
             labels: std::collections::BTreeMap::from([(
@@ -442,7 +445,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),
@@ -502,7 +505,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
             },
             collector_type: "sensor_collector",
             labels: Default::default(),

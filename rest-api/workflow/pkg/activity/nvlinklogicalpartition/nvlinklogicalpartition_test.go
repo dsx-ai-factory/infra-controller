@@ -110,49 +110,49 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionsInDB(t *testi
 	assert.NotNil(t, nvllp1)
 
 	// Set updated earlier than the inventory receipt interval (with buffer to exceed threshold)
-	_, err := dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), nvllp1.ID.String())
+	_, err := dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), nvllp1.ID.String())
 	assert.NoError(t, err)
 
 	nvllp2 := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-2", nil, st1, tn, cdbm.NVLinkLogicalPartitionStatusProvisioning, false)
 	assert.NotNil(t, nvllp2)
 
 	// Set created earlier than the inventory receipt interval (with buffer to exceed threshold)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), nvllp2.ID.String())
+	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), nvllp2.ID.String())
 	assert.NoError(t, err)
 
 	nvllp3 := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-3", nil, st1, tn, cdbm.NVLinkLogicalPartitionStatusDeleting, false)
 	assert.NotNil(t, nvllp3)
 
 	// Set created earlier than the inventory receipt interval (with buffer to exceed threshold)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), nvllp3.ID.String())
+	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), nvllp3.ID.String())
 	assert.NoError(t, err)
 
 	nvllp4 := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-4", nil, st1, tn, cdbm.NVLinkLogicalPartitionStatusDeleting, false)
 	assert.NotNil(t, nvllp4)
 
 	// Set created earlier than the inventory receipt interval (with buffer to exceed threshold)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), nvllp4.ID.String())
+	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), nvllp4.ID.String())
 	assert.NoError(t, err)
 
 	nvllp5 := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-5", nil, st1, tn, cdbm.NVLinkLogicalPartitionStatusDeleting, false)
 	assert.NotNil(t, nvllp5)
 
 	// Set created earlier than the inventory receipt interval (with buffer to exceed threshold)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), nvllp5.ID.String())
+	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), nvllp5.ID.String())
 	assert.NoError(t, err)
 
 	nvllp6 := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-6", nil, st1, tn, cdbm.NVLinkLogicalPartitionStatusDeleting, false)
 	assert.NotNil(t, nvllp6)
 
 	// Set created earlier than the inventory receipt interval (with buffer to exceed threshold)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), nvllp6.ID.String())
+	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), nvllp6.ID.String())
 	assert.NoError(t, err)
 
 	nvllp7 := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-7", nil, st1, tn, cdbm.NVLinkLogicalPartitionStatusReady, false)
 	assert.NotNil(t, nvllp7)
 
 	// Set created and updated earlier than the inventory receipt interval (with buffer to exceed threshold)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), nvllp7.ID.String())
+	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), nvllp7.ID.String())
 	assert.NoError(t, err)
 
 	nvllp8 := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-8", nil, st1, tn, cdbm.NVLinkLogicalPartitionStatusError, true)
@@ -162,21 +162,21 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionsInDB(t *testi
 	assert.NotNil(t, nvllp9)
 
 	// Set created earlier than the inventory receipt interval (with buffer to exceed threshold)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), nvllp9.ID.String())
+	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), nvllp9.ID.String())
 	assert.NoError(t, err)
 
 	nvllp10 := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-10", nil, st1, tn, cdbm.NVLinkLogicalPartitionStatusDeleting, false)
 	assert.NotNil(t, nvllp10)
 
 	// Set created earlier than the inventory receipt interval (with buffer to exceed threshold)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), nvllp10.ID.String())
+	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), nvllp10.ID.String())
 	assert.NoError(t, err)
 
 	nvllp11 := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-11", nil, st1, tn, cdbm.NVLinkLogicalPartitionStatusReady, false)
 	assert.NotNil(t, nvllp11)
 
 	// Set created and updated earlier than the inventory receipt interval (with buffer to exceed threshold)
-	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*2), nvllp11.ID.String())
+	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), nvllp11.ID.String())
 	assert.NoError(t, err)
 
 	// Build InfiniBand Partition inventory that is paginated
@@ -186,7 +186,7 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionsInDB(t *testi
 	for i := 0; i < 38; i++ {
 		nvllp := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, fmt.Sprintf("test-vpc-paged-%d", i), nil, st2, tn, cdbm.NVLinkLogicalPartitionStatusReady, false)
 		// Update created and updated timestamps to be earlier than inventory processing interval (with buffer to exceed threshold)
-		_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*3), time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval)*3), nvllp.ID.String())
+		_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*3), time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*3), nvllp.ID.String())
 		assert.NoError(t, err)
 		pagedIbps = append(pagedIbps, nvllp)
 		pagedInvIds = append(pagedInvIds, nvllp.ID.String())
@@ -423,6 +423,8 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionsInDB(t *testi
 			// Mock the "UpdateNVLinkLogicalPartitionsInDB" activity
 			mtc := &tmocks.Client{}
 			mnvllp.siteClientPool.IDClientMap[st1.ID.String()] = mtc
+
+			cwu.TestInventoryAgeUpdatedTimestamp(tt.args.ctx, t, dbSession, (*cdbm.NVLinkLogicalPartition)(nil))
 
 			err := mnvllp.UpdateNVLinkLogicalPartitionsInDB(tt.args.ctx, tt.args.siteID, tt.args.nvLinkLogicalPartitionInventory)
 			assert.Equal(t, tt.wantErr, err != nil)

@@ -17,19 +17,18 @@
 
 //! State Controller IO implementation for Machines
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use config_version::{ConfigVersion, Versioned};
-use db::{self, DatabaseError};
+use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpa_interface::DpaSearchConfig;
-use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::slas::MachineSlaConfig;
 use model::machine::{
-    self, AttestationMode, DecommissioningState, DpuDiscoveringState, DpuInitState,
-    HostHealthConfig, MachineMaintenanceOperation, MachineValidatingState, ManagedHostState,
-    ManagedHostStateSnapshot, MeasuringState, ReadyBootConfigState, SpdmMeasuringState,
-    ValidationState,
+    self, AttestationMode, ConfigureAstraState, DecommissioningState, DpuDiscoveringState,
+    DpuInitState, HostHealthConfig, MachineMaintenanceOperation, MachineValidatingState,
+    ManagedHostState, ManagedHostStateSnapshot, MeasuringState, ReadyBootConfigState,
+    SpdmMeasuringState, ValidationState,
 };
 use sqlx::PgConnection;
 use state_controller::io::StateControllerIO;
@@ -46,7 +45,7 @@ pub struct MachineStateControllerIO {
 
 #[async_trait::async_trait]
 impl StateControllerIO for MachineStateControllerIO {
-    type ObjectId = MachineId;
+    type ObjectId = HostMachineId;
     type State = ManagedHostStateSnapshot;
     type ControllerState = ManagedHostState;
     type MetricsEmitter = MachineMetricsEmitter;
@@ -61,14 +60,7 @@ impl StateControllerIO for MachineStateControllerIO {
         &self,
         txn: &mut PgConnection,
     ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
-        Ok(db::machine::find_machine_ids(
-            txn,
-            MachineSearchConfig {
-                include_predicted_host: true,
-                ..Default::default()
-            },
-        )
-        .await?)
+        db::managed_host::load_host_ids(txn).await
     }
 
     /// Loads a state snapshot from the database
@@ -77,19 +69,6 @@ impl StateControllerIO for MachineStateControllerIO {
         txn: &mut PgConnection,
         machine_id: &Self::ObjectId,
     ) -> Result<Option<Self::State>, DatabaseError> {
-        // Never load state for DPUs
-        // The state machine is only supposed to execute for hosts
-        // If by any accidental chance a DPU ID was enqueued into the system,
-        // we filter it here.
-        if machine_id.machine_type().is_dpu() {
-            return Err(DatabaseError::new(
-                "MachineStateControllerIO::load_object_state",
-                sqlx::Error::InvalidArgument(
-                    "DPU state can not be loaded by state controller".to_string(),
-                ),
-            ));
-        }
-
         let mut retstate = db::managed_host::load_snapshot(
             txn,
             machine_id,
@@ -130,18 +109,22 @@ impl StateControllerIO for MachineStateControllerIO {
         &self,
         txn: &mut PgConnection,
         object_id: &Self::ObjectId,
-        _old_version: ConfigVersion,
-        _new_version: ConfigVersion,
+        old_version: ConfigVersion,
+        new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
-        db::machine::update_state(txn, object_id, new_state).await?;
-        Ok(true)
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
+        db::machine::try_update_controller_state(
+            txn,
+            object_id,
+            old_version,
+            new_version,
+            new_state,
+        )
+        .await
     }
 
-    /// State history for machines (including DPUs) is persisted internally by
-    /// `db::machine::advance()` inside `update_state`, so this is actually a
-    /// no-op for now.
-    // TODO(chet): Pull this in as well.
+    /// Machine persistence writes history before updating each machine, matching
+    /// `advance`'s lock order. Moving history here could deadlock with `advance`.
     async fn persist_state_history(
         &self,
         _txn: &mut PgConnection,
@@ -296,6 +279,15 @@ impl StateControllerIO for MachineStateControllerIO {
         }
 
         match state {
+            ManagedHostState::ConfigureAstra {
+                configure_astra_state,
+            } => (
+                "configureastra",
+                match configure_astra_state {
+                    ConfigureAstraState::EnableNics => "enablenics",
+                    ConfigureAstraState::WaitingForPowercycle => "waitingforpowercycle",
+                },
+            ),
             ManagedHostState::DpuDiscoveringState { dpu_states } => {
                 // Min state indicates the least processed DPU. The state machine is blocked
                 // becasue of this.
@@ -334,6 +326,7 @@ impl StateControllerIO for MachineStateControllerIO {
                     ("decommissioning", "suppressingoobdhcp")
                 }
                 DecommissioningState::PowerCyclingHost => ("decommissioning", "powercyclinghost"),
+                DecommissioningState::PoweringOnHost => ("decommissioning", "poweringonhost"),
                 DecommissioningState::WaitingForOobDhcpAcknowledgement => {
                     ("decommissioning", "waitingforoobdhcpacknowledgement")
                 }
@@ -357,11 +350,12 @@ impl StateControllerIO for MachineStateControllerIO {
                 "bootconfiguring",
                 ready_boot_config_state_name(boot_config_state),
             ),
-            ManagedHostState::Maintenance { operation } => {
+            ManagedHostState::Maintenance { operation, .. } => {
                 let op = match operation {
                     MachineMaintenanceOperation::PowerOn => "power_on",
                     MachineMaintenanceOperation::PowerOff => "power_off",
                     MachineMaintenanceOperation::Reset => "reset",
+                    MachineMaintenanceOperation::ChassisReset { .. } => "chassis_reset",
                 };
                 ("maintenance", op)
             }
@@ -379,6 +373,7 @@ impl StateControllerIO for MachineStateControllerIO {
             ManagedHostState::RotatingBmc { .. } => ("rotatingbmc", ""),
             ManagedHostState::RotatingHostUefi { .. } => ("rotatinghostuefi", ""),
             ManagedHostState::RotatingDpuUefi { .. } => ("rotatingdpuuefi", ""),
+            ManagedHostState::RotatingNicLockdown => ("rotatingniclockdown", ""),
             ManagedHostState::Measuring { measuring_state } => {
                 ("measuring", measuring_state_name(measuring_state))
             }

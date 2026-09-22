@@ -19,5 +19,5 @@ use carbide_uuid::domain::DomainId;
 
 pub struct TestDomain {
     pub id: DomainId,
-    pub name: &'static str,
+    pub name: String,
 }

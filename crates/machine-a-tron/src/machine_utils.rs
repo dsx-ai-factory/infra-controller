@@ -14,16 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashSet;
 
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
 use carbide_uuid::machine_validation::MachineValidationId;
 use lazy_static::lazy_static;
 use rpc::forge::{ForgeAgentControlResponse, MachineArchitecture};
 use tempfile::TempDir;
-use uuid::Uuid;
 
-use crate::DeviceHandle;
 use crate::api_client::ClientApiError;
 use crate::config::MachineATronContext;
 
@@ -177,22 +174,6 @@ fn parse_pxe_response(pxe_script: &str) -> Result<PxeResponse, PxeError> {
         boot_target,
         machine_interface_id,
     })
-}
-
-pub(super) async fn get_next_free_machine(
-    provisionable_handles: &Vec<DeviceHandle>,
-    assigned_mat_ids: &HashSet<Uuid>,
-) -> Option<DeviceHandle> {
-    for machine in provisionable_handles {
-        if assigned_mat_ids.contains(&machine.mat_id()) {
-            continue;
-        }
-        let state = machine.api_state().await.ok()?;
-        if state == "Ready" {
-            return Some(machine.clone());
-        }
-    }
-    None
 }
 
 #[cfg(test)]

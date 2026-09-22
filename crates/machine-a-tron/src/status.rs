@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 use bmc_mock::HardwareType;
-use bmc_mock::ipmi_sim::IpmiEndpoint;
 use serde::Serialize;
 use ufm_mock::{EpochId, Generation, InventoryId};
 
@@ -129,19 +128,10 @@ impl EndpointStatus {
         }
     }
 
-    pub fn ssh(port: u16) -> Self {
+    pub fn same_port(port: u16) -> Self {
         Self {
             reachable_port: port,
             listen_port: port,
-        }
-    }
-}
-
-impl From<IpmiEndpoint> for EndpointStatus {
-    fn from(endpoint: IpmiEndpoint) -> Self {
-        Self {
-            reachable_port: endpoint.reachable_port,
-            listen_port: endpoint.listen_port,
         }
     }
 }

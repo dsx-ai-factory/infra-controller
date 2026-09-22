@@ -22,7 +22,6 @@ use std::time::Duration;
 use carbide_mqtt_common::hook::{MqttPublisher, publish_with_deadline};
 use carbide_mqtt_common::metrics::{MqttHookMetrics, PublishComponent};
 use carbide_utils::managed_loop::{self, LoopManager};
-use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, Utc};
 use db::work_lock_manager::{AcquireLockError, WorkLockManagerHandle};
 use health_report::HealthReport;
@@ -221,7 +220,7 @@ impl<P: MqttPublisher> ManagedHostStateRepublisher<P> {
                 &self.topic_prefix,
                 self.publish_timeout,
                 &self.metrics,
-                &snapshot.host_snapshot.id,
+                &machine_id,
                 &snapshot.managed_state,
                 Utc::now(),
             )
@@ -283,7 +282,7 @@ async fn publish_state<P: MqttPublisher>(
     topic_prefix: &str,
     publish_timeout: Duration,
     metrics: &MqttHookMetrics,
-    machine_id: &MachineId,
+    machine_id: &carbide_uuid::machine::HostMachineId,
     state: &ManagedHostState,
     timestamp: DateTime<Utc>,
 ) {
@@ -337,12 +336,14 @@ mod tests {
         MqttHookMetrics::without_queue_depth(PublishComponent::ManagedHostRepublish)
     }
 
-    fn test_machine_id() -> MachineId {
-        MachineId::new(
+    fn test_machine_id() -> carbide_uuid::machine::HostMachineId {
+        carbide_uuid::machine::MachineId::new(
             MachineIdSource::ProductBoardChassisSerial,
             [0; 32],
             MachineType::Host,
         )
+        .try_into()
+        .unwrap()
     }
 
     /// Publisher that forwards each published (topic, payload) over a channel.

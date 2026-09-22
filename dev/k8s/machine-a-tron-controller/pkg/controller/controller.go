@@ -52,6 +52,8 @@ const (
 	AnnotationRedfishListenPort = "nvidia-infra-controller/mat-redfish-listen-port"
 	// AnnotationIPMIListenPort is the IPMI listen port annotation.
 	AnnotationIPMIListenPort = "nvidia-infra-controller/mat-ipmi-listen-port"
+	// AnnotationSSHListenPort is the SSH listen port annotation.
+	AnnotationSSHListenPort = "nvidia-infra-controller/mat-ssh-listen-port"
 
 	// MachineTypeHost is the machine type for hosts.
 	MachineTypeHost = "host"
@@ -62,6 +64,8 @@ const (
 	PortNameRedfish = "redfish"
 	// PortNameIPMI is the name of the IPMI port.
 	PortNameIPMI = "ipmi"
+	// PortNameSSH is the name of the SSH port.
+	PortNameSSH = "ssh"
 
 	// DefaultConcurrency is the default number of concurrent workers for K8s API calls.
 	DefaultConcurrency = 50
@@ -71,6 +75,10 @@ const (
 type ServiceBuilder struct {
 	Namespace    string
 	BaseSelector map[string]string
+	// EnableStateAnnotations controls whether machine state annotations
+	// (api-state, power-state) are included on Services. When false (default),
+	// these annotations are omitted to reduce K8s API update churn.
+	EnableStateAnnotations bool
 	// OwnerRefs maps pod names to their Deployment's OwnerReference.
 	// Services are owned by the machine-a-tron Deployment they route to.
 	OwnerRefs map[string]metav1.OwnerReference
@@ -109,9 +117,11 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 	}
 
 	annotations := map[string]string{
-		AnnotationAPIState:          machine.APIState,
-		AnnotationPowerState:        machine.PowerState,
 		AnnotationRedfishListenPort: strconv.Itoa(int(machine.BMC.Redfish.ListenPort)),
+	}
+	if b.EnableStateAnnotations {
+		annotations[AnnotationAPIState] = machine.APIState
+		annotations[AnnotationPowerState] = machine.PowerState
 	}
 	if machine.BMC.IP != nil {
 		annotations[AnnotationBMCIP] = *machine.BMC.IP
@@ -138,6 +148,17 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 			TargetPort: intstr.FromInt32(int32(machine.BMC.IPMI.ListenPort)),
 		})
 		annotations[AnnotationIPMIListenPort] = strconv.Itoa(int(machine.BMC.IPMI.ListenPort))
+	}
+
+	// Add SSH port if available
+	if machine.BMC.SSH != nil {
+		ports = append(ports, corev1.ServicePort{
+			Name:       PortNameSSH,
+			Protocol:   corev1.ProtocolTCP,
+			Port:       int32(machine.BMC.SSH.ReachablePort),
+			TargetPort: intstr.FromInt32(int32(machine.BMC.SSH.ListenPort)),
+		})
+		annotations[AnnotationSSHListenPort] = strconv.Itoa(int(machine.BMC.SSH.ListenPort))
 	}
 
 	// Build selector - include pod name for multi-pod deployments
@@ -185,14 +206,18 @@ func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatu
 	var services []*corev1.Service
 
 	for _, machine := range status.Machines {
-		// Build service for the host
-		svc := b.BuildService(&machine, MachineTypeHost, "", podName)
-		services = append(services, svc)
+		// Build service for the host only after DHCP has assigned its BMC IP.
+		// BuildService sets spec.clusterIP from the BMC IP, so a Service built
+		// without one would be given an arbitrary ClusterIP by the API server.
+		if machine.BMC.IP != nil && *machine.BMC.IP != "" {
+			services = append(services, b.BuildService(&machine, MachineTypeHost, "", podName))
+		}
 
-		// Build services for DPUs
+		// Build services for DPUs under the same BMC IP gate.
 		for _, dpu := range machine.DPUs {
-			dpuSvc := b.BuildService(&dpu, MachineTypeDPU, machine.MatID, podName)
-			services = append(services, dpuSvc)
+			if dpu.BMC.IP != nil && *dpu.BMC.IP != "" {
+				services = append(services, b.BuildService(&dpu, MachineTypeDPU, machine.MatID, podName))
+			}
 		}
 	}
 
@@ -374,7 +399,7 @@ func isControllerLabel(k string) bool {
 
 func isControllerAnnotation(k string) bool {
 	switch k {
-	case AnnotationBMCIP, AnnotationAPIState, AnnotationPowerState, AnnotationHardwareType, AnnotationRedfishListenPort, AnnotationIPMIListenPort:
+	case AnnotationBMCIP, AnnotationAPIState, AnnotationPowerState, AnnotationHardwareType, AnnotationRedfishListenPort, AnnotationIPMIListenPort, AnnotationSSHListenPort:
 		return true
 	default:
 		return false

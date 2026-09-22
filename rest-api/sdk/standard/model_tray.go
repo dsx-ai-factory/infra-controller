@@ -24,10 +24,8 @@ var _ MappedNullable = &Tray{}
 
 // Tray Tray represents a component within a rack (e.g. compute node, NVSwitch, power shelf)
 type Tray struct {
-	// Unique identifier of the Tray
+	// Component ID
 	Id *string `json:"id,omitempty"`
-	// ID of the component
-	ComponentId *string `json:"componentId,omitempty"`
 	// Type of the tray
 	Type *string `json:"type,omitempty"`
 	// Name of the tray
@@ -52,10 +50,11 @@ type Tray struct {
 	Position *TrayPosition `json:"position,omitempty"`
 	// BMC (Baseboard Management Controller) entries for the tray
 	Bmcs []BMCInfo `json:"bmcs,omitempty"`
-	// ID of the rack this tray belongs to
+	// ID of the Rack this Tray belongs to
 	RackId *string `json:"rackId,omitempty"`
 	// ID of the NVLink Domain containing this Tray's Rack. Null when the Rack is not assigned to an NVLink Domain.
 	NvLinkDomainId NullableString `json:"nvLinkDomainId"`
+	TaskStats      TaskStats      `json:"taskStats"`
 }
 
 type _Tray Tray
@@ -64,9 +63,10 @@ type _Tray Tray
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTray(nvLinkDomainId NullableString) *Tray {
+func NewTray(nvLinkDomainId NullableString, taskStats TaskStats) *Tray {
 	this := Tray{}
 	this.NvLinkDomainId = nvLinkDomainId
+	this.TaskStats = taskStats
 	return &this
 }
 
@@ -108,38 +108,6 @@ func (o *Tray) HasId() bool {
 // SetId gets a reference to the given string and assigns it to the Id field.
 func (o *Tray) SetId(v string) {
 	o.Id = &v
-}
-
-// GetComponentId returns the ComponentId field value if set, zero value otherwise.
-func (o *Tray) GetComponentId() string {
-	if o == nil || IsNil(o.ComponentId) {
-		var ret string
-		return ret
-	}
-	return *o.ComponentId
-}
-
-// GetComponentIdOk returns a tuple with the ComponentId field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-func (o *Tray) GetComponentIdOk() (*string, bool) {
-	if o == nil || IsNil(o.ComponentId) {
-		return nil, false
-	}
-	return o.ComponentId, true
-}
-
-// HasComponentId returns a boolean if a field has been set.
-func (o *Tray) HasComponentId() bool {
-	if o != nil && !IsNil(o.ComponentId) {
-		return true
-	}
-
-	return false
-}
-
-// SetComponentId gets a reference to the given string and assigns it to the ComponentId field.
-func (o *Tray) SetComponentId(v string) {
-	o.ComponentId = &v
 }
 
 // GetType returns the Type field value if set, zero value otherwise.
@@ -584,6 +552,30 @@ func (o *Tray) SetNvLinkDomainId(v string) {
 	o.NvLinkDomainId.Set(&v)
 }
 
+// GetTaskStats returns the TaskStats field value
+func (o *Tray) GetTaskStats() TaskStats {
+	if o == nil {
+		var ret TaskStats
+		return ret
+	}
+
+	return o.TaskStats
+}
+
+// GetTaskStatsOk returns a tuple with the TaskStats field value
+// and a boolean to check if the value has been set.
+func (o *Tray) GetTaskStatsOk() (*TaskStats, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.TaskStats, true
+}
+
+// SetTaskStats sets field value
+func (o *Tray) SetTaskStats(v TaskStats) {
+	o.TaskStats = v
+}
+
 func (o Tray) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -596,9 +588,6 @@ func (o Tray) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	if !IsNil(o.Id) {
 		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.ComponentId) {
-		toSerialize["componentId"] = o.ComponentId
 	}
 	if !IsNil(o.Type) {
 		toSerialize["type"] = o.Type
@@ -640,6 +629,7 @@ func (o Tray) ToMap() (map[string]interface{}, error) {
 		toSerialize["rackId"] = o.RackId
 	}
 	toSerialize["nvLinkDomainId"] = o.NvLinkDomainId.Get()
+	toSerialize["taskStats"] = o.TaskStats
 	return toSerialize, nil
 }
 
@@ -649,6 +639,7 @@ func (o *Tray) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"nvLinkDomainId",
+		"taskStats",
 	}
 
 	allProperties := make(map[string]interface{})

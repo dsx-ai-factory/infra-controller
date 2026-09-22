@@ -20,7 +20,9 @@
 use carbide_uuid::power_shelf::PowerShelfId;
 use component_manager::component_common::{PowerStatePollOutcome, interpret_power_state_poll};
 use db::power_shelf as db_power_shelf;
-use model::power_shelf::{PowerShelf, PowerShelfControllerState, PowerShelfStatus};
+use model::power_shelf::{
+    PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState, PowerShelfStatus,
+};
 use sqlx::PgTransaction;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -54,6 +56,17 @@ pub async fn handle_ready(
         ));
     }
 
+    if state.decommission_requested {
+        let mut txn = ctx.services.db_pool.begin().await?;
+        db_power_shelf::clear_decommission_requested(txn.as_mut(), *power_shelf_id).await?;
+        return Ok(
+            StateHandlerOutcome::transition(PowerShelfControllerState::Decommissioning {
+                decommissioning_state: PowerShelfDecommissioningState::SuppressingSiteExplorer,
+            })
+            .with_txn(txn),
+        );
+    }
+
     if let Some(req) = state.power_shelf_maintenance_requested.as_ref() {
         tracing::info!(
             operation = ?req.operation,
@@ -63,6 +76,7 @@ pub async fn handle_ready(
         return Ok(StateHandlerOutcome::transition(
             PowerShelfControllerState::Maintenance {
                 operation: req.operation,
+                request: Some(req.clone()),
             },
         ));
     }

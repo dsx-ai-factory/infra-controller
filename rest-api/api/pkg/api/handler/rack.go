@@ -163,7 +163,7 @@ func (grh GetRackHandler) Handle(c echo.Context) error {
 		ctx, c, logger, stc,
 		flowv1.Flow_GetRackInfoByID_FullMethodName,
 		flowRequest, &flowResponse,
-		common.FlowWorkflowID(fmt.Sprintf("rack-get-%s", rackStrID)), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		fmt.Sprintf("rack-get-%s", rackStrID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
 		return proxyErr
@@ -349,7 +349,7 @@ func (garh GetAllRackHandler) Handle(c echo.Context) error {
 		ctx, c, logger, stc,
 		flowv1.Flow_GetListOfRacks_FullMethodName,
 		flowRequest, &flowResponse,
-		common.FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
 		return proxyErr
@@ -499,9 +499,7 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 				Racks: &flowv1.RackTargets{
 					Targets: []*flowv1.RackTarget{
 						{
-							Identifier: &flowv1.RackTarget_Id{
-								Id: &flowv1.UUID{Id: rackStrID},
-							},
+							Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 						},
 					},
 				},
@@ -515,7 +513,7 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 		ctx, c, logger, stc,
 		flowv1.Flow_ValidateComponents_FullMethodName,
 		flowRequest, &flowResponse,
-		common.FlowWorkflowID(fmt.Sprintf("rack-validate-%s", rackStrID)), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		fmt.Sprintf("rack-validate-%s", rackStrID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
 		return proxyErr
@@ -660,7 +658,7 @@ func (vrsh ValidateRacksHandler) Handle(c echo.Context) error {
 		ctx, c, logger, stc,
 		flowv1.Flow_ValidateComponents_FullMethodName,
 		flowRequest, &flowResponse,
-		common.FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
 		return proxyErr
@@ -698,7 +696,7 @@ func NewUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 
 // Handle godoc
 // @Summary Power control a Rack
-// @Description Power control a Rack identified by Rack UUID (on, off, cycle, forceoff, forcecycle)
+// @Description Power control a Rack identified by Rack ID (on, off, cycle, forceoff, forcecycle)
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -791,9 +789,7 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 			Racks: &flowv1.RackTargets{
 				Targets: []*flowv1.RackTarget{
 					{
-						Identifier: &flowv1.RackTarget_Id{
-							Id: &flowv1.UUID{Id: rackStrID},
-						},
+						Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 					},
 				},
 			},
@@ -952,13 +948,13 @@ func NewUpdateRackFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp
 
 // Handle godoc
 // @Summary Firmware update a Rack
-// @Description Update firmware on a Rack identified by Rack UUID.
+// @Description Update firmware on a Rack identified by Rack ID.
 // @Tags rack
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param id path string true "UUID of the Rack"
+// @Param id path string true "Rack ID"
 // @Param body body model.APIUpdateFirmwareRequest true "Firmware update request"
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/rack/{id}/firmware [patch]
@@ -1043,9 +1039,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 			Racks: &flowv1.RackTargets{
 				Targets: []*flowv1.RackTarget{
 					{
-						Identifier: &flowv1.RackTarget_Id{
-							Id: &flowv1.UUID{Id: rackStrID},
-						},
+						Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 					},
 				},
 			},
@@ -1054,7 +1048,8 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 
 	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.Version,
 		nil, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID, apiRequest.RuleID,
-		apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack")
+		apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
+		fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack")
 	if err != nil {
 		return err
 	}
@@ -1173,7 +1168,8 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 
 	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, request.Version,
 		nil, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
-		request.OverrideReadinessCheck, fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack")
+		request.OverrideReadinessCheck, request.OverrideVersionCheck,
+		fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack")
 	if err != nil {
 		return err
 	}
@@ -1206,13 +1202,13 @@ func NewBringUpRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cl
 
 // Handle godoc
 // @Summary Bring up a Rack
-// @Description Bring up a Rack identified by Rack UUID
+// @Description Bring up a Rack identified by Rack ID
 // @Tags rack
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param id path string true "UUID of the Rack"
+// @Param id path string true "Rack ID"
 // @Param body body model.APIBringUpRackRequest true "Bring up request"
 // @Success 200 {object} model.APIBringUpRackResponse
 // @Router /v2/org/{org}/nico/rack/{id}/bringup [post]
@@ -1298,9 +1294,7 @@ func (burh BringUpRackHandler) Handle(c echo.Context) error {
 			Racks: &flowv1.RackTargets{
 				Targets: []*flowv1.RackTarget{
 					{
-						Identifier: &flowv1.RackTarget_Id{
-							Id: &flowv1.UUID{Id: rackStrID},
-						},
+						Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 					},
 				},
 			},

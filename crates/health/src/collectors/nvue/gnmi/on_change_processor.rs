@@ -122,6 +122,7 @@ impl GnmiOnChangeProcessor {
                     grpc_status_code = e.code,
                     error = %e.message,
                     stream = %self.collector_name,
+                    rack_id = self.event_context.rack_id().map(tracing::field::display),
                     "nvue_gnmi ON_CHANGE: server error in stream"
                 );
                 return;
@@ -258,6 +259,7 @@ impl GnmiOnChangeProcessor {
             instance_id,
             severity,
             text,
+            rack_id = self.event_context.rack_id().map(tracing::field::display),
             "nvue_gnmi ON_CHANGE: row received"
         );
 
@@ -315,8 +317,8 @@ fn delete_target_from_path(elems: &[&PathElem]) -> Option<DeleteTarget> {
 fn severity_to_f64(severity: Option<&str>) -> f64 {
     match severity {
         Some(s) if s.eq_ignore_ascii_case("informational") => 1.0,
-        Some(s) if s.eq_ignore_ascii_case("warning") => 2.0,
-        Some(s) if s.eq_ignore_ascii_case("error") => 3.0,
+        Some(s) if s.eq_ignore_ascii_case("warning") || s.eq_ignore_ascii_case("minor") => 2.0,
+        Some(s) if s.eq_ignore_ascii_case("error") || s.eq_ignore_ascii_case("major") => 3.0,
         Some(s) if s.eq_ignore_ascii_case("critical") => 4.0,
         _ => 0.0,
     }
@@ -378,7 +380,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().unwrap(),
                 port: None,
-                mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+                mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
             },
             collector_type,
             metadata: None,
@@ -477,7 +479,9 @@ mod tests {
     fn test_severity_to_f64() {
         assert_eq!(severity_to_f64(Some("informational")), 1.0);
         assert_eq!(severity_to_f64(Some("warning")), 2.0);
+        assert_eq!(severity_to_f64(Some("MINOR")), 2.0);
         assert_eq!(severity_to_f64(Some("error")), 3.0);
+        assert_eq!(severity_to_f64(Some("MAJOR")), 3.0);
         assert_eq!(severity_to_f64(Some("critical")), 4.0);
         assert_eq!(severity_to_f64(Some("CRITICAL")), 4.0);
         assert_eq!(severity_to_f64(Some("other")), 0.0);
@@ -777,7 +781,7 @@ mod tests {
                 addr: BmcAddr {
                     ip: "10.0.0.1".parse().unwrap(),
                     port: None,
-                    mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+                    mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
                 },
                 collector_type: ON_CHANGE_STREAM_ID_SYSTEM_EVENTS,
                 labels: Default::default(),

@@ -138,6 +138,15 @@ impl K8sConfigRepository for RebootAnnotationMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for RebootAnnotationMock {
+    async fn get(
+        &self,
+        _name: &str,
+        _ns: &str,
+    ) -> Result<Option<crate::crds::dpfoperatorconfigs_generated::DPFOperatorConfig>, DpfError>
+    {
+        Ok(None)
+    }
+
     async fn patch(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), DpfError> {
         Ok(())
     }

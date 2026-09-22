@@ -1,5 +1,13 @@
 # NVIDIA Infra Controller
 
+> **Repository move notice:** On September 4, 2026, the NICo repository moved
+> from the NVIDIA GitHub organization to
+> [`dsx-ai-factory/infra-controller`](https://github.com/dsx-ai-factory/infra-controller).
+> Existing repository URLs and standard Git operations continue to work through
+> GitHub redirects. If you maintain automation or integrations that reference
+> `NVIDIA/infra-controller`, such as GitHub Actions, webhooks, or pinned
+> repository URLs, update them to `dsx-ai-factory/infra-controller`.
+
 NVIDIA Infra Controller (NICo) delivers zero-touch lifecycle automation for
 bare-metal systems that secures datacenter infrastructure at its foundation.
 
@@ -77,10 +85,14 @@ cd helm-prereqs
 
 See [helm-prereqs/README.md](helm-prereqs/README.md) for the full reference: PKI architecture, PostgreSQL setup, phase-by-phase description, secrets reference, and troubleshooting.
 
-## Experimental Notice
+## Contributing
 
-This software is considered *experimental* and is a preview release. Use at
-your own risk in production environments. The software is provided "as is"
-without warranties of any kind. Features, APIs, and configurations may change
-without notice in future releases. For production deployments, thoroughly test
-in non-critical environments first.
+See the [contribution guide](CONTRIBUTING.md) for instructions on setting
+up a development environment and submitting changes, and the
+[code of conduct](CODE_OF_CONDUCT.md) for contributor expectations.
+
+## Release Notice
+
+The software is provided "as is" without warranties of any kind. Features,
+APIs, and configurations may change in future releases. For production
+deployments, please test thoroughly in non-critical environments first.

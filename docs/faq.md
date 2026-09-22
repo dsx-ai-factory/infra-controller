@@ -8,7 +8,7 @@ This document contains frequently asked questions about NVIDIA Infra Controller 
 
 NICo commonly runs on a Kubernetes cluster (with 3 or 5 control plane nodes recommended), though there is no requirement to do so. NICo runs as a set of microservices for API, DNS, DHCP, Hardware Monitoring, BMC Console, Rack Management, etc.
 
-NICo can be deployed with Helm charts (located in  the `/helm`) directory or with Kubernetes Kustomize manifests.
+NICo can be deployed with Helm charts (located in the `/helm`) directory or with Kubernetes Kustomize manifests.
 
 **Does NICo install Cumulus Linux onto Ethernet switches?**
 
@@ -20,7 +20,7 @@ Yes, NICo installs the DPU operating system, including all DPU firmware (BMC, NI
 
 **Does NICo install NVIDIA Unified Fabric Manager (UFM)?**
 
-No, NICo does not install UFM; it is a dependency. NICo leverages existing UFM deployments for InfiniBand partition management via the UFM API using partition keys (P_Keys). 
+No, NICo does not install UFM; it is a dependency. NICo leverages existing UFM deployments for InfiniBand partition management via the UFM API using partition keys (P_Keys).
 
 **Does NICo manage InfiniBand switches in standalone mode?**
 
@@ -36,9 +36,14 @@ Yes, NICo supports DGX as well as OEM/ODM nodes that are CPU-only, for storage, 
 
 Yes, NICo supports both PXE and image-based installation of operating systems onto servers. Any operating system supported by [iPXE](http://ipxe.org) can be installed. Operating system management (patching, configuration, image generation) is the user’s responsibility.
 
-**Do I need to change the OOB management TOR to configure a separate VLAN for the NICo managed hosts and DPU (DPU OOB, Host OOB), with DHCP relay pointing to NICo DHCP?**
+**Must every host BMC use a separate OOB VLAN with DHCP relay to NICo?**
 
-Yes, this is the most common way to configure NICo. Each VLAN (sometimes the whole switch is a VLAN) or SVI port needs to have its DHCP relay for the machines and DPUs you wish to manage, with NICo pointing to the DHCP server address you have set up.
+No. A dedicated OOB VLAN is the conventional and recommended topology. For a
+zero-DPU or DPU-NIC-mode host, however, the host BMC and host OS NIC may use
+distinct addresses on one `HostInband` subnet/VLAN. Model it as one HostInband
+segment and relay that network to NICo DHCP. The exception does not apply to a
+DPU BMC or DPU OOB interface, and it gives up dedicated OOB network isolation.
+See [Shared HostInband for a Host BMC and Host OS](provisioning/ip-and-network-configuration.md#15-shared-hostinband-for-a-host-bmc-and-host-os).
 
 **Do I need to change existing infrastructure if separate VLANs are used?**
 
@@ -46,13 +51,21 @@ No, there is no need to change existing infrastructure if separate VLANs are use
 
 **With only one RJ45 on BF3, the DPU in-band IP addresses allocation is part of DPU loopback allocated by NICo. Does it assume that the same management switch also supports DPU SSH access and that the DPU SSH IP is allocated by NICo and only accessible inside the data center?**
 
-The IP addresses issued to the DPU RJ45 port are from the "network segments" (which is different than a DPU loopback)--the API in NICo is used to create a Network Segment of type underlay on whatever the underlying network configuration is. NICo issues two IPs to the RJ45: One IP is the DPU OOB used to SSH to the ARM OS and NICo management traffic; the other IP is for the DPU BMC, which is used for Redfish and DPU configuration.  
+The IP addresses issued to the DPU RJ45 port are from the "network segments" (which is different than a DPU loopback)--the API in NICo is used to create a Network Segment of type underlay on whatever the underlying network configuration is. NICo issues two IPs to the RJ45: One IP is the DPU OOB used to SSH to the ARM OS and NICo management traffic; the other IP is for the DPU BMC, which is used for Redfish and DPU configuration.
 
-Also note that the host BMC needs to be on a VLAN that is forwarded to the NICo DHCP relay.
+The host BMC must be on a network relayed to NICo DHCP. That network can be the
+conventional OOB Underlay or, for the supported zero-DPU topology, the shared
+HostInband segment described above.
 
 **The host overlay interfaces addresses on top of vxlan and DPU is allocated via NICo through the control NIC on NICo through overlay networking. Is DHCP relay configuration needed on any switches? Does this overlay need to be manually configured on the NICo control host NIC?**
 
-The DHCP relay is required only on the switches connected to the DPU OOBs/BMCs and Host BMCs. The in-band ToRs only need to be configured for BGP Unnumbered as "routed port". The "overlay" networks that NICo will assign IPs to are defined as "network segments" with the "overlay" type, then the overlay network is referenced when creating an instance.
+For a managed-DPU host, DHCP relay is required only on the switches connected
+to DPU OOB/BMC and host-BMC networks; the DPU serves the host overlay itself,
+and the in-band ToRs use BGP unnumbered routed ports. For a zero-DPU or
+DPU-NIC-mode host, the host OS uses central NICo DHCP on HostInband, so the
+HostInband L2/SVI must also relay to `nico-dhcp`. The host BMC can use that same
+relay-selected segment as described above. The DPU-served overlay itself does
+not require a physical-switch DHCP relay.
 
 **Do I need to separate the NICo PXE to isolate the PXE installation process from site PXE server?**
 
@@ -84,10 +97,10 @@ Yes, NICo supports NVLink partitioning.
 
 **How does NICo maintain tenancy enforcement between Ethernet (N/S), Infiniband (E/W), NVLink (GPU-to-GPU) networks?**
 
-* **Ethernet**: VXLAN with EVPN for VPC creation on DPUs
-* **E/W Ethernet (Spectrum-X)**: A CX-based firmware, named "DPA", which uses VXLAN on CX switches (as part of a future release)
-* **Infiniband**: UFM-based partition key (P_Key) assignment
-* **NVLink**: NMX-C-based partition management
+- **Ethernet**: VXLAN with EVPN for VPC creation on DPUs
+- **E/W Ethernet (Spectrum-X)**: A CX-based firmware, named "DPA", which uses VXLAN on CX switches (as part of a future release)
+- **Infiniband**: UFM-based partition key (P_Key) assignment
+- **NVLink**: NMX-C-based partition management
 
 DPUs enforce Ethernet isolation in hardware, UFM enforces InfiniBand isolation, and NMX-C enforces NVLink isolation--all coordinated by NICo.
 
@@ -103,7 +116,15 @@ NICo stores the owner of each instance in the form of a `tenant_organization_id`
 
 **When NICo is used to maintain tenancy enforcement for Ethernet and hosts are presented to customers as bare metal, is OOB isolation of GPU/CPU host BMC managed as well, or only the N/S overlay running on DPU?**
 
-NICo configures the host BMC to disable connectivity from within the host to the BMC (e.g. Dell iDrac Lockdown, disabling KCS, etc), and also prevents access from the host (via network) to the BMC of the host. Effectively, the user cannot access the BMC of the bare metal hosts. The BMC console (serial console) is accessed by a user through a NICo service called "SSH Console", which performs authentication and authorization to ensure that the user accessing the console is the current owner of the machine.
+NICo hardens host-local BMC access where the platform supports controls such as
+Dell iDRAC Lockdown or disabling KCS. Network isolation is topology-dependent:
+a dedicated OOB network can keep the tenant-facing host network from reaching
+the BMC, but the supported shared HostInband topology does not provide that
+separation by itself. Operators using shared HostInband must enforce the
+required BMC isolation in the fabric with ACLs, VRFs, private VLANs, or an
+equivalent control. The BMC console (serial console) is accessed through NICo's
+SSH Console service, which authenticates and authorizes the current instance
+owner.
 
 **Can NICo be used to manage a portion of a cluster?**
 

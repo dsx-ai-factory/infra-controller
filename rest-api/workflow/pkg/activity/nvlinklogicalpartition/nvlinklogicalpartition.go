@@ -143,6 +143,16 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 		}
 
 		needsUpdate := name != nil || description != nil || isMissingOnSite != nil || status != nil
+
+		// A row written since the Site collected this inventory holds changes the snapshot cannot
+		// know about, including any made through the API, so writing the reported values over
+		// them would lose those edits.
+		if needsUpdate && site.IsTimeWithinStaleInventoryThreshold(nvllp.Updated) {
+			slogger.Info().Msg("not updating NVLinkLogicalPartition yet because it changed more recently than the inventory interval")
+
+			continue
+		}
+
 		if needsUpdate {
 			_, err := nvlinklogicalpartitionDAO.Update(
 				ctx,
@@ -193,7 +203,7 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 	for _, nvllp := range nvlinklogicalpartitionsToDelete {
 		slogger := logger.With().Str("NVLink Logical Partition ID", nvllp.ID.String()).Logger()
 
-		if util.IsTimeWithinStaleInventoryThreshold(nvllp.Updated) {
+		if site.IsTimeWithinStaleInventoryThreshold(nvllp.Updated) {
 			continue
 		}
 

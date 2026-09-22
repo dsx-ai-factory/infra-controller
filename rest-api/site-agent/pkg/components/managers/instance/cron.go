@@ -6,6 +6,7 @@ package instance
 import (
 	"context"
 
+	wfmgr "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/workflow"
 	sww "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/workflow"
 	"go.temporal.io/sdk/client"
 )
@@ -15,20 +16,13 @@ const (
 	InventoryQueuePrefix = "inventory-"
 	// InventoryCarbidePageSize is the number of items to be fetched from Carbide API at a time
 	InventoryCarbidePageSize = 100
-	// InventoryCloudPageSize is the number of items to be sent to Cloud at a time
-	InventoryCloudPageSize = 25
-	// InventoryDefaultSchedule is the default schedule for inventory discovery
-	InventoryDefaultSchedule = "@every 3m"
 )
 
 // RegisterCron - Register Cron
 func (api *API) RegisterCron() error {
 	ManagerAccess.Data.EB.Log.Info().Msg("Instance: Registering Inventory Discovery Cron")
 	workflowID := "inventory-instance-" + ManagerAccess.Conf.EB.Temporal.TemporalSubscribeNamespace
-	cronSchedule := InventoryDefaultSchedule
-	if ManagerAccess.Conf.EB.Temporal.TemporalInventorySchedule != "" {
-		cronSchedule = ManagerAccess.Conf.EB.Temporal.TemporalInventorySchedule
-	}
+	cronSchedule := wfmgr.EffectiveCronSchedule()
 	ManagerAccess.Data.EB.Log.Info().Str("Schedule", cronSchedule).Msg("Instance: Inventory Discovery Cron Schedule")
 
 	workflowOptions := client.StartWorkflowOptions{

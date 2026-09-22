@@ -121,6 +121,7 @@ pub(crate) async fn create_initial_networks(
     networks: &HashMap<String, NetworkDefinition>,
 ) -> Result<(), CarbideError> {
     let mut txn = Transaction::begin(db_pool).await?;
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
     let domains = db::dns::domain::find_by(
         &mut txn,
         ObjectColumnFilter::<db::dns::domain::IdColumn>::All,
@@ -213,6 +214,8 @@ pub(crate) async fn create_initial_networks(
     }
     db::dns::ensure_reverse_zones(&reverse_zone_prefixes, &mut txn).await?;
 
+    crate::handlers::tenant_prefix_overlap::validate_retained_state_in_transaction(api, &mut txn)
+        .await?;
     txn.commit().await?;
     Ok(())
 }
@@ -464,17 +467,15 @@ pub(crate) async fn store_initial_dpu_agent_upgrade_policy(
     Ok(())
 }
 
-pub(crate) async fn create_admin_vpc(
-    db_pool: &Pool<Postgres>,
-    vpc_vni: Option<u32>,
-) -> Result<(), CarbideError> {
+pub(crate) async fn create_admin_vpc(api: &Api, vpc_vni: Option<u32>) -> Result<(), CarbideError> {
     let Some(vpc_vni) = vpc_vni else {
         return Err(CarbideError::internal(
             "no VNI is configured for admin VPC".to_string(),
         ));
     };
 
-    let mut txn = Transaction::begin(db_pool).await?;
+    let mut txn = api.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
 
     let configured_vni = vpc_vni as i32;
     let admin_segments = db::network_segment::admin(&mut txn).await?;
@@ -574,6 +575,10 @@ pub(crate) async fn create_admin_vpc(
             }
         }
 
+        crate::handlers::tenant_prefix_overlap::validate_retained_state_in_transaction(
+            api, &mut txn,
+        )
+        .await?;
         txn.commit().await?;
 
         return Ok(());
@@ -613,6 +618,8 @@ pub(crate) async fn create_admin_vpc(
         db::network_segment::set_vpc_id_and_can_stretch(&admin_segment, &mut txn, vpc.id).await?;
     }
 
+    crate::handlers::tenant_prefix_overlap::validate_retained_state_in_transaction(api, &mut txn)
+        .await?;
     txn.commit().await?;
 
     Ok(())

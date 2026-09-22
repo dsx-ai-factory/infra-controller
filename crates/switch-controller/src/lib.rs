@@ -22,6 +22,7 @@ pub mod certificate;
 pub mod configuring;
 pub mod context;
 pub mod created;
+mod decommissioning;
 pub mod deleting;
 pub mod endpoint;
 pub mod error_state;

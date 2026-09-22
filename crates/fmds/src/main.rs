@@ -155,26 +155,31 @@ async fn main() -> eyre::Result<()> {
         }
     });
 
-    // Start REST server for tenant metadata queries
+    // Build the REST service once so both the standard endpoint and the
+    // compatibility endpoint expose exactly the same metadata API.
     let rest_state = state.clone();
-    let rest_address = options.rest_address;
-    let rest_http_metrics = http_request_metrics_state.clone();
-    tokio::spawn(async move {
-        // We serve metadata under both /latest and /2009-04-04 for
-        // compatibility with cloud-init, which uses the AWS EC2 instance
-        // metadata API versioned path format.
-        let router = axum::Router::new()
-            .nest("/latest", get_fmds_router(rest_state.clone()))
-            .nest("/2009-04-04", get_fmds_router(rest_state));
-        let router = http_request_metrics::with_http_request_trace_layer(router, rest_http_metrics);
+    // We serve metadata under both /latest and /2009-04-04 for
+    // compatibility with cloud-init, which uses the AWS EC2 instance
+    // metadata API versioned path format.
+    let router = axum::Router::new()
+        .nest("/latest", get_fmds_router(rest_state.clone()))
+        .nest("/2009-04-04", get_fmds_router(rest_state));
+    let router =
+        http_request_metrics::with_http_request_trace_layer(router, http_request_metrics_state);
 
-        let server = axum_server::Server::bind(rest_address);
+    let rest_addresses =
+        std::iter::once(options.rest_address).chain(options.compatibility_rest_address);
+    for rest_address in rest_addresses {
+        let router = router.clone();
+        tokio::spawn(async move {
+            let server = axum_server::Server::bind(rest_address);
 
-        tracing::info!(%rest_address, "REST server listening");
-        if let Err(err) = server.serve(router.into_make_service()).await {
-            tracing::error!(error = %err, "REST server error");
-        }
-    });
+            tracing::info!(%rest_address, "REST server listening");
+            if let Err(err) = server.serve(router.into_make_service()).await {
+                tracing::error!(%rest_address, error = %err, "REST server error");
+            }
+        });
+    }
 
     // Start gRPC server for receiving config updates from agent
     let grpc_server = FmdsGrpcServer::new(state);

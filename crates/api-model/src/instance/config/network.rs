@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use ipnetwork::IpNetwork;
@@ -255,9 +255,9 @@ impl InstanceNetworkConfig {
     /// Returns the DPU machine IDs used by the instance network configuration.
     pub fn get_used_dpus(
         &self,
-        device_to_id_map: &HashMap<String, Vec<MachineId>>,
-        primary_dpu_machine_id: Option<MachineId>,
-    ) -> Vec<MachineId> {
+        device_to_id_map: &HashMap<String, Vec<DpuMachineId>>,
+        primary_dpu_machine_id: Option<DpuMachineId>,
+    ) -> Vec<DpuMachineId> {
         let device_locators: Vec<&DeviceLocator> = self
             .interfaces
             .iter()
@@ -281,7 +281,7 @@ impl InstanceNetworkConfig {
             return primary_dpu_machine_id.into_iter().collect();
         }
 
-        let used_dpus: Vec<MachineId> = device_locators
+        let used_dpus: Vec<DpuMachineId> = device_locators
             .iter()
             .filter_map(|device_locator| {
                 device_to_id_map
@@ -585,6 +585,13 @@ impl InstanceNetworkConfig {
     /// instance sees an overlay network.
     pub fn is_host_inband(&self) -> bool {
         self.interfaces.iter().all(|i| i.is_host_inband())
+    }
+
+    /// `uses_operator_managed_networking` returns true when every configured interface uses the
+    /// operator's HostInband network instead of the NICo DPU data plane. The config must be
+    /// nonempty because `is_host_inband` is vacuously true for an empty interface list.
+    pub fn uses_operator_managed_networking(&self) -> bool {
+        !self.interfaces.is_empty() && self.is_host_inband()
     }
 }
 
@@ -1108,6 +1115,32 @@ mod tests {
             interfaces,
             auto_config: None,
         }
+    }
+
+    #[test]
+    fn operator_managed_networking_requires_nonempty_host_inband_interfaces() {
+        let empty = InstanceNetworkConfig::default();
+        let dpu_networked = create_valid_network_config();
+
+        let mut host_inband = create_valid_network_config();
+        for interface in &mut host_inband.interfaces {
+            interface.host_inband_mac_address = Some(MacAddress::new([1, 2, 3, 4, 5, 6]));
+        }
+
+        let mut mixed = host_inband.clone();
+        mixed.interfaces[0].host_inband_mac_address = None;
+
+        value_scenarios!(
+            run = |config: InstanceNetworkConfig| config.uses_operator_managed_networking();
+            "operator-managed" {
+                host_inband => true,
+            }
+            "not operator-managed" {
+                empty => false,
+                dpu_networked => false,
+                mixed => false,
+            }
+        );
     }
 
     /// Builds one resolved automatic interface while retaining the usual

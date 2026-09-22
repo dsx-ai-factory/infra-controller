@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use carbide_mqtt_common::hook::{MqttPublisher, QueuedMessage, process_events};
 use carbide_mqtt_common::metrics::{MqttHookMetrics, PublishComponent};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use model::machine::ManagedHostState;
 use opentelemetry::metrics::Meter;
 use state_controller::state_change_emitter::{StateChangeEvent, StateChangeHook};
@@ -79,8 +79,8 @@ impl MqttStateChangeHook {
     }
 }
 
-impl StateChangeHook<MachineId, ManagedHostState> for MqttStateChangeHook {
-    fn on_state_changed(&self, event: &StateChangeEvent<'_, MachineId, ManagedHostState>) {
+impl StateChangeHook<HostMachineId, ManagedHostState> for MqttStateChangeHook {
+    fn on_state_changed(&self, event: &StateChangeEvent<'_, HostMachineId, ManagedHostState>) {
         // Serialize immediately to avoid cloning state
         let message = ManagedHostStateMessage {
             machine_id: event.object_id,
@@ -131,19 +131,21 @@ mod tests {
         global::meter("test")
     }
 
-    fn test_machine_id() -> MachineId {
+    fn test_machine_id() -> HostMachineId {
         use carbide_uuid::machine::{MachineIdSource, MachineType};
-        MachineId::new(
+        carbide_uuid::machine::MachineId::new(
             MachineIdSource::ProductBoardChassisSerial,
             [0; 32],
             MachineType::Host,
         )
+        .try_into()
+        .unwrap()
     }
 
     fn make_event<'a>(
-        id: &'a MachineId,
+        id: &'a HostMachineId,
         state: &'a ManagedHostState,
-    ) -> StateChangeEvent<'a, MachineId, ManagedHostState> {
+    ) -> StateChangeEvent<'a, HostMachineId, ManagedHostState> {
         StateChangeEvent {
             object_id: id,
             previous_state: None,

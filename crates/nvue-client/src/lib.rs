@@ -19,5 +19,8 @@ pub mod client;
 pub mod config;
 pub mod types;
 
+#[cfg(test)]
+mod test_support;
+
 pub use client::{FieldFilter, NvueClient};
 pub use config::NvueConfig;

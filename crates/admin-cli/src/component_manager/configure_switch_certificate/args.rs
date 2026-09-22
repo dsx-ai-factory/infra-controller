@@ -17,7 +17,7 @@
 
 use clap::Parser;
 
-use crate::component_manager::common::SwitchTargetArgs;
+use crate::component_manager::common::SwitchIdArgs;
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
@@ -38,7 +38,7 @@ Dispatch directly to the component backend, bypassing the switch state controlle
 ")]
 pub(crate) struct Args {
     #[clap(flatten)]
-    ids: SwitchTargetArgs,
+    ids: SwitchIdArgs,
 
     #[clap(
         long = "domain-name",

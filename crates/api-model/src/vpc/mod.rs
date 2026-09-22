@@ -26,7 +26,7 @@ pub use capability::{
 };
 use carbide_network::ip::IpAddressFamily;
 use carbide_network::virtualization::VpcVirtualizationType;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::nvlink::NvLinkLogicalPartitionId;
 use carbide_uuid::vpc::VpcId;
@@ -117,6 +117,7 @@ pub struct VpcDefinition {
 pub struct VpcSearchFilter {
     pub name: Option<String>,
     pub tenant_org_id: Option<String>,
+    pub network_virtualization_type: Option<VpcVirtualizationType>,
     pub label: Option<LabelFilter>,
 }
 
@@ -149,6 +150,23 @@ pub struct UpdateVpc {
 pub enum PowerResourceGroupUpdate {
     Set(String),
     Clear,
+}
+
+/// Changes a VPC's named routing profile using an observed version.
+///
+/// Core validates the destination against the persisted tenant and retains
+/// the previous VNI until the operator explicitly releases it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeVpcRoutingProfile {
+    /// VPC whose profile and active VNI will change.
+    pub id: VpcId,
+    /// Original observed version; callers must not refresh it during retries.
+    pub if_version_match: ConfigVersion,
+    /// Configuration-defined destination profile name.
+    pub routing_profile_type: String,
+    /// Optional exact destination VNI in 1..=16777215. Must match retained
+    /// destination ownership; omission reuses it or allocates automatically.
+    pub vni: Option<i32>,
 }
 
 /// UpdateVpcVirtualization exists as a mechanism to translate
@@ -203,13 +221,13 @@ impl<'r> sqlx::FromRow<'r, PgRow> for Vpc {
 
 #[derive(Clone, Debug, FromRow)]
 pub struct VpcDpuLoopback {
-    pub dpu_id: MachineId,
+    pub dpu_id: DpuMachineId,
     pub vpc_id: VpcId,
     pub loopback_ip: IpAddr,
 }
 
 impl VpcDpuLoopback {
-    pub fn new(dpu_id: MachineId, vpc_id: VpcId, loopback_ip: IpAddr) -> Self {
+    pub fn new(dpu_id: DpuMachineId, vpc_id: VpcId, loopback_ip: IpAddr) -> Self {
         Self {
             dpu_id,
             vpc_id,

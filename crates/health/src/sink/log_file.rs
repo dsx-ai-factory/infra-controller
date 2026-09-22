@@ -100,6 +100,8 @@ struct JsonLogRecord<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     machine_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    rack_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     system_uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     machine_serial: Option<&'a str>,
@@ -124,6 +126,7 @@ impl<'a> JsonLogRecord<'a> {
             endpoint: context.endpoint_key(),
             collector: context.collector_type,
             machine_id: context.machine_id().map(|id| id.to_string()),
+            rack_id: context.rack_id().map(|rack_id| rack_id.as_str()),
             system_uuid: context.system_uuid().map(|id| id.to_string()),
             machine_serial: context.machine_serial(),
             driver_version: context.driver_version(),
@@ -279,6 +282,7 @@ mod tests {
     use std::str::FromStr;
 
     use carbide_uuid::nvlink::NvLinkDomainId;
+    use carbide_uuid::rack::RackId;
     use mac_address::MacAddress;
 
     use super::*;
@@ -292,7 +296,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap(),
+                mac: Some(MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap()),
             },
             collector_type: "test",
             metadata: None,
@@ -304,6 +308,7 @@ mod tests {
     /// Builds a log context with representative machine metadata.
     fn machine_context() -> EventContext {
         EventContext {
+            rack_id: Some(RackId::new("RACK_1")),
             labels: std::collections::BTreeMap::from([(
                 "site".to_string(),
                 "rno-dev7".to_string(),
@@ -377,6 +382,7 @@ mod tests {
         assert_eq!(parsed["body"], "something happened");
         assert_eq!(parsed["severity"], "INFO");
         assert_eq!(parsed["endpoint"], "aa:bb:cc:dd:ee:ff");
+        assert!(parsed.get("rack_id").is_none());
     }
 
     #[test]
@@ -502,7 +508,7 @@ mod tests {
 
     /// Verifies that machine metadata is emitted as top-level JSONL fields.
     #[test]
-    fn test_writes_machine_metadata_as_jsonl_fields() {
+    fn test_writes_machine_and_rack_metadata_as_jsonl_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = LogFileSinkConfig {
             include_diagnostics: false,
@@ -540,6 +546,7 @@ mod tests {
         assert_eq!(parsed["machine_serial"], "MN-001");
         assert_eq!(parsed["driver_version"], "570.82");
         assert_eq!(parsed["component_type"], "compute_node");
+        assert_eq!(parsed["rack_id"], "RACK_1");
         assert_eq!(parsed["labels"]["site"], "rno-dev7");
         assert_eq!(
             parsed["nvlink_domain_uuid"],

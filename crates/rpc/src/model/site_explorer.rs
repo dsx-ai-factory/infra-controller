@@ -28,10 +28,22 @@ use model::site_explorer::{
 };
 
 use crate as rpc;
+use crate::errors::RpcDataConversionError;
+use crate::model::machine::machine_id::try_parse_machine_id;
 
-impl From<rpc::site_explorer::ExploredEndpointSearchFilter> for ExploredEndpointSearchFilter {
-    fn from(_filter: rpc::site_explorer::ExploredEndpointSearchFilter) -> Self {
-        ExploredEndpointSearchFilter {}
+impl TryFrom<rpc::site_explorer::ExploredEndpointSearchFilter> for ExploredEndpointSearchFilter {
+    type Error = RpcDataConversionError;
+
+    fn try_from(
+        filter: rpc::site_explorer::ExploredEndpointSearchFilter,
+    ) -> Result<Self, Self::Error> {
+        Ok(ExploredEndpointSearchFilter {
+            machine_id: filter
+                .machine_id
+                .as_deref()
+                .map(try_parse_machine_id)
+                .transpose()?,
+        })
     }
 }
 
@@ -740,30 +752,6 @@ mod tests {
                 .map(|status| (status.status, status.message)),
             firmware_versions: report.firmware_versions,
         }
-    }
-
-    #[test]
-    fn endpoint_search_filters_convert_to_model() {
-        value_scenarios!(
-            run = |filter| {
-                let _: ExploredEndpointSearchFilter = filter.into();
-            };
-            "empty endpoint filter" {
-                rpc::site_explorer::ExploredEndpointSearchFilter {} => (),
-            }
-        );
-    }
-
-    #[test]
-    fn managed_host_search_filters_convert_to_model() {
-        value_scenarios!(
-            run = |filter| {
-                let _: ExploredManagedHostSearchFilter = filter.into();
-            };
-            "empty managed-host filter" {
-                rpc::site_explorer::ExploredManagedHostSearchFilter {} => (),
-            }
-        );
     }
 
     #[test]

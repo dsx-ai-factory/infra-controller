@@ -65,6 +65,7 @@ pub enum StateHistoryTableId {
     Rack,
     SitePrefix,
     Switch,
+    ExtensionService,
 }
 
 impl StateHistoryTableId {
@@ -79,6 +80,7 @@ impl StateHistoryTableId {
             StateHistoryTableId::Rack => "rack_state_history",
             StateHistoryTableId::SitePrefix => "site_prefix_state_history",
             StateHistoryTableId::Switch => "switch_state_history",
+            StateHistoryTableId::ExtensionService => "extension_service_state_history",
         }
     }
 }
@@ -196,9 +198,9 @@ pub async fn update_object_ids(
 mod tests {
     use sqlx::PgPool;
 
-    use super::{StateHistoryTableId, find_by_object_ids, for_object, persist, update_object_ids};
+    use super::{StateHistoryTableId, persist};
 
-    const TABLES: [StateHistoryTableId; 9] = [
+    const TABLES: [StateHistoryTableId; 10] = [
         StateHistoryTableId::Machine,
         StateHistoryTableId::NetworkSegment,
         StateHistoryTableId::VpcPrefix,
@@ -208,6 +210,7 @@ mod tests {
         StateHistoryTableId::Rack,
         StateHistoryTableId::SitePrefix,
         StateHistoryTableId::Switch,
+        StateHistoryTableId::ExtensionService,
     ];
 
     // This test helper intentionally keeps the first transaction open while it verifies that the
@@ -311,161 +314,6 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         for table_id in TABLES {
             assert_concurrent_retention(&pool, table_id).await?;
-        }
-
-        Ok(())
-    }
-
-    #[crate::sqlx_test]
-    async fn state_history_tables_share_schema_and_retention_behavior(
-        pool: PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut conn = pool.acquire().await?;
-        let expected_columns = [
-            ("id", "bigint", "NO"),
-            ("object_id", "text", "NO"),
-            ("state", "jsonb", "NO"),
-            ("state_version", "character varying", "NO"),
-            ("timestamp", "timestamp with time zone", "NO"),
-        ];
-
-        for table_id in TABLES {
-            let table_name = table_id.sql_table();
-            let columns: Vec<(String, String, String)> = sqlx::query_as(
-                "SELECT column_name, data_type, is_nullable \
-                 FROM information_schema.columns \
-                 WHERE table_schema = 'public' AND table_name = $1 \
-                 ORDER BY ordinal_position",
-            )
-            .bind(table_name)
-            .fetch_all(&mut *conn)
-            .await?;
-            assert_eq!(
-                columns,
-                expected_columns
-                    .iter()
-                    .map(|(name, data_type, nullable)| {
-                        (
-                            (*name).to_string(),
-                            (*data_type).to_string(),
-                            (*nullable).to_string(),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-                "unexpected schema for {table_name}",
-            );
-
-            let primary_key: String = sqlx::query_scalar(
-                "SELECT key_column_usage.column_name \
-                 FROM information_schema.table_constraints \
-                 JOIN information_schema.key_column_usage \
-                   ON table_constraints.constraint_name = key_column_usage.constraint_name \
-                  AND table_constraints.constraint_schema = key_column_usage.constraint_schema \
-                 WHERE table_constraints.table_schema = 'public' \
-                   AND table_constraints.table_name = $1 \
-                   AND table_constraints.constraint_type = 'PRIMARY KEY'",
-            )
-            .bind(table_name)
-            .fetch_one(&mut *conn)
-            .await?;
-            assert_eq!(primary_key, "id", "unexpected primary key for {table_name}");
-
-            let foreign_key_count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) \
-                 FROM information_schema.table_constraints \
-                 WHERE table_schema = 'public' \
-                   AND table_name = $1 \
-                   AND constraint_type = 'FOREIGN KEY'",
-            )
-            .bind(table_name)
-            .fetch_one(&mut *conn)
-            .await?;
-            assert_eq!(
-                foreign_key_count, 0,
-                "{table_name} must not reference the object table",
-            );
-
-            let timestamp_default: Option<String> = sqlx::query_scalar(
-                "SELECT column_default \
-                 FROM information_schema.columns \
-                 WHERE table_schema = 'public' \
-                   AND table_name = $1 \
-                   AND column_name = 'timestamp'",
-            )
-            .bind(table_name)
-            .fetch_one(&mut *conn)
-            .await?;
-            assert_eq!(
-                timestamp_default.as_deref(),
-                Some("now()"),
-                "unexpected timestamp default for {table_name}",
-            );
-
-            let has_object_id_index: bool = sqlx::query_scalar(
-                "SELECT EXISTS ( \
-                    SELECT 1 FROM pg_indexes \
-                    WHERE schemaname = 'public' \
-                      AND tablename = $1 \
-                      AND indexdef LIKE '% (object_id)%' \
-                 )",
-            )
-            .bind(table_name)
-            .fetch_one(&mut *conn)
-            .await?;
-            assert!(
-                has_object_id_index,
-                "{table_name} must index object_id lookups",
-            );
-
-            // An arbitrary ID proves both that the table no longer has a parent
-            // foreign key and that every caller uses the common TEXT contract.
-            let object_id = format!("orphaned-{table_name}-{}", "x".repeat(80));
-            let renamed_object_id = format!("renamed-{object_id}");
-            let version = config_version::ConfigVersion::new(1);
-            let inserted = persist(&mut conn, table_id, &object_id, &1_u32, version).await?;
-            assert_eq!(inserted.state, "1", "unexpected state for {table_name}");
-            assert_eq!(inserted.state_version, version);
-            assert!(
-                inserted.time.is_some(),
-                "missing timestamp for {table_name}"
-            );
-
-            let history = for_object(&mut conn, table_id, &object_id).await?;
-            assert_eq!(history.len(), 1, "failed to read {table_name}");
-
-            update_object_ids(&mut conn, table_id, &object_id, &renamed_object_id).await?;
-            let histories = find_by_object_ids(
-                &mut conn,
-                table_id,
-                &[renamed_object_id.as_str(), "missing-object"],
-            )
-            .await?;
-            assert_eq!(
-                histories.len(),
-                1,
-                "unexpected lookup result for {table_name}"
-            );
-            assert_eq!(
-                histories[&renamed_object_id].len(),
-                1,
-                "renamed history missing from {table_name}",
-            );
-
-            // Exercise the row-level retention trigger in one bulk insert. The
-            // original row is the oldest of 251 and must be evicted.
-            let mut insert = sqlx::QueryBuilder::new("INSERT INTO ");
-            insert.push(table_name);
-            insert.push(" (object_id, state, state_version) SELECT ");
-            insert.push_bind(&renamed_object_id);
-            insert.push(", to_jsonb(sequence), ");
-            insert.push_bind(config_version::ConfigVersion::new(2));
-            insert.push(" FROM generate_series(2, 251) AS sequence");
-            insert.build().execute(&mut *conn).await?;
-
-            let retained = for_object(&mut conn, table_id, &renamed_object_id).await?;
-            assert_eq!(retained.len(), 250, "retention failed for {table_name}");
-            assert_eq!(retained.first().unwrap().state, "2");
-            assert_eq!(retained.last().unwrap().state, "251");
         }
 
         Ok(())

@@ -26,10 +26,16 @@ global:
 namespaceOverride: ""
 
 replicas: 1
+
+## Container resource requests and limits. Empty by default.
+resources: {}
+
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-ssh-console-rs.name" . }}-config-files'
 
-## Soft open-file limit applied before startup. Must not exceed the runtime hard limit.
+## Soft open-file limit applied before startup. Clamped to the runtime hard
+## limit when it exceeds it. null falls back to 65536; non-null values must be
+## a positive integer (validated at render).
 fileDescriptorLimit: 65536
 
 imagePullSecrets: []
@@ -88,6 +94,22 @@ serviceMonitor:
   enabled: false
   interval: 30s
   scrapeTimeout: 25s
+
+## Operator authentication with OpenSSH certificates.
+##
+## ssh-console admits a certificate when it is signed by a trusted CA and its
+## key_id carries `roles=<adminCertificateRole>`. Both settings are empty by
+## default, which trusts no CA and disables certificate auth.
+##
+## These are substituted into the packaged config.toml, so a deployment can set
+## just these two rather than restating the whole file. They are ignored when
+## configFiles.config supplies a complete config.
+sshConsole:
+  ## CA fingerprints in the form `ssh-keygen -lf` prints, for example
+  ## ["SHA256:0wdgK9aNegCbsccq9nwulAMo34TakGz+RP7sCS2e7Oc"].
+  opensshCertificateCaFingerprints: []
+  ## Role that must appear in the certificate key_id `roles=` field.
+  adminCertificateRole: ""
 
 # Config files - can be overridden
 configFiles:

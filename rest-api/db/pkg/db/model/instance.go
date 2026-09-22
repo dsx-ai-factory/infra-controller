@@ -170,6 +170,7 @@ type Instance struct {
 	TpmEkCertificate                       *string                                 `bun:"tpm_ek_certificate"`
 	Status                                 string                                  `bun:"status,notnull"`
 	PowerStatus                            *string                                 `bun:"power_status"`
+	PowerProfile                           *string                                 `bun:"power_profile"`
 	IsMissingOnSite                        bool                                    `bun:"is_missing_on_site,notnull"`
 	Created                                time.Time                               `bun:"created,nullzero,notnull,default:current_timestamp"`
 	Updated                                time.Time                               `bun:"updated,nullzero,notnull,default:current_timestamp"`
@@ -311,6 +312,7 @@ type InstanceCreateInput struct {
 	TpmEkCertificate                       *string
 	Status                                 string
 	PowerStatus                            *string
+	PowerProfile                           *string
 	CreatedBy                              uuid.UUID
 }
 
@@ -345,6 +347,7 @@ type InstanceUpdateCommonInput struct {
 	TpmEkCertificate                       *string
 	Status                                 *string
 	PowerStatus                            *string
+	PowerProfile                           *string
 	IsMissingOnSite                        *bool
 }
 
@@ -380,6 +383,7 @@ type InstanceClearInput struct {
 	UserData                               bool
 	Labels                                 bool
 	TpmEkCertificate                       bool
+	PowerProfile                           bool
 }
 
 // InstanceFilterInput input parameters for GetAll method
@@ -851,6 +855,10 @@ func (isd InstanceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceCl
 		i.TpmEkCertificate = nil
 		updatedFields = append(updatedFields, "tpm_ek_certificate")
 	}
+	if input.PowerProfile {
+		i.PowerProfile = nil
+		updatedFields = append(updatedFields, "power_profile")
+	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
@@ -941,6 +949,7 @@ func (isd InstanceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs 
 			TpmEkCertificate:                       input.TpmEkCertificate,
 			Status:                                 input.Status,
 			PowerStatus:                            input.PowerStatus,
+			PowerProfile:                           input.PowerProfile,
 			CreatedBy:                              input.CreatedBy,
 			Labels:                                 input.Labels,
 		}
@@ -1148,6 +1157,11 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 		proto.PowerStatus = c.PowerStatus
 		columns = append(columns, "power_status")
 		trace("power_status", *c.PowerStatus)
+	}
+	if c.PowerProfile != nil {
+		proto.PowerProfile = c.PowerProfile
+		columns = append(columns, "power_profile")
+		trace("power_profile", *c.PowerProfile)
 	}
 	if c.IsMissingOnSite != nil {
 		proto.IsMissingOnSite = *c.IsMissingOnSite

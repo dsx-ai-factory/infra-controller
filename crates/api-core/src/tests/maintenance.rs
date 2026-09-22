@@ -28,197 +28,6 @@ use crate::tests::common;
 use crate::tests::common::api_fixtures::{create_managed_host, create_managed_host_multi_dpu};
 
 #[crate::sqlx_test]
-async fn test_maintenance(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
-    let env = create_test_env(db_pool.clone()).await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-    // Create a machine
-    let (host_id, _dpu_machine_id) = create_managed_host(&env).await.into();
-    let (_host_id_2, _dpu_machine_id_2) = create_managed_host(&env).await.into();
-    let rpc_host_id: MachineId = host_id;
-
-    // enable maintenance mode
-    let req = rpcf::MaintenanceRequest {
-        operation: rpcf::MaintenanceOperation::Enable.into(),
-        host_id: Some(rpc_host_id),
-        reference: Some("https://jira.example.com/ABC-123".to_string()),
-    };
-    env.api
-        .set_maintenance(tonic::Request::new(req))
-        .await
-        .unwrap();
-
-    // Check that the expected alert is set on the Machine
-    let mut host_machine = env.find_machine(rpc_host_id).await.remove(0);
-    assert_eq!(
-        host_machine
-            .config
-            .as_ref()
-            .unwrap()
-            .maintenance_reference
-            .clone()
-            .unwrap(),
-        "https://jira.example.com/ABC-123"
-    );
-    assert!(
-        host_machine
-            .config
-            .as_ref()
-            .unwrap()
-            .maintenance_start_time
-            .is_some()
-    );
-    let alerts = &mut host_machine
-        .status
-        .as_mut()
-        .unwrap()
-        .health
-        .as_mut()
-        .unwrap()
-        .alerts;
-    assert_eq!(alerts.len(), 1);
-    let alert = &mut alerts[0];
-    assert!(alert.in_alert_since.is_some());
-    alert.in_alert_since = None;
-    assert_eq!(
-        *alert,
-        rpc::health::HealthProbeAlert {
-            id: "Maintenance".to_string(),
-            target: None,
-            in_alert_since: None,
-            message: "https://jira.example.com/ABC-123".to_string(),
-            tenant_message: None,
-            classifications: vec![
-                "PreventAllocations".to_string(),
-                "SuppressExternalAlerting".to_string(),
-                "ExcludeFromStateMachineSla".to_string(),
-            ]
-        }
-    );
-
-    let instance_config = rpc::InstanceConfig {
-        tenant: Some(default_tenant_config()),
-        os: Some(default_os_config()),
-        network: Some(single_interface_network_config(segment_id)),
-        infiniband: None,
-        nvlink: None,
-        spxconfig: None,
-        network_security_group_id: None,
-        dpu_extension_services: None,
-        power_profile: None,
-    };
-
-    // allocate: should fail
-    let req = rpcf::InstanceAllocationRequest {
-        instance_id: None,
-        machine_id: Some(rpc_host_id),
-        instance_type_id: None,
-        config: Some(instance_config.clone()),
-        metadata: Some(rpcf::Metadata {
-            name: "test_instance".to_string(),
-            description: "tests/maintenance".to_string(),
-            labels: Vec::new(),
-        }),
-        allow_unhealthy_machine: false,
-    };
-    match env.api.allocate_instance(tonic::Request::new(req)).await {
-        Ok(_) => {
-            panic!("Allocating an instance on host in maintenance mode should fail");
-        }
-        Err(status) if status.code() == tonic::Code::FailedPrecondition => {
-            // Expected
-        }
-        Err(err) => {
-            eyre::bail!("allocate_instance unexpected status {err}");
-        }
-    }
-
-    // list: should be included
-    let machine_ids = env
-        .api
-        .find_machine_ids(tonic::Request::new(rpc::forge::MachineSearchConfig {
-            include_dpus: true,
-            include_predicted_host: true,
-            only_maintenance: true,
-            ..Default::default()
-        }))
-        .await?
-        .into_inner()
-        .machine_ids;
-    assert_eq!(machine_ids.len(), 1); // Host
-    assert_eq!(
-        machine_ids[0], rpc_host_id,
-        "Listing maintenance machines return incorrectly machines"
-    );
-
-    // disable maintenance
-    let req = tonic::Request::new(rpcf::MaintenanceRequest {
-        operation: rpcf::MaintenanceOperation::Disable.into(),
-        host_id: Some(rpc_host_id),
-        reference: None,
-    });
-    env.api.set_maintenance(req).await.unwrap();
-
-    // Maintenance reference is cleared and there's no alarm anymore
-    let host_machine = env.find_machine(rpc_host_id).await.remove(0);
-    assert!(
-        host_machine
-            .config
-            .as_ref()
-            .unwrap()
-            .maintenance_reference
-            .is_none()
-    );
-    assert!(
-        host_machine
-            .config
-            .as_ref()
-            .unwrap()
-            .maintenance_start_time
-            .is_none()
-    );
-    let alerts = &host_machine
-        .status
-        .as_ref()
-        .unwrap()
-        .health
-        .as_ref()
-        .unwrap()
-        .alerts;
-    assert!(alerts.is_empty());
-
-    // There are now no machines in maintenance mode
-    let machine_ids = env
-        .api
-        .find_machine_ids(tonic::Request::new(rpc::forge::MachineSearchConfig {
-            include_dpus: true,
-            include_predicted_host: true,
-            only_maintenance: true,
-            ..Default::default()
-        }))
-        .await?
-        .into_inner()
-        .machine_ids;
-    assert!(machine_ids.is_empty());
-
-    // allocate: should succeed
-    let req = rpcf::InstanceAllocationRequest {
-        instance_id: None,
-        machine_id: Some(rpc_host_id),
-        instance_type_id: None,
-        config: Some(instance_config),
-        metadata: Some(rpc::Metadata {
-            name: "test_instance".to_string(),
-            description: "tests/maintenance".to_string(),
-            labels: Vec::new(),
-        }),
-        allow_unhealthy_machine: false,
-    };
-    env.api.allocate_instance(tonic::Request::new(req)).await?;
-
-    Ok(())
-}
-
-#[crate::sqlx_test]
 async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let env = create_test_env(db_pool.clone()).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
@@ -228,7 +37,7 @@ async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::R
     // enable maintenance mode
     let req = rpcf::MaintenanceRequest {
         operation: rpcf::MaintenanceOperation::Enable.into(),
-        host_id: Some(mh.host().id),
+        host_id: Some(mh.host().id.into()),
         reference: Some("https://jira.example.com/ABC-123".to_string()),
     };
     env.api
@@ -289,14 +98,14 @@ async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::R
     assert_eq!(machine_ids.len(), 1); // Host
     assert_eq!(
         machine_ids[0],
-        mh.host().id,
+        mh.host().id.into(),
         "Listing maintenance machines return incorrectly machines"
     );
 
     // disable maintenance
     let req = tonic::Request::new(rpcf::MaintenanceRequest {
         operation: rpcf::MaintenanceOperation::Disable.into(),
-        host_id: Some(mh.host().id),
+        host_id: Some(mh.host().id.into()),
         reference: None,
     });
     env.api.set_maintenance(req).await.unwrap();
@@ -347,7 +156,7 @@ async fn test_maintenance_suppresses_state_machine_sla_alert(
 ) -> Result<(), eyre::Report> {
     let env = create_test_env(db_pool.clone()).await;
     let (host_id, _dpu_id) = create_managed_host(&env).await.into();
-    let rpc_host_id: MachineId = host_id;
+    let rpc_host_id: MachineId = host_id.into();
 
     // force the host into Failed state (0-second SLA).
     // this is what would otherwise drive `carbide_machines_per_state_above_sla > 0`
@@ -362,7 +171,7 @@ async fn test_maintenance_suppresses_state_machine_sla_alert(
                 failed_at: chrono::Utc::now(),
                 source: FailureSource::NoError,
             },
-            machine_id: host_id,
+            machine_id: host_id.into(),
             retry_count: 1,
         },
     )
@@ -372,7 +181,7 @@ async fn test_maintenance_suppresses_state_machine_sla_alert(
 
     // with no maintenance override, the machine reports as
     // above-SLA and would be counted by the stuck-instance alert metric.
-    let machine = env.find_machine(rpc_host_id).await.remove(0);
+    let machine = env.find_machine(&rpc_host_id).await.remove(0);
     let sla = machine.state_sla.as_ref().unwrap();
     assert!(
         sla.time_in_state_above_sla,
@@ -392,7 +201,7 @@ async fn test_maintenance_suppresses_state_machine_sla_alert(
     // SetMaintenance now adds the ExcludeFromStateMachineSla
     // classification, so state_sla() short-circuits to no_sla() and the
     // host stops contributing to the stuck-instance Prometheus metric.
-    let machine = env.find_machine(rpc_host_id).await.remove(0);
+    let machine = env.find_machine(&rpc_host_id).await.remove(0);
     let sla = machine.state_sla.as_ref().unwrap();
     assert!(
         !sla.time_in_state_above_sla,
@@ -413,7 +222,7 @@ async fn test_maintenance_suppresses_state_machine_sla_alert(
         .await
         .unwrap();
 
-    let machine = env.find_machine(rpc_host_id).await.remove(0);
+    let machine = env.find_machine(&rpc_host_id).await.remove(0);
     let sla = machine.state_sla.as_ref().unwrap();
     assert!(
         sla.time_in_state_above_sla,

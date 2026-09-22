@@ -24,7 +24,7 @@ use carbide_rack::firmware_object::{
     rack_maintenance_access_token_key, rms_access_token_or_noauth,
 };
 use carbide_secrets::credentials::CredentialManager;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
@@ -179,6 +179,23 @@ pub(crate) async fn find_rack_state_histories(
     txn.commit().await?;
 
     Ok(tonic::Response::new(response))
+}
+
+pub(crate) async fn find_rack_health_histories(
+    api: &Api,
+    request: Request<rpc::RackHealthHistoriesRequest>,
+) -> Result<Response<rpc::HealthHistories>, Status> {
+    log_request_data(&request);
+    let request = request.into_inner();
+
+    crate::handlers::health::find_health_histories(
+        api,
+        request.rack_ids,
+        db::health_history::HealthHistoryTableId::Rack,
+        request.start_time,
+        request.end_time,
+    )
+    .await
 }
 
 pub(crate) async fn delete_rack(
@@ -800,7 +817,7 @@ pub(crate) async fn on_demand_rack_maintenance(
         machine_ids: proto_scope
             .machine_ids
             .iter()
-            .map(|s| MachineId::from_str(s))
+            .map(|s| HostMachineId::from_str(s))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| CarbideError::InvalidArgument(format!("invalid machine_id: {e}")))?,
         switch_ids: proto_scope
@@ -816,23 +833,25 @@ pub(crate) async fn on_demand_rack_maintenance(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| CarbideError::InvalidArgument(format!("invalid power_shelf_id: {e}")))?,
         activities,
+        requested_at: None,
     };
 
     if !scope.is_full_rack() {
         let mut reader = api.db_reader();
 
         if !scope.machine_ids.is_empty() {
-            let rack_machines: HashSet<MachineId> = db_machine::find_machine_ids(
-                reader.as_mut(),
-                MachineSearchConfig {
-                    rack_id: Some(rack_id.clone()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(CarbideError::from)?
-            .into_iter()
-            .collect();
+            let rack_machines: HashSet<HostMachineId> =
+                db_machine::find_machine_ids::<HostMachineId>(
+                    reader.as_mut(),
+                    MachineSearchConfig {
+                        rack_id: Some(rack_id.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(CarbideError::from)?
+                .into_iter()
+                .collect();
 
             let foreign: Vec<_> = scope
                 .machine_ids

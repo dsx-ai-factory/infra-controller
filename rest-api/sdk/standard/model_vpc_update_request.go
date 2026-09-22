@@ -32,6 +32,8 @@ type VpcUpdateRequest struct {
 	NvLinkLogicalPartitionId NullableString `json:"nvLinkLogicalPartitionId,omitempty"`
 	// Replaces the current inline routing-profile definition when present. Requires `TargetedInstanceCreation` to be effective for the Tenant at the VPC's Site. Omission or `null` preserves the current definition. An empty object restores inheritance for every property; a partial object replaces the previous definition and inherits its omitted properties from the named profile.
 	RoutingProfileOverrides NullableVpcRoutingProfileOverrides `json:"routingProfileOverrides,omitempty"`
+	// Power resource group to associate with the VPC. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`. Omission or `null` preserves the current association; an empty string clears it when DPS power management is disabled.
+	PowerResourceGroup NullableString `json:"powerResourceGroup,omitempty"`
 	// Update labels of the VPC. Up to 10 key-value pairs can be specified. The labels will be replaced with the labels sent in the request. Any labels not included in the request will be removed. To retain existing labels, fetch them first and include them in this request.
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -268,6 +270,49 @@ func (o *VpcUpdateRequest) UnsetRoutingProfileOverrides() {
 	o.RoutingProfileOverrides.Unset()
 }
 
+// GetPowerResourceGroup returns the PowerResourceGroup field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *VpcUpdateRequest) GetPowerResourceGroup() string {
+	if o == nil || IsNil(o.PowerResourceGroup.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.PowerResourceGroup.Get()
+}
+
+// GetPowerResourceGroupOk returns a tuple with the PowerResourceGroup field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *VpcUpdateRequest) GetPowerResourceGroupOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.PowerResourceGroup.Get(), o.PowerResourceGroup.IsSet()
+}
+
+// HasPowerResourceGroup returns a boolean if a field has been set.
+func (o *VpcUpdateRequest) HasPowerResourceGroup() bool {
+	if o != nil && o.PowerResourceGroup.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetPowerResourceGroup gets a reference to the given NullableString and assigns it to the PowerResourceGroup field.
+func (o *VpcUpdateRequest) SetPowerResourceGroup(v string) {
+	o.PowerResourceGroup.Set(&v)
+}
+
+// SetPowerResourceGroupNil sets the value for PowerResourceGroup to be an explicit nil
+func (o *VpcUpdateRequest) SetPowerResourceGroupNil() {
+	o.PowerResourceGroup.Set(nil)
+}
+
+// UnsetPowerResourceGroup ensures that no value is present for PowerResourceGroup, not even an explicit nil
+func (o *VpcUpdateRequest) UnsetPowerResourceGroup() {
+	o.PowerResourceGroup.Unset()
+}
+
 // GetLabels returns the Labels field value if set, zero value otherwise.
 func (o *VpcUpdateRequest) GetLabels() map[string]string {
 	if o == nil || IsNil(o.Labels) {
@@ -324,6 +369,9 @@ func (o VpcUpdateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.RoutingProfileOverrides.IsSet() {
 		toSerialize["routingProfileOverrides"] = o.RoutingProfileOverrides.Get()
+	}
+	if o.PowerResourceGroup.IsSet() {
+		toSerialize["powerResourceGroup"] = o.PowerResourceGroup.Get()
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels

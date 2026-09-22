@@ -187,23 +187,44 @@ const allowedServiceIdentityForTest = "spiffe://example.test/ns/site/sa/site-wor
 func TestLoadDataCipherFromEnv(t *testing.T) {
 	validKey := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	emptyKey := ""
+	malformedKey := "not-base64"
 	tests := []struct {
 		name        string
+		envSet      bool
+		envValue    string
 		keyContents *string
 		wantErr     string
+		wantCipher  bool
 	}{
-		{name: "missing environment variable", wantErr: secret.EncryptionKeyPathEnvVar + " is not set"},
-		{name: "valid key", keyContents: &validKey},
+		{name: "missing environment variable"},
 		{
-			name:        "invalid key",
+			name:    "empty environment variable",
+			envSet:  true,
+			wantErr: secret.EncryptionKeyPathEnvVar + " is set but empty",
+		},
+		{
+			name:     "missing key file",
+			envSet:   true,
+			envValue: "/missing/encryption-key",
+			wantErr:  "read data encryption key",
+		},
+		{name: "valid key", keyContents: &validKey, wantCipher: true},
+		{
+			name:        "empty key",
 			keyContents: &emptyKey,
 			wantErr:     "data encryption key is empty",
+		},
+		{
+			name:        "malformed key",
+			keyContents: &malformedKey,
+			wantErr:     "data encryption key must be base64 encoded",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv(secret.EncryptionKeyPathEnvVar, "")
+			t.Setenv(secret.EncryptionKeyPathEnvVar, "temporary")
+			require.NoError(t, os.Unsetenv(secret.EncryptionKeyPathEnvVar))
 			if tt.keyContents != nil {
 				path := filepath.Join(t.TempDir(), "encryption-key")
 				require.NoError(
@@ -211,6 +232,8 @@ func TestLoadDataCipherFromEnv(t *testing.T) {
 					os.WriteFile(path, []byte(*tt.keyContents), 0o600),
 				)
 				t.Setenv(secret.EncryptionKeyPathEnvVar, path)
+			} else if tt.envSet {
+				t.Setenv(secret.EncryptionKeyPathEnvVar, tt.envValue)
 			}
 
 			cipher, err := loadDataCipherFromEnv()
@@ -221,7 +244,11 @@ func TestLoadDataCipherFromEnv(t *testing.T) {
 			}
 
 			require.NoError(t, err)
-			require.NotNil(t, cipher)
+			if tt.wantCipher {
+				require.NotNil(t, cipher)
+			} else {
+				require.Nil(t, cipher)
+			}
 		})
 	}
 }

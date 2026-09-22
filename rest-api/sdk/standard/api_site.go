@@ -50,6 +50,8 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 
 Tenants cannot create Sites.
 
+New Sites enable `nativeNetworking`, `networkSecurityGroup`, and `flow` by default. Other Site capabilities default to `false`.
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@return ApiCreateSiteRequest
@@ -861,6 +863,8 @@ UpdateSite Update Site
 User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 Infrastructure Provider updating the Site must be the owner of the Site. At present, there are no other Site-specific configurations modifiable by Tenant.
+
+Providers can set `capabilities.dpsPowerManagement` to control whether the Site accepts power profiles and resource groups. Omission or `null` preserves the current value; the default is `false`.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

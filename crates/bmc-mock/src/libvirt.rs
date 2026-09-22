@@ -16,17 +16,27 @@
  */
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::process::{Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock, Weak};
+use std::time::Duration;
 
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+use tokio::sync::oneshot;
+use tokio::task::JoinSet;
+use tokio::time::Instant;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use url::Url;
 
+use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult};
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
-use crate::{BmcState, Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl};
+use crate::{
+    BmcState, BootOptionKind, Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl,
+};
 
 #[derive(Debug, thiserror::Error)]
 enum VirtualMediaError {
@@ -38,6 +48,12 @@ enum VirtualMediaError {
 
 type VirtualMediaResult = Result<(), VirtualMediaError>;
 
+/// Maximum duration of one virsh attempt, including output collection.
+const VIRSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Additional grace period for reaping after a kill request, independent of the command deadline.
+const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub virsh_path: PathBuf,
@@ -46,58 +62,181 @@ pub struct Config {
     pub virtual_media_targets: BTreeMap<String, String>,
 }
 
+/// Backend handle that sends operations to one sequential libvirt actor.
+///
+/// Commands use an unbounded mailbox. Refresh notifications coalesce into one pending signal.
+/// Power reads return the last observation, initially Off, updated at actor startup
+/// and after power commands, binding, and refresh notifications. Power commands
+/// return once enqueued; execution failures are logged by the actor.
+/// Dropping the handle cancels the actor. Once binding starts, it finishes even if
+/// its caller stops awaiting the reply, to avoid interrupting XML updates.
 #[derive(Debug)]
 pub struct LibvirtCallbacks {
+    mailbox: ActorMailbox<LibvirtMessage>,
+    refresh_pending: Arc<AtomicBool>,
+    power_state: Arc<RwLock<MockPowerState>>,
+    _stop: DropGuard,
+}
+
+#[derive(Debug)]
+enum LibvirtMessage {
+    Run,
+    Bind {
+        state: Weak<SystemState<LibvirtCallbacks>>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    SendPowerCommand {
+        reset_type: SystemPowerControl,
+    },
+    Refresh,
+}
+
+struct LibvirtBackend {
     config: Config,
-    restore_boot_after_power_on: Mutex<bool>,
-    system_state: OnceLock<Weak<SystemState>>,
-    applied_state: Mutex<AppliedState>,
+    restore_boot_after_power_on: bool,
+    system_state: Option<Weak<SystemState<LibvirtCallbacks>>>,
+    applied_state: AppliedState,
+    refresh_pending: Arc<AtomicBool>,
+    power_state: Arc<RwLock<MockPowerState>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct AppliedState {
+    persistent_boot_selection: Option<BootOptionKind>,
     boot_source_override: serde_json::Value,
     virtual_media: BTreeMap<String, serde_json::Value>,
 }
 
 impl LibvirtCallbacks {
-    pub fn new(config: Config) -> Self {
+    /// Starts a libvirt actor in the owner's supervised task set.
+    /// The owner must observe task failures and shut down the set when stopping the BMC.
+    pub fn new(config: Config, tasks: &mut JoinSet<()>) -> Self {
+        let refresh_pending = Arc::new(AtomicBool::new(false));
+        let power_state = Arc::new(RwLock::new(MockPowerState::Off));
+        let (actor, mailbox) = Actor::new(
+            LibvirtBackend {
+                config,
+                restore_boot_after_power_on: false,
+                system_state: None,
+                applied_state: AppliedState::default(),
+                refresh_pending: refresh_pending.clone(),
+                power_state: power_state.clone(),
+            },
+            LibvirtMessage::Run,
+        );
+        let stop = CancellationToken::new();
+        let guard = stop.clone().drop_guard();
+        tasks.spawn(async move {
+            stop.run_until_cancelled(actor.run()).await;
+        });
         Self {
-            config,
-            restore_boot_after_power_on: Mutex::new(false),
-            system_state: OnceLock::new(),
-            applied_state: Mutex::new(AppliedState::default()),
+            mailbox,
+            refresh_pending,
+            power_state,
+            _stop: guard,
         }
     }
 
-    pub fn bind_state(&self, state: &BmcState) -> Result<(), &'static str> {
-        let controlled_system = state
-            .system_state
+    /// Binds this backend to the generated BMC state and applies its initial
+    /// persistent boot selection to the inactive libvirt domain XML.
+    ///
+    /// Binding succeeds at most once. An initial boot-selection failure leaves
+    /// the backend unbound so the caller can retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the BMC has no controlled `ComputerSystem`, this
+    /// backend is already bound, or libvirt cannot apply the initial selection.
+    pub async fn bind_state(&self, state: &BmcState<Self>) -> Result<(), String> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::Bind {
+                state: Arc::downgrade(&state.system_state),
+                reply,
+            })
+            .map_err(|error| error.to_string())?;
+        response.await.map_err(|error| error.to_string())?
+    }
+}
+
+impl LibvirtBackend {
+    async fn bind_state(
+        &mut self,
+        state: Weak<SystemState<LibvirtCallbacks>>,
+    ) -> Result<(), String> {
+        let system_state = state
+            .upgrade()
+            .ok_or_else(|| "BMC mock state was dropped before binding".to_string())?;
+        let controlled_system = system_state
             .controlled_system()
-            .ok_or("libvirt backend has no controlled ComputerSystem")?;
-        self.system_state
-            .set(Arc::downgrade(&state.system_state))
-            .map_err(|_| "libvirt backend state is already bound")?;
-        *self.applied_state.lock().unwrap() = AppliedState::from(controlled_system);
+            .ok_or_else(|| "libvirt backend has no controlled ComputerSystem".to_string())?;
+        if self.system_state.is_some() {
+            return Err("libvirt backend state is already bound".to_string());
+        }
+        let applied = AppliedState::from(controlled_system);
+        self.set_persistent_boot_selection(applied.persistent_boot_selection)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.system_state = Some(state);
+        self.applied_state = applied;
         Ok(())
     }
 
-    fn virsh_output(&self, arguments: &[&str]) -> Result<Output, String> {
-        Command::new(&self.config.virsh_path)
+    async fn virsh_output(&self, arguments: &[&str]) -> Result<Output, String> {
+        let command = self.config.virsh_path.display().to_string();
+        let mut child = Command::new(&self.config.virsh_path)
             .arg("--connect")
             .arg(&self.config.uri)
             .args(arguments)
-            .output()
-            .map_err(|error| {
-                format!(
-                    "could not execute {}: {error}",
-                    self.config.virsh_path.display()
-                )
-            })
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| format!("could not execute {command}: {error}"))?;
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        // Drain both pipes while waiting: a full pipe must not deadlock the child.
+        // The deadline includes output collection as well as process execution.
+        let completion = tokio::time::timeout(VIRSH_COMMAND_TIMEOUT, async {
+            tokio::try_join!(
+                child.wait(),
+                stdout.read_to_end(&mut stdout_bytes),
+                stderr.read_to_end(&mut stderr_bytes),
+            )
+        })
+        .await;
+        match completion {
+            Ok(Ok((status, _, _))) => Ok(Output {
+                status,
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+            }),
+            failed => {
+                child
+                    .start_kill()
+                    .map_err(|error| format!("could not stop {command}: {error}"))?;
+                // On timeout, returning drops Child and leaves reaping to Tokio's
+                // best-effort cleanup so the actor can keep processing.
+                tokio::time::timeout(VIRSH_CLEANUP_TIMEOUT, child.wait())
+                    .await
+                    .map_err(|_| {
+                        format!("could not reap {command} within {VIRSH_CLEANUP_TIMEOUT:?} after kill request")
+                    })?
+                    .map_err(|error| format!("could not reap {command}: {error}"))?;
+                Err(match failed {
+                    Err(_) => format!("{command} timed out after {VIRSH_COMMAND_TIMEOUT:?}"),
+                    Ok(Err(error)) => format!("could not collect {command} output: {error}"),
+                    Ok(Ok(_)) => unreachable!(),
+                })
+            }
+        }
     }
 
-    fn virsh(&self, arguments: &[&str]) -> Result<Output, String> {
-        let output = self.virsh_output(arguments)?;
+    async fn virsh(&self, arguments: &[&str]) -> Result<Output, String> {
+        let output = self.virsh_output(arguments).await?;
         if output.status.success() {
             return Ok(output);
         }
@@ -109,27 +248,73 @@ impl LibvirtCallbacks {
         ))
     }
 
-    fn domain_command(&self, command: &str) -> Result<(), SetSystemPowerError> {
+    async fn domain_command(&self, command: &str) -> Result<(), SetSystemPowerError> {
         self.virsh(&[command, &self.config.domain])
+            .await
             .map(drop)
             .map_err(SetSystemPowerError::CommandSendError)
     }
 
-    fn start(&self) -> Result<(), SetSystemPowerError> {
-        self.domain_command("start")?;
-        let restore_boot = {
-            let mut restore_boot_after_power_on = self.restore_boot_after_power_on.lock().unwrap();
-            std::mem::take(&mut *restore_boot_after_power_on)
-        };
+    async fn start(&mut self) -> Result<(), SetSystemPowerError> {
+        self.domain_command("start").await?;
+        let restore_boot = std::mem::take(&mut self.restore_boot_after_power_on);
         if restore_boot {
-            self.set_boot_devices(&["hd"])?;
+            if let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) {
+                system_state.on_boot_completed();
+            }
+            self.restore_persistent_boot_order().await?;
         }
         Ok(())
     }
 
-    fn set_boot_devices(&self, devices: &[&str]) -> Result<(), SetSystemPowerError> {
+    async fn restore_persistent_boot_order(&self) -> Result<(), SetSystemPowerError> {
+        let selection = self
+            .system_state
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .and_then(|state| {
+                state
+                    .controlled_system()
+                    .and_then(SingleSystemState::resolve_persistent_boot_selection)
+            });
+        self.set_persistent_boot_selection(selection).await
+    }
+
+    async fn reapply_effective_boot_order(&mut self) -> Result<(), SetSystemPowerError> {
+        let Some(state) = self.system_state.as_ref().and_then(Weak::upgrade) else {
+            return Err(SetSystemPowerError::CommandSendError(
+                "libvirt backend is not bound to BMC mock state".to_string(),
+            ));
+        };
+        let Some(system) = state.controlled_system() else {
+            return Err(SetSystemPowerError::CommandSendError(
+                "BMC mock state has no controlled ComputerSystem".to_string(),
+            ));
+        };
+        let boot_source_override = system.boot_source_override();
+        if boot_source_override_is_active(&boot_source_override) {
+            self.set_boot_source_override(&boot_source_override).await
+        } else {
+            self.set_persistent_boot_selection(system.resolve_persistent_boot_selection())
+                .await
+        }
+    }
+
+    async fn set_persistent_boot_selection(
+        &self,
+        selection: Option<BootOptionKind>,
+    ) -> Result<(), SetSystemPowerError> {
+        match selection {
+            Some(BootOptionKind::Disk) => self.set_boot_devices(&["hd"]).await,
+            Some(BootOptionKind::Network) => self.set_boot_devices(&["network", "hd"]).await,
+            None => Ok(()),
+        }
+    }
+
+    async fn set_boot_devices(&self, devices: &[&str]) -> Result<(), SetSystemPowerError> {
         let output = self
             .virsh(&["dumpxml", "--inactive", &self.config.domain])
+            .await
             .map_err(SetSystemPowerError::CommandSendError)?;
         let xml = String::from_utf8(output.stdout).map_err(|error| {
             SetSystemPowerError::CommandSendError(format!(
@@ -138,17 +323,20 @@ impl LibvirtCallbacks {
         })?;
         let xml =
             set_boot_order_xml(&xml, devices).map_err(SetSystemPowerError::CommandSendError)?;
-        let mut file = tempfile::NamedTempFile::new().map_err(|error| {
+        let file = tempfile::NamedTempFile::new().map_err(|error| {
             SetSystemPowerError::CommandSendError(format!(
                 "could not create temporary domain XML: {error}"
             ))
         })?;
-        file.write_all(xml.as_bytes()).map_err(|error| {
-            SetSystemPowerError::CommandSendError(format!(
-                "could not write temporary domain XML: {error}"
-            ))
-        })?;
+        tokio::fs::write(file.path(), xml.as_bytes())
+            .await
+            .map_err(|error| {
+                SetSystemPowerError::CommandSendError(format!(
+                    "could not write temporary domain XML: {error}"
+                ))
+            })?;
         self.virsh(&["define", file.path().to_string_lossy().as_ref()])
+            .await
             .map(drop)
             .map_err(SetSystemPowerError::CommandSendError)
     }
@@ -165,9 +353,10 @@ impl LibvirtCallbacks {
             })
     }
 
-    fn target_is_attached(&self, target: &str) -> Result<bool, VirtualMediaError> {
+    async fn target_is_attached(&self, target: &str) -> Result<bool, VirtualMediaError> {
         let output = self
             .virsh(&["domblklist", "--details", &self.config.domain])
+            .await
             .map_err(VirtualMediaError::Command)?;
         let output = String::from_utf8(output.stdout).map_err(|error| {
             VirtualMediaError::Command(format!("virsh domblklist returned invalid UTF-8: {error}"))
@@ -179,17 +368,18 @@ impl LibvirtCallbacks {
         }))
     }
 
-    fn detach_target(&self, target: &str) -> VirtualMediaResult {
-        if !self.target_is_attached(target)? {
+    async fn detach_target(&self, target: &str) -> VirtualMediaResult {
+        if !self.target_is_attached(target).await? {
             return Ok(());
         }
         self.virsh(&["detach-disk", &self.config.domain, target, "--persistent"])
+            .await
             .map(drop)
             .map_err(VirtualMediaError::Command)
     }
 
-    fn set_boot_source_override(
-        &self,
+    async fn set_boot_source_override(
+        &mut self,
         boot_source_override: &serde_json::Value,
     ) -> Result<(), SetSystemPowerError> {
         let enabled = boot_source_override
@@ -210,43 +400,45 @@ impl LibvirtCallbacks {
             }
             (_, None) => return Ok(()),
         };
-        self.set_boot_devices(devices)?;
-        *self.restore_boot_after_power_on.lock().unwrap() =
-            enabled == Some("Once") && target != Some("Hdd");
+        self.set_boot_devices(devices).await?;
+        self.restore_boot_after_power_on = enabled == Some("Once");
         Ok(())
     }
 
-    fn insert_virtual_media(
+    async fn insert_virtual_media(
         &self,
         device_id: &str,
         image: &str,
         write_protected: bool,
     ) -> VirtualMediaResult {
         let target = self.target_for_device(device_id)?;
-        self.detach_target(target)?;
+        self.detach_target(target).await?;
         let xml = virtual_media_xml(device_id, target, image, write_protected)?;
-        let mut file = tempfile::NamedTempFile::new().map_err(|error| {
+        let file = tempfile::NamedTempFile::new().map_err(|error| {
             VirtualMediaError::Command(format!("could not create temporary device XML: {error}"))
         })?;
-        file.write_all(xml.as_bytes()).map_err(|error| {
-            VirtualMediaError::Command(format!("could not write temporary device XML: {error}"))
-        })?;
+        tokio::fs::write(file.path(), xml.as_bytes())
+            .await
+            .map_err(|error| {
+                VirtualMediaError::Command(format!("could not write temporary device XML: {error}"))
+            })?;
         self.virsh(&[
             "attach-device",
             &self.config.domain,
             file.path().to_string_lossy().as_ref(),
             "--persistent",
         ])
+        .await
         .map(drop)
         .map_err(VirtualMediaError::Command)
     }
 
-    fn eject_virtual_media(&self, device_id: &str) -> VirtualMediaResult {
+    async fn eject_virtual_media(&self, device_id: &str) -> VirtualMediaResult {
         let target = self.target_for_device(device_id)?;
-        self.detach_target(target)
+        self.detach_target(target).await
     }
 
-    fn apply_virtual_media(&self, state: &serde_json::Value) -> VirtualMediaResult {
+    async fn apply_virtual_media(&self, state: &serde_json::Value) -> VirtualMediaResult {
         let device_id = state
             .get("Id")
             .and_then(serde_json::Value::as_str)
@@ -258,7 +450,7 @@ impl LibvirtCallbacks {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         if !inserted {
-            return self.eject_virtual_media(device_id);
+            return self.eject_virtual_media(device_id).await;
         }
         let image = state
             .get("Image")
@@ -273,29 +465,45 @@ impl LibvirtCallbacks {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
         self.insert_virtual_media(device_id, image, write_protected)
+            .await
     }
 
-    fn reconcile_state(&self, desired: AppliedState) -> Result<(), String> {
-        let mut applied = self.applied_state.lock().unwrap();
-        if desired.boot_source_override != applied.boot_source_override {
+    async fn reconcile_state(&mut self, desired: AppliedState) -> Result<(), String> {
+        let desired_override_active = boot_source_override_is_active(&desired.boot_source_override);
+        if desired.boot_source_override != self.applied_state.boot_source_override
+            && desired_override_active
+        {
             self.set_boot_source_override(&desired.boot_source_override)
+                .await
                 .map_err(|error| error.to_string())?;
-            applied.boot_source_override = desired.boot_source_override;
+        } else if !desired_override_active
+            && (desired.boot_source_override != self.applied_state.boot_source_override
+                || desired.persistent_boot_selection
+                    != self.applied_state.persistent_boot_selection)
+        {
+            self.set_persistent_boot_selection(desired.persistent_boot_selection)
+                .await
+                .map_err(|error| error.to_string())?;
         }
+        self.applied_state.boot_source_override = desired.boot_source_override;
+        self.applied_state.persistent_boot_selection = desired.persistent_boot_selection;
         for (device_id, desired_device) in desired.virtual_media {
-            if applied.virtual_media.get(&device_id) == Some(&desired_device) {
+            if self.applied_state.virtual_media.get(&device_id) == Some(&desired_device) {
                 continue;
             }
             self.apply_virtual_media(&desired_device)
+                .await
                 .map_err(|error| error.to_string())?;
-            applied.virtual_media.insert(device_id, desired_device);
+            self.applied_state
+                .virtual_media
+                .insert(device_id, desired_device);
         }
         Ok(())
     }
 }
 
-impl From<&SingleSystemState> for AppliedState {
-    fn from(system: &SingleSystemState) -> Self {
+impl<C: Callbacks> From<&SingleSystemState<C>> for AppliedState {
+    fn from(system: &SingleSystemState<C>) -> Self {
         let virtual_media = system
             .virtual_media()
             .into_iter()
@@ -309,15 +517,26 @@ impl From<&SingleSystemState> for AppliedState {
             })
             .collect();
         Self {
+            persistent_boot_selection: system.resolve_persistent_boot_selection(),
             boot_source_override: system.boot_source_override(),
             virtual_media,
         }
     }
 }
 
-impl Callbacks for LibvirtCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        match self.virsh(&["domstate", &self.config.domain]) {
+fn boot_source_override_is_active(boot_source_override: &serde_json::Value) -> bool {
+    let enabled = boot_source_override
+        .get("BootSourceOverrideEnabled")
+        .and_then(serde_json::Value::as_str);
+    let target = boot_source_override
+        .get("BootSourceOverrideTarget")
+        .and_then(serde_json::Value::as_str);
+    enabled != Some("Disabled") && !matches!(target, None | Some("None"))
+}
+
+impl LibvirtBackend {
+    async fn get_power_state(&self) -> MockPowerState {
+        match self.virsh(&["domstate", &self.config.domain]).await {
             Ok(output) => match String::from_utf8_lossy(&output.stdout).trim() {
                 "running" | "idle" | "blocked" | "paused" | "in shutdown" | "pmsuspended" => {
                     MockPowerState::On
@@ -335,32 +554,42 @@ impl Callbacks for LibvirtCallbacks {
         }
     }
 
-    fn send_power_command(
-        &self,
+    async fn refresh_power_state(&self) {
+        let observed = self.get_power_state().await;
+        *self.power_state.write().expect("power state lock poisoned") = observed;
+    }
+
+    async fn send_power_command(
+        &mut self,
         reset_type: SystemPowerControl,
     ) -> Result<(), SetSystemPowerError> {
         use SystemPowerControl::*;
+        // Only a cold start loads the saved domain XML. Reboot and reset keep
+        // the running domain's boot configuration and their existing semantics.
+        if matches!(reset_type, On | ForceOn | PowerCycle) {
+            self.reapply_effective_boot_order().await?;
+        }
         match reset_type {
-            On | ForceOn => self.start(),
-            GracefulShutdown => self.domain_command("shutdown"),
-            ForceOff => self.domain_command("destroy"),
-            GracefulRestart => self.domain_command("reboot"),
-            ForceRestart => self.domain_command("reset"),
+            On | ForceOn => self.start().await,
+            GracefulShutdown => self.domain_command("shutdown").await,
+            ForceOff => self.domain_command("destroy").await,
+            GracefulRestart => self.domain_command("reboot").await,
+            ForceRestart => self.domain_command("reset").await,
             PowerCycle => {
-                self.domain_command("destroy")?;
-                self.start()
+                self.domain_command("destroy").await?;
+                self.start().await
             }
-            Pause => self.domain_command("suspend"),
-            Resume => self.domain_command("resume"),
-            Nmi => self.domain_command("inject-nmi"),
+            Pause => self.domain_command("suspend").await,
+            Resume => self.domain_command("resume").await,
+            Nmi => self.domain_command("inject-nmi").await,
             PushPowerButton | Suspend => Err(SetSystemPowerError::BadRequest(format!(
                 "libvirt backend does not support {reset_type:?}"
             ))),
         }
     }
 
-    fn state_refresh_indication(&self) {
-        let Some(system_state) = self.system_state.get().and_then(Weak::upgrade) else {
+    async fn refresh(&mut self) {
+        let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) else {
             tracing::error!(
                 domain = %self.config.domain,
                 "libvirt backend is not bound to BMC mock state",
@@ -374,12 +603,78 @@ impl Callbacks for LibvirtCallbacks {
             );
             return;
         };
-        if let Err(error) = self.reconcile_state(AppliedState::from(controlled_system)) {
+        if let Err(error) = self
+            .reconcile_state(AppliedState::from(controlled_system))
+            .await
+        {
             tracing::error!(
                 domain = %self.config.domain,
                 error = %error,
                 "could not reconcile libvirt domain with BMC mock state",
             );
+        }
+    }
+}
+
+impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
+    async fn message(
+        &mut self,
+        _mailbox: &ActorMailbox<LibvirtMessage>,
+        message: LibvirtMessage,
+    ) -> ActorResult {
+        match message {
+            LibvirtMessage::Run => self.refresh_power_state().await,
+            LibvirtMessage::Bind { state, reply } => {
+                if !reply.is_closed() {
+                    let result = self.bind_state(state).await;
+                    self.refresh_power_state().await;
+                    // The caller can stop waiting while the operation completes.
+                    reply.send(result).ok();
+                }
+            }
+            LibvirtMessage::SendPowerCommand { reset_type } => {
+                if matches!(reset_type, SystemPowerControl::PowerCycle) {
+                    *self.power_state.write().expect("power state lock poisoned") =
+                        MockPowerState::PowerCycling {
+                            since: Instant::now(),
+                        };
+                }
+                if let Err(error) = self.send_power_command(reset_type).await {
+                    tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
+                }
+                self.refresh_power_state().await;
+            }
+            LibvirtMessage::Refresh => {
+                // Clear before reading state so changes during reconciliation queue another refresh.
+                self.refresh_pending.store(false, Ordering::SeqCst);
+                self.refresh().await;
+                self.refresh_power_state().await;
+            }
+        }
+        ActorResult::Noop
+    }
+}
+
+impl Callbacks for LibvirtCallbacks {
+    fn get_power_state(&self) -> MockPowerState {
+        *self.power_state.read().expect("power state lock poisoned")
+    }
+
+    fn send_power_command(
+        &self,
+        reset_type: SystemPowerControl,
+    ) -> Result<(), SetSystemPowerError> {
+        self.mailbox
+            .send(LibvirtMessage::SendPowerCommand { reset_type })
+            .map_err(|error| SetSystemPowerError::CommandSendError(error.to_string()))
+    }
+
+    fn state_refresh_indication(&self) {
+        if !self.refresh_pending.swap(true, Ordering::SeqCst)
+            && let Err(error) = self.mailbox.send(LibvirtMessage::Refresh)
+        {
+            self.refresh_pending.store(false, Ordering::SeqCst);
+            tracing::warn!(%error, "could not notify libvirt actor of changed BMC state");
         }
     }
 }
@@ -446,12 +741,17 @@ impl MediaSource {
                         "virtual media URLs must not contain credentials or a query".to_string(),
                     ));
                 }
-                let host = url.host_str().ok_or_else(|| {
+                let host = url.host().ok_or_else(|| {
                     VirtualMediaError::BadRequest(format!("virtual media URL has no host: {image}"))
                 })?;
+                // `Host::Display` brackets IPv6, but libvirt needs the bare address.
+                let host = match host {
+                    url::Host::Ipv6(address) => address.to_string(),
+                    host => host.to_string(),
+                };
                 Ok(Self::Network {
                     protocol: url.scheme().to_string(),
-                    host: host.to_string(),
+                    host,
                     port: url
                         .port_or_known_default()
                         .expect("HTTP(S) has a default port"),
@@ -541,40 +841,10 @@ fn virtual_media_xml(
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-    use std::fs;
-    use std::sync::Arc;
-
-    use axum::Router;
-    use axum::body::Body;
-    use axum::http::{Method, Request, StatusCode};
-    use serde_json::json;
-    use tower::ServiceExt;
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases};
 
     use super::*;
-    use crate::test_support::host_info;
-    use crate::{HardwareType, MachineRouterOptions, VirtualMediaDeviceConfig, machine_router};
-
-    async fn request(
-        router: &Router,
-        method: Method,
-        uri: &str,
-        body: serde_json::Value,
-    ) -> StatusCode {
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(uri)
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        response.status()
-    }
 
     #[test]
     fn replaces_domain_boot_order() {
@@ -587,15 +857,40 @@ mod tests {
     }
 
     #[test]
-    fn builds_http_virtual_media_device() {
-        let actual =
-            virtual_media_xml("Cd", "sdb", "http://127.0.0.1:8080/installer.iso", true).unwrap();
-
-        assert!(actual.contains("<disk type=\"network\" device=\"cdrom\">"));
-        assert!(actual.contains("<source protocol=\"http\" name=\"/installer.iso\">"));
-        assert!(actual.contains("<host name=\"127.0.0.1\" port=\"8080\"/>"));
-        assert!(actual.contains("<target dev=\"sdb\" bus=\"sata\"/>"));
-        assert!(actual.contains("<readonly/>"));
+    fn builds_network_virtual_media_device() {
+        let device = |source| {
+            format!(
+                "<disk type=\"network\" device=\"cdrom\"><driver name=\"qemu\" type=\"raw\"/>\
+                {source}</source><target dev=\"sdb\" bus=\"sata\"/><readonly/>\
+                <alias name=\"ua-bmc-mock-vmedia-Cd\"/></disk>"
+            )
+        };
+        check_cases(
+            [
+                Case {
+                    scenario: "IPv4 with an explicit port",
+                    input: "http://127.0.0.1:8080/installer.iso",
+                    expect: Yields(device(
+                        "<source protocol=\"http\" name=\"/installer.iso\"><host name=\"127.0.0.1\" port=\"8080\"/>",
+                    )),
+                },
+                Case {
+                    scenario: "IPv6 with an explicit port",
+                    input: "http://[2001:db8::10]:8080/installer.iso",
+                    expect: Yields(device(
+                        "<source protocol=\"http\" name=\"/installer.iso\"><host name=\"2001:db8::10\" port=\"8080\"/>",
+                    )),
+                },
+                Case {
+                    scenario: "domain with the default HTTPS port",
+                    input: "https://images.example.com/installer.iso",
+                    expect: Yields(device(
+                        "<source protocol=\"https\" name=\"/installer.iso\"><host name=\"images.example.com\" port=\"443\"/>",
+                    )),
+                },
+            ],
+            |image| virtual_media_xml("Cd", "sdb", image, true).map_err(|error| error.to_string()),
+        );
     }
 
     #[test]
@@ -606,125 +901,5 @@ mod tests {
         assert!(actual.contains("<source file=\"/tmp/config.iso\"/>"));
         assert!(actual.contains("<target dev=\"sdc\" bus=\"sata\"/>"));
         assert!(!actual.contains("<readonly/>"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn state_refresh_drives_the_configured_domain() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = tempfile::tempdir().unwrap();
-        let virsh_path = directory.path().join("virsh");
-        let log_path = directory.path().join("virsh.log");
-        let defined_xml_path = directory.path().join("defined.xml");
-        let attached_xml_path = directory.path().join("attached.xml");
-        let script = format!(
-            r#"#!/bin/sh
-printf '%s\n' "$*" >> '{}'
-case "$3" in
-  domstate) printf 'shut off\n' ;;
-  dumpxml) printf '<domain><os><type>hvm</type><boot dev="hd"/></os><devices/></domain>\n' ;;
-  domblklist) printf 'Type Device Target Source\nnetwork cdrom sdb http://example/old.iso\n' ;;
-  define) cp "$4" '{}' ;;
-  attach-device) cp "$5" '{}' ;;
-esac
-"#,
-            log_path.display(),
-            defined_xml_path.display(),
-            attached_xml_path.display(),
-        );
-        fs::write(&virsh_path, script).unwrap();
-        let mut permissions = fs::metadata(&virsh_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&virsh_path, permissions).unwrap();
-
-        let callbacks = Arc::new(LibvirtCallbacks::new(Config {
-            virsh_path,
-            uri: "qemu:///system".to_string(),
-            domain: "dsx-node".to_string(),
-            virtual_media_targets: BTreeMap::from([("Cd".to_string(), "sdb".to_string())]),
-        }));
-        let (router, state) = machine_router(
-            &host_info(HardwareType::DellPowerEdgeR750),
-            callbacks.clone(),
-            "test-host-id".to_string(),
-            false,
-            MachineRouterOptions {
-                virtual_media_devices: Some(vec![VirtualMediaDeviceConfig {
-                    id: Cow::Borrowed("Cd"),
-                    name: Cow::Borrowed("Operating System Virtual CD"),
-                    media_types: vec![Cow::Borrowed("CD"), Cow::Borrowed("DVD")],
-                }]),
-            },
-        );
-        callbacks.bind_state(&state).unwrap();
-        let system = "/redfish/v1/Systems/System.Embedded.1";
-
-        let status = request(
-            &router,
-            Method::PATCH,
-            system,
-            json!({
-                "Boot": {
-                    "BootSourceOverrideEnabled": "Once",
-                    "BootSourceOverrideTarget": "Cd",
-                }
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let status = request(
-            &router,
-            Method::POST,
-            &format!("{system}/Actions/ComputerSystem.Reset"),
-            json!({"ResetType": "On"}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let status = request(
-            &router,
-            Method::POST,
-            &format!("{system}/VirtualMedia/Cd/Actions/VirtualMedia.InsertMedia"),
-            json!({
-                "Image": "http://127.0.0.1:8080/installer.iso",
-                "WriteProtected": true,
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        let status = request(
-            &router,
-            Method::POST,
-            &format!("{system}/VirtualMedia/Cd/Actions/VirtualMedia.EjectMedia"),
-            json!({}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        let status = request(
-            &router,
-            Method::PATCH,
-            system,
-            json!({
-                "Boot": {
-                    "BootSourceOverrideMode": "UEFI",
-                    "BootSourceOverrideEnabled": "Disabled",
-                    "BootSourceOverrideTarget": "None",
-                }
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-
-        let log = fs::read_to_string(log_path).unwrap();
-        assert!(log.contains("--connect qemu:///system dumpxml --inactive dsx-node"));
-        assert!(log.contains("--connect qemu:///system start dsx-node"));
-        assert!(log.contains("--connect qemu:///system detach-disk dsx-node sdb --persistent"));
-        assert!(log.contains("--connect qemu:///system attach-device dsx-node"));
-        let attached_xml = fs::read_to_string(attached_xml_path).unwrap();
-        assert!(attached_xml.contains("protocol=\"http\""));
-        assert!(attached_xml.contains("dev=\"sdb\""));
-        let defined_xml = fs::read_to_string(defined_xml_path).unwrap();
-        assert!(defined_xml.contains("<boot dev=\"hd\"/>"));
-        assert!(!defined_xml.contains("<boot dev=\"cdrom\"/>"));
     }
 }

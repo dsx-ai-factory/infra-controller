@@ -40,6 +40,7 @@ use crate::metrics::BmcLatencyMetrics;
 fn parse_static_nvlink_domain_uuid(
     value: Option<&str>,
     endpoint_kind: &str,
+    rack_id: Option<&str>,
 ) -> Option<NvLinkDomainId> {
     value.and_then(|value| match NvLinkDomainId::from_str(value) {
         Ok(domain_uuid) => Some(domain_uuid),
@@ -47,6 +48,7 @@ fn parse_static_nvlink_domain_uuid(
             tracing::warn!(
                 ?error,
                 nvlink_domain_uuid = ?value,
+                rack_id = rack_id.map(tracing::field::display),
                 "Invalid {endpoint_kind}.nvlink_domain_uuid in static endpoint config"
             );
 
@@ -100,6 +102,7 @@ impl StaticEndpointSource {
                     tracing::warn!(
                         ?error,
                         bmc_mac_address = ?cfg.mac,
+                        rack_id = cfg.rack_id.as_deref().map(tracing::field::display),
                         "Invalid MAC in static endpoint config"
                     );
                     continue;
@@ -113,18 +116,25 @@ impl StaticEndpointSource {
                         tracing::warn!(
                             ?error,
                             power_shelf_id = ?id,
+                            rack_id = cfg.rack_id.as_deref().map(tracing::field::display),
                             "Invalid power_shelf.id in static endpoint config"
                         );
                         None
                     }
                 });
-                let serial = power_shelf
-                    .serial
-                    .clone()
-                    .or_else(|| power_shelf.id.clone())
-                    .unwrap_or_else(|| cfg.mac.clone());
+                let serial = power_shelf.serial.clone();
+                let nvlink_domain_uuid = parse_static_nvlink_domain_uuid(
+                    power_shelf.nvlink_domain_uuid.as_deref(),
+                    "power_shelf",
+                    cfg.rack_id.as_deref(),
+                )
+                .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil());
 
-                Some(EndpointMetadata::PowerShelf(PowerShelfData { id, serial }))
+                Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                    id,
+                    serial,
+                    nvlink_domain_uuid,
+                }))
             } else if let Some(switch) = &cfg.switch {
                 let id = switch.id.as_ref().and_then(|id| match id.parse() {
                     Ok(id) => Some(id),
@@ -132,6 +142,7 @@ impl StaticEndpointSource {
                         tracing::warn!(
                             ?error,
                             switch_id = ?id,
+                            rack_id = cfg.rack_id.as_deref().map(tracing::field::display),
                             "Invalid switch.id in static endpoint config"
                         );
                         None
@@ -143,9 +154,12 @@ impl StaticEndpointSource {
                     .or_else(|| switch.id.clone())
                     .unwrap_or_else(|| cfg.mac.clone());
 
-                let nvlink_domain_uuid =
-                    parse_static_nvlink_domain_uuid(switch.nvlink_domain_uuid.as_deref(), "switch")
-                        .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil());
+                let nvlink_domain_uuid = parse_static_nvlink_domain_uuid(
+                    switch.nvlink_domain_uuid.as_deref(),
+                    "switch",
+                    cfg.rack_id.as_deref(),
+                )
+                .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil());
 
                 let endpoint_role = match switch.endpoint_role {
                     StaticSwitchEndpointRole::Bmc => SwitchEndpointRole::Bmc,
@@ -170,7 +184,13 @@ impl StaticEndpointSource {
                 let machine_id = machine.id.as_deref().and_then(|id| match id.parse() {
                     Ok(machine_id) => Some(machine_id),
                     Err(error) => {
-                        tracing::warn!(?error, ?id, "Invalid machine.id in static endpoint config");
+                        tracing::warn!(
+                            ?error,
+                            ?id,
+                            rack_id = cfg.rack_id.as_deref().map(tracing::field::display),
+                            "Invalid machine.id in static endpoint config"
+                        );
+
                         None
                     }
                 });
@@ -178,6 +198,7 @@ impl StaticEndpointSource {
                 let nvlink_domain_uuid = parse_static_nvlink_domain_uuid(
                     machine.nvlink_domain_uuid.as_deref(),
                     "machine",
+                    cfg.rack_id.as_deref(),
                 );
 
                 let driver_version = machine
@@ -203,7 +224,7 @@ impl StaticEndpointSource {
             let addr = BmcAddr {
                 ip: cfg.ip,
                 port: cfg.port,
-                mac,
+                mac: Some(mac),
             };
             let credentials = BmcCredentials::UsernamePassword {
                 username: cfg.username.clone(),
@@ -231,6 +252,7 @@ impl StaticEndpointSource {
                     tracing::warn!(
                         ?error,
                         bmc_address = ?addr,
+                        rack_id = rack_id.as_ref().map(tracing::field::display),
                         "Failed to construct BmcClient for static endpoint"
                     );
                     continue;
@@ -359,7 +381,7 @@ mod tests {
         assert_eq!(endpoints.len(), 1);
         assert_eq!(
             endpoints[0].addr.mac,
-            MacAddress::from_str("00:11:22:33:44:55").unwrap()
+            Some(MacAddress::from_str("00:11:22:33:44:55").unwrap())
         );
     }
 
@@ -462,6 +484,7 @@ mod tests {
     #[tokio::test]
     async fn test_static_endpoint_with_power_shelf_metadata() {
         let power_shelf_id = test_power_shelf_id("power-shelf-a");
+        let domain_uuid = NvLinkDomainId::new();
         let configs = vec![StaticBmcEndpoint {
             ip: ip("10.0.2.1"),
             port: Some(443),
@@ -472,6 +495,7 @@ mod tests {
             power_shelf: Some(StaticPowerShelfEndpoint {
                 id: Some(power_shelf_id.to_string()),
                 serial: Some("PS-001".to_string()),
+                nvlink_domain_uuid: Some(domain_uuid.to_string()),
             }),
             switch: None,
             rack_id: None,
@@ -485,7 +509,42 @@ mod tests {
         match &endpoints[0].metadata {
             Some(EndpointMetadata::PowerShelf(power_shelf)) => {
                 assert_eq!(power_shelf.id, Some(power_shelf_id));
-                assert_eq!(power_shelf.serial, "PS-001");
+                assert_eq!(power_shelf.serial.as_deref(), Some("PS-001"));
+                assert_eq!(power_shelf.nvlink_domain_uuid, Some(domain_uuid));
+            }
+            other => panic!("expected PowerShelf metadata, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_static_endpoint_without_power_shelf_serial_preserves_absence() {
+        let power_shelf_id = test_power_shelf_id("power-shelf-without-serial");
+        let configs = vec![StaticBmcEndpoint {
+            ip: ip("10.0.2.2"),
+            port: Some(443),
+            mac: "22:33:44:55:66:88".to_string(),
+            username: "admin".to_string(),
+            password: Some("pass".to_string()),
+            machine: None,
+            power_shelf: Some(StaticPowerShelfEndpoint {
+                id: Some(power_shelf_id.to_string()),
+                serial: None,
+                nvlink_domain_uuid: Some(NvLinkDomainId::nil().to_string()),
+            }),
+            switch: None,
+            rack_id: None,
+            labels: Default::default(),
+        }];
+
+        let source = StaticEndpointSource::from_config(&configs, &reqwest(), None, 10, None);
+        let endpoints = source.fetch_bmc_hosts().await.unwrap();
+
+        assert_eq!(endpoints.len(), 1);
+        match &endpoints[0].metadata {
+            Some(EndpointMetadata::PowerShelf(power_shelf)) => {
+                assert_eq!(power_shelf.id, Some(power_shelf_id));
+                assert_eq!(power_shelf.serial, None);
+                assert_eq!(power_shelf.nvlink_domain_uuid, None);
             }
             other => panic!("expected PowerShelf metadata, got {other:?}"),
         }

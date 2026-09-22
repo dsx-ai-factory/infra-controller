@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{{- if .Values.serviceMonitor.enabled }}
+{{- $name := include "nico-site-health-probe.name" . }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "nico-site-health-probe.namespace" . }}
+  labels:
+    {{- include "nico-site-health-probe.labels" . | nindent 4 }}
+    prometheus: nico-monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/metrics: {{ $name }}
+  namespaceSelector:
+    matchNames:
+      - {{ include "nico-site-health-probe.namespace" . }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+{{- end }}

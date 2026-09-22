@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 {{- include "nico-rest-api.validateAuth" . }}
+{{- include "nico-rest-api.validatePowerProvisioning" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

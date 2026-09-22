@@ -23,7 +23,7 @@ helm install cert-manager jetstack/cert-manager \
 
 ### HashiCorp Vault
 
-Required for PKI (certificate signing) and secret storage. Vault serves as the backend for the cert-manager issuer and provides secrets to various NICo components.
+Required for PKI (certificate signing) and, by default, secret storage. Vault serves as the backend for the cert-manager issuer and provides secrets to various NICo components. NICo can keep the credentials it manages in Postgres instead; see [Secrets Storage](../docs/configuration/secrets-storage.md).
 
 - Vault must be deployed and unsealed.
 - A PKI secrets engine must be configured for certificate signing.
@@ -168,17 +168,21 @@ global:
 
 Provides Vault connection information to NICo services.
 
-**Required keys:** `VAULT_SERVICE`, `FORGE_VAULT_MOUNT`, `FORGE_VAULT_PKI_MOUNT`
+**Required keys:** `VAULT_SERVICE`, `NICO_VAULT_MOUNT`, `NICO_VAULT_PKI_MOUNT`
+
+**Optional key:** `VAULT_NAMESPACE` selects a HashiCorp Vault Enterprise or HCP Vault Dedicated namespace. This is distinct from the Kubernetes namespace and from NICo's SPIFFE configuration. When present, NICo sends it as `X-Vault-Namespace` on every Vault request. Runtime configuration takes precedence over this environment value.
+
+> **Migration:** Vault namespaces isolate auth methods, secret engines, policies, and secrets. Before enabling `VAULT_NAMESPACE` for an existing NICo deployment, migrate or recreate the NICo KV and PKI mounts, their data, and the authentication configuration in the target namespace. See HashiCorp's [Vault namespace documentation](https://docs.hashicorp.com/vault/docs/enterprise/namespaces).
 
 ```bash
 kubectl create configmap vault-cluster-info \
   --namespace forge-system \
   --from-literal=VAULT_SERVICE='https://vault.example.com' \
-  --from-literal=FORGE_VAULT_MOUNT='secrets' \
-  --from-literal=FORGE_VAULT_PKI_MOUNT='forgeca'
+  --from-literal=NICO_VAULT_MOUNT='secrets' \
+  --from-literal=NICO_VAULT_PKI_MOUNT='forgeca'
 ```
 
-**Note:** Alternatively, populate `nico-api.vaultClusterInfo` in your `values.yaml` to have the chart create this ConfigMap for you.
+**Note:** Alternatively, set `vault.namespace` in the prerequisites chart values to have it add `VAULT_NAMESPACE` to this ConfigMap, or populate `nico-api.vaultClusterInfo` in your `values.yaml` to have the chart create it.
 
 ### `forge-system-nico-database-config`
 

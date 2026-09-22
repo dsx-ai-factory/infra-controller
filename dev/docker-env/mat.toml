@@ -22,23 +22,12 @@
 
 carbide_api_url = "https://127.0.0.1:1079"
 
-# tui_enabled enables a TUI view of machine-a-tron. If set to true, you need to
-# specify log_file to redirect logs.
-#
-# tui_enabled = true
-
-# Logs will be written here, because machine-a-tron shows a TUI by default. You
-# can omit this if tui_enabled = false
+# Logs will be written here.
 log_file = "/tmp/mat.log"
 
 # Log format can be "compact" (the default) or "logfmt". Kubernetes deployments
 # use logfmt on stdout so log collectors can preserve structured tracing fields.
 log_format = "compact"
-
-# Network interface to bind to when creating addresses for BMC mocks. BMC mocks
-# will be configured with whatever IP address carbide assigns them, so they will
-# assign new addresses to this interface via `ip address add`.
-interface = "carbide0"
 
 # Set use_pxe_api to true if you want to avoid running a PXE server and instead
 # have machine-a-tron use the carbide API to simulate PXE requests.
@@ -64,11 +53,9 @@ pxe_server_port = "1083"
 
 [machines.config]
 host_count = 1
-vpc_count = 2
 dpu_per_host_count = 1
 dpu_reboot_delay = 20  # in units of seconds
 host_reboot_delay = 20 # in units of seconds
-subnets_per_vpc = 2
 
 # These addresses must correspond to subnets defined in your
 # carbide-api-site-config.toml. Nothing actually binds to these addresses, it is

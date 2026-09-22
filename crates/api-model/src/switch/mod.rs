@@ -177,6 +177,9 @@ pub struct Switch {
     /// one BMC, so the flag's presence on the row names the target device.
     pub bmc_credential_rotation_requested: bool,
 
+    /// Set by the API to start decommissioning once the switch is Ready.
+    pub decommission_requested: bool,
+
     pub controller_state: Versioned<SwitchControllerState>,
 
     /// The result of the last attempt to change state
@@ -258,6 +261,7 @@ impl<'r> FromRow<'r, PgRow> for Switch {
             bmc_credential_rotation_requested: row
                 .try_get("bmc_credential_rotation_requested")
                 .unwrap_or(false),
+            decommission_requested: row.try_get("decommission_requested").unwrap_or(false),
             controller_state: Versioned {
                 value: controller_state.0,
                 version: row.try_get("controller_state_version")?,
@@ -357,6 +361,31 @@ pub enum ReProvisioningState {
     WaitingForNMXCConfigure,
 }
 
+/// Progress through the managed-switch decommissioning workflow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum SwitchDecommissioningState {
+    /// Site Explorer is being suppressed before the destructive reset.
+    SuppressingSiteExplorer,
+    /// NVOS DHCP is suppressed before the factory reset so post-reset discovers are ignored.
+    SuppressingNvosDhcp,
+    /// Submits the destructive RMS NVOS factory-reset job.
+    /// Completion is not polled: NVOS DHCP is already suppressed, so the job
+    /// cannot be observed reliably; progress continues via DHCP acknowledgement.
+    FactoryResetNvos,
+    /// Waiting for the pre-reset NVOS DHCP suppression to be acknowledged.
+    WaitingForNvosDhcpAcknowledgement,
+    /// BMC DHCP is suppressed before the BMC factory reset.
+    SuppressingBmcDhcp,
+    /// Issues the BMC factory reset.
+    FactoryResetBmc,
+    /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
+    WaitingForBmcDhcpAcknowledgement,
+    /// Managed per-device BMC and NVOS credentials are being removed after factory reset.
+    DeletingManagedCredentials,
+    Decommissioned,
+}
+
 /// State of a Switch as tracked by the controller
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
@@ -380,6 +409,11 @@ pub enum SwitchControllerState {
     /// The Switch is ready for use.
     Ready,
 
+    /// The Switch is being removed from managed service.
+    Decommissioning {
+        decommissioning_state: SwitchDecommissioningState,
+    },
+
     /// The Switch is converging its BMC credentials to the staged site-wide
     /// rotation target. Entered from `Ready` (lowest precedence) when
     /// the switch BMC lags the target and site-wide rotation is enabled, or when
@@ -395,6 +429,10 @@ pub enum SwitchControllerState {
     /// The Switch is executing an operator-requested maintenance operation.
     Maintenance {
         operation: SwitchMaintenanceOperation,
+        /// The request admitted before external work began. Older saved states
+        /// omit this, so their completion must leave pending requests alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<SwitchMaintenanceRequest>,
         /// Sub-states for async maintenance operations such as certificate reconfiguration.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         configure_certificate: Option<ConfigureCertificateState>,
@@ -411,15 +449,18 @@ pub enum SwitchControllerState {
 }
 
 impl SwitchControllerState {
-    /// Builds the controller state for a requested maintenance operation.
-    pub fn maintenance_for_operation(operation: SwitchMaintenanceOperation) -> Self {
+    /// Starts `Maintenance` and saves the full request for the completion check.
+    /// `ReconfigureCertificate` starts at `ConfigureCertificateState::Start`;
+    /// other operations have no certificate job state.
+    pub fn maintenance_for_request(request: SwitchMaintenanceRequest) -> Self {
         Self::Maintenance {
-            operation,
+            operation: request.operation,
             configure_certificate: matches!(
-                operation,
+                request.operation,
                 SwitchMaintenanceOperation::ReconfigureCertificate
             )
             .then_some(ConfigureCertificateState::Start),
+            request: Some(request),
         }
     }
 }
@@ -457,6 +498,47 @@ pub fn state_sla(state: &SwitchControllerState, state_version: &ConfigVersion) -
             time_in_state,
         ),
         SwitchControllerState::Ready => StateSla::no_sla(),
+        SwitchControllerState::Decommissioning {
+            decommissioning_state,
+        } => match decommissioning_state {
+            SwitchDecommissioningState::SuppressingSiteExplorer => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_SUPPRESSING_SITE_EXPLORER),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::SuppressingNvosDhcp => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_SUPPRESSING_NVOS_DHCP),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::FactoryResetNvos => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_NVOS),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => StateSla::with_sla(
+                std::time::Duration::from_secs(
+                    slas::DECOMMISSIONING_WAITING_FOR_NVOS_DHCP_ACKNOWLEDGEMENT,
+                ),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::SuppressingBmcDhcp => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_SUPPRESSING_BMC_DHCP),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::FactoryResetBmc => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_BMC),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::WaitingForBmcDhcpAcknowledgement => StateSla::with_sla(
+                std::time::Duration::from_secs(
+                    slas::DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACKNOWLEDGEMENT,
+                ),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::DeletingManagedCredentials => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_DELETING_MANAGED_CREDENTIALS),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::Decommissioned => StateSla::no_sla(),
+        },
         SwitchControllerState::RotatingBmc { .. } => StateSla::with_sla(
             std::time::Duration::from_secs(slas::ROTATING_BMC),
             time_in_state,
@@ -564,6 +646,80 @@ mod tests {
                 SwitchControllerState::Ready => Yields(r#"{"state":"ready"}"#.to_string()),
             }
 
+            "decommissioning: suppressing Site Explorer" {
+                SwitchControllerState::Decommissioning {
+                    decommissioning_state: SwitchDecommissioningState::SuppressingSiteExplorer,
+                } => Yields(
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"suppressingsiteexplorer"}}"#
+                        .to_string(),
+                ),
+            }
+
+            "decommissioning: suppressing NVOS DHCP" {
+                SwitchControllerState::Decommissioning {
+                    decommissioning_state: SwitchDecommissioningState::SuppressingNvosDhcp,
+                } => Yields(
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"suppressingnvosdhcp"}}"#
+                        .to_string(),
+                ),
+            }
+
+            "decommissioning: submit NVOS reset" {
+                SwitchControllerState::Decommissioning {
+                    decommissioning_state: SwitchDecommissioningState::FactoryResetNvos,
+                } => Yields(
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"factoryresetnvos"}}"#
+                        .to_string(),
+                ),
+            }
+
+            "decommissioning: waiting for NVOS DHCP acknowledgement" {
+                SwitchControllerState::Decommissioning {
+                    decommissioning_state:
+                        SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement,
+                } => Yields(
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"waitingfornvosdhcpacknowledgement"}}"#
+                        .to_string(),
+                ),
+            }
+
+            "decommissioning: suppressing BMC DHCP" {
+                SwitchControllerState::Decommissioning {
+                    decommissioning_state: SwitchDecommissioningState::SuppressingBmcDhcp,
+                } => Yields(
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"suppressingbmcdhcp"}}"#
+                        .to_string(),
+                ),
+            }
+
+            "decommissioning: waiting for BMC DHCP acknowledgement" {
+                SwitchControllerState::Decommissioning {
+                    decommissioning_state:
+                        SwitchDecommissioningState::WaitingForBmcDhcpAcknowledgement,
+                } => Yields(
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"waitingforbmcdhcpacknowledgement"}}"#
+                        .to_string(),
+                ),
+            }
+
+            "decommissioning: deleting managed credentials" {
+                SwitchControllerState::Decommissioning {
+                    decommissioning_state: SwitchDecommissioningState::DeletingManagedCredentials,
+                } => Yields(
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"deletingmanagedcredentials"}}"#
+                        .to_string(),
+                ),
+            }
+
+            "decommissioning: terminal" {
+                SwitchControllerState::Decommissioning {
+                    decommissioning_state: SwitchDecommissioningState::Decommissioned,
+                } => Yields(
+                    r#"{"state":"decommissioning","decommissioning_state":{"state":"decommissioned"}}"#
+                        .to_string(),
+                ),
+            }
+
             "rotatingbmc carries its retry count" {
                 SwitchControllerState::RotatingBmc { retry_count: 4 } => Yields(
                     r#"{"state":"rotatingbmc","retry_count":4}"#.to_string(),
@@ -573,6 +729,7 @@ mod tests {
             "maintenance: power on" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::PowerOn,
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"poweron"}}"#.to_string(),
@@ -582,6 +739,7 @@ mod tests {
             "maintenance: power off" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::PowerOff,
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"#
@@ -592,6 +750,7 @@ mod tests {
             "maintenance: reset" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::Reset,
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"reset"}}"#.to_string(),
@@ -601,6 +760,7 @@ mod tests {
             "maintenance: reconfigure certificate" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::ReconfigureCertificate,
+                    request: None,
                     configure_certificate: Some(ConfigureCertificateState::Start),
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"reconfigurecertificate"},"configure_certificate":"Start"}"#
@@ -690,6 +850,14 @@ mod tests {
                 r#"{"state":"ready"}"# => Yields(SwitchControllerState::Ready),
             }
 
+            "decommissioning terminal state" {
+                r#"{"state":"decommissioning","decommissioning_state":{"state":"decommissioned"}}"# => Yields(
+                    SwitchControllerState::Decommissioning {
+                        decommissioning_state: SwitchDecommissioningState::Decommissioned,
+                    },
+                ),
+            }
+
             "legacy ready with stray ready_state still deserializes to Ready" {
                 r#"{"state":"ready","ready_state":"poweroff"}"# => Yields(SwitchControllerState::Ready),
             }
@@ -709,6 +877,7 @@ mod tests {
             "maintenance: reset" {
                 r#"{"state":"maintenance","operation":{"operation":"reset"}}"# => Yields(SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::Reset,
+                    request: None,
                     configure_certificate: None,
                 }),
             }

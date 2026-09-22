@@ -50,8 +50,8 @@ pub(in crate::tests) mod tests {
     //   A = allow_allocation_on_validation_failure (F=block on failure, T=allow allocation despite failures)
     //   B = auto_generate_missing_sku (F=manual, T=auto-generate)
     //
-    // When allow_allocation_on_validation_failure=true, machines in failed states
-    // (SkuVerificationFailed, SkuMissing, WaitingForSkuAssignment) can transition
+    // When allow_allocation_on_validation_failure=true, machines with assigned
+    // SKUs in failed states (SkuVerificationFailed or SkuMissing) can transition
     // back to Ready/MachineValidation instead of staying blocked.
     //
     // ================================================================================
@@ -72,7 +72,7 @@ pub(in crate::tests) mod tests {
     // │2.1 │ F │ F │ WaitingForSkuAssignment     │ Stays in Waiting           │ test_stays_in_waiting_state_when_not_assigned            │
     // │2.2 │ F │ F │ Waiting → Test assigns SKU  │ → UpdatingInventory        │ test_leave_waiting_when_assigned                         │
     // │2.3 │ F │ F │ No SKU assigned             │ Stuck in Waiting           │ test_stuck_in_waiting_without_sku                        │
-    // │2.4 │ T │ F │ No SKU (skips Waiting)      │ Panic (never enters)       │ test_escapes_waiting_with_allow_allocation               │
+    // │2.4 │ T │ F │ No SKU assigned             │ Stays in Waiting           │ test_allow_allocation_does_not_bypass_unassigned_sku     │
     // ├────┼───┼───┼─────────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────┤
     // │ 3. SkuMissing State                                                                                                              │
     // ├────┼───┼───┼─────────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────┤
@@ -97,7 +97,7 @@ pub(in crate::tests) mod tests {
     // ├────┼───┼───┼─────────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────┤
     // │6.1 │ F │ * │ Second machine, same HW     │ Auto-match existing → Ready│ test_auto_match_sku                                      │
     // │6.2 │ F │ * │ SKU replacement triggers    │ Re-verify (to BomValidating)│ test_replace_triggers_verify                            │
-    // │6.3 │ F │ * │ Unassign + clear status     │ Immediate re-match → Ready │ test_auto_match_after_unassign                           │
+    // │6.3 │ F │ * │ Unassign + retained status  │ Immediate re-match → Ready │ test_auto_match_after_unassign                           │
     // ├────┼───┼───┼─────────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────┤
     // │ 7. SKU Version Compatibility                                                                                                     │
     // ├────┼───┼───┼─────────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────┤
@@ -153,7 +153,7 @@ pub(in crate::tests) mod tests {
               "count": 1,
               "min_size_mb": 1800000,
               "max_size_mb": 2000000,
-              "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/nvme/nvme0/nvme0n1"]
+              "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/nvme"]
             }
           ],
           "tpm":
@@ -216,7 +216,7 @@ pub(in crate::tests) mod tests {
         "count": 1,
         "min_size_mb": 1831420,
         "max_size_mb": 1831420,
-        "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme/nvme0/nvme0n1"]
+        "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme"]
       }
     ],
     "memory": [
@@ -294,6 +294,17 @@ pub(in crate::tests) mod tests {
         test_env
     }
 
+    async fn create_test_env_ignoring_unassigned_machines(db_pool: sqlx::PgPool) -> TestEnv {
+        let mut overrides = TestEnvOverrides::default();
+        let mut config = get_config();
+        config.bom_validation.enabled = true;
+        config.bom_validation.ignore_unassigned_machines = true;
+        config.bom_validation.allow_allocation_on_validation_failure = false;
+        overrides.config = Some(config);
+
+        create_test_env_with_overrides(db_pool, overrides).await
+    }
+
     async fn get_machine_state(pool: &sqlx::PgPool, mh: &TestManagedHost) -> ManagedHostState {
         let mut txn = pool.begin().await.unwrap();
         let machine = mh.host().db_machine(&mut txn).await;
@@ -326,7 +337,7 @@ pub(in crate::tests) mod tests {
     async fn get_machine_by_id(
         txn: &mut PgConnection,
         machine_id: &MachineId,
-    ) -> Result<model::machine::Machine, eyre::Error> {
+    ) -> Result<model::machine::AnyMachine, eyre::Error> {
         db::machine::find(
             txn,
             ObjectFilter::One(*machine_id),
@@ -335,23 +346,6 @@ pub(in crate::tests) mod tests {
         .await?
         .pop()
         .ok_or_else(|| eyre::eyre!("machine not found: {}", machine_id))
-    }
-
-    /// Helper: Clear the SKU status/timestamp on a machine to allow re-matching
-    /// Used in tests to reset the SKU matching state and test re-match behavior
-    pub(in crate::tests) async fn clear_sku_status(
-        txn: &mut PgConnection,
-        machine_id: &MachineId,
-    ) -> Result<(), DatabaseError> {
-        let query = "UPDATE machines SET hw_sku_status=null WHERE id=$1 RETURNING id";
-
-        let _: () = sqlx::query_as(query)
-            .bind(machine_id)
-            .fetch_one(txn)
-            .await
-            .map_err(|e| DatabaseError::new("clear sku last match attempt", e))?;
-
-        Ok(())
     }
 
     /// Helper: Test SKU version compatibility and backward compatibility
@@ -804,21 +798,18 @@ pub(in crate::tests) mod tests {
         Ok(())
     }
 
-    /// Test 2.4: Never enters WaitingForSkuAssignment with allow_allocation_on_validation_failure=true
+    /// Test 2.4: WaitingForSkuAssignment with allow_allocation_on_validation_failure=true
     /// Conditions:
     /// - allow_allocation_on_validation_failure = true
     /// - auto_generate_missing_sku = false
     /// - auto_assign_sku_in_fixture = false
-    /// - expected_state = WaitingForSkuAssignment
-    /// Expected: fixture panics because machine never enters WaitingForSkuAssignment
-    /// (machine directly skips to MachineValidation, proving allow_allocation logic works)
+    /// Expected: machine enters WaitingForSkuAssignment because no SKU validation occurred
     #[crate::sqlx_test]
-    #[should_panic(expected = "Expected Machine state condition not hit after")]
-    async fn test_escapes_waiting_with_allow_allocation(pool: sqlx::PgPool) {
+    async fn test_allow_allocation_does_not_bypass_unassigned_sku(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
         let env = create_test_env_for_bom_validation(pool.clone(), true, None, false).await;
 
-        // Expect WaitingForSkuAssignment, but machine will never enter that state
-        // because allow_allocation=true makes it skip directly to MachineValidation
         let mut config =
             ManagedHostConfig::default().with_expected_state(ManagedHostState::BomValidating {
                 bom_validating_state: BomValidating::WaitingForSkuAssignment(
@@ -830,9 +821,50 @@ pub(in crate::tests) mod tests {
             });
         config.auto_assign_sku_in_fixture = false;
 
-        // This will panic because machine never enters WaitingForSkuAssignment
-        // (it goes directly from MatchingSku to MachineValidation)
-        let _mh = create_managed_host_with_config(&env, config).await;
+        let mh = create_managed_host_with_config(&env, config).await;
+        let mut txn = pool.begin().await?;
+        let machine = mh.host().db_machine(&mut txn).await;
+
+        assert!(matches!(
+            machine.current_state(),
+            ManagedHostState::BomValidating {
+                bom_validating_state: BomValidating::WaitingForSkuAssignment(_)
+            }
+        ));
+        assert!(machine.config.hw_sku.is_none());
+
+        Ok(())
+    }
+
+    /// Test 2.5: Machine creation with ignore_unassigned_machines=true
+    /// Conditions:
+    /// - ignore_unassigned_machines = true
+    /// - no SKU is assigned
+    /// Expected: machine reaches Ready state without an assigned SKU
+    #[crate::sqlx_test]
+    async fn test_ignore_unassigned_machines_bypasses_unassigned_sku(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        let env = create_test_env_ignoring_unassigned_machines(pool.clone()).await;
+        let config = ManagedHostConfig {
+            auto_assign_sku_in_fixture: false,
+            ..ManagedHostConfig::default()
+        };
+
+        let mh = create_managed_host_with_config(&env, config).await;
+        let mut txn = pool.begin().await?;
+        let machine = mh.host().db_machine(&mut txn).await;
+
+        assert_eq!(machine.current_state(), &ManagedHostState::Ready);
+        assert!(machine.config.hw_sku.is_none());
+        assert!(
+            machine
+                .status
+                .hw_sku
+                .is_some_and(|status| status.last_match_attempt.is_some())
+        );
+
+        Ok(())
     }
 
     /// Test 3.1: SkuMissing State → stays in SkuMissing
@@ -1490,6 +1522,44 @@ pub(in crate::tests) mod tests {
         Ok(())
     }
 
+    /// Test 5.1a: Assigned SKU verification failure with ignore_unassigned_machines=true
+    /// Conditions:
+    /// - ignore_unassigned_machines = true
+    /// - allow_allocation_on_validation_failure = false
+    /// - machine has an assigned SKU that does not match hardware
+    /// Expected: machine enters SkuVerificationFailed and remains unallocatable
+    #[crate::sqlx_test]
+    async fn test_ignore_unassigned_machines_does_not_bypass_assigned_sku_verification(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        let env = create_test_env_ignoring_unassigned_machines(pool.clone()).await;
+
+        let mh = create_managed_host(&env).await;
+        let machine_id = mh.host().id;
+
+        let mut txn = pool.begin().await?;
+        let current_sku = db::sku::generate_sku_from_machine(txn.as_mut(), &machine_id).await?;
+        db::sku::create(&mut txn, &current_sku).await?;
+        assign_mismatched_sku(&mut txn, &machine_id, &current_sku.id).await?;
+        db::machine::update_sku_status_verify_request_time(&mut txn, &machine_id).await?;
+        txn.commit().await?;
+
+        handle_inventory_update(&pool, &env, &mh).await;
+        env.run_machine_state_controller_iteration().await;
+        env.run_machine_state_controller_iteration().await;
+
+        let mut txn = pool.begin().await?;
+        let machine = get_machine_by_id(&mut txn, &machine_id).await?;
+        assert!(matches!(
+            machine.current_state(),
+            ManagedHostState::BomValidating {
+                bom_validating_state: BomValidating::SkuVerificationFailed(_)
+            }
+        ));
+
+        Ok(())
+    }
+
     /// Test 5.2: SKU replaced but no re-verification triggered → continues to Ready
     /// Conditions:
     /// - allow_allocation_on_validation_failure = false (standard mode)
@@ -1731,16 +1801,13 @@ pub(in crate::tests) mod tests {
         Ok(())
     }
 
-    /// Test 6.3: Auto-matching SKU after unassign and status clear
+    /// Test 6.3: Auto-matching SKU after unassign with retained SKU status
     /// Conditions:
     /// - allow_allocation_on_validation_failure = false (standard mode)
     /// - auto_generate_missing_sku = false
     /// - Machine reaches Ready with auto-matched SKU
-    /// - SKU is unassigned and hw_sku_status is cleared (simulating fresh start)
+    /// - SKU is unassigned while hw_sku_status retains a verification request
     /// Expected: Machine re-enters BOM validation flow and successfully re-matches the same SKU
-    /// Note: Status is cleared to bypass find_match_interval for immediate re-matching. The
-    ///       find_match_interval config throttles retry attempts when NO matching SKU is found,
-    ///       not when a matching SKU exists (which matches immediately).
     #[crate::sqlx_test]
     async fn test_auto_match_after_unassign(pool: sqlx::PgPool) -> Result<(), eyre::Error> {
         let env = create_test_env_for_bom_validation(
@@ -1797,8 +1864,7 @@ pub(in crate::tests) mod tests {
         assert_eq!(machine.config.hw_sku, Some(expected_sku.id.clone()));
         assert_eq!(machine.current_state(), &ManagedHostState::Ready);
 
-        clear_sku_status(&mut txn, &machine_id).await?;
-        // test that an unassigned can find and assign a machine.
+        db::machine::update_sku_status_verify_request_time(&mut txn, &machine_id).await?;
         db::machine::unassign_sku(&mut txn, &machine_id).await?;
         txn.commit().await?;
 

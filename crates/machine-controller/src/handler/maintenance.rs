@@ -20,15 +20,15 @@
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use chrono::Utc;
 use component_manager::compute_tray_manager::{ComputeTrayEndpoint, ComputeTrayResult};
 use db::machine as db_machine;
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::machine::{
-    FailureCause, FailureDetails, FailureSource, Machine, MachineMaintenanceOperation,
-    ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
+    FailureCause, FailureDetails, FailureSource, HostMachine, MachineMaintenanceOperation,
+    MachineMaintenanceRequest, ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
 };
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -39,35 +39,42 @@ use crate::context::MachineStateHandlerContextObjects;
 /// Handles the Maintenance state for a host, dispatching on the requested
 /// operation (`PowerOn` / `PowerOff` / `Reset`).
 pub(super) async fn handle_maintenance(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let operation = match &mh_snapshot.managed_state {
-        ManagedHostState::Maintenance { operation } => *operation,
-        _ => unreachable!("handle_maintenance called with non-Maintenance state"),
+    let ManagedHostState::Maintenance { operation, request } = &mh_snapshot.managed_state else {
+        unreachable!("handle_maintenance called with non-Maintenance state");
     };
+    let request = request.as_ref();
 
     match operation {
         MachineMaintenanceOperation::PowerOn => {
-            handle_power_on(host_machine_id, mh_snapshot, ctx).await
+            handle_power_on(host_machine_id, mh_snapshot, request, ctx).await
         }
         MachineMaintenanceOperation::PowerOff => {
-            handle_power_off(host_machine_id, mh_snapshot, ctx).await
+            handle_power_off(host_machine_id, mh_snapshot, request, ctx).await
         }
-        MachineMaintenanceOperation::Reset => handle_reset(host_machine_id, mh_snapshot, ctx).await,
+        MachineMaintenanceOperation::Reset => {
+            handle_reset(host_machine_id, mh_snapshot, request, ctx).await
+        }
+        MachineMaintenanceOperation::ChassisReset { chassis_id } => {
+            handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id).await
+        }
     }
 }
 
 async fn handle_power_on(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
+    request: Option<&MachineMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     tracing::info!(machine_id = %host_machine_id, "Machine maintenance: PowerOn");
     invoke_power_operation(
         host_machine_id,
         mh_snapshot,
+        request,
         ctx,
         PowerAction::On,
         "PowerOn",
@@ -76,14 +83,16 @@ async fn handle_power_on(
 }
 
 async fn handle_power_off(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
+    request: Option<&MachineMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     tracing::info!(machine_id = %host_machine_id, "Machine maintenance: PowerOff");
     invoke_power_operation(
         host_machine_id,
         mh_snapshot,
+        request,
         ctx,
         PowerAction::ForceOff,
         "PowerOff",
@@ -92,14 +101,16 @@ async fn handle_power_off(
 }
 
 async fn handle_reset(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
+    request: Option<&MachineMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     tracing::info!(machine_id = %host_machine_id, "Machine maintenance: Reset");
     invoke_power_operation(
         host_machine_id,
         mh_snapshot,
+        request,
         ctx,
         PowerAction::ForceRestart,
         "Reset",
@@ -107,10 +118,66 @@ async fn handle_reset(
     .await
 }
 
+async fn handle_chassis_reset(
+    host_machine_id: &HostMachineId,
+    mh_snapshot: &ManagedHostStateSnapshot,
+    request: Option<&MachineMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    chassis_id: &str,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    tracing::info!(
+        machine_id = %host_machine_id,
+        %chassis_id,
+        "Machine maintenance: ChassisReset",
+    );
+
+    let redfish_client = match ctx
+        .services
+        .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
+        .await
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return finish_maintenance_with_error(
+                host_machine_id,
+                request,
+                ctx,
+                format!(
+                    "Machine {host_machine_id} maintenance (ChassisReset): failed to create Redfish client: {error}"
+                ),
+            )
+            .await;
+        }
+    };
+
+    if let Err(error) = redfish_client
+        .chassis_reset(chassis_id, libredfish::SystemPowerControl::ForceRestart)
+        .await
+    {
+        return finish_maintenance_with_error(
+            host_machine_id,
+            request,
+            ctx,
+            format!(
+                "Machine {host_machine_id} maintenance (ChassisReset): chassis reset failed: {error}"
+            ),
+        )
+        .await;
+    }
+
+    tracing::info!(
+        machine_id = %host_machine_id,
+        %chassis_id,
+        "Chassis reset request accepted; verify recovery before clearing operator maintenance",
+    );
+    finish_maintenance(host_machine_id, request, ctx, ManagedHostState::Ready).await
+}
+
 /// Common driver for component-manager-backed power maintenance operations.
 async fn invoke_power_operation(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
+    request: Option<&MachineMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     action: PowerAction,
     operation_label: &'static str,
@@ -120,6 +187,7 @@ async fn invoke_power_operation(
     let Some(component_manager) = ctx.services.component_manager.as_ref() else {
         return finish_maintenance_with_error(
             host_machine_id,
+            request,
             ctx,
             format!(
                 "Machine {host_machine_id} maintenance ({operation_label}): component manager not configured"
@@ -139,6 +207,7 @@ async fn invoke_power_operation(
         Err(cause) => {
             return finish_maintenance_with_error(
                 host_machine_id,
+                request,
                 ctx,
                 format!("Machine {host_machine_id} maintenance ({operation_label}): {cause}"),
             )
@@ -154,8 +223,10 @@ async fn invoke_power_operation(
         Ok(results) => {
             let result = results.into_iter().next().unwrap_or(ComputeTrayResult {
                 bmc_ip: endpoint.bmc_ip,
+                bmc_mac: endpoint.bmc_mac,
                 success: false,
                 error: Some("component manager returned no result".into()),
+                backend_job_id: None,
             });
 
             if result.success {
@@ -165,9 +236,8 @@ async fn invoke_power_operation(
                     backend = component_manager.compute_tray.name(),
                     "Machine power control succeeded; returning host to Ready"
                 );
-                let mut txn = ctx.services.db_pool.begin().await?;
-                db_machine::clear_machine_maintenance_requested(&mut txn, *host_machine_id).await?;
-                return Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn));
+                return finish_maintenance(host_machine_id, request, ctx, ManagedHostState::Ready)
+                    .await;
             }
 
             let summary = result
@@ -182,6 +252,7 @@ async fn invoke_power_operation(
             );
             finish_maintenance_with_error(
                 host_machine_id,
+                request,
                 ctx,
                 format!(
                     "Machine {host_machine_id} maintenance ({operation_label}): power control failed: {summary}"
@@ -199,6 +270,7 @@ async fn invoke_power_operation(
             );
             finish_maintenance_with_error(
                 host_machine_id,
+                request,
                 ctx,
                 format!(
                     "Machine {host_machine_id} maintenance ({operation_label}): power control failed: {error}"
@@ -211,8 +283,8 @@ async fn invoke_power_operation(
 
 /// Build the [`ComputeTrayEndpoint`] describing this host for component manager power operations.
 pub(super) async fn build_compute_tray_endpoint(
-    machine_id: &MachineId,
-    machine: &Machine,
+    machine_id: &HostMachineId,
+    machine: &HostMachine,
     credential_manager: &dyn CredentialManager,
 ) -> Result<ComputeTrayEndpoint, String> {
     let bmc_mac = machine
@@ -231,6 +303,7 @@ pub(super) async fn build_compute_tray_endpoint(
     Ok(ComputeTrayEndpoint {
         vendor: machine.bmc_vendor().into(),
         bmc_ip,
+        bmc_mac,
         bmc_credentials: credentials,
     })
 }
@@ -255,26 +328,58 @@ async fn lookup_bmc_credentials(
     }
 }
 
-/// Clear the pending maintenance request and transition to `Failed` with the
-/// given cause. Clearing the request breaks retry loops on persistent failures
-/// and forces the operator to explicitly re-request maintenance to retry.
+/// Acknowledge the failed request so it does not retry indefinitely. A newer
+/// request remains available to the `Failed` state's maintenance admission.
 async fn finish_maintenance_with_error(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
+    request: Option<&MachineMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     cause: String,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
-    db_machine::clear_machine_maintenance_requested(&mut txn, *host_machine_id).await?;
-    Ok(StateHandlerOutcome::transition(ManagedHostState::Failed {
-        details: FailureDetails {
-            cause: FailureCause::UnhandledState { err: cause },
-            failed_at: Utc::now(),
-            source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
+    finish_maintenance(
+        host_machine_id,
+        request,
+        ctx,
+        ManagedHostState::Failed {
+            details: FailureDetails {
+                cause: FailureCause::UnhandledState { err: cause },
+                failed_at: Utc::now(),
+                source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
+            },
+            machine_id: (*host_machine_id).into(),
+            retry_count: 0,
         },
-        machine_id: *host_machine_id,
-        retry_count: 0,
-    })
-    .with_txn(txn))
+    )
+    .await
+}
+
+async fn finish_maintenance(
+    host_machine_id: &HostMachineId,
+    request: Option<&MachineMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    next_state: ManagedHostState,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let Some(request) = request else {
+        // Older saved states cannot identify the request that started this
+        // operation. Preserve the pending request, even if that repeats work.
+        tracing::warn!(
+            machine_id = %host_machine_id,
+            "Maintenance completed without its original request; preserving pending maintenance"
+        );
+        return Ok(StateHandlerOutcome::transition(next_state));
+    };
+
+    let mut txn = ctx.services.db_pool.begin().await?;
+    if let db::ConditionalWrite::NotApplied(reason) =
+        db_machine::clear_machine_maintenance_requested(&mut txn, *host_machine_id, request).await?
+    {
+        tracing::debug!(
+            machine_id = %host_machine_id,
+            ?reason,
+            "Completed maintenance request is no longer pending"
+        );
+    }
+    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
 }
 
 /// If a maintenance request has been posted via `machine_maintenance_requested`,
@@ -292,6 +397,6 @@ pub(super) fn maintenance_transition_if_requested(
         "Machine maintenance requested; transitioning to Maintenance"
     );
     Some(StateHandlerOutcome::transition(
-        ManagedHostState::maintenance_for_operation(req.operation),
+        ManagedHostState::maintenance_for_request(req.clone()),
     ))
 }

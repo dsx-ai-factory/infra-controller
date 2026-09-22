@@ -48,7 +48,6 @@ pub struct SiteExplorerConfig {
     #[serde(skip)]
     pub retained_boot_interface_window: Option<chrono::Duration>,
     /// The interval at which site explorer runs.
-    /// Defaults to 5 Minutes if not specified.
     #[serde(
         default = "SiteExplorerConfig::default_run_interval",
         deserialize_with = "deserialize_duration",
@@ -56,11 +55,9 @@ pub struct SiteExplorerConfig {
     )]
     pub run_interval: std::time::Duration,
     /// The maximum amount of nodes that are explored concurrently.
-    /// Default is 5.
     #[serde(default = "SiteExplorerConfig::default_concurrent_explorations")]
     pub concurrent_explorations: u64,
     /// How many routine (non-requested) endpoints should be explored in a single run.
-    /// Default is 90.
     /// This bounds only the background refresh work: previously unseen endpoints
     /// and stale endpoints whose reports we want to update. Endpoints with the
     /// `exploration_requested` flag set are always attempted, regardless of this
@@ -82,7 +79,7 @@ pub struct SiteExplorerConfig {
     )]
     pub create_machines: Arc<AtomicBool>,
 
-    /// How many ManagedHosts should be created in a single run. Default is 4.
+    /// How many ManagedHosts should be created in a single run.
     #[serde(default = "SiteExplorerConfig::default_machines_created_per_run")]
     pub machines_created_per_run: u64,
 
@@ -290,16 +287,23 @@ impl SiteExplorerConfig {
         Arc::new(true.into())
     }
 
+    /// Redfish endpoints probed in parallel per exploration cycle. Bounds the
+    /// concurrent load placed on BMCs.
     pub const fn default_concurrent_explorations() -> u64 {
-        30
+        100
     }
 
+    /// Endpoints selected for exploration per cycle. Identification and machine
+    /// creation run only at the end of a completed cycle, so this trades sweep
+    /// breadth against how frequently creation runs.
     pub const fn default_explorations_per_run() -> u64 {
-        90
+        360
     }
 
+    /// Machines created per completed exploration cycle. Caps ingestion rate
+    /// independently of how many hosts exploration has identified.
     pub const fn default_machines_created_per_run() -> u64 {
-        4
+        100
     }
 
     pub fn default_rotate_switch_nvos_credentials() -> Arc<AtomicBool> {

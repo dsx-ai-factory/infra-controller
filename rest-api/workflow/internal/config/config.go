@@ -81,11 +81,6 @@ const (
 	// ConfigNotificationsSlackWebhookURLPath specifies file path to read Slack webhook URL
 	ConfigNotificationsSlackWebhookURLPath = "notifications.slack.webhookURLPath"
 
-	// ConfigNotificationsPagerDutyIntegrationKey specifies the PagerDuty integration key
-	ConfigNotificationsPagerDutyIntegrationKey = "notifications.pagerduty.integrationKey"
-	// ConfigNotificationsPagerDutyIntegrationKeyPath specifies file path to read PagerDuty integration key
-	ConfigNotificationsPagerDutyIntegrationKeyPath = "notifications.pagerduty.integrationKeyPath"
-
 	// ConfigSiteManagerEndpoint is the service endpoint for site manager
 	ConfigSiteManagerEndpoint = "siteManager.svcEndpoint"
 
@@ -93,6 +88,8 @@ const (
 	ConfigMetricsEnabled = "metrics.enabled"
 	// ConfigMetricsPort specifies the port for Prometheus metrics
 	ConfigMetricsPort = "metrics.port"
+	// ConfigMetricsNamespace specifies the prefix for every exposed metric name
+	ConfigMetricsNamespace = "metrics.namespace"
 
 	// ConfigHealthzEnabled is a feature flag for health check endpoint
 	ConfigHealthzEnabled = "healthz.enabled"
@@ -103,6 +100,26 @@ const (
 	ConfigTracingEnabled = "tracing.enabled"
 	// ConfigTracingServiceName specifies the service name for tracing
 	ConfigTracingServiceName = "tracing.serviceName"
+
+	// ConfigWorkerMaxConcurrentActivityPollers specifies how many concurrent activity
+	// task pollers the Temporal worker runs. This service reads only from config.yaml
+	// (Helm-rendered) -- unlike Site Agent's old-style config, there's no env var override.
+	ConfigWorkerMaxConcurrentActivityPollers = "worker.maxConcurrentActivityPollers"
+)
+
+const (
+	// DefaultMaxConcurrentActivityPollers is the poller count used when config.yaml
+	// doesn't set worker.maxConcurrentActivityPollers. Matches the historical hardcoded value.
+	DefaultMaxConcurrentActivityPollers = 10
+	// MaxMaxConcurrentActivityPollers caps the configurable poller count. Each poller can
+	// hold a DB connection from the shared pgx pool while its activity runs, and this worker
+	// also serves the cloud task queue. Lowered from an initial 200 (an unguessed
+	// fat-finger-only bound) to 20 per review: benchmarking found no throughput gain going
+	// from poller=10 to poller=40 at page_size=50, and Temporal's own worker design means a
+	// handful of pollers already saturates typical activity-execution-slot counts -- raising
+	// this further is unlikely to help and mainly risks pgx pool exhaustion on a worker that
+	// also serves the cloud task queue. Bump with fresh benchmark data if a real need appears.
+	MaxMaxConcurrentActivityPollers = 20
 )
 
 // Maintain a global config object
@@ -147,11 +164,14 @@ func NewConfig() *Config {
 
 	c.v.SetDefault(ConfigMetricsEnabled, true)
 	c.v.SetDefault(ConfigMetricsPort, 9360)
+	c.v.SetDefault(ConfigMetricsNamespace, DefaultMetricsNamespace)
 
 	c.v.SetDefault(ConfigHealthzEnabled, true)
 	c.v.SetDefault(ConfigHealthzPort, 8899)
 
 	c.v.SetDefault(ConfigTracingEnabled, false)
+
+	c.v.SetDefault(ConfigWorkerMaxConcurrentActivityPollers, DefaultMaxConcurrentActivityPollers)
 
 	c.v.AutomaticEnv()
 	c.v.SetConfigFile(c.GetPathToConfig())
@@ -174,10 +194,6 @@ func NewConfig() *Config {
 
 	if c.GetNotificationsSlackWebhookURLPath() != "" {
 		c.setNotificationsSlackWebhookURL()
-	}
-
-	if c.GetNotificationsPagerDutyIntegrationKeyPath() != "" {
-		c.setNotificationsPagerDutyIntegrationKey()
 	}
 
 	c.setTemporalNamespace()
@@ -250,6 +266,10 @@ func (c *Config) Validate() {
 	if c.GetNgcAPIBaseURL() == "" {
 		log.Warn().Msg("ngc api base url config not specified, NGC user lookups will be unavailable")
 	}
+
+	if p := c.GetMaxConcurrentActivityPollers(); p < 1 || p > MaxMaxConcurrentActivityPollers {
+		log.Panic().Msgf("worker max concurrent activity pollers %d must be between 1 and %d", p, MaxMaxConcurrentActivityPollers)
+	}
 }
 
 // Config setters
@@ -285,18 +305,6 @@ func (c *Config) setNotificationsSlackWebhookURL() {
 		log.Err(err).Str("notifications.slack.webhookURLPath", c.GetNotificationsSlackWebhookURLPath()).Msg("failed to read Slack webhook URL from file")
 	} else {
 		c.v.Set(ConfigNotificationsSlackWebhookURL, string(webhookURLBytes))
-	}
-}
-
-// setNotificationsPagerDutyIntegrationKey sets the PagerDuty integration key by reading from integration key path
-func (c *Config) setNotificationsPagerDutyIntegrationKey() {
-	log.Warn().Str("notifications.pagerduty.integrationKeyPath", c.GetNotificationsPagerDutyIntegrationKeyPath()).Msg("setting PagerDuty integration key by reading from integration key path")
-
-	integrationKeyBytes, err := os.ReadFile(c.GetNotificationsPagerDutyIntegrationKeyPath())
-	if err != nil {
-		log.Err(err).Str("notifications.pagerduty.integrationKeyPath", c.GetNotificationsPagerDutyIntegrationKeyPath()).Msg("failed to read PagerDuty integration key from file")
-	} else {
-		c.v.Set(ConfigNotificationsPagerDutyIntegrationKey, string(integrationKeyBytes))
 	}
 }
 
@@ -340,7 +348,7 @@ func (c *Config) GetTemporalConfig() (*cconfig.TemporalConfig, error) {
 
 // GetMetricsConfig returns the Metrics config
 func (c *Config) GetMetricsConfig() *MetricsConfig {
-	return NewMetricsConfig(c.GetMetricsEnabled(), c.GetMetricsPort())
+	return NewMetricsConfig(c.GetMetricsEnabled(), c.GetMetricsPort(), c.GetMetricsNamespace())
 }
 
 // GetHealthzConfig returns the Healthz config
@@ -395,6 +403,12 @@ func (c *Config) GetDBPasswordPath() string {
 // GetDBPassword returns the password of the database
 func (c *Config) GetDBPassword() string {
 	return c.v.GetString(ConfigDBPassword)
+}
+
+// GetMaxConcurrentActivityPollers returns the number of concurrent activity task pollers
+// the Temporal worker should run
+func (c *Config) GetMaxConcurrentActivityPollers() int {
+	return c.v.GetInt(ConfigWorkerMaxConcurrentActivityPollers)
 }
 
 // GetTemporalHost returns the hostname for Temporal
@@ -515,26 +529,6 @@ func (c *Config) GetNotificationsSlackWebhookURLPath() string {
 	return c.v.GetString(ConfigNotificationsSlackWebhookURLPath)
 }
 
-// GetNotificationsPagerDutyEnabled returns if PagerDuty notifications are enabled
-func (c *Config) GetNotificationsPagerDutyEnabled() bool {
-	return c.GetNotificationsPagerDutyIntegrationKey() != "" || c.GetNotificationsPagerDutyIntegrationKeyPath() != ""
-}
-
-// GetNotificationsPagerDutyIntegrationKey gets the PagerDuty integration key
-func (c *Config) GetNotificationsPagerDutyIntegrationKey() string {
-	return c.v.GetString(ConfigNotificationsPagerDutyIntegrationKey)
-}
-
-// SetNotificationsPagerDutyIntegrationKey sets the PagerDuty integration key
-func (c *Config) SetNotificationsPagerDutyIntegrationKey(value string) {
-	c.v.Set(ConfigNotificationsPagerDutyIntegrationKey, value)
-}
-
-// GetNotificationsPagerDutyIntegrationKeyPath gets the file path to read PagerDuty integration key
-func (c *Config) GetNotificationsPagerDutyIntegrationKeyPath() string {
-	return c.v.GetString(ConfigNotificationsPagerDutyIntegrationKeyPath)
-}
-
 // SetSiteManagerEndpoint sets the endpoint
 func (c *Config) SetSiteManagerEndpoint(value string) {
 	c.v.Set(ConfigSiteManagerEndpoint, value)
@@ -553,6 +547,17 @@ func (c *Config) GetMetricsEnabled() bool {
 // GetMetricsPort gets the port for Metrics
 func (c *Config) GetMetricsPort() int {
 	return c.v.GetInt(ConfigMetricsPort)
+}
+
+// GetMetricsNamespace gets the prefix applied to every exposed metric name.
+// An explicitly empty value falls back to the default rather than exposing
+// unprefixed names that would collide with another service's.
+func (c *Config) GetMetricsNamespace() string {
+	namespace := c.v.GetString(ConfigMetricsNamespace)
+	if namespace == "" {
+		return DefaultMetricsNamespace
+	}
+	return namespace
 }
 
 // GetHealthzEnabled gets the enabled field for Healthz

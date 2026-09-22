@@ -32,6 +32,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     let expected_initial_states_json = serde_json::json!([
         {"state": "created"},
+        {"state": "configureastra", "configure_astra_state": {"state": "enablenics"}},
         {"state": "dpudiscoveringstate", "dpu_states": {"states": {&dpu_machine_id_string: {"dpudiscoverystate": "initializing"}}}},
         {"state": "dpudiscoveringstate", "dpu_states": {"states": {&dpu_machine_id_string: {"dpudiscoverystate": "configuring"}}}},
         {"state": "dpudiscoveringstate", "dpu_states": {"states": {&dpu_machine_id_string: {"dpudiscoverystate": "enablershim"}}}},
@@ -61,12 +62,12 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let expected_initial_states: Vec<serde_json::Value> =
         expected_initial_states_json.as_array().unwrap().clone();
 
-    for machine_id in &[host_machine_id, dpu_machine_id] {
+    for machine_id in [host_machine_id.into(), dpu_machine_id.into()] {
         let mut txn = env.pool.begin().await?;
 
         let machine = db::machine::find_one(
             txn.as_mut(),
-            &dpu_machine_id,
+            &machine_id,
             model::machine::machine_search_config::MachineSearchConfig {
                 include_history: true,
                 ..Default::default()
@@ -96,7 +97,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         let rpc_machine = env
             .api
             .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
-                machine_ids: vec![*machine_id],
+                machine_ids: vec![machine_id],
                 include_history: true,
             }))
             .await?
@@ -117,7 +118,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
             .api
             .find_machine_state_histories(tonic::Request::new(
                 rpc::forge::MachineStateHistoriesRequest {
-                    machine_ids: vec![*machine_id],
+                    machine_ids: vec![machine_id],
                 },
             ))
             .await?
@@ -205,7 +206,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         .unwrap()
         .into_inner();
 
-    assert!(env.find_machine(host_machine_id).await.is_empty());
+    assert!(env.find_machine(&host_machine_id).await.is_empty());
 
     let mut txn = env.pool.begin().await?;
     let power_entry = db::power_options::get_all(&mut txn).await?;
@@ -215,7 +216,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         .api
         .find_machine_state_histories(tonic::Request::new(
             rpc::forge::MachineStateHistoriesRequest {
-                machine_ids: vec![host_machine_id],
+                machine_ids: vec![host_machine_id.into()],
             },
         ))
         .await?

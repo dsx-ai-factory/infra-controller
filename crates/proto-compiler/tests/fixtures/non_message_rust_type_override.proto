@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package carbide.proto.compiler.fixture.non_message_rust_type_override;
+
+import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
+import "codegen/v1/rust_type.proto";
+
+message Target {
+  string id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
+}

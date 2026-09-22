@@ -26,7 +26,7 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceConfig {
@@ -112,20 +112,29 @@ fn eject_media_target(system_id: &str, device_id: &str) -> String {
     )
 }
 
-pub(crate) fn add_routes(router: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(router: Router<BmcState<C>>) -> Router<BmcState<C>> {
     const SYSTEM_ID: &str = "{system_id}";
     const DEVICE_ID: &str = "{device_id}";
     router
-        .route(&collection(SYSTEM_ID).odata_id, get(get_collection))
-        .route(&resource(SYSTEM_ID, DEVICE_ID).odata_id, get(get_device))
+        .route(&collection(SYSTEM_ID).odata_id, get(get_collection::<C>))
+        .route(
+            &resource(SYSTEM_ID, DEVICE_ID).odata_id,
+            get(get_device::<C>),
+        )
         .route(
             &insert_media_target(SYSTEM_ID, DEVICE_ID),
-            post(insert_media),
+            post(insert_media::<C>),
         )
-        .route(&eject_media_target(SYSTEM_ID, DEVICE_ID), post(eject_media))
+        .route(
+            &eject_media_target(SYSTEM_ID, DEVICE_ID),
+            post(eject_media::<C>),
+        )
 }
 
-async fn get_collection(State(state): State<BmcState>, Path(system_id): Path<String>) -> Response {
+async fn get_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(system_id): Path<String>,
+) -> Response {
     let Some(virtual_media) = state
         .system_state
         .find(&system_id)
@@ -143,8 +152,8 @@ async fn get_collection(State(state): State<BmcState>, Path(system_id): Path<Str
         .into_ok_response()
 }
 
-async fn get_device(
-    State(state): State<BmcState>,
+async fn get_device<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, device_id)): Path<(String, String)>,
 ) -> Response {
     let Some(device) = state
@@ -158,8 +167,8 @@ async fn get_device(
     device.to_json(&system_id).into_ok_response()
 }
 
-async fn insert_media(
-    State(state): State<BmcState>,
+async fn insert_media<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, device_id)): Path<(String, String)>,
     Json(request): Json<serde_json::Value>,
 ) -> Response {
@@ -197,8 +206,8 @@ async fn insert_media(
     http::ok_no_content()
 }
 
-async fn eject_media(
-    State(state): State<BmcState>,
+async fn eject_media<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((system_id, device_id)): Path<(String, String)>,
 ) -> Response {
     let Some(device) = state
@@ -248,7 +257,7 @@ impl DeviceState {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
 
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
@@ -256,46 +265,23 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::test_support::host_info;
-    use crate::{
-        Callbacks, HardwareType, MachineRouterOptions, MockPowerState, SetSystemPowerError,
-        SystemPowerControl, machine_router,
-    };
+    use crate::test_support::{TestCallbacks, host_info};
+    use crate::{HardwareType, MachineRouterOptions, MockPowerState, machine_router};
 
-    #[derive(Debug, Default)]
-    struct RecordingCallbacks {
-        refresh_count: AtomicUsize,
-    }
-
-    impl Callbacks for RecordingCallbacks {
-        fn get_power_state(&self) -> MockPowerState {
-            MockPowerState::Off
-        }
-
-        fn send_power_command(
-            &self,
-            _reset_type: SystemPowerControl,
-        ) -> Result<(), SetSystemPowerError> {
-            Ok(())
-        }
-
-        fn state_refresh_indication(&self) {
-            self.refresh_count.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    fn test_router() -> (Router, Arc<RecordingCallbacks>) {
+    fn test_router() -> (Router, Arc<TestCallbacks>) {
         test_router_for(HardwareType::DellPowerEdgeR750)
     }
 
-    fn test_router_for(hardware_type: HardwareType) -> (Router, Arc<RecordingCallbacks>) {
-        let callbacks = Arc::new(RecordingCallbacks::default());
+    fn test_router_for(hardware_type: HardwareType) -> (Router, Arc<TestCallbacks>) {
+        let callbacks = Arc::new(TestCallbacks::new(MockPowerState::Off));
         let router = machine_router(
             &host_info(hardware_type),
             callbacks.clone(),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions {
+                event_service: crate::EventServiceOverride::Profile,
+                bmc_reset_duration: None,
                 virtual_media_devices: Some(vec![
                     DeviceConfig {
                         id: "Cd".into(),

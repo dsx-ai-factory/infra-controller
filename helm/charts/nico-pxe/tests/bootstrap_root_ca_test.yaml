@@ -36,7 +36,7 @@ tests:
     set:
       env: null
     asserts:
-      - isNull:
+      - isEmpty:
           path: spec.template.spec.containers[0].env
 
   - it: mounts an existing ConfigMap as the bootstrap CA

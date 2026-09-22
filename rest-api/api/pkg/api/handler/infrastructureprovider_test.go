@@ -355,6 +355,9 @@ func TestGetCurrentInfrastructureProviderStatsHandler_Handle(t *testing.T) {
 
 	ipb2 := testIPBlockBuildIPBlock(t, dbSession, "test2", site1, ip1, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.2.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu2)
 	assert.NotNil(t, ipb2)
+	// This private Tenant SitePrefix belongs to the provider but must not change
+	// its generic IPBlock total.
+	testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site1, ip1, tn1, "192.168.3.0", 24, cdbm.IPBlockStatusReady, ipu1)
 
 	// Build Machine
 	m1 := testMachineBuildMachine(t, dbSession, ip1.ID, site1.ID, nil, cutil.GetPtr("mcType"), false, false, cdbm.MachineStatusInitializing)

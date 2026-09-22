@@ -1,8 +1,8 @@
 # Node-Auth: Self-Signed Bearer JWTs for Scout and DPU-Agent
 
-Design for [#355](https://github.com/NVIDIA/infra-controller/issues/355)
+Design for [#355](https://github.com/dsx-ai-factory/infra-controller/issues/355)
 (sub-issue of the Vault-elimination epic
-[#195](https://github.com/NVIDIA/infra-controller/issues/195)): Scout and the
+[#195](https://github.com/dsx-ai-factory/infra-controller/issues/195)): Scout and the
 DPU-agent authenticate to the API with short-lived bearer JWTs alongside —
 and eventually instead of — mTLS client certificates.
 
@@ -275,6 +275,14 @@ chain that vouches for its signing key, and the API verifies that chain
 against the root CA bundle it already holds (`[tls] root_cafile_path`). There
 is no JWKS endpoint, no key registry, and no key distribution problem — CA
 rotation is handled wherever the root bundle is handled today.
+
+An `x5c` chain contains at most four certificates, including the leaf. The
+node refuses to mint a token when its client-certificate bundle exceeds that
+limit, emits a `node_auth` warning at most once every five minutes per process,
+and continues with mTLS only. The API rejects an over-limit token before Base64-
+decoding its certificates or building a verification path. Keep the node's
+bundle within the limit; otherwise, a deployment with `mtls_enabled = false`
+has no node authentication path.
 
 **CA rotation** moves both consumers of that bundle together. The TLS
 listener already re-reads the file every five minutes for cert-manager

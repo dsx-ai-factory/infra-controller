@@ -251,10 +251,9 @@ func (s *SSHStrategy) executeCopy(ctx context.Context, update *FirmwareUpdate, t
 	}
 
 	// Build SCP command
-	// Format: scp -P <port> -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <local> <user>@<host>:<remote>
 	fileName := filepath.Base(s.firmwarePath)
 	remotePath := filepath.Join(s.config.RemoteDir, fileName)
-	targetAddr := fmt.Sprintf("%s@%s:%s",
+	targetAddr := sshclient.SCPDestination(
 		tray.NVOS.Credential.User,
 		tray.NVOS.IP.String(),
 		remotePath,

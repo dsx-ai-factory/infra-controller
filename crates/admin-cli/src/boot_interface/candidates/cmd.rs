@@ -17,11 +17,12 @@
 
 //! Render one machine's boot-interface candidates: every NIC the machine
 //! offers (managed `machine_interfaces` rows and pre-first-lease predictions),
-//! annotated with the picks the system computes among them. The picks --
-//! current, default (primary flag masked), predicted, and the explored
-//! endpoint default -- all arrive server-computed on the
-//! `GetMachineBootInterfaces` response; this module only matches rows against
-//! them, it never re-derives selection logic.
+//! annotated with the selection/default picks the system computes among them.
+//! Current, default (primary flag masked), predicted, and explored-endpoint
+//! picks all arrive server-computed on `GetMachineBootInterfaces`; this module
+//! only matches rows against them, it never re-derives selection logic. The
+//! persisted desired target and controller progress live in `boot-interface
+//! show`, not in this narrower candidate view.
 
 use std::fmt::Write as _;
 
@@ -45,11 +46,9 @@ enum CandidateSource {
     Predicted,
 }
 
-/// One candidate NIC with the marks the picks put on it. Markers are matched
-/// by MAC: the boot target the BMC ultimately receives is a MAC (plus its
-/// Redfish id), so a MAC-level mark is the semantically honest granularity --
-/// duplicate MACs across segments both light up, mirroring what the BMC
-/// operation would actually aim at.
+/// One candidate NIC with the marks the picks put on it. The pick messages
+/// identify targets by MAC (plus a Redfish id), not by managed row id, so
+/// duplicate MACs across segments both receive the same MAC-level mark.
 #[derive(Debug, Serialize)]
 struct CandidateRow {
     mac_address: String,
@@ -62,12 +61,13 @@ struct CandidateRow {
     network_segment_type: Option<String>,
     source: CandidateSource,
     primary_interface: bool,
-    /// Whether the selection considers this row at all. Mirrors the pick
-    /// functions' one exclusion -- underlay rows are never boot candidates --
-    /// for display only; the actual picks are server-computed.
+    /// Whether selection considers this row: a declared primary is eligible
+    /// regardless of segment, while non-primary underlay rows are excluded
+    /// from the automatic fallback. Display only; the actual picks are
+    /// server-computed.
     eligible: bool,
-    /// This NIC is what resolution targets right now: the effective managed
-    /// pick, or the predicted pick while no managed row offers a candidate.
+    /// This NIC is the effective managed/predicted selection. Persisted
+    /// desired state may differ and is intentionally outside this view.
     current: bool,
     /// This NIC is the automatic pick with the primary flag masked -- what
     /// the system would choose if nothing were declared.
@@ -82,8 +82,8 @@ struct CandidateRow {
 struct CandidatesReport {
     machine_id: Option<MachineId>,
     candidates: Vec<CandidateRow>,
-    /// What resolution targets right now -- the effective managed pick, else
-    /// the predicted pick for a machine with no managed candidate yet.
+    /// The effective managed pick, else the predicted pick when managed rows
+    /// offer no candidate. Persisted desired state may differ.
     current_boot_interface_mac: Option<String>,
     current_boot_interface_id: Option<String>,
     current_source: Option<CandidateSource>,
@@ -178,12 +178,12 @@ impl From<forgerpc::GetMachineBootInterfacesResponse> for CandidatesReport {
             .collect();
 
         let mark = |mac: &str, pick: &Option<String>| pick.as_deref() == Some(mac);
-        // The one exclusion the pick functions apply, matched against the
-        // segment type's wire form (`NetworkSegmentType` serializes `Underlay`
-        // as "tor"). Display only -- the picks themselves arrive
-        // server-computed.
+        // Primary wins regardless of segment; non-primary underlay rows are
+        // excluded from the automatic fallback. Match against the segment
+        // type's display form (`NetworkSegmentType::Underlay` renders as
+        // "tor"). Display only -- the picks themselves arrive server-computed.
         let underlay = model::network_segment::NetworkSegmentType::Underlay.to_string();
-        let eligible = |segment: Option<&str>| segment != Some(underlay.as_str());
+        let is_eligible = |primary, segment| primary || segment != Some(underlay.as_str());
 
         let mut candidates: Vec<CandidateRow> = r
             .machine_interfaces
@@ -195,7 +195,7 @@ impl From<forgerpc::GetMachineBootInterfacesResponse> for CandidatesReport {
                 network_segment_type: i.network_segment_type.clone(),
                 source: CandidateSource::Managed,
                 primary_interface: i.primary_interface,
-                eligible: eligible(i.network_segment_type.as_deref()),
+                eligible: is_eligible(i.primary_interface, i.network_segment_type.as_deref()),
                 current: mark(&i.mac_address, &current_mac),
                 default: mark(&i.mac_address, &default_mac),
                 explored_default: explored_macs.contains(&i.mac_address),
@@ -208,7 +208,7 @@ impl From<forgerpc::GetMachineBootInterfacesResponse> for CandidatesReport {
             network_segment_type: p.network_segment_type.clone(),
             source: CandidateSource::Predicted,
             primary_interface: p.primary_interface,
-            eligible: eligible(p.network_segment_type.as_deref()),
+            eligible: is_eligible(p.primary_interface, p.network_segment_type.as_deref()),
             current: mark(&p.mac_address, &current_mac),
             default: mark(&p.mac_address, &default_mac),
             explored_default: explored_macs.contains(&p.mac_address),
@@ -308,7 +308,11 @@ fn render_candidates(report: &CandidatesReport) -> String {
                 CandidateSource::Managed => "managed",
                 CandidateSource::Predicted => "predicted",
             };
-            let eligible = if c.eligible { "yes" } else { "no (underlay)" };
+            let eligible = if c.eligible {
+                "yes"
+            } else {
+                "no (non-primary underlay)"
+            };
             table.add_row(Row::new(vec![
                 Cell::new(&c.mac_address),
                 Cell::new(&dash(&c.interface_id)),
@@ -519,7 +523,10 @@ mod tests {
         assert!(lower.default, "the lower non-underlay MAC is the default");
 
         let underlay = &report.candidates[2];
-        assert!(!underlay.eligible, "underlay rows are never candidates");
+        assert!(
+            !underlay.eligible,
+            "non-primary underlay rows are excluded from the fallback"
+        );
         assert!(!underlay.current && !underlay.default);
 
         let prediction = &report.candidates[3];
@@ -571,11 +578,26 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_primary_underlay_row_is_eligible() {
+        let mut response = sample_response();
+        response.machine_interfaces[0].primary_interface = false;
+        response.machine_interfaces[2].primary_interface = true;
+        response.effective_boot_interface_mac = Some("aa:bb:cc:00:00:00".to_string());
+        response.effective_boot_interface_id = None;
+
+        let report = CandidatesReport::from(response);
+        let underlay = &report.candidates[2];
+
+        assert!(underlay.eligible);
+        assert!(underlay.current);
+    }
+
+    #[test]
     fn ascii_render_shows_markers_and_summary() {
         let rendered = render_candidates(&CandidatesReport::from(sample_response()));
 
         assert!(rendered.contains("current,explored"));
-        assert!(rendered.contains("no (underlay)"));
+        assert!(rendered.contains("no (non-primary underlay)"));
         assert!(
             rendered.contains("Current boot interface:       aa:bb:cc:00:00:02 (NIC.Slot.2-1-1)\n")
         );

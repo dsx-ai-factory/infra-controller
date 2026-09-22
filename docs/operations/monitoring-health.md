@@ -1,4 +1,4 @@
-# Monitoring and Health <Badge intent="launch" minimal>New</Badge>
+# Monitoring and Health
 
 This page covers monitoring and health workflows for NICo sites after
 deployment: hardware health, DPU health, aggregate host health, health
@@ -33,6 +33,7 @@ alerts from a reporting source. Common health sources are:
 | DPU agent | DPU service health, DPU networking health, BGP state, DHCP service health, and agent heartbeat. |
 | Validation and discovery | SKU validation, host validation, endpoint discovery, and inventory checks. |
 | Rack health | Rack-level health input when rack health reporting is configured. |
+| NVLink domain health | NMX-C controller health for an NVLink domain when domain health reporting is configured. |
 | Health overrides | Manual or service-created health reports used for maintenance, repair, validation, or other controlled workflows. |
 
 Each alert has an ID, an optional target, a message, a start time, and one or
@@ -158,6 +159,7 @@ Collector defaults from the example config:
 | Entity discovery | `discovery_concurrency` | `1` | Concurrent endpoint identity resolutions. |
 | Entity metrics collector | `fetch_interval` | `"2m"` | Entity metrics polling cadence. |
 | Firmware collector | `firmware_refresh_interval` | `"30m"` | Firmware refresh cadence. |
+| Manager collector | `poll_interval` | `"5m"` | Power-shelf manager (PMC) status polling cadence. Power-shelf endpoints only. |
 | Logs collector | `mode` | `"sse"` | Preferred BMC log collection mode. |
 | NMX-C collector | `grpc_port` | `9370` | Switch-host NMX-C gRPC endpoint port. |
 | NMX-C collector | `heartbeat_rate` | `30` | Subscribe heartbeat for NMX-C `DomainStateInfo` updates. |
@@ -175,8 +177,13 @@ switch config has NMX-C enabled; it does not use BMC or NICo API TLS material.
 For static switch-host endpoints, `switch.nmxc_enabled` controls this target
 eligibility after the `endpoint_role = "host"` and `is_primary = true` checks;
 it defaults to `switch.is_primary` when omitted.
-NMX-C notifications emit log events for tracing, log-file, and OTLP
-log sinks only; Prometheus metrics and switch health reports are separate scope.
+NMX-C notifications emit log events for tracing, log-file, and OTLP log sinks.
+With `[collectors.nmxc]` and `[sinks.nvlink_domain_health_report]` enabled,
+supported `DomainStateInfo` controller health states also produce NVLink domain
+health reports. Both settings are disabled by default. Configuration validation
+rejects enabling the sink with `[collectors.nmxc.schema_override]`. See
+[NVLink Domain Health Reports](./nvlink-domain-health-reports.md) for state
+mapping, identity checks, report persistence, and configuration behavior.
 
 NMX-C collection uses plaintext gRPC over HTTP/2. TLS, certificate
 bypass, custom certificate loading, and mTLS are intentionally separate scope; do not model them with the NICo API SPIFFE certificate fields.
@@ -296,21 +303,22 @@ Health report records exported over OTLP carry versioned routing fields, counts,
 
 Keep the following in mind when configuring health report records:
 
-* The per-target `include_alert_details` setting defaults to `false`. This omits `health_report.alerts` and `health_report.alerts.dropped`. Set `include_alert_details` to `true` on a `[[sinks.otlp.targets]]` entry to add `health_report.alerts` when the report has alerts.
+- The per-target `include_alert_details` setting defaults to `false`. This omits `health_report.alerts` and `health_report.alerts.dropped`. Set `include_alert_details` to `true` on a `[[sinks.otlp.targets]]` entry to add `health_report.alerts` when the report has alerts.
 
-* _The setting is per-target_. This means that, for example, a debugging destination can receive detail, while a long-term store receives the routing, count, and success evidence without needing to store free-form alert messages.
+- *The setting is per-target*. This means that, for example, a debugging destination can receive detail, while a long-term store receives the routing, count, and success evidence without needing to store free-form alert messages.
 
-* The JSON array in `health_report.alerts` contains the first 64 alerts in report order, each with `probe_id`, `message`, `classifications`, and `target` if the alert names one.
+- The JSON array in `health_report.alerts` contains the first 64 alerts in report order, each with `probe_id`, `message`, `classifications`, and `target` if the alert names one. Sensor alerts also carry `powersupply_id` and `physical_context` when the sensor reports them, so a consumer can attribute the alert to a power supply without parsing the sensor name.
 
-* `health_report.alerts.dropped` appears only when details are enabled _and_ the report has more than 64 alerts. It contains the number of omitted alerts beyond those first 64.
+- `health_report.alerts.dropped` appears only when details are enabled *and* the report has more than 64 alerts. It contains the number of omitted alerts beyond those first 64.
 
-* Probe IDs use health API names: for example, OOB GPU inventory alerts appear as `SkuValidation` to deduplicate with the in-band SKU alerts.
+- Probe IDs use health API names: for example, OOB GPU inventory alerts appear as `SkuValidation` to deduplicate with the in-band SKU alerts.
 
 ## DPU Health Checks
 
 `dpu-agent` runs on managed DPUs and reports DPU health to NICo. The BlueField
-chart is named `nico-dpu-agent`. In service names and logs, the DPU agent
-currently appears as `forge-dpu-agent.service`.
+chart is named `nico-dpu-agent`. A systemd deployment uses
+`forge-dpu-agent.service`. A DPF deployment runs the `nico-dpu-agent` container,
+and centralized logs identify it as `nico-dpu-agent`.
 
 The agent checks DPU service health, networking state, HBN/NVUE configuration,
 DHCP behavior, BGP status, and heartbeat. DPU health is part of aggregate host
@@ -337,6 +345,8 @@ Key `nico-dpu-agent` chart values:
 | `dhcp_server.interface_prepend` | empty by default | Optional DHCP interface prefix argument. |
 | `dhcp_server.service_name` | set by DPF service integration | DHCP gRPC service name. |
 | `fmds.service_name` | set by DPF service integration | FMDS gRPC service name. |
+| `lldpSidecar.resources.requests` | `10m` CPU, `64Mi` memory | Default scheduler request for DPF LLDP collection. |
+| `lldpSidecar.resources.limits` | `250m` CPU, `128Mi` memory | Default resource limit for DPF LLDP collection. |
 
 The DaemonSet renders these core arguments:
 
@@ -368,6 +378,24 @@ The pod sets these runtime environment variables:
 | `NVUE_PASSWORD` | Secret key from `hbn.nvue_credentials_secret_name`. |
 | `RUST_LOG` | `info`. |
 
+### DPF LLDP Collection
+
+A DPF-managed DPU pod includes a `nico-lldp-sidecar` container. It captures
+LLDP-MED data through the DPU host's `lldpcli` and publishes `/data/lldp` for
+the `nico-dpu-agent` container. A successful capture is refreshed every 120
+seconds; a failure is retried after 30 seconds. The previous successful file is
+retained across a collection failure, but the agent rejects it after five
+minutes.
+
+When physical uplink discovery is missing or stale, inspect both containers in
+the DPU pod. Confirm that the sidecar can execute the host `lldpcli`, that
+`/data/lldp` is being refreshed, and that the agent has not rejected the file as
+too old. Centralized DPF logs identify the sidecar with
+`systemd.unit=nico-lldp-sidecar`. A systemd-managed DPU does not use the
+snapshot; its agent queries the local `lldpd` service directly.
+
+The deployment and freshness contract is documented in [DPU LLDP Collection](../dpu-management/dpu_configuration.md#dpu-lldp-collection).
+
 ### Common DPU Alerts
 
 Common DPU alert IDs include:
@@ -388,27 +416,45 @@ Common DPU alert IDs include:
 from the DPU agent. Check whether the DPU is powered, the agent is running, DPU
 time is correct, and the DPU can reach NICo.
 
+For `BgpPeeringTor`, start with the alert target and message. A p0 transport
+failure includes `PreventAllocations` and blocks normal PXE readiness. A lone
+p1 transport failure does not prevent allocation or block host state
+transitions. An FRR message that states the session did not negotiate IPv6
+unicast is an address family warning, not evidence that the transport session
+is down.
+
+`PostConfigCheckWait` is expected in one report after the agent changes HBN or
+reloads local DHCP in ContainerExec mode. It includes `PreventAllocations` and
+`PreventHostStateChanges`, then clears when the agent sends a fresh sample. If
+it appears in consecutive reports, check the DPU agent logs for repeated
+configuration applications.
+
+Refer to [DPU ToR Uplink Health](../dpu-management/dpu_configuration.md#dpu-tor-uplink-health)
+for the configuration values, classifications, and complete transport matrix.
+
 ### DPU Logs
 
-Use Loki to inspect DPU-agent logs:
+Use Loki to inspect DPU agent logs. Select the query for the deployment path:
 
 ```logql
 {systemd_unit="forge-dpu-agent.service", machine_id="<machine-id>"}
+{systemd_unit="nico-dpu-agent", machine_id="<machine-id>"}
 ```
 
-Alternative labels can be used when available:
+Use the hostname label when the DPU has not learned its machine ID:
 
 ```logql
 {systemd_unit="forge-dpu-agent.service", host_name="<host-name>"}
+{systemd_unit="nico-dpu-agent", host_name="<host-name>"}
 ```
 
-On the DPU, use `journalctl` for direct service logs:
+On a systemd DPU, use `journalctl` for direct service logs:
 
 ```bash
 journalctl -u forge-dpu-agent.service -e --no-pager
 ```
 
-Restart the agent when required:
+Restart the systemd agent when required:
 
 ```bash
 systemctl restart forge-dpu-agent.service
@@ -765,6 +811,7 @@ Common Loki patterns:
 
 ```logql
 {systemd_unit="forge-dpu-agent.service", machine_id="<machine-id>"}
+{systemd_unit="nico-dpu-agent", machine_id="<machine-id>"}
 ```
 
 ```logql
@@ -823,6 +870,7 @@ For example:
 ```bash
 logcli query --since=1h '{k8s_container_name="nico-hardware-health"} |= "<machine-id>"'
 logcli query --since=1h '{systemd_unit="forge-dpu-agent.service"} |= "<machine-id>"'
+logcli query --since=1h '{systemd_unit="nico-dpu-agent"} |= "<machine-id>"'
 ```
 
 ### Dashboard Starting Points
@@ -847,7 +895,7 @@ Classifications.
 | Symptom | Check | Next action |
 |---|---|---|
 | Host is unhealthy with `PoweredOff` | Admin Web UI health page and hardware-health logs around `inAlertSince`. | Confirm BMC power state and whether the alert target is the expected BMC IP. |
-| Host is unhealthy with `HeartbeatTimeout` for `forge-dpu-agent` | `journalctl -u forge-dpu-agent.service -e --no-pager` and Loki query for the DPU agent. | Confirm the DPU is powered, time-synced, and able to reach NICo. Restart `forge-dpu-agent.service` only when service-level remediation requires it. |
+| Host is unhealthy with `HeartbeatTimeout` for the DPU agent | For systemd, use `journalctl -u forge-dpu-agent.service -e --no-pager`. For DPF, query the `nico-dpu-agent` logs in Loki. | Confirm the DPU is powered, its time is synchronized, and it can reach NICo. Restart the systemd service or DPF pod only when service remediation requires it. |
 | Host has active overrides | `nico-admin-cli machine health-override show <machine-id>` and the Health Overrides dashboard panel. | Verify the override reason is still valid. Remove temporary overrides after the condition ends. |
 | Health metrics are missing | `kubectl get servicemonitor -n nico-system` and the component-specific ServiceMonitor. | Enable the chart `serviceMonitor` block or fix the Prometheus selector/namespace match. |
 | Hardware-health logs do not show reports for a host | Loki query for `k8s_container_name="nico-hardware-health"` and the machine ID. | Confirm hardware-health is running, BMC discovery found the endpoint, and the collector is enabled for the source. |

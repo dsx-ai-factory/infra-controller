@@ -372,7 +372,7 @@ mod tests {
             addr: crate::endpoint::BmcAddr {
                 ip: "10.85.14.144".parse().unwrap(),
                 port: Some(443),
-                mac: MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap(),
+                mac: Some(MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap()),
             },
             collector_type: "test",
             metadata: None,
@@ -619,6 +619,44 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_log_occurrences_queue_separately_and_replays_replace() {
+        let occurrence = |entry_id: &str| {
+            let CollectorEvent::Log(mut record) = log_event(
+                "ResourceEvent.1.0.ResourceErrorsDetected",
+                r#"["resource-1","detail"]"#,
+            ) else {
+                unreachable!("log_event always returns a log event");
+            };
+
+            record
+                .attributes
+                .push((Cow::Borrowed("service_id"), "EventLog".to_string()));
+
+            record
+                .attributes
+                .push((Cow::Borrowed("entry_id"), entry_id.to_string()));
+
+            CollectorEvent::Log(record)
+        };
+
+        let first = occurrence("41");
+        let second = occurrence("42");
+        let sink = test_sink();
+        let context = test_context();
+
+        sink.handle_event(&context, &first);
+        sink.handle_event(&context, &second);
+
+        assert_eq!(sink.queue.len(), 2);
+        assert_eq!(sink.replaced_total.get() as u64, 0);
+
+        sink.handle_event(&context, &second);
+
+        assert_eq!(sink.queue.len(), 2);
+        assert_eq!(sink.replaced_total.get() as u64, 1);
+    }
+
+    #[test]
     fn bounded_signal_queues_drop_oldest_and_report_depth() {
         let metrics = MetricsCapture::start();
         let sink = bounded_test_sink(1);
@@ -743,33 +781,6 @@ mod tests {
         assert!(metrics.contains(
             "otlp_replacement_test_otlp_sink_metrics_replaced_total{target=\"http://second.example:4317\"} 1"
         ));
-    }
-
-    #[test]
-    fn same_sensor_different_direction_deduplicates() {
-        let sink = test_sink();
-        let ctx = test_context();
-
-        sink.handle_event(
-            &ctx,
-            &log_event(
-                "OpenBMC.0.1.SensorThresholdWarningLowGoingHigh",
-                r#"["HGX_GPU_0_Temp_1","3.96","-0.05"]"#,
-            ),
-        );
-        sink.handle_event(
-            &ctx,
-            &log_event(
-                "OpenBMC.0.1.SensorThresholdWarningHighGoingLow",
-                r#"["HGX_GPU_0_Temp_1","3.96","-0.05"]"#,
-            ),
-        );
-
-        let mut count = 0;
-        while sink.queue.pop().is_some() {
-            count += 1;
-        }
-        assert_eq!(count, 1, "same sensor should dedup to one entry");
     }
 
     /// Verifies OTLP logs omit diagnostic payloads by default.

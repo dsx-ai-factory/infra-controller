@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 pub use iface::{
     Filter, GetPartitionOptions, IBFabric, IBFabricConfig, IBFabricManager, IBFabricRawResponse,
@@ -254,10 +255,13 @@ impl IBFabricManager for IBFabricManagerImpl {
                     .credential_reader
                     .get_credentials(key)
                     .await
-                    .map_err(|err| {
-                        IbError::internal(format!(
-                            "Cannot create UFM client: secret manager error: {err}"
-                        ))
+                    .map_err(|error| match error {
+                        error @ SecretsError::UfmCredentialReadBlocked { .. } => {
+                            IbError::CredentialConfigurationError(error.to_string())
+                        }
+                        error => IbError::internal(format!(
+                            "Cannot create UFM client: secret manager error: {error}"
+                        )),
                     })?
                     .ok_or_else(|| {
                         IbError::internal(format!(
@@ -515,6 +519,37 @@ mod tests {
             ..Default::default()
         };
         create_ib_fabric_manager(reader, config).unwrap()
+    }
+
+    struct BlockedUfmCredentialReader;
+
+    #[async_trait]
+    impl CredentialReader for BlockedUfmCredentialReader {
+        async fn get_credentials(
+            &self,
+            key: &CredentialKey,
+        ) -> Result<Option<Credentials>, SecretsError> {
+            let CredentialKey::UfmAuth { fabric } = key else {
+                return Ok(None);
+            };
+            Err(SecretsError::UfmCredentialReadBlocked {
+                fabric: fabric.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_ufm_credential_is_a_configuration_error() {
+        let manager = rest_manager(Arc::new(BlockedUfmCredentialReader));
+
+        let error = manager
+            .new_client("f1")
+            .await
+            .err()
+            .expect("authoritative local credential miss must fail client creation");
+
+        assert!(matches!(error, IbError::CredentialConfigurationError(_)));
+        assert!(error.to_string().contains("credentials.ufm_source"));
     }
 
     #[tokio::test]

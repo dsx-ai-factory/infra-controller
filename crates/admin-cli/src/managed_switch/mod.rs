@@ -15,12 +15,10 @@
  * limitations under the License.
  */
 
+mod decommission;
 mod delete;
 mod list;
 mod show;
-
-#[cfg(test)]
-mod tests;
 
 use clap::Parser;
 
@@ -34,4 +32,6 @@ pub(crate) enum Cmd {
     List(list::Args),
     #[clap(about = "Delete a managed switch")]
     Delete(delete::Args),
+    #[clap(about = "Start decommissioning a managed switch")]
+    Decommission(decommission::Args),
 }

@@ -21,7 +21,7 @@ import (
 // checks if the DpuExtensionServiceDeployment type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &DpuExtensionServiceDeployment{}
 
-// DpuExtensionServiceDeployment Describes a deployment of a DPU Extension Service on DPUs of an Instance
+// DpuExtensionServiceDeployment Describes placement of a DPU Extension Service on DPUs of an Instance. For DpfHelmChart, Running means the DPF placement label was applied; it does not report Helm release or workload health.
 type DpuExtensionServiceDeployment struct {
 	// Unique identifier for the DPU Extension Service Deployment
 	Id *string `json:"id,omitempty"`

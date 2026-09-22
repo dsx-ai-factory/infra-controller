@@ -43,7 +43,7 @@ pub struct IbPartitionSearchFilter {
 /// Partition Keys are 16 bit values valid up to a value of 0x7fff
 /// Partition Keys are serialized as strings, since the hex represenation is
 /// their canonical representation.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PartitionKey(u16);
 
 impl PartitionKey {

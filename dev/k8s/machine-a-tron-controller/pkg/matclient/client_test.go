@@ -59,6 +59,10 @@ func TestClient_GetMachinesStatus(t *testing.T) {
 										ReachablePort: 443,
 										ListenPort:    8444,
 									},
+									SSH: &EndpointStatus{
+										ReachablePort: 32022,
+										ListenPort:    32022,
+									},
 								},
 							},
 						},

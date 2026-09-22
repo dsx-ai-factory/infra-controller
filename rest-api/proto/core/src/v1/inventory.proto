@@ -6,6 +6,7 @@ syntax = "proto3";
 package inventory;
 
 import "common_nico.proto";
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "machine_discovery_nico.proto";
 import "nico_nico.proto";
@@ -31,6 +32,28 @@ message InventoryPage {
   int32 total_items = 4;
   // IDs of all items
   repeated string item_ids = 5;
+}
+
+// SiteAgentBuildInfo - build metadata and configuration the Site Agent reports about itself,
+// as opposed to the Core configuration it relays
+message SiteAgentBuildInfo {
+  // Site Agent build version
+  string version = 1;
+  // How often the Site Agent collects inventory, derived from its configured schedule.
+  // Cloud compares object timestamps against this to decide whether an inventory is stale.
+  google.protobuf.Duration inventory_interval = 2;
+  // Whether Flow is enabled in the Site Agent configuration
+  optional bool flow_enabled = 3;
+}
+
+// SiteConfigInventory - Site configuration reported periodically. Site-level reporting is
+// added to this message rather than as another workflow argument, so extending it does not
+// require a new workflow.
+message SiteConfigInventory {
+  // Core build metadata, advertised capabilities, and runtime configuration
+  forge.BuildInfo core_build_info = 1;
+  // Build metadata and configuration owned by the Site Agent itself
+  SiteAgentBuildInfo site_agent_build_info = 2;
 }
 
 // DpuExtensionServiceInventory - inventory of all DPU Extension Services on Site, collected periodically
@@ -119,6 +142,20 @@ message InfiniBandPartitionInventory {
   google.protobuf.Timestamp timestamp = 3;
   // List of InfiniBand Partition
   repeated forge.IBPartition ib_partitions = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// SpectrumXPartitionInventory - inventory info of all SpectrumX Partitions on Site, collected periodically
+message SpectrumXPartitionInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of SpectrumX Partition inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of SpectrumX Partition
+  repeated forge.SpxPartition spx_partitions = 4;
   // Inventory page information
   InventoryPage inventory_page = 5;
 }
@@ -340,5 +377,35 @@ message VpcPrefixInventory {
   // Message for status
   string status_msg = 4;
   // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// SitePrefixInventory reports one message from a periodic SitePrefix inventory
+// run. Every SUCCESS message uses the same timestamp and repeats the complete
+// item_ids set in SitePrefix ID order. In a complete nonempty run, the
+// site_prefixes payloads are ordered, disjoint, and together contain exactly
+// one record matching each item_ids entry. Receipt of the final page and that
+// exact union make the run complete. total_pages on a non-final page is an
+// estimate and may increase if later messages must be smaller.
+//
+// An unpaged FAILED message represents a collection failure detected before
+// any SUCCESS message was published. A failure after partial publication emits
+// no FAILED message; the non-final SUCCESS messages remain an incomplete run.
+// An empty SUCCESS run is one message with current_page 1, zero total_pages and
+// total_items, page_size set to the effective configured publish page size, and
+// empty lists. Omitted repeated fields and empty lists have the same meaning.
+// Receivers must leave REST IP Block records unchanged for a FAILED message.
+// They may process SitePrefixes present on SUCCESS pages, but must not treat
+// any ID as missing until the run is complete.
+message SitePrefixInventory {
+  // SitePrefixes included in this page
+  repeated forge.SitePrefix site_prefixes = 1;
+  // Time this inventory run began. Every page from the same run uses this value.
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of inventory collection
+  InventoryStatus inventory_status = 3;
+  // Message describing the inventory status
+  string status_msg = 4;
+  // Page information, including every SitePrefix ID in a successful run
   InventoryPage inventory_page = 5;
 }

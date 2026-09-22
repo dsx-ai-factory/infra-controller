@@ -25,7 +25,7 @@
 //! appear in the Redfish simulator.
 
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, StableHostMachineId};
 use chrono::{DateTime, Utc};
 use ipnetwork::IpNetwork;
 use model::machine::{InstanceState, ManagedHostState};
@@ -53,7 +53,7 @@ async fn host_with_moved_primary(
     env: &api_fixtures::TestEnv,
 ) -> Result<
     (
-        MachineId,
+        StableHostMachineId,
         MachineBootInterfaceTarget,
         MachineBootInterfaceTarget,
     ),
@@ -62,7 +62,7 @@ async fn host_with_moved_primary(
     let host =
         api_fixtures::site_explorer::new_host(env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id: StableHostMachineId = host.host_snapshot.id.try_into()?;
 
     let (original_target, promote_id, promote_target) = {
         let mut txn = env.pool.begin().await?;
@@ -103,7 +103,7 @@ async fn host_with_moved_primary(
 /// Clears any pending machine-controller wakeup for a test host.
 async fn clear_controller_queue(
     pool: &sqlx::PgPool,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
         .bind(machine_id.to_string())
@@ -115,7 +115,7 @@ async fn clear_controller_queue(
 /// Returns the number of pending machine-controller wakeups for a test host.
 async fn controller_queue_count(
     pool: &sqlx::PgPool,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT count(*) FROM machine_state_controller_queued_objects WHERE object_id = $1",
@@ -491,7 +491,7 @@ async fn test_set_dpu_first_persists_a_zero_dpu_host_target_without_redfish(
     env.run_network_segment_controller_iteration().await;
 
     let host = api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::zero_dpu()).await?;
-    let host_id = host.host_snapshot.id;
+    let host_id: HostMachineId = host.host_snapshot.id;
 
     let inband_target = {
         let mut txn = env.pool.begin().await?;
@@ -508,7 +508,6 @@ async fn test_set_dpu_first_persists_a_zero_dpu_host_target_without_redfish(
         )
         .expect("the HostInband interface should resolve an exact target")
     };
-
     let timepoint = env.redfish_sim.timepoint();
 
     env.api
@@ -554,7 +553,7 @@ async fn test_boot_interface_candidates_skips_dpu_machines(
 
     let mut txn = env.pool.begin().await?;
     assert!(
-        summarize_boot_interface_candidates_for_test(txn.as_mut(), Some(dpu_id))
+        summarize_boot_interface_candidates_for_test(txn.as_mut(), Some(dpu_id.into()))
             .await?
             .is_none(),
         "a DPU machine should not resolve boot-interface rows",
@@ -566,7 +565,7 @@ async fn test_boot_interface_candidates_skips_dpu_machines(
         "an unowned endpoint should not resolve boot-interface rows",
     );
     let (has_primary_interface, predicted_is_empty) =
-        summarize_boot_interface_candidates_for_test(txn.as_mut(), Some(host_id))
+        summarize_boot_interface_candidates_for_test(txn.as_mut(), Some(host_id.into()))
             .await?
             .expect("a host machine should resolve its boot-interface candidates");
     assert!(
@@ -684,7 +683,7 @@ async fn test_managed_host_without_a_resolvable_target_preserves_action_requirem
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(1))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id: HostMachineId = host.host_snapshot.id;
 
     let mut txn = env.pool.begin().await?;
     sqlx::query("DELETE FROM machine_boot_interfaces WHERE machine_id = $1")
@@ -768,8 +767,8 @@ async fn test_machine_setup_uses_the_bmc_endpoints_actual_owner(
     let caller_supplied =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(1))
             .await?;
-    let actual_id = actual.host_snapshot.id;
-    let caller_supplied_id = caller_supplied.host_snapshot.id;
+    let actual_id: HostMachineId = actual.host_snapshot.id;
+    let caller_supplied_id: HostMachineId = caller_supplied.host_snapshot.id;
     let actual_bmc_ip = actual
         .host_snapshot
         .status
@@ -864,6 +863,7 @@ async fn test_set_dpu_first_persists_predicted_host_intent_without_redfish(
         .expect("the prediction always supplies a MAC");
         (predicted.machine_id, target)
     };
+    let machine_id = HostMachineId::try_from(machine_id)?;
 
     let timepoint = env.redfish_sim.timepoint();
 
@@ -888,7 +888,7 @@ async fn test_set_dpu_first_persists_predicted_host_intent_without_redfish(
         .api
         .get_machine_boot_interfaces(tonic::Request::new(
             forge::GetMachineBootInterfacesRequest {
-                machine_id: Some(machine_id),
+                machine_id: Some(machine_id.into()),
             },
         ))
         .await?

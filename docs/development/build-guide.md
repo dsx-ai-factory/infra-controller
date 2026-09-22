@@ -1,5 +1,35 @@
 # Build Guide
 
+## Native Linux ARM64 Builds
+
+On native Linux ARM64 hosts, [`.envrc`](../../.envrc) selects the repository's
+[`clang-mold`](../../dev/linkers/clang-mold) driver for the
+`aarch64-unknown-linux-gnu` target. The driver invokes Clang with
+`-fuse-ld=mold`, avoiding the higher memory use of GNU ld without imposing that
+linker choice on CI images and cross-build environments. On other host
+architectures, `.envrc` does not change Cargo's ARM64 linker.
+
+Before running Cargo directly, ensure that the `clang` and `mold` executables
+are on `PATH`. On Ubuntu 24.04 or Debian 12 (Bookworm) and newer, install both
+packages with:
+
+```bash
+sudo apt-get install -y clang mold
+```
+
+Without either executable, Cargo fails during linking. If you do not use
+`direnv`, select the wrapper in the shell that runs Cargo from this checkout:
+
+```bash
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$(git rev-parse --show-toplevel)/dev/linkers/clang-mold"
+```
+
+Debian 11 (Bullseye) does not package mold. Use the containerized ARM64 build
+path for Bullseye-compatible artifacts; its
+[build image](../../dev/docker/Dockerfile.build-artifacts-container-aarch64)
+installs a checksum-verified upstream ARM64 release. Containerized ARM64 build
+paths select mold inside their build images and do not require it on the host.
+
 ## Updating Pinned Dependencies
 
 ### Git submodules
@@ -75,30 +105,28 @@ locally with `debug = true` in a `[profile.dev]` override or a local `Cargo.toml
 Release container builds override the default back to full debug info via the
 `CARGO_PROFILE_RELEASE_DEBUG=true` environment variable in the Dockerfiles.
 
-### `--no-workspace` on `clippy-release` and `build-release`
+### Workspace clippy and targeted release builds
 
-**What it does:** Both tasks are invoked with `cargo make --no-workspace` in the Dockerfile.
-Without this flag, cargo-make iterates all workspace members (64 crates) and calls `cargo build`
-or `cargo clippy` once per crate. With `--no-workspace`, cargo-make runs the task once at the
-workspace root, which is equivalent to running `cargo build --workspace` — a single invocation
-that builds everything once.
+**What it does:** `clippy-release` is invoked with `cargo make --no-workspace` in the SA
+Dockerfile, so cargo-make runs clippy once at the workspace root instead of once per workspace
+member. `build-release` is itself a non-workspace task and explicitly selects the packages that
+produce artifacts copied into the release container.
 
 **Why:** The per-member iteration caused shared dependencies (`tonic`, `sqlx`, `nico-rpc`, etc.)
 to be recompiled repeatedly across members. Switching to `--no-workspace` reduced the build from
-~98 minutes to ~21 minutes on a 72-core server.
+~98 minutes to ~21 minutes on a 72-core server. Selecting the production packages also prevents
+test-only workspace members from enabling test-support features in production dependencies.
 
-**Trade-off:** Per-crate feature isolation is lost. Cargo unifies features across all workspace
-members at once rather than resolving each crate independently. For this project all crates ship
-together as a single release image, so cross-crate feature conflicts are not a concern. If you
-ever extract a crate for standalone deployment, validate its feature set independently with
-`cargo build -p <crate>`.
+Keep the package selection in `build-release` synchronized with the explicit artifact list in the
+`Dockerfile.release-container-*` files. A clean container build fails at its `COPY --from=builder`
+step if a required artifact is missing.
 
 ### `clippy-release` shares artifacts with `build-release`
 
 **What it does:** The `clippy-release` Makefile task runs clippy with `--release`, and
-`build-release` also compiles in release mode. Because they share the same compilation flags and
-profile, the compiled `.rlib` and `.rmeta` artifacts from the clippy step are reused by the build
-step — no second compile of all 64 crates.
+`build-release` also compiles the production packages in release mode. Cargo reuses compatible
+`.rlib` and `.rmeta` artifacts from the clippy step. A dependency whose production feature set
+differs from clippy's `--all-features` graph is rebuilt with the narrower feature set.
 
 **Trade-off:** `clippy-release` passes `--all-targets`, which includes test and benchmark targets
 that `build-release` does not compile. Clippy therefore lints slightly more code than is shipped

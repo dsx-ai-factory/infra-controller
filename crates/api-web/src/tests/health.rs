@@ -16,8 +16,12 @@
  */
 
 use axum::body::Body;
+use carbide_uuid::rack::RackProfileId;
+use db::health_history::HealthHistoryTableId;
+use health_report::HealthReport;
 use http_body_util::BodyExt;
 use hyper::http::{Method, StatusCode};
+use model::test_support::power_shelf_config;
 use rpc::forge::AdminForceDeleteMachineRequest;
 use rpc::forge::forge_server::Forge;
 use tower::ServiceExt;
@@ -56,7 +60,7 @@ async fn test_health_of_nonexisting_machine(pool: sqlx::PgPool) {
 
     assert!(
         env.test_harness
-            .find_machine(host_machine_id)
+            .find_machine(host_machine_id.into())
             .await
             .is_empty()
     );
@@ -193,6 +197,11 @@ async fn test_add_remove_nvlink_domain_health_report_via_web_ui(pool: sqlx::PgPo
     assert!(aggregate_health.contains("NvLinkDomainWebHealth"));
     assert!(aggregate_health.contains("nvlink domain web health"));
     assert!(body.contains("web-nvlink-domain-health-test"));
+    assert!(
+        get_nvlink_domain_health_list(&app)
+            .await
+            .contains(domain_id)
+    );
 
     post_nvlink_domain_health_report(
         &app,
@@ -202,8 +211,12 @@ async fn test_add_remove_nvlink_domain_health_report_via_web_ui(pool: sqlx::PgPo
     )
     .await;
 
-    let body = get_nvlink_domain_health_page(&app, domain_id).await;
-    assert!(!body.contains("web-nvlink-domain-health-test"));
+    assert!(
+        !get_nvlink_domain_health_list(&app)
+            .await
+            .contains(domain_id)
+    );
+    verify_health_page_not_found(&app, &format!("/admin/nvlink-domain/{domain_id}/health")).await;
 }
 
 #[crate::sqlx_test]
@@ -331,7 +344,11 @@ async fn test_add_replace_remove_dpu_health_report_via_web_ui(pool: sqlx::PgPool
 async fn test_health_of_rack(pool: sqlx::PgPool) {
     let env = TestEnv::new(pool).await;
     let app = make_test_app(&env.test_harness);
-    let rack_id = env.test_harness.create_rack().await.id;
+    let rack_id = env
+        .test_harness
+        .create_rack(RackProfileId::new("rack"))
+        .await
+        .id;
 
     let response = app
         .clone()
@@ -355,6 +372,7 @@ async fn test_health_of_rack(pool: sqlx::PgPool) {
     assert!(body.contains("Rack Health"));
     assert!(body.contains("Health Report Management"));
     assert!(body.contains("Health History"));
+    assert!(body.contains(&format!("/admin/rack/{rack_id}/health-history")));
 
     let payload = r#"{
         "mode": "Merge",
@@ -472,6 +490,7 @@ async fn test_health_of_switch(pool: sqlx::PgPool) {
     assert!(body.contains("Switch Health"));
     assert!(body.contains("Health Report Management"));
     assert!(body.contains("Health History"));
+    assert!(body.contains(&format!("/admin/switch/{switch_id}/health-history")));
 
     let payload = r#"{
         "mode": "Merge",
@@ -565,7 +584,11 @@ async fn test_health_of_switch(pool: sqlx::PgPool) {
 async fn test_health_of_power_shelf(pool: sqlx::PgPool) {
     let env = TestEnv::new(pool).await;
     let app = make_test_app(&env.test_harness);
-    let power_shelf_id = env.test_harness.create_power_shelf().await.id;
+    let power_shelf_id = env
+        .test_harness
+        .create_power_shelf(power_shelf_config("Power Shelf Health Test"))
+        .await
+        .id;
 
     let response = app
         .clone()
@@ -589,6 +612,9 @@ async fn test_health_of_power_shelf(pool: sqlx::PgPool) {
     assert!(body.contains("Power Shelf Health"));
     assert!(body.contains("Health Report Management"));
     assert!(body.contains("Health History"));
+    assert!(body.contains(&format!(
+        "/admin/power-shelf/{power_shelf_id}/health-history"
+    )));
 
     let payload = r#"{
         "mode": "Merge",
@@ -680,6 +706,124 @@ async fn test_health_of_power_shelf(pool: sqlx::PgPool) {
         .to_bytes();
     let body = String::from_utf8_lossy(&body_bytes);
     assert!(!body.contains("web-power-shelf-health-test"));
+}
+
+#[crate::sqlx_test]
+async fn test_health_history_pages(pool: sqlx::PgPool) {
+    let env = TestEnv::new(pool.clone()).await;
+    let app = make_test_app(&env.test_harness);
+
+    let rack_id = env
+        .test_harness
+        .create_rack(RackProfileId::new("rack"))
+        .await
+        .id
+        .to_string();
+    let switch_id = env.test_harness.create_switch(1, 1).await.id.to_string();
+    let power_shelf_id = env
+        .test_harness
+        .create_power_shelf(power_shelf_config("Power Shelf History Test"))
+        .await
+        .id
+        .to_string();
+
+    // Seed one health-history record per object directly through the persistence
+    // layer (there is no controller loop in these tests) so we exercise the full
+    // read path: RPC -> handler -> fetch helper -> template.
+    seed_health_history(
+        &pool,
+        HealthHistoryTableId::Rack,
+        &rack_id,
+        "web-rack-history-probe",
+    )
+    .await;
+    seed_health_history(
+        &pool,
+        HealthHistoryTableId::Switch,
+        &switch_id,
+        "web-switch-history-probe",
+    )
+    .await;
+    seed_health_history(
+        &pool,
+        HealthHistoryTableId::PowerShelf,
+        &power_shelf_id,
+        "web-power-shelf-history-probe",
+    )
+    .await;
+
+    for (path, title, source) in [
+        (
+            format!("/admin/rack/{rack_id}/health-history"),
+            "Rack Health History",
+            "web-rack-history-probe",
+        ),
+        (
+            format!("/admin/switch/{switch_id}/health-history"),
+            "Switch Health History",
+            "web-switch-history-probe",
+        ),
+        (
+            format!("/admin/power-shelf/{power_shelf_id}/health-history"),
+            "Power Shelf Health History",
+            "web-power-shelf-history-probe",
+        ),
+    ] {
+        let body = get_page(&app, &path).await;
+        assert!(body.contains(title), "{path} missing title {title}");
+        assert!(
+            body.contains(&format!("{path}.json")),
+            "{path} missing JSON link"
+        );
+        assert!(
+            body.contains(source),
+            "{path} should render the seeded record source {source}"
+        );
+
+        let json = get_page(&app, &format!("{path}.json")).await;
+        assert!(
+            json.contains(source),
+            "{path}.json should include the seeded record source {source}"
+        );
+    }
+}
+
+/// Persists a single health-history record for `object_id` via the shared
+/// persistence layer, tagged with `source` so tests can assert it renders.
+async fn seed_health_history(
+    pool: &sqlx::PgPool,
+    table: HealthHistoryTableId,
+    object_id: &str,
+    source: &str,
+) {
+    let report = HealthReport {
+        source: source.to_string(),
+        triggered_by: None,
+        observed_at: None,
+        successes: vec![],
+        alerts: vec![],
+    };
+    let mut conn = pool.acquire().await.expect("acquire db connection");
+    db::health_history::persist(&mut conn, table, &object_id, &report)
+        .await
+        .expect("persist seeded health history");
+}
+
+async fn get_page(app: &axum::Router, path: &str) -> String {
+    let response = app
+        .clone()
+        .oneshot(web_request_builder().uri(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{path}");
+
+    let body_bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("Empty response body?")
+        .to_bytes();
+    String::from_utf8_lossy(&body_bytes).into_owned()
 }
 
 async fn post_machine_health_report(
@@ -785,6 +929,28 @@ async fn get_nvlink_domain_health_page(app: &axum::Router, domain_id: &str) -> S
         .collect()
         .await
         .expect("Empty response body?")
+        .to_bytes();
+    String::from_utf8_lossy(&body_bytes).into_owned()
+}
+
+async fn get_nvlink_domain_health_list(app: &axum::Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            web_request_builder()
+                .uri("/admin/nvlink-domain.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("failed to collect NVLink domain health list response body")
         .to_bytes();
     String::from_utf8_lossy(&body_bytes).into_owned()
 }

@@ -34,10 +34,13 @@ const (
 	Forge_FindDomainLegacy_FullMethodName                                   = "/forge.Forge/FindDomainLegacy"
 	Forge_CreateVpc_FullMethodName                                          = "/forge.Forge/CreateVpc"
 	Forge_UpdateVpc_FullMethodName                                          = "/forge.Forge/UpdateVpc"
+	Forge_ChangeVpcRoutingProfile_FullMethodName                            = "/forge.Forge/ChangeVpcRoutingProfile"
+	Forge_ReleaseVpcInactiveVni_FullMethodName                              = "/forge.Forge/ReleaseVpcInactiveVni"
 	Forge_UpdateVpcVirtualization_FullMethodName                            = "/forge.Forge/UpdateVpcVirtualization"
 	Forge_DeleteVpc_FullMethodName                                          = "/forge.Forge/DeleteVpc"
 	Forge_FindVpcIds_FullMethodName                                         = "/forge.Forge/FindVpcIds"
 	Forge_FindVpcsByIds_FullMethodName                                      = "/forge.Forge/FindVpcsByIds"
+	Forge_GetVpcRoutingState_FullMethodName                                 = "/forge.Forge/GetVpcRoutingState"
 	Forge_CreateSpxPartition_FullMethodName                                 = "/forge.Forge/CreateSpxPartition"
 	Forge_DeleteSpxPartition_FullMethodName                                 = "/forge.Forge/DeleteSpxPartition"
 	Forge_FindSpxPartitionIds_FullMethodName                                = "/forge.Forge/FindSpxPartitionIds"
@@ -71,6 +74,7 @@ const (
 	Forge_FindPowerShelves_FullMethodName                                   = "/forge.Forge/FindPowerShelves"
 	Forge_FindPowerShelfIds_FullMethodName                                  = "/forge.Forge/FindPowerShelfIds"
 	Forge_FindPowerShelvesByIds_FullMethodName                              = "/forge.Forge/FindPowerShelvesByIds"
+	Forge_DecommissionPowerShelf_FullMethodName                             = "/forge.Forge/DecommissionPowerShelf"
 	Forge_DeletePowerShelf_FullMethodName                                   = "/forge.Forge/DeletePowerShelf"
 	Forge_AdminForceDeletePowerShelf_FullMethodName                         = "/forge.Forge/AdminForceDeletePowerShelf"
 	Forge_SetPowerShelfMaintenance_FullMethodName                           = "/forge.Forge/SetPowerShelfMaintenance"
@@ -78,11 +82,13 @@ const (
 	Forge_FindSwitchIds_FullMethodName                                      = "/forge.Forge/FindSwitchIds"
 	Forge_FindSwitchesByIds_FullMethodName                                  = "/forge.Forge/FindSwitchesByIds"
 	Forge_DeleteSwitch_FullMethodName                                       = "/forge.Forge/DeleteSwitch"
+	Forge_DecommissionSwitch_FullMethodName                                 = "/forge.Forge/DecommissionSwitch"
 	Forge_AdminForceDeleteSwitch_FullMethodName                             = "/forge.Forge/AdminForceDeleteSwitch"
 	Forge_FindIBFabricIds_FullMethodName                                    = "/forge.Forge/FindIBFabricIds"
 	Forge_AllocateInstance_FullMethodName                                   = "/forge.Forge/AllocateInstance"
 	Forge_AllocateInstances_FullMethodName                                  = "/forge.Forge/AllocateInstances"
 	Forge_ReleaseInstance_FullMethodName                                    = "/forge.Forge/ReleaseInstance"
+	Forge_ReleaseInstances_FullMethodName                                   = "/forge.Forge/ReleaseInstances"
 	Forge_UpdateInstanceOperatingSystem_FullMethodName                      = "/forge.Forge/UpdateInstanceOperatingSystem"
 	Forge_UpdateInstanceConfig_FullMethodName                               = "/forge.Forge/UpdateInstanceConfig"
 	Forge_FindInstanceIds_FullMethodName                                    = "/forge.Forge/FindInstanceIds"
@@ -133,8 +139,11 @@ const (
 	Forge_FindMachineStateHistories_FullMethodName                          = "/forge.Forge/FindMachineStateHistories"
 	Forge_FindMachineHealthHistories_FullMethodName                         = "/forge.Forge/FindMachineHealthHistories"
 	Forge_FindPowerShelfStateHistories_FullMethodName                       = "/forge.Forge/FindPowerShelfStateHistories"
+	Forge_FindPowerShelfHealthHistories_FullMethodName                      = "/forge.Forge/FindPowerShelfHealthHistories"
 	Forge_FindRackStateHistories_FullMethodName                             = "/forge.Forge/FindRackStateHistories"
+	Forge_FindRackHealthHistories_FullMethodName                            = "/forge.Forge/FindRackHealthHistories"
 	Forge_FindSwitchStateHistories_FullMethodName                           = "/forge.Forge/FindSwitchStateHistories"
+	Forge_FindSwitchHealthHistories_FullMethodName                          = "/forge.Forge/FindSwitchHealthHistories"
 	Forge_FindNetworkSegmentStateHistories_FullMethodName                   = "/forge.Forge/FindNetworkSegmentStateHistories"
 	Forge_FindVpcPrefixStateHistories_FullMethodName                        = "/forge.Forge/FindVpcPrefixStateHistories"
 	Forge_FindSitePrefixStateHistories_FullMethodName                       = "/forge.Forge/FindSitePrefixStateHistories"
@@ -198,6 +207,7 @@ const (
 	Forge_ListHostsWaitingForReprovisioning_FullMethodName                  = "/forge.Forge/ListHostsWaitingForReprovisioning"
 	Forge_TriggerBmcCredentialRotation_FullMethodName                       = "/forge.Forge/TriggerBmcCredentialRotation"
 	Forge_TriggerUefiCredentialRotation_FullMethodName                      = "/forge.Forge/TriggerUefiCredentialRotation"
+	Forge_TriggerNicLockdownCredentialRotation_FullMethodName               = "/forge.Forge/TriggerNicLockdownCredentialRotation"
 	Forge_MarkManualFirmwareUpgradeComplete_FullMethodName                  = "/forge.Forge/MarkManualFirmwareUpgradeComplete"
 	Forge_ReportScoutFirmwareUpgradeStatus_FullMethodName                   = "/forge.Forge/ReportScoutFirmwareUpgradeStatus"
 	Forge_GetDpuInfoList_FullMethodName                                     = "/forge.Forge/GetDpuInfoList"
@@ -225,6 +235,7 @@ const (
 	Forge_AddExpectedMachine_FullMethodName                                 = "/forge.Forge/AddExpectedMachine"
 	Forge_DeleteExpectedMachine_FullMethodName                              = "/forge.Forge/DeleteExpectedMachine"
 	Forge_UpdateExpectedMachine_FullMethodName                              = "/forge.Forge/UpdateExpectedMachine"
+	Forge_PatchExpectedMachine_FullMethodName                               = "/forge.Forge/PatchExpectedMachine"
 	Forge_GetExpectedMachine_FullMethodName                                 = "/forge.Forge/GetExpectedMachine"
 	Forge_GetAllExpectedMachines_FullMethodName                             = "/forge.Forge/GetAllExpectedMachines"
 	Forge_ReplaceAllExpectedMachines_FullMethodName                         = "/forge.Forge/ReplaceAllExpectedMachines"
@@ -233,9 +244,11 @@ const (
 	Forge_GetAllUnexpectedMachines_FullMethodName                           = "/forge.Forge/GetAllUnexpectedMachines"
 	Forge_CreateExpectedMachines_FullMethodName                             = "/forge.Forge/CreateExpectedMachines"
 	Forge_UpdateExpectedMachines_FullMethodName                             = "/forge.Forge/UpdateExpectedMachines"
+	Forge_PatchExpectedMachines_FullMethodName                              = "/forge.Forge/PatchExpectedMachines"
 	Forge_AddExpectedPowerShelf_FullMethodName                              = "/forge.Forge/AddExpectedPowerShelf"
 	Forge_DeleteExpectedPowerShelf_FullMethodName                           = "/forge.Forge/DeleteExpectedPowerShelf"
 	Forge_UpdateExpectedPowerShelf_FullMethodName                           = "/forge.Forge/UpdateExpectedPowerShelf"
+	Forge_PatchExpectedPowerShelf_FullMethodName                            = "/forge.Forge/PatchExpectedPowerShelf"
 	Forge_GetExpectedPowerShelf_FullMethodName                              = "/forge.Forge/GetExpectedPowerShelf"
 	Forge_GetAllExpectedPowerShelves_FullMethodName                         = "/forge.Forge/GetAllExpectedPowerShelves"
 	Forge_ReplaceAllExpectedPowerShelves_FullMethodName                     = "/forge.Forge/ReplaceAllExpectedPowerShelves"
@@ -244,6 +257,7 @@ const (
 	Forge_AddExpectedSwitch_FullMethodName                                  = "/forge.Forge/AddExpectedSwitch"
 	Forge_DeleteExpectedSwitch_FullMethodName                               = "/forge.Forge/DeleteExpectedSwitch"
 	Forge_UpdateExpectedSwitch_FullMethodName                               = "/forge.Forge/UpdateExpectedSwitch"
+	Forge_PatchExpectedSwitch_FullMethodName                                = "/forge.Forge/PatchExpectedSwitch"
 	Forge_GetExpectedSwitch_FullMethodName                                  = "/forge.Forge/GetExpectedSwitch"
 	Forge_GetAllExpectedSwitches_FullMethodName                             = "/forge.Forge/GetAllExpectedSwitches"
 	Forge_ReplaceAllExpectedSwitches_FullMethodName                         = "/forge.Forge/ReplaceAllExpectedSwitches"
@@ -333,6 +347,8 @@ const (
 	Forge_FindMachineValidationRunItemIds_FullMethodName                    = "/forge.Forge/FindMachineValidationRunItemIds"
 	Forge_FindMachineValidationRunItemsByIds_FullMethodName                 = "/forge.Forge/FindMachineValidationRunItemsByIds"
 	Forge_GetMachineValidationAttempt_FullMethodName                        = "/forge.Forge/GetMachineValidationAttempt"
+	Forge_AppendMachineValidationAttemptLog_FullMethodName                  = "/forge.Forge/AppendMachineValidationAttemptLog"
+	Forge_GetMachineValidationAttemptLogs_FullMethodName                    = "/forge.Forge/GetMachineValidationAttemptLogs"
 	Forge_HeartbeatMachineValidationRun_FullMethodName                      = "/forge.Forge/HeartbeatMachineValidationRun"
 	Forge_RemoveMachineValidationExternalConfig_FullMethodName              = "/forge.Forge/RemoveMachineValidationExternalConfig"
 	Forge_GetMachineValidationTests_FullMethodName                          = "/forge.Forge/GetMachineValidationTests"
@@ -341,9 +357,11 @@ const (
 	Forge_MachineValidationTestVerfied_FullMethodName                       = "/forge.Forge/MachineValidationTestVerfied"
 	Forge_MachineValidationTestNextVersion_FullMethodName                   = "/forge.Forge/MachineValidationTestNextVersion"
 	Forge_MachineValidationTestEnableDisableTest_FullMethodName             = "/forge.Forge/MachineValidationTestEnableDisableTest"
+	Forge_MachineValidationTestApproveFullHost_FullMethodName               = "/forge.Forge/MachineValidationTestApproveFullHost"
 	Forge_UpdateMachineValidationRun_FullMethodName                         = "/forge.Forge/UpdateMachineValidationRun"
 	Forge_AdminBmcReset_FullMethodName                                      = "/forge.Forge/AdminBmcReset"
 	Forge_AdminPowerControl_FullMethodName                                  = "/forge.Forge/AdminPowerControl"
+	Forge_AdminChassisReset_FullMethodName                                  = "/forge.Forge/AdminChassisReset"
 	Forge_DisableSecureBoot_FullMethodName                                  = "/forge.Forge/DisableSecureBoot"
 	Forge_Lockdown_FullMethodName                                           = "/forge.Forge/Lockdown"
 	Forge_LockdownStatus_FullMethodName                                     = "/forge.Forge/LockdownStatus"
@@ -530,10 +548,21 @@ type ForgeClient interface {
 	// VPC
 	CreateVpc(ctx context.Context, in *VpcCreationRequest, opts ...grpc.CallOption) (*Vpc, error)
 	UpdateVpc(ctx context.Context, in *VpcUpdateRequest, opts ...grpc.CallOption) (*VpcUpdateResult, error)
+	// Changes an FNN VPC's named profile and active VNI while retaining the old
+	// allocation. Success means Core committed, not that the dataplane converged.
+	ChangeVpcRoutingProfile(ctx context.Context, in *VpcChangeRoutingProfileRequest, opts ...grpc.CallOption) (*VpcRoutingState, error)
+	// Operator cleanup after independently verifying that no DPU or fabric route
+	// still uses the retained VNI. Core does not verify dataplane convergence.
+	ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(ctx context.Context, in *VpcUpdateVirtualizationRequest, opts ...grpc.CallOption) (*VpcUpdateVirtualizationResult, error)
+	// Deletion does not release a retained VNI implicitly. Call
+	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+	// Retained or inconsistent owned allocations cause FailedPrecondition.
 	DeleteVpc(ctx context.Context, in *VpcDeletionRequest, opts ...grpc.CallOption) (*VpcDeletionResult, error)
 	FindVpcIds(ctx context.Context, in *VpcSearchFilter, opts ...grpc.CallOption) (*VpcIdList, error)
 	FindVpcsByIds(ctx context.Context, in *VpcsByIdsRequest, opts ...grpc.CallOption) (*VpcList, error)
+	// Reads persisted VPC routing and allocation state without changing it.
+	GetVpcRoutingState(ctx context.Context, in *VpcRoutingStateRequest, opts ...grpc.CallOption) (*VpcRoutingState, error)
 	CreateSpxPartition(ctx context.Context, in *SpxPartitionCreationRequest, opts ...grpc.CallOption) (*SpxPartition, error)
 	DeleteSpxPartition(ctx context.Context, in *SpxPartitionDeletionRequest, opts ...grpc.CallOption) (*SpxPartitionDeletionResult, error)
 	FindSpxPartitionIds(ctx context.Context, in *SpxPartitionSearchFilter, opts ...grpc.CallOption) (*SpxPartitionIdList, error)
@@ -577,8 +606,11 @@ type ForgeClient interface {
 	FindPowerShelves(ctx context.Context, in *PowerShelfQuery, opts ...grpc.CallOption) (*PowerShelfList, error)
 	FindPowerShelfIds(ctx context.Context, in *PowerShelfSearchFilter, opts ...grpc.CallOption) (*PowerShelfIdList, error)
 	FindPowerShelvesByIds(ctx context.Context, in *PowerShelvesByIdsRequest, opts ...grpc.CallOption) (*PowerShelfList, error)
+	// Starts the decommissioning workflow for a Ready managed power shelf.
+	DecommissionPowerShelf(ctx context.Context, in *DecommissionPowerShelfRequest, opts ...grpc.CallOption) (*DecommissionPowerShelfResponse, error)
 	DeletePowerShelf(ctx context.Context, in *PowerShelfDeletionRequest, opts ...grpc.CallOption) (*PowerShelfDeletionResult, error)
-	// Force deletes a Power Shelf and optionally its associated interfaces from the database.
+	// Force deletes a Power Shelf and optionally its associated interfaces
+	// and BMC suppressions from the database.
 	AdminForceDeletePowerShelf(ctx context.Context, in *AdminForceDeletePowerShelfRequest, opts ...grpc.CallOption) (*AdminForceDeletePowerShelfResponse, error)
 	// Request a maintenance operation (PowerOn / PowerOff) for a Power Shelf.
 	// When the power shelf is in Ready state, the power shelf state controller
@@ -589,6 +621,9 @@ type ForgeClient interface {
 	FindSwitchIds(ctx context.Context, in *SwitchSearchFilter, opts ...grpc.CallOption) (*SwitchIdList, error)
 	FindSwitchesByIds(ctx context.Context, in *SwitchesByIdsRequest, opts ...grpc.CallOption) (*SwitchList, error)
 	DeleteSwitch(ctx context.Context, in *SwitchDeletionRequest, opts ...grpc.CallOption) (*SwitchDeletionResult, error)
+	// Starts managed-switch decommissioning. The switch must be Ready and the
+	// Component Manager switch backend must be RMS.
+	DecommissionSwitch(ctx context.Context, in *DecommissionSwitchRequest, opts ...grpc.CallOption) (*DecommissionSwitchResponse, error)
 	// Force deletes a Switch and optionally its associated interfaces from the database.
 	AdminForceDeleteSwitch(ctx context.Context, in *AdminForceDeleteSwitchRequest, opts ...grpc.CallOption) (*AdminForceDeleteSwitchResponse, error)
 	// InfiniBand Fabrics
@@ -601,6 +636,13 @@ type ForgeClient interface {
 	AllocateInstances(ctx context.Context, in *BatchInstanceAllocationRequest, opts ...grpc.CallOption) (*BatchInstanceAllocationResponse, error)
 	// Releases an instance that has been allocated by a tenant
 	ReleaseInstance(ctx context.Context, in *InstanceReleaseRequest, opts ...grpc.CallOption) (*InstanceReleaseResult, error)
+	// Releases multiple instances in a single call. Best-effort per instance --
+	// one instance failing to release (e.g. already released, or blocked by a
+	// health check) does not roll back or block the release of the rest of the
+	// batch. Compare AllocateInstances, which is all-or-nothing: that semantic
+	// does not fit release, where callers need partial progress rather than a
+	// single bad ID aborting an entire large batch.
+	ReleaseInstances(ctx context.Context, in *BatchInstanceReleaseRequest, opts ...grpc.CallOption) (*BatchInstanceReleaseResponse, error)
 	// Updates the network interface configuration for an instance
 	// The update will take effect asynchronously. Users should monitor `Instance.status.network_status.synced`
 	// to determine whether all updates have been applied.
@@ -693,8 +735,11 @@ type ForgeClient interface {
 	FindMachineStateHistories(ctx context.Context, in *MachineStateHistoriesRequest, opts ...grpc.CallOption) (*MachineStateHistories, error)
 	FindMachineHealthHistories(ctx context.Context, in *MachineHealthHistoriesRequest, opts ...grpc.CallOption) (*HealthHistories, error)
 	FindPowerShelfStateHistories(ctx context.Context, in *PowerShelfStateHistoriesRequest, opts ...grpc.CallOption) (*StateHistories, error)
+	FindPowerShelfHealthHistories(ctx context.Context, in *PowerShelfHealthHistoriesRequest, opts ...grpc.CallOption) (*HealthHistories, error)
 	FindRackStateHistories(ctx context.Context, in *RackStateHistoriesRequest, opts ...grpc.CallOption) (*StateHistories, error)
+	FindRackHealthHistories(ctx context.Context, in *RackHealthHistoriesRequest, opts ...grpc.CallOption) (*HealthHistories, error)
 	FindSwitchStateHistories(ctx context.Context, in *SwitchStateHistoriesRequest, opts ...grpc.CallOption) (*StateHistories, error)
+	FindSwitchHealthHistories(ctx context.Context, in *SwitchHealthHistoriesRequest, opts ...grpc.CallOption) (*HealthHistories, error)
 	FindNetworkSegmentStateHistories(ctx context.Context, in *NetworkSegmentStateHistoriesRequest, opts ...grpc.CallOption) (*StateHistories, error)
 	FindVpcPrefixStateHistories(ctx context.Context, in *VpcPrefixStateHistoriesRequest, opts ...grpc.CallOption) (*StateHistories, error)
 	FindSitePrefixStateHistories(ctx context.Context, in *SitePrefixStateHistoriesRequest, opts ...grpc.CallOption) (*StateHistories, error)
@@ -829,6 +874,11 @@ type ForgeClient interface {
 	// withdraws a not-yet-consumed request -- it does not undo or reset any UEFI
 	// credential that a prior sweep already rotated.
 	TriggerUefiCredentialRotation(ctx context.Context, in *UefiCredentialRotationRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Operator "force-converge this host's NIC lockdown keys now" escape hatch
+	// for a single host. This is asynchronous: the handler only persists (Set) or
+	// removes (Clear) a flag maintained per host to determine whether to initiate NIC lockdown key rotation.
+	// A later machine-controller sweep observes a set flag and facilitates rotation.
+	TriggerNicLockdownCredentialRotation(ctx context.Context, in *NicLockdownCredentialRotationRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// TODO: Remove when manual upgrade feature is removed
 	// Mark host as having completed manual firmware upgrade
 	MarkManualFirmwareUpgradeComplete(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -883,6 +933,8 @@ type ForgeClient interface {
 	DeleteExpectedMachine(ctx context.Context, in *ExpectedMachineRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedMachine(ctx context.Context, in *ExpectedMachine, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedMachine(ctx context.Context, in *PatchExpectedMachineRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected machine
 	GetExpectedMachine(ctx context.Context, in *ExpectedMachineRequest, opts ...grpc.CallOption) (*ExpectedMachine, error)
 	// Get the BMC credentials for all expected machines
@@ -903,6 +955,8 @@ type ForgeClient interface {
 	CreateExpectedMachines(ctx context.Context, in *BatchExpectedMachineOperationRequest, opts ...grpc.CallOption) (*BatchExpectedMachineOperationResponse, error)
 	// Batch update expected machines
 	UpdateExpectedMachines(ctx context.Context, in *BatchExpectedMachineOperationRequest, opts ...grpc.CallOption) (*BatchExpectedMachineOperationResponse, error)
+	// Apply every patch in one transaction. Any failure rolls back the whole batch.
+	PatchExpectedMachines(ctx context.Context, in *PatchExpectedMachinesRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Expected Power Shelf Management
 	// Add expected power shelf
 	AddExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelf, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -910,6 +964,8 @@ type ForgeClient interface {
 	DeleteExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelfRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelf, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedPowerShelf(ctx context.Context, in *PatchExpectedPowerShelfRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected power shelf
 	GetExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelfRequest, opts ...grpc.CallOption) (*ExpectedPowerShelf, error)
 	// Get the BMC credentials for all expected power shelves
@@ -927,6 +983,8 @@ type ForgeClient interface {
 	DeleteExpectedSwitch(ctx context.Context, in *ExpectedSwitchRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedSwitch(ctx context.Context, in *ExpectedSwitch, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedSwitch(ctx context.Context, in *PatchExpectedSwitchRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected switch
 	GetExpectedSwitch(ctx context.Context, in *ExpectedSwitchRequest, opts ...grpc.CallOption) (*ExpectedSwitch, error)
 	// Get the BMC credentials for all expected switches
@@ -1050,23 +1108,51 @@ type ForgeClient interface {
 	FindMachineValidationRunItemsByIds(ctx context.Context, in *MachineValidationRunItemsByIdsRequest, opts ...grpc.CallOption) (*MachineValidationRunItemList, error)
 	// Machine-Validation attempt detail
 	GetMachineValidationAttempt(ctx context.Context, in *MachineValidationAttemptGetRequest, opts ...grpc.CallOption) (*MachineValidationAttempt, error)
+	// Append the next ordered stdout or stderr chunk while an attempt is active.
+	AppendMachineValidationAttemptLog(ctx context.Context, in *MachineValidationAttemptLogAppendRequest, opts ...grpc.CallOption) (*MachineValidationAttemptLogAppendResponse, error)
+	// Read a cursor-based page of persisted attempt logs.
+	GetMachineValidationAttemptLogs(ctx context.Context, in *MachineValidationAttemptLogGetRequest, opts ...grpc.CallOption) (*MachineValidationAttemptLogList, error)
 	// Machine-Validation run and active attempt heartbeat
 	HeartbeatMachineValidationRun(ctx context.Context, in *MachineValidationHeartbeatRequest, opts ...grpc.CallOption) (*MachineValidationHeartbeatResponse, error)
 	// Remove ExternalConfig
 	RemoveMachineValidationExternalConfig(ctx context.Context, in *RemoveMachineValidationExternalConfigRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Machine-Validation test list
 	GetMachineValidationTests(ctx context.Context, in *MachineValidationTestsGetRequest, opts ...grpc.CallOption) (*MachineValidationTestsGetResponse, error)
+	// A request without plugin creates a legacy test. A plugin creates an immutable
+	// revision that starts unverified and disabled; it must be verified before enablement.
 	AddMachineValidationTest(ctx context.Context, in *MachineValidationTestAddRequest, opts ...grpc.CallOption) (*MachineValidationTestAddUpdateResponse, error)
 	UpdateMachineValidationTest(ctx context.Context, in *MachineValidationTestUpdateRequest, opts ...grpc.CallOption) (*MachineValidationTestAddUpdateResponse, error)
+	// Verifies one immutable plugin revision. Verification is required before enablement.
 	MachineValidationTestVerfied(ctx context.Context, in *MachineValidationTestVerfiedRequest, opts ...grpc.CallOption) (*MachineValidationTestVerfiedResponse, error)
 	MachineValidationTestNextVersion(ctx context.Context, in *MachineValidationTestNextVersionRequest, opts ...grpc.CallOption) (*MachineValidationTestNextVersionResponse, error)
+	// Enables or disables a revision. Plugin enablement requires verification and,
+	// for host_access_full, separate approval of the exact revision.
 	MachineValidationTestEnableDisableTest(ctx context.Context, in *MachineValidationTestEnableDisableTestRequest, opts ...grpc.CallOption) (*MachineValidationTestEnableDisableTestResponse, error)
+	// Approves the writable host-root mount for one verified plugin revision.
+	// The request fails unless that exact immutable revision requests host_access_full.
+	MachineValidationTestApproveFullHost(ctx context.Context, in *MachineValidationTestFullHostApprovalRequest, opts ...grpc.CallOption) (*MachineValidationTestFullHostApprovalResponse, error)
 	UpdateMachineValidationRun(ctx context.Context, in *MachineValidationRunRequest, opts ...grpc.CallOption) (*MachineValidationRunResponse, error)
 	// Bmc Endpoint Explorer Actions
 	// Reset a BMC
 	AdminBmcReset(ctx context.Context, in *AdminBmcResetRequest, opts ...grpc.CallOption) (*AdminBmcResetResponse, error)
 	// Admin Power Control
 	AdminPowerControl(ctx context.Context, in *AdminPowerControlRequest, opts ...grpc.CallOption) (*AdminPowerControlResponse, error)
+	// Queues a Redfish Chassis.Reset request for later execution by the machine
+	// controller through Maintenance state. Success means the request was accepted,
+	// not that the reset completed. Requests are accepted only for hosts in Ready.
+	// The controller returns the host to Ready after the Redfish command succeeds,
+	// and to Failed if execution fails.
+	// Operator maintenance must be enabled with SetMaintenance and is preserved
+	// after execution. Disable it only after verifying target chassis readiness.
+	//
+	// v1 accepts only ForceRestart. An omitted action has proto3's On default and
+	// is rejected with INVALID_ARGUMENT, as are a missing/invalid machine_id or
+	// missing chassis_id.
+	// NOT_FOUND means the machine does not exist. FAILED_PRECONDITION means
+	// operator maintenance is disabled, an instance exists, or the host is not in Ready.
+	//
+	// This replaces the unused AdminGpuReset RPC; no compatibility alias is kept.
+	AdminChassisReset(ctx context.Context, in *AdminChassisResetRequest, opts ...grpc.CallOption) (*AdminChassisResetResponse, error)
 	// Disable Secure Boot
 	DisableSecureBoot(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*DisableSecureBootResponse, error)
 	// Set Lockdown (Enable or Disable)
@@ -1329,7 +1415,8 @@ type ForgeClient interface {
 	// Helm/docker versions for the nico DPF mandatory services, from both
 	// the nico config and the live DPUServiceTemplate CRs.
 	GetDPFServiceVersions(ctx context.Context, in *GetDPFServiceVersionsRequest, opts ...grpc.CallOption) (*DPFServiceVersionsResponse, error)
-	// Machines DPF is waiting on before a changed DPUService can roll out.
+	// Predicted or stable host machines DPF is waiting on before a changed
+	// DPUService can roll out.
 	//
 	// Required rather than convenient: the release RPC has no fleet-wide form, so
 	// this is the only way to discover which machines to name. Split ids-then-
@@ -1494,6 +1581,26 @@ func (c *forgeClient) UpdateVpc(ctx context.Context, in *VpcUpdateRequest, opts 
 	return out, nil
 }
 
+func (c *forgeClient) ChangeVpcRoutingProfile(ctx context.Context, in *VpcChangeRoutingProfileRequest, opts ...grpc.CallOption) (*VpcRoutingState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VpcRoutingState)
+	err := c.cc.Invoke(ctx, Forge_ChangeVpcRoutingProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VpcReleaseInactiveVniResult)
+	err := c.cc.Invoke(ctx, Forge_ReleaseVpcInactiveVni_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) UpdateVpcVirtualization(ctx context.Context, in *VpcUpdateVirtualizationRequest, opts ...grpc.CallOption) (*VpcUpdateVirtualizationResult, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VpcUpdateVirtualizationResult)
@@ -1528,6 +1635,16 @@ func (c *forgeClient) FindVpcsByIds(ctx context.Context, in *VpcsByIdsRequest, o
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VpcList)
 	err := c.cc.Invoke(ctx, Forge_FindVpcsByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetVpcRoutingState(ctx context.Context, in *VpcRoutingStateRequest, opts ...grpc.CallOption) (*VpcRoutingState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VpcRoutingState)
+	err := c.cc.Invoke(ctx, Forge_GetVpcRoutingState_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1864,6 +1981,16 @@ func (c *forgeClient) FindPowerShelvesByIds(ctx context.Context, in *PowerShelve
 	return out, nil
 }
 
+func (c *forgeClient) DecommissionPowerShelf(ctx context.Context, in *DecommissionPowerShelfRequest, opts ...grpc.CallOption) (*DecommissionPowerShelfResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DecommissionPowerShelfResponse)
+	err := c.cc.Invoke(ctx, Forge_DecommissionPowerShelf_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) DeletePowerShelf(ctx context.Context, in *PowerShelfDeletionRequest, opts ...grpc.CallOption) (*PowerShelfDeletionResult, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PowerShelfDeletionResult)
@@ -1934,6 +2061,16 @@ func (c *forgeClient) DeleteSwitch(ctx context.Context, in *SwitchDeletionReques
 	return out, nil
 }
 
+func (c *forgeClient) DecommissionSwitch(ctx context.Context, in *DecommissionSwitchRequest, opts ...grpc.CallOption) (*DecommissionSwitchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DecommissionSwitchResponse)
+	err := c.cc.Invoke(ctx, Forge_DecommissionSwitch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) AdminForceDeleteSwitch(ctx context.Context, in *AdminForceDeleteSwitchRequest, opts ...grpc.CallOption) (*AdminForceDeleteSwitchResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AdminForceDeleteSwitchResponse)
@@ -1978,6 +2115,16 @@ func (c *forgeClient) ReleaseInstance(ctx context.Context, in *InstanceReleaseRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InstanceReleaseResult)
 	err := c.cc.Invoke(ctx, Forge_ReleaseInstance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ReleaseInstances(ctx context.Context, in *BatchInstanceReleaseRequest, opts ...grpc.CallOption) (*BatchInstanceReleaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BatchInstanceReleaseResponse)
+	err := c.cc.Invoke(ctx, Forge_ReleaseInstances_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2487,6 +2634,16 @@ func (c *forgeClient) FindPowerShelfStateHistories(ctx context.Context, in *Powe
 	return out, nil
 }
 
+func (c *forgeClient) FindPowerShelfHealthHistories(ctx context.Context, in *PowerShelfHealthHistoriesRequest, opts ...grpc.CallOption) (*HealthHistories, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HealthHistories)
+	err := c.cc.Invoke(ctx, Forge_FindPowerShelfHealthHistories_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) FindRackStateHistories(ctx context.Context, in *RackStateHistoriesRequest, opts ...grpc.CallOption) (*StateHistories, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StateHistories)
@@ -2497,10 +2654,30 @@ func (c *forgeClient) FindRackStateHistories(ctx context.Context, in *RackStateH
 	return out, nil
 }
 
+func (c *forgeClient) FindRackHealthHistories(ctx context.Context, in *RackHealthHistoriesRequest, opts ...grpc.CallOption) (*HealthHistories, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HealthHistories)
+	err := c.cc.Invoke(ctx, Forge_FindRackHealthHistories_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) FindSwitchStateHistories(ctx context.Context, in *SwitchStateHistoriesRequest, opts ...grpc.CallOption) (*StateHistories, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StateHistories)
 	err := c.cc.Invoke(ctx, Forge_FindSwitchStateHistories_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindSwitchHealthHistories(ctx context.Context, in *SwitchHealthHistoriesRequest, opts ...grpc.CallOption) (*HealthHistories, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HealthHistories)
+	err := c.cc.Invoke(ctx, Forge_FindSwitchHealthHistories_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3137,6 +3314,16 @@ func (c *forgeClient) TriggerUefiCredentialRotation(ctx context.Context, in *Uef
 	return out, nil
 }
 
+func (c *forgeClient) TriggerNicLockdownCredentialRotation(ctx context.Context, in *NicLockdownCredentialRotationRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_TriggerNicLockdownCredentialRotation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) MarkManualFirmwareUpgradeComplete(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
@@ -3407,6 +3594,16 @@ func (c *forgeClient) UpdateExpectedMachine(ctx context.Context, in *ExpectedMac
 	return out, nil
 }
 
+func (c *forgeClient) PatchExpectedMachine(ctx context.Context, in *PatchExpectedMachineRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedMachine_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) GetExpectedMachine(ctx context.Context, in *ExpectedMachineRequest, opts ...grpc.CallOption) (*ExpectedMachine, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ExpectedMachine)
@@ -3487,6 +3684,16 @@ func (c *forgeClient) UpdateExpectedMachines(ctx context.Context, in *BatchExpec
 	return out, nil
 }
 
+func (c *forgeClient) PatchExpectedMachines(ctx context.Context, in *PatchExpectedMachinesRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedMachines_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) AddExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelf, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
@@ -3511,6 +3718,16 @@ func (c *forgeClient) UpdateExpectedPowerShelf(ctx context.Context, in *Expected
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_UpdateExpectedPowerShelf_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) PatchExpectedPowerShelf(ctx context.Context, in *PatchExpectedPowerShelfRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedPowerShelf_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3591,6 +3808,16 @@ func (c *forgeClient) UpdateExpectedSwitch(ctx context.Context, in *ExpectedSwit
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_UpdateExpectedSwitch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) PatchExpectedSwitch(ctx context.Context, in *PatchExpectedSwitchRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedSwitch_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -4487,6 +4714,26 @@ func (c *forgeClient) GetMachineValidationAttempt(ctx context.Context, in *Machi
 	return out, nil
 }
 
+func (c *forgeClient) AppendMachineValidationAttemptLog(ctx context.Context, in *MachineValidationAttemptLogAppendRequest, opts ...grpc.CallOption) (*MachineValidationAttemptLogAppendResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MachineValidationAttemptLogAppendResponse)
+	err := c.cc.Invoke(ctx, Forge_AppendMachineValidationAttemptLog_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetMachineValidationAttemptLogs(ctx context.Context, in *MachineValidationAttemptLogGetRequest, opts ...grpc.CallOption) (*MachineValidationAttemptLogList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MachineValidationAttemptLogList)
+	err := c.cc.Invoke(ctx, Forge_GetMachineValidationAttemptLogs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) HeartbeatMachineValidationRun(ctx context.Context, in *MachineValidationHeartbeatRequest, opts ...grpc.CallOption) (*MachineValidationHeartbeatResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MachineValidationHeartbeatResponse)
@@ -4567,6 +4814,16 @@ func (c *forgeClient) MachineValidationTestEnableDisableTest(ctx context.Context
 	return out, nil
 }
 
+func (c *forgeClient) MachineValidationTestApproveFullHost(ctx context.Context, in *MachineValidationTestFullHostApprovalRequest, opts ...grpc.CallOption) (*MachineValidationTestFullHostApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MachineValidationTestFullHostApprovalResponse)
+	err := c.cc.Invoke(ctx, Forge_MachineValidationTestApproveFullHost_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) UpdateMachineValidationRun(ctx context.Context, in *MachineValidationRunRequest, opts ...grpc.CallOption) (*MachineValidationRunResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MachineValidationRunResponse)
@@ -4591,6 +4848,16 @@ func (c *forgeClient) AdminPowerControl(ctx context.Context, in *AdminPowerContr
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AdminPowerControlResponse)
 	err := c.cc.Invoke(ctx, Forge_AdminPowerControl_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) AdminChassisReset(ctx context.Context, in *AdminChassisResetRequest, opts ...grpc.CallOption) (*AdminChassisResetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdminChassisResetResponse)
+	err := c.cc.Invoke(ctx, Forge_AdminChassisReset_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6224,10 +6491,21 @@ type ForgeServer interface {
 	// VPC
 	CreateVpc(context.Context, *VpcCreationRequest) (*Vpc, error)
 	UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error)
+	// Changes an FNN VPC's named profile and active VNI while retaining the old
+	// allocation. Success means Core committed, not that the dataplane converged.
+	ChangeVpcRoutingProfile(context.Context, *VpcChangeRoutingProfileRequest) (*VpcRoutingState, error)
+	// Operator cleanup after independently verifying that no DPU or fabric route
+	// still uses the retained VNI. Core does not verify dataplane convergence.
+	ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error)
+	// Deletion does not release a retained VNI implicitly. Call
+	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+	// Retained or inconsistent owned allocations cause FailedPrecondition.
 	DeleteVpc(context.Context, *VpcDeletionRequest) (*VpcDeletionResult, error)
 	FindVpcIds(context.Context, *VpcSearchFilter) (*VpcIdList, error)
 	FindVpcsByIds(context.Context, *VpcsByIdsRequest) (*VpcList, error)
+	// Reads persisted VPC routing and allocation state without changing it.
+	GetVpcRoutingState(context.Context, *VpcRoutingStateRequest) (*VpcRoutingState, error)
 	CreateSpxPartition(context.Context, *SpxPartitionCreationRequest) (*SpxPartition, error)
 	DeleteSpxPartition(context.Context, *SpxPartitionDeletionRequest) (*SpxPartitionDeletionResult, error)
 	FindSpxPartitionIds(context.Context, *SpxPartitionSearchFilter) (*SpxPartitionIdList, error)
@@ -6271,8 +6549,11 @@ type ForgeServer interface {
 	FindPowerShelves(context.Context, *PowerShelfQuery) (*PowerShelfList, error)
 	FindPowerShelfIds(context.Context, *PowerShelfSearchFilter) (*PowerShelfIdList, error)
 	FindPowerShelvesByIds(context.Context, *PowerShelvesByIdsRequest) (*PowerShelfList, error)
+	// Starts the decommissioning workflow for a Ready managed power shelf.
+	DecommissionPowerShelf(context.Context, *DecommissionPowerShelfRequest) (*DecommissionPowerShelfResponse, error)
 	DeletePowerShelf(context.Context, *PowerShelfDeletionRequest) (*PowerShelfDeletionResult, error)
-	// Force deletes a Power Shelf and optionally its associated interfaces from the database.
+	// Force deletes a Power Shelf and optionally its associated interfaces
+	// and BMC suppressions from the database.
 	AdminForceDeletePowerShelf(context.Context, *AdminForceDeletePowerShelfRequest) (*AdminForceDeletePowerShelfResponse, error)
 	// Request a maintenance operation (PowerOn / PowerOff) for a Power Shelf.
 	// When the power shelf is in Ready state, the power shelf state controller
@@ -6283,6 +6564,9 @@ type ForgeServer interface {
 	FindSwitchIds(context.Context, *SwitchSearchFilter) (*SwitchIdList, error)
 	FindSwitchesByIds(context.Context, *SwitchesByIdsRequest) (*SwitchList, error)
 	DeleteSwitch(context.Context, *SwitchDeletionRequest) (*SwitchDeletionResult, error)
+	// Starts managed-switch decommissioning. The switch must be Ready and the
+	// Component Manager switch backend must be RMS.
+	DecommissionSwitch(context.Context, *DecommissionSwitchRequest) (*DecommissionSwitchResponse, error)
 	// Force deletes a Switch and optionally its associated interfaces from the database.
 	AdminForceDeleteSwitch(context.Context, *AdminForceDeleteSwitchRequest) (*AdminForceDeleteSwitchResponse, error)
 	// InfiniBand Fabrics
@@ -6295,6 +6579,13 @@ type ForgeServer interface {
 	AllocateInstances(context.Context, *BatchInstanceAllocationRequest) (*BatchInstanceAllocationResponse, error)
 	// Releases an instance that has been allocated by a tenant
 	ReleaseInstance(context.Context, *InstanceReleaseRequest) (*InstanceReleaseResult, error)
+	// Releases multiple instances in a single call. Best-effort per instance --
+	// one instance failing to release (e.g. already released, or blocked by a
+	// health check) does not roll back or block the release of the rest of the
+	// batch. Compare AllocateInstances, which is all-or-nothing: that semantic
+	// does not fit release, where callers need partial progress rather than a
+	// single bad ID aborting an entire large batch.
+	ReleaseInstances(context.Context, *BatchInstanceReleaseRequest) (*BatchInstanceReleaseResponse, error)
 	// Updates the network interface configuration for an instance
 	// The update will take effect asynchronously. Users should monitor `Instance.status.network_status.synced`
 	// to determine whether all updates have been applied.
@@ -6387,8 +6678,11 @@ type ForgeServer interface {
 	FindMachineStateHistories(context.Context, *MachineStateHistoriesRequest) (*MachineStateHistories, error)
 	FindMachineHealthHistories(context.Context, *MachineHealthHistoriesRequest) (*HealthHistories, error)
 	FindPowerShelfStateHistories(context.Context, *PowerShelfStateHistoriesRequest) (*StateHistories, error)
+	FindPowerShelfHealthHistories(context.Context, *PowerShelfHealthHistoriesRequest) (*HealthHistories, error)
 	FindRackStateHistories(context.Context, *RackStateHistoriesRequest) (*StateHistories, error)
+	FindRackHealthHistories(context.Context, *RackHealthHistoriesRequest) (*HealthHistories, error)
 	FindSwitchStateHistories(context.Context, *SwitchStateHistoriesRequest) (*StateHistories, error)
+	FindSwitchHealthHistories(context.Context, *SwitchHealthHistoriesRequest) (*HealthHistories, error)
 	FindNetworkSegmentStateHistories(context.Context, *NetworkSegmentStateHistoriesRequest) (*StateHistories, error)
 	FindVpcPrefixStateHistories(context.Context, *VpcPrefixStateHistoriesRequest) (*StateHistories, error)
 	FindSitePrefixStateHistories(context.Context, *SitePrefixStateHistoriesRequest) (*StateHistories, error)
@@ -6523,6 +6817,11 @@ type ForgeServer interface {
 	// withdraws a not-yet-consumed request -- it does not undo or reset any UEFI
 	// credential that a prior sweep already rotated.
 	TriggerUefiCredentialRotation(context.Context, *UefiCredentialRotationRequest) (*emptypb.Empty, error)
+	// Operator "force-converge this host's NIC lockdown keys now" escape hatch
+	// for a single host. This is asynchronous: the handler only persists (Set) or
+	// removes (Clear) a flag maintained per host to determine whether to initiate NIC lockdown key rotation.
+	// A later machine-controller sweep observes a set flag and facilitates rotation.
+	TriggerNicLockdownCredentialRotation(context.Context, *NicLockdownCredentialRotationRequest) (*emptypb.Empty, error)
 	// TODO: Remove when manual upgrade feature is removed
 	// Mark host as having completed manual firmware upgrade
 	MarkManualFirmwareUpgradeComplete(context.Context, *MachineId) (*emptypb.Empty, error)
@@ -6577,6 +6876,8 @@ type ForgeServer interface {
 	DeleteExpectedMachine(context.Context, *ExpectedMachineRequest) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedMachine(context.Context, *ExpectedMachine) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedMachine(context.Context, *PatchExpectedMachineRequest) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected machine
 	GetExpectedMachine(context.Context, *ExpectedMachineRequest) (*ExpectedMachine, error)
 	// Get the BMC credentials for all expected machines
@@ -6597,6 +6898,8 @@ type ForgeServer interface {
 	CreateExpectedMachines(context.Context, *BatchExpectedMachineOperationRequest) (*BatchExpectedMachineOperationResponse, error)
 	// Batch update expected machines
 	UpdateExpectedMachines(context.Context, *BatchExpectedMachineOperationRequest) (*BatchExpectedMachineOperationResponse, error)
+	// Apply every patch in one transaction. Any failure rolls back the whole batch.
+	PatchExpectedMachines(context.Context, *PatchExpectedMachinesRequest) (*emptypb.Empty, error)
 	// Expected Power Shelf Management
 	// Add expected power shelf
 	AddExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error)
@@ -6604,6 +6907,8 @@ type ForgeServer interface {
 	DeleteExpectedPowerShelf(context.Context, *ExpectedPowerShelfRequest) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedPowerShelf(context.Context, *PatchExpectedPowerShelfRequest) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected power shelf
 	GetExpectedPowerShelf(context.Context, *ExpectedPowerShelfRequest) (*ExpectedPowerShelf, error)
 	// Get the BMC credentials for all expected power shelves
@@ -6621,6 +6926,8 @@ type ForgeServer interface {
 	DeleteExpectedSwitch(context.Context, *ExpectedSwitchRequest) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedSwitch(context.Context, *ExpectedSwitch) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedSwitch(context.Context, *PatchExpectedSwitchRequest) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected switch
 	GetExpectedSwitch(context.Context, *ExpectedSwitchRequest) (*ExpectedSwitch, error)
 	// Get the BMC credentials for all expected switches
@@ -6744,23 +7051,51 @@ type ForgeServer interface {
 	FindMachineValidationRunItemsByIds(context.Context, *MachineValidationRunItemsByIdsRequest) (*MachineValidationRunItemList, error)
 	// Machine-Validation attempt detail
 	GetMachineValidationAttempt(context.Context, *MachineValidationAttemptGetRequest) (*MachineValidationAttempt, error)
+	// Append the next ordered stdout or stderr chunk while an attempt is active.
+	AppendMachineValidationAttemptLog(context.Context, *MachineValidationAttemptLogAppendRequest) (*MachineValidationAttemptLogAppendResponse, error)
+	// Read a cursor-based page of persisted attempt logs.
+	GetMachineValidationAttemptLogs(context.Context, *MachineValidationAttemptLogGetRequest) (*MachineValidationAttemptLogList, error)
 	// Machine-Validation run and active attempt heartbeat
 	HeartbeatMachineValidationRun(context.Context, *MachineValidationHeartbeatRequest) (*MachineValidationHeartbeatResponse, error)
 	// Remove ExternalConfig
 	RemoveMachineValidationExternalConfig(context.Context, *RemoveMachineValidationExternalConfigRequest) (*emptypb.Empty, error)
 	// Machine-Validation test list
 	GetMachineValidationTests(context.Context, *MachineValidationTestsGetRequest) (*MachineValidationTestsGetResponse, error)
+	// A request without plugin creates a legacy test. A plugin creates an immutable
+	// revision that starts unverified and disabled; it must be verified before enablement.
 	AddMachineValidationTest(context.Context, *MachineValidationTestAddRequest) (*MachineValidationTestAddUpdateResponse, error)
 	UpdateMachineValidationTest(context.Context, *MachineValidationTestUpdateRequest) (*MachineValidationTestAddUpdateResponse, error)
+	// Verifies one immutable plugin revision. Verification is required before enablement.
 	MachineValidationTestVerfied(context.Context, *MachineValidationTestVerfiedRequest) (*MachineValidationTestVerfiedResponse, error)
 	MachineValidationTestNextVersion(context.Context, *MachineValidationTestNextVersionRequest) (*MachineValidationTestNextVersionResponse, error)
+	// Enables or disables a revision. Plugin enablement requires verification and,
+	// for host_access_full, separate approval of the exact revision.
 	MachineValidationTestEnableDisableTest(context.Context, *MachineValidationTestEnableDisableTestRequest) (*MachineValidationTestEnableDisableTestResponse, error)
+	// Approves the writable host-root mount for one verified plugin revision.
+	// The request fails unless that exact immutable revision requests host_access_full.
+	MachineValidationTestApproveFullHost(context.Context, *MachineValidationTestFullHostApprovalRequest) (*MachineValidationTestFullHostApprovalResponse, error)
 	UpdateMachineValidationRun(context.Context, *MachineValidationRunRequest) (*MachineValidationRunResponse, error)
 	// Bmc Endpoint Explorer Actions
 	// Reset a BMC
 	AdminBmcReset(context.Context, *AdminBmcResetRequest) (*AdminBmcResetResponse, error)
 	// Admin Power Control
 	AdminPowerControl(context.Context, *AdminPowerControlRequest) (*AdminPowerControlResponse, error)
+	// Queues a Redfish Chassis.Reset request for later execution by the machine
+	// controller through Maintenance state. Success means the request was accepted,
+	// not that the reset completed. Requests are accepted only for hosts in Ready.
+	// The controller returns the host to Ready after the Redfish command succeeds,
+	// and to Failed if execution fails.
+	// Operator maintenance must be enabled with SetMaintenance and is preserved
+	// after execution. Disable it only after verifying target chassis readiness.
+	//
+	// v1 accepts only ForceRestart. An omitted action has proto3's On default and
+	// is rejected with INVALID_ARGUMENT, as are a missing/invalid machine_id or
+	// missing chassis_id.
+	// NOT_FOUND means the machine does not exist. FAILED_PRECONDITION means
+	// operator maintenance is disabled, an instance exists, or the host is not in Ready.
+	//
+	// This replaces the unused AdminGpuReset RPC; no compatibility alias is kept.
+	AdminChassisReset(context.Context, *AdminChassisResetRequest) (*AdminChassisResetResponse, error)
 	// Disable Secure Boot
 	DisableSecureBoot(context.Context, *BmcEndpointRequest) (*DisableSecureBootResponse, error)
 	// Set Lockdown (Enable or Disable)
@@ -7023,7 +7358,8 @@ type ForgeServer interface {
 	// Helm/docker versions for the nico DPF mandatory services, from both
 	// the nico config and the live DPUServiceTemplate CRs.
 	GetDPFServiceVersions(context.Context, *GetDPFServiceVersionsRequest) (*DPFServiceVersionsResponse, error)
-	// Machines DPF is waiting on before a changed DPUService can roll out.
+	// Predicted or stable host machines DPF is waiting on before a changed
+	// DPUService can roll out.
 	//
 	// Required rather than convenient: the release RPC has no fleet-wide form, so
 	// this is the only way to discover which machines to name. Split ids-then-
@@ -7106,6 +7442,12 @@ func (UnimplementedForgeServer) CreateVpc(context.Context, *VpcCreationRequest) 
 func (UnimplementedForgeServer) UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateVpc not implemented")
 }
+func (UnimplementedForgeServer) ChangeVpcRoutingProfile(context.Context, *VpcChangeRoutingProfileRequest) (*VpcRoutingState, error) {
+	return nil, status.Error(codes.Unimplemented, "method ChangeVpcRoutingProfile not implemented")
+}
+func (UnimplementedForgeServer) ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReleaseVpcInactiveVni not implemented")
+}
 func (UnimplementedForgeServer) UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateVpcVirtualization not implemented")
 }
@@ -7117,6 +7459,9 @@ func (UnimplementedForgeServer) FindVpcIds(context.Context, *VpcSearchFilter) (*
 }
 func (UnimplementedForgeServer) FindVpcsByIds(context.Context, *VpcsByIdsRequest) (*VpcList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindVpcsByIds not implemented")
+}
+func (UnimplementedForgeServer) GetVpcRoutingState(context.Context, *VpcRoutingStateRequest) (*VpcRoutingState, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetVpcRoutingState not implemented")
 }
 func (UnimplementedForgeServer) CreateSpxPartition(context.Context, *SpxPartitionCreationRequest) (*SpxPartition, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateSpxPartition not implemented")
@@ -7217,6 +7562,9 @@ func (UnimplementedForgeServer) FindPowerShelfIds(context.Context, *PowerShelfSe
 func (UnimplementedForgeServer) FindPowerShelvesByIds(context.Context, *PowerShelvesByIdsRequest) (*PowerShelfList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindPowerShelvesByIds not implemented")
 }
+func (UnimplementedForgeServer) DecommissionPowerShelf(context.Context, *DecommissionPowerShelfRequest) (*DecommissionPowerShelfResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DecommissionPowerShelf not implemented")
+}
 func (UnimplementedForgeServer) DeletePowerShelf(context.Context, *PowerShelfDeletionRequest) (*PowerShelfDeletionResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeletePowerShelf not implemented")
 }
@@ -7238,6 +7586,9 @@ func (UnimplementedForgeServer) FindSwitchesByIds(context.Context, *SwitchesById
 func (UnimplementedForgeServer) DeleteSwitch(context.Context, *SwitchDeletionRequest) (*SwitchDeletionResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteSwitch not implemented")
 }
+func (UnimplementedForgeServer) DecommissionSwitch(context.Context, *DecommissionSwitchRequest) (*DecommissionSwitchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DecommissionSwitch not implemented")
+}
 func (UnimplementedForgeServer) AdminForceDeleteSwitch(context.Context, *AdminForceDeleteSwitchRequest) (*AdminForceDeleteSwitchResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AdminForceDeleteSwitch not implemented")
 }
@@ -7252,6 +7603,9 @@ func (UnimplementedForgeServer) AllocateInstances(context.Context, *BatchInstanc
 }
 func (UnimplementedForgeServer) ReleaseInstance(context.Context, *InstanceReleaseRequest) (*InstanceReleaseResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReleaseInstance not implemented")
+}
+func (UnimplementedForgeServer) ReleaseInstances(context.Context, *BatchInstanceReleaseRequest) (*BatchInstanceReleaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReleaseInstances not implemented")
 }
 func (UnimplementedForgeServer) UpdateInstanceOperatingSystem(context.Context, *InstanceOperatingSystemUpdateRequest) (*Instance, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateInstanceOperatingSystem not implemented")
@@ -7403,11 +7757,20 @@ func (UnimplementedForgeServer) FindMachineHealthHistories(context.Context, *Mac
 func (UnimplementedForgeServer) FindPowerShelfStateHistories(context.Context, *PowerShelfStateHistoriesRequest) (*StateHistories, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindPowerShelfStateHistories not implemented")
 }
+func (UnimplementedForgeServer) FindPowerShelfHealthHistories(context.Context, *PowerShelfHealthHistoriesRequest) (*HealthHistories, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindPowerShelfHealthHistories not implemented")
+}
 func (UnimplementedForgeServer) FindRackStateHistories(context.Context, *RackStateHistoriesRequest) (*StateHistories, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindRackStateHistories not implemented")
 }
+func (UnimplementedForgeServer) FindRackHealthHistories(context.Context, *RackHealthHistoriesRequest) (*HealthHistories, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindRackHealthHistories not implemented")
+}
 func (UnimplementedForgeServer) FindSwitchStateHistories(context.Context, *SwitchStateHistoriesRequest) (*StateHistories, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindSwitchStateHistories not implemented")
+}
+func (UnimplementedForgeServer) FindSwitchHealthHistories(context.Context, *SwitchHealthHistoriesRequest) (*HealthHistories, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindSwitchHealthHistories not implemented")
 }
 func (UnimplementedForgeServer) FindNetworkSegmentStateHistories(context.Context, *NetworkSegmentStateHistoriesRequest) (*StateHistories, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindNetworkSegmentStateHistories not implemented")
@@ -7598,6 +7961,9 @@ func (UnimplementedForgeServer) TriggerBmcCredentialRotation(context.Context, *B
 func (UnimplementedForgeServer) TriggerUefiCredentialRotation(context.Context, *UefiCredentialRotationRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method TriggerUefiCredentialRotation not implemented")
 }
+func (UnimplementedForgeServer) TriggerNicLockdownCredentialRotation(context.Context, *NicLockdownCredentialRotationRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method TriggerNicLockdownCredentialRotation not implemented")
+}
 func (UnimplementedForgeServer) MarkManualFirmwareUpgradeComplete(context.Context, *MachineId) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method MarkManualFirmwareUpgradeComplete not implemented")
 }
@@ -7679,6 +8045,9 @@ func (UnimplementedForgeServer) DeleteExpectedMachine(context.Context, *Expected
 func (UnimplementedForgeServer) UpdateExpectedMachine(context.Context, *ExpectedMachine) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedMachine not implemented")
 }
+func (UnimplementedForgeServer) PatchExpectedMachine(context.Context, *PatchExpectedMachineRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedMachine not implemented")
+}
 func (UnimplementedForgeServer) GetExpectedMachine(context.Context, *ExpectedMachineRequest) (*ExpectedMachine, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetExpectedMachine not implemented")
 }
@@ -7703,6 +8072,9 @@ func (UnimplementedForgeServer) CreateExpectedMachines(context.Context, *BatchEx
 func (UnimplementedForgeServer) UpdateExpectedMachines(context.Context, *BatchExpectedMachineOperationRequest) (*BatchExpectedMachineOperationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedMachines not implemented")
 }
+func (UnimplementedForgeServer) PatchExpectedMachines(context.Context, *PatchExpectedMachinesRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedMachines not implemented")
+}
 func (UnimplementedForgeServer) AddExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method AddExpectedPowerShelf not implemented")
 }
@@ -7711,6 +8083,9 @@ func (UnimplementedForgeServer) DeleteExpectedPowerShelf(context.Context, *Expec
 }
 func (UnimplementedForgeServer) UpdateExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedPowerShelf not implemented")
+}
+func (UnimplementedForgeServer) PatchExpectedPowerShelf(context.Context, *PatchExpectedPowerShelfRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedPowerShelf not implemented")
 }
 func (UnimplementedForgeServer) GetExpectedPowerShelf(context.Context, *ExpectedPowerShelfRequest) (*ExpectedPowerShelf, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetExpectedPowerShelf not implemented")
@@ -7735,6 +8110,9 @@ func (UnimplementedForgeServer) DeleteExpectedSwitch(context.Context, *ExpectedS
 }
 func (UnimplementedForgeServer) UpdateExpectedSwitch(context.Context, *ExpectedSwitch) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedSwitch not implemented")
+}
+func (UnimplementedForgeServer) PatchExpectedSwitch(context.Context, *PatchExpectedSwitchRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedSwitch not implemented")
 }
 func (UnimplementedForgeServer) GetExpectedSwitch(context.Context, *ExpectedSwitchRequest) (*ExpectedSwitch, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetExpectedSwitch not implemented")
@@ -8003,6 +8381,12 @@ func (UnimplementedForgeServer) FindMachineValidationRunItemsByIds(context.Conte
 func (UnimplementedForgeServer) GetMachineValidationAttempt(context.Context, *MachineValidationAttemptGetRequest) (*MachineValidationAttempt, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetMachineValidationAttempt not implemented")
 }
+func (UnimplementedForgeServer) AppendMachineValidationAttemptLog(context.Context, *MachineValidationAttemptLogAppendRequest) (*MachineValidationAttemptLogAppendResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AppendMachineValidationAttemptLog not implemented")
+}
+func (UnimplementedForgeServer) GetMachineValidationAttemptLogs(context.Context, *MachineValidationAttemptLogGetRequest) (*MachineValidationAttemptLogList, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetMachineValidationAttemptLogs not implemented")
+}
 func (UnimplementedForgeServer) HeartbeatMachineValidationRun(context.Context, *MachineValidationHeartbeatRequest) (*MachineValidationHeartbeatResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method HeartbeatMachineValidationRun not implemented")
 }
@@ -8027,6 +8411,9 @@ func (UnimplementedForgeServer) MachineValidationTestNextVersion(context.Context
 func (UnimplementedForgeServer) MachineValidationTestEnableDisableTest(context.Context, *MachineValidationTestEnableDisableTestRequest) (*MachineValidationTestEnableDisableTestResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MachineValidationTestEnableDisableTest not implemented")
 }
+func (UnimplementedForgeServer) MachineValidationTestApproveFullHost(context.Context, *MachineValidationTestFullHostApprovalRequest) (*MachineValidationTestFullHostApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MachineValidationTestApproveFullHost not implemented")
+}
 func (UnimplementedForgeServer) UpdateMachineValidationRun(context.Context, *MachineValidationRunRequest) (*MachineValidationRunResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateMachineValidationRun not implemented")
 }
@@ -8035,6 +8422,9 @@ func (UnimplementedForgeServer) AdminBmcReset(context.Context, *AdminBmcResetReq
 }
 func (UnimplementedForgeServer) AdminPowerControl(context.Context, *AdminPowerControlRequest) (*AdminPowerControlResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AdminPowerControl not implemented")
+}
+func (UnimplementedForgeServer) AdminChassisReset(context.Context, *AdminChassisResetRequest) (*AdminChassisResetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AdminChassisReset not implemented")
 }
 func (UnimplementedForgeServer) DisableSecureBoot(context.Context, *BmcEndpointRequest) (*DisableSecureBootResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DisableSecureBoot not implemented")
@@ -8734,6 +9124,42 @@ func _Forge_UpdateVpc_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_ChangeVpcRoutingProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VpcChangeRoutingProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ChangeVpcRoutingProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ChangeVpcRoutingProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ChangeVpcRoutingProfile(ctx, req.(*VpcChangeRoutingProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ReleaseVpcInactiveVni_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VpcReleaseInactiveVniRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReleaseVpcInactiveVni(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReleaseVpcInactiveVni_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReleaseVpcInactiveVni(ctx, req.(*VpcReleaseInactiveVniRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_UpdateVpcVirtualization_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(VpcUpdateVirtualizationRequest)
 	if err := dec(in); err != nil {
@@ -8802,6 +9228,24 @@ func _Forge_FindVpcsByIds_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).FindVpcsByIds(ctx, req.(*VpcsByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetVpcRoutingState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VpcRoutingStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetVpcRoutingState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetVpcRoutingState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetVpcRoutingState(ctx, req.(*VpcRoutingStateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -9400,6 +9844,24 @@ func _Forge_FindPowerShelvesByIds_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_DecommissionPowerShelf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DecommissionPowerShelfRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).DecommissionPowerShelf(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_DecommissionPowerShelf_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).DecommissionPowerShelf(ctx, req.(*DecommissionPowerShelfRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_DeletePowerShelf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PowerShelfDeletionRequest)
 	if err := dec(in); err != nil {
@@ -9526,6 +9988,24 @@ func _Forge_DeleteSwitch_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_DecommissionSwitch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DecommissionSwitchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).DecommissionSwitch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_DecommissionSwitch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).DecommissionSwitch(ctx, req.(*DecommissionSwitchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_AdminForceDeleteSwitch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AdminForceDeleteSwitchRequest)
 	if err := dec(in); err != nil {
@@ -9612,6 +10092,24 @@ func _Forge_ReleaseInstance_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).ReleaseInstance(ctx, req.(*InstanceReleaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ReleaseInstances_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BatchInstanceReleaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReleaseInstances(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReleaseInstances_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReleaseInstances(ctx, req.(*BatchInstanceReleaseRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -10516,6 +11014,24 @@ func _Forge_FindPowerShelfStateHistories_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_FindPowerShelfHealthHistories_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PowerShelfHealthHistoriesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindPowerShelfHealthHistories(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindPowerShelfHealthHistories_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindPowerShelfHealthHistories(ctx, req.(*PowerShelfHealthHistoriesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_FindRackStateHistories_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RackStateHistoriesRequest)
 	if err := dec(in); err != nil {
@@ -10534,6 +11050,24 @@ func _Forge_FindRackStateHistories_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_FindRackHealthHistories_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RackHealthHistoriesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindRackHealthHistories(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindRackHealthHistories_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindRackHealthHistories(ctx, req.(*RackHealthHistoriesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_FindSwitchStateHistories_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SwitchStateHistoriesRequest)
 	if err := dec(in); err != nil {
@@ -10548,6 +11082,24 @@ func _Forge_FindSwitchStateHistories_Handler(srv interface{}, ctx context.Contex
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).FindSwitchStateHistories(ctx, req.(*SwitchStateHistoriesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindSwitchHealthHistories_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SwitchHealthHistoriesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindSwitchHealthHistories(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindSwitchHealthHistories_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindSwitchHealthHistories(ctx, req.(*SwitchHealthHistoriesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -11686,6 +12238,24 @@ func _Forge_TriggerUefiCredentialRotation_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_TriggerNicLockdownCredentialRotation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NicLockdownCredentialRotationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).TriggerNicLockdownCredentialRotation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_TriggerNicLockdownCredentialRotation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).TriggerNicLockdownCredentialRotation(ctx, req.(*NicLockdownCredentialRotationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_MarkManualFirmwareUpgradeComplete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MachineId)
 	if err := dec(in); err != nil {
@@ -12172,6 +12742,24 @@ func _Forge_UpdateExpectedMachine_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_PatchExpectedMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedMachineRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedMachine(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedMachine_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedMachine(ctx, req.(*PatchExpectedMachineRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_GetExpectedMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ExpectedMachineRequest)
 	if err := dec(in); err != nil {
@@ -12316,6 +12904,24 @@ func _Forge_UpdateExpectedMachines_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_PatchExpectedMachines_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedMachinesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedMachines(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedMachines_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedMachines(ctx, req.(*PatchExpectedMachinesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_AddExpectedPowerShelf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ExpectedPowerShelf)
 	if err := dec(in); err != nil {
@@ -12366,6 +12972,24 @@ func _Forge_UpdateExpectedPowerShelf_Handler(srv interface{}, ctx context.Contex
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).UpdateExpectedPowerShelf(ctx, req.(*ExpectedPowerShelf))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_PatchExpectedPowerShelf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedPowerShelfRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedPowerShelf(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedPowerShelf_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedPowerShelf(ctx, req.(*PatchExpectedPowerShelfRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -12510,6 +13134,24 @@ func _Forge_UpdateExpectedSwitch_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).UpdateExpectedSwitch(ctx, req.(*ExpectedSwitch))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_PatchExpectedSwitch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedSwitchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedSwitch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedSwitch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedSwitch(ctx, req.(*PatchExpectedSwitchRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -14116,6 +14758,42 @@ func _Forge_GetMachineValidationAttempt_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_AppendMachineValidationAttemptLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MachineValidationAttemptLogAppendRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AppendMachineValidationAttemptLog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AppendMachineValidationAttemptLog_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AppendMachineValidationAttemptLog(ctx, req.(*MachineValidationAttemptLogAppendRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetMachineValidationAttemptLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MachineValidationAttemptLogGetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetMachineValidationAttemptLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetMachineValidationAttemptLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetMachineValidationAttemptLogs(ctx, req.(*MachineValidationAttemptLogGetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_HeartbeatMachineValidationRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MachineValidationHeartbeatRequest)
 	if err := dec(in); err != nil {
@@ -14260,6 +14938,24 @@ func _Forge_MachineValidationTestEnableDisableTest_Handler(srv interface{}, ctx 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_MachineValidationTestApproveFullHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MachineValidationTestFullHostApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).MachineValidationTestApproveFullHost(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_MachineValidationTestApproveFullHost_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).MachineValidationTestApproveFullHost(ctx, req.(*MachineValidationTestFullHostApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_UpdateMachineValidationRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MachineValidationRunRequest)
 	if err := dec(in); err != nil {
@@ -14310,6 +15006,24 @@ func _Forge_AdminPowerControl_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).AdminPowerControl(ctx, req.(*AdminPowerControlRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_AdminChassisReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdminChassisResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AdminChassisReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AdminChassisReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AdminChassisReset(ctx, req.(*AdminChassisResetRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -17235,6 +17949,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_UpdateVpc_Handler,
 		},
 		{
+			MethodName: "ChangeVpcRoutingProfile",
+			Handler:    _Forge_ChangeVpcRoutingProfile_Handler,
+		},
+		{
+			MethodName: "ReleaseVpcInactiveVni",
+			Handler:    _Forge_ReleaseVpcInactiveVni_Handler,
+		},
+		{
 			MethodName: "UpdateVpcVirtualization",
 			Handler:    _Forge_UpdateVpcVirtualization_Handler,
 		},
@@ -17249,6 +17971,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FindVpcsByIds",
 			Handler:    _Forge_FindVpcsByIds_Handler,
+		},
+		{
+			MethodName: "GetVpcRoutingState",
+			Handler:    _Forge_GetVpcRoutingState_Handler,
 		},
 		{
 			MethodName: "CreateSpxPartition",
@@ -17383,6 +18109,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_FindPowerShelvesByIds_Handler,
 		},
 		{
+			MethodName: "DecommissionPowerShelf",
+			Handler:    _Forge_DecommissionPowerShelf_Handler,
+		},
+		{
 			MethodName: "DeletePowerShelf",
 			Handler:    _Forge_DeletePowerShelf_Handler,
 		},
@@ -17411,6 +18141,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_DeleteSwitch_Handler,
 		},
 		{
+			MethodName: "DecommissionSwitch",
+			Handler:    _Forge_DecommissionSwitch_Handler,
+		},
+		{
 			MethodName: "AdminForceDeleteSwitch",
 			Handler:    _Forge_AdminForceDeleteSwitch_Handler,
 		},
@@ -17429,6 +18163,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReleaseInstance",
 			Handler:    _Forge_ReleaseInstance_Handler,
+		},
+		{
+			MethodName: "ReleaseInstances",
+			Handler:    _Forge_ReleaseInstances_Handler,
 		},
 		{
 			MethodName: "UpdateInstanceOperatingSystem",
@@ -17631,12 +18369,24 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_FindPowerShelfStateHistories_Handler,
 		},
 		{
+			MethodName: "FindPowerShelfHealthHistories",
+			Handler:    _Forge_FindPowerShelfHealthHistories_Handler,
+		},
+		{
 			MethodName: "FindRackStateHistories",
 			Handler:    _Forge_FindRackStateHistories_Handler,
 		},
 		{
+			MethodName: "FindRackHealthHistories",
+			Handler:    _Forge_FindRackHealthHistories_Handler,
+		},
+		{
 			MethodName: "FindSwitchStateHistories",
 			Handler:    _Forge_FindSwitchStateHistories_Handler,
+		},
+		{
+			MethodName: "FindSwitchHealthHistories",
+			Handler:    _Forge_FindSwitchHealthHistories_Handler,
 		},
 		{
 			MethodName: "FindNetworkSegmentStateHistories",
@@ -17891,6 +18641,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_TriggerUefiCredentialRotation_Handler,
 		},
 		{
+			MethodName: "TriggerNicLockdownCredentialRotation",
+			Handler:    _Forge_TriggerNicLockdownCredentialRotation_Handler,
+		},
+		{
 			MethodName: "MarkManualFirmwareUpgradeComplete",
 			Handler:    _Forge_MarkManualFirmwareUpgradeComplete_Handler,
 		},
@@ -17999,6 +18753,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_UpdateExpectedMachine_Handler,
 		},
 		{
+			MethodName: "PatchExpectedMachine",
+			Handler:    _Forge_PatchExpectedMachine_Handler,
+		},
+		{
 			MethodName: "GetExpectedMachine",
 			Handler:    _Forge_GetExpectedMachine_Handler,
 		},
@@ -18031,6 +18789,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_UpdateExpectedMachines_Handler,
 		},
 		{
+			MethodName: "PatchExpectedMachines",
+			Handler:    _Forge_PatchExpectedMachines_Handler,
+		},
+		{
 			MethodName: "AddExpectedPowerShelf",
 			Handler:    _Forge_AddExpectedPowerShelf_Handler,
 		},
@@ -18041,6 +18803,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateExpectedPowerShelf",
 			Handler:    _Forge_UpdateExpectedPowerShelf_Handler,
+		},
+		{
+			MethodName: "PatchExpectedPowerShelf",
+			Handler:    _Forge_PatchExpectedPowerShelf_Handler,
 		},
 		{
 			MethodName: "GetExpectedPowerShelf",
@@ -18073,6 +18839,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateExpectedSwitch",
 			Handler:    _Forge_UpdateExpectedSwitch_Handler,
+		},
+		{
+			MethodName: "PatchExpectedSwitch",
+			Handler:    _Forge_PatchExpectedSwitch_Handler,
 		},
 		{
 			MethodName: "GetExpectedSwitch",
@@ -18431,6 +19201,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_GetMachineValidationAttempt_Handler,
 		},
 		{
+			MethodName: "AppendMachineValidationAttemptLog",
+			Handler:    _Forge_AppendMachineValidationAttemptLog_Handler,
+		},
+		{
+			MethodName: "GetMachineValidationAttemptLogs",
+			Handler:    _Forge_GetMachineValidationAttemptLogs_Handler,
+		},
+		{
 			MethodName: "HeartbeatMachineValidationRun",
 			Handler:    _Forge_HeartbeatMachineValidationRun_Handler,
 		},
@@ -18463,6 +19241,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_MachineValidationTestEnableDisableTest_Handler,
 		},
 		{
+			MethodName: "MachineValidationTestApproveFullHost",
+			Handler:    _Forge_MachineValidationTestApproveFullHost_Handler,
+		},
+		{
 			MethodName: "UpdateMachineValidationRun",
 			Handler:    _Forge_UpdateMachineValidationRun_Handler,
 		},
@@ -18473,6 +19255,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AdminPowerControl",
 			Handler:    _Forge_AdminPowerControl_Handler,
+		},
+		{
+			MethodName: "AdminChassisReset",
+			Handler:    _Forge_AdminChassisReset_Handler,
 		},
 		{
 			MethodName: "DisableSecureBoot",

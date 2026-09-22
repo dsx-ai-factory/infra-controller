@@ -32,6 +32,15 @@ use crate::{
 
 const MAX_INTERNAL_PAGE_SIZE: usize = 100;
 
+/// Default number of ids per internal `*ByIds` page. The gRPC client refuses
+/// replies above 4 MiB (tonic's default `max_decoding_message_size`), and a
+/// 100-machine page has exceeded that in the field: 4.6 MiB, about 46 KB per
+/// machine. Instances have measured about 78 KB each, so 25 keeps a page of
+/// either under half the limit. Raise it per invocation with
+/// `--internal-page-size`, or raise the limit itself with
+/// `TONIC_MAX_DECODING_MESSAGE_SIZE`.
+const DEFAULT_INTERNAL_PAGE_SIZE: usize = 25;
+
 fn parse_internal_page_size(value: &str) -> Result<usize, String> {
     let page_size = value
         .parse::<usize>()
@@ -118,7 +127,7 @@ pub(crate) struct CliOptions {
 
     /// Extended result output.
     ///
-    /// This used by measured boot, where basic output contains just
+    /// This is used by measured boot, where basic output contains just
     /// what you probably care about, and "extended" output also dumps out all
     /// the internal UUIDs that are used to associate instances.
     #[clap(long, global = true)]
@@ -130,10 +139,15 @@ pub(crate) struct CliOptions {
     #[clap(
         short = 'p',
         long,
-        default_value_t = 100,
+        default_value_t = DEFAULT_INTERNAL_PAGE_SIZE,
         value_parser = parse_internal_page_size
     )]
-    #[clap(help = "For commands that internally retrieve data with paging, use this page size.")]
+    #[clap(
+        help = "For commands that internally retrieve data with paging, use this page size (1-100). \
+                Smaller pages keep each gRPC reply under the client's 4 MiB receive limit; to raise \
+                that limit instead, set TONIC_MAX_DECODING_MESSAGE_SIZE to a byte count, for \
+                example 33554432 for 32 MiB."
+    )]
     pub(crate) internal_page_size: usize,
 
     #[clap(
@@ -549,5 +563,15 @@ mod tests {
             .expect("valid page size should parse");
 
         assert_eq!(opts.internal_page_size, 100);
+    }
+
+    #[test]
+    fn internal_page_size_defaults_below_the_grpc_receive_limit() {
+        let opts = CliOptions::try_parse_from(["nico-admin-cli"]).expect("bare invocation parses");
+
+        // A 100-id page of machines has exceeded tonic's 4 MiB receive limit in
+        // the field, so the default must keep a page of the largest records seen
+        // (instances, about 78 KB each) comfortably under it.
+        assert_eq!(opts.internal_page_size, 25);
     }
 }

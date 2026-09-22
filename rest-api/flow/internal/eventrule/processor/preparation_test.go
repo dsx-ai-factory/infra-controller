@@ -78,25 +78,47 @@ func TestPrepare(t *testing.T) {
 				resolvedRackID uuid.UUID,
 			) (*eventrule.Rule, error) {
 				resolverCalled = true
+
 				require.Equal(t, eventrule.Type("test.event"), eventType)
 				require.Equal(t, rackID, resolvedRackID)
+
 				return test.rule, test.ruleErr
 			})
+
 			processor := newRackProcessor(t, rackID, resolver)
 
 			result, err := processor.prepare(
 				context.Background(),
 				envelope,
 			)
+
 			require.Equal(t, test.wantResolved, resolverCalled)
+
 			if test.wantErr == nil {
 				require.NoError(t, err)
+
+				if test.rule == nil {
+					require.Nil(t, result)
+
+					return
+				}
+
+				require.NotNil(t, result)
+				require.Equal(t, rackID, result.Resource.ID)
 				require.Equal(t, rackID, result.Resource.RackID)
-				require.Equal(t, test.rule, result.Rule)
+				require.Equal(t, eventrule.ResourceKindRack, result.Resource.Kind)
+				require.Equal(t, rackID, result.Event.Resource.ID)
+				require.Equal(t, eventrule.ResourceKindRack, result.Event.Resource.Kind)
+				require.Equal(t, test.rule.ID, result.Event.AppliedRuleID)
+				require.Equal(t, uuid.Nil, result.Event.ID)
+				require.Zero(t, result.Event.Observations)
+				require.True(t, result.Event.CreatedAt.IsZero())
 				return
 			}
 
+			require.Nil(t, result)
 			require.ErrorIs(t, err, test.wantErr)
+
 			if test.wantMessage != "" {
 				require.ErrorContains(t, err, test.wantMessage)
 			}
@@ -115,6 +137,7 @@ func newRackProcessor(
 	rules RuleResolver,
 ) *Processor {
 	t.Helper()
+
 	return newTestProcessor(
 		t,
 		&processorInventory{

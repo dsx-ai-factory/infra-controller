@@ -184,6 +184,45 @@ func TestHTTPServiceStart(t *testing.T) {
 	}
 }
 
+func TestWithRequestMetrics(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverName string
+		envValue   string
+		want       string
+	}{
+		{
+			name:       "uses the supplied prefix when the environment is unset",
+			serverName: "nico_rest_cert_manager",
+			want:       "nico_rest_cert_manager",
+		},
+		{
+			name:       "METRICS_NAMESPACE takes precedence",
+			serverName: "nico_rest_cert_manager",
+			envValue:   "acme_cert_manager",
+			want:       "acme_cert_manager",
+		},
+		{
+			// An empty value is indistinguishable from unset, and an empty prefix
+			// would expose bare names like "http_duration_seconds".
+			name:       "an empty METRICS_NAMESPACE leaves the supplied prefix alone",
+			serverName: "nico_rest_cert_manager",
+			envValue:   "",
+			want:       "nico_rest_cert_manager",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(MetricsNamespaceEnv, tt.envValue)
+
+			h := &httpMiddleware{}
+			WithRequestMetrics(tt.serverName)(h)
+
+			assert.Equal(t, tt.want, h.latencyMetricsName)
+		})
+	}
+}
+
 func Test_telemetryMiddleware(t *testing.T) {
 	otel.SetTracerProvider(sdktrace.NewTracerProvider())
 

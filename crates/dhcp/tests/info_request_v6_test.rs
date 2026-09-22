@@ -27,17 +27,10 @@ mod common;
 
 use common::{
     DHCPv6Factory, Kea6, assert_api_v6_domain_search, assert_hook_v6_dns_servers,
-    assert_hook_v6_ntp_servers,
+    assert_hook_v6_ntp_servers, send_and_recv_v6,
 };
 
 const READ_TIMEOUT: Duration = Duration::from_millis(500);
-
-fn send_and_recv(socket: &UdpSocket, packet: Vec<u8>) -> Option<v6::Message> {
-    socket.send(&packet).unwrap();
-    let mut buf = [0u8; 1500];
-    let n = socket.recv(&mut buf).ok()?;
-    Some(DHCPv6Factory::decode_reply(&buf[..n]).unwrap())
-}
 
 struct Harness {
     _rt: tokio::runtime::Runtime,
@@ -141,10 +134,10 @@ fn information_request_is_observed_without_allocating_a_lease() -> Result<(), ey
     let h = Harness::new();
 
     // INFORMATION-REQUEST should be observed as V6InfoRequest.
-    let response = send_and_recv(
+    let response = send_and_recv_v6(
         &h.socket,
         DHCPv6Factory::information_request_with_client_fqdn(0x30),
-    )
+    )?
     .expect("kea did not respond to INFORMATION-REQUEST");
     assert_stateless_response(&h, &response, v6::MessageType::Reply);
     let requested_flags = DHCPv6Factory::client_fqdn_payload()[0];
@@ -166,10 +159,10 @@ fn information_request_with_empty_api_fqdn_does_not_echo_client_fqdn() -> Result
         .set_fqdn_override(&DHCPv6Factory::mac_string(idx), "");
 
     // Empty FQDN models anonymous reserved-segment options-only records.
-    let response = send_and_recv(
+    let response = send_and_recv_v6(
         &h.socket,
         DHCPv6Factory::information_request_with_client_fqdn(idx),
-    )
+    )?
     .expect("kea did not respond to INFORMATION-REQUEST with empty API FQDN");
     assert_eq!(response.msg_type(), v6::MessageType::Reply);
     assert_eq!(DHCPv6Factory::ia_addr(&response), None);
@@ -187,7 +180,7 @@ fn stateless_solicit_is_observed_without_allocating_a_lease() -> Result<(), eyre
     let h = Harness::new();
 
     // SOLICIT without IA_NA follows the same information-only path.
-    let response = send_and_recv(&h.socket, DHCPv6Factory::stateless_solicit(0x31))
+    let response = send_and_recv_v6(&h.socket, DHCPv6Factory::stateless_solicit(0x31))?
         .expect("kea did not respond to stateless SOLICIT");
     assert_stateless_response(&h, &response, v6::MessageType::Advertise);
     assert!(response.opts().get(OptionCode::ClientFqdn).is_none());
@@ -203,7 +196,7 @@ fn options_only_and_stateful_v6_requests_do_not_share_cache() -> Result<(), eyre
 
     // Options-only observation returns no address and must not poison the
     // following stateful allocation cache entry for the same identity.
-    let info_response = send_and_recv(&h.socket, DHCPv6Factory::information_request(idx))
+    let info_response = send_and_recv_v6(&h.socket, DHCPv6Factory::information_request(idx))?
         .expect("kea did not respond to INFORMATION-REQUEST");
     assert_stateless_response(&h, &info_response, v6::MessageType::Reply);
     assert_eq!(
@@ -212,7 +205,7 @@ fn options_only_and_stateful_v6_requests_do_not_share_cache() -> Result<(), eyre
         1
     );
 
-    let solicit_response = send_and_recv(&h.socket, DHCPv6Factory::solicit(idx))
+    let solicit_response = send_and_recv_v6(&h.socket, DHCPv6Factory::solicit(idx))?
         .expect("kea did not respond to stateful SOLICIT after options-only request");
     assert_eq!(solicit_response.msg_type(), v6::MessageType::Advertise);
     assert_eq!(

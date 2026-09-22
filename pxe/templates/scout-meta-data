@@ -1,0 +1,3 @@
+instance-id: {{ instance_id }}
+{% if local_hostname is defined and local_hostname %}local-hostname: {{ local_hostname | json_encode | safe }}
+{% endif %}

@@ -17,12 +17,12 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId as MachineId, DpuMachineId};
 use model::machine::{
     DpfState, DpuDiscoveringState, DpuDiscoveringStates, DpuInitNextStateResolver, DpuInitState,
-    DpuInitStates, DpuReprovisionStates, HostReprovisionState, InstallDpuOsState,
-    InstanceNextStateResolver, InstanceState, Machine, MachineNextStateResolver, MachineState,
-    ManagedHostState, ManagedHostStateSnapshot, ReprovisionState,
+    DpuInitStates, DpuMachine, DpuReprovisionStates, HostMachine, HostReprovisionState,
+    InstallDpuOsState, InstanceNextStateResolver, InstanceState, MachineNextStateResolver,
+    MachineState, ManagedHostState, ManagedHostStateSnapshot, ReprovisionState,
 };
 use state_controller::state_handler::StateHandlerError;
 
@@ -38,7 +38,7 @@ pub(super) trait NextState {
         &self,
         current_state: &ManagedHostState,
         dpu_id: &MachineId,
-        host_snapshot: &Machine,
+        host_snapshot: &HostMachine,
     ) -> Result<ManagedHostState, StateHandlerError>;
 
     fn next_state_with_all_dpus_updated(
@@ -46,18 +46,18 @@ pub(super) trait NextState {
         state: &ManagedHostStateSnapshot,
         current_reprovision_state: &ReprovisionState,
     ) -> Result<ManagedHostState, StateHandlerError> {
-        let dpu_ids_for_reprov =
-            // EnumIter conflicts with Itertool, don't know why?
-            itertools::Itertools::collect_vec(state.dpu_snapshots.iter().filter_map(|x| {
-                if x.reprovision_requested.is_some() {
-                    Some(&x.id)
-                } else {
-                    None
-                }
-            }));
+        let dpu_ids_for_reprov = state
+            .dpu_snapshots
+            .iter()
+            .filter(|machine| machine.reprovision_requested.is_some())
+            .map(|dpu_machine| dpu_machine.id)
+            .collect::<Vec<_>>();
 
-        let all_machine_ids =
-            itertools::Itertools::collect_vec(state.dpu_snapshots.iter().map(|x| &x.id));
+        let all_machine_ids = state
+            .dpu_snapshots
+            .iter()
+            .map(|dpu_machine| dpu_machine.id)
+            .collect::<Vec<_>>();
 
         match current_reprovision_state {
             ReprovisionState::BmcFirmwareUpgrade { .. } => ReprovisionState::FirmwareUpgrade
@@ -216,12 +216,6 @@ impl DpuInitStateHelper for DpuInitState {
         current_state: &ManagedHostState,
         dpu_id: &MachineId,
     ) -> Result<ManagedHostState, StateHandlerError> {
-        if !dpu_id.machine_type().is_dpu() {
-            return Err(StateHandlerError::InvalidState(format!(
-                "Invalid DPU ID passed to DpuInitState::next_state. DPU ID: {dpu_id}."
-            )));
-        }
-
         match current_state {
             ManagedHostState::DPUInit { dpu_states } => {
                 let mut states = dpu_states.states.clone();
@@ -290,7 +284,7 @@ impl NextState for MachineNextStateResolver {
         &self,
         current_state: &ManagedHostState,
         dpu_id: &MachineId,
-        _host_snapshot: &Machine,
+        _host_snapshot: &HostMachine,
     ) -> Result<ManagedHostState, StateHandlerError> {
         let reprovision_state = current_state.as_reprovision_state(dpu_id).ok_or_else(|| {
             StateHandlerError::MissingData {
@@ -367,7 +361,7 @@ impl NextState for InstanceNextStateResolver {
         &self,
         current_state: &ManagedHostState,
         dpu_id: &MachineId,
-        host_snapshot: &Machine,
+        host_snapshot: &HostMachine,
     ) -> Result<ManagedHostState, StateHandlerError> {
         let reprovision_state = current_state.as_reprovision_state(dpu_id).ok_or_else(|| {
             StateHandlerError::MissingData {
@@ -465,7 +459,7 @@ impl NextState for DpuInitNextStateResolver {
         &self,
         current_state: &ManagedHostState,
         dpu_id: &MachineId,
-        _host_snapshot: &Machine,
+        _host_snapshot: &HostMachine,
     ) -> Result<ManagedHostState, StateHandlerError> {
         DpuInitState::Init.next_state(current_state, dpu_id)
     }
@@ -491,8 +485,8 @@ pub(super) trait ReprovisionStateHelper {
     fn next_state_with_all_dpus_updated(
         self,
         current_state: &ManagedHostState,
-        dpu_snapshots: &[Machine],
-        dpu_ids_to_process: Vec<&MachineId>,
+        dpu_snapshots: &[DpuMachine],
+        dpu_ids_to_process: Vec<DpuMachineId>,
     ) -> Result<ManagedHostState, StateHandlerError>;
 }
 
@@ -503,17 +497,18 @@ impl ReprovisionStateHelper for ReprovisionState {
     fn next_state_with_all_dpus_updated(
         self,
         current_state: &ManagedHostState,
-        dpu_snapshots: &[Machine],
-        dpu_ids_to_process: Vec<&MachineId>,
+        dpu_snapshots: &[DpuMachine],
+        dpu_ids_to_process: Vec<DpuMachineId>,
     ) -> Result<ManagedHostState, StateHandlerError> {
         match current_state {
             ManagedHostState::Ready => {
                 let states = dpu_snapshots
                     .iter()
                     .map(|x| {
+                        let dpu_id = x.id;
                         (
-                            x.id,
-                            if dpu_ids_to_process.contains(&&x.id) {
+                            dpu_id,
+                            if dpu_ids_to_process.contains(&dpu_id) {
                                 self.clone()
                             } else {
                                 ReprovisionState::NotUnderReprovision
@@ -530,9 +525,10 @@ impl ReprovisionStateHelper for ReprovisionState {
                 let states = dpu_snapshots
                     .iter()
                     .map(|x| {
+                        let dpu_id = x.id;
                         (
-                            x.id,
-                            if dpu_ids_to_process.contains(&&x.id) {
+                            dpu_id,
+                            if dpu_ids_to_process.contains(&dpu_id) {
                                 self.clone()
                             } else {
                                 ReprovisionState::NotUnderReprovision
@@ -551,9 +547,10 @@ impl ReprovisionStateHelper for ReprovisionState {
                     let states = dpu_snapshots
                         .iter()
                         .map(|x| {
+                            let dpu_id = x.id;
                             (
-                                x.id,
-                                if dpu_ids_to_process.contains(&&x.id) {
+                                dpu_id,
+                                if dpu_ids_to_process.contains(&dpu_id) {
                                     self.clone()
                                 } else {
                                     ReprovisionState::NotUnderReprovision

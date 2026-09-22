@@ -22,6 +22,11 @@ var defaultTaskPagination = dbquery.Pagination{
 	Total:  0,
 }
 
+var defaultTaskOrderBy = []dbquery.OrderBy{
+	{Column: "created_at", Direction: dbquery.OrderDescending},
+	{Column: "id", Direction: dbquery.OrderDescending},
+}
+
 // Task models the persisted task metadata managed by Flow.
 type Task struct {
 	bun.BaseModel `bun:"table:task,alias:t"`
@@ -43,11 +48,13 @@ type Task struct {
 	StartedAt     *time.Time                `bun:"started_at"`
 	FinishedAt    *time.Time                `bun:"finished_at"`
 
-	// QueueExpiresAt is set only for waiting tasks. After this time, the
-	// Promoter will discard the task instead of promoting it.
+	// QueueExpiresAt is set for pre-execution waits. After this time, the
+	// Promoter or task manager terminates the task instead of executing it.
 	QueueExpiresAt *time.Time `bun:"queue_expires_at"`
 
-	IdempotencyKey string `bun:"idempotency_key,nullzero"`
+	IdempotencyKey string     `bun:"idempotency_key,nullzero"`
+	TriggerType    string     `bun:"trigger_type,nullzero"`
+	TriggerID      *uuid.UUID `bun:"trigger_id,type:uuid"`
 }
 
 func (t *Task) HasIdempotencyKey() bool {
@@ -117,23 +124,36 @@ func (t *Task) UpdateScheduledTask(
 
 	t.UpdatedAt = time.Now().UTC()
 
-	_, err := idb.NewUpdate().
+	result, err := idb.NewUpdate().
 		Model(t).
-		Column("execution_id", "executor_type", "updated_at").
+		Column("execution_id", "executor_type", "applied_rule_id", "updated_at").
 		Where("id = ?", t.ID).
 		Exec(ctx)
+	if err != nil {
+		return err
+	}
 
-	return err
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("update scheduled task %s affected %d rows", t.ID, rowsAffected)
+	}
+
+	return nil
 }
 
-// UpdateTaskStatus updates the status of the task.
-// report, when non-nil, replaces the stored report column.
+// UpdateTaskStatus updates the status of the task. Non-nil report and
+// queueExpiresAt values replace their corresponding stored columns. Finished
+// statuses clear queueExpiresAt because the deadline applies only while waiting.
 func (t *Task) UpdateTaskStatus(
 	ctx context.Context,
 	idb bun.IDB,
 	status taskcommon.TaskStatus,
 	message string,
 	report json.RawMessage,
+	queueExpiresAt *time.Time,
 ) error {
 	t.Status = status
 	t.Message = message
@@ -144,15 +164,20 @@ func (t *Task) UpdateTaskStatus(
 		t.Report = report
 		columns = append(columns, "report")
 	}
-
 	if status == taskcommon.TaskStatusRunning && t.StartedAt == nil {
 		t.StartedAt = &t.UpdatedAt
 		columns = append(columns, "started_at")
 	}
 	if status.IsFinished() {
 		t.FinishedAt = &t.UpdatedAt
+		t.QueueExpiresAt = nil
+		columns = append(columns, "queue_expires_at")
 	} else {
 		t.FinishedAt = nil
+		if queueExpiresAt != nil {
+			t.QueueExpiresAt = queueExpiresAt
+			columns = append(columns, "queue_expires_at")
+		}
 	}
 
 	_, err := idb.NewUpdate().
@@ -238,11 +263,7 @@ func taskListOptionsToFilterable(
 		filters = append(filters, dbquery.Filter{
 			Column:   "status",
 			Operator: dbquery.OperatorIn,
-			Value: []taskcommon.TaskStatus{
-				taskcommon.TaskStatusWaiting,
-				taskcommon.TaskStatusPending,
-				taskcommon.TaskStatusRunning,
-			},
+			Value:    taskcommon.NonTerminalTaskStatuses(),
 		})
 	}
 
@@ -332,6 +353,37 @@ func ListTasksForRackByStatus(
 	return tasks, err
 }
 
+// ListTasksForRacksByStatus returns tasks for the requested racks matching any
+// of the given statuses.
+func ListTasksForRacksByStatus(
+	ctx context.Context,
+	idb bun.IDB,
+	rackIDs []uuid.UUID,
+	statuses []taskcommon.TaskStatus,
+) ([]Task, error) {
+	if len(rackIDs) == 0 || len(statuses) == 0 {
+		return []Task{}, nil
+	}
+
+	var tasks []Task
+	err := listTasksForRacksByStatusQuery(idb, &tasks, rackIDs, statuses).
+		Scan(ctx)
+	return tasks, err
+}
+
+func listTasksForRacksByStatusQuery(
+	idb bun.IDB,
+	tasks *[]Task,
+	rackIDs []uuid.UUID,
+	statuses []taskcommon.TaskStatus,
+) *bun.SelectQuery {
+	return idb.NewSelect().
+		Model(tasks).
+		Column("id", "rack_id", "attributes", "status").
+		Where("rack_id IN (?)", bun.In(rackIDs)).
+		Where("status IN (?)", bun.In(statuses))
+}
+
 // ListRacksWithWaitingTasks returns the distinct rack IDs that have at least
 // one task in the waiting state.
 func ListRacksWithWaitingTasks(
@@ -369,8 +421,9 @@ func ListTasks(
 ) ([]Task, int32, error) {
 	var tasks []Task
 	conf := &dbquery.Config{
-		IDB:   idb,
-		Model: &tasks,
+		IDB:            idb,
+		Model:          &tasks,
+		DefaultOrderBy: defaultTaskOrderBy,
 	}
 
 	if pagination != nil {

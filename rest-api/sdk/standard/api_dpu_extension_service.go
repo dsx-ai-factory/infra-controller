@@ -167,7 +167,7 @@ type ApiDeleteDpuExtensionServiceRequest struct {
 	dpuExtensionServiceId string
 }
 
-func (r ApiDeleteDpuExtensionServiceRequest) Execute() (*http.Response, error) {
+func (r ApiDeleteDpuExtensionServiceRequest) Execute() (*MessageResponse, *http.Response, error) {
 	return r.ApiService.DeleteDpuExtensionServiceExecute(r)
 }
 
@@ -195,16 +195,19 @@ func (a *DPUExtensionServiceAPIService) DeleteDpuExtensionService(ctx context.Co
 }
 
 // Execute executes the request
-func (a *DPUExtensionServiceAPIService) DeleteDpuExtensionServiceExecute(r ApiDeleteDpuExtensionServiceRequest) (*http.Response, error) {
+//
+//	@return MessageResponse
+func (a *DPUExtensionServiceAPIService) DeleteDpuExtensionServiceExecute(r ApiDeleteDpuExtensionServiceRequest) (*MessageResponse, *http.Response, error) {
 	var (
-		localVarHTTPMethod = http.MethodDelete
-		localVarPostBody   interface{}
-		formFiles          []formFile
+		localVarHTTPMethod  = http.MethodDelete
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue *MessageResponse
 	)
 
 	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DPUExtensionServiceAPIService.DeleteDpuExtensionService")
 	if err != nil {
-		return nil, &GenericOpenAPIError{error: err.Error()}
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
 
 	localVarPath := localBasePath + "/v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId}"
@@ -234,19 +237,19 @@ func (a *DPUExtensionServiceAPIService) DeleteDpuExtensionServiceExecute(r ApiDe
 	}
 	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
 	if err != nil {
-		return nil, err
+		return localVarReturnValue, nil, err
 	}
 
 	localVarHTTPResponse, err := a.client.callAPI(req)
 	if err != nil || localVarHTTPResponse == nil {
-		return localVarHTTPResponse, err
+		return localVarReturnValue, localVarHTTPResponse, err
 	}
 
 	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
 	localVarHTTPResponse.Body.Close()
 	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
 	if err != nil {
-		return localVarHTTPResponse, err
+		return localVarReturnValue, localVarHTTPResponse, err
 	}
 
 	if localVarHTTPResponse.StatusCode >= 300 {
@@ -259,15 +262,24 @@ func (a *DPUExtensionServiceAPIService) DeleteDpuExtensionServiceExecute(r ApiDe
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
 				newErr.error = err.Error()
-				return localVarHTTPResponse, newErr
+				return localVarReturnValue, localVarHTTPResponse, newErr
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
 		}
-		return localVarHTTPResponse, newErr
+		return localVarReturnValue, localVarHTTPResponse, newErr
 	}
 
-	return localVarHTTPResponse, nil
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
 type ApiDeleteDpuExtensionServiceVersionRequest struct {
@@ -856,6 +868,8 @@ UpdateDpuExtensionService Update DPU Extension Service
 Update a specific DPU Extension Service.
 
 DPU Extension Service must be owned by current Tenant. A new version will be created if data or credentials are modified.
+
+For a `DpfHelmChart` service, `credentials` and `observability` are unsupported, and `data` is accepted only while the service is `Ready` and only when it differs from the current definition.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 

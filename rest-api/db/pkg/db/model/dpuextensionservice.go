@@ -6,6 +6,10 @@ package model
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +38,8 @@ const (
 	DpuExtensionServiceStatusReady = "Ready"
 	// DpuExtensionServiceStatusError is the status of a DpuExtensionService that is in error mode
 	DpuExtensionServiceStatusError = "Error"
+	// DpuExtensionServiceStatusUpdating indicates that the DpuExtensionService is being updated on the Site
+	DpuExtensionServiceStatusUpdating = "Updating"
 	// DpuExtensionServiceStatusDeleting indicates that the DpuExtensionService is being deleted
 	DpuExtensionServiceStatusDeleting = "Deleting"
 
@@ -47,6 +53,7 @@ var (
 		DpuExtensionServiceStatusPending:  true,
 		DpuExtensionServiceStatusReady:    true,
 		DpuExtensionServiceStatusError:    true,
+		DpuExtensionServiceStatusUpdating: true,
 		DpuExtensionServiceStatusDeleting: true,
 	}
 
@@ -61,12 +68,83 @@ var (
 
 	// DpuExtensionServiceServiceTypeKubernetesPod indicates an extension service running as a Kubernetes pod
 	DpuExtensionServiceServiceTypeKubernetesPod = "KubernetesPod"
+	// DpuExtensionServiceServiceTypeDpfHelmChart indicates an extension service managed as a DPF Helm chart
+	DpuExtensionServiceServiceTypeDpfHelmChart = "DpfHelmChart"
+	// DpuExtensionServiceDpuTargetPrimary targets the host's primary attached DPU
+	DpuExtensionServiceDpuTargetPrimary = "Primary"
+	// DpuExtensionServiceDpuTargetAllActive targets DPUs used by the instance network configuration
+	DpuExtensionServiceDpuTargetAllActive = "AllActive"
+	// DpuExtensionServiceDpuTargetAll targets every attached DPU
+	DpuExtensionServiceDpuTargetAll = "All"
 
 	// DpuExtensionServiceServiceTypeMap is a map of valid service types for the DpuExtensionService model
 	DpuExtensionServiceServiceTypeMap = map[string]bool{
 		DpuExtensionServiceServiceTypeKubernetesPod: true,
+		DpuExtensionServiceServiceTypeDpfHelmChart:  true,
 	}
 )
+
+// dpuExtensionServiceLifecycleStatePrefix is the proto enum value prefix that Core omits from the lifecycle envelope
+const dpuExtensionServiceLifecycleStatePrefix = "DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_"
+
+// DpuExtensionServiceDpuTargetFromProto maps Core's DPU target enum to its REST representation.
+func DpuExtensionServiceDpuTargetFromProto(target *corev1.DpuExtensionServiceDpuTarget) (*string, error) {
+	if target == nil {
+		return nil, nil
+	}
+
+	var value string
+	switch *target {
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY:
+		value = DpuExtensionServiceDpuTargetPrimary
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE:
+		value = DpuExtensionServiceDpuTargetAllActive
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL:
+		value = DpuExtensionServiceDpuTargetAll
+	default:
+		return nil, fmt.Errorf("unrecognized DPU target %d", *target)
+	}
+
+	return &value, nil
+}
+
+// DpuExtensionServiceStatusFromLifecycleStatus maps Core's reconciliation state
+// onto a DpuExtensionService status. Core carries the state as a JSON envelope
+// rather than the proto enum, so an absent or unrecognized state is an error.
+func DpuExtensionServiceStatusFromLifecycleStatus(lifecycleStatus *corev1.LifecycleStatus) (string, error) {
+	if lifecycleStatus == nil {
+		return "", errors.New("lifecycle status is not set")
+	}
+
+	var envelope struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(lifecycleStatus.State), &envelope); err != nil {
+		return "", fmt.Errorf("failed to parse lifecycle state %q: %w", lifecycleStatus.State, err)
+	}
+
+	state, ok := corev1.DpuExtensionServiceLifecycleState_value[dpuExtensionServiceLifecycleStatePrefix+strings.ToUpper(envelope.State)]
+	if !ok {
+		return "", fmt.Errorf("unrecognized lifecycle state %q", envelope.State)
+	}
+
+	switch corev1.DpuExtensionServiceLifecycleState(state) {
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_CREATING:
+		return DpuExtensionServiceStatusPending, nil
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_READY:
+		return DpuExtensionServiceStatusReady, nil
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_UPDATING:
+		return DpuExtensionServiceStatusUpdating, nil
+	// Deleted stays Deleting because the projection lives until inventory omits the service
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_DELETING,
+		corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_DELETED:
+		return DpuExtensionServiceStatusDeleting, nil
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_FAILED:
+		return DpuExtensionServiceStatusError, nil
+	default:
+		return "", fmt.Errorf("unmapped lifecycle state %q", envelope.State)
+	}
+}
 
 // DpuExtensionServiceVersionInfo is a data structure to capture information for a specific DPU Extension Service version
 type DpuExtensionServiceVersionInfo struct {
@@ -142,6 +220,7 @@ type DpuExtensionService struct {
 	Name            string                          `bun:"name,notnull"`
 	Description     *string                         `bun:"description"`
 	ServiceType     string                          `bun:"service_type,notnull"`
+	DpuTarget       *string                         `bun:"dpu_target"`
 	SiteID          uuid.UUID                       `bun:"site_id,type:uuid,notnull,pk"`
 	Site            *Site                           `bun:"rel:belongs-to,join:site_id=id"`
 	TenantID        uuid.UUID                       `bun:"tenant_id,type:uuid,notnull"`
@@ -205,6 +284,7 @@ type DpuExtensionServiceCreateInput struct {
 	Name                  string
 	Description           *string
 	ServiceType           string
+	DpuTarget             *string
 	SiteID                uuid.UUID
 	TenantID              uuid.UUID
 	Version               *string
@@ -231,6 +311,7 @@ type DpuExtensionServiceUpdateInput struct {
 	DpuExtensionServiceID uuid.UUID
 	Name                  *string
 	Description           *string
+	DpuTarget             *string
 	Version               *string
 	VersionInfo           *DpuExtensionServiceVersionInfo
 	ActiveVersions        []string
@@ -291,6 +372,7 @@ func (dessd DpuExtensionServiceSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 		Name:           input.Name,
 		Description:    input.Description,
 		ServiceType:    input.ServiceType,
+		DpuTarget:      input.DpuTarget,
 		SiteID:         input.SiteID,
 		TenantID:       input.TenantID,
 		Version:        input.Version,
@@ -482,6 +564,11 @@ func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 		updatedFields = append(updatedFields, "description")
 	}
 
+	if input.DpuTarget != nil {
+		des.DpuTarget = input.DpuTarget
+		updatedFields = append(updatedFields, "dpu_target")
+	}
+
 	if input.Version != nil {
 		des.Version = input.Version
 		updatedFields = append(updatedFields, "version")
@@ -522,7 +609,9 @@ func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID).Exec(ctx)
+		query := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID)
+
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}

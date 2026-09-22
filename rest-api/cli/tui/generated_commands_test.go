@@ -21,6 +21,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestQuoteShellCommandArgument(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", want: "''"},
+		{name: "safe characters", value: "abc-123_@%+=:,./", want: "abc-123_@%+=:,./"},
+		{name: "whitespace", value: "two words", want: "'two words'"},
+		{name: "single quote", value: "single'quote", want: "'single'\"'\"'quote'"},
+		{name: "backslash", value: "path\\name", want: "'path\\name'"},
+		{name: "control character", value: "line\nbreak", want: "'line\nbreak'"},
+		{name: "non-ASCII", value: "caf\u00e9", want: "'caf\u00e9'"},
+		{name: "shell metacharacters", value: "$HOME;rm", want: "'$HOME;rm'"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, quoteShellCommandArgument(test.value))
+		})
+	}
+}
+
 func TestAllCommands_CoversGeneratedCLISurface(t *testing.T) {
 	spec, err := appcli.ParseSpec(openapi.Spec)
 	require.NoError(t, err)
@@ -72,19 +93,32 @@ func TestAllCommands_CoversGeneratedCLISurface(t *testing.T) {
 
 func TestAllCommands_RegistersConciseAliases(t *testing.T) {
 	commands := commandNames(AllCommands())
-	for _, name := range []string{
-		"machine power",
-		"machine power-control-machine machine-power-control-machine",
-		"measured-boot machine approve",
-		"measured-boot machine list",
-		"measured-boot machine remove",
-		"measured-boot profile approve",
-		"measured-boot profile list",
-		"measured-boot profile remove",
-		"site-explorer endpoint action",
+	for _, test := range []struct {
+		name string
+		want bool
+	}{
+		{name: "machine power", want: true},
+		{name: "machine power-control-machine machine-power-control-machine", want: true},
+		{name: "measured-boot machine approve", want: true},
+		{name: "measured-boot machine list", want: true},
+		{name: "measured-boot machine remove", want: true},
+		{name: "measured-boot profile approve", want: true},
+		{name: "measured-boot profile list", want: true},
+		{name: "measured-boot profile remove", want: true},
+		{name: "site-explorer endpoint action", want: true},
+		{name: "machine health-report delete", want: true},
+		{name: "machine health-report list", want: true},
+		{name: "machine health-report update", want: true},
+		{name: "health-report delete", want: false},
+		{name: "health-report list", want: false},
+		{name: "health-report update", want: false},
 	} {
-		t.Run(name, func(t *testing.T) {
-			assert.Containsf(t, commands, name, "expected concise command %q", name)
+		t.Run(test.name, func(t *testing.T) {
+			if test.want {
+				assert.Containsf(t, commands, test.name, "expected concise command %q", test.name)
+			} else {
+				assert.NotContainsf(t, commands, test.name, "unexpected top-level command %q", test.name)
+			}
 		})
 	}
 }
@@ -133,7 +167,6 @@ func TestAllCommands_RegistersRepresentativeFormerGaps(t *testing.T) {
 		"bmc-credential create",
 		"dpu-extension-service version get",
 		"expected-machine batch-create",
-		"health-report list",
 		"instance-type machine-association create",
 		"ip-block derived list",
 		"ipxe-template list",
@@ -519,7 +552,7 @@ func TestGeneratedCommand_UnpaginatedListDoesNotFetchAll(t *testing.T) {
 		Cache:  NewCache(),
 		Scope:  Scope{SiteID: "site-1"},
 	}
-	command := requireTUICommand(t, "health-report list")
+	command := requireTUICommand(t, "machine health-report list")
 	var runErr error
 	output := captureStdout(func() {
 		runErr = command.Run(session, []string{"machine-1"})
@@ -585,6 +618,8 @@ func TestGeneratedPathResourcePolicy_CoversEveryParameter(t *testing.T) {
 		"measured-boot profile remove|id",
 		"measured-boot-trusted-machine delete|id",
 		"measured-boot-trusted-profile delete|id",
+		"nvlink-domain firmware-update-nvlink-domain firmware-update-nvlink-domain|id",
+		"nvlink-domain power-control-nvlink-domain|id",
 		"task cancel|id",
 		"task cancel cancel-task|id",
 		"task get|id",
@@ -604,6 +639,10 @@ func TestCanonicalGeneratedResourceType_NormalizesSelectorKeys(t *testing.T) {
 		"nvlink acronym": {
 			command: "nvlink-logical-partition delete", parameter: "nvLinkLogicalPartitionId",
 			want: "nvlink-logical-partition",
+		},
+		"spectrumx acronym": {
+			command: "spectrumx-partition get", parameter: "spectrumXPartitionId",
+			want: "spectrumx-partition",
 		},
 		"numbered vpc": {
 			command: "vpc-peering create", parameter: "vpc1Id", want: "vpc",
@@ -669,13 +708,23 @@ func TestResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 		},
 		{
 			name:    "health report source",
-			command: "health-report delete",
+			command: "machine health-report delete",
 			cache: map[string][]NamedItem{
 				"machine": {{Name: "host-one", ID: "machine-1"}},
 			},
 			listPath:     "/v2/org/acme/nico/machine/machine-1/health-report",
 			listResponse: `[{"source":"overrides.sre","mode":"Replace"}]`,
 			want:         []string{"machine-1", "overrides.sre"},
+		},
+		{
+			name: "machine label key", command: "machine label-values list",
+			listPath: "/v2/org/acme/nico/machine/label/key", listResponse: `["Failure-Domain"]`,
+			want: []string{"Failure-Domain"},
+		},
+		{
+			name: "expected machine label key", command: "expected-machine label-values list",
+			listPath: "/v2/org/acme/nico/expected-machine/label/key", listResponse: `["Rack"]`,
+			want: []string{"Rack"},
 		},
 		{
 			name:    "instance type machine association",
@@ -840,7 +889,7 @@ func TestResolveGeneratedResource_NilResolverReturnsErrorForInteractiveDependent
 	}
 	_, supported, err := session.ResolveGeneratedResource(
 		context.Background(),
-		GeneratedPathResourceDescriptor("health-report delete", "source"),
+		GeneratedPathResourceDescriptor("machine health-report delete", "source"),
 		map[string]string{"machineId": "machine-1"},
 		"Source",
 		"",

@@ -17,7 +17,6 @@
 
 mod args;
 mod cmd;
-
 #[cfg(test)]
 mod tests;
 
@@ -34,7 +33,13 @@ use crate::errors::CarbideCliResult;
 
 impl Run for Opts {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmd::handle_show_version(&self, &ctx.api_client, ctx.config.format).await
+        cmd::handle_show_version(
+            &self,
+            &ctx.api_client,
+            ctx.config.format,
+            &mut ctx.output_file,
+        )
+        .await
     }
 }
 

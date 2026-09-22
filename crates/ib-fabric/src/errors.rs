@@ -35,6 +35,9 @@ pub enum IbError {
     },
     #[error("argument is invalid: {0}")]
     InvalidArgument(String),
+    /// An authoritative local UFM credential source is missing or invalid.
+    #[error("credential configuration error: {0}")]
+    CredentialConfigurationError(String),
     #[error("the function is not implemented")]
     NotImplemented,
     #[error("internal error: {message}")]
@@ -61,6 +64,7 @@ mod tests {
         Fabric,
         NotFound,
         InvalidArgument,
+        CredentialConfiguration,
         NotImplemented,
         Internal,
     }
@@ -73,6 +77,9 @@ mod tests {
                 id: "machine-1".to_string(),
             },
             ErrorCase::InvalidArgument => IbError::InvalidArgument("bad pkey".to_string()),
+            ErrorCase::CredentialConfiguration => {
+                IbError::CredentialConfigurationError("missing UFM token".to_string())
+            }
             ErrorCase::NotImplemented => IbError::NotImplemented,
             ErrorCase::Internal => IbError::internal("unexpected state".to_string()),
         }
@@ -86,6 +93,8 @@ mod tests {
                 ErrorCase::Fabric => "failed to call IBFabricManager: ufm failed".to_string(),
                 ErrorCase::NotFound => "Machine not found: machine-1".to_string(),
                 ErrorCase::InvalidArgument => "argument is invalid: bad pkey".to_string(),
+                ErrorCase::CredentialConfiguration =>
+                    "credential configuration error: missing UFM token".to_string(),
                 ErrorCase::NotImplemented => "the function is not implemented".to_string(),
                 ErrorCase::Internal => "internal error: unexpected state".to_string(),
             }

@@ -17,7 +17,7 @@
 
 use std::str::FromStr;
 
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{MachineInterfaceId, StableHostMachineId};
 use clap::Parser;
 use mac_address::MacAddress;
 
@@ -39,18 +39,18 @@ Request another reconciliation for the selected interface:
 Tip: 'boot-interface candidates <MACHINE_ID>' lists the candidate NICs with their MACs and UUIDs.
 ")]
 pub(crate) struct Args {
-    #[clap(help = "The machine whose boot interface to set")]
-    pub(super) machine: MachineId,
+    #[clap(help = "The managed host for which to set the boot interface")]
+    pub(super) machine: StableHostMachineId,
     #[clap(help = "The interface to boot from -- a machine-interface UUID or a MAC address")]
     pub(super) interface: InterfaceSelector,
     #[clap(
         long,
-        help = "Request a fresh machine-controller reconciliation even when this interface is already selected"
+        help = "Request a fresh machine-controller reconciliation even when this interface is already selected. Sends only force_reconcile=true; servers without force_reconcile support ignore it, while supporting servers leave any required restart to machine-controller"
     )]
     pub(super) force_reconcile: bool,
     #[clap(
         long,
-        help = "Deprecated compatibility alias; use --force-reconcile with current servers"
+        help = "Deprecated compatibility option for servers without force_reconcile support. Sends reboot=true and force_reconcile=true; supporting servers treat it as reconciliation, while older servers force-restart the host after changing the target"
     )]
     pub(super) reboot: bool,
 }

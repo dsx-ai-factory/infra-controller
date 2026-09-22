@@ -54,12 +54,10 @@
 mod codegen;
 mod compiler;
 mod error;
-mod extern_paths;
 mod schema;
 
-pub use codegen::{Codegen, TonicBuilderCodegenExt};
+pub use codegen::{Codegen, ExternPathSearchIndex, TonicBuilderCodegenExt};
 pub use compiler::{CompilerConfig, compile};
 pub use error::Error;
-pub use extern_paths::{ExternPathSearchIndex, ExternPaths, TonicBuilderExternPathsExt};
 pub use schema::Schema;
 pub use syn;

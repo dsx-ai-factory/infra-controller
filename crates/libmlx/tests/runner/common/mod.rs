@@ -198,6 +198,7 @@ pub(super) fn create_sample_json_response(device: &str) -> serde_json::Value {
     })
 }
 
+#[allow(dead_code)]
 /// Creates test device info
 pub(super) fn create_test_device_info() -> QueriedDeviceInfo {
     QueriedDeviceInfo::new()

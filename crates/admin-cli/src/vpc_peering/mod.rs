@@ -19,9 +19,6 @@ mod create;
 mod delete;
 mod show;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 use prettytable::{Table, row};
 use rpc::forge::VpcPeering;

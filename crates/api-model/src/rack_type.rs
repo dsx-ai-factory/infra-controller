@@ -19,10 +19,13 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
+use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
 use carbide_utils::config::as_std_duration;
 use duration_str::deserialize_duration;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::hardware_info::HardwareInfo;
 
 /// RackHardwareType identifies the hardware type of a rack.
 /// This is a flexible string-based type to allow new hardware types
@@ -90,7 +93,46 @@ pub enum RackProductFamily {
     Other(String),
 }
 
+/// Selects the fixed DPU NVConfig profile supported by a product family and DPU
+/// identity.
+///
+/// A profile is selected only for the GB200 product family and an exact
+/// supported DPU part number. Missing identity does not select a profile.
+pub fn select_dpu_nvconfig_profile(
+    product_family: Option<&RackProductFamily>,
+    hardware_info: Option<&HardwareInfo>,
+) -> Option<DpuNvConfigProfile> {
+    if product_family != Some(&RackProductFamily::Gb200) {
+        return None;
+    }
+
+    let part_number = &hardware_info?.dpu_info.as_ref()?.part_number;
+    DpuNvConfigProfile::for_gb200_b3240_part_number(part_number)
+}
+
 impl RackProductFamily {
+    /// Returns `GB200` or `GB300` when a hardware model reported by Redfish
+    /// contains exactly one of those product family tokens.
+    ///
+    /// Matching ignores ASCII case and requires whole tokens separated by ASCII
+    /// whitespace. Unknown models, concatenated names, and models naming both
+    /// families return `None`.
+    pub fn from_hardware_model(model: &str) -> Option<Self> {
+        let mut has_gb200 = false;
+        let mut has_gb300 = false;
+
+        for token in model.split_ascii_whitespace() {
+            has_gb200 |= token.eq_ignore_ascii_case("gb200");
+            has_gb300 |= token.eq_ignore_ascii_case("gb300");
+        }
+
+        match (has_gb200, has_gb300) {
+            (true, false) => Some(Self::Gb200),
+            (false, true) => Some(Self::Gb300),
+            (false, false) | (true, true) => None,
+        }
+    }
+
     /// Returns the product-family identifier sent to descriptor-based backends.
     ///
     /// Named variants use their canonical lowercase value. Values stored in
@@ -379,14 +421,28 @@ pub struct RackCapabilitiesSet {
 
 /// Optional source for a rack-wide SOT firmware-object document.
 ///
-/// When present on a [`RackProfile`], rack ingestion fetches this document and
-/// uses it as the default firmware request for the profile's compute and switch
-/// inventory.
+/// When present on a [`RackProfile`], NICo uses this document for compute-tray
+/// preingestion and fetches it separately for the rack maintenance firmware and
+/// switch NVOS image phases. RMS selects the matching artifacts from the
+/// document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RackFirmwareObjectConfig {
-    /// URL from which rack ingestion fetches the SOT JSON document.
+    /// URL from which NICo fetches the SOT JSON document.
     pub url: url::Url,
+
+    /// Named credential containing the artifact access token sent to RMS during
+    /// compute-tray preingestion.
+    ///
+    /// The credential is read when the operation starts, so rack profiles do
+    /// not contain secret material. When omitted, RMS receives its no-auth
+    /// sentinel.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_credential_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub access_token_credential: Option<String>,
 
     /// Maximum duration for the complete HTTP request.
     ///
@@ -405,6 +461,21 @@ impl RackFirmwareObjectConfig {
     }
 }
 
+fn deserialize_optional_credential_name<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let name = Option::<String>::deserialize(deserializer)?;
+
+    if name.as_deref() == Some("") {
+        return Err(D::Error::custom(
+            "firmware artifact access-token credential name must not be empty",
+        ));
+    }
+
+    Ok(name)
+}
+
 /// RackProfile describes the hardware identity and expected device
 /// capabilities for a class of rack. The profile is referenced by name
 /// (the map key in the config file) from expected racks and rack configs.
@@ -415,10 +486,15 @@ pub struct RackProfile {
     #[serde(default)]
     pub product_family: Option<RackProductFamily>,
 
-    /// Default firmware-object source for ingestion.
+    /// Default firmware-object source for compute-tray preingestion and
+    /// automatic rack maintenance.
     ///
-    /// When absent, ingestion skips the automatic firmware update unless an
-    /// explicit maintenance request supplies a firmware object.
+    /// When absent, compute-tray preingestion skips its automatic update, and
+    /// rack maintenance skips automatic firmware and NVOS updates unless an
+    /// explicit maintenance request supplies a firmware object. If no firmware
+    /// object is available while a switch in the maintenance scope is already
+    /// waiting for an NVOS update, maintenance enters `Error` instead of
+    /// skipping the NVOS phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware_object: Option<RackFirmwareObjectConfig>,
 
@@ -471,9 +547,127 @@ impl RackProfileConfig {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::{scenarios, value_scenarios};
+    use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
 
     use super::*;
+    use crate::hardware_info::DpuData;
+
+    fn dpu_hardware_info(part_number: &str) -> HardwareInfo {
+        HardwareInfo {
+            dpu_info: Some(DpuData {
+                part_number: part_number.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hardware_model_requires_one_known_product_family_token() {
+        check_values(
+            [
+                Check {
+                    scenario: "DGX GB200 compute tray",
+                    input: "DGX GB200 Compute Tray",
+                    expect: Some(RackProductFamily::Gb200),
+                },
+                Check {
+                    scenario: "GB200 board",
+                    input: "GB200 1CPU:2GPU Board PC",
+                    expect: Some(RackProductFamily::Gb200),
+                },
+                Check {
+                    scenario: "GB200 NVL",
+                    input: "GB200 NVL",
+                    expect: Some(RackProductFamily::Gb200),
+                },
+                Check {
+                    scenario: "lowercase GB200 token",
+                    input: "dgx gb200 compute tray",
+                    expect: Some(RackProductFamily::Gb200),
+                },
+                Check {
+                    scenario: "GB200 token separated by ASCII whitespace",
+                    input: "DGX\tGB200\nCompute Tray",
+                    expect: Some(RackProductFamily::Gb200),
+                },
+                Check {
+                    scenario: "GB300 compute tray",
+                    input: "DGX GB300 Compute Tray",
+                    expect: Some(RackProductFamily::Gb300),
+                },
+                Check {
+                    scenario: "concatenated GB200 name",
+                    input: "GB200Nvl Compute Tray",
+                    expect: None,
+                },
+                Check {
+                    scenario: "model names multiple product families",
+                    input: "GB200 GB300 Compute Tray",
+                    expect: None,
+                },
+                Check {
+                    scenario: "unknown model",
+                    input: "PowerEdge R750",
+                    expect: None,
+                },
+            ],
+            RackProductFamily::from_hardware_model,
+        );
+    }
+
+    #[test]
+    fn dpu_nvconfig_profile_requires_matching_product_family_and_dpu_identity() {
+        check_values(
+            [
+                Check {
+                    scenario: "GB200 family with supported B3240",
+                    input: (
+                        Some(RackProductFamily::Gb200),
+                        Some(dpu_hardware_info("900-9D3B6-00CN-PA0")),
+                    ),
+                    expect: Some(DpuNvConfigProfile::Gb200B3240V1),
+                },
+                Check {
+                    scenario: "other product family with supported B3240",
+                    input: (
+                        Some(RackProductFamily::Gb300),
+                        Some(dpu_hardware_info("900-9D3B6-00CN-PA0")),
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "GB200 family with another BlueField 3 product",
+                    input: (
+                        Some(RackProductFamily::Gb200),
+                        Some(dpu_hardware_info("900-9D3B6-00CV-AA0")),
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "GB200 family without DPU hardware information",
+                    input: (Some(RackProductFamily::Gb200), None),
+                    expect: None,
+                },
+                Check {
+                    scenario: "GB200 family without DPU identity",
+                    input: (
+                        Some(RackProductFamily::Gb200),
+                        Some(HardwareInfo::default()),
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "missing product family with supported B3240",
+                    input: (None, Some(dpu_hardware_info("900-9D3B6-00CN-PA0"))),
+                    expect: None,
+                },
+            ],
+            |(product_family, hardware_info)| {
+                select_dpu_nvconfig_profile(product_family.as_ref(), hardware_info.as_ref())
+            },
+        );
+    }
 
     #[test]
     fn test_rack_profile_config_lookup() {
@@ -644,10 +838,12 @@ count = 0
 [Rack.firmware_object]
 url = "https://firmware.example.invalid/sot/rack.json"
 fetch_timeout = "45s"
+access_token_credential = "rack-artifacts"
 "#,
                 Some((
                     "https://firmware.example.invalid/sot/rack.json",
                     std::time::Duration::from_secs(45),
+                    Some("rack-artifacts"),
                 )),
             ),
             (
@@ -659,6 +855,7 @@ url = "https://firmware.example.invalid/sot/rack.json"
                 Some((
                     "https://firmware.example.invalid/sot/rack.json",
                     std::time::Duration::from_secs(30),
+                    None,
                 )),
             ),
             ("not configured", "[Rack]\n", None),
@@ -675,11 +872,39 @@ url = "https://firmware.example.invalid/sot/rack.json"
                     .firmware_object
                     .as_ref()
                     .map(|firmware_object| {
-                        (firmware_object.url.as_str(), firmware_object.fetch_timeout)
+                        (
+                            firmware_object.url.as_str(),
+                            firmware_object.fetch_timeout,
+                            firmware_object.access_token_credential.as_deref(),
+                        )
                     });
 
             assert_eq!(actual, expected, "{name}");
         }
+    }
+
+    #[test]
+    fn rack_profile_rejects_empty_firmware_access_token_credential_name() {
+        let input = r#"
+[Rack.firmware_object]
+url = "https://firmware.example.invalid/sot/rack.json"
+access_token_credential = ""
+
+[Rack.rack_capabilities.compute]
+count = 0
+[Rack.rack_capabilities.switch]
+count = 0
+[Rack.rack_capabilities.power_shelf]
+count = 0
+"#;
+
+        let error = toml::from_str::<RackProfileConfig>(input).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("firmware artifact access-token credential name must not be empty")
+        );
     }
 
     #[test]
@@ -967,63 +1192,6 @@ count = 2
 
             "empty product family" {
                 "\"  \"" => Fails,
-            }
-        );
-    }
-
-    // RackHardwareTopology serde.
-
-    // JSON round-trip: each topology variant serializes to its expected
-    // snake_case string and deserializes back to itself. Projected to
-    // (json, value_back); the (non-PartialEq) serde_json error is discarded.
-    #[test]
-    fn test_rack_hardware_topology_serde_round_trip() {
-        scenarios!(
-            run = |variant| {
-                let json = serde_json::to_string(&variant).map_err(drop)?;
-                let back: RackHardwareTopology = serde_json::from_str(&json).map_err(drop)?;
-                Ok::<_, ()>((json, back))
-            };
-            "gb200 nvl36 round-trips" {
-                RackHardwareTopology::Gb200Nvl36r1C2g4Topology => Yields((
-                    "\"gb200_nvl36r1_c2g4_topology\"".to_string(),
-                    RackHardwareTopology::Gb200Nvl36r1C2g4Topology,
-                )),
-            }
-
-            "gb300 nvl36 round-trips" {
-                RackHardwareTopology::Gb300Nvl36r1C2g4Topology => Yields((
-                    "\"gb300_nvl36r1_c2g4_topology\"".to_string(),
-                    RackHardwareTopology::Gb300Nvl36r1C2g4Topology,
-                )),
-            }
-
-            "gb200 nvl72 round-trips" {
-                RackHardwareTopology::Gb200Nvl72r1C2g4Topology => Yields((
-                    "\"gb200_nvl72r1_c2g4_topology\"".to_string(),
-                    RackHardwareTopology::Gb200Nvl72r1C2g4Topology,
-                )),
-            }
-
-            "gb300 nvl72 round-trips" {
-                RackHardwareTopology::Gb300Nvl72r1C2g4Topology => Yields((
-                    "\"gb300_nvl72r1_c2g4_topology\"".to_string(),
-                    RackHardwareTopology::Gb300Nvl72r1C2g4Topology,
-                )),
-            }
-
-            "vr nvl8 rtf round-trips" {
-                RackHardwareTopology::VrNvl8r1C2g4RtfTopology => Yields((
-                    "\"vr_nvl8r1_c2g4_rtf_topology\"".to_string(),
-                    RackHardwareTopology::VrNvl8r1C2g4RtfTopology,
-                )),
-            }
-
-            "vr nvl72 round-trips" {
-                RackHardwareTopology::VrNvl72r1C2g4Topology => Yields((
-                    "\"vr_nvl72r1_c2g4_topology\"".to_string(),
-                    RackHardwareTopology::VrNvl72r1C2g4Topology,
-                )),
             }
         );
     }

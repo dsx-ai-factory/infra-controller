@@ -1,0 +1,14 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package carbide.proto.compiler.fixture.unknown_extern_path;
+
+import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
+
+option (carbide.codegen.v1.imported_extern_path) = {
+  protobuf_type: ".unknown.Missing"
+  rust_type: "::fixture_types::Missing"
+};

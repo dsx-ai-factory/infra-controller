@@ -374,19 +374,21 @@ write_files:
         CMD_PREFIX="ip vrf exec mgmt"
         if [[ ! -f "/run/cloud-init.done" ]]
         then
-          ${CMD_PREFIX} /opt/forge/forge-scout --api={{ api_url }} --machine-interface-id={{ interface_id }} --mode="standalone" logerror
+          # --uuid is required by the logerror subcommand's argument parser but is
+          # then ignored; the ID actually used is --machine-interface-id above.
+          # Without it clap rejects the invocation before any code runs, which is
+          # why this failure path never reported anything.
+          ${CMD_PREFIX} /opt/forge/forge-scout --api={{ api_url }} --machine-interface-id={{ interface_id }} --mode="standalone" logerror --uuid={{ interface_id }}
         else
           /bin/rm /run/cloud-init.done
         fi
       }
       function ensure_ethernet_link_type()
       {
+        local mst_device=$1
         local log_file="/var/log/forge/link-type.log"
         mkdir -p /var/log/forge
 
-        # Find the DPU config device before any management VRF setup depends on Ethernet.
-        local mst_device
-        mst_device="$(compgen -G '/dev/mst/mt*_pciconf0' | head -n 1)"
         if [[ -z "${mst_device}" ]]
         then
           echo "No mst pciconf device found for LINK_TYPE normalization" | tee -a "${log_file}"
@@ -441,8 +443,17 @@ write_files:
       date -s '@{{ seconds_since_epoch }}'
       hwclock --systohc
       /usr/bin/bfrec --capsule /lib/firmware/mellanox/boot/capsule/efi_sbkeysync.cap || true
-      ensure_ethernet_link_type
+      mst_device="$(compgen -G '/dev/mst/mt*_pciconf0' | head -n 1)"
+      ensure_ethernet_link_type "${mst_device}"
       /usr/bin/bfcfg
+      {% if forge_dpu_nvconfig_parameters %}
+      if [[ -z "${mst_device}" ]]
+      then
+        echo "No mst pciconf device found for the DPU NVConfig profile" >&2
+        exit 1
+      fi
+      /usr/bin/mlxconfig -y -d "${mst_device}" set {{ forge_dpu_nvconfig_parameters }}
+      {% endif %}
       {% if bootstrap_ca_source == "embedded" or bootstrap_ca_source == "mounted" %}
       # BEGIN bootstrap CA validation helpers
       validate_bootstrap_ca()

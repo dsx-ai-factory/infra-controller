@@ -16,18 +16,19 @@ import (
 )
 
 const (
-	// SubnetBlockSizeMin is the minimum value of the SubnetSize field
+	// SubnetBlockSizeMin is the minimum IPv4 prefix length accepted by REST Subnet creation.
 	SubnetBlockSizeMin = 8
-	// SubnetBlockSizeMax is the maximum value of the SubnetSize field
+	// SubnetBlockSizeMax is the maximum IPv4 prefix length accepted by REST Subnet creation.
 	SubnetBlockSizeMax = 30
 
-	validationErrorIPv4BlockIDRequired    = "IPv4BlockID is required in request"
-	validationErrorIPv6SubnetNotSupported = "IPv6 Subnet creation is not supported at this time"
+	validationErrorIPv4BlockIDRequired    = "REST Subnet creation requires ipv4BlockId"
+	validationErrorIPv6SubnetNotSupported = "ipv6BlockId is not supported for Subnets in Ethernet virtualizer VPCs; FNN VPCs use VPC Prefixes"
 	validationErrorSubnetBlockSizeMin     = "prefixLength must be at least 8"
 	validationErrorSubnetBlockSizeMax     = "prefixLength must be at most 30"
 )
 
-// APISubnetCreateRequest is the data structure to capture user request to create a new Subnet
+// APISubnetCreateRequest captures a request to create an IPv4 Subnet in an Ethernet virtualizer VPC.
+// FNN VPCs use the separate VPC Prefix resource.
 type APISubnetCreateRequest struct {
 	// Name is the name of the Subnet
 	Name string `json:"name"`
@@ -35,11 +36,11 @@ type APISubnetCreateRequest struct {
 	Description *string `json:"description"`
 	// VpcID is the ID of the vpc containing the Subnet
 	VpcID string `json:"vpcId"`
-	// IPv4BlockID is the derived IPv4BlockId for the tenant from an allocation
+	// IPv4BlockID identifies a Ready, derived IPv4 block for the tenant from an allocation.
 	IPv4BlockID *string `json:"ipv4BlockId"`
-	// IPv6BlockID is the derived IPv6BlockId for the tenant from an allocation
+	// IPv6BlockID is retained so legacy ipv6BlockId input can be rejected explicitly.
 	IPv6BlockID *string `json:"ipv6BlockId"`
-	// PrefixLength is the length of the prefix
+	// PrefixLength is the length of the IPv4 prefix.
 	PrefixLength int `json:"prefixLength"`
 }
 
@@ -60,7 +61,7 @@ func (scr *APISubnetCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorIPv4BlockIDRequired),
 			validation.When(scr.IPv4BlockID != nil, validationis.UUID.Error(validationErrorInvalidUUID))),
 		validation.Field(&scr.IPv6BlockID,
-			// IPv6 is not supported yet
+			// Subnets in Ethernet virtualizer VPCs support IPv4 only.
 			validation.Nil.Error(validationErrorIPv6SubnetNotSupported)),
 		validation.Field(&scr.PrefixLength,
 			validation.Required.Error(validationErrorValueRequired),

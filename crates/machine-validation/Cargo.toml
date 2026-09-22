@@ -47,6 +47,8 @@ reqwest = { default-features = false, features = [
   "stream",
 ], workspace = true }
 futures-util = { workspace = true }
+libc = { workspace = true }
+uuid = { features = ["v4"], workspace = true }
 
 [dev-dependencies]
 carbide-instrument = { path = "../instrument", features = ["test-support"] }

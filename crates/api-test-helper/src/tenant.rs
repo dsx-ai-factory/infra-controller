@@ -17,7 +17,12 @@
 
 use std::net::SocketAddr;
 
-use super::grpcurl::grpcurl;
+use rpc::forge::{
+    CreateTenantKeysetRequest, CreateTenantRequest, Metadata, TenantKeysetContent,
+    TenantKeysetIdentifier, TenantPublicKey,
+};
+
+use crate::api_client;
 
 pub async fn create(
     carbide_api_addrs: &[SocketAddr],
@@ -26,14 +31,18 @@ pub async fn create(
 ) -> eyre::Result<()> {
     tracing::info!("Creating tenant");
 
-    let data = serde_json::json!({
-        "organization_id": organization_id,
-        "routing_profile_type": "EXTERNAL".to_string(),
-        "metadata": {
-            "name": name,
-        }
-    });
-    grpcurl(carbide_api_addrs, "CreateTenant", Some(&data.to_string())).await?;
+    let request = CreateTenantRequest {
+        organization_id: organization_id.to_string(),
+        metadata: Some(Metadata {
+            name: name.to_string(),
+            ..Default::default()
+        }),
+        routing_profile_type: Some("EXTERNAL".to_string()),
+    };
+    api_client::call(carbide_api_addrs, "CreateTenant", |mut client| async move {
+        client.create_tenant(request).await
+    })
+    .await?;
     tracing::info!(tenant_name = name, "Tenant created",);
     Ok(())
 }
@@ -51,22 +60,26 @@ pub mod keyset {
     ) -> eyre::Result<()> {
         tracing::info!("Creating tenant keyset");
 
-        let data = serde_json::json!({
-            "keyset_identifier": {
-                "organization_id": organization_id,
-                "keyset_id": &id.to_string(),
-            },
-            "keyset_content": {
-                "public_keys": public_keys.iter().map(|k| serde_json::json!({
-                    "public_key": k,
-                })).collect::<Vec<_>>(),
-            },
-            "version": "V1",
-        });
-        grpcurl(
+        let request = CreateTenantKeysetRequest {
+            keyset_identifier: Some(TenantKeysetIdentifier {
+                organization_id: organization_id.to_string(),
+                keyset_id: id.to_string(),
+            }),
+            keyset_content: Some(TenantKeysetContent {
+                public_keys: public_keys
+                    .iter()
+                    .map(|public_key| TenantPublicKey {
+                        public_key: (*public_key).to_string(),
+                        comment: None,
+                    })
+                    .collect(),
+            }),
+            version: "V1".to_string(),
+        };
+        api_client::call(
             carbide_api_addrs,
             "CreateTenantKeyset",
-            Some(&data.to_string()),
+            |mut client| async move { client.create_tenant_keyset(request).await },
         )
         .await?;
         tracing::info!(

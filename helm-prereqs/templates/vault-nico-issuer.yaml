@@ -17,6 +17,9 @@ spec:
   vault:
     path: {{ .Values.vault.pkiMount }}/sign/{{ .Values.vault.pkiRole }}
     server: {{ .Values.vault.address }}
+    {{- with .Values.vault.namespace }}
+    namespace: {{ . | quote }}
+    {{- end }}
     caBundleSecretRef:
       name: site-root
       key: ca.crt

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -373,7 +372,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 				} else {
 					if skgsa.Status == cdbm.SSHKeyGroupSiteAssociationStatusSynced {
 						// Was this created within inventory receipt interval? If so, we may be processing an older inventory
-						if time.Since(skgsa.Created) < cwutil.InventoryReceiptInterval {
+						if site.IsTimeWithinStaleInventoryThreshold(skgsa.Created) {
 							continue
 						}
 

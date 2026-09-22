@@ -43,34 +43,40 @@ pub(crate) enum Cmd {
         visible_alias = "details",
         about = "Show boot interfaces for a machine from every store (troubleshooting)",
         long_about = "Gather the boot-interface view for one machine from all four stores and \
-            print them together: the managed `machine_interfaces` rows (authoritative for a \
-            managed machine), `predicted_machine_interfaces` (pre-first-lease candidates), \
-            the `explored_endpoints` default (for endpoints without a machine), and the \
-            retained post-deletion pairs (including stale records). Also reports the \
-            effective boot interface, flags when the stores disagree, and shows desired-state \
-            reconciliation progress when one exists. Read-only."
+            print them together: the managed `machine_interfaces` rows (owned candidates and \
+            primary selection), `predicted_machine_interfaces` (pre-first-lease candidates), \
+            the `explored_endpoints` default, and retained post-deletion pairs (including stale \
+            records). Also reports the effective owned pick and flags when current selection \
+            signals disagree (the effective owned pick, explored defaults, and declared-primary \
+            predictions; retained history and the desired target are excluded). The persisted \
+            desired target and reconciliation progress appear separately. Read-only."
     )]
     Show(show::Args),
     #[clap(
         about = "List boot-interface candidates for a machine and the picks among them",
         long_about = "List every NIC that could be the boot interface for a machine -- the \
             managed `machine_interfaces` rows and the pre-first-lease predictions -- and \
-            mark the picks among them: `current` (what resolution targets now: the primary \
-            interface if one is set, else the lowest-MAC non-underlay interface), `default` \
-            (what the automatic selection would choose if no primary interface were set), \
-            and `explored` (the default site-explorer recorded for the BMC endpoint of the \
-            machine). Underlay rows are listed but marked ineligible. Every pick is computed \
-            server-side by the same selection code the machine-controller acts on. Read-only."
+            mark the picks among them: `current` (the effective managed pick, or the predicted \
+            pick before the first lease), `default` (the lowest-MAC non-underlay managed \
+            interface if no primary interface were set), and `explored` (the default \
+            site-explorer recorded for the BMC endpoint of the machine). The predicted pick is \
+            a declared primary, or the sole non-underlay prediction; with several eligible \
+            undeclared predictions the system refuses to guess. For selection, an already-declared \
+            primary is eligible regardless of segment; otherwise underlay rows are excluded from \
+            the automatic fallback. The selection/default picks are computed server-side; use \
+            `boot-interface show` to compare them with the persisted desired target and controller \
+            progress. Read-only."
     )]
     Candidates(candidates::Args),
     #[clap(
-        about = "Set the boot interface for a machine (promotes it to the primary interface)",
-        long_about = "Make an interface the boot interface for a machine by promoting it to \
-            the primary interface -- the designation every boot flow keys on. This is the \
-            same operation as `managed-host set-primary-interface`: the primary row and desired \
-            target commit together, then machine-controller reconciles the BMC when the host is \
-            eligible. The interface can be named by machine-interface UUID or by MAC address; a \
-            MAC must match exactly one managed interface row on the machine."
+        about = "Set the boot interface for a managed host (promotes it to the primary interface)",
+        long_about = "Make an interface both the primary interface and persisted desired boot \
+            target for a managed host. This is the same operation as `managed-host \
+            set-primary-interface`: the primary row and desired target commit together, then \
+            machine-controller reconciles the BMC when the host is eligible. The interface can \
+            be named by machine-interface UUID or by MAC address; a MAC must match exactly one \
+            managed interface row on the machine. If the host has a DPU-backed Admin interface, \
+            the selected interface must also be on the Admin segment."
     )]
     Set(set::Args),
 }

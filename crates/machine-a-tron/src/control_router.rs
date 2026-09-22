@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -22,17 +23,21 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
-use bmc_mock::HardwareType;
 use bmc_mock::injection::{InjectionStore, Rule, RuleId};
+use bmc_mock::{HardwareType, MockPowerState, RackPlacement, SystemPowerControl, TrayPlacement};
 use carbide_uuid::rack::RackId;
 use chrono::{SecondsFormat, Utc};
+use mac_address::MacAddress;
+use rms_mock::{PowerOperation, RmsInventory, SimNode, SimNodeKind, SimPowerState};
 use tower::Service;
 use ufm_mock::{
     EpochId, Generation, InventoryId, InventoryMachine as UfmInventoryMachine, InventoryPort,
     InventoryProvider, InventorySnapshot, MachineId, MatId,
 };
 
+use crate::device_handle::DeviceHandle;
 use crate::device_simulator::SimulatorLifecycle;
+use crate::expected_inventory::ExpectedInventorySummary;
 use crate::simulator_registry::SimulatorRegistry;
 use crate::status::{DeviceKind, DeviceStatus, DeviceStatusConfig, DevicesStatusResponse};
 
@@ -42,6 +47,10 @@ pub fn append(router: Option<Router>, control_state: ControlState) -> Router {
         .route("/machines/status", get(get_machines_status))
         .route("/racks/status", get(get_racks_status))
         .route("/racks/{rack_id}/status", get(get_rack_status))
+        .route(
+            "/expected-inventory/status",
+            get(get_expected_inventory_status),
+        )
         .route(
             "/machines/{id}/bmc/injection/rules",
             get(list_bmc_injection_rules).post(upsert_bmc_injection_rule),
@@ -62,6 +71,8 @@ pub struct ControlState {
     simulators: SimulatorRegistry,
     status_config: DeviceStatusConfig,
     inventory_version: Arc<Mutex<InventoryVersion>>,
+    rms_snapshot: Arc<Mutex<RmsSnapshot>>,
+    expected_inventory: Arc<ExpectedInventorySummary>,
 }
 
 #[derive(Debug)]
@@ -70,6 +81,23 @@ struct InventoryVersion {
     epoch_id: EpochId,
     generation: Generation,
     snapshot: Vec<InventoryMachine>,
+}
+
+/// The fleet as last reported to the RMS mock, and the fingerprint it
+/// was built from.
+///
+/// Same idea as `InventoryVersion`: rebuild only when the result would
+/// differ. An RMS client enriches a fleet one request per device, and
+/// building every `SimNode` for every request made that pass quadratic in
+/// the fleet size. Everything in a `SimNode` is fixed when the device is
+/// built except the two DHCP-assigned addresses, so those are the whole
+/// fingerprint. The UFM fingerprint above is not reused because it covers
+/// machines only and none of their addresses.
+#[derive(Debug, Default)]
+struct RmsSnapshot {
+    /// `(bmc_ip, host_ip)` per device, in registry order.
+    addresses: Vec<(Option<IpAddr>, Option<IpAddr>)>,
+    nodes: Arc<[SimNode]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,6 +109,13 @@ struct InventoryMachine {
 }
 
 impl ControlState {
+    fn device_by_bmc_mac(&self, bmc_mac: MacAddress) -> eyre::Result<&DeviceHandle> {
+        self.simulators
+            .find_by_bmc_mac(bmc_mac)
+            .map(SimulatorLifecycle::handle)
+            .ok_or_else(|| eyre::eyre!("no simulated device has BMC MAC {bmc_mac}"))
+    }
+
     pub fn new(
         simulators: SimulatorRegistry,
         status_config: DeviceStatusConfig,
@@ -98,7 +133,16 @@ impl ControlState {
                 generation: Generation::INITIAL,
                 snapshot: Self::inventory_snapshot(&devices),
             })),
+            rms_snapshot: Arc::default(),
+            expected_inventory: Arc::default(),
         }
+    }
+
+    /// Publishes the startup expected inventory registration outcome on
+    /// `/expected-inventory/status`.
+    pub fn with_expected_inventory(mut self, summary: ExpectedInventorySummary) -> Self {
+        self.expected_inventory = Arc::new(summary);
+        self
     }
 
     fn devices_status(&self) -> DevicesStatusResponse {
@@ -168,6 +212,131 @@ impl ControlState {
     }
 }
 
+/// Report simulated hardware to the hosted RMS mock.
+///
+/// Placement comes from the same `RackPlacement` the device's Redfish chassis
+/// is built from, so RMS and Redfish cannot disagree about where a node sits.
+/// Compute trays report their chassis slot and compute tray index; switch
+/// trays report the rack unit they occupy and their index among the rack's
+/// switch trays. Power shelves carry a placement too, but RMS does not
+/// report one for them and NICo does not ask.
+///
+/// The snapshot handed out is rebuilt only when a device's BMC or host
+/// address has changed since the last request (see `RmsSnapshot`); nothing
+/// else in it can change, so a cached snapshot is never stale.
+impl RmsInventory for ControlState {
+    fn nodes(&self) -> Arc<[SimNode]> {
+        let mut cached = self
+            .rms_snapshot
+            .lock()
+            .expect("RMS snapshot lock poisoned");
+        let devices = self.simulators.devices();
+        let unchanged = cached.addresses.len() == devices.len()
+            && devices
+                .iter()
+                .zip(&cached.addresses)
+                .all(|(simulator, (bmc_ip, host_ip))| {
+                    let handle = simulator.handle();
+                    handle.bmc_ip().map(IpAddr::V4) == *bmc_ip
+                        && handle.host_ip().map(IpAddr::V4) == *host_ip
+                });
+        if !unchanged {
+            // Each address is read once and used for both the fingerprint
+            // and the node, so the two cannot disagree about it.
+            let (addresses, nodes): (Vec<_>, Vec<_>) = devices
+                .iter()
+                .map(|simulator| {
+                    let handle = simulator.handle();
+                    // machine-a-tron leases IPv4 today; the snapshot and the contract carry IpAddr.
+                    let (bmc_ip, host_ip) = (
+                        handle.bmc_ip().map(IpAddr::V4),
+                        handle.host_ip().map(IpAddr::V4),
+                    );
+                    ((bmc_ip, host_ip), Self::sim_node(handle, bmc_ip, host_ip))
+                })
+                .unzip();
+            cached.addresses = addresses;
+            cached.nodes = nodes.into_iter().flatten().collect();
+        }
+        Arc::clone(&cached.nodes)
+    }
+
+    fn power_state(&self, bmc_mac: MacAddress) -> eyre::Result<SimPowerState> {
+        Ok(match self.device_by_bmc_mac(bmc_mac)?.power_state() {
+            MockPowerState::On => SimPowerState::On,
+            // The Redfish mock reports a cycling device as off until the
+            // cycle's delay has run, and RMS has no state in between.
+            MockPowerState::Off | MockPowerState::PowerCycling { .. } => SimPowerState::Off,
+        })
+    }
+
+    fn set_power(&self, bmc_mac: MacAddress, op: PowerOperation) -> eyre::Result<()> {
+        let control = power_control_for(op)?;
+        self.device_by_bmc_mac(bmc_mac)?.set_system_power(control)?;
+        Ok(())
+    }
+}
+
+/// The Redfish reset an RMS power operation stands for; RMS documents `RESET`
+/// as a power cycle and `OFF` as a graceful shutdown.
+fn power_control_for(op: PowerOperation) -> eyre::Result<SystemPowerControl> {
+    Ok(match op {
+        PowerOperation::Unspecified => eyre::bail!("power operation is unspecified"),
+        PowerOperation::On | PowerOperation::ForceOn => SystemPowerControl::On,
+        PowerOperation::Off | PowerOperation::GracefulShutdown => {
+            SystemPowerControl::GracefulShutdown
+        }
+        PowerOperation::ForceOff => SystemPowerControl::ForceOff,
+        PowerOperation::Reset => SystemPowerControl::PowerCycle,
+        PowerOperation::GracefulRestart => SystemPowerControl::GracefulRestart,
+        PowerOperation::ForceRestart => SystemPowerControl::ForceRestart,
+    })
+}
+
+impl ControlState {
+    /// The RMS view of one device, or `None` for a device RMS does not
+    /// address.
+    fn sim_node(
+        handle: &DeviceHandle,
+        bmc_ip: Option<IpAddr>,
+        host_ip: Option<IpAddr>,
+    ) -> Option<SimNode> {
+        let kind = match handle.kind() {
+            DeviceKind::Machine => SimNodeKind::Compute,
+            DeviceKind::Switch => SimNodeKind::Switch,
+            DeviceKind::PowerShelf => SimNodeKind::PowerShelf,
+            // A DPU is reached through the host that carries it; RMS never
+            // addresses one on its own.
+            DeviceKind::Dpu => return None,
+        };
+        let info = handle.host_info();
+        let (slot_number, tray_index) = match info.rack_placement.and_then(RackPlacement::tray) {
+            Some(TrayPlacement::Compute {
+                tray_index,
+                chassis_physical_slot_number,
+            }) => (
+                Some(chassis_physical_slot_number),
+                Some(u32::from(tray_index)),
+            ),
+            Some(TrayPlacement::Switch {
+                tray_index,
+                slot_number,
+            }) => (Some(slot_number), Some(u32::from(tray_index))),
+            None => (None, None),
+        };
+        Some(SimNode {
+            kind: Some(kind),
+            bmc_mac: Some(info.bmc_mac_address),
+            bmc_ip,
+            host_mac: info.nvos_mac_addresses.first().copied(),
+            host_ip,
+            rack_id: None,
+            slot_number,
+            tray_index,
+        })
+    }
+}
+
 // This adapter connects machine-a-tron's live control state to the hosted UFM mock. It lets the
 // mock consume the same in-process inventory when `include_local_inventory` is enabled, without
 // polling machine-a-tron over HTTP.
@@ -230,6 +399,12 @@ async fn get_rack_status(
         .map(Json)
         .map(IntoResponse::into_response)
         .unwrap_or_else(|| (StatusCode::NOT_FOUND, "rack not found").into_response())
+}
+
+async fn get_expected_inventory_status(
+    State(state): State<ControlRouter>,
+) -> Json<ExpectedInventorySummary> {
+    Json(state.control_state.expected_inventory.as_ref().clone())
 }
 
 async fn get_machines_ui() -> Html<&'static str> {
@@ -310,13 +485,17 @@ async fn call_inner_router(router: &mut Router, request: Request<Body>) -> Respo
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+
     use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, StatusCode};
     use axum::routing::get;
-    use bmc_mock::ipmi_sim::IpmiEndpoint;
     use bmc_mock::{HardwareType, RackInfo, RackType};
     use carbide_uuid::rack::{RackId, RackProfileId};
+    use mac_address::MacAddress;
+    use rms_mock::{PowerOperation, RmsInventory, SimPowerState};
     use tower::ServiceExt;
     use uuid::Uuid;
 
@@ -324,6 +503,7 @@ mod tests {
     use crate::DeviceHandle;
     use crate::device_simulator::DeviceSimulator;
     use crate::dpu_machine::DpuMachineHandle;
+    use crate::expected_inventory::ExpectedInventorySummary;
     use crate::rack::{RackMemberRegistration, RackRegistration};
     use crate::simulator_registry::SimulatorRegistry;
     use crate::status::DeviceStatusConfig;
@@ -404,6 +584,83 @@ mod tests {
         assert_eq!(body["machines"], serde_json::json!([]));
     }
 
+    #[test]
+    fn rms_inventory_is_shared_until_a_device_changes() {
+        let handle = DeviceHandle::for_control_test(Vec::new(), None);
+        let state = control_state(vec![handle.clone()]);
+
+        let first = state.nodes();
+        let second = state.nodes();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first[0].bmc_mac,
+            Some(MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]))
+        );
+        assert_eq!(first[0].bmc_ip, None);
+
+        handle.set_control_test_bmc_ip(Some(Ipv4Addr::new(10, 0, 0, 7)));
+        let third = state.nodes();
+        assert!(!Arc::ptr_eq(&second, &third));
+        assert_eq!(third[0].bmc_ip, Some(IpAddr::from([10, 0, 0, 7])));
+        assert!(Arc::ptr_eq(&third, &state.nodes()));
+    }
+
+    /// RMS power reads the BMC's own state and is refused by the BMC's own
+    /// guard.
+    #[test]
+    fn rms_power_is_the_bmc_power() {
+        let handle = DeviceHandle::for_control_test(Vec::new(), None);
+        let state = control_state(vec![handle]);
+        let mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
+
+        assert_eq!(state.power_state(mac).unwrap(), SimPowerState::On);
+        let refused = state
+            .set_power(mac, PowerOperation::On)
+            .expect_err("the BMC refuses to power on a machine that is on")
+            .to_string();
+        assert!(refused.contains("already on"), "{refused}");
+        assert_eq!(state.power_state(mac).unwrap(), SimPowerState::On);
+
+        let unknown = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x99]);
+        assert!(state.power_state(unknown).is_err());
+    }
+
+    #[tokio::test]
+    async fn expected_inventory_status_reports_registration_summary() {
+        let summary = ExpectedInventorySummary {
+            registered: 3,
+            already_present: 1,
+            failed_identifiers: vec!["switch SW1 (02:00:00:00:00:01)".to_string()],
+        };
+        let router = append(
+            None,
+            control_state(Vec::new()).with_expected_inventory(summary),
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/expected-inventory/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "registered": 3,
+                "already_present": 1,
+                "failed_identifiers": ["switch SW1 (02:00:00:00:00:01)"],
+            })
+        );
+    }
+
     #[tokio::test]
     async fn machines_ui_returns_html() {
         let router = append(
@@ -423,21 +680,9 @@ mod tests {
 
     #[tokio::test]
     async fn machines_status_reports_each_bmc_console_endpoint() {
-        let first = DeviceHandle::for_control_test(
-            Vec::new(),
-            Some(IpmiEndpoint {
-                reachable_port: 623,
-                listen_port: 16_020,
-            }),
-        )
-        .with_control_test_ssh_endpoint(22_020);
-        let second = DeviceHandle::for_control_test(
-            Vec::new(),
-            Some(IpmiEndpoint {
-                reachable_port: 623,
-                listen_port: 16_021,
-            }),
-        );
+        let first = DeviceHandle::for_control_test(Vec::new(), Some(16_020))
+            .with_control_test_ssh_endpoint(22_020);
+        let second = DeviceHandle::for_control_test(Vec::new(), Some(16_021));
         let without_ipmi = DeviceHandle::for_control_test(Vec::new(), None);
         let router = append(None, control_state(vec![first, second, without_ipmi]));
 
@@ -454,11 +699,11 @@ mod tests {
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let machines = status["machines"].as_array().unwrap();
 
-        assert_eq!(machines[0]["bmc"]["ipmi"]["reachable_port"], 623);
+        assert_eq!(machines[0]["bmc"]["ipmi"]["reachable_port"], 16_020);
         assert_eq!(machines[0]["bmc"]["ipmi"]["listen_port"], 16_020);
         assert_eq!(machines[0]["bmc"]["ssh"]["reachable_port"], 22_020);
         assert_eq!(machines[0]["bmc"]["ssh"]["listen_port"], 22_020);
-        assert_eq!(machines[1]["bmc"]["ipmi"]["reachable_port"], 623);
+        assert_eq!(machines[1]["bmc"]["ipmi"]["reachable_port"], 16_021);
         assert_eq!(machines[1]["bmc"]["ipmi"]["listen_port"], 16_021);
         assert!(machines[1]["bmc"].get("ssh").is_none());
         assert!(machines[2]["bmc"].get("ipmi").is_none());

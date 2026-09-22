@@ -113,7 +113,7 @@ func newSiteManager(ctx context.Context, o Options, c crdclient.Interface) (*Sit
 	appService.AddHealthRoute(ctx)
 	appService.AddVersionRoute(ctx)
 	appService.AddMetricsRoute(ctx)
-	appService.Use(core.NewHTTPMiddleware(ctx, core.WithRequestMetrics("cloud_site_manager"))...)
+	appService.Use(core.NewHTTPMiddleware(ctx, core.WithRequestMetrics("nico_rest_site_manager"))...)
 	appService.Path("/v1/site").Handler(s.siteCreateHandler()).Methods("POST")
 	appService.Path("/v1/site/{uuid}").Handler(s.siteGetHandler()).Methods("GET")
 	appService.Path("/v1/site/roll/{uuid}").Handler(s.siteRollHandler()).Methods("POST")

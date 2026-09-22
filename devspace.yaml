@@ -97,6 +97,7 @@ images:
         - include
         - dev/docker/Dockerfile.build-container-x86_64
         - dev/docker/Dockerfile.build-container-aarch64
+        - dev/docker/kea.version
         - dev/deployment/devspace/Dockerfile.core-artifacts
         - dev/deployment/devspace/Dockerfile.core-artifacts.dockerignore
         - dev/deployment/devspace/Dockerfile.api
@@ -117,6 +118,7 @@ images:
         - crates
         - dev/docker/Dockerfile.build-container-x86_64
         - dev/docker/Dockerfile.build-container-aarch64
+        - dev/docker/kea.version
         - dev/deployment/devspace/Dockerfile.core-artifacts
         - dev/deployment/devspace/Dockerfile.core-artifacts.dockerignore
         - dev/deployment/devspace/Dockerfile.bmc-proxy
@@ -136,6 +138,7 @@ images:
         - include
         - dev/docker/Dockerfile.build-container-x86_64
         - dev/docker/Dockerfile.build-container-aarch64
+        - dev/docker/kea.version
         - dev/deployment/devspace/Dockerfile.core-artifacts
         - dev/deployment/devspace/Dockerfile.core-artifacts.dockerignore
         - dev/deployment/devspace/Dockerfile.machine-a-tron
@@ -303,9 +306,9 @@ deployments:
           CORE_GRPC_SEC_OPT: "2"
           FLOW_GRPC_ENABLED: "false"
           CLUSTER_ID: 00000000-0000-4000-8000-000000000001
-          # The REST workflow ignores inventory for 3m5s after a machine update.
-          # Keep the local inventory cadence beyond that guard to avoid skipped hosts.
-          TEMPORAL_INVENTORY_SCHEDULE: "@every 4m"
+          # The Site Agent reports this interval and Cloud derives its staleness guard from it,
+          # so a fast local cadence no longer needs padding to avoid skipped hosts.
+          TEMPORAL_INVENTORY_SCHEDULE: "@every 1m"
           TEMPORAL_SERVER: site.server.temporal.local
           TEMPORAL_SUBSCRIBE_NAMESPACE: 00000000-0000-4000-8000-000000000001
           TEMPORAL_SUBSCRIBE_QUEUE: site
@@ -318,7 +321,9 @@ hooks:
         aarch64|arm64) BUILD_ARCH=aarch64 ;;
         *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
       esac
+      KEA_VERSION=$(cat dev/docker/kea.version)
       docker build --pull=false \
+        --build-arg KEA_VERSION="$KEA_VERSION" \
         -t build-container-localdev \
         -f "dev/docker/Dockerfile.build-container-$BUILD_ARCH" .
   - name: load-images-into-local-cluster

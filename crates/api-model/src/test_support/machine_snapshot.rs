@@ -25,7 +25,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 
-use carbide_uuid::machine::{MachineId, MachineIdSource, MachineInterfaceId, MachineType};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSource, MachineIdSubtypeTrait,
+    MachineInterfaceId, MachineType, StableHostMachineId,
+};
 use carbide_uuid::network::NetworkSegmentId;
 use chrono::{DateTime, TimeZone, Utc};
 use config_version::ConfigVersion;
@@ -34,7 +37,7 @@ use health_report::HealthReport;
 use crate::bmc_info::BmcInfo;
 use crate::hardware_info::{
     BlockDevice, CpuInfo, DmiData, Gpu, HardwareInfo, InfinibandInterface, MachineInventory,
-    MachineInventorySoftwareComponent, MemoryDevice, NetworkInterface, NvmeDevice,
+    MachineInventorySoftwareComponent, MemoryDeviceGroup, NetworkInterface, NvmeDevice,
     PciDeviceProperties, TpmEkCertificate,
 };
 use crate::health::HealthReportSources;
@@ -45,9 +48,10 @@ use crate::machine::json::MachineSnapshotPgJson;
 use crate::machine::network::{MachineNetworkStatusObservation, ManagedHostNetworkConfig};
 use crate::machine::topology::{DiscoveryData, MachineTopology, TopologyData};
 use crate::machine::{
-    CURRENT_STATE_MODEL_VERSION, Dpf, FailureCause, FailureDetails, FailureSource, HostProfile,
-    Machine, MachineInterfaceSnapshot, MachineLastRebootRequested, MachineLastRebootRequestedMode,
-    ManagedHostState, ManagedHostStateSnapshot, UpgradeDecision,
+    CURRENT_STATE_MODEL_VERSION, Dpf, DpuMachine, FailureCause, FailureDetails, FailureSource,
+    HostMachine, HostProfile, MachineInterfaceSnapshot, MachineLastRebootRequested,
+    MachineLastRebootRequestedMode, ManagedHostState, ManagedHostStateSnapshot, StableHostMachine,
+    UpgradeDecision,
 };
 use crate::machine_interface::InterfaceType;
 use crate::network_segment::NetworkSegmentType;
@@ -57,12 +61,14 @@ use crate::test_support::dpu::DPU_BF3_INFO_JSON;
 use crate::test_support::{DpuConfig, HardwareInfoTemplate};
 
 /// Deterministic machine id for the fixture host.
-pub fn host_machine_id() -> MachineId {
+pub fn host_machine_id() -> StableHostMachineId {
     MachineId::new(MachineIdSource::Tpm, [0x11; 32], MachineType::Host)
+        .try_into()
+        .unwrap()
 }
 
 /// Deterministic machine ids for the fixture host's DPUs.
-pub fn dpu_machine_id(index: u8) -> MachineId {
+pub fn dpu_machine_id(index: u8) -> DpuMachineId {
     // Widen before adding: `0x20 + index` on a u8 overflows past index 223,
     // the same bound `fixture_dpu_index` documents. Fail with a clear message
     // instead of an overflow panic.
@@ -76,12 +82,14 @@ pub fn dpu_machine_id(index: u8) -> MachineId {
         [hash_byte as u8; 32],
         MachineType::Dpu,
     )
+    .try_into()
+    .unwrap()
 }
 
 /// Recovers the index a [`dpu_machine_id`] was created from, so id-keyed
 /// builders can give each fixture DPU its own hardware identity. `None` for
 /// ids that no fixture index produces.
-fn fixture_dpu_index(machine_id: MachineId) -> Option<u8> {
+fn fixture_dpu_index(machine_id: DpuMachineId) -> Option<u8> {
     // `dpu_machine_id` fills the id bytes with `0x20 + index`, so indexes
     // beyond `u8::MAX - 0x20` are not constructible.
     (0..=u8::MAX - 0x20).find(|&index| dpu_machine_id(index) == machine_id)
@@ -202,12 +210,11 @@ pub fn host_hardware_info() -> HardwareInfo {
                 platform_info: None,
             })
             .collect(),
-        memory_devices: (0..8)
-            .map(|_| MemoryDevice {
-                size_mb: Some(65536),
-                mem_type: Some("DDR5".to_string()),
-            })
-            .collect(),
+        memory_devices: vec![MemoryDeviceGroup {
+            size_mb: Some(65536),
+            mem_type: Some("DDR5".to_string()),
+            count: 8,
+        }],
         tpm_description: None,
     }
 }
@@ -243,7 +250,7 @@ fn interface(
     machine_id: MachineId,
     interface_type: InterfaceType,
     primary: bool,
-    attached_dpu: Option<MachineId>,
+    attached_dpu: Option<carbide_uuid::machine::DpuMachineId>,
     segment_type: Option<NetworkSegmentType>,
 ) -> MachineInterfaceSnapshot {
     MachineInterfaceSnapshot {
@@ -271,7 +278,7 @@ fn interface(
 /// The host's 9 interfaces: one BMC, one primary boot interface, two
 /// DPU-attached ports (matching `host_hardware_info` MACs), two on
 /// `HostInband` segments, and regular tenant/data ports for the rest.
-fn host_interfaces(machine_id: MachineId) -> Vec<MachineInterfaceSnapshot> {
+fn host_interfaces(machine_id: HostMachineId) -> Vec<MachineInterfaceSnapshot> {
     (0..9)
         .map(|i| {
             let attached_dpu = match i {
@@ -286,7 +293,7 @@ fn host_interfaces(machine_id: MachineId) -> Vec<MachineInterfaceSnapshot> {
             };
             interface(
                 i,
-                machine_id,
+                machine_id.into(),
                 if i == 0 {
                     InterfaceType::Bmc
                 } else {
@@ -332,25 +339,24 @@ fn health_reports(agent_source: &str) -> HealthReportSources {
 ///
 /// `machine_type` decides between the host shape (8 GPUs, 9 NICs) and the
 /// DPU shape (BlueField hardware info, small interface set).
-pub fn machine_snapshot_pg_json(machine_id: MachineId) -> MachineSnapshotPgJson {
-    let is_dpu = machine_id.machine_type().is_dpu();
-    let hardware_info = if is_dpu {
-        dpu_hardware_info(fixture_dpu_index(machine_id).unwrap_or(0))
-    } else {
-        host_hardware_info()
+pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> MachineSnapshotPgJson {
+    let host_or_dpu = machine_id.host_or_dpu_id();
+    let (hardware_info, interfaces, dpu_machine_id) = match host_or_dpu {
+        HostOrDpuId::Dpu(dpu_machine_id) => (
+            dpu_hardware_info(fixture_dpu_index(dpu_machine_id).unwrap_or(0)),
+            vec![interface(
+                0,
+                dpu_machine_id.into(),
+                InterfaceType::Data,
+                true,
+                None,
+                Some(NetworkSegmentType::Underlay),
+            )],
+            Some(dpu_machine_id),
+        ),
+        HostOrDpuId::Host(host_id) => (host_hardware_info(), host_interfaces(host_id), None),
     };
-    let interfaces = if is_dpu {
-        vec![interface(
-            0,
-            machine_id,
-            InterfaceType::Data,
-            true,
-            None,
-            Some(NetworkSegmentType::Underlay),
-        )]
-    } else {
-        host_interfaces(machine_id)
-    };
+
     let bmc_info = BmcInfo {
         machine_interface_id: Some(MachineInterfaceId::from(uuid::Uuid::from_u128(0x1000))),
         ip: Some(IpAddr::from([10, 180, 0, 9])),
@@ -365,7 +371,8 @@ pub fn machine_snapshot_pg_json(machine_id: MachineId) -> MachineSnapshotPgJson 
         decommission_requested: false,
         bmc_credential_rotation_requested: false,
         uefi_credential_rotation_requested: false,
-        id: machine_id,
+        lockdown_ikm_credential_rotation_requested: false,
+        id: machine_id.into(),
         rack_id: Some("rack-bench-01".parse().expect("valid rack id")),
         created: fixture_time(0),
         updated: fixture_time(2000),
@@ -392,16 +399,17 @@ pub fn machine_snapshot_pg_json(machine_id: MachineId) -> MachineSnapshotPgJson 
             quarantine_state: None,
             use_admin_network_changed: None,
         },
-        network_status_observation: Some(MachineNetworkStatusObservation {
-            machine_id,
-            agent_version: Some("1.4.2".to_string()),
-            observed_at: fixture_time(1900),
-            network_config_version: Some(config_version(3)),
-            client_certificate_expiry: Some(1_781_536_000),
-            agent_version_superseded_at: None,
-            instance_network_observation: None,
-            extension_service_observation: None,
-            fabric_interfaces: vec![],
+        network_status_observation: dpu_machine_id.map(|machine_id| {
+            MachineNetworkStatusObservation {
+                machine_id,
+                agent_version: Some("1.4.2".to_string()),
+                observed_at: fixture_time(1900),
+                network_config_version: Some(config_version(3)),
+                client_certificate_expiry: Some(1_781_536_000),
+                agent_version_superseded_at: None,
+                instance_network_observation: None,
+                fabric_interfaces: vec![],
+            }
         }),
         infiniband_status_observation: Some(MachineInfinibandStatusObservation {
             ib_interfaces: (0..6)
@@ -417,6 +425,7 @@ pub fn machine_snapshot_pg_json(machine_id: MachineId) -> MachineSnapshotPgJson 
         }),
         nvlink_status_observation: None,
         spx_status_observation: None,
+        extension_service_status_observations: Default::default(),
         controller_state_version: config_version(5).version_string(),
         controller_state: ManagedHostState::Ready,
         last_discovery_time: Some(fixture_time(200)),
@@ -448,7 +457,7 @@ pub fn machine_snapshot_pg_json(machine_id: MachineId) -> MachineSnapshotPgJson 
             last_updated: fixture_time(1600),
         }),
         firmware_autoupdate: Some(true),
-        health_reports: Some(health_reports(if is_dpu {
+        health_reports: Some(health_reports(if dpu_machine_id.is_some() {
             HealthReport::DPU_AGENT_SOURCE
         } else {
             "platform-health"
@@ -462,7 +471,7 @@ pub fn machine_snapshot_pg_json(machine_id: MachineId) -> MachineSnapshotPgJson 
         instance_type_id: Some(uuid::Uuid::from_u128(0x4001).into()),
         interfaces,
         topology: vec![MachineTopology {
-            machine_id,
+            machine_id: machine_id.into(),
             topology: TopologyData {
                 discovery_data: DiscoveryData {
                     info: hardware_info,
@@ -495,7 +504,6 @@ pub fn machine_snapshot_pg_json(machine_id: MachineId) -> MachineSnapshotPgJson 
         power_options: None,
         hw_sku_device_type: Some("compute".to_string()),
         update_complete: true,
-        backend_firmware_object_job_id: None,
         nvlink_info: None,
         dpf: Dpf {
             enabled: false,
@@ -508,15 +516,15 @@ pub fn machine_snapshot_pg_json(machine_id: MachineId) -> MachineSnapshotPgJson 
     }
 }
 
-/// A fully-populated host [`Machine`], as loaded from the database.
-pub fn host_machine() -> Machine {
+/// A fully-populated host [`StableHostMachine`], as loaded from the database.
+pub fn host_machine() -> StableHostMachine {
     machine_snapshot_pg_json(host_machine_id())
         .try_into()
         .expect("fixture host snapshot converts to Machine")
 }
 
-/// A fully-populated DPU [`Machine`], as loaded from the database.
-pub fn dpu_machine(index: u8) -> Machine {
+/// A fully-populated DPU [`DpuMachine`], as loaded from the database.
+pub fn dpu_machine(index: u8) -> DpuMachine {
     machine_snapshot_pg_json(dpu_machine_id(index))
         .try_into()
         .expect("fixture DPU snapshot converts to Machine")
@@ -525,7 +533,7 @@ pub fn dpu_machine(index: u8) -> Machine {
 /// A managed-host snapshot bundling the fixture host with two DPUs, as the
 /// GetMachines / FindMachinesByIds handlers see it.
 pub fn managed_host_state_snapshot() -> ManagedHostStateSnapshot {
-    let host_snapshot = host_machine();
+    let host_snapshot: HostMachine = host_machine().into();
     let managed_state = host_snapshot.state.value.clone();
     ManagedHostStateSnapshot {
         host_snapshot,
@@ -535,5 +543,108 @@ pub fn managed_host_state_snapshot() -> ManagedHostStateSnapshot {
         managed_state,
         aggregate_health: health_report_with_source("aggregate-health"),
         rack_health_overrides: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+    use serde_json::json;
+
+    use super::*;
+
+    fn memory_devices(memory_devices_json: serde_json::Value) -> Vec<MemoryDeviceGroup> {
+        let json = json!({
+            "machine_type": "x86_64",
+            "memory_devices": memory_devices_json,
+        });
+        let info: HardwareInfo = serde_json::from_value(json).unwrap();
+        info.memory_devices
+    }
+
+    /// `HardwareInfo.memory_devices` accepts both the condensed `{size_mb, mem_type, count}`
+    /// shape and the legacy flat shape (`{size_mb, mem_type}`, one object per DIMM, implicit
+    /// `count: 1`). Consecutive entries with the same `(size_mb, mem_type)` merge regardless of
+    /// which shape produced them.
+    #[test]
+    fn hardware_info_normalizes_mixed_legacy_and_counted_memory_devices() {
+        check_values(
+            [
+                Check {
+                    scenario: "legacy entries without count merge like a single counted group",
+                    input: json!([
+                        {"size_mb": 16384, "mem_type": "DDR5"},
+                        {"size_mb": 16384, "mem_type": "DDR5"},
+                        {"size_mb": 16384, "mem_type": "DDR5"}
+                    ]),
+                    expect: vec![MemoryDeviceGroup {
+                        size_mb: Some(16384),
+                        mem_type: Some("DDR5".into()),
+                        count: 3,
+                    }],
+                },
+                Check {
+                    scenario: "a legacy entry directly followed by a counted entry of the same key merges",
+                    input: json!([
+                        {"size_mb": 16384, "mem_type": "DDR5"},
+                        {"size_mb": 16384, "mem_type": "DDR5", "count": 4}
+                    ]),
+                    expect: vec![MemoryDeviceGroup {
+                        size_mb: Some(16384),
+                        mem_type: Some("DDR5".into()),
+                        count: 5,
+                    }],
+                },
+                Check {
+                    scenario: "a counted entry directly followed by a legacy entry of the same key merges",
+                    input: json!([
+                        {"size_mb": 16384, "mem_type": "DDR5", "count": 4},
+                        {"size_mb": 16384, "mem_type": "DDR5"}
+                    ]),
+                    expect: vec![MemoryDeviceGroup {
+                        size_mb: Some(16384),
+                        mem_type: Some("DDR5".into()),
+                        count: 5,
+                    }],
+                },
+                Check {
+                    scenario: "legacy and counted entries with different keys stay separate",
+                    input: json!([
+                        {"size_mb": 8192, "mem_type": "DDR4"},
+                        {"size_mb": 16384, "mem_type": "DDR5", "count": 4},
+                        {"size_mb": 8192, "mem_type": "DDR4"}
+                    ]),
+                    expect: vec![
+                        MemoryDeviceGroup {
+                            size_mb: Some(8192),
+                            mem_type: Some("DDR4".into()),
+                            count: 1,
+                        },
+                        MemoryDeviceGroup {
+                            size_mb: Some(16384),
+                            mem_type: Some("DDR5".into()),
+                            count: 4,
+                        },
+                        MemoryDeviceGroup {
+                            size_mb: Some(8192),
+                            mem_type: Some("DDR4".into()),
+                            count: 1,
+                        },
+                    ],
+                },
+                Check {
+                    // Ties the legacy wire shape back to the fixture host's own memory
+                    // layout: 8 flat DIMM entries should normalize to exactly what
+                    // `host_hardware_info()` already carries as a single counted group.
+                    scenario: "a full host's worth of legacy DIMMs matches the fixture's counted group",
+                    input: json!(
+                        std::iter::repeat_n(json!({"size_mb": 65536, "mem_type": "DDR5"}), 8)
+                            .collect::<Vec<_>>()
+                    ),
+                    expect: host_hardware_info().memory_devices,
+                },
+            ],
+            memory_devices,
+        );
     }
 }

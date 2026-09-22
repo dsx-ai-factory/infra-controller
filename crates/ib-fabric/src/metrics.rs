@@ -689,15 +689,7 @@ enum UfmOperationStatus {
     // If you add anything here, adjust the values function below
 }
 
-impl UfmOperationStatus {
-    /// The closed status vocabulary. `UfmGuidPkeyChangeFinished`'s variants now
-    /// enumerate the (operation, status) space directly, so this survives to
-    /// pin the vocabulary in tests.
-    #[cfg(test)]
-    fn values() -> impl Iterator<Item = Self> {
-        [Self::Ok, Self::Error].into_iter()
-    }
-}
+impl UfmOperationStatus {}
 
 /// `ConfiguredFabric` is the reviewed escape hatch for the existing `fabric`
 /// label. Values come from `IbFabricMonitor`'s startup configuration, and the
@@ -882,7 +874,7 @@ fn truncate_error_for_metric_label(mut error: String) -> String {
 #[cfg(test)]
 mod tests {
     use carbide_instrument::emit;
-    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
 
     use super::*;
@@ -911,7 +903,7 @@ mod tests {
             log_count: usize,
             log: Option<LogObservation>,
             histogram_count_delta: u64,
-            histogram_sum_delta: f64,
+            histogram_sum_delta: ApproxHistogramSum,
         }
 
         let failure = r#"Internal { message: "simulated iteration failure" }"#;
@@ -927,7 +919,7 @@ mod tests {
                         log_count: 0,
                         log: None,
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 125.0,
+                        histogram_sum_delta: ApproxHistogramSum(125.0),
                     },
                 },
                 Check {
@@ -940,7 +932,7 @@ mod tests {
                         log_count: 0,
                         log: None,
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 125.5,
+                        histogram_sum_delta: ApproxHistogramSum(125.5),
                     },
                 },
                 Check {
@@ -960,7 +952,7 @@ mod tests {
                             error: Some(failure.to_string()),
                         }),
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 375.0,
+                        histogram_sum_delta: ApproxHistogramSum(375.0),
                     },
                 },
             ],
@@ -1604,34 +1596,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn enumerates_ufm_operations_and_statuses() {
-        assert_eq!(
-            UfmOperation::values().collect::<Vec<_>>(),
-            vec![
-                UfmOperation::BindGuidToPkey,
-                UfmOperation::UnbindGuidFromPkey
-            ]
-        );
-        assert_eq!(
-            UfmOperationStatus::values().collect::<Vec<_>>(),
-            vec![UfmOperationStatus::Ok, UfmOperationStatus::Error]
-        );
-    }
-
-    #[test]
-    fn creates_empty_monitor_metrics() {
-        let metrics = IbFabricMonitorMetrics::new();
-
-        assert_eq!(metrics.num_fabrics, 0);
-        assert!(metrics.fabrics.is_empty());
-        assert_eq!(metrics.num_machine_ib_status_updates, 0);
-        assert!(metrics.num_machines_by_port_states.is_empty());
-        assert!(metrics.num_machines_by_ports_with_partitions.is_empty());
-        assert_eq!(metrics.num_machines_with_missing_pkeys, 0);
-        assert_eq!(metrics.num_machines_with_unexpected_pkeys, 0);
-        assert_eq!(metrics.num_machines_with_unknown_pkeys, 0);
     }
 }

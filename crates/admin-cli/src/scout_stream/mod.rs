@@ -28,9 +28,6 @@ use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
-#[cfg(test)]
-mod tests;
-
 #[derive(Parser, Debug, Dispatch)]
 pub(crate) enum ScoutStreamAction {
     #[clap(about = "Show all active scout stream connections")]

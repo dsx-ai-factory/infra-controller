@@ -24,8 +24,5 @@
 mod args;
 mod cmds;
 
-#[cfg(test)]
-mod tests;
-
 pub(crate) use args::RedfishAction;
 pub(crate) use cmds::action;

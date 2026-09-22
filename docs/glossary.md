@@ -6,7 +6,6 @@ Terms are grouped by domain rather than by repository. A reader looking up "Site
 
 This glossary focuses on NICo-specific concepts: terms that only make sense in the context of the NICo platform. Where a term has a general industry definition but carries additional NICo-specific meaning, this glossary explains the NICo-specific part.
 
-
 ## Platform Architecture
 
 ### NICo
@@ -148,11 +147,26 @@ VXLAN solves this by wrapping an Ethernet frame in a VXLAN packet identified by 
 
 ### Network Segments
 
-A NICo concept for defining IP address pools. Underlay segments are used for management traffic on the underlying physical network, such as DPU OOB and BMC addresses. Overlay segments are used for tenant-facing networks built on top of VXLAN. NICo assigns IPs from overlay segments to Hosts when creating instances.
+A NICo concept for defining IP address pools. Underlay segments are normally
+used for management traffic on the underlying physical network, such as DPU OOB
+and BMC addresses. A supported zero-DPU exception places the host BMC on
+HostInband instead. Overlay segments are used for tenant-facing networks built
+on top of VXLAN. NICo assigns IPs from overlay segments to Hosts when creating
+instances.
 
 ### HostInband Network Segment
 
-A network segment type for the underlay network that a zero-DPU host's NIC attaches to directly. Unlike overlay (tenant) segments, a HostInband segment describes a real underlay subnet, exists before any VPC, and may remain unassociated with a VPC. It is the only segment type a Flat VPC accepts. Operators declare HostInband segments in the API server configuration (or create them through the segment API); tenant instances on zero-DPU hosts attach to them automatically rather than drawing a link-net from a VpcPrefix.
+A network segment type for the underlay network that a zero-DPU host's NIC
+attaches to directly. Unlike overlay (tenant) segments, a HostInband segment
+describes a real underlay subnet, exists before any VPC, and may remain
+unassociated with a VPC. It is the only segment type a Flat VPC accepts. A
+zero-DPU host BMC may share the same physical subnet/VLAN and segment with the
+host OS, using a distinct address; this does not extend to DPU BMC or DPU OOB
+interfaces. Operators declare HostInband segments in the API server
+configuration (or create them through the segment API); tenant instances on
+zero-DPU hosts attach to them automatically rather than drawing a link-net from
+a VpcPrefix. See
+[Shared HostInband for a Host BMC and Host OS](provisioning/ip-and-network-configuration.md#15-shared-hostinband-for-a-host-bmc-and-host-os).
 
 ### Flat VPC
 
@@ -160,7 +174,7 @@ A VPC virtualization type for tenant instances on zero-DPU hosts. A Flat VPC is 
 
 ### Zero-DPU Host
 
-A managed host that NICo operates without a NICo-managed DPU — either a host whose DPU policy is `ignore`, or a host whose BlueField DPU is run as a plain NIC through `nic`. NICo does not build an overlay for a zero-DPU host; its tenant instances attach directly to HostInband underlay segments and belong to Flat VPCs. DPU policy is set site-wide in the API server configuration or per host on its Expected Machine. `rack_management_enabled` does not itself make a host zero-DPU; rack-manager deployments must also resolve the applicable DPU policy to `nic`.
+A managed host that NICo operates without a NICo-managed DPU — either a host whose DPU policy is `ignore`, or a host whose BlueField DPU is run as a plain NIC through `nic`. NICo does not build an overlay for a zero-DPU host; its tenant instances attach directly to HostInband underlay segments and belong to Flat VPCs. DPU policy is set site-wide in the API server configuration or per host on its Expected Machine. Rack-manager deployments must resolve the applicable DPU policy to `nic` to run DPUs as plain NICs.
 
 ### HBN in NICo
 
@@ -275,7 +289,12 @@ General reference: [Redfish](https://en.wikipedia.org/wiki/Redfish_(specificatio
 
 ### OOB
 
-Out of band. OOB management uses a path independent from the Host operating system, usually through BMC and DPU management networks, so NICo can discover, power-cycle, and repair machines even when the tenant OS is unavailable.
+Out of band. OOB management uses an endpoint independent from the Host operating
+system, usually through dedicated BMC and DPU management networks, so NICo can
+discover, power-cycle, and repair machines even when the tenant OS is
+unavailable. A host BMC can remain operationally out of band while sharing a
+HostInband L2 network with a zero-DPU host OS, but that topology lacks dedicated
+network isolation.
 
 ### IPMI
 

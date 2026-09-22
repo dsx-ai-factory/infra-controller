@@ -30,7 +30,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use carbide_network::virtualization::{VpcVirtualizationType, get_svi_ip};
 use carbide_uuid::domain::DomainId;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineInterfaceId};
 use carbide_uuid::network::NetworkSegmentId;
 use chrono::{DateTime, TimeZone, Utc};
 use eyre::WrapErr;
@@ -294,8 +294,6 @@ async fn run_common_parts(
     virtualization_type: VpcVirtualizationType,
     test_metadata_service: bool,
 ) -> eyre::Result<TestOut> {
-    carbide_host_support::init_logging("nico-dpu-agent")?;
-
     let state: Arc<Mutex<State>> = Arc::new(Mutex::new(Default::default()));
     state.lock().await.virtualization_type = virtualization_type;
 
@@ -477,14 +475,14 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         vlan_id: 10,
         vni: 10100,
         vpc_vni: 10101,
-        gateway: "192.168.0.0/16".to_string(),
-        ip: "192.168.0.12".to_string(),
-        interface_prefix: admin_interface_prefix.to_string(),
+        gateway: Some("192.168.0.0/16".to_string()),
+        ip: Some("192.168.0.12".to_string()),
+        interface_prefix: Some(admin_interface_prefix.to_string()),
         virtual_function_id: None,
         vpc_prefixes: vec![],
         vpc_peer_prefixes: vec![],
         vpc_peer_vnis: vec![1025186, 1025197],
-        prefix: "192.168.0.1/32".to_string(),
+        prefix: Some("192.168.0.1/32".to_string()),
         fqdn: "host1".to_string(),
         booturl: None,
         svi_ip: get_svi_ip(&Some(svi_ip), virtualization_type, false, 28)
@@ -509,14 +507,14 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         vlan_id: 10,
         vni: 10100,
         vpc_vni: 10101,
-        gateway: "192.168.1.0/16".to_string(),
-        ip: "192.168.1.12".to_string(),
-        interface_prefix: tenant_interface_prefix.to_string(),
+        gateway: Some("192.168.1.0/16".to_string()),
+        ip: Some("192.168.1.12".to_string()),
+        interface_prefix: Some(tenant_interface_prefix.to_string()),
         virtual_function_id: None,
         vpc_prefixes: vec![],
         vpc_peer_prefixes,
         vpc_peer_vnis,
-        prefix: "192.168.1.1/32".to_string(),
+        prefix: Some("192.168.1.1/32".to_string()),
         fqdn: "host1".to_string(),
         booturl: None,
         svi_ip: get_svi_ip(&Some(svi_ip), virtualization_type, false, 28)
@@ -939,6 +937,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         remote_id: "".to_string(),
         deny_prefixes: vec!["1.1.1.1/32".to_string()],
         site_fabric_prefixes: vec!["2.2.2.2/32".to_string()],
+        site_fabric_null_routes: None,
+        vpc_peer_vnis_authoritative: true,
         vpc_isolation_behavior: rpc::forge::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
         deprecated_deny_prefixes: vec![],
         enable_dhcp: true,
@@ -1024,7 +1024,7 @@ async fn handle_find_interfaces() -> impl axum::response::IntoResponse {
                 .expect("valid interface id"),
         ),
         attached_dpu_machine_id: Some(
-            MachineId::from_str("fm100ds7f2c7e5i3nlho0cfq4ke3ma8chtpn49qm6j12rv63l6fa527j8c0")
+            DpuMachineId::from_str("fm100ds7f2c7e5i3nlho0cfq4ke3ma8chtpn49qm6j12rv63l6fa527j8c0")
                 .expect("valid machine id"),
         ),
         machine_id: Some(

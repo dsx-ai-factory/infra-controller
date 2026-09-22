@@ -39,6 +39,8 @@ type BMCStatus struct {
 	Redfish EndpointStatus `json:"redfish"`
 	// IPMI contains the IPMI endpoint configuration, if enabled.
 	IPMI *EndpointStatus `json:"ipmi,omitempty"`
+	// SSH contains the SSH serial-console endpoint configuration, if enabled.
+	SSH *EndpointStatus `json:"ssh,omitempty"`
 }
 
 // EndpointStatus describes port mapping for an endpoint.

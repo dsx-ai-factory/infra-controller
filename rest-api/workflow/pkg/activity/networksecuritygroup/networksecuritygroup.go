@@ -6,7 +6,6 @@ package networksecuritygroup
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -155,6 +154,15 @@ func (mv ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupsInDB(ctx context
 			//			but this isn't expensive.
 			reportedNetworkSecurityGroupIDMap[networkSecurityGroup.ID] = true
 
+			// A row written since the Site collected this inventory holds changes the snapshot
+			// cannot know about, including rules set through the API, so writing the reported
+			// values over them would lose those edits.
+			if site.IsTimeWithinStaleInventoryThreshold(networkSecurityGroup.Updated) {
+				slogger.Info().Msg("not updating NetworkSecurityGroup yet because it changed more recently than the inventory interval")
+
+				continue
+			}
+
 			if networkSecurityGroup.Version != controllerNetworkSecurityGroup.Version {
 				// If the record coming in from site is known to cloud but site
 				// reports a different version, time to update cloud.
@@ -206,7 +214,7 @@ func (mv ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupsInDB(ctx context
 				// inventory, so make sure the object has existed for at least as
 				// long as our inventory interval with a little buffer to make
 				// sure we aren't in lock-step.
-				if time.Since(networkSecurityGroup.Created) < cwutil.InventoryReceiptInterval+(time.Second*5) {
+				if site.IsTimeWithinStaleInventoryThreshold(networkSecurityGroup.Created) {
 					slogger.Info().Msg("not going to delete yet because group is newer than the inventory interval")
 
 					continue

@@ -45,3 +45,19 @@ pub(super) const ROTATING_BMC: u64 = 15 * 60; // 15 minutes
 
 /// SLA for PowerShelf rack-level reprovisioning (firmware wait) in seconds
 pub(super) const REPROVISIONING: u64 = 3600; // 1 hour
+
+/// SLA for Site Explorer suppression acknowledgement during decommissioning
+pub(super) const DECOMMISSIONING_SUPPRESSING_SITE_EXPLORER: u64 = 300; // 5 minutes
+
+/// SLA for recording BMC DHCP suppression during decommissioning
+pub(super) const DECOMMISSIONING_SUPPRESSING_BMC_DHCP: u64 = 300; // 5 minutes
+
+/// SLA for BMC factory reset during decommissioning
+pub(super) const DECOMMISSIONING_FACTORY_RESET_BMC: u64 = 300; // 5 minutes
+
+/// SLA for waiting for BMC DHCP suppression acknowledgement after reset.
+/// Covers BMC reboot, Kea reload, and the subsequent DHCP discover.
+pub(super) const DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACK: u64 = 15 * 60; // 15 minutes
+
+/// SLA for deleting managed per-device credentials during decommissioning
+pub(super) const DECOMMISSIONING_DELETING_MANAGED_CREDENTIALS: u64 = 300; // 5 minutes

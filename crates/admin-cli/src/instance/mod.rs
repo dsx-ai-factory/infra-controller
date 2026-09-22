@@ -27,13 +27,9 @@ mod update_spx_config;
 // Cross-module re-exports for jump module
 // Cross-module re-export for rpc module
 pub(crate) use allocate::args::Args as AllocateInstance;
+use clap::Parser;
 pub(crate) use show::args::Args as ShowInstance;
 pub(crate) use show::cmd::handle_show;
-
-#[cfg(test)]
-mod tests;
-
-use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
 

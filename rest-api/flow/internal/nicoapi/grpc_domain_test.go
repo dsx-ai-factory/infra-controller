@@ -37,6 +37,15 @@ func (c *deadlineTrackingForgeClient) FindSwitchIds(
 	return &corev1.SwitchIdList{Ids: []*corev1.SwitchId{{Id: "switch-a"}}}, nil
 }
 
+func (c *deadlineTrackingForgeClient) Version(
+	ctx context.Context,
+	_ *corev1.VersionRequest,
+	_ ...grpc.CallOption,
+) (*corev1.BuildInfo, error) {
+	c.recordDeadline(ctx)
+	return &corev1.BuildInfo{RuntimeConfig: &corev1.RuntimeConfig{MaxFindByIds: 100}}, nil
+}
+
 func (c *deadlineTrackingForgeClient) FindSwitchesByIds(
 	ctx context.Context,
 	_ *corev1.SwitchesByIdsRequest,
@@ -54,13 +63,14 @@ func (c *deadlineTrackingForgeClient) FindSwitchesByIds(
 
 func TestGetObservedNVLinkDomainMembershipsUsesPerRPCTimeouts(t *testing.T) {
 	forgeClient := &deadlineTrackingForgeClient{}
-	client := &grpcClient{gclient: forgeClient, grpcTimeout: time.Minute}
+	client := &grpcClient{gclient: newBatchingForgeClient(forgeClient), grpcTimeout: time.Minute}
 
 	memberships, err := client.GetObservedNVLinkDomainMemberships(context.Background())
 	require.NoError(t, err)
 	require.Len(t, memberships, 1)
-	require.Len(t, forgeClient.deadlines, 2)
+	require.Len(t, forgeClient.deadlines, 3)
 	assert.Greater(t, forgeClient.deadlines[1].Sub(forgeClient.deadlines[0]), 5*time.Millisecond)
+	assert.Equal(t, forgeClient.deadlines[1], forgeClient.deadlines[2])
 }
 
 func TestNVLinkDomainMembershipsFromSwitches(t *testing.T) {

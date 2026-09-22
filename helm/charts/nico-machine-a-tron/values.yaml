@@ -22,6 +22,9 @@ global:
   ## Namespace override (propagates to subcharts). Required when mat-k8s-controller is enabled.
   ## Example: --set global.namespaceOverride=nico-system
   namespaceOverride: ""
+  ## Pull Secrets referenced by the machine-a-tron and controller Deployments.
+  ## Example: [{name: machine-a-tron-pull}] together with imagePullSecret.create.
+  imagePullSecrets: []
   certificate:
     duration: 720h0m0s
     renewBefore: 360h0m0s
@@ -48,6 +51,12 @@ image:
 ## Create namespace when global.namespaceOverride is set
 createNamespace: true
 
+## Create the `machine-a-tron-pull` pull Secret from base64-encoded docker config
+## JSON. Reference it in global.imagePullSecrets.
+imagePullSecret:
+  create: false
+  dockerconfigjson: ""
+
 automountServiceAccountToken: false
 
 ## Graceful shutdown timeout (seconds)
@@ -72,6 +81,39 @@ service:
     targetPort: 2222
   metrics:
     port: 9090
+
+## =============================================================================
+## DHCP Relay Mode
+## =============================================================================
+## When enabled, machine-a-tron obtains IP addresses through UDP relay to a
+## DHCP server instead of the Carbide API. This exercises the real DHCP packet
+## path in Kubernetes deployments.
+##
+## Prerequisites:
+##   - nico-dhcp must be deployed (default: nico-system namespace)
+##   - A dedicated K8s ServiceCIDR for relay IPs (e.g., mat-dhcp-services)
+##
+## Each pod gets a unique ClusterIP Service for receiving DHCP replies:
+##   - Pod 0 (mat-0): baseIP + 0 (e.g., 10.96.127.10)
+##   - Pod 1 (mat-1): baseIP + 1 (e.g., 10.96.127.11)
+##
+## WARNING: Kubernetes ClusterIP addresses are immutable. Changing baseIP
+## after initial deployment requires deleting and recreating the Services.
+##
+dhcpRelay:
+  ## Base IP address for DHCP relay Services. Setting this enables relay mode.
+  ## Each pod's ClusterIP = baseIP + podIndex.
+  ## Must be from a ServiceCIDR available to the cluster.
+  ## Leave empty to use API mode (default).
+  baseIP: ""
+
+  ## UDP port for receiving DHCP replies. Must match the DHCP server's
+  ## relay response port (typically 67).
+  listenPort: 67
+
+  ## DHCP server address (host:port). Default: nico-dhcp.nico-system.svc.cluster.local:67
+  ## Override if nico-dhcp is deployed in a different namespace or uses a non-standard port.
+  serverAddress: ""
 
 certificate:
   serviceName: ""
@@ -101,9 +143,9 @@ envFrom:
 
 # startupProbe gates the livenessProbe until MAT has bound its redfish port.
 # MAT binds the port only after registering all expected machines via the API,
-# which takes O(hosts) time. Without a startupProbe the kubelet kills the pod
-# mid-registration (exit 137) once livenessProbe failures exceed failureThreshold
-# (issue #4298). Scale the failureThreshold to cover your largest deployment:
+# which can take a while for large deployments (time scales with host count).
+# Without a startupProbe the kubelet kills the pod mid-registration (exit 137)
+# Scale the failureThreshold to cover your largest deployment:
 #   hosts=2300  → default (20 * 30s = 10 min)
 #   hosts=4500  → failureThreshold: 60  (30 min)
 #   hosts=13500 → failureThreshold: 1200 (10 h, see machine-a-tron-scale.yaml)
@@ -150,21 +192,15 @@ ufmMock:
 ## =============================================================================
 machineATron:
   nicoApiUrl: "https://nico-api.nico-system.svc.cluster.local:1079"
-  interface: "NOTUSED"
-  tuiEnabled: false
   logFile: ""
   # Kubernetes log collectors consume structured logs from stdout.
   logFormat: "logfmt"
-  useSingleBmcMock: true
   mockBmcSshServer: true
   mockBmcSshPort: 2222
   configureBmcProxyHost: ""
   persistDir: "/tmp/machine-a-tron-data"
   cleanupOnQuit: false
   enableIpmiSimulation: false
-  # IPMI port advertised through Redfish. Unset uses default 623
-  # Set to 0 for dynamic port (required for mat-k8s-controller)
-  # ipmiReachablePort: 0
   registerExpectedMachines: true
   hostBmcPassword: ""
   dpuBmcPassword: ""
@@ -177,18 +213,23 @@ machineATron:
 ## Override per-group by specifying the value in pods.*.machines.*.
 ##
 machineDefaults:
-  vpcCount: 0
-  subnetsPerVpc: 0
   dpuRebootDelay: 1
   hostRebootDelay: 1
+  ## Positive multiplier applied after timing overrides. Default 1.0; values below 1 speed up the simulation.
+  accelerationFactor: 1.0
   scoutRunInterval: "60s"
   ## Delay after a failed DiscoverMachine call; the default matches the production DPU agent.
   discoveryRetryInterval: "60s"
   runIntervalWorking: "1s"
   runIntervalIdle: "10s"
   networkStatusRunInterval: "20s"
-  networkVirtualizationType: ""
   dpusInNicMode: false
+  ## Host firmware upgrade simulation. Set initial BMC/UEFI versions here to
+  ## apply to all machine groups. Override per-group in pods.*.machines.*.
+  ## When set, NICo detects version delta and triggers the upgrade flow.
+  # hostFirmwareVersions:
+  #   bmc: "24.08.00"
+  #   uefi: "01.04.00"
 
 ## =============================================================================
 ## MAC Address Pool - Standalone MACs for BMC and management interfaces
@@ -262,8 +303,11 @@ hwMacAddressRanges:
 ##   - hwType: Hardware type (required)
 ##   - hostCount: Number of hosts (required)
 ##   - dpuPerHostCount: DPUs per host (default: 0)
-##   - oobDhcpRelayAddress: OOB network gateway
-##   - adminDhcpRelayAddress: Admin network gateway
+##   - bmcDhcpRelayAddress: BMC (OOB) network gateway, the relay for BMC DHCP
+##   - underlayDhcpRelayAddress: underlay segment gateway, the relay for DPU OOB
+##     and switch NVOS DHCP
+##     (the previous names oobDhcpRelayAddress and adminDhcpRelayAddress are accepted as
+##     deprecated aliases; rack groups use bmc_dhcp_relay_address / underlay_dhcp_relay_address)
 ##
 ## All other settings inherit from machineDefaults above.
 ##
@@ -290,8 +334,16 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 10
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "192.168.192.1"
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "192.168.192.1"
+        underlayDhcpRelayAddress: "192.168.176.1"
+        ## Host firmware upgrade simulation (optional).
+        ## Set initial versions older than the API's desired versions to trigger
+        ## the upgrade flow: version detection -> upload -> task polling ->
+        ## power-cycle -> inventory verification.
+        ## Supported platforms: DGX H100, Wiwynn GB200, Lenovo GB300, Dell R750/R760.
+        # hostFirmwareVersions:
+        #   bmc: "24.08.00"
+        #   uefi: "01.04.00"
 
 ## =============================================================================
 ## Multi-Pod Example (mat-k8s-controller.enabled is required)
@@ -304,18 +356,18 @@ pods:
 #        hwType: wiwynn_gb200_nvl
 #        hostCount: 252       # 18 trays × 14 racks
 #        dpuPerHostCount: 2   # 2 BF3 per tray
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.96.64.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #      switches:
 #        hwType: nvidia_switch_nd5200_ld
 #        hostCount: 126       # 9 switches × 14 racks
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.96.64.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #      power:
 #        hwType: liteon_power_shelf
 #        hostCount: 112       # 8 shelves × 14 racks
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.96.64.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #
 #  mat-1:
 #    machines:
@@ -323,8 +375,8 @@ pods:
 #        hwType: wiwynn_gb200_nvl
 #        hostCount: 252
 #        dpuPerHostCount: 2
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.96.64.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #      # ... same pattern
 
 ## Persistence volume for machine state
@@ -350,11 +402,8 @@ configFiles:
   # matConfigs:
   #   default: |
   #     carbide_api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
-  #     interface = "NOTUSED"
-  #     tui_enabled = false
   #     log_format = "logfmt"
   #     bmc_mock_port = 1266
-  #     use_single_bmc_mock = true
   #     mock_bmc_ssh_server = true
   #     mock_bmc_ssh_port = 2222
   #     cleanup_on_quit = false
@@ -401,3 +450,16 @@ mat-k8s-controller:
     syncInterval: "30s"
     insecureSkipVerify: false
     logLevel: "info"
+
+## nico-site-health-probe — synthetic monitoring for NICo APIs (#5360).
+## Disabled by default because it needs site-specific configuration to run:
+## the image has no registry prefix until overridden. Enable it per site with:
+##   nico-site-health-probe:
+##     enabled: true
+##     image:
+##       repository: <registry>/site-health-probe
+##       tag: "<version>"
+## REST probes additionally need org + Keycloak client secrets — see the
+## subchart's values.yaml.
+nico-site-health-probe:
+  enabled: false

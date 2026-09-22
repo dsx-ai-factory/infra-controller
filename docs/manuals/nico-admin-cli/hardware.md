@@ -2,12 +2,13 @@
 
 Live hardware and lifecycle operations: machines, BMC, DPUs, firmware and component lifecycle, attestation, low-level passthrough (Redfish, RMS, MLX), and operator utilities.
 
-For global flags and setup, see [the overview](./README.md) and [`setup.md`](./setup.md). For task-oriented sequences see [`workflows.md`](./workflows.md).
+For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admin-cli.md). Browse all command groups in the [CLI reference index](./README.md).
 
 | Command | Description |
 |---|---|
 | [`attestation`](./commands/attestation/attestation.md) | MeasuredBoot or SPDM attestations. |
 | [`bmc-machine`](./commands/bmc-machine/bmc-machine.md) | BMC Machine related handling. |
+| [`boot-interface`](./commands/boot-interface/boot-interface.md) | Machine boot-interface management. |
 | [`boot-override`](./commands/boot-override/boot-override.md) | Machine boot override. |
 | [`browse`](./commands/browse/browse.md) | Browse subsystem resource trees via the API server. |
 | [`component-manager`](./commands/component-manager/component-manager.md) | Component manager actions. |

@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::convert::Into;
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::vpc::VpcId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
@@ -33,7 +33,7 @@ use crate::instance::config::network::{
     InterfaceFunctionId,
 };
 use crate::instance::status::SyncState;
-use crate::machine::Machine;
+use crate::machine::DpuMachine;
 use crate::network_security_group::NetworkSecurityGroupStatusObservation;
 
 /// Status of the networking subsystem of an instance
@@ -91,9 +91,9 @@ impl InstanceNetworkStatus {
     /// because the observation might have been related to a different config,
     /// and the interfaces therefore won't match.
     pub fn from_config_and_observations(
-        dpu_id_to_device_map: HashMap<String, Vec<MachineId>>,
+        dpu_id_to_device_map: HashMap<String, Vec<DpuMachineId>>,
         config: Versioned<&InstanceNetworkConfig>,
-        observations: &HashMap<MachineId, InstanceNetworkStatusObservation>,
+        observations: &HashMap<DpuMachineId, InstanceNetworkStatusObservation>,
         is_network_config_request_pending: bool,
     ) -> Self {
         if is_network_config_request_pending {
@@ -108,7 +108,7 @@ impl InstanceNetworkStatus {
         }
 
         // Observations without interfaces are from unused DPUs.  filter them out
-        let observations: HashMap<&MachineId, &InstanceNetworkStatusObservation> = observations
+        let observations: HashMap<&DpuMachineId, &InstanceNetworkStatusObservation> = observations
             .iter()
             .filter(|obs| !obs.1.interfaces.is_empty())
             .collect();
@@ -362,17 +362,17 @@ pub struct InstanceInterfaceStatus {
     /// and therefore the address is unknown.
     pub mac_address: Option<MacAddress>,
 
-    /// The list of IP addresses that had been assigned to this interface,
-    /// based on the requested subnet.
-    /// IPv4 precedes IPv6 when both families are assigned.
-    /// The list will be empty if interface configuration hasn't been completed
+    /// The IP addresses reported for this interface, ordered IPv4 before IPv6.
+    /// This list is independent from `prefixes` and is empty when no address
+    /// is available.
     pub addresses: Vec<IpAddr>,
 
-    /// The IP prefixes assigned to this interface, with one prefix for each
-    /// entry in `addresses` in the same IPv4-before-IPv6 order. A prefix may be
-    /// a /30 for FNN or a /32 for ETV.
-    ///
-    /// The list will be empty if interface configuration hasn't been completed
+    /// The prefixes reported for this interface in CIDR notation, ordered IPv4
+    /// before IPv6. Prefix lengths follow the selected network and allocation
+    /// policy. This list is independent from `addresses`: SLAAC reports an IPv6
+    /// prefix without a fixed host address. Consumers must match values by
+    /// address family rather than list position. The list is empty when no
+    /// prefix is available.
     pub prefixes: Vec<IpNetwork>,
 
     /// The explicitly configured gateways, in CIDR notation. There is at most
@@ -480,8 +480,8 @@ impl InstanceNetworkStatusObservation {
     }
 
     pub fn aggregate_instance_observation(
-        dpu_snapshots: &[Machine],
-    ) -> HashMap<MachineId, InstanceNetworkStatusObservation> {
+        dpu_snapshots: &[DpuMachine],
+    ) -> HashMap<DpuMachineId, InstanceNetworkStatusObservation> {
         let mut observation_map = HashMap::default();
 
         for dpu_snapshot in dpu_snapshots {
@@ -516,18 +516,18 @@ pub struct InstanceInterfaceStatusObservation {
     #[serde(default)]
     pub mac_address: Option<SerializableMacAddress>,
 
-    /// The list of IP addresses that had been assigned to this interface,
-    /// based on the requested subnet.
-    /// IPv4 precedes IPv6 when both families are assigned.
-    /// The list will be empty if interface configuration hasn't been completed
+    /// The IP addresses reported for this interface, ordered IPv4 before IPv6.
+    /// This list is independent from `prefixes` and is empty when no address
+    /// is available.
     #[serde(default)]
     pub addresses: Vec<IpAddr>,
 
-    /// The IP prefixes assigned to this interface, with one prefix for each
-    /// entry in `addresses` in the same IPv4-before-IPv6 order. A prefix may be
-    /// a /30 for FNN or a /32 for ETV.
-    ///
-    /// The list will be empty if interface configuration hasn't been completed
+    /// The prefixes reported for this interface in CIDR notation, ordered IPv4
+    /// before IPv6. Prefix lengths follow the selected network and allocation
+    /// policy. This list is independent from `addresses`: SLAAC reports an IPv6
+    /// prefix without a fixed host address. Consumers must match values by
+    /// address family rather than list position. The list is empty when no
+    /// prefix is available.
     #[serde(default)]
     pub prefixes: Vec<IpNetwork>,
 
@@ -554,6 +554,7 @@ mod tests {
     use std::fmt::Write;
     use std::str::FromStr;
 
+    use carbide_uuid::machine::DpuMachineId as MachineId;
     use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
     use carbide_uuid::vpc::VpcPrefixId;
 

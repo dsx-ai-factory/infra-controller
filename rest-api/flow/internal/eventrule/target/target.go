@@ -21,16 +21,17 @@ var ErrUnresolvable = errors.New("event target cannot be resolved")
 
 // Target identifies one canonical target for an action.
 type Target struct {
-	Kind eventrule.ResourceKind
-	ID   uuid.UUID
+	Kind   eventrule.ResourceKind
+	ID     uuid.UUID
+	RackID uuid.UUID
 }
 
-// ResolveRequest contains the event, enriched resource, and strategy needed to
-// resolve concrete targets.
+// ResolveRequest contains the durable event classification, reconstructed
+// resource, and strategy needed to resolve concrete targets while planning.
 type ResolveRequest struct {
-	Envelope eventrule.Envelope
-	Resource eventrule.ResolvedResource
-	Strategy eventrule.TargetStrategy
+	EventType eventrule.Type
+	Resource  eventrule.ResolvedResource
+	Strategy  eventrule.TargetStrategy
 }
 
 // Resolver resolves concrete targets for task actions.
@@ -45,6 +46,12 @@ func (t Target) Validate() error {
 	}
 	if t.ID == uuid.Nil {
 		return fmt.Errorf("target id is required")
+	}
+	if t.RackID == uuid.Nil {
+		return fmt.Errorf("target rack id is required")
+	}
+	if t.Kind == eventrule.ResourceKindRack && t.ID != t.RackID {
+		return fmt.Errorf("rack target id must equal rack id")
 	}
 	return nil
 }

@@ -22,19 +22,17 @@ import (
 // checks if the SubnetCreateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &SubnetCreateRequest{}
 
-// SubnetCreateRequest Request data for creating Subnet
+// SubnetCreateRequest Request data for creating an IPv4 Subnet in a VPC whose network virtualization type is `ETHERNET_VIRTUALIZER`. FNN VPCs use VPC Prefixes instead.
 type SubnetCreateRequest struct {
 	// Name of the Subnet
 	Name string `json:"name"`
 	// Description of the Subnet
 	Description NullableString `json:"description,omitempty"`
-	// ID of the VPC containing the Subnet
+	// ID of the Ethernet virtualizer VPC containing the Subnet
 	VpcId string `json:"vpcId"`
-	// ID of the derived Tenant IPv4 Block from an Allocation
-	Ipv4BlockId NullableString `json:"ipv4BlockId,omitempty"`
-	// ID of the derived Tenant IPv6 Block from an Allocation
-	Ipv6BlockId NullableString `json:"ipv6BlockId,omitempty"`
-	// Length of the prefix
+	// ID of the Ready, derived Tenant IPv4 Block from an Allocation
+	Ipv4BlockId string `json:"ipv4BlockId"`
+	// Length of the IPv4 prefix, from 8 through 30
 	PrefixLength int32 `json:"prefixLength"`
 }
 
@@ -44,10 +42,11 @@ type _SubnetCreateRequest SubnetCreateRequest
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewSubnetCreateRequest(name string, vpcId string, prefixLength int32) *SubnetCreateRequest {
+func NewSubnetCreateRequest(name string, vpcId string, ipv4BlockId string, prefixLength int32) *SubnetCreateRequest {
 	this := SubnetCreateRequest{}
 	this.Name = name
 	this.VpcId = vpcId
+	this.Ipv4BlockId = ipv4BlockId
 	this.PrefixLength = prefixLength
 	return &this
 }
@@ -151,90 +150,28 @@ func (o *SubnetCreateRequest) SetVpcId(v string) {
 	o.VpcId = v
 }
 
-// GetIpv4BlockId returns the Ipv4BlockId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetIpv4BlockId returns the Ipv4BlockId field value
 func (o *SubnetCreateRequest) GetIpv4BlockId() string {
-	if o == nil || IsNil(o.Ipv4BlockId.Get()) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Ipv4BlockId.Get()
+
+	return o.Ipv4BlockId
 }
 
-// GetIpv4BlockIdOk returns a tuple with the Ipv4BlockId field value if set, nil otherwise
+// GetIpv4BlockIdOk returns a tuple with the Ipv4BlockId field value
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SubnetCreateRequest) GetIpv4BlockIdOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.Ipv4BlockId.Get(), o.Ipv4BlockId.IsSet()
+	return &o.Ipv4BlockId, true
 }
 
-// HasIpv4BlockId returns a boolean if a field has been set.
-func (o *SubnetCreateRequest) HasIpv4BlockId() bool {
-	if o != nil && o.Ipv4BlockId.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetIpv4BlockId gets a reference to the given NullableString and assigns it to the Ipv4BlockId field.
+// SetIpv4BlockId sets field value
 func (o *SubnetCreateRequest) SetIpv4BlockId(v string) {
-	o.Ipv4BlockId.Set(&v)
-}
-
-// SetIpv4BlockIdNil sets the value for Ipv4BlockId to be an explicit nil
-func (o *SubnetCreateRequest) SetIpv4BlockIdNil() {
-	o.Ipv4BlockId.Set(nil)
-}
-
-// UnsetIpv4BlockId ensures that no value is present for Ipv4BlockId, not even an explicit nil
-func (o *SubnetCreateRequest) UnsetIpv4BlockId() {
-	o.Ipv4BlockId.Unset()
-}
-
-// GetIpv6BlockId returns the Ipv6BlockId field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *SubnetCreateRequest) GetIpv6BlockId() string {
-	if o == nil || IsNil(o.Ipv6BlockId.Get()) {
-		var ret string
-		return ret
-	}
-	return *o.Ipv6BlockId.Get()
-}
-
-// GetIpv6BlockIdOk returns a tuple with the Ipv6BlockId field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *SubnetCreateRequest) GetIpv6BlockIdOk() (*string, bool) {
-	if o == nil {
-		return nil, false
-	}
-	return o.Ipv6BlockId.Get(), o.Ipv6BlockId.IsSet()
-}
-
-// HasIpv6BlockId returns a boolean if a field has been set.
-func (o *SubnetCreateRequest) HasIpv6BlockId() bool {
-	if o != nil && o.Ipv6BlockId.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetIpv6BlockId gets a reference to the given NullableString and assigns it to the Ipv6BlockId field.
-func (o *SubnetCreateRequest) SetIpv6BlockId(v string) {
-	o.Ipv6BlockId.Set(&v)
-}
-
-// SetIpv6BlockIdNil sets the value for Ipv6BlockId to be an explicit nil
-func (o *SubnetCreateRequest) SetIpv6BlockIdNil() {
-	o.Ipv6BlockId.Set(nil)
-}
-
-// UnsetIpv6BlockId ensures that no value is present for Ipv6BlockId, not even an explicit nil
-func (o *SubnetCreateRequest) UnsetIpv6BlockId() {
-	o.Ipv6BlockId.Unset()
+	o.Ipv4BlockId = v
 }
 
 // GetPrefixLength returns the PrefixLength field value
@@ -276,12 +213,7 @@ func (o SubnetCreateRequest) ToMap() (map[string]interface{}, error) {
 		toSerialize["description"] = o.Description.Get()
 	}
 	toSerialize["vpcId"] = o.VpcId
-	if o.Ipv4BlockId.IsSet() {
-		toSerialize["ipv4BlockId"] = o.Ipv4BlockId.Get()
-	}
-	if o.Ipv6BlockId.IsSet() {
-		toSerialize["ipv6BlockId"] = o.Ipv6BlockId.Get()
-	}
+	toSerialize["ipv4BlockId"] = o.Ipv4BlockId
 	toSerialize["prefixLength"] = o.PrefixLength
 	return toSerialize, nil
 }
@@ -293,6 +225,7 @@ func (o *SubnetCreateRequest) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"name",
 		"vpcId",
+		"ipv4BlockId",
 		"prefixLength",
 	}
 

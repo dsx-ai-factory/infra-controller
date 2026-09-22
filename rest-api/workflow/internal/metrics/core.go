@@ -7,19 +7,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-const (
-	MetricsNamespace = "cloud_workflow"
-)
-
 type coreMetrics struct {
 	Info *prometheus.GaugeVec
 }
 
 // NewCoreMetrics creates a new coreMetrics struct and registers the metrics with the provided registerer
-func NewCoreMetrics(reg prometheus.Registerer) *coreMetrics {
+func NewCoreMetrics(reg prometheus.Registerer, namespace string) *coreMetrics {
 	m := &coreMetrics{
 		Info: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: MetricsNamespace,
+			Namespace: namespace,
 			Name:      "info",
 			Help:      "Information about the Cloud/Site worker",
 		}, []string{"version", "namespace"}),

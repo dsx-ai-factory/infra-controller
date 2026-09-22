@@ -6,7 +6,7 @@ For the overall NICo architecture and component responsibilities, see [Overview 
 
 ## Workflow Summary
 
-```
+```text
 DHCP Request (BMC)
   → NICo DHCP (Kea hook)
     → NICo Core (gRPC discover_dhcp)
@@ -28,7 +28,12 @@ DHCP Request (BMC)
 
 ## 1. DHCP Discovery
 
-When a BMC on the underlay network sends a DHCP request, the NICo DHCP server (a Kea hook plugin) captures it and forwards the discovery information to NICo Core.
+When a BMC on a NICo-managed physical network sends a DHCP request, the NICo
+DHCP server (a Kea hook plugin) captures it and forwards the discovery
+information to NICo Core. Site Explorer scans conventional `Underlay` BMC
+interfaces and BMC-typed interfaces on the supported shared `HostInband`
+topology; ordinary host data interfaces on HostInband are not Redfish targets.
+See [Shared HostInband for a Host BMC and Host OS](../provisioning/ip-and-network-configuration.md#15-shared-hostinband-for-a-host-bmc-and-host-os).
 
 The Kea hook is implemented as a Rust library with C FFI bindings. When a DHCP packet arrives, the hook:
 
@@ -40,6 +45,7 @@ The Kea hook is implemented as a Rust library with C FFI bindings. When a DHCP p
 The vendor class string is parsed to identify the BMC type and capabilities. DHCP entries are tracked in the database by MAC address and associated with machine interfaces.
 
 **Key files:**
+
 - `crates/dhcp/src/discovery.rs` — `Discovery` struct and FFI entry points (`discovery_fetch_machine`)
 - `crates/dhcp/src/machine.rs` — `Machine::try_fetch()` sends gRPC discovery request
 - `crates/dhcp/src/vendor_class.rs` — Vendor class parsing and BMC type identification
@@ -80,6 +86,7 @@ With an authenticated session, Site Explorer queries a comprehensive set of Redf
 Serial numbers are trimmed of whitespace. If `system.serial_number` is missing, the chassis serial number is used as a fallback.
 
 **Key files:**
+
 - `crates/site-explorer/src/redfish.rs` — `RedfishClient`: `get_redfish_vendor()`, `create_redfish_client()`, inventory queries
 - `crates/site-explorer/src/bmc_endpoint_explorer.rs` — `BmcEndpointExplorer` orchestrates credential lookup and exploration
 - `crates/api-model/src/bmc_info.rs` — `BmcInfo` model (IP, port, MAC, firmware version)
@@ -107,6 +114,7 @@ If the explored matches are incomplete, check `expected_machine.fallback_dpu_ser
 ### Validation
 
 Before accepting a pairing, NICo validates:
+
 - **DPU mode**: The DPU must be in DPU mode, not NIC mode. BlueFields in NIC mode are excluded from pairing.
 - **DPU model configuration**: `check_and_configure_dpu_mode()` verifies the DPU is correctly configured for its model. Hosts with misconfigured DPUs are not ingested.
 - **Completeness**: The number of explored DPUs must match the number of BlueField devices the host reports. Incomplete pairings are deferred.
@@ -116,6 +124,7 @@ Before accepting a pairing, NICo validates:
 Once all DPUs are matched and validated, the host enters an "ingestable" state and Site Explorer kickstarts the ingestion process via the ManagedHost state machine.
 
 **Key file:**
+
 - `crates/site-explorer/src/lib.rs`: `identify_managed_hosts()` with the complete pairing algorithm
 
 ## 4. DPU Provisioning
@@ -133,7 +142,7 @@ The DPU is configured to boot from HTTP IPv4 UEFI, which directs it to the NICo 
 
 The DPU is power-cycled via Redfish to trigger the network boot:
 
-```
+```http
 POST /redfish/v1/Systems/{system_id}/Actions/ComputerSystem.Reset
 Body: {"ResetType": "GracefulRestart"}
 ```
@@ -143,11 +152,13 @@ The power control operation supports multiple reset types: `On`, `ForceOff`, `Gr
 ### Installation
 
 After PXE boot, the DPU:
+
 1. Fetches `nico.efi` from the NICo PXE server over HTTP
 2. Receives cloud-init configuration with its `machine_id` and NICo API endpoint
 3. Installs and starts the DPU agent (`dpu-agent`), which connects back to NICo Core via gRPC
 
 **Key files:**
+
 - `crates/api/src/ipxe.rs` — iPXE instruction generation per architecture
 - `pxe/ipxe/local/embed.ipxe` — iPXE boot script template
 - `nico-rest/workflow/pkg/workflow/instance/reboot.go` — `RebootInstance` Temporal workflow
@@ -167,7 +178,8 @@ NICo sets BIOS attributes required for bare-metal infrastructure operation. This
 - `is_bios_setup()` / `machine_setup_status()` — Check configuration state
 
 These translate to Redfish calls:
-```
+
+```http
 GET  /redfish/v1/Systems/{id}/Bios           — Read attributes
 PATCH /redfish/v1/Systems/{id}/Bios/Settings — Write attributes (pending next reboot)
 ```
@@ -186,7 +198,7 @@ This configures the UEFI boot order to prioritize the DPU's PF MAC address, ensu
 
 After BIOS and boot order changes, the host is power-cycled via Redfish to apply the configuration:
 
-```
+```http
 POST /redfish/v1/Systems/{system_id}/Actions/ComputerSystem.Reset
 Body: {"ResetType": "GracefulRestart"}
 ```
@@ -194,6 +206,7 @@ Body: {"ResetType": "GracefulRestart"}
 Power cycles are rate-limited to avoid excessive reboots (checked via `time_since_redfish_powercycle` against `config.reset_rate_limit`).
 
 **Key files:**
+
 - `crates/site-explorer/src/redfish.rs` — `set_boot_order_dpu_first()`, `redfish_powercycle()`
 - `crates/site-explorer/src/bmc_endpoint_explorer.rs` — Orchestrates boot order with credential lookup
 
@@ -218,7 +231,8 @@ let firmware_inventories = update_service.firmware_inventories().await?;
 ```
 
 This translates to:
-```
+
+```http
 GET /redfish/v1
 GET /redfish/v1/UpdateService
 GET /redfish/v1/UpdateService/FirmwareInventory
@@ -226,6 +240,7 @@ GET /redfish/v1/UpdateService/FirmwareInventory/{id}  (for each item)
 ```
 
 Each firmware item's name and version is exported as a Prometheus gauge metric with labels:
+
 - `serial_number` — Machine chassis serial
 - `machine_id` — NICo machine UUID
 - `bmc_mac` — BMC MAC address
@@ -246,16 +261,18 @@ global `bmc_request_concurrency` limit. It defaults to four concurrent Redfish
 operations per BMC.
 
 Sensor data is read from:
-```
+
+```http
 GET /redfish/v1/Chassis/{id}/Sensors
 GET /redfish/v1/Chassis/{id}/Sensors/{sensor_id}
 ```
 
 Sensor types include: Temperature (Cel), Rotational/Fan (RPM), Power (W), and Current (A).
 
-All sensor data is exported as Prometheus metrics on the `/metrics` endpoint (port 9009) and fed into NICo Core via `RecordHardwareHealthReport` for health aggregation.
+Sensor measurements are exported as Prometheus metrics on `/telemetry` on port 9009. Health reports derived from collected hardware events are submitted separately to NICo Core through `InsertMachineHealthReport` for health aggregation.
 
 **Key files:**
+
 - `crates/health/src/firmware_collector.rs` — `FirmwareCollector` using nv-redfish
 - `crates/health/src/discovery.rs` — Creates and manages collectors per endpoint
 - `crates/health/src/config.rs` — Polling intervals and concurrency configuration

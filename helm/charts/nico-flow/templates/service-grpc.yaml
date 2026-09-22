@@ -1,5 +1,4 @@
-## Headless gRPC services for the three containers in the flow pod.
-## All three select on the same pod; targetPort routes to the per-container port.
+## Headless gRPC Service for Flow.
 apiVersion: v1
 kind: Service
 metadata:
@@ -15,41 +14,5 @@ spec:
   ports:
     - port: {{ .Values.ports.flow }}
       targetPort: {{ .Values.ports.flow }}
-      name: grpc
-      protocol: TCP
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: psm
-  namespace: {{ include "nico-flow.namespace" . }}
-  labels:
-    {{- include "nico-flow.labels" . | nindent 4 }}
-    app: psm
-spec:
-  clusterIP: None
-  selector:
-    {{- include "nico-flow.selectorLabels" . | nindent 4 }}
-  ports:
-    - port: {{ .Values.ports.psm }}
-      targetPort: {{ .Values.ports.psm }}
-      name: grpc
-      protocol: TCP
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: nsm
-  namespace: {{ include "nico-flow.namespace" . }}
-  labels:
-    {{- include "nico-flow.labels" . | nindent 4 }}
-    app: nsm
-spec:
-  clusterIP: None
-  selector:
-    {{- include "nico-flow.selectorLabels" . | nindent 4 }}
-  ports:
-    - port: {{ .Values.ports.nsm }}
-      targetPort: {{ .Values.ports.nsm }}
       name: grpc
       protocol: TCP

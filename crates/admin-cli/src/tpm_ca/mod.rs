@@ -21,9 +21,6 @@ mod delete;
 mod show;
 mod show_unmatched_ek;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;

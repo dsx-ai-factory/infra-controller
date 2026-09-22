@@ -28,7 +28,12 @@ for f in \
     "$UNIT_TEST_DIR/../on-server/install.sh" \
     "$UNIT_TEST_DIR/../on-server/provision-dpu.sh" \
     "$UNIT_TEST_DIR/../on-server/post-power-cycle.sh" \
-    "$UNIT_TEST_DIR/../on-server/setup_netplan.sh"; do
+    "$UNIT_TEST_DIR/../on-server/setup_netplan.sh" \
+    "$UNIT_TEST_DIR/../upgrade/build-dpu-upgrade-iso.sh" \
+    "$UNIT_TEST_DIR/../upgrade/on-server/upgrade-install.sh" \
+    "$UNIT_TEST_DIR/../upgrade/on-server/upgrade-dpu-fw.sh" \
+    "$UNIT_TEST_DIR/../upgrade/on-server/upgrade-post-power-cycle.sh" \
+    "$UNIT_TEST_DIR/../upgrade/on-server/upgrade-lib.sh"; do
     printf "  %-55s" "$(basename "$f")"
     if bash -n "$f" 2>&1; then
         echo "OK"

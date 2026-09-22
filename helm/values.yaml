@@ -112,13 +112,13 @@ nico-dsx-exchange-consumer:
   enabled: true
 
 ## ---------------------------------------------------------------------------
-## nico-flow — Flow (formerly RLA) rack lifecycle orchestrator
+## nico-flow — task, policy, and automation service
 ## Flow ships as a STANDALONE Helm release in its own namespace; it is not
 ## installed by `helm install nico ./helm`. The dependency is declared so the
 ## chart lives at helm/charts/nico-flow (Helm convention), but the condition
 ## keeps the umbrella from auto-rendering it. Deploy with:
 ##   helm install flow ./helm/charts/nico-flow -n flow ...
-## (helm-prereqs/setup.sh phase 7i does this for you.)
+## (helm-prereqs/setup.sh phase 7h does this for you.)
 ## ---------------------------------------------------------------------------
 nico-flow:
   enabled: false

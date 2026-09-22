@@ -3,8 +3,11 @@ syntax = "proto3";
 package common;
 
 import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
+import "codegen/v1/rust_type.proto";
 
 message MachineId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::machine::MachineId";
   string id = 1;
 }
 
@@ -17,6 +20,7 @@ message MachineIdList {
 // allows to express a nullable/optional list
 message StringList {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   repeated string items = 1;
 }
 
@@ -29,20 +33,24 @@ message UUID {
 }
 
 message PowerShelfId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::power_shelf::PowerShelfId";
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   string id = 1;
 }
 
 message RackId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::rack::RackId";
   string id = 1;
 }
 
 message RackProfileId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::rack::RackProfileId";
   string id = 1;
 }
 
 message SwitchId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::switch::SwitchId";
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   string id = 1;
@@ -71,39 +79,51 @@ message RouteTargets {
 // Placeholder ID types: These are not code-generated, but overridden by our own type-safe UUID wrappers. They are
 // identical to common.UUID over the wire, for backwards compatibility.
 message DomainId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::domain::DomainId";
   string value = 1;
 }
 message MachineInterfaceId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::machine::MachineInterfaceId";
   string value = 1;
 }
 message VpcId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::vpc::VpcId";
   string value = 1;
 }
 message VpcPrefixId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::vpc::VpcPrefixId";
   string value = 1;
 }
 message SitePrefixId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::site_prefix::SitePrefixId";
   string value = 1;
 }
 message VpcPeeringId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::vpc_peering::VpcPeeringId";
   string value = 1;
 }
 message IBPartitionId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::infiniband::IBPartitionId";
   string value = 1;
 }
 message InstanceId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::instance::InstanceId";
   string value = 1;
 }
 message NetworkSegmentId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::network::NetworkSegmentId";
   string value = 1;
 }
 message DpaInterfaceId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::dpa_interface::DpaInterfaceId";
   string value = 1;
 }
 message NetworkPrefixId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::network::NetworkPrefixId";
   string value = 1;
 }
 message RemediationId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::dpu_remediations::RemediationId";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   option (carbide.codegen.v1.message_derive) = "Ord";
@@ -112,34 +132,41 @@ message RemediationId {
 }
 
 message NVLinkPartitionId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::nvlink::NvLinkPartitionId";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   string value = 1;
 }
 
 message NVLinkLogicalPartitionId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::nvlink::NvLinkLogicalPartitionId";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   string value = 1;
 }
 
 message NVLinkDomainId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::nvlink::NvLinkDomainId";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   string value = 1;
 }
 
 message ComputeAllocationId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::compute_allocation::ComputeAllocationId";
   string value = 1;
 }
 
 
 message SpxPartitionId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::spx::SpxPartitionId";
   string value = 1;
 }
 
 message OperatingSystemId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::operating_system::OperatingSystemId";
   string value = 1;
 }
 
 message IpxeTemplateId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::ipxe_template::IpxeTemplateId";
   string value = 1;
 }
 
@@ -149,12 +176,14 @@ message RackHardwareType {
 }
 
 message MachineValidationId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::machine_validation::MachineValidationId";
   string value = 1;
 }
 
 // ID of a physical device managed by NICo. Individual RPCs may support only a
 // subset of these device kinds.
 message DeviceId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::device::DeviceId";
   oneof value {
     MachineId machine_id = 1;
     SwitchId switch_id = 2;

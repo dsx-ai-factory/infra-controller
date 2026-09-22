@@ -17,7 +17,6 @@
 use std::sync::Arc;
 
 use bmc_mock::injection::InjectionStore;
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::PersistedDevice;
@@ -27,7 +26,6 @@ use crate::host_machine::MachineHandle;
 use crate::power_shelf_simulator::PowerShelfHandle;
 use crate::status::{DeviceKind, DeviceStatus, DeviceStatusConfig};
 use crate::switch_simulator::SwitchHandle;
-use crate::tui::UiUpdate;
 
 /// The common lifecycle exposed by every simulated physical device.
 pub trait SimulatorLifecycle {
@@ -36,10 +34,6 @@ pub trait SimulatorLifecycle {
 
     fn mat_id(&self) -> Uuid {
         self.handle().mat_id()
-    }
-
-    fn attach_to_tui(&self, tui_event_tx: Option<mpsc::Sender<UiUpdate>>) -> eyre::Result<()> {
-        self.handle().attach_to_tui(tui_event_tx)
     }
 
     fn resume(&self) -> eyre::Result<()> {

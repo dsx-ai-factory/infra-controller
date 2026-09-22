@@ -21,8 +21,14 @@ must be configured with a component-manager backend for each role being managed:
 
 - [RMS](../configuration/component-manager-rms.md) can provide compute, switch,
   and power-shelf management.
-- NSM is required only when the switch backend is set to `nsm`.
-- PSM is required only when the power-shelf backend is set to `psm`.
+- An externally managed NSM is required only when the switch backend is set to
+  `nsm`.
+- An externally managed PSM is required only when the power-shelf backend is
+  set to `psm`.
+
+The NICo deployment charts do not install NSM or PSM. Their Core backend
+configuration remains available for sites that operate those managers as
+external services.
 
 NICo Flow is required for deployments using the HW Lifecycle REST API and its
 workflow orchestration. Clients using NICo Core APIs directly do not require

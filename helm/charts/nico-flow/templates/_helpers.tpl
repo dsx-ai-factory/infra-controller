@@ -25,8 +25,6 @@ app.kubernetes.io/component: orchestrator
 
 {{/*
 Pod selector labels — must match the pod template labels in deployment.yaml.
-The three sidecar Services all select on `app: flow` because they target the
-same pod.
 */}}
 {{- define "nico-flow.selectorLabels" -}}
 app: flow
@@ -34,8 +32,8 @@ app.kubernetes.io/name: flow
 {{- end -}}
 
 {{/*
-Image references — one per container.  If <component>.repository is empty, fall
-back to <global.image.repository>/nico-<component>.  Same for tag.
+Flow image reference. If images.flow.repository is empty, fall back to
+<global.image.repository>/nico-flow. Same for the tag.
 Usage: {{ include "nico-flow.image" (dict "component" "flow" "Values" .Values) }}
 */}}
 {{- define "nico-flow.image" -}}
@@ -54,7 +52,7 @@ Usage: {{ include "nico-flow.image" (dict "component" "flow" "Values" .Values) }
 {{- end -}}
 
 {{/*
-SPIFFE Certificate spec for flow (covers flow, psm, nsm Service DNS names).
+SPIFFE Certificate spec for Flow.
 */}}
 {{- define "nico-flow.certificateSpec" -}}
 duration: {{ .global.certificate.duration }}
@@ -87,4 +85,43 @@ issuerRef:
   name: {{ .global.certificate.issuerRef.name }}
   group: {{ .global.certificate.issuerRef.group }}
 secretName: {{ .name }}
+{{- end -}}
+
+{{/*
+Reject the chart 0.2.x raw-string flowConfig before any field access.
+*/}}
+{{- define "nico-flow.flowConfigMap" -}}
+{{- if not (kindIs "map" .Values.flowConfig) -}}
+{{- fail "flowConfig must be a map of settings such as flowConfig.leakDetectionInterval, not the chart 0.2.x raw file string; see the nico-flow README section \"Upgrading from 0.2.x\"" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Render a flowConfig interval: Go time.ParseDuration syntax, greater than zero.
+*/}}
+{{- define "nico-flow.flowConfigInterval" -}}
+{{- if kindIs "invalid" .value -}}
+{{- fail (printf "flowConfig.%s must be a Go duration string such as 30s, 1m, or 1h30m; the key is missing or null" .key) -}}
+{{- end -}}
+{{- $value := toString .value -}}
+{{- if not (regexMatch "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$" $value) -}}
+{{- fail (printf "flowConfig.%s must be a Go duration string with a unit, such as 30s, 1m, or 1h30m; got %q" .key $value) -}}
+{{- end -}}
+{{- if regexMatch "^(0+(\\.0+)?(ns|us|µs|ms|s|m|h))+$" $value -}}
+{{- fail (printf "flowConfig.%s must be greater than zero; got %q" .key $value) -}}
+{{- end -}}
+{{- $value | quote -}}
+{{- end -}}
+
+{{/*
+Render a flowConfig toggle: must be a YAML boolean, not a string.
+*/}}
+{{- define "nico-flow.flowConfigBool" -}}
+{{- if kindIs "invalid" .value -}}
+{{- fail (printf "flowConfig.%s must be true or false; the key is missing or null" .key) -}}
+{{- end -}}
+{{- if not (kindIs "bool" .value) -}}
+{{- fail (printf "flowConfig.%s must be a boolean (true or false); got %q" .key (toString .value)) -}}
+{{- end -}}
+{{- toYaml .value -}}
 {{- end -}}

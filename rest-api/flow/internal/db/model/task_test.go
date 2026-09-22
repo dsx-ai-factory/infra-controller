@@ -4,9 +4,12 @@
 package model
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,6 +29,130 @@ func newOfflineBun() *bun.DB {
 
 func TestTaskListOptionsToFilterable_Nil(t *testing.T) {
 	assert.Nil(t, taskListOptionsToFilterable(nil))
+}
+
+func TestListTasks_DefaultOrderBeforePagination(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	db := bun.NewDB(sqlDB, pgdialect.New())
+	defer db.Close()
+
+	mock.ExpectQuery(`ORDER BY "created_at" DESC, "id" DESC LIMIT 20`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	tasks, total, err := ListTasks(
+		t.Context(),
+		db,
+		&taskcommon.TaskListOptions{TaskType: taskcommon.TaskTypeUnknown},
+		&dbquery.Pagination{Offset: 0, Limit: 20, Total: 1},
+	)
+
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.Equal(t, int32(1), total)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTask_UpdateTaskStatus(t *testing.T) {
+	t.Run("persists a queue deadline", func(t *testing.T) {
+		sqlDB, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer sqlDB.Close()
+
+		db := bun.NewDB(sqlDB, pgdialect.New())
+		defer db.Close()
+
+		deadline := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+		mock.ExpectExec(
+			`UPDATE "task" AS "t" SET .*"queue_expires_at" = '2030-01-02 03:04:05\+00:00'.* WHERE \(id =`,
+		).WillReturnResult(sqlmock.NewResult(0, 1))
+		task := &Task{ID: uuid.New()}
+
+		err = task.UpdateTaskStatus(
+			t.Context(),
+			db,
+			taskcommon.TaskStatusWaiting,
+			"Waiting for target linkage",
+			nil,
+			&deadline,
+		)
+
+		require.NoError(t, err)
+		require.Equal(t, taskcommon.TaskStatusWaiting, task.Status)
+		require.Equal(t, deadline, *task.QueueExpiresAt)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("clears the queue deadline when finished", func(t *testing.T) {
+		sqlDB, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer sqlDB.Close()
+
+		db := bun.NewDB(sqlDB, pgdialect.New())
+		defer db.Close()
+
+		mock.ExpectExec(`UPDATE "task" AS "t" SET .*"queue_expires_at" = NULL.* WHERE \(id =`).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		deadline := time.Now().Add(time.Hour).UTC()
+		task := &Task{ID: uuid.New(), QueueExpiresAt: &deadline}
+
+		err = task.UpdateTaskStatus(
+			t.Context(),
+			db,
+			taskcommon.TaskStatusTerminated,
+			"Expired",
+			nil,
+			nil,
+		)
+
+		require.NoError(t, err)
+		require.Nil(t, task.QueueExpiresAt)
+		require.NotNil(t, task.FinishedAt)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestTask_UpdateScheduledTask(t *testing.T) {
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		wantError    string
+	}{
+		{name: "persists scheduling metadata and applied rule", rowsAffected: 1},
+		{name: "rejects a missing task row", rowsAffected: 0, wantError: "affected 0 rows"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sqlDB, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer sqlDB.Close()
+
+			db := bun.NewDB(sqlDB, pgdialect.New())
+			defer db.Close()
+
+			mock.ExpectExec(
+				`UPDATE "task" AS "t" SET "execution_id" = .*"executor_type" = .*"applied_rule_id" = .*"updated_at" = .* WHERE \(id =`,
+			).WillReturnResult(sqlmock.NewResult(0, test.rowsAffected))
+			ruleID := uuid.New()
+			task := &Task{
+				ID:            uuid.New(),
+				ExecutorType:  taskcommon.ExecutorTypeTemporal,
+				ExecutionID:   "workflow-id",
+				AppliedRuleID: &ruleID,
+			}
+
+			err = task.UpdateScheduledTask(t.Context(), db)
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 // All tests below set TaskType: TaskTypeUnknown explicitly, matching the
@@ -166,4 +293,44 @@ func TestTaskListOptionsToFilterable_FullQuerySQL(t *testing.T) {
 	}
 	assert.Equal(t, 0, strings.Count(gotSQL, " OR "),
 		"filters must be AND-combined, got: %s", gotSQL)
+}
+
+func TestListTasksForRacksByStatus_GeneratedSQL(t *testing.T) {
+	rackID := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	db := newOfflineBun()
+	var tasks []Task
+
+	q := listTasksForRacksByStatusQuery(
+		db,
+		&tasks,
+		[]uuid.UUID{rackID},
+		taskcommon.NonTerminalTaskStatuses(),
+	)
+	sql, err := q.AppendQuery(db.Formatter(), nil)
+	require.NoError(t, err)
+	got := string(sql)
+
+	for _, fragment := range []string{
+		`"t"."id"`,
+		`"t"."rack_id"`,
+		`"t"."attributes"`,
+		`"t"."status"`,
+		`rack_id IN`,
+		rackID.String(),
+		`status IN`,
+	} {
+		assert.Contains(t, got, fragment)
+	}
+	assert.NotContains(t, got, `"t"."report"`)
+}
+
+func TestListTasksForRacksByStatus_EmptyFilter(t *testing.T) {
+	tasks, err := ListTasksForRacksByStatus(
+		context.Background(),
+		nil,
+		nil,
+		taskcommon.NonTerminalTaskStatuses(),
+	)
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
 }

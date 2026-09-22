@@ -304,7 +304,7 @@ pub(super) async fn advance_bios_config_job(
                         "HandleBiosJobFailure: resetting BMC after BIOS job failure"
                     );
                     redfish_client
-                        .bmc_reset()
+                        .bmc_reset(None)
                         .await
                         .map_err(|e| redfish_error("bmc_reset", e))?;
                     Ok(BiosConfigJobAdvanceOutcome::Continue(BiosConfigInfo {

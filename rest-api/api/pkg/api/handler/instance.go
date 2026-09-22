@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -25,10 +26,12 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	powerutil "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util"
 	common "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -53,6 +56,7 @@ type CreateInstanceHandler struct {
 	tc         temporalClient.Client
 	scp        *sc.ClientPool
 	cfg        *config.Config
+	dps        dpsclient.PowerProvisioner
 	tracerSpan *cutil.TracerSpan
 }
 
@@ -170,12 +174,13 @@ func instanceInterfaceVpcSelection(ifc *cdbm.Interface) (*corev1.InstanceInterfa
 }
 
 // NewCreateInstanceHandler initializes and returns a new handler for creating Instance
-func NewCreateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateInstanceHandler {
+func NewCreateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) CreateInstanceHandler {
 	return CreateInstanceHandler{
 		dbSession:  dbSession,
 		tc:         tc,
 		scp:        scp,
 		cfg:        cfg,
+		dps:        dps,
 		tracerSpan: cutil.NewTracerSpan(),
 	}
 }
@@ -471,6 +476,8 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		logger.Warn().Err(verr).Msg("error validating Instance creation request data")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating Instance creation request data", verr)
 	}
+	logger.Info().Interface("MachineLabelSelector", apiRequest.MachineLabelSelector).
+		Msg("validated Instance creation placement selector")
 
 	// Validate the tenant for which this Instance is being created
 	tenant, err := common.GetTenantForOrg(ctx, nil, cih.dbSession, org)
@@ -517,7 +524,6 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		logger.Warn().Msg("VPC specified in request data is not ready")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "VPC specified in request data is not ready", nil)
 	}
-
 	// Validate request fields that depend on the resolved VPC (e.g.
 	// `autoNetwork` requires a Flat VPC).
 	verr = apiRequest.ValidateForVpc(vpc)
@@ -547,7 +553,17 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		logger.Warn().Msg(fmt.Sprintf("The Site: %v where this Instance is being created is not in Registered state", vpc.SiteID.String()))
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where this Instance is being created is not in Registered state", nil)
 	}
-
+	if apiErr := util.ValidateSitePowerManagement(site.Config, apiRequest.PowerProfile); apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+	if cih.cfg.GetDPSEnabled() && apiRequest.PowerProfile != nil && vpc.PowerResourceGroup == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Power profile cannot be specified when creating Instances if VPC doesn't have power resource group populated.", nil)
+	}
+	apiErr := model.ValidatePowerProfile(ctx, cih.cfg.GetDPSEnabled(), cih.dps, apiRequest.PowerProfile)
+	if apiErr != nil {
+		logger.Warn().Err(apiErr.Diagnosis()).Msg("failed to validate Instance power profile")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
 	// Begin validating interfaces
 	// Fetch and validate Subnets, VPC Prefixes, and VPC selections
 	sbDAO := cdbm.NewSubnetDAO(cih.dbSession)
@@ -610,6 +626,53 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	if interfaceVpcErr != nil {
 		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by Instance interfaces")
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
+	}
+
+	// Resolve the referenced SpectrumX Partitions before any writes so a bad ID is a 400
+	// rather than a foreign key error when the attachment row is inserted.
+	requestedSxpIDs := make([]uuid.UUID, 0, len(apiRequest.SpectrumXAttachments))
+	seenSxpIDs := make(map[uuid.UUID]struct{}, len(apiRequest.SpectrumXAttachments))
+	for _, sac := range apiRequest.SpectrumXAttachments {
+		partitionID, sxpErr := uuid.Parse(sac.SpectrumXPartitionID)
+		if sxpErr != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition ID: %s specified in spectrumXAttachments data in request is not valid", sac.SpectrumXPartitionID), nil)
+		}
+		_, seen := seenSxpIDs[partitionID]
+		if !seen {
+			seenSxpIDs[partitionID] = struct{}{}
+			requestedSxpIDs = append(requestedSxpIDs, partitionID)
+		}
+	}
+	if len(requestedSxpIDs) > 0 {
+		requestedSxps, _, sxpErr := cdbm.NewSpectrumXPartitionDAO(cih.dbSession).GetAll(ctx, nil, cdbm.SpectrumXPartitionFilterInput{
+			SpectrumXPartitionIDs: requestedSxpIDs,
+		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if sxpErr != nil {
+			logger.Error().Err(sxpErr).Msg("failed to retrieve SpectrumX Partitions from DB by IDs")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Partitions from DB by IDs", nil)
+		}
+
+		sxpByID := make(map[uuid.UUID]cdbm.SpectrumXPartition, len(requestedSxps))
+		for _, sxp := range requestedSxps {
+			sxpByID[sxp.ID] = sxp
+		}
+
+		for _, partitionID := range requestedSxpIDs {
+			sxp, ok := sxpByID[partitionID]
+			if !ok {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request data is not found in DB", partitionID), nil)
+			}
+			if sxp.TenantID != tenant.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request is not owned by Tenant", partitionID), nil)
+			}
+			if sxp.SiteID != site.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
+			}
+			if sxp.Status != cdbm.SpectrumXPartitionStatusReady {
+				logger.Warn().Msg(fmt.Sprintf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID))
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in request data is not in Ready state", partitionID), nil)
+			}
+		}
 	}
 
 	dbInterfaces := []cdbm.Interface{}
@@ -710,6 +773,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 
 			dbInterfaces = append(dbInterfaces, cdbm.Interface{
 				SubnetID:           &subnetID,
+				Subnet:             subnet,
 				IsPhysical:         ifc.IsPhysical,
 				RequestedIpAddress: nil, // RequestedIpAddress requires a VPC prefix, and model validation enforces this.
 				Status:             cdbm.InterfaceStatusPending,
@@ -1089,21 +1153,29 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	var instance *cdbm.Instance
 	var ifcs []cdbm.Interface
 	var ibifcs []cdbm.InfiniBandInterface
+	var sxas []cdbm.SpectrumXAttachment
 	var desds []cdbm.DpuExtensionServiceDeployment
 	var nvlifcs []cdbm.NVLinkInterface
 	var ssd *cdbm.StatusDetail
 
 	// Validate the targeted instance creation capability before opening the
 	// transaction so no writes or locks happen for an unauthorized request.
-	if apiRequest.MachineID != nil {
+	// A non-empty label selector can narrow placement to a single Machine, so it
+	// require the same privilege as an explicit Machine ID.
+	if apiRequest.MachineID != nil || len(apiRequest.MachineLabelSelector) > 0 {
 		privilegedAccess, derr := common.TenantHasTargetedInstanceCreation(ctx, nil, cih.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &site.ID})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error checking effective targeted instance creation for Site")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to verify capability for Site", nil)
 		}
 		if !privilegedAccess {
-			logger.Warn().Msg("tenant does not have capability to create instances from specific machine")
-			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have capability to create Instances using specific Machine ID", nil)
+			if apiRequest.MachineID != nil {
+				logger.Warn().Msg("tenant does not have capability to create instances from specific machine")
+				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have capability to create Instances using specific Machine ID", nil)
+			}
+
+			logger.Warn().Msg("tenant does not have capability to create instances using Machine label selector")
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have capability to create Instances using Machine label selector", nil)
 		}
 	}
 
@@ -1112,8 +1184,35 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	// the DB tx unwinds before we make the second remote call. nil means
 	// no timeout occurred and the normal flow continues.
 	var timeoutResp func() error
+	var dpsRollback func() error
 
 	err = cdb.WithTx(ctx, cih.dbSession, func(tx *cdb.Tx) error {
+		if cih.cfg.GetDPSEnabled() {
+			lockErr := powerutil.AcquireVPCPowerLock(ctx, tx, vpc.ID)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("vpcID", vpc.ID.String()).Msg("failed to serialize DPS operations for VPC")
+				return cutil.NewAPIError(http.StatusConflict, "Another power operation is already in progress for the VPC", nil)
+			}
+			lockedVPC, lockErr := cdbm.NewVpcDAO(cih.dbSession).GetByID(ctx, tx, vpc.ID, nil)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("vpcID", vpc.ID.String()).Msg("failed to reload VPC after acquiring its power lock")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload VPC power configuration", nil)
+			}
+			vpc = lockedVPC
+			lockedSite, lockErr := stDAO.GetByID(ctx, tx, vpc.SiteID, nil, false)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("siteID", vpc.SiteID.String()).Msg("failed to reload Site after acquiring the VPC power lock")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload Site power configuration", nil)
+			}
+			apiErr := util.ValidateSitePowerManagement(lockedSite.Config, apiRequest.PowerProfile)
+			if apiErr != nil {
+				return apiErr
+			}
+			if apiRequest.PowerProfile != nil && vpc.PowerResourceGroup == nil {
+				return cutil.NewAPIError(http.StatusBadRequest, "Power profile cannot be specified when creating Instances if VPC doesn't have power resource group populated.", nil)
+			}
+		}
+
 		// ==================== Step 4: Machine Selection  ====================
 
 		// Begin validating Machine ID
@@ -1128,7 +1227,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			// Retrieve Machine by ID
-			machine, err = mDAO.GetByID(ctx, nil, *apiRequest.MachineID, nil, false)
+			machine, err = mDAO.GetByID(ctx, tx, *apiRequest.MachineID, nil, true)
 			if err != nil {
 				if err == cdb.ErrDoesNotExist {
 					return cutil.NewAPIError(http.StatusBadRequest, "Could not find Machine with ID specified in request data", nil)
@@ -1141,6 +1240,14 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			if machine.SiteID != site.ID {
 				logger.Warn().Msg("Machine specified in request is not part of the site")
 				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine specified in request does not belong to Site: %s", site.Name), nil)
+			}
+
+			if !machine.MatchesLabelSelector(apiRequest.MachineLabelSelector) {
+				logger.Warn().Str("MachineID", machine.ID).
+					Interface("MachineLabelSelector", apiRequest.MachineLabelSelector).
+					Msg("Machine specified in request does not match Machine label selector")
+				return cutil.NewAPIError(http.StatusBadRequest,
+					"Machine specified in request does not match machineLabelSelector", nil)
 			}
 
 			// Validate Machine availability. Note: allowUnhealthyMachine also bypasses
@@ -1316,6 +1423,9 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		} // if apiRequest.InstanceTypeID != nil
 
 		// NOTE: At this stage, we have a Machine ID whether it was provided in request or selected through Instance Type
+		logger.Info().Str("MachineID", machine.ID).
+			Interface("MachineLabelSelector", apiRequest.MachineLabelSelector).
+			Msg("selected Machine for Instance creation")
 
 		mcDAO := cdbm.NewMachineCapabilityDAO(cih.dbSession)
 
@@ -1545,6 +1655,18 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			}
 		}
 
+		if cih.cfg.GetDPSEnabled() && vpc.PowerResourceGroup != nil {
+			assignment := powerutil.MachinePowerAssignment{MachineID: machine.ID}
+			if apiRequest.PowerProfile != nil {
+				assignment.PowerProfile = *apiRequest.PowerProfile
+			}
+			dpsRollback, err = powerutil.ProvisionMachinePower(ctx, cih.dps, *vpc.PowerResourceGroup, assignment)
+			if err != nil {
+				logger.Error().Err(err).Str("machineID", machine.ID).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("DPS rejected Instance allocation")
+				return cutil.NewAPIError(http.StatusServiceUnavailable, "DPS rejected Instance power allocation", nil)
+			}
+		}
+
 		// ==================== Step 5: Create Instance Records  ====================
 
 		instanceCreateInput := cdbm.InstanceCreateInput{
@@ -1566,6 +1688,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			IsUpdatePending:          false,
 			Status:                   cdbm.InstanceStatusPending,
 			PowerStatus:              cutil.GetPtr(cdbm.InstancePowerStatusRebooting),
+			PowerProfile:             apiRequest.PowerProfile,
 			CreatedBy:                dbUser.ID,
 		}
 
@@ -1854,6 +1977,37 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			description = *instance.Description
 		}
 
+		// Persist the SpectrumX Attachments, then build the Site request from the
+		// persisted rows so inventory has something to reconcile against.
+		sxaInputs := make([]cdbm.SpectrumXAttachmentCreateInput, 0, len(apiRequest.SpectrumXAttachments))
+		for _, sac := range apiRequest.SpectrumXAttachments {
+			// The Partition ID was parsed during validation, so it cannot fail here.
+			partitionID, _ := uuid.Parse(sac.SpectrumXPartitionID)
+			sxaInputs = append(sxaInputs, cdbm.SpectrumXAttachmentCreateInput{
+				InstanceID:           instance.ID,
+				SiteID:               site.ID,
+				SpectrumXPartitionID: partitionID,
+				Device:               sac.Device,
+				DeviceInstance:       *sac.DeviceInstance,
+				AttachmentType:       sac.AttachmentType,
+				VirtualFunctionID:    sac.VirtualFunctionID,
+				Status:               cdbm.SpectrumXAttachmentStatusPending,
+				CreatedBy:            dbUser.ID,
+			})
+		}
+
+		sxaDAO := cdbm.NewSpectrumXAttachmentDAO(cih.dbSession)
+		sxas, serr = sxaDAO.CreateMultiple(ctx, tx, sxaInputs)
+		if serr != nil {
+			logger.Error().Err(serr).Msg("error creating Instance SpectrumX Attachment DB entries")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SpectrumX Attachments for Instance, DB error", nil)
+		}
+
+		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(sxas))
+		for i := range sxas {
+			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, sxas[i].ToProto())
+		}
+
 		// Prepare the create request workflow object
 		createInstanceRequest := &corev1.InstanceAllocationRequest{
 			InstanceId: &corev1.InstanceId{Value: instance.GetSiteID().String()},
@@ -1865,6 +2019,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			},
 			Config: &corev1.InstanceConfig{
 				NetworkSecurityGroupId: instance.NetworkSecurityGroupID,
+				PowerProfile:           instance.PowerProfile,
 				Tenant: &corev1.TenantConfig{
 					TenantOrganizationId: tenant.Org,
 					TenantKeysetIds:      instanceSshKeyGroupIds,
@@ -1880,6 +2035,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				Nvlink: &corev1.InstanceNVLinkConfig{
 					GpuConfigs: nvlInterfaceConfigs,
 				},
+				Spxconfig: &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs},
 			},
 			AllowUnhealthyMachine: allowUnhealthyMachine,
 		}
@@ -1940,17 +2096,30 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	if err != nil {
 		var apiErr *cutil.APIError
 		if !errors.As(err, &apiErr) || timeoutResp == nil {
+			if dpsRollback != nil {
+				rollbackErr := dpsRollback()
+				if rollbackErr != nil {
+					logger.Error().Err(rollbackErr).Str("machineID", machine.ID).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("failed to compensate DPS after Instance creation failure")
+				}
+			}
 			return common.HandleTxError(c, logger, err, "Failed to create Instance, DB transaction error")
 		}
 	}
 	if timeoutResp != nil {
-		return timeoutResp()
+		responseErr := timeoutResp()
+		if dpsRollback != nil {
+			rollbackErr := dpsRollback()
+			if rollbackErr != nil {
+				logger.Error().Err(rollbackErr).Str("machineID", machine.ID).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("failed to compensate DPS after Instance creation failure")
+			}
+		}
+		return responseErr
 	}
 
 	// ==================== Step 7: Response ====================
 
 	// Create response
-	apiInstance := model.NewAPIInstance(instance, site, ifcs, ibifcs, desds, nvlifcs, skgs, []cdbm.StatusDetail{*ssd})
+	apiInstance := model.NewAPIInstance(instance, site, ifcs, ibifcs, sxas, desds, nvlifcs, skgs, []cdbm.StatusDetail{*ssd})
 
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusCreated, apiInstance)
@@ -1964,16 +2133,18 @@ type UpdateInstanceHandler struct {
 	tc         temporalClient.Client
 	scp        *sc.ClientPool
 	cfg        *config.Config
+	dps        dpsclient.PowerProvisioner
 	tracerSpan *cutil.TracerSpan
 }
 
 // NewUpdateInstanceHandler initializes and returns a new handler for updating Instance
-func NewUpdateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateInstanceHandler {
+func NewUpdateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) UpdateInstanceHandler {
 	return UpdateInstanceHandler{
 		dbSession:  dbSession,
 		tc:         tc,
 		scp:        scp,
 		cfg:        cfg,
+		dps:        dps,
 		tracerSpan: cutil.NewTracerSpan(),
 	}
 }
@@ -2143,8 +2314,22 @@ func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Lo
 		return timeoutResp()
 	}
 
+	// A reboot leaves the Instance's SpectrumX Attachments untouched, so load them rather
+	// than returning an empty array that contradicts the GET immediately afterward.
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(uih.dbSession)
+	sxas, _, serr := sxaDAO.GetAll(reqCtx, nil, cdbm.SpectrumXAttachmentFilterInput{
+		InstanceIDs: []uuid.UUID{ui.ID},
+	}, cdbp.PageInput{
+		OrderBy: &cdbp.OrderBy{Field: cdbm.SpectrumXAttachmentOrderByDefault, Order: cdbp.OrderAscending},
+		Limit:   cutil.GetPtr(cdbp.TotalLimit),
+	}, []string{cdbm.SpectrumXPartitionRelationName})
+	if serr != nil {
+		logger.Error().Err(serr).Msg("error retrieving SpectrumX Attachments for rebooted Instance")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Attachments for Instance", nil)
+	}
+
 	// Create response
-	apiInstance := model.NewAPIInstance(ui, instance.Site, retifc, nil, nil, nil, dbskgs, ssds)
+	apiInstance := model.NewAPIInstance(ui, instance.Site, retifc, nil, sxas, nil, nil, dbskgs, ssds)
 	if ui.NetworkSecurityGroupID == nil {
 		err = AttachVpcNsgPropagationDetailsToApiInstance(c, reqCtx, logger, uih.dbSession, ui, retifc, apiInstance)
 		if err != nil {
@@ -2435,7 +2620,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		logger.Warn().Err(verr).Msg("error validating Instance update request data")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Instance update request data", verr)
 	}
-
 	instanceDAO := cdbm.NewInstanceDAO(uih.dbSession)
 
 	// Check that Instance exists
@@ -2469,6 +2653,9 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	site := instance.Site
 	vpc := instance.Vpc
 	machine := instance.Machine
+	if uih.cfg.GetDPSEnabled() && apiRequest.PowerProfile != nil && vpc.PowerResourceGroup == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "A power profile update requires the VPC to have a power resource group", nil)
+	}
 
 	// Confirm that the Instance's org matches the org sent in the request
 	if tenant.Org != org {
@@ -2483,7 +2670,14 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		logger.Error().Str("Site ID", site.ID.String()).Str("Site Status", site.Status).Msg("Unable to update Instance, Site is not in Registered state")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site is not in Registered state - cannot update Instance", nil)
 	}
-
+	if apiErr := util.ValidateSitePowerManagement(site.Config, apiRequest.PowerProfile); apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+	apiErr := model.ValidatePowerProfile(ctx, uih.cfg.GetDPSEnabled(), uih.dps, apiRequest.PowerProfile)
+	if apiErr != nil {
+		logger.Warn().Err(apiErr.Diagnosis()).Msg("failed to validate Instance power profile")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
 	// If the instance is in some stage of deprovisioning, there's nothing to update.
 	// We could move this up even higher, but we might not want to reveal status at all until
 	// we know the caller has access to this instance.
@@ -2581,8 +2775,8 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	// Collect all Subnet and VPC Prefix IDs for batch query
 	subnetIDs := []uuid.UUID{}
 	vpcPrefixIDs := []uuid.UUID{}
-	subnetIfcMap := map[uuid.UUID]int{}
-	vpcPrefixIfcMap := map[uuid.UUID]int{}
+	subnetIfcMap := map[uuid.UUID]uint64{}
+	vpcPrefixIfcMap := map[uuid.UUID]uint64{}
 
 	for _, ifc := range apiRequest.Interfaces {
 		if ifc.SubnetID != nil {
@@ -2638,8 +2832,55 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
 	}
 
-	existingSubnetIfcMap := map[uuid.UUID]int{}
-	existingVpcPrefixIfcMap := map[uuid.UUID]int{}
+	// Resolve the referenced SpectrumX Partitions before any writes so a bad ID is a 400
+	// rather than a foreign key error when the attachment row is inserted.
+	requestedSxpIDs := make([]uuid.UUID, 0, len(apiRequest.SpectrumXAttachments))
+	seenSxpIDs := make(map[uuid.UUID]struct{}, len(apiRequest.SpectrumXAttachments))
+	for _, sac := range apiRequest.SpectrumXAttachments {
+		partitionID, sxpErr := uuid.Parse(sac.SpectrumXPartitionID)
+		if sxpErr != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition ID: %s specified in spectrumXAttachments data in request is not valid", sac.SpectrumXPartitionID), nil)
+		}
+		_, seen := seenSxpIDs[partitionID]
+		if !seen {
+			seenSxpIDs[partitionID] = struct{}{}
+			requestedSxpIDs = append(requestedSxpIDs, partitionID)
+		}
+	}
+	if len(requestedSxpIDs) > 0 {
+		requestedSxps, _, sxpErr := cdbm.NewSpectrumXPartitionDAO(uih.dbSession).GetAll(ctx, nil, cdbm.SpectrumXPartitionFilterInput{
+			SpectrumXPartitionIDs: requestedSxpIDs,
+		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if sxpErr != nil {
+			logger.Error().Err(sxpErr).Msg("failed to retrieve SpectrumX Partitions from DB by IDs")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Partitions from DB by IDs", nil)
+		}
+
+		sxpByID := make(map[uuid.UUID]cdbm.SpectrumXPartition, len(requestedSxps))
+		for _, sxp := range requestedSxps {
+			sxpByID[sxp.ID] = sxp
+		}
+
+		for _, partitionID := range requestedSxpIDs {
+			sxp, ok := sxpByID[partitionID]
+			if !ok {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request data is not found in DB", partitionID), nil)
+			}
+			if sxp.TenantID != tenant.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request is not owned by Tenant", partitionID), nil)
+			}
+			if sxp.SiteID != site.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
+			}
+			if sxp.Status != cdbm.SpectrumXPartitionStatusReady {
+				logger.Warn().Msg(fmt.Sprintf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID))
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in request data is not in Ready state", partitionID), nil)
+			}
+		}
+	}
+
+	existingSubnetIfcMap := map[uuid.UUID]uint64{}
+	existingVpcPrefixIfcMap := map[uuid.UUID]uint64{}
 	if len(apiRequest.Interfaces) > 0 {
 		ifcDAO := cdbm.NewInterfaceDAO(uih.dbSession)
 		existingIfcsForCapacity, _, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
@@ -2649,6 +2890,10 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 		for i := range existingIfcsForCapacity {
 			eifc := &existingIfcsForCapacity[i]
+			if eifc.Status == cdbm.InterfaceStatusDeleting {
+				continue
+			}
+
 			if eifc.SubnetID != nil {
 				existingSubnetIfcMap[*eifc.SubnetID]++
 			}
@@ -2742,9 +2987,13 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			// Check if Subnet is exhausted
-			incomingInterfaceIPs := subnetIfcMap[subnetID] - existingSubnetIfcMap[subnetID]
+			incomingInterfaceIPs := uint64(0)
+			if subnetIfcMap[subnetID] > existingSubnetIfcMap[subnetID] {
+				incomingInterfaceIPs = subnetIfcMap[subnetID] - existingSubnetIfcMap[subnetID]
+			}
+
 			subnetUsage := subnetUsageMap[subnetID]
-			if subnetUsage != nil && subnetUsage.AvailableIPs > 0 && subnetUsage.AcquiredIPs+uint64(incomingInterfaceIPs) > subnetUsage.AvailableIPs {
+			if incomingInterfaceIPs > 0 && subnetUsage != nil && subnetUsage.AvailableIPs > 0 && subnetUsage.AcquiredIPs+incomingInterfaceIPs > subnetUsage.AvailableIPs {
 				msg := fmt.Sprintf(
 					"Subnet %v does not have enough IP addresses: %d of %d IP addresses remain available, but the %d additional interface(s) in this request require %d IP address(es)",
 					subnetID, subnetUsage.AvailableIPs-subnetUsage.AcquiredIPs, subnetUsage.AvailableIPs, incomingInterfaceIPs, incomingInterfaceIPs,
@@ -2755,6 +3004,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 
 			dbInterfaces = append(dbInterfaces, cdbm.Interface{
 				SubnetID:           &subnetID,
+				Subnet:             subnet,
 				IsPhysical:         ifc.IsPhysical,
 				RequestedIpAddress: nil, // RequestedIpAddress requires a VPC prefix, and model validation enforces this.
 				Status:             cdbm.InterfaceStatusPending,
@@ -2826,9 +3076,13 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 
 			// Check if VPC Prefix is exhausted
-			incomingInterfaceIPs := max(vpcPrefixIfcMap[vpcPrefixID]-existingVpcPrefixIfcMap[vpcPrefixID], 0)
+			incomingInterfaceIPs := uint64(0)
+			if vpcPrefixIfcMap[vpcPrefixID] > existingVpcPrefixIfcMap[vpcPrefixID] {
+				incomingInterfaceIPs = vpcPrefixIfcMap[vpcPrefixID] - existingVpcPrefixIfcMap[vpcPrefixID]
+			}
+
 			vpUsage := vpcPrefixUsageMap[vpcPrefixID]
-			if vpUsage != nil && vpUsage.AvailableIPs > 0 && vpUsage.AcquiredIPs+uint64(incomingInterfaceIPs)*2 > vpUsage.AvailableIPs {
+			if incomingInterfaceIPs > 0 && vpUsage != nil && vpUsage.AvailableIPs > 0 && vpUsage.AcquiredIPs+incomingInterfaceIPs*2 > vpUsage.AvailableIPs {
 				msg := fmt.Sprintf(
 					"VPC Prefix %v does not have enough IP addresses: %d of %d IP addresses remain available, but the %d additional interface(s) in this request require %d IP addresses",
 					vpcPrefixID, vpUsage.AvailableIPs-vpUsage.AcquiredIPs, vpUsage.AvailableIPs, incomingInterfaceIPs, incomingInterfaceIPs*2,
@@ -3217,6 +3471,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	var existingNvlIfcs []cdbm.NVLinkInterface
 	var newOrExistingIbIfcs []cdbm.InfiniBandInterface
 	var newOrExistingNvlIfcs []cdbm.NVLinkInterface
+	var newOrExistingSxAs []cdbm.SpectrumXAttachment
 	var dbskgs []cdbm.SSHKeyGroup
 	var ssds []cdbm.StatusDetail
 	reqCtx := ctx
@@ -3228,8 +3483,26 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	// the DB tx unwinds before we make the second remote call. nil means
 	// no timeout occurred and the normal flow continues.
 	var timeoutResp func() error
+	var dpsProfileRollback func() error
 
 	err = cdb.WithTx(ctx, uih.dbSession, func(tx *cdb.Tx) error {
+		if uih.cfg.GetDPSEnabled() && apiRequest.PowerProfile != nil {
+			lockErr := powerutil.AcquireVPCPowerLock(ctx, tx, vpc.ID)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("vpcID", vpc.ID.String()).Msg("failed to serialize DPS operations for VPC")
+				return cutil.NewAPIError(http.StatusConflict, "Another power operation is already in progress for the VPC", nil)
+			}
+			lockedVPC, lockErr := cdbm.NewVpcDAO(uih.dbSession).GetByID(ctx, tx, vpc.ID, nil)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("vpcID", vpc.ID.String()).Msg("failed to reload VPC after acquiring its power lock")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload VPC power configuration", nil)
+			}
+			vpc = lockedVPC
+			if vpc.PowerResourceGroup == nil {
+				return cutil.NewAPIError(http.StatusBadRequest, "A power profile update requires the VPC to have a power resource group", nil)
+			}
+		}
+
 		// Prepare DAOs
 		sdDAO := cdbm.NewStatusDetailDAO(uih.dbSession)
 
@@ -3247,6 +3520,24 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			// be hidden if we merge it all under StatusBadRequest here.
 			logger.Error().Err(oserr).Msg("error building os config for updating Instance")
 			return oserr
+		}
+
+		if uih.cfg.GetDPSEnabled() && apiRequest.PowerProfile != nil && vpc.PowerResourceGroup != nil {
+			previousProfile := ""
+			if instance.PowerProfile != nil {
+				previousProfile = *instance.PowerProfile
+			}
+			if strings.TrimSpace(previousProfile) != strings.TrimSpace(*apiRequest.PowerProfile) {
+				var dpsErr error
+				dpsProfileRollback, dpsErr = powerutil.UpdateMachinePower(ctx, uih.dps, *vpc.PowerResourceGroup, powerutil.MachinePowerAssignment{
+					MachineID:    machine.ID,
+					PowerProfile: *apiRequest.PowerProfile,
+				}, previousProfile)
+				if dpsErr != nil {
+					logger.Error().Err(dpsErr).Str("machineID", machine.ID).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("DPS rejected Instance power-profile update")
+					return cutil.NewAPIError(http.StatusServiceUnavailable, "DPS rejected Instance power-profile update", nil)
+				}
+			}
 		}
 
 		// Update Instance
@@ -3269,6 +3560,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					UserData:                 apiRequest.UserData,
 					AutoNetwork:              apiRequest.AutoNetwork,
 					Labels:                   apiRequest.Labels,
+					PowerProfile:             apiRequest.PowerProfile,
 				},
 			},
 		)
@@ -3294,6 +3586,11 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			// We should always clear details for any NSG change so that users don't see stale
 			// status.
 			clearInput.NetworkSecurityGroupPropagationDetails = true
+			shouldClear = true
+		}
+
+		if apiRequest.PowerProfile != nil && *apiRequest.PowerProfile == "" {
+			clearInput.PowerProfile = true
 			shouldClear = true
 		}
 
@@ -3460,8 +3757,8 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		//     return an empty list. Reads after this should reflect the
 		//     auto contract (no explicit interfaces) rather than the
 		//     stale rows that pre-dated the mode switch.
-		//   - Explicit interfaces in the request: create the new rows
-		//     and mark the previous rows as Deleting (existing behavior).
+		//   - Explicit interfaces in the request: reuse matching rows,
+		//     create new rows, and mark only removed rows as Deleting.
 		//   - Neither (no interface change, not switching to auto):
 		//     carry the existing rows forward.
 		switch {
@@ -3476,7 +3773,34 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 			newdbIfcs = []cdbm.Interface{}
 		case len(apiRequest.Interfaces) > 0:
+			existingIfcMap := make(map[string][]cdbm.Interface, len(existingIfcs))
+			for existingIfcIndex := range existingIfcs {
+				if existingIfcs[existingIfcIndex].Status == cdbm.InterfaceStatusDeleting {
+					continue
+				}
+
+				key := existingIfcs[existingIfcIndex].EthernetInterfaceKey()
+				existingIfcMap[key] = append(existingIfcMap[key], existingIfcs[existingIfcIndex])
+			}
+
+			reusedIfcIDs := make(map[uuid.UUID]bool)
 			for _, dbifc := range dbInterfaces {
+				key := dbifc.EthernetInterfaceKey()
+				existingIfcsForKey := existingIfcMap[key]
+
+				if len(existingIfcsForKey) > 0 {
+					reusedIfc := existingIfcsForKey[0]
+					if len(existingIfcsForKey) == 1 {
+						delete(existingIfcMap, key)
+					} else {
+						existingIfcMap[key] = existingIfcsForKey[1:]
+					}
+
+					reusedIfcIDs[reusedIfc.ID] = true
+					newdbIfcs = append(newdbIfcs, reusedIfc)
+					continue
+				}
+
 				input := cdbm.InterfaceCreateInput{
 					InstanceID:           instance.ID,
 					SubnetID:             dbifc.SubnetID,
@@ -3502,19 +3826,36 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				ifc := *newDbifc
 				ifc.Vpc = dbifc.Vpc
 				ifc.VpcPrefix = dbifc.VpcPrefix // We created the interface in the DB based on the values in dbifc, so we can populate this as well.
+				ifc.Subnet = dbifc.Subnet
 				// Add the new Interface to the list of new Interfaces
 				newdbIfcs = append(newdbIfcs, ifc)
 			}
 
-			// Update status of existing Interfaces to Deleting
-			for i := range existingIfcs {
-				existingIfcs[i].Status = cdbm.InterfaceStatusDeleting
-				_, err := ifcDAO.Update(ctx, tx, cdbm.InterfaceUpdateInput{InterfaceID: existingIfcs[i].ID, Status: cutil.GetPtr(cdbm.InterfaceStatusDeleting)})
-				if err != nil {
-					logger.Error().Err(err).Msg("failed to update Interface record in DB")
-					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Interface for Instance, DB error", nil)
+			unmatchedIfcs := make([]cdbm.Interface, 0, len(existingIfcs)-len(reusedIfcIDs))
+			for existingIfcIndex := range existingIfcs {
+				if reusedIfcIDs[existingIfcs[existingIfcIndex].ID] {
+					continue
 				}
+
+				if existingIfcs[existingIfcIndex].Status != cdbm.InterfaceStatusDeleting {
+					existingIfcs[existingIfcIndex].Status = cdbm.InterfaceStatusDeleting
+
+					// Deleting rows retain their associations and allocated addresses until Site cleanup releases them.
+					_, err := ifcDAO.Update(ctx, tx, cdbm.InterfaceUpdateInput{
+						InterfaceID: existingIfcs[existingIfcIndex].ID,
+						Status:      cutil.GetPtr(cdbm.InterfaceStatusDeleting),
+					})
+					if err != nil {
+						logger.Error().Err(err).Msg("failed to update Interface record in DB")
+
+						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Interface for Instance, DB error", nil)
+					}
+				}
+
+				unmatchedIfcs = append(unmatchedIfcs, existingIfcs[existingIfcIndex])
 			}
+
+			existingIfcs = unmatchedIfcs
 		default:
 			newdbIfcs = existingIfcs
 		}
@@ -3632,6 +3973,104 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Infiniband Interface for Instance, DB error", nil)
 					}
 				}
+			}
+		}
+
+		// Sync SpectrumX Attachments. A nil request list leaves the persisted rows untouched;
+		// an explicit list replaces them, reusing any row whose partition, device, and device
+		// instance are still requested so an unchanged attachment is not torn down and rebuilt.
+		sxaDAO := cdbm.NewSpectrumXAttachmentDAO(uih.dbSession)
+
+		existingSxAs, _, derr := sxaDAO.GetAll(ctx, tx, cdbm.SpectrumXAttachmentFilterInput{
+			InstanceIDs: []uuid.UUID{instanceID},
+		}, cdbp.PageInput{
+			OrderBy: &cdbp.OrderBy{Field: cdbm.SpectrumXAttachmentOrderByDefault, Order: cdbp.OrderAscending},
+			Limit:   cutil.GetPtr(cdbp.TotalLimit),
+		}, nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to retrieve SpectrumX Attachment details for Instance")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SpectrumX Attachments for Instance, DB error", nil)
+		}
+
+		if apiRequest.SpectrumXAttachments == nil {
+			newOrExistingSxAs = existingSxAs
+		} else {
+			existingSxAByKey := make(map[string]cdbm.SpectrumXAttachment, len(existingSxAs))
+			for i := range existingSxAs {
+				if existingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
+					continue
+				}
+				existingSxAByKey[existingSxAs[i].Key()] = existingSxAs[i]
+			}
+
+			retainedSxAIDs := map[uuid.UUID]bool{}
+			sxaCreateInputs := []cdbm.SpectrumXAttachmentCreateInput{}
+
+			for _, apiSxA := range apiRequest.SpectrumXAttachments {
+				partitionID, perr := uuid.Parse(apiSxA.SpectrumXPartitionID)
+				if perr != nil {
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to parse SpectrumX Partition ID specified in request: %s", apiSxA.SpectrumXPartitionID), nil)
+				}
+
+				// Keyed through the persisted row so a requested Attachment and the row it
+				// would reuse cannot disagree. The attachment type is part of that identity,
+				// so changing it retires the old row rather than silently keeping the type.
+				requestedSxA := cdbm.SpectrumXAttachment{
+					SpectrumXPartitionID: partitionID,
+					Device:               apiSxA.Device,
+					DeviceInstance:       *apiSxA.DeviceInstance,
+					AttachmentType:       apiSxA.AttachmentType,
+				}
+
+				existing, reusable := existingSxAByKey[requestedSxA.Key()]
+				if reusable {
+					retainedSxAIDs[existing.ID] = true
+					newOrExistingSxAs = append(newOrExistingSxAs, existing)
+					continue
+				}
+
+				sxaCreateInputs = append(sxaCreateInputs, cdbm.SpectrumXAttachmentCreateInput{
+					InstanceID:           instanceID,
+					SiteID:               site.ID,
+					SpectrumXPartitionID: partitionID,
+					Device:               apiSxA.Device,
+					DeviceInstance:       *apiSxA.DeviceInstance,
+					AttachmentType:       apiSxA.AttachmentType,
+					VirtualFunctionID:    apiSxA.VirtualFunctionID,
+					Status:               cdbm.SpectrumXAttachmentStatusPending,
+					CreatedBy:            dbUser.ID,
+				})
+			}
+
+			createdSxAs, derr := sxaDAO.CreateMultiple(ctx, tx, sxaCreateInputs)
+			if derr != nil {
+				logger.Error().Err(derr).Msg("failed to create SpectrumX Attachment records in DB")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SpectrumX Attachments for Instance, DB error", nil)
+			}
+			newOrExistingSxAs = append(newOrExistingSxAs, createdSxAs...)
+
+			// Anything no longer requested moves to Deleting. Instance inventory removes the
+			// row once the Site stops reporting the attachment.
+			for i := range existingSxAs {
+				if retainedSxAIDs[existingSxAs[i].ID] {
+					continue
+				}
+				if existingSxAs[i].Status != cdbm.SpectrumXAttachmentStatusDeleting {
+					existingSxAs[i].Status = cdbm.SpectrumXAttachmentStatusDeleting
+					_, derr := sxaDAO.Update(ctx, tx, cdbm.SpectrumXAttachmentUpdateInput{
+						SpectrumXAttachmentID: existingSxAs[i].ID,
+						Status:                cutil.GetPtr(cdbm.SpectrumXAttachmentStatusDeleting),
+					})
+					if derr != nil {
+						logger.Error().Err(derr).Msg("failed to update SpectrumX Attachment record in DB")
+						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+					}
+				}
+
+				// Carried into the response so a retiring attachment still appears with its
+				// Deleting status, matching what a following GET reports. The Site config
+				// build below filters these out.
+				newOrExistingSxAs = append(newOrExistingSxAs, existingSxAs[i])
 			}
 		}
 
@@ -4001,6 +4440,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			},
 			Config: &corev1.InstanceConfig{
 				NetworkSecurityGroupId: ui.NetworkSecurityGroupID,
+				PowerProfile:           ui.PowerProfile,
 				Tenant: &corev1.TenantConfig{
 					TenantOrganizationId: tenant.Org,
 					TenantKeysetIds:      instanceSshKeyGroupIds,
@@ -4018,6 +4458,20 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				},
 			},
 		}
+
+		// The Site treats the config as a full replacement rather than a merge, so this
+		// always carries the current attachments. A nil request list leaves the persisted
+		// rows alone, and newOrExistingSxAs is then the existing set, which keeps an
+		// unrelated PATCH from clearing the Instance's attachments on the Site.
+		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(newOrExistingSxAs))
+		for i := range newOrExistingSxAs {
+			if newOrExistingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
+				// NOTE: Don't send any SpectrumX Attachments that are being deleted
+				continue
+			}
+			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, newOrExistingSxAs[i].ToProto())
+		}
+		updateInstanceRequest.Config.Spxconfig = &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs}
 
 		workflowOptions := temporalClient.StartWorkflowOptions{
 			ID:                       "instance-update-" + instance.ID.String(),
@@ -4070,11 +4524,24 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	if err != nil {
 		var apiErr *cutil.APIError
 		if !errors.As(err, &apiErr) || timeoutResp == nil {
+			if dpsProfileRollback != nil {
+				rollbackErr := dpsProfileRollback()
+				if rollbackErr != nil {
+					logger.Error().Err(rollbackErr).Str("machineID", machine.ID).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("failed to compensate DPS after Instance update failure")
+				}
+			}
 			return common.HandleTxError(c, logger, err, "Failed to update Instance, DB transaction error")
 		}
 	}
 	if timeoutResp != nil {
-		return timeoutResp()
+		responseErr := timeoutResp()
+		if dpsProfileRollback != nil {
+			rollbackErr := dpsProfileRollback()
+			if rollbackErr != nil {
+				logger.Error().Err(rollbackErr).Str("machineID", machine.ID).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("failed to compensate DPS after Instance update failure")
+			}
+		}
+		return responseErr
 	}
 
 	// If existing Interfaces were updated, add them to the response
@@ -4084,7 +4551,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	apiInstance := model.NewAPIInstance(ui, site, newdbIfcs, newOrExistingIbIfcs, updateDesds, newOrExistingNvlIfcs, dbskgs, ssds)
+	apiInstance := model.NewAPIInstance(ui, site, newdbIfcs, newOrExistingIbIfcs, newOrExistingSxAs, updateDesds, newOrExistingNvlIfcs, dbskgs, ssds)
 
 	// If the instance has no NSG ID, then we need to check if its parent VPC does.
 	// We'll need to pull that separately because the user might not have asked for
@@ -4334,6 +4801,22 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instance Interfaces for Instance", nil)
 	}
 
+	// Get the instance SpectrumX attachment records from the db
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(gih.dbSession)
+	sxas, _, err := sxaDAO.GetAll(
+		ctx,
+		nil,
+		cdbm.SpectrumXAttachmentFilterInput{
+			InstanceIDs: []uuid.UUID{instanceID},
+		},
+		cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.SpectrumXAttachmentOrderByDefault, Order: cdbp.OrderAscending}, Limit: cutil.GetPtr(cdbp.TotalLimit)},
+		[]string{cdbm.SpectrumXPartitionRelationName},
+	)
+	if err != nil {
+		logger.Error().Err(err).Msg("error retrieving instance SpectrumX Attachment Details from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Attachments for Instance", nil)
+	}
+
 	// Get the instance infiniband interface record from the db
 	ibifcDAO := cdbm.NewInfiniBandInterfaceDAO(gih.dbSession)
 	ibIfcs, _, err := ibifcDAO.GetAll(
@@ -4408,7 +4891,7 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	ins := model.NewAPIInstance(instance, site, ifcs, ibIfcs, desds, nvlIfcs, dbskgs, ssds)
+	ins := model.NewAPIInstance(instance, site, ifcs, ibIfcs, sxas, desds, nvlIfcs, dbskgs, ssds)
 
 	// If the instance has no NSG ID, then we need to check if any parent VPC does.
 	if instance.NetworkSecurityGroupID == nil {
@@ -4757,6 +5240,14 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	// Get IP addresses from query param and filter by interface IPs
 	if ipAddresses := qParams["ipAddress"]; len(ipAddresses) != 0 {
 		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("ipAddress", ipAddresses), logger)
+		// Core stores these addresses in compressed form, and the database
+		// compares them as text. Leave invalid filters unchanged to match nothing.
+		for i, value := range ipAddresses {
+			address, err := netip.ParseAddr(value)
+			if err == nil {
+				ipAddresses[i] = address.String()
+			}
+		}
 
 		// GetAll interfaces matching specified IP addresses
 		ifcDAO := cdbm.NewInterfaceDAO(gaih.dbSession)
@@ -4907,6 +5398,29 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 		ibifcMap[ibifc.InstanceID] = append(ibifcMap[ibifc.InstanceID], cibifc)
 	}
 
+	// Get the instance SpectrumX Attachment records from the db
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(gaih.dbSession)
+	sxas, _, serr := sxaDAO.GetAll(
+		ctx,
+		nil,
+		cdbm.SpectrumXAttachmentFilterInput{
+			InstanceIDs: insIDs,
+		},
+		cdbp.PageInput{
+			Limit: cutil.GetPtr(cdbp.TotalLimit),
+		},
+		[]string{cdbm.SpectrumXPartitionRelationName},
+	)
+	if serr != nil {
+		logger.Error().Err(serr).Msg("error retrieving instance SpectrumX Attachment Details from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instance SpectrumX Attachments for Instance", nil)
+	}
+	sxaMap := map[uuid.UUID][]cdbm.SpectrumXAttachment{}
+	for _, sxa := range sxas {
+		csxa := sxa
+		sxaMap[sxa.InstanceID] = append(sxaMap[sxa.InstanceID], csxa)
+	}
+
 	// Get the instance NVLink Interface record from the db
 	retnvlifc, _, serr := nvlDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: insIDs}, cdbp.PageInput{}, nil)
 	if serr != nil {
@@ -4989,7 +5503,7 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	for _, ins := range dbInstances {
 		// Create response
 		dbInstance := ins
-		apiInstance := model.NewAPIInstance(&dbInstance, sitesByID[dbInstance.SiteID], ifcMap[dbInstance.ID], ibifcMap[dbInstance.ID], desdsMap[dbInstance.ID], nvlifcMap[dbInstance.ID], skgiasMap[dbInstance.ID], ssdMap[ins.ID.String()])
+		apiInstance := model.NewAPIInstance(&dbInstance, sitesByID[dbInstance.SiteID], ifcMap[dbInstance.ID], ibifcMap[dbInstance.ID], sxaMap[dbInstance.ID], desdsMap[dbInstance.ID], nvlifcMap[dbInstance.ID], skgiasMap[dbInstance.ID], ssdMap[ins.ID.String()])
 		apiInstance.Deprecations = queryParamDeprecations
 
 		// If the instance has no NSG applied directly, and there
@@ -5088,16 +5602,18 @@ type DeleteInstanceHandler struct {
 	tc         temporalClient.Client
 	scp        *sc.ClientPool
 	cfg        *config.Config
+	dps        dpsclient.PowerProvisioner
 	tracerSpan *cutil.TracerSpan
 }
 
 // NewDeleteInstanceHandler initializes and r`eturns a new handler for deleting an Instance
-func NewDeleteInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteInstanceHandler {
+func NewDeleteInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) DeleteInstanceHandler {
 	return DeleteInstanceHandler{
 		dbSession:  dbSession,
 		tc:         tc,
 		scp:        scp,
 		cfg:        cfg,
+		dps:        dps,
 		tracerSpan: cutil.NewTracerSpan(),
 	}
 }
@@ -5152,7 +5668,7 @@ func (dih DeleteInstanceHandler) Handle(c echo.Context) error {
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(dih.dbSession)
 
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName})
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName})
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)
@@ -5225,6 +5741,20 @@ func (dih DeleteInstanceHandler) Handle(c echo.Context) error {
 	var timeoutResp func() error
 
 	err = cdb.WithTx(ctx, dih.dbSession, func(tx *cdb.Tx) error {
+		if dih.cfg.GetDPSEnabled() && instance.Vpc != nil {
+			lockErr := powerutil.AcquireVPCPowerLock(ctx, tx, instance.Vpc.ID)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("vpcID", instance.Vpc.ID.String()).Msg("failed to serialize DPS operations for VPC")
+				return cutil.NewAPIError(http.StatusConflict, "Another power operation is already in progress for the VPC", nil)
+			}
+			lockedVPC, lockErr := cdbm.NewVpcDAO(dih.dbSession).GetByID(ctx, tx, instance.Vpc.ID, nil)
+			if lockErr != nil {
+				logger.Error().Err(lockErr).Str("vpcID", instance.Vpc.ID.String()).Msg("failed to reload VPC after acquiring its power lock")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload VPC power configuration", nil)
+			}
+			instance.Vpc = lockedVPC
+		}
+
 		// Update Instance to set status to Deleting
 		_, derr := instanceDAO.Update(ctx, tx, cdbm.InstanceUpdateInput{InstanceID: instance.ID, InstanceUpdateCommonInput: cdbm.InstanceUpdateCommonInput{Status: cutil.GetPtr(cdbm.InstanceStatusTerminating)}})
 		if derr != nil {
@@ -5323,6 +5853,12 @@ func (dih DeleteInstanceHandler) Handle(c echo.Context) error {
 	}
 	if timeoutResp != nil {
 		return timeoutResp()
+	}
+	if dih.cfg.GetDPSEnabled() && dih.dps != nil && instance.Vpc != nil && instance.Vpc.PowerResourceGroup != nil && instance.MachineID != nil {
+		cleanupErr := dih.dps.RemoveMachine(context.WithoutCancel(ctx), *instance.Vpc.PowerResourceGroup, *instance.MachineID)
+		if cleanupErr != nil {
+			logger.Error().Err(cleanupErr).Str("machineID", *instance.MachineID).Str("powerResourceGroup", *instance.Vpc.PowerResourceGroup).Msg("failed to remove released machine from DPS; external reconciliation is required")
+		}
 	}
 
 	// Return response

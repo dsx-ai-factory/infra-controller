@@ -6,7 +6,9 @@ metadata:
     {{- include "nico-otelcol.labels" . | nindent 4 }}
 data:
   config.yaml: |
-    {{- /* Swap the embedded /opt/nico cert dir + nico_root.pem filename to match certsDir + rootCaFile. */ -}}
+    {{- /* Swap the embedded /opt/forge cert dir + forge_root.pem filename to match certsDir + rootCaFile. Rewrite the filename first so the override directory is inserted only once. */ -}}
     {{- $certsDir := .Values.certsDir | default "/opt/nico" -}}
     {{- $rootCa := .Values.rootCaFile | default "nico_root.pem" -}}
-    {{- .Files.Get "files/otel_config.yaml" | replace "/opt/nico/nico_root.pem" (printf "%s/%s" $certsDir $rootCa) | replace "/opt/nico" $certsDir | nindent 4 }}
+    {{- /* Remote scraping opts this host-network exporter into all interfaces; otherwise preserve loopback. */ -}}
+    {{- $prometheusEndpoint := printf "%s:%s" (ternary "" "127.0.0.1" (.Values.prometheusRemoteAccess | default false)) (include "nico-otelcol.prometheusPort" .) -}}
+    {{- .Files.Get "files/otel_config.yaml" | replace "/opt/forge/forge_root.pem" (printf "/opt/forge/%s" $rootCa) | replace "/opt/forge" $certsDir | replace "127.0.0.1:9999" $prometheusEndpoint | nindent 4 }}

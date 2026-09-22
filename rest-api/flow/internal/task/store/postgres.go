@@ -119,7 +119,7 @@ func (s *PostgresStore) GetTaskByIdempotencyKey(
 		return nil, errors.GRPCErrorInternal(err.Error())
 	}
 
-	return dao.TaskFrom(taskDao), nil
+	return taskFromDAO(taskDao)
 }
 
 // GetTask retrieves a single task by its ID.
@@ -131,7 +131,7 @@ func (s *PostgresStore) GetTask(
 	if err != nil {
 		return nil, errors.GRPCErrorInternal(err.Error())
 	}
-	return dao.TaskFrom(taskDao), nil
+	return taskFromDAO(taskDao)
 }
 
 // GetTasks retrieves tasks by their IDs.
@@ -151,7 +151,11 @@ func (s *PostgresStore) GetTasks(
 			return nil, errors.GRPCErrorInternal(err.Error())
 		}
 
-		results = append(results, dao.TaskFrom(taskDao))
+		converted, err := taskFromDAO(taskDao)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, converted)
 	}
 
 	return results, nil
@@ -170,10 +174,41 @@ func (s *PostgresStore) ListTasks(
 
 	results := make([]*taskdef.Task, 0, len(taskDaos))
 	for _, taskDao := range taskDaos {
-		results = append(results, dao.TaskFrom(&taskDao))
+		converted, err := taskFromDAO(&taskDao)
+		if err != nil {
+			return nil, 0, err
+		}
+		results = append(results, converted)
 	}
 
 	return results, total, nil
+}
+
+// ListNonTerminalTasksForRacks returns Waiting, Pending, and Running tasks for
+// the requested racks.
+func (s *PostgresStore) ListNonTerminalTasksForRacks(
+	ctx context.Context,
+	rackIDs []uuid.UUID,
+) ([]*taskdef.Task, error) {
+	taskDaos, err := model.ListTasksForRacksByStatus(
+		ctx,
+		s.pg.DB,
+		rackIDs,
+		taskcommon.NonTerminalTaskStatuses(),
+	)
+	if err != nil {
+		return nil, errors.GRPCErrorInternal(err.Error())
+	}
+
+	results := make([]*taskdef.Task, 0, len(taskDaos))
+	for i := range taskDaos {
+		converted, err := taskFromDAO(&taskDaos[i])
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, converted)
+	}
+	return results, nil
 }
 
 // UpdateScheduledTask updates task scheduling information.
@@ -189,18 +224,23 @@ func (s *PostgresStore) UpdateScheduledTask(
 	return nil
 }
 
-// UpdateTaskStatus persists status, message, and (optionally) the report
-// snapshot. The report carried in arg is treated as authoritative: when
-// non-empty it replaces the stored document, when empty the stored
-// document is left untouched (the underlying model omits the report
-// column from the UPDATE in that case). No read-modify-write is performed,
-// so concurrent transitions cannot lose updates.
+// UpdateTaskStatus persists status and message, plus optional report and queue
+// deadline changes. Finished statuses clear the queue deadline; otherwise nil
+// optional values leave their stored columns untouched. No read-modify-write is
+// performed, so concurrent transitions cannot lose updates.
 func (s *PostgresStore) UpdateTaskStatus(
 	ctx context.Context,
 	arg *taskdef.TaskStatusUpdate,
 ) error {
 	taskDao := &model.Task{ID: arg.ID}
-	err := taskDao.UpdateTaskStatus(ctx, s.idb(ctx), arg.Status, arg.Message, arg.Report)
+	err := taskDao.UpdateTaskStatus(
+		ctx,
+		s.idb(ctx),
+		arg.Status,
+		arg.Message,
+		arg.Report,
+		arg.QueueExpiresAt,
+	)
 	if err != nil {
 		return errors.GRPCErrorInternal(err.Error())
 	}
@@ -246,7 +286,11 @@ func (s *PostgresStore) ListActiveTasksForRack(
 
 	result := make([]*taskdef.Task, len(tasks))
 	for i := range tasks {
-		result[i] = dao.TaskFrom(&tasks[i])
+		converted, err := taskFromDAO(&tasks[i])
+		if err != nil {
+			return nil, err
+		}
+		result[i] = converted
 	}
 	return result, nil
 }
@@ -266,9 +310,22 @@ func (s *PostgresStore) ListWaitingTasksForRack(
 
 	result := make([]*taskdef.Task, len(tasks))
 	for i := range tasks {
-		result[i] = dao.TaskFrom(&tasks[i])
+		converted, err := taskFromDAO(&tasks[i])
+		if err != nil {
+			return nil, err
+		}
+		result[i] = converted
 	}
 	return result, nil
+}
+
+func taskFromDAO(taskDAO *model.Task) (*taskdef.Task, error) {
+	converted, err := dao.TaskFrom(taskDAO)
+	if err != nil {
+		return nil, errors.GRPCErrorInternal(err.Error())
+	}
+
+	return converted, nil
 }
 
 // ListRacksWithWaitingTasks returns distinct rack IDs with waiting tasks.

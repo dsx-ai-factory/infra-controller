@@ -14098,7 +14098,7 @@ Copyright notices are retained in src/* files where relevant.
 [[third_party_libraries]]
 package_name = "libredfish"
 package_version = "0.31.2"
-repository = "https://gitlab-master.nvidia.com/nvmetal/libredfish"
+repository = "https://github.com/NVIDIA/libredfish"
 license = "MIT"
 
 [[third_party_libraries.licenses]]

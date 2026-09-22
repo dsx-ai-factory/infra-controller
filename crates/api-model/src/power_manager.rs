@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,7 @@ impl PowerHandlingOutcome {
 /// the handling and move to the state handler.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PowerOptions {
-    pub host_id: MachineId,
+    pub host_id: HostMachineId,
     pub last_fetched_updated_at: DateTime<Utc>,
     pub last_fetched_next_try_at: DateTime<Utc>,
     pub last_fetched_power_state: PowerState,
@@ -180,7 +180,7 @@ pub fn are_all_dpus_up_after_power_operation(
 
 impl<'r> FromRow<'r, PgRow> for PowerOptions {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
-        let host_id: MachineId = row.try_get("host_id")?;
+        let host_id: HostMachineId = row.try_get("host_id")?;
         let last_fetched_updated_at = row.try_get("last_fetched_updated_at")?;
         let last_fetched_next_try_at = row.try_get("last_fetched_next_try_at")?;
         let last_fetched_power_state = row.try_get("last_fetched_power_state")?;

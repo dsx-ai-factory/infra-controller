@@ -49,12 +49,19 @@ pub trait EndpointExplorer: Send + Sync + 'static {
         &self,
         metrics: &mut SiteExplorationMetrics,
     ) -> Result<(), EndpointExplorationError>;
+}
 
+/// Authenticated BMC operations, resolving stored credentials from the
+/// endpoint's interface. Kept separate from [`EndpointExplorer`] so BMC ops
+/// don't route through the explorer.
+#[async_trait::async_trait]
+pub trait AuthenticatedBmc: Send + Sync + 'static {
     // redfish_reset_bmc issues a BMC reset through redfish.
     async fn redfish_reset_bmc(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        reset_type: Option<libredfish::ManagerResetType>,
     ) -> Result<(), EndpointExplorationError>;
 
     // ipmitool_reset_bmc issues a cold BMC reset through ipmitool.
@@ -74,6 +81,18 @@ pub trait EndpointExplorer: Send + Sync + 'static {
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        action: libredfish::SystemPowerControl,
+    ) -> Result<(), EndpointExplorationError>;
+
+    /// Reset a Redfish Chassis (e.g. an HGX baseboard) out-of-band via the BMC at
+    /// `address`, resolving credentials from `interface`. `chassis_id` is the
+    /// Redfish Chassis id (e.g. "HGX_Chassis_0"). Errors if credentials cannot be
+    /// loaded or the Redfish request fails.
+    async fn redfish_chassis_reset(
+        &self,
+        address: SocketAddr,
+        interface: &MachineInterfaceSnapshot,
+        chassis_id: &str,
         action: libredfish::SystemPowerControl,
     ) -> Result<(), EndpointExplorationError>;
 

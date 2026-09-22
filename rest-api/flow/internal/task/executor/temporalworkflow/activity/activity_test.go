@@ -88,13 +88,8 @@ func TestActivityCallsManagerWhenCapabilityIsSupported(t *testing.T) {
 	require.True(t, manager.called)
 }
 
-func TestFirmwareControlDecryptsAuthenticationDataInActivity(t *testing.T) {
-	acts, manager := newCapabilityTestActivities(
-		t,
-		capability.CapabilityFirmwareControl,
-	)
+func TestFirmwareControlDataCipherAvailability(t *testing.T) {
 	cipher := newActivityTestCipher(t)
-	acts.dataCipher = cipher
 	encrypted, err := firmwareauth.Encrypt(
 		cipher,
 		&pb.FirmwareAuthenticationData{
@@ -109,17 +104,58 @@ func TestFirmwareControlDecryptsAuthenticationDataInActivity(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	err = acts.FirmwareControl(
-		context.Background(),
-		newActivityTestTarget(),
-		operations.FirmwareControlTaskInfo{
-			Operation:          operations.FirmwareOperationUpgrade,
-			AuthenticationData: encrypted,
+	tests := []struct {
+		name               string
+		dataCipher         *secret.Cipher
+		authenticationData *secret.EncryptedData
+		wantAccessToken    string
+		wantUnavailable    bool
+		wantManagerCall    bool
+	}{
+		{
+			name:               "configured cipher decrypts authentication data",
+			dataCipher:         cipher,
+			authenticationData: encrypted,
+			wantAccessToken:    "compute-token",
+			wantManagerCall:    true,
 		},
-	)
+		{
+			name:            "missing cipher allows operation without authentication data",
+			wantManagerCall: true,
+		},
+		{
+			name:               "missing cipher rejects encrypted authentication data",
+			authenticationData: encrypted,
+			wantUnavailable:    true,
+		},
+	}
 
-	require.NoError(t, err)
-	require.Equal(t, "compute-token", manager.firmwareInfo.AccessToken)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			acts, manager := newCapabilityTestActivities(
+				t,
+				capability.CapabilityFirmwareControl,
+			)
+			acts.dataCipher = tt.dataCipher
+
+			err := acts.FirmwareControl(
+				context.Background(),
+				newActivityTestTarget(),
+				operations.FirmwareControlTaskInfo{
+					Operation:          operations.FirmwareOperationUpgrade,
+					AuthenticationData: tt.authenticationData,
+				},
+			)
+
+			if tt.wantUnavailable {
+				require.ErrorIs(t, err, firmwareauth.ErrDataCipherNotConfigured)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tt.wantManagerCall, manager.called)
+			require.Equal(t, tt.wantAccessToken, manager.firmwareInfo.AccessToken)
+		})
+	}
 }
 
 func TestActivityRequiresOperationInterfaceAfterCapabilityValidation(t *testing.T) {
@@ -401,7 +437,7 @@ func newDescriptorOnlyActivities(
 
 func newActivityTestTarget() common.Target {
 	return common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"machine-1"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"machine-1"},
 	}
 }

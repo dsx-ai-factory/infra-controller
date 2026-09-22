@@ -46,14 +46,16 @@ type Task struct {
 	StartedAt     *time.Time
 	FinishedAt    *time.Time
 
-	// QueueExpiresAt is the deadline for a waiting task to be promoted.
-	// After this time the Promoter terminates the task automatically.
+	// QueueExpiresAt is the deadline for a pre-execution wait. After this time
+	// the Promoter or task manager terminates the task automatically.
 	// Nil for non-waiting tasks.
 	QueueExpiresAt *time.Time
 
 	// IdempotencyKey is an optional stable submission key. When set, retries
 	// return the existing task instead of creating another row.
 	IdempotencyKey string
+	TriggerType    operation.TriggerType
+	TriggerID      *uuid.UUID
 }
 
 // IsScheduled reports whether the task has been submitted to an executor.
@@ -61,11 +63,13 @@ func (t *Task) IsScheduled() bool {
 	return t != nil && t.ExecutionID != ""
 }
 
-// WorkflowComponent holds the minimal component data needed to execute
-// a workflow. All fields are plain JSON-safe types.
+// WorkflowComponent holds the minimal component data needed to execute a
+// workflow, including the management MAC fallback used before ingestion has
+// assigned an external component ID. All fields are plain JSON-safe types.
 type WorkflowComponent struct {
 	Type        devicetypes.ComponentType `json:"type"`
 	ComponentID string                    `json:"component_id"`
+	MACAddress  string                    `json:"mac_address,omitempty"`
 }
 
 // ExecutionInfo contains the information needed to execute a task.
@@ -146,6 +150,10 @@ type TaskStatusUpdate struct {
 	ID      uuid.UUID
 	Status  taskcommon.TaskStatus
 	Message string
+	// QueueExpiresAt, when non-nil, replaces the task's pre-execution wait
+	// deadline. A nil value leaves it unchanged unless Status is finished, in
+	// which case the stored deadline is cleared.
+	QueueExpiresAt *time.Time
 	// Report, when non-empty, replaces the stored report document. An
 	// empty value leaves the stored report untouched.
 	Report json.RawMessage

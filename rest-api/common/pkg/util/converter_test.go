@@ -97,3 +97,47 @@ func TestGetPtr(t *testing.T) {
 		}
 	})
 }
+
+func TestGetPtrIfNotZero(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantNil bool
+	}{
+		{name: "zero value", wantNil: true},
+		{name: "non-zero value", value: "test"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := GetPtrIfNotZero(test.value)
+
+			if test.wantNil {
+				require.Nil(t, got)
+
+				return
+			}
+
+			require.NotNil(t, got)
+			require.Equal(t, test.value, *got)
+		})
+	}
+}
+
+func TestGetValueOrZero(t *testing.T) {
+	tests := []struct {
+		name  string
+		value *string
+		want  string
+	}{
+		{name: "nil"},
+		{name: "pointer to zero value", value: GetPtr("")},
+		{name: "pointer to non-zero value", value: GetPtr("test"), want: "test"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, GetValueOrZero(test.value))
+		})
+	}
+}

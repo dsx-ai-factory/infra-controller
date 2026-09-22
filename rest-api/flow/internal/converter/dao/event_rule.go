@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"time"
 
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	policycodec "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/codec/policy"
-	"github.com/google/uuid"
+	eventrulecodec "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/codec"
 )
 
 // EventRuleTo converts a domain rule to a database model.
@@ -26,7 +26,7 @@ func EventRuleTo(rule *eventrule.Rule) (*dbmodel.EventRule, error) {
 		)
 	}
 
-	policy, err := policycodec.Marshal(rule.Policy)
+	policy, err := eventrulecodec.MarshalPolicy(rule.Policy)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +49,7 @@ func EventRuleFrom(dbRule *dbmodel.EventRule) (*eventrule.Rule, error) {
 		return nil, nil
 	}
 
-	policy, err := policycodec.Unmarshal(dbRule.Policy)
+	policy, err := eventrulecodec.UnmarshalPolicy(dbRule.Policy)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: decode policy: %w",
@@ -66,8 +66,8 @@ func EventRuleFrom(dbRule *dbmodel.EventRule) (*eventrule.Rule, error) {
 		Enabled:     dbRule.Enabled,
 		EventType:   eventrule.Type(dbRule.EventType),
 		Policy:      policy,
-		CreatedAt:   dbRule.CreatedAt,
-		UpdatedAt:   dbRule.UpdatedAt,
+		CreatedAt:   timeFromPersistence(dbRule.CreatedAt),
+		UpdatedAt:   timeFromPersistence(dbRule.UpdatedAt),
 	}
 
 	if err := rule.Validate(); err != nil {
@@ -87,18 +87,12 @@ func EventRuleBindingTo(
 		return nil, err
 	}
 
-	var scopeID *uuid.UUID
-	if binding.Scope.HasID() {
-		id := binding.Scope.ID
-		scopeID = &id
-	}
-
 	return &dbmodel.EventRuleBinding{
 		ID:        binding.ID,
 		RuleID:    binding.RuleID,
 		EventType: string(binding.EventType),
 		ScopeType: string(binding.Scope.Type),
-		ScopeID:   scopeID,
+		ScopeID:   cutil.GetPtrIfNotZero(binding.Scope.ID),
 		CreatedAt: createdAt,
 		UpdatedAt: updatedAt,
 	}, nil
@@ -112,18 +106,13 @@ func EventRuleBindingFrom(
 		return nil, nil
 	}
 
-	var scopeID uuid.UUID
-	if dbBinding.ScopeID != nil {
-		scopeID = *dbBinding.ScopeID
-	}
-
 	binding := &eventrule.Binding{
 		ID:        dbBinding.ID,
 		RuleID:    dbBinding.RuleID,
 		EventType: eventrule.Type(dbBinding.EventType),
 		Scope: eventrule.Scope{
 			Type: eventrule.ScopeType(dbBinding.ScopeType),
-			ID:   scopeID,
+			ID:   cutil.GetValueOrZero(dbBinding.ScopeID),
 		},
 	}
 

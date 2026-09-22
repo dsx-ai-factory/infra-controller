@@ -18,8 +18,8 @@
 //! State Controller IO implementation for dpa interfaces
 
 use config_version::{ConfigVersion, Versioned};
-use db::DatabaseError;
 use db::attestation::spdm::load_snapshot_for_machine_and_device_id;
+use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use model::StateSla;
 use model::attestation::spdm::{SpdmAttestationState, SpdmDeviceAttestation, SpdmObjectId};
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -80,11 +80,18 @@ impl StateControllerIO for SpdmStateControllerIO {
         &self,
         txn: &mut PgConnection,
         object_id: &Self::ObjectId,
-        _old_version: ConfigVersion,
-        _new_version: ConfigVersion,
+        old_version: ConfigVersion,
+        new_version: ConfigVersion,
         new_controller_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
-        db::attestation::spdm::persist_controller_state(txn, object_id, new_controller_state).await
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
+        db::attestation::spdm::persist_controller_state(
+            txn,
+            object_id,
+            old_version,
+            new_version,
+            new_controller_state,
+        )
+        .await
     }
 
     async fn persist_state_history(

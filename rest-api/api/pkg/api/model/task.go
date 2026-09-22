@@ -21,7 +21,26 @@ var ProtoToAPITaskStatusName = map[flowv1.TaskStatus]string{
 	flowv1.TaskStatus_TASK_STATUS_COMPLETED:  "Succeeded",
 	flowv1.TaskStatus_TASK_STATUS_FAILED:     "Failed",
 	flowv1.TaskStatus_TASK_STATUS_TERMINATED: "Terminated",
-	flowv1.TaskStatus_TASK_STATUS_WAITING:    "Waiting",
+	flowv1.TaskStatus_TASK_STATUS_WAITING:    "Pending",
+}
+
+// APITaskStats counts non-terminal tasks currently associated with an
+// inventory resource. Pending combines Flow's Waiting and Pending states,
+// while Active represents Running. Every count is serialized, including zero.
+type APITaskStats struct {
+	PendingTaskCount uint32 `json:"pendingTaskCount"`
+	ActiveTaskCount  uint32 `json:"activeTaskCount"`
+}
+
+// FromProto replaces the task statistics with the values reported by Flow. Nil
+// stats clear all counts so the REST response shape remains stable.
+func (s *APITaskStats) FromProto(stats *flowv1.TaskStats) {
+	*s = APITaskStats{}
+	if stats == nil {
+		return
+	}
+	s.PendingTaskCount = stats.GetWaitingTaskCount() + stats.GetPendingTaskCount()
+	s.ActiveTaskCount = stats.GetRunningTaskCount()
 }
 
 // APITask is the API response model for a Flow-scheduled task
@@ -267,8 +286,8 @@ func (r *APICancelTaskRequest) Validate() error {
 	return nil
 }
 
-// APIGetTasksRequest binds query parameters for rack- and tray-scoped task list
-// endpoints. Pagination is bound separately via pagination.PageRequest.
+// APIGetTasksRequest binds query parameters for Site-, Rack-, and Tray-scoped
+// task list endpoints. Pagination is bound separately via pagination.PageRequest.
 type APIGetTasksRequest struct {
 	SiteID        string `query:"siteId"`
 	ActiveOnly    bool   `query:"activeOnly"`

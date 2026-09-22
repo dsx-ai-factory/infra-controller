@@ -227,7 +227,7 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 			}
 		} else {
 			// Was this created within inventory receipt interval? If so, we may be processing an older inventory
-			if time.Since(ossa.Created) < cutil.InventoryReceiptInterval {
+			if site.IsTimeWithinStaleInventoryThreshold(ossa.Created) {
 				continue
 			}
 
@@ -886,8 +886,12 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 			return derr
 		}
 		candidateOSIDs := make([]uuid.UUID, 0, len(siteOssas))
+		// Deletion below requires a single association, so this Site's association is the only
+		// one and its creation time is when the OS became known to the Site.
+		assocCreatedByOS := make(map[uuid.UUID]time.Time, len(siteOssas))
 		for _, ossa := range siteOssas {
 			candidateOSIDs = append(candidateOSIDs, ossa.OperatingSystemID)
+			assocCreatedByOS[ossa.OperatingSystemID] = ossa.Created
 		}
 
 		if len(candidateOSIDs) > 0 {
@@ -925,8 +929,17 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 				slogger := logger.With().Str("OperatingSystemID", ipxeOS.ID.String()).Logger()
 
 				if !deletionReportedIDs.Contains(ipxeOS.ID) {
+					// An OS associated to this Site after the inventory was collected is absent
+					// from it for that reason alone. A later inventory reads an already-deleted
+					// OS as a user decision and will not restore it, so defer to the next run.
+					if site.IsTimeWithinStaleInventoryThreshold(assocCreatedByOS[ipxeOS.ID]) {
+						slogger.Info().Msg("Not soft-deleting iPXE OS yet because its Site association is newer than the inventory interval")
+
+						continue
+					}
 					slogger.Info().Msg("Soft-deleting single-site iPXE OS absent from Site inventory")
-					if serr := osDAO.Delete(ctx, nil, ipxeOS.ID); serr != nil {
+					serr := osDAO.Delete(ctx, nil, ipxeOS.ID)
+					if serr != nil {
 						slogger.Error().Err(serr).Msg("Failed to soft-delete OS, DB error")
 						continue
 					}

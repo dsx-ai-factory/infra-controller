@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
@@ -154,6 +155,29 @@ func testIPBlockBuildIPBlock(t *testing.T, dbSession *cdb.Session, name string, 
 	return ipb
 }
 
+// testIPBlockBuildTenantSitePrefix creates a private Tenant SitePrefix. The
+// combination of TenantID and SitePrefixID keeps it out of generic IPBlock
+// handlers.
+func testIPBlockBuildTenantSitePrefix(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, ip *cdbm.InfrastructureProvider, tenant *cdbm.Tenant, prefix string, prefixLength int, status string, user *cdbm.User) *cdbm.IPBlock {
+	t.Helper()
+	sitePrefixID := uuid.New()
+	ipBlock, err := cdbm.NewIPBlockDAO(dbSession).Create(context.Background(), nil, cdbm.IPBlockCreateInput{
+		Name:                     name,
+		SiteID:                   site.ID,
+		InfrastructureProviderID: ip.ID,
+		TenantID:                 &tenant.ID,
+		SitePrefixID:             &sitePrefixID,
+		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
+		Prefix:                   prefix,
+		PrefixLength:             prefixLength,
+		ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
+		Status:                   status,
+		CreatedBy:                &user.ID,
+	})
+	require.NoError(t, err)
+	return ipBlock
+}
+
 func testIPBlockBuildStatusDetail(t *testing.T, dbSession *cdb.Session, entityID string, status string) {
 	sdDAO := cdbm.NewStatusDetailDAO(dbSession)
 	ssd, err := sdDAO.Create(context.Background(), nil, cdbm.StatusDetailCreateInput{EntityID: entityID, Status: status, Message: nil})
@@ -246,6 +270,7 @@ func TestIPBlockHandler_Create(t *testing.T) {
 	assert.NotNil(t, site)
 	site2 := testIPBlockBuildSite(t, dbSession, ip2, "testSite2", cdbm.SiteStatusRegistered, true, user)
 	assert.NotNil(t, site2)
+	testIPBlockBuildIPBlock(t, dbSession, "existing-ipv6", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8:1::", 64, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, user)
 
 	prefLen24 := 24
 	prefLen19 := 19
@@ -317,6 +342,22 @@ func TestIPBlockHandler_Create(t *testing.T) {
 		PrefixLength:    prefLen24,
 		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
 	assert.Nil(t, err)
+	publicSamePrefix, err := json.Marshal(&model.APIIPBlockCreateRequest{
+		Name:            "public-same-prefix",
+		SiteID:          site.ID.String(),
+		RoutingType:     cdbm.IPBlockRoutingTypePublic,
+		Prefix:          "192.168.0.0",
+		PrefixLength:    prefLen24,
+		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
+	assert.Nil(t, err)
+	lockBusyBody, err := json.Marshal(&model.APIIPBlockCreateRequest{
+		Name:            "site-fabric-lock-busy",
+		SiteID:          site.ID.String(),
+		RoutingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+		Prefix:          "192.172.0.0",
+		PrefixLength:    prefLen24,
+		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
+	assert.Nil(t, err)
 	errBody1, err := json.Marshal(&model.APIIPBlockCreateRequest{
 		Name:            "errortest",
 		SiteID:          site.ID.String(),
@@ -333,6 +374,25 @@ func TestIPBlockHandler_Create(t *testing.T) {
 		PrefixLength:    prefLen19,
 		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
 	assert.Nil(t, err)
+
+	okBodyIPv6, err := json.Marshal(&model.APIIPBlockCreateRequest{
+		Name:            "expanded-ipv6",
+		SiteID:          site.ID.String(),
+		RoutingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+		Prefix:          "2001:0DB8:0:0:0:0:0:0",
+		PrefixLength:    64,
+		ProtocolVersion: cdbm.IPBlockProtocolVersionV6,
+	})
+	require.NoError(t, err)
+	errBodyIPv6PrefixClash, err := json.Marshal(&model.APIIPBlockCreateRequest{
+		Name:            "duplicate-ipv6",
+		SiteID:          site.ID.String(),
+		RoutingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+		Prefix:          "2001:0DB8:0001:0:0:0:0:0",
+		PrefixLength:    64,
+		ProtocolVersion: cdbm.IPBlockProtocolVersionV6,
+	})
+	require.NoError(t, err)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -352,8 +412,11 @@ func TestIPBlockHandler_Create(t *testing.T) {
 		expectedStatus     int
 		expectedIpam       bool
 		expectedIpamErrMsg string
+		expectedErrorText  string
+		expectedPrefix     string
 		expectMessage      *string
 		verifyChildSpanner bool
+		holdSiteFabricLock bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -445,12 +508,53 @@ func TestIPBlockHandler_Create(t *testing.T) {
 			expectMessage:  cutil.GetPtr("IP Block is ready for use"),
 		},
 		{
-			name:           "error when ip prefix clashes in same infrastructure provider",
+			name:           "success with expanded uppercase IPv6 prefix",
 			reqOrgName:     ipOrg1,
-			reqBody:        string(errIPPrefixClash),
+			reqBody:        string(okBodyIPv6),
 			user:           user,
-			expectedErr:    true,
-			expectedStatus: http.StatusConflict,
+			expectedStatus: http.StatusCreated,
+			paramNamespace: ipam.GetIpamNamespaceForIPBlock(ctx, cdbm.IPBlockRoutingTypeDatacenterOnly, ip.ID.String(), site.ID.String()),
+			paramCIDR:      "2001:db8::/64",
+			expectedPrefix: "2001:db8::",
+		},
+		{
+			name:              "error when equivalent IPv6 prefix already exists",
+			reqOrgName:        ipOrg1,
+			reqBody:           string(errBodyIPv6PrefixClash),
+			user:              user,
+			expectedErr:       true,
+			expectedStatus:    http.StatusConflict,
+			expectedErrorText: "IPBlock with prefix: 2001:db8:1:: and prefix_length: 64",
+		},
+		{
+			name:              "error when ip prefix clashes in same infrastructure provider",
+			reqOrgName:        ipOrg1,
+			reqBody:           string(errIPPrefixClash),
+			user:              user,
+			expectedErr:       true,
+			expectedStatus:    http.StatusConflict,
+			expectedErrorText: "IPBlock with prefix: 192.168.0.0 and prefix_length: 24",
+		},
+		{
+			name:           "success when the same prefix uses another routing type",
+			reqOrgName:     ipOrg1,
+			reqBody:        string(publicSamePrefix),
+			user:           user,
+			expectedErr:    false,
+			expectedStatus: http.StatusCreated,
+			paramNamespace: ipam.GetIpamNamespaceForIPBlock(ctx, cdbm.IPBlockRoutingTypePublic, ip.ID.String(), site.ID.String()),
+			paramCIDR:      ipam.GetCidrForIPBlock(ctx, "192.168.0.0", 24),
+			expectedIpam:   true,
+		},
+		{
+			name:               "conflict while Site fabric IP Blocks are being updated",
+			reqOrgName:         ipOrg1,
+			reqBody:            string(lockBusyBody),
+			user:               user,
+			expectedErr:        true,
+			expectedStatus:     http.StatusConflict,
+			expectedErrorText:  "Site fabric IP Blocks are being updated; retry the request",
+			holdSiteFabricLock: true,
 		},
 		{
 			name:           "error when ip prefix does not match block size",
@@ -510,6 +614,18 @@ func TestIPBlockHandler_Create(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
+			if tc.holdSiteFabricLock {
+				lockingTx, err := cdb.BeginTx(ctx, dbSession, nil)
+				require.NoError(t, err)
+				t.Cleanup(func() {
+					assert.NoError(t, lockingTx.Rollback())
+				})
+				require.NoError(t, lockingTx.AcquireAdvisoryLock(
+					ctx,
+					cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, site.ID),
+					false,
+				))
+			}
 			// Setup echo server/context
 			e := echo.New()
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
@@ -547,6 +663,16 @@ func TestIPBlockHandler_Create(t *testing.T) {
 				if tc.expectMessage != nil {
 					assert.Equal(t, rsp.StatusHistory[0].Message, tc.expectMessage)
 				}
+				if tc.expectedPrefix != "" {
+					assert.Equal(t, tc.expectedPrefix, rsp.Prefix)
+					ipBlockID, err := uuid.Parse(rsp.ID)
+					require.NoError(t, err)
+					storedIPBlock, err := cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, ipBlockID, nil)
+					require.NoError(t, err)
+					assert.Equal(t, tc.expectedPrefix, storedIPBlock.Prefix)
+					_, err = ipamStorage.ReadPrefix(ctx, tc.paramCIDR, tc.paramNamespace)
+					require.NoError(t, err)
+				}
 				// validate ipam exists
 				if tc.expectedIpam {
 					ipamer := cipam.NewWithStorage(ipamStorage)
@@ -557,6 +683,9 @@ func TestIPBlockHandler_Create(t *testing.T) {
 				}
 			} else {
 				fmt.Printf("error message body : %s", string(rec.Body.Bytes()))
+				if tc.expectedErrorText != "" {
+					assert.Contains(t, rec.Body.String(), tc.expectedErrorText)
+				}
 				if tc.expectedIpam && tc.expectedIpamErrMsg != "" {
 					assert.Contains(t, rec.Body.String(), tc.expectedIpamErrMsg)
 				}
@@ -603,6 +732,8 @@ func TestIPBlockHandler_Update(t *testing.T) {
 	ipb2 := testIPBlockBuildIPBlock(t, dbSession, "testDel2", site2, ip2, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.1.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusPending, user)
 	assert.NotNil(t, ipb2)
 	testIPBlockBuildStatusDetail(t, dbSession, ipb2.ID.String(), cdbm.IPBlockStatusPending)
+	tenant := testIPBlockBuildTenant(t, dbSession, "private-tenant", "private-tenant", user)
+	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tenant, "10.202.0.0", 24, cdbm.IPBlockStatusReady, user)
 
 	errBody1, err := json.Marshal(model.APIIPBlockUpdateRequest{Name: cutil.GetPtr("a")})
 	assert.Nil(t, err)
@@ -690,7 +821,7 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			user:           user,
 			ipbID:          ipb1.ID.String(),
 			expectedErr:    true,
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus: http.StatusNotFound,
 		},
 		{
 			name:           "error when specified ipblock id is invalid uuid",
@@ -721,6 +852,16 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			ipbID:          ipb1.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusConflict,
+		},
+		{
+			name:           "provider cannot update a Tenant SitePrefix",
+			reqOrgName:     ipOrg1,
+			reqBody:        string(okBody1),
+			reqIpb:         tenantSitePrefix,
+			user:           user,
+			ipbID:          tenantSitePrefix.ID.String(),
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
 		},
 		{
 			name:               "success case 1",
@@ -797,6 +938,11 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			}
 		})
 	}
+	// A scoped 404 must leave the private record untouched. Read it without the
+	// handler filter to distinguish hiding it from accidentally updating it.
+	tenantSitePrefixAfter, err := cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, tenantSitePrefix.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "private-site-prefix", tenantSitePrefixAfter.Name)
 }
 
 func TestIPBlockHandler_Get(t *testing.T) {
@@ -875,6 +1021,7 @@ func TestIPBlockHandler_Get(t *testing.T) {
 	ipb5 := testIPBlockBuildIPBlock(t, dbSession, "test5", site, ip, cutil.GetPtr(tn3.ID), cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.1.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusPending, ipu)
 	assert.NotNil(t, ipb5)
 	testIPBlockBuildStatusDetail(t, dbSession, ipb5.ID.String(), cdbm.IPBlockStatusPending)
+	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tn, "10.201.0.0", 24, cdbm.IPBlockStatusPending, tnu)
 
 	alloc := testIPBlockBuildAllocation(t, dbSession, site3, tn, "testAlloc", ipu)
 	allocConstraint := testIPBlockBuildAllocationConstraint(t, dbSession, alloc.ID, cdbm.AllocationResourceTypeIPBlock, ipb3.ID, cdbm.AllocationConstraintTypeOnDemand, 10, nil, ipu.ID)
@@ -982,7 +1129,7 @@ func TestIPBlockHandler_Get(t *testing.T) {
 			user:           ipu,
 			ipbID:          ipb2.ID.String(),
 			expectedErr:    true,
-			expectedStatus: http.StatusForbidden,
+			expectedStatus: http.StatusNotFound,
 		},
 		{
 			name:           "error when IP Block is not associated with Tenant",
@@ -990,7 +1137,23 @@ func TestIPBlockHandler_Get(t *testing.T) {
 			user:           tnu,
 			ipbID:          ipb1.ID.String(),
 			expectedErr:    true,
-			expectedStatus: http.StatusForbidden,
+			expectedStatus: http.StatusNotFound,
+		},
+		{
+			name:           "provider cannot retrieve a Tenant SitePrefix",
+			reqOrgName:     ipOrg1,
+			user:           ipu,
+			ipbID:          tenantSitePrefix.ID.String(),
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
+		},
+		{
+			name:           "tenant cannot retrieve its SitePrefix through the generic IPBlock API",
+			reqOrgName:     tnOrg1,
+			user:           tnu,
+			ipbID:          tenantSitePrefix.ID.String(),
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
 		},
 		{
 			name:                     "success when retrieving IP Block as Provider with admin role",
@@ -1252,6 +1415,7 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 	assert.NotNil(t, tn)
 	tn2 := testIPBlockBuildTenant(t, dbSession, "test-tenant-2", tnOrg2, tnu)
 	assert.NotNil(t, tn2)
+	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-tenant-site-prefix", site, ip, tn, "10.200.0.0", 24, cdbm.IPBlockStatusPending, tnu)
 
 	totalCount := 30
 
@@ -1497,6 +1661,15 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
 			expectedCnt:    totalCount / 2,
+		},
+		{
+			name:           "Tenant SitePrefix is absent from search and pagination total",
+			reqOrgName:     tnOrg1,
+			user:           tnu,
+			querySearch:    cutil.GetPtr(tenantSitePrefix.Name),
+			expectedStatus: http.StatusOK,
+			expectedCnt:    0,
+			expectedTotal:  cutil.GetPtr(0),
 		},
 		{
 			name:           "success when status query search specified",
@@ -1761,6 +1934,7 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 	parentIpb3 := testIPBlockBuildIPBlock(t, dbSession, "test3", site3, ip3, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.1.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	assert.NotNil(t, parentIpb3)
 	testIPBlockBuildStatusDetail(t, dbSession, parentIpb3.ID.String(), cdbm.IPBlockStatusReady)
+	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site3, ip3, tn, "192.168.5.0", 24, cdbm.IPBlockStatusReady, ipu)
 
 	// Child IPBlocks
 	childIpb1 := testIPBlockBuildIPBlock(t, dbSession, "test3", site, ip, cutil.GetPtr(tn.ID), cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.3.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusError, ipu)
@@ -1861,7 +2035,7 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 			user:           ipu,
 			ipbID:          parentIpb2.ID.String(),
 			expectedErr:    true,
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus: http.StatusNotFound,
 		},
 		{
 			name:           "error when dervied ipblock provided as parent ipblock",
@@ -1869,7 +2043,15 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 			user:           ipu,
 			ipbID:          childIpb1.ID.String(),
 			expectedErr:    true,
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus: http.StatusNotFound,
+		},
+		{
+			name:           "Tenant SitePrefix returns not found as a parent",
+			reqOrgName:     ipOrg3,
+			user:           ipu,
+			ipbID:          tenantSitePrefix.ID.String(),
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
 		},
 		{
 			name:                   "success when valid parent id with two derived blocks are specified specified",
@@ -2121,6 +2303,16 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 
 	ipb4 := testIPBlockBuildIPBlock(t, dbSession, "testDel4", site3, ip3, &tn.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.3.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusPending, user)
 	assert.NotNil(t, ipb4)
+	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site3, ip3, tn, "192.168.4.0", 24, cdbm.IPBlockStatusPending, user)
+	coreLinkedRoot := testIPBlockBuildIPBlock(t, dbSession, "core-linked-root", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.2.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, user)
+	_, err = cdbm.NewIPBlockDAO(dbSession).LinkSitePrefix(ctx, nil, coreLinkedRoot.ID, uuid.New())
+	require.NoError(t, err)
+	coreLinkedAllocation := testIPBlockBuildAllocation(t, dbSession, site, tn, "coreLinkedAllocation", user)
+	coreLinkedConstraint := testIPBlockBuildAllocationConstraint(t, dbSession, coreLinkedAllocation.ID, cdbm.AllocationResourceTypeIPBlock, coreLinkedRoot.ID, cdbm.AllocationConstraintTypeOnDemand, 10, nil, user.ID)
+	require.NotNil(t, coreLinkedConstraint)
+	coreLinkedPrefix, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, coreLinkedRoot.Prefix, coreLinkedRoot.PrefixLength, coreLinkedRoot.RoutingType, coreLinkedRoot.InfrastructureProviderID.String(), coreLinkedRoot.SiteID.String())
+	require.NoError(t, err)
+	require.NotNil(t, coreLinkedPrefix)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -2136,6 +2328,7 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 		ipb                *cdbm.IPBlock
 		expectedErr        bool
 		expectedStatus     int
+		expectedMessage    string
 		verifyChildSpanner bool
 	}{
 		{
@@ -2168,7 +2361,7 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 			user:           user,
 			ipbID:          ipb1.ID.String(),
 			expectedErr:    true,
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus: http.StatusNotFound,
 		},
 		{
 			name:           "error when specified ipblock doesnt exist",
@@ -2184,7 +2377,7 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 			user:           user,
 			ipbID:          ipb1.ID.String(),
 			expectedErr:    true,
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus: http.StatusNotFound,
 		},
 		{
 			name:           "error when this is a derived ipBlock with non-nil tenantID",
@@ -2192,7 +2385,15 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 			user:           user,
 			ipbID:          ipb4.ID.String(),
 			expectedErr:    true,
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus: http.StatusNotFound,
+		},
+		{
+			name:           "Tenant SitePrefix returns not found",
+			reqOrgName:     ipOrg3,
+			user:           user,
+			ipbID:          tenantSitePrefix.ID.String(),
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
 		},
 		{
 			name:           "error when allocations exist for ipblock",
@@ -2201,6 +2402,15 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 			ipbID:          ipb3.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:            "Core-linked Site fabric IP Block returns conflict before allocation checks",
+			reqOrgName:      ipOrg1,
+			user:            user,
+			ipbID:           coreLinkedRoot.ID.String(),
+			expectedErr:     true,
+			expectedStatus:  http.StatusConflict,
+			expectedMessage: "This IP Block is linked to an OperatorManaged SitePrefix; remove the corresponding prefix from Core's site_fabric_prefixes configuration instead",
 		},
 		{
 			name:               "success case 1",
@@ -2252,6 +2462,13 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusAccepted)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedMessage != "" {
+				response := struct {
+					Message string `json:"message"`
+				}{}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, tc.expectedMessage, response.Message)
+			}
 			if !tc.expectedErr && rec.Code != http.StatusAccepted {
 				rsp := &model.APIIPBlock{}
 				err := json.Unmarshal(rec.Body.Bytes(), rsp)
@@ -2272,4 +2489,393 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 			}
 		})
 	}
+
+	type raceFixture struct {
+		ipBlock *cdbm.IPBlock
+		prefix  *cipam.Prefix
+	}
+
+	createFixture := func(t *testing.T, name, prefix string) raceFixture {
+		t.Helper()
+		ipBlock := testIPBlockBuildIPBlock(
+			t,
+			dbSession,
+			name,
+			site,
+			ip,
+			nil,
+			cdbm.IPBlockRoutingTypeDatacenterOnly,
+			prefix,
+			24,
+			cdbm.IPBlockProtocolVersionV4,
+			false,
+			cdbm.IPBlockStatusReady,
+			user,
+		)
+		ipamPrefix, err := ipam.CreateIpamEntryForIPBlock(
+			ctx,
+			ipamStorage,
+			ipBlock.Prefix,
+			ipBlock.PrefixLength,
+			ipBlock.RoutingType,
+			ipBlock.InfrastructureProviderID.String(),
+			ipBlock.SiteID.String(),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, ipamPrefix)
+		return raceFixture{ipBlock: ipBlock, prefix: ipamPrefix}
+	}
+
+	startDelete := func(t *testing.T, raceCtx context.Context, cancel context.CancelFunc, id uuid.UUID) (*httptest.ResponseRecorder, <-chan error, *bool) {
+		t.Helper()
+		e := echo.New()
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec := httptest.NewRecorder()
+		ec := e.NewContext(req, rec)
+		ec.SetParamNames("orgName", "id")
+		ec.SetParamValues(ipOrg1, id.String())
+		ec.Set("user", user)
+		requestCtx := context.WithValue(raceCtx, otelecho.TracerKey, tracer) //nolint:staticcheck // Middleware owns the context key.
+		ec.SetRequest(ec.Request().WithContext(requestCtx))
+
+		done := make(chan error, 1)
+		go func() {
+			done <- (DeleteIPBlockHandler{
+				dbSession: dbSession,
+				tc:        tempClient,
+				cfg:       cfg,
+			}).Handle(ec)
+		}()
+
+		drained := false
+		t.Cleanup(func() {
+			cancel()
+			if drained {
+				return
+			}
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("provider deletion handler did not stop during cleanup")
+			}
+		})
+		return rec, done, &drained
+	}
+
+	t.Run("rejects an allocation that commits while deletion waits", func(t *testing.T) {
+		fixture := createFixture(t, "allocation-delete-race", "192.168.5.0")
+		raceRoot := fixture.ipBlock
+		raceAllocation := testIPBlockBuildAllocation(t, dbSession, site, tn, "allocationDeleteRace", user)
+
+		raceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		allocationTx, err := cdb.BeginTx(raceCtx, dbSession, nil)
+		require.NoError(t, err)
+		allocationCommitted := false
+		defer func() {
+			if !allocationCommitted {
+				_ = allocationTx.Rollback()
+			}
+		}()
+
+		var allocationBackendPID int
+		err = allocationTx.GetBunTx().NewSelect().
+			ColumnExpr("pg_backend_pid()").
+			Scan(raceCtx, &allocationBackendPID)
+		require.NoError(t, err)
+		allocationStorage := ipam.NewIpamStorage(dbSession.DB, allocationTx.GetBunTx())
+		allocatedChild, err := ipam.CreateChildIpamEntryForIPBlock(
+			raceCtx,
+			allocationTx,
+			dbSession,
+			allocationStorage,
+			raceRoot,
+			28,
+		)
+		require.NoError(t, err)
+		_, err = cdbm.NewAllocationConstraintDAO(dbSession).Create(
+			raceCtx,
+			allocationTx,
+			cdbm.AllocationConstraintCreateInput{
+				AllocationID:    raceAllocation.ID,
+				ResourceType:    cdbm.AllocationResourceTypeIPBlock,
+				ResourceTypeID:  raceRoot.ID,
+				ConstraintType:  cdbm.AllocationConstraintTypeOnDemand,
+				ConstraintValue: 28,
+				CreatedBy:       user.ID,
+			},
+		)
+		require.NoError(t, err)
+
+		rec, handlerDone, handlerDrained := startDelete(t, raceCtx, cancel, raceRoot.ID)
+
+		require.Eventually(t, func() bool {
+			var waiters int
+			queryErr := dbSession.DB.NewSelect().
+				ColumnExpr("count(*)").
+				TableExpr("pg_catalog.pg_stat_activity").
+				Where("? = ANY(pg_blocking_pids(pid))", allocationBackendPID).
+				Scan(raceCtx, &waiters)
+			return queryErr == nil && waiters > 0
+		}, 5*time.Second, 10*time.Millisecond, "IP Block deletion did not wait for the lock on the allocation parent row")
+
+		require.NoError(t, allocationTx.Commit())
+		allocationCommitted = true
+		select {
+		case err = <-handlerDone:
+			*handlerDrained = true
+			require.NoError(t, err)
+		case <-raceCtx.Done():
+			t.Fatalf("IP Block deletion did not resume after allocation commit: %v", raceCtx.Err())
+		}
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "1 Allocations exist for IP Block, unable to delete")
+
+		_, err = cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, raceRoot.ID, nil)
+		require.NoError(t, err)
+		ipamer := cipam.NewWithStorage(ipamStorage)
+		ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+			ctx,
+			raceRoot.RoutingType,
+			raceRoot.InfrastructureProviderID.String(),
+			raceRoot.SiteID.String(),
+		))
+		require.NotNil(t, ipamer.PrefixFrom(ctx, fixture.prefix.Cidr))
+		require.NotNil(t, ipamer.PrefixFrom(ctx, allocatedChild.Cidr))
+	})
+
+	t.Run("orders Core links with provider deletion", func(t *testing.T) {
+		assertIPAMRecord := func(t *testing.T, fixture raceFixture, expected bool) {
+			t.Helper()
+			ipamer := cipam.NewWithStorage(ipamStorage)
+			ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+				ctx,
+				fixture.ipBlock.RoutingType,
+				fixture.ipBlock.InfrastructureProviderID.String(),
+				fixture.ipBlock.SiteID.String(),
+			))
+			if expected {
+				require.NotNil(t, ipamer.PrefixFrom(ctx, fixture.prefix.Cidr))
+				return
+			}
+			require.Nil(t, ipamer.PrefixFrom(ctx, fixture.prefix.Cidr))
+		}
+
+		raceCases := []struct {
+			name   string
+			prefix string
+			run    func(t *testing.T, fixture raceFixture)
+		}{
+			{
+				name:   "link commits first",
+				prefix: "192.168.6.0",
+				run: func(t *testing.T, fixture raceFixture) {
+					raceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					defer cancel()
+
+					linkTx, err := cdb.BeginTx(raceCtx, dbSession, nil)
+					require.NoError(t, err)
+					linkCommitted := false
+					defer func() {
+						if !linkCommitted {
+							assert.NoError(t, linkTx.Rollback())
+						}
+					}()
+
+					var linkBackendPID int
+					err = linkTx.GetBunTx().NewSelect().
+						ColumnExpr("pg_backend_pid()").
+						Scan(raceCtx, &linkBackendPID)
+					require.NoError(t, err)
+					// Keep the link uncommitted so the provider delete reaches the
+					// same row only after the link already owns it.
+					sitePrefixID := uuid.New()
+					_, err = cdbm.NewIPBlockDAO(dbSession).LinkSitePrefix(
+						raceCtx,
+						linkTx,
+						fixture.ipBlock.ID,
+						sitePrefixID,
+					)
+					require.NoError(t, err)
+
+					rec, deleteDone, deleteDrained := startDelete(t, raceCtx, cancel, fixture.ipBlock.ID)
+					require.Eventually(t, func() bool {
+						var waiters int
+						queryErr := dbSession.DB.NewSelect().
+							ColumnExpr("count(*)").
+							TableExpr("pg_catalog.pg_stat_activity").
+							Where("datname = current_database()").
+							Where("state = 'active'").
+							Where("wait_event_type = 'Lock'").
+							Where("query ILIKE '%ip_block%'").
+							Where("query ILIKE '%FOR UPDATE%'").
+							Where("? = ANY(pg_blocking_pids(pid))", linkBackendPID).
+							Scan(raceCtx, &waiters)
+						return queryErr == nil && waiters > 0
+					}, 5*time.Second, 10*time.Millisecond, "provider deletion did not wait for the Core link")
+
+					require.NoError(t, linkTx.Commit())
+					linkCommitted = true
+					select {
+					case err = <-deleteDone:
+						*deleteDrained = true
+						require.NoError(t, err)
+					case <-raceCtx.Done():
+						t.Fatalf("provider deletion did not resume after the Core link committed: %v", raceCtx.Err())
+					}
+					assert.Equal(t, http.StatusConflict, rec.Code)
+					assert.Contains(t, rec.Body.String(), "linked to an OperatorManaged SitePrefix")
+
+					linked, err := cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, fixture.ipBlock.ID, nil)
+					require.NoError(t, err)
+					require.NotNil(t, linked.SitePrefixID)
+					assert.Equal(t, sitePrefixID, *linked.SitePrefixID)
+					assertIPAMRecord(t, fixture, true)
+				},
+			},
+			{
+				name:   "deletion commits first",
+				prefix: "192.168.7.0",
+				run: func(t *testing.T, fixture raceFixture) {
+					raceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					defer cancel()
+
+					gateTx, err := cdb.BeginTx(raceCtx, dbSession, nil)
+					require.NoError(t, err)
+					gateCommitted := false
+					defer func() {
+						if !gateCommitted {
+							assert.NoError(t, gateTx.Rollback())
+						}
+					}()
+					// Provider deletion locks the IP Block row before querying
+					// Allocation Constraints. Pause it at that query so the Core link
+					// starts only after deletion owns the row.
+					_, err = gateTx.GetBunTx().ExecContext(
+						raceCtx,
+						"LOCK TABLE allocation_constraint IN ACCESS EXCLUSIVE MODE",
+					)
+					require.NoError(t, err)
+					var gateBackendPID int
+					err = gateTx.GetBunTx().NewSelect().
+						ColumnExpr("pg_backend_pid()").
+						Scan(raceCtx, &gateBackendPID)
+					require.NoError(t, err)
+
+					rec, deleteDone, deleteDrained := startDelete(t, raceCtx, cancel, fixture.ipBlock.ID)
+					var deleteBackendPID int
+					require.Eventually(t, func() bool {
+						queryErr := dbSession.DB.NewSelect().
+							ColumnExpr("pid").
+							TableExpr("pg_catalog.pg_stat_activity").
+							Where("datname = current_database()").
+							Where("state = 'active'").
+							Where("wait_event_type = 'Lock'").
+							Where("query ILIKE '%allocation_constraint%'").
+							Where("? = ANY(pg_blocking_pids(pid))", gateBackendPID).
+							OrderExpr("query_start DESC").
+							Limit(1).
+							Scan(raceCtx, &deleteBackendPID)
+						return queryErr == nil && deleteBackendPID > 0
+					}, 5*time.Second, 10*time.Millisecond, "provider deletion did not reach the Allocation Constraint check")
+
+					linkTx, err := cdb.BeginTx(raceCtx, dbSession, nil)
+					require.NoError(t, err)
+					linkCtx, cancelLink := context.WithCancel(raceCtx)
+					linkRolledBack := false
+					linkJoined := false
+					linkStarted := false
+					linkDone := make(chan error, 1)
+					t.Cleanup(func() {
+						cancelLink()
+						if linkStarted && !linkJoined {
+							<-linkDone
+							linkJoined = true
+						}
+						if !linkRolledBack {
+							if rollbackErr := linkTx.Rollback(); rollbackErr != nil {
+								t.Errorf("roll back Core link transaction: %v", rollbackErr)
+							}
+							linkRolledBack = true
+						}
+					})
+					var linkBackendPID int
+					err = linkTx.GetBunTx().NewSelect().
+						ColumnExpr("pg_backend_pid()").
+						Scan(raceCtx, &linkBackendPID)
+					require.NoError(t, err)
+					go func() {
+						_, linkErr := cdbm.NewIPBlockDAO(dbSession).LinkSitePrefix(
+							linkCtx,
+							linkTx,
+							fixture.ipBlock.ID,
+							uuid.New(),
+						)
+						linkDone <- linkErr
+					}()
+					linkStarted = true
+					require.Eventually(t, func() bool {
+						var waiters int
+						queryErr := dbSession.DB.NewSelect().
+							ColumnExpr("count(*)").
+							TableExpr("pg_catalog.pg_stat_activity").
+							Where("pid = ?", linkBackendPID).
+							Where("? = ANY(pg_blocking_pids(pid))", deleteBackendPID).
+							Scan(raceCtx, &waiters)
+						return queryErr == nil && waiters == 1
+					}, 5*time.Second, 10*time.Millisecond, "Core link did not wait for provider deletion")
+
+					require.NoError(t, gateTx.Commit())
+					gateCommitted = true
+					select {
+					case err = <-deleteDone:
+						*deleteDrained = true
+						require.NoError(t, err)
+					case <-raceCtx.Done():
+						t.Fatalf("provider deletion did not resume after the test gate opened: %v", raceCtx.Err())
+					}
+					assert.Equal(t, http.StatusAccepted, rec.Code)
+
+					select {
+					case err = <-linkDone:
+						linkJoined = true
+						require.ErrorIs(t, err, cdb.ErrInvalidValue)
+					case <-raceCtx.Done():
+						t.Fatalf("Core link did not resume after provider deletion committed: %v", raceCtx.Err())
+					}
+					require.NoError(t, linkTx.Rollback())
+					linkRolledBack = true
+
+					_, err = cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, fixture.ipBlock.ID, nil)
+					require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+					deleted := &cdbm.IPBlock{}
+					err = dbSession.DB.NewSelect().Model(deleted).
+						WhereAllWithDeleted().
+						Where("ipb.id = ?", fixture.ipBlock.ID).
+						Scan(ctx)
+					require.NoError(t, err)
+					require.NotNil(t, deleted.Deleted)
+					assert.Nil(t, deleted.SitePrefixID)
+					assertIPAMRecord(t, fixture, false)
+				},
+			},
+		}
+
+		for _, tc := range raceCases {
+			t.Run(tc.name, func(t *testing.T) {
+				fixture := createFixture(t, tc.name, tc.prefix)
+				tc.run(t, fixture)
+			})
+		}
+	})
+
+	// The filtered NotFound path must leave the Tenant SitePrefix in the database.
+	_, err = cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, tenantSitePrefix.ID, nil)
+	require.NoError(t, err)
+	_, err = cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, coreLinkedRoot.ID, nil)
+	require.NoError(t, err)
+	ipamer := cipam.NewWithStorage(ipamStorage)
+	ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(ctx, coreLinkedRoot.RoutingType, coreLinkedRoot.InfrastructureProviderID.String(), coreLinkedRoot.SiteID.String()))
+	require.NotNil(t, ipamer.PrefixFrom(ctx, ipam.GetCidrForIPBlock(ctx, coreLinkedRoot.Prefix, coreLinkedRoot.PrefixLength)))
 }

@@ -104,12 +104,12 @@ fn comparison_interface(id: &str, vlan_id: u32, vni: u32) -> rpc::FlatInterfaceC
         function_type: rpc::InterfaceFunctionType::Physical.into(),
         vlan_id,
         vni,
-        gateway: "10.0.0.1/24".to_string(),
-        ip: "10.0.0.2".to_string(),
-        interface_prefix: "10.0.0.0/31".to_string(),
+        gateway: Some("10.0.0.1/24".to_string()),
+        ip: Some("10.0.0.2".to_string()),
+        interface_prefix: Some("10.0.0.0/31".to_string()),
         virtual_function_id: None,
         vpc_prefixes: vec!["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()],
-        prefix: "10.0.0.0/24".to_string(),
+        prefix: Some("10.0.0.0/24".to_string()),
         fqdn: format!("{id}.example.test"),
         booturl: Some("http://boot.example.test/ipxe".to_string()),
         vpc_vni: vni + 1_000,
@@ -187,6 +187,10 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
         deprecated_deny_prefixes: vec!["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()],
         deny_prefixes: vec!["100.64.0.0/10".to_string(), "169.254.0.0/16".to_string()],
         site_fabric_prefixes: vec!["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()],
+        site_fabric_null_routes: Some(::rpc::common::StringList {
+            items: vec!["10.0.0.0/8".to_string(), "10.2.0.0/24".to_string()],
+        }),
+        vpc_peer_vnis_authoritative: true,
         vpc_isolation_behavior: rpc::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
         stateful_acls_enabled: true,
         ntp_servers: vec!["10.40.0.1".to_string(), "10.40.0.2".to_string()],
@@ -230,8 +234,9 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
     }
 }
 
-/// Selects the unchanged baseline or one response mutation that should
-/// invalidate the HBN skip decision.
+/// Selects the unchanged baseline or one response mutation used to verify the
+/// HBN skip decision. The address-list case intentionally remains a match
+/// because HBN does not consume the list and the fingerprint excludes it.
 #[derive(Clone, Copy, Debug)]
 enum RenderedInputChange {
     Unchanged,
@@ -240,8 +245,10 @@ enum RenderedInputChange {
     ManagedHostLoopback,
     DenyPrefix,
     SiteFabricPrefix,
+    SiteFabricNullRoute,
     AdminInterfaceVni,
     TenantInterfaceVni,
+    TenantInterfaceIp,
     TenantInterfaceAddresses,
     TenantVpcPrefix,
     TenantPeerPrefix,
@@ -256,6 +263,7 @@ enum RenderedInputChange {
 
 impl RenderedInputChange {
     /// Applies the selected case to the shared response.
+    #[allow(deprecated)]
     fn apply(self, config: &mut ManagedHostNetworkConfigResponse) {
         match self {
             Self::Unchanged => {}
@@ -274,6 +282,12 @@ impl RenderedInputChange {
                     .site_fabric_prefixes
                     .push("192.168.0.0/16".to_string());
             }
+            Self::SiteFabricNullRoute => config
+                .site_fabric_null_routes
+                .as_mut()
+                .expect("comparison fixture has FNN null routes")
+                .items
+                .push("192.168.0.0/16".to_string()),
             Self::AdminInterfaceVni => {
                 config
                     .admin_interface
@@ -282,15 +296,30 @@ impl RenderedInputChange {
                     .vni += 1;
             }
             Self::TenantInterfaceVni => config.tenant_interfaces[1].vni += 1,
+            Self::TenantInterfaceIp => {
+                config.tenant_interfaces[1].ip = Some("10.0.0.99".to_string());
+            }
             Self::TenantInterfaceAddresses => {
-                config.tenant_interfaces[1].addresses = vec![rpc::InterfaceAddressConfig {
-                    address_family: rpc::AddressFamily::V4.into(),
-                    gateway: "10.0.0.1/24".to_string(),
-                    ip: "10.0.0.2".to_string(),
-                    interface_prefix: "10.0.0.0/31".to_string(),
-                    prefix: "10.0.0.0/24".to_string(),
-                    svi_ip: Some("10.0.0.1".to_string()),
-                }];
+                config.tenant_interfaces[1].addresses = vec![
+                    rpc::InterfaceAddressConfig {
+                        address_family: rpc::AddressFamily::V4.into(),
+                        ip: "10.0.0.2".to_string(),
+                        interface_prefix: "10.0.0.0/31".to_string(),
+                        prefix: "10.0.0.0/24".to_string(),
+                        gateway: Some("10.0.0.1/24".to_string()),
+                        svi_ip: Some("10.0.0.1".to_string()),
+                        tenant_vrf_loopback_ip: Some("10.0.0.3".to_string()),
+                    },
+                    rpc::InterfaceAddressConfig {
+                        address_family: rpc::AddressFamily::V6.into(),
+                        ip: "2001:db8::1".to_string(),
+                        interface_prefix: "2001:db8::/127".to_string(),
+                        prefix: "2001:db8::/64".to_string(),
+                        gateway: None,
+                        svi_ip: Some("2001:db8::".to_string()),
+                        tenant_vrf_loopback_ip: None,
+                    },
+                ];
             }
             Self::TenantVpcPrefix => {
                 config.tenant_interfaces[1]
@@ -401,13 +430,14 @@ fn current_network_version_detects_rendered_input_changes() {
             RenderedInputChange::ManagedHostLoopback => false,
             RenderedInputChange::DenyPrefix => false,
             RenderedInputChange::SiteFabricPrefix => false,
+            RenderedInputChange::SiteFabricNullRoute => false,
             RenderedInputChange::NetworkVirtualizationType => false,
             RenderedInputChange::PrimaryDpu => false,
         }
         "interface rendering inputs" {
             RenderedInputChange::AdminInterfaceVni => false,
             RenderedInputChange::TenantInterfaceVni => false,
-            RenderedInputChange::TenantInterfaceAddresses => false,
+            RenderedInputChange::TenantInterfaceIp => false,
             RenderedInputChange::TenantVpcPrefix => false,
             RenderedInputChange::TenantPeerPrefix => false,
             RenderedInputChange::TenantPeerVni => false,
@@ -415,6 +445,9 @@ fn current_network_version_detects_rendered_input_changes() {
             RenderedInputChange::InterfaceRoutingProfile => false,
             RenderedInputChange::NetworkSecurityGroup => false,
             RenderedInputChange::NetworkSecurityPolicyOverride => false,
+        }
+        "family-neutral address list is not an HBN rendering input" {
+            RenderedInputChange::TenantInterfaceAddresses => true,
         }
     );
 }
@@ -426,6 +459,7 @@ enum SetLikeInputReordering {
     DhcpServers,
     RouteServers,
     SiteFabricPrefixes,
+    SiteFabricNullRoutes,
     AdminInterfaceVpcPrefixes,
     TenantVpcPrefixes,
     TenantPeerPrefixes,
@@ -446,6 +480,12 @@ impl SetLikeInputReordering {
             Self::DhcpServers => config.dhcp_servers.reverse(),
             Self::RouteServers => config.route_servers.reverse(),
             Self::SiteFabricPrefixes => config.site_fabric_prefixes.reverse(),
+            Self::SiteFabricNullRoutes => config
+                .site_fabric_null_routes
+                .as_mut()
+                .expect("comparison fixture has FNN null routes")
+                .items
+                .reverse(),
             Self::AdminInterfaceVpcPrefixes => config
                 .admin_interface
                 .as_mut()
@@ -522,6 +562,7 @@ fn current_network_version_ignores_set_like_input_order() {
             SetLikeInputReordering::DhcpServers => true,
             SetLikeInputReordering::RouteServers => true,
             SetLikeInputReordering::SiteFabricPrefixes => true,
+            SetLikeInputReordering::SiteFabricNullRoutes => true,
             SetLikeInputReordering::AdditionalRouteTargets => true,
             SetLikeInputReordering::TopLevelRoutingProfileRouteTargets => true,
             SetLikeInputReordering::NetworkSecurityPolicyOverrides => true,

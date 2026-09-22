@@ -4,14 +4,26 @@ This page covers the out-of-band (OOB) network configuration and BMC preparation
 
 ## OOB Network and DHCP Relay
 
-NICo discovers hosts when their BMCs send DHCP requests over the OOB network. The OOB network must be configured to forward these requests to the NICo DHCP service.
+NICo discovers hosts when their BMCs send DHCP requests through a
+NICo-managed physical network. A dedicated OOB network is the conventional and
+recommended topology, and it must forward these requests to the NICo DHCP
+service.
 
 **Requirements:**
-- A dedicated OOB management network connecting all host BMCs and DPU BMCs to the site controller
-- A DHCP relay configured on OOB switches, pointing to the NICo DHCP service IP (`NICo_DHCP_EXTERNAL`)
-- Separate OOB management connectivity for DPU BMCs
+
+- Network connectivity from every BMC to the site controller; normally this is
+  a dedicated OOB management network
+- A DHCP relay on every BMC-facing network, pointing to the NICo DHCP service
+  IP (`NICo_DHCP_EXTERNAL`)
+- `Underlay` connectivity for DPU BMC and DPU OOB interfaces
 
 NICo manages IP allocation for the management network—the OOB switches only need to relay DHCP traffic, not assign addresses. For the full switch configuration requirements, refer to the [Network Prerequisites](network.md) page.
+
+For a zero-DPU host, including a host whose DPU policy is `nic`, the **host
+BMC** may instead share one `HostInband` subnet/VLAN with the host OS NIC. This
+exception does not apply to a DPU BMC or DPU OOB interface. See
+[Shared HostInband for a Host BMC and Host OS](../../provisioning/ip-and-network-configuration.md#15-shared-hostinband-for-a-host-bmc-and-host-os)
+for the allocation, relay, DNS-subdomain, and isolation requirements.
 
 ## BMC Credentials
 

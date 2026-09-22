@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -37,7 +38,6 @@ use crate::dhcp_wrapper::{DhcpRelayResult, DhcpResponseInfo, DpuDhcpRelay, DpuDh
 use crate::host_machine::HandleMessageResult;
 use crate::machine_state_machine::{LiveState, MachineStateMachine, OsImage, PersistedMachine};
 use crate::status::{BmcStatus, DeviceKind, DeviceStatus, DeviceStatusConfig, EndpointStatus};
-use crate::tui::HostDetails;
 use crate::{MachineConfig, saturating_add_duration_to_instant};
 
 pub(super) struct DpuMachine {
@@ -131,7 +131,9 @@ impl DpuMachine {
             .dpu_firmware_versions
             .clone()
             .unwrap_or_default()
-            .fill_missing_from_desired_firmware(&app_context.desired_firmware_versions);
+            .fill_missing_from_desired_firmware(
+                &app_context.desired_firmware_versions.read().unwrap(),
+            );
 
         let dpu_info = DpuMachineInfo::new(
             hw_type,
@@ -226,7 +228,7 @@ impl DpuMachine {
         tokio::select! {
             _ = tokio::time::sleep_until(self.sleep_until.into()) => {},
             _ = self.api_refresh_interval.tick() => {
-                // Wake up to refresh the API state and UI
+                // Wake up to refresh the API state
                 if let Some(machine_id) = self.live_state.read().unwrap().observed_machine_id {
                     let actor_message_tx = actor_message_tx.clone();
                     self.app_context.api_throttler.get_machine(machine_id, move |machine| {
@@ -358,6 +360,14 @@ impl DpuMachineHandle {
         self.0.mat_id
     }
 
+    pub fn bmc_ip(&self) -> Option<Ipv4Addr> {
+        self.0.live_state.read().unwrap().bmc_ip
+    }
+
+    pub fn machine_ip(&self) -> Option<Ipv4Addr> {
+        self.0.live_state.read().unwrap().machine_ip
+    }
+
     pub fn observed_machine_id(&self) -> Option<MachineId> {
         self.0
             .live_state
@@ -440,26 +450,6 @@ impl DpuMachineHandle {
         Ok(())
     }
 
-    pub fn host_details(&self) -> HostDetails {
-        let guard = self.0.live_state.read().unwrap();
-        HostDetails {
-            mat_id: self.0.mat_id,
-            hw_type: None,
-            machine_id: guard.observed_machine_id.as_ref().map(|m| m.to_string()),
-            mat_state: guard.state_string,
-            api_state: guard.api_state.clone(),
-            oob_ip: guard.bmc_ip.map(|ip| ip.to_string()).unwrap_or_default(),
-            machine_ip: guard
-                .machine_ip
-                .map(|ip| ip.to_string())
-                .unwrap_or_default(),
-            dpus: Vec::default(),
-            booted_os: guard.booted_os.to_string(),
-            next_boot_kind: guard.ui_next_boot_kind().into(),
-            power_state: guard.power_state,
-        }
-    }
-
     pub fn status(&self, config: &DeviceStatusConfig) -> DeviceStatus {
         let live_state = self.0.live_state.read().unwrap();
         DeviceStatus {
@@ -484,8 +474,8 @@ impl DpuMachineHandle {
             bmc: BmcStatus {
                 ip: live_state.bmc_ip.map(|ip| ip.to_string()),
                 redfish: EndpointStatus::redfish(config),
-                ipmi: live_state.ipmi_endpoint.map(Into::into),
-                ssh: live_state.ssh_endpoint_port.map(EndpointStatus::ssh),
+                ipmi: live_state.ipmi_port.map(EndpointStatus::same_port),
+                ssh: live_state.ssh_endpoint_port.map(EndpointStatus::same_port),
             },
             dpus: Vec::new(),
         }
@@ -504,6 +494,10 @@ impl DpuMachineHandle {
     }
 
     pub fn persisted(&self) -> PersistedDpuMachine {
+        let live_state = self.0.live_state.read().unwrap();
+        let installed_os = live_state.installed_os;
+        let bmc_accounts = live_state.bmc_accounts_for_snapshot();
+        drop(live_state);
         PersistedDpuMachine {
             mat_id: self.0.mat_id,
             hw_type: self.0.dpu_info.hw_type,
@@ -512,8 +506,9 @@ impl DpuMachineHandle {
             oob_mac_address: self.0.dpu_info.oob_mac_address,
             serial: self.0.dpu_info.serial.clone(),
             settings: self.0.dpu_info.settings.clone(),
-            installed_os: self.0.live_state.read().unwrap().installed_os,
+            installed_os,
             dpu_index: self.0.dpu_index,
+            bmc_accounts,
         }
     }
 

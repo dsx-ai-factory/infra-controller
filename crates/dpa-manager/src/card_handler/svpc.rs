@@ -22,12 +22,13 @@ use carbide_dpa::DpaInfo;
 use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::spx::{NULL_SPX_PARTITION_ID, SpxPartitionId};
 use chrono::TimeDelta;
+use db::credential_rotation::NoStagedCredentialRotation;
 use db::{self, ObjectColumnFilter};
 use mac_address::MacAddress;
 use model::dpa_interface::DpaLockMode::{Locked, Unlocked};
 use model::dpa_interface::{DpaInterface, DpaInterfaceControllerState};
 use model::instance::snapshot::InstanceSnapshot;
-use model::machine::{Machine, ManagedHostStateSnapshot};
+use model::machine::{HostMachine, ManagedHostStateSnapshot};
 use mqttea::client::MqtteaClient;
 use sqlx::{PgConnection, PgTransaction};
 
@@ -89,7 +90,7 @@ impl SvpcInterfaceHandler {
     async fn reconcile_assigned_state<'a>(
         monitor: &mut DpaMonitor,
         dpa_interface: &DpaInterface,
-        machine: &Machine,
+        machine: &HostMachine,
         instance: &InstanceSnapshot,
         client: Arc<MqtteaClient>,
         dpa_info: &Arc<DpaInfo>,
@@ -167,7 +168,7 @@ impl SvpcInterfaceHandler {
             ReconcileAction::Heartbeat => {
                 let vni =
                     Self::get_partition_vni(monitor, configured_partition_id.unwrap()).await?;
-                let hb_interval = monitor.config.hb_interval;
+                let hb_interval = monitor.config.svpc.hb_interval;
                 let txn = monitor
                     .do_heartbeat(dpa_interface, client, dpa_info, hb_interval, vni, metrics)
                     .await?;
@@ -194,7 +195,7 @@ impl SvpcInterfaceHandler {
 
     async fn reconcile_ready_state<'a>(
         monitor: &mut DpaMonitor,
-        machine: &Machine,
+        machine: &HostMachine,
         dpa_interface: &DpaInterface,
         client: Arc<MqtteaClient>,
         dpa_info: &Arc<DpaInfo>,
@@ -334,7 +335,7 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
         }
 
         let dpa_info = monitor.dpa_info.clone();
-        let hb_interval = monitor.config.hb_interval;
+        let hb_interval = monitor.config.svpc.hb_interval;
         let client = dpa_info
             .mqtt_client
             .clone()
@@ -610,6 +611,122 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
             txn,
         })
     }
+
+    /// Tenant-free rekey, phase one: wait for the card to report `Unlocked`,
+    /// record the unlock (NULLing `current_version` so the truth column reflects
+    /// an unlocked card), then advance to `RotateKeyLocking` to relock at the
+    /// staged site-wide target. The record commits atomically with the state
+    /// transition via the returned txn, mirroring `handle_locking`.
+    async fn handle_rotate_key_unlocking(
+        &self,
+        monitor: &mut DpaMonitor,
+        mh: &ManagedHostStateSnapshot,
+        idx: usize,
+        _metrics: &mut DpaMonitorMetrics,
+    ) -> DpaManagerResult<HandlerResult> {
+        let Some(dpa_interface) = mh.dpa_interface_snapshots.get(idx) else {
+            tracing::error!(
+                index = idx,
+                dpa_interface_snapshot_count = mh.dpa_interface_snapshots.len(),
+                "handle_rotate_key_unlocking index out of bounds",
+            );
+            return Ok(HandlerResult {
+                new_state: None,
+                txn: None,
+            });
+        };
+
+        let Some(ref cs) = dpa_interface.card_state else {
+            tracing::error!(
+                dpa_interface_id = %dpa_interface.id,
+                "DPA interface has no card state",
+            );
+            return Ok(HandlerResult {
+                new_state: None,
+                txn: None,
+            });
+        };
+
+        if cs.lockmode == Some(Unlocked) {
+            let mut txn = monitor.db_services.db_pool.begin().await.map_err(|e| {
+                db::AnnotatedSqlxError::new("handle_rotate_key_unlocking begin txn", e)
+            })?;
+            db::credential_rotation::record_device_unlocked(
+                txn.as_mut(),
+                dpa_interface.mac_address,
+                db::credential_rotation::CredentialRotationType::LockdownIkm,
+            )
+            .await?;
+
+            let new_state = DpaInterfaceControllerState::RotateKeyLocking;
+            tracing::info!(next_state = ?new_state, "rekey: card unlocked, transitioning to relock");
+            return Ok(HandlerResult {
+                new_state: Some(new_state),
+                txn: Some(txn),
+            });
+        }
+
+        Ok(HandlerResult {
+            new_state: None,
+            txn: None,
+        })
+    }
+
+    /// Tenant-free rekey, phase two: wait for the card to report `Locked` at the
+    /// staged target, promote `rotating_to_version -> current_version`
+    /// (`record_lock_convergence`), then return the card to `Ready`. This is the
+    /// assignment `handle_locking` promote path with a `Ready` terminal instead
+    /// of `Assigned`.
+    async fn handle_rotate_key_locking(
+        &self,
+        monitor: &mut DpaMonitor,
+        mh: &ManagedHostStateSnapshot,
+        idx: usize,
+        _metrics: &mut DpaMonitorMetrics,
+    ) -> DpaManagerResult<HandlerResult> {
+        let Some(dpa_interface) = mh.dpa_interface_snapshots.get(idx) else {
+            tracing::error!(
+                index = idx,
+                dpa_interface_snapshot_count = mh.dpa_interface_snapshots.len(),
+                "handle_rotate_key_locking index out of bounds",
+            );
+            return Ok(HandlerResult {
+                new_state: None,
+                txn: None,
+            });
+        };
+
+        let Some(ref cs) = dpa_interface.card_state else {
+            tracing::error!(
+                dpa_interface_id = %dpa_interface.id,
+                "DPA interface has no card state",
+            );
+            return Ok(HandlerResult {
+                new_state: None,
+                txn: None,
+            });
+        };
+
+        if cs.lockmode == Some(Locked) {
+            let mut txn = monitor.db_services.db_pool.begin().await.map_err(|e| {
+                db::AnnotatedSqlxError::new("handle_rotate_key_locking begin txn", e)
+            })?;
+            record_lock_convergence(txn.as_mut(), dpa_interface.id, dpa_interface.mac_address)
+                .await?;
+
+            let new_state = DpaInterfaceControllerState::Ready;
+            tracing::info!(next_state = ?new_state, "rekey: card relocked, returning to Ready");
+            return Ok(HandlerResult {
+                new_state: Some(new_state),
+                txn: Some(txn),
+            });
+        }
+
+        Ok(HandlerResult {
+            new_state: None,
+            txn: None,
+        })
+    }
 }
 
 fn apply_profile(state: &DpaInterface) -> DpaManagerResult<HandlerResult> {
@@ -652,9 +769,8 @@ fn apply_profile(state: &DpaInterface) -> DpaManagerResult<HandlerResult> {
 ///     must NOT re-read the site-wide target: it can advance between issuing the
 ///     lock and observing it, which would record the card as converged to a
 ///     newer version than the IKM it is actually locked under.
-///   * if nothing is staged (a card locked before this flow shipped, already
-///     covered by the backfill at v0), fall back to the site-wide target and
-///     warn; that path is idempotent.
+///   * if nothing is staged, preserve the existing record and warn. Observing
+///     Locked does not identify the IKM version used to lock the card.
 async fn record_lock_convergence(
     conn: &mut PgConnection,
     dpa_interface_id: DpaInterfaceId,
@@ -667,19 +783,13 @@ async fn record_lock_convergence(
     )
     .await?;
 
-    if !promoted {
+    if let db::ConditionalWrite::NotApplied(NoStagedCredentialRotation) = promoted {
         tracing::warn!(
             %dpa_interface_id,
             %mac_address,
             "card locked without a staged lockdown IKM rotation; \
-             recording convergence at the site-wide target"
+             keeping existing rotation bookkeeping"
         );
-        db::credential_rotation::record_device_converged(
-            conn,
-            mac_address,
-            db::credential_rotation::CredentialRotationType::LockdownIkm,
-        )
-        .await?;
     }
     Ok(())
 }
@@ -759,10 +869,8 @@ mod tests {
         );
     }
 
-    // Fallback (warn) path: nothing staged falls back to the site-wide target
-    // (seeded at 0 by the backfill migration).
     #[crate::sqlx_test]
-    async fn falls_back_to_sitewide_target_when_nothing_staged(pool: PgPool) {
+    async fn missing_staged_version_does_not_claim_sitewide_target(pool: PgPool) {
         let id = carbide_uuid::dpa_interface::DpaInterfaceId::new();
         let mac: MacAddress = "02:00:00:00:00:12".parse().unwrap();
 
@@ -772,8 +880,8 @@ mod tests {
 
         assert_eq!(
             lockdown_version_of(&pool, "02:00:00:00:00:12").await,
-            Some(0),
-            "nothing staged must fall back to the site-wide target (0)"
+            None,
+            "observing Locked does not prove which IKM version was used"
         );
     }
 }

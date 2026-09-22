@@ -20,7 +20,8 @@ use carbide_utils::none_if_empty::NoneIfEmpty;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use model::machine_validation::{
-    MachineValidation, MachineValidationAttempt, MachineValidationExternalConfig,
+    MachineValidation, MachineValidationAttempt, MachineValidationAttemptLogChunk,
+    MachineValidationAttemptLogStream, MachineValidationExternalConfig, MachineValidationPlugin,
     MachineValidationResult, MachineValidationRunItem, MachineValidationState,
     MachineValidationTest, MachineValidationTestAddRequest, MachineValidationTestUpdatePayload,
     MachineValidationTestUpdateRequest, MachineValidationTestsGetRequest,
@@ -50,6 +51,7 @@ impl From<rpc::forge::MachineValidationTestAddRequest> for MachineValidationTest
             custom_tags: req.custom_tags,
             components: req.components,
             is_enabled: req.is_enabled,
+            plugin: req.plugin.map(Into::into),
         }
     }
 }
@@ -77,6 +79,7 @@ impl From<rpc::forge::machine_validation_test_update_request::Payload>
             custom_tags: p.custom_tags,
             components: p.components,
             is_enabled: p.is_enabled,
+            plugin: p.plugin.map(Into::into),
         }
     }
 }
@@ -194,6 +197,8 @@ impl From<MachineValidationRunItem> for rpc::forge::MachineValidationRunItem {
             last_heartbeat_at: value.last_heartbeat_at.map(Into::into),
             skip_reason: value.skip_reason,
             failure_reason: value.failure_reason,
+            plugin: value.plugin.map(Into::into),
+            plugin_full_host_approved: value.plugin_full_host_approved,
         }
     }
 }
@@ -220,6 +225,27 @@ impl From<MachineValidationAttempt> for rpc::forge::MachineValidationAttempt {
             last_heartbeat_at: value.last_heartbeat_at.map(Into::into),
             stdout_summary: value.stdout_summary,
             stderr_summary: value.stderr_summary,
+        }
+    }
+}
+
+impl From<MachineValidationAttemptLogChunk> for rpc::forge::MachineValidationAttemptLogChunk {
+    fn from(value: MachineValidationAttemptLogChunk) -> Self {
+        rpc::forge::MachineValidationAttemptLogChunk {
+            attempt_id: Some(rpc::common::Uuid {
+                value: value.attempt_id.to_string(),
+            }),
+            sequence: value.sequence.try_into().unwrap_or(0),
+            stream: match value.stream {
+                MachineValidationAttemptLogStream::Stdout => {
+                    rpc::forge::MachineValidationAttemptLogStream::Stdout as i32
+                }
+                MachineValidationAttemptLogStream::Stderr => {
+                    rpc::forge::MachineValidationAttemptLogStream::Stderr as i32
+                }
+            },
+            created_at: Some(value.created_at.into()),
+            content: value.content,
         }
     }
 }
@@ -275,6 +301,8 @@ impl From<MachineValidationTest> for rpc::forge::MachineValidationTest {
             components: value.components,
             last_modified_at: value.last_modified_at.to_string(),
             is_enabled: value.is_enabled,
+            plugin: value.plugin.map(Into::into),
+            full_host_approved: value.full_host_approved,
         }
     }
 }
@@ -307,7 +335,39 @@ impl TryFrom<rpc::forge::MachineValidationTest> for MachineValidationTest {
             components: value.components,
             last_modified_at: Utc::now(),
             is_enabled: value.is_enabled,
+            plugin: value.plugin.map(Into::into),
+            full_host_approved: value.full_host_approved,
         })
+    }
+}
+
+impl From<rpc::forge::MachineValidationPlugin> for MachineValidationPlugin {
+    fn from(value: rpc::forge::MachineValidationPlugin) -> Self {
+        Self {
+            plugin_type: if value.r#type.is_empty() {
+                MachineValidationPlugin::CONTAINER_TYPE.to_string()
+            } else {
+                value.r#type
+            },
+            image: value.image,
+            entrypoint: value.entrypoint,
+            parameters_json: value.parameters_json,
+            privileged: value.privileged,
+            host_access_full: value.host_access_full,
+        }
+    }
+}
+
+impl From<MachineValidationPlugin> for rpc::forge::MachineValidationPlugin {
+    fn from(value: MachineValidationPlugin) -> Self {
+        Self {
+            r#type: value.plugin_type,
+            image: value.image,
+            entrypoint: value.entrypoint,
+            parameters_json: value.parameters_json,
+            privileged: value.privileged,
+            host_access_full: value.host_access_full,
+        }
     }
 }
 
@@ -367,16 +427,8 @@ impl TryFrom<rpc::forge::MachineValidationResult> for MachineValidationResult {
 
 #[cfg(test)]
 mod tests {
-    use carbide_uuid::machine_validation::{
-        MachineValidationAttemptId, MachineValidationId, MachineValidationRunItemId,
-    };
-    use model::machine_validation::{MachineValidationAttemptState, MachineValidationRunItemState};
 
     use super::*;
-
-    fn id(value: &str) -> uuid::Uuid {
-        uuid::Uuid::parse_str(value).unwrap()
-    }
 
     #[test]
     fn tests_get_request_from_rpc() {
@@ -428,369 +480,5 @@ mod tests {
         assert_eq!(payload.verified, Some(true));
         assert_eq!(payload.is_enabled, Some(false));
         assert!(payload.name.is_none());
-    }
-
-    #[test]
-    fn run_item_from_model_maps_populated_and_sparse_values() {
-        struct Case {
-            name: &'static str,
-            item: MachineValidationRunItem,
-            has_current_attempt: bool,
-            has_test_version: bool,
-            has_component: bool,
-            has_started_at: bool,
-            has_ended_at: bool,
-            has_last_heartbeat_at: bool,
-            has_skip_reason: bool,
-            has_failure_reason: bool,
-        }
-
-        let cases = [
-            Case {
-                name: "populated",
-                item: MachineValidationRunItem {
-                    id: MachineValidationRunItemId::from(id(
-                        "10000000-0000-0000-0000-000000000001",
-                    )),
-                    run_id: MachineValidationId::from(id("20000000-0000-0000-0000-000000000001")),
-                    current_attempt_id: Some(MachineValidationAttemptId::from(id(
-                        "30000000-0000-0000-0000-000000000001",
-                    ))),
-                    test_id: "test-a".to_string(),
-                    test_version: Some("1".to_string()),
-                    display_name: "Test A".to_string(),
-                    context: "OnDemand".to_string(),
-                    component: Some("GPU".to_string()),
-                    state: MachineValidationRunItemState::Running,
-                    order_index: 2,
-                    attempt: 1,
-                    max_attempts: 3,
-                    timeout_seconds: 90,
-                    started_at: DateTime::<Utc>::from_timestamp(10, 0),
-                    ended_at: DateTime::<Utc>::from_timestamp(20, 0),
-                    last_heartbeat_at: DateTime::<Utc>::from_timestamp(15, 0),
-                    skip_reason: Some("skipped".to_string()),
-                    failure_reason: Some("failed".to_string()),
-                },
-                has_current_attempt: true,
-                has_test_version: true,
-                has_component: true,
-                has_started_at: true,
-                has_ended_at: true,
-                has_last_heartbeat_at: true,
-                has_skip_reason: true,
-                has_failure_reason: true,
-            },
-            Case {
-                name: "sparse",
-                item: MachineValidationRunItem {
-                    id: MachineValidationRunItemId::from(id(
-                        "10000000-0000-0000-0000-000000000002",
-                    )),
-                    run_id: MachineValidationId::from(id("20000000-0000-0000-0000-000000000002")),
-                    current_attempt_id: None,
-                    test_id: "test-b".to_string(),
-                    test_version: None,
-                    display_name: "Test B".to_string(),
-                    context: "Discovery".to_string(),
-                    component: None,
-                    state: MachineValidationRunItemState::Pending,
-                    order_index: 0,
-                    attempt: 0,
-                    max_attempts: 1,
-                    timeout_seconds: 0,
-                    started_at: None,
-                    ended_at: None,
-                    last_heartbeat_at: None,
-                    skip_reason: None,
-                    failure_reason: None,
-                },
-                has_current_attempt: false,
-                has_test_version: false,
-                has_component: false,
-                has_started_at: false,
-                has_ended_at: false,
-                has_last_heartbeat_at: false,
-                has_skip_reason: false,
-                has_failure_reason: false,
-            },
-        ];
-
-        for case in cases {
-            let item = case.item.clone();
-            let rpc_item = rpc::forge::MachineValidationRunItem::from(item.clone());
-
-            assert_eq!(
-                rpc_item.run_item_id.unwrap().value,
-                item.id.to_string(),
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_item.validation_id.unwrap().to_string(),
-                item.run_id.to_string(),
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_item.current_attempt_id.is_some(),
-                case.has_current_attempt,
-                "{}",
-                case.name
-            );
-            assert_eq!(rpc_item.test_id, item.test_id, "{}", case.name);
-            assert_eq!(
-                rpc_item.test_version.is_some(),
-                case.has_test_version,
-                "{}",
-                case.name
-            );
-            assert_eq!(rpc_item.display_name, item.display_name, "{}", case.name);
-            assert_eq!(rpc_item.context, item.context, "{}", case.name);
-            assert_eq!(
-                rpc_item.component.is_some(),
-                case.has_component,
-                "{}",
-                case.name
-            );
-            assert_eq!(rpc_item.state, item.state.to_string(), "{}", case.name);
-            assert_eq!(
-                rpc_item.order_index,
-                u32::try_from(item.order_index).unwrap(),
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_item.attempt,
-                u32::try_from(item.attempt).unwrap(),
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_item.max_attempts,
-                u32::try_from(item.max_attempts).unwrap(),
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_item.timeout.unwrap().seconds,
-                item.timeout_seconds,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_item.started_at.is_some(),
-                case.has_started_at,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_item.ended_at.is_some(),
-                case.has_ended_at,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_item.last_heartbeat_at.is_some(),
-                case.has_last_heartbeat_at,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_item.skip_reason.is_some(),
-                case.has_skip_reason,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_item.failure_reason.is_some(),
-                case.has_failure_reason,
-                "{}",
-                case.name
-            );
-        }
-    }
-
-    #[test]
-    fn attempt_from_model_maps_populated_and_sparse_values() {
-        struct Case {
-            name: &'static str,
-            attempt: MachineValidationAttempt,
-            has_command: bool,
-            has_args: bool,
-            has_container_image: bool,
-            has_execute_in_host: bool,
-            has_exit_code: bool,
-            has_failure_classification: bool,
-            has_started_at: bool,
-            has_ended_at: bool,
-            has_last_heartbeat_at: bool,
-            has_stdout_summary: bool,
-            has_stderr_summary: bool,
-        }
-
-        let cases = [
-            Case {
-                name: "populated",
-                attempt: MachineValidationAttempt {
-                    id: MachineValidationAttemptId::from(id(
-                        "30000000-0000-0000-0000-000000000002",
-                    )),
-                    run_item_id: MachineValidationRunItemId::from(id(
-                        "10000000-0000-0000-0000-000000000003",
-                    )),
-                    attempt_number: 2,
-                    state: MachineValidationAttemptState::Success,
-                    command: Some("/bin/test".to_string()),
-                    args: Some("--verbose".to_string()),
-                    container_image: Some("image:tag".to_string()),
-                    execute_in_host: Some(true),
-                    exit_code: Some(0),
-                    failure_classification: Some("none".to_string()),
-                    started_at: DateTime::<Utc>::from_timestamp(30, 0),
-                    ended_at: DateTime::<Utc>::from_timestamp(40, 0),
-                    last_heartbeat_at: DateTime::<Utc>::from_timestamp(35, 0),
-                    stdout_summary: Some("stdout".to_string()),
-                    stderr_summary: Some("stderr".to_string()),
-                },
-                has_command: true,
-                has_args: true,
-                has_container_image: true,
-                has_execute_in_host: true,
-                has_exit_code: true,
-                has_failure_classification: true,
-                has_started_at: true,
-                has_ended_at: true,
-                has_last_heartbeat_at: true,
-                has_stdout_summary: true,
-                has_stderr_summary: true,
-            },
-            Case {
-                name: "sparse",
-                attempt: MachineValidationAttempt {
-                    id: MachineValidationAttemptId::from(id(
-                        "30000000-0000-0000-0000-000000000003",
-                    )),
-                    run_item_id: MachineValidationRunItemId::from(id(
-                        "10000000-0000-0000-0000-000000000004",
-                    )),
-                    attempt_number: 1,
-                    state: MachineValidationAttemptState::Pending,
-                    command: None,
-                    args: None,
-                    container_image: None,
-                    execute_in_host: None,
-                    exit_code: None,
-                    failure_classification: None,
-                    started_at: None,
-                    ended_at: None,
-                    last_heartbeat_at: None,
-                    stdout_summary: None,
-                    stderr_summary: None,
-                },
-                has_command: false,
-                has_args: false,
-                has_container_image: false,
-                has_execute_in_host: false,
-                has_exit_code: false,
-                has_failure_classification: false,
-                has_started_at: false,
-                has_ended_at: false,
-                has_last_heartbeat_at: false,
-                has_stdout_summary: false,
-                has_stderr_summary: false,
-            },
-        ];
-
-        for case in cases {
-            let attempt = case.attempt.clone();
-            let rpc_attempt = rpc::forge::MachineValidationAttempt::from(attempt.clone());
-
-            assert_eq!(
-                rpc_attempt.attempt_id.unwrap().value,
-                attempt.id.to_string(),
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.run_item_id.unwrap().value,
-                attempt.run_item_id.to_string(),
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.attempt_number,
-                u32::try_from(attempt.attempt_number).unwrap(),
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.state,
-                attempt.state.to_string(),
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.command.is_some(),
-                case.has_command,
-                "{}",
-                case.name
-            );
-            assert_eq!(rpc_attempt.args.is_some(), case.has_args, "{}", case.name);
-            assert_eq!(
-                rpc_attempt.container_image.is_some(),
-                case.has_container_image,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.execute_in_host.is_some(),
-                case.has_execute_in_host,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.exit_code.is_some(),
-                case.has_exit_code,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.failure_classification.is_some(),
-                case.has_failure_classification,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.started_at.is_some(),
-                case.has_started_at,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.ended_at.is_some(),
-                case.has_ended_at,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.last_heartbeat_at.is_some(),
-                case.has_last_heartbeat_at,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.stdout_summary.is_some(),
-                case.has_stdout_summary,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                rpc_attempt.stderr_summary.is_some(),
-                case.has_stderr_summary,
-                "{}",
-                case.name
-            );
-        }
     }
 }

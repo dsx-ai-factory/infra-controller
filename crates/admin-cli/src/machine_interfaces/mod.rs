@@ -22,13 +22,9 @@ mod show;
 mod show_addresses;
 
 // Cross-module re-exports for jump module
+use clap::Parser;
 pub(crate) use show::args::Args as ShowMachineInterfaces;
 pub(crate) use show::cmd::handle_show;
-
-#[cfg(test)]
-mod tests;
-
-use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
 

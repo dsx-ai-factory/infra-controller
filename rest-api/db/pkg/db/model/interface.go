@@ -7,6 +7,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/netip"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -130,6 +133,45 @@ type Interface struct {
 	Updated              time.Time                      `bun:"updated,nullzero,notnull,default:current_timestamp"`
 	Deleted              *time.Time                     `bun:"deleted,soft_delete"`
 	CreatedBy            uuid.UUID                      `bun:"type:uuid,notnull"`
+}
+
+// EthernetInterfaceKey returns a stable string key for the Interface fields controlled by an update request.
+func (ifc Interface) EthernetInterfaceKey() string {
+	values := url.Values{}
+	if ifc.SubnetID != nil {
+		values.Set("subnet_id", ifc.SubnetID.String())
+	}
+
+	if ifc.VpcID != nil {
+		values.Set("vpc_id", ifc.VpcID.String())
+		if ifc.VpcIPFamilyMode != nil {
+			values.Set("vpc_ip_family_mode", string(*ifc.VpcIPFamilyMode))
+		}
+	} else if ifc.VpcPrefixID != nil {
+		// A Core-selected VPC interface may also have a resolved prefix. Its
+		// desired identity remains the VPC selector, not that resolved result.
+		values.Set("vpc_prefix_id", ifc.VpcPrefixID.String())
+	}
+
+	values.Set("is_physical", strconv.FormatBool(ifc.IsPhysical))
+	if ifc.VirtualFunctionID != nil {
+		values.Set("virtual_function_id", strconv.Itoa(*ifc.VirtualFunctionID))
+	}
+	if ifc.Device != nil {
+		values.Set("device", *ifc.Device)
+	}
+	if ifc.DeviceInstance != nil {
+		values.Set("device_instance", strconv.Itoa(*ifc.DeviceInstance))
+	}
+	if ifc.RequestedIpAddress != nil {
+		values.Set("requested_ip_address", *ifc.RequestedIpAddress)
+	}
+	if ifc.InlineRoutingProfile != nil {
+		values.Set("has_inline_routing_profile", "true")
+		values["inline_routing_prefix"] = append([]string(nil), ifc.InlineRoutingProfile.AllowedAnycastPrefixes...)
+	}
+
+	return values.Encode()
 }
 
 // InterfaceCreateInput input parameters for Create method
@@ -518,6 +560,13 @@ func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input Interfa
 		}
 	}
 	if input.IpAddresses != nil {
+		for _, ipAddress := range input.IpAddresses {
+			_, parseErr := netip.ParseAddr(ipAddress)
+			if parseErr != nil {
+				return nil, fmt.Errorf("invalid Interface IP address %q: %w", ipAddress, parseErr)
+			}
+		}
+
 		is.IPAddresses = input.IpAddresses
 		updatedFields = append(updatedFields, "ip_addresses")
 

@@ -30,6 +30,9 @@ pub(crate) enum CarbideCliError {
     #[error("the API call to the forge API server returned {0}")]
     ApiInvocationError(#[from] tonic::Status),
 
+    #[error("ufm credential command is unavailable: {0}")]
+    UfmCredentialCommandUnavailable(String),
+
     #[error("error while writing into string: {0}")]
     StringWriteError(#[from] std::fmt::Error),
 

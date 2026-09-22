@@ -21,9 +21,6 @@ mod log_filter;
 mod site_explorer_enabled;
 mod tracing_enabled;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;

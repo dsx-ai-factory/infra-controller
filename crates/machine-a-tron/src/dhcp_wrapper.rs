@@ -318,6 +318,10 @@ fn synthesize_dhcp_response_for_host(
 
     let ip = interface[0]
         .ip
+        .as_deref()
+        .ok_or_else(|| {
+            DhcpRelayError::InvalidDhcpRecord("interface IPv4 address is missing".to_string())
+        })?
         .parse::<Ipv4Addr>()
         .map_err(|x| DhcpRelayError::InvalidDhcpRecord(x.to_string()))?;
 

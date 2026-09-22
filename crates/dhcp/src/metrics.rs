@@ -21,13 +21,12 @@
 //! The counters are `carbide-instrument` events declared with `log = off`:
 //! the Kea process installs no tracing subscriber, so the C++ `LOG_ERROR`
 //! lines in `callouts.cc` remain the log side and the events move only the
-//! metric. The two request counters declare their existing exposed Prometheus
-//! series names directly, so the names and the `reason` label key that
-//! existing dashboards select on stay byte-identical. The certificate-expiry
-//! gauge is point-in-time state, not an occurrence, and stays on the
-//! observable-gauge pattern. `metrics_server` installs the metrics endpoint's
-//! Prometheus-only meter provider, so there is no separate OTLP instrument-name
-//! contract for these counters.
+//! metric. The DHCPv4 counters retain their existing exposed Prometheus names
+//! and `reason` label values, while DHCPv6 traffic uses explicit v6 metric
+//! names. The certificate-expiry gauge is point-in-time state, not an
+//! occurrence, and stays on the observable-gauge pattern. `metrics_server`
+//! installs the metrics endpoint's Prometheus-only meter provider, so there is
+//! no separate OTLP instrument-name contract for these counters.
 
 use std::ops::Deref;
 use std::sync::Arc;
@@ -68,6 +67,36 @@ impl From<u8> for ReplyMessageType {
             2 => Self::Offer, // DHCPOFFER
             5 => Self::Ack,   // DHCPACK
             6 => Self::Nak,   // DHCPNAK
+            _ => Self::Other,
+        }
+    }
+}
+
+/// The DHCPv6 message type of an incoming client request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+pub(super) enum V6RequestMessageType {
+    Solicit,
+    Request,
+    Confirm,
+    Renew,
+    Rebind,
+    Release,
+    Decline,
+    InformationRequest,
+    Other,
+}
+
+impl From<u8> for V6RequestMessageType {
+    fn from(message_type_code: u8) -> Self {
+        match message_type_code {
+            1 => Self::Solicit,
+            3 => Self::Request,
+            4 => Self::Confirm,
+            5 => Self::Renew,
+            6 => Self::Rebind,
+            8 => Self::Release,
+            9 => Self::Decline,
+            11 => Self::InformationRequest,
             _ => Self::Other,
         }
     }
@@ -215,7 +244,7 @@ impl From<&str> for DropReason {
 }
 
 /// Why the DHCPv6 hook dropped a request, as the bounded `reason` label on
-/// `carbide_dropped_v6_requests_total`.
+/// `carbide_dhcp_v6_requests_dropped_total`.
 ///
 /// These labels intentionally follow the existing DHCPv6 snake_case contract,
 /// except `NonRelayedPacket`, which is shared with the v4 drop path.
@@ -291,7 +320,7 @@ impl From<&str> for V6DropReason {
     }
 }
 
-/// A DHCP request reached the hook's `pkt4_receive` callout, whatever becomes
+/// A DHCPv4 request reached the hook's `pkt4_receive` callout, whatever becomes
 /// of it next.
 #[derive(Event)]
 #[event(
@@ -300,11 +329,11 @@ impl From<&str> for V6DropReason {
     component = "carbide-dhcp",
     log = off,
     metric = counter,
-    describe = "Number of DHCP requests received."
+    describe = "Number of DHCPv4 requests received."
 )]
 struct DhcpRequestReceived;
 
-/// The hook dropped or refused a DHCP request. This counts refusal events,
+/// The hook dropped or refused a DHCPv4 request. This counts refusal events,
 /// not packets: an exchange that fails at more than one callout (a refused
 /// lease selection and then a missing machine at send time) counts each site.
 #[derive(Event)]
@@ -314,29 +343,44 @@ struct DhcpRequestReceived;
     component = "carbide-dhcp",
     log = off,
     metric = counter,
-    describe = "Number of DHCP requests dropped or refused, by reason."
+    describe = "Number of DHCPv4 requests dropped or refused, by reason."
 )]
 struct DhcpRequestDropped {
     #[label]
     reason: DropReason,
 }
 
+/// A DHCPv6 request reached the hook's `pkt6_receive` callout.
+#[derive(Event)]
+#[event(
+    event_name = "kea_dhcp_v6_request_received",
+    metric_name = "carbide_dhcp_v6_requests_total",
+    component = "carbide-dhcp",
+    log = off,
+    metric = counter,
+    describe = "Number of DHCPv6 requests received, by DHCP message type."
+)]
+struct DhcpV6RequestReceived {
+    #[label]
+    message_type: V6RequestMessageType,
+}
+
 /// The DHCPv6 hook dropped a packet before Kea could safely answer it.
 #[derive(Event)]
 #[event(
     event_name = "kea_dhcp_v6_request_dropped",
-    metric_name = "carbide_dropped_v6_requests_total",
+    metric_name = "carbide_dhcp_v6_requests_dropped_total",
     component = "carbide-dhcp",
     log = off,
     metric = counter,
-    describe = "Number of dropped DHCPv6 requests, by reason."
+    describe = "Number of DHCPv6 requests dropped or refused, by reason."
 )]
 struct DhcpV6RequestDropped {
     #[label]
     reason: V6DropReason,
 }
 
-/// A fully assembled DHCP reply left `pkt4_send` for transmission: an `offer`
+/// A fully assembled DHCPv4 reply left `pkt4_send` for transmission: an `offer`
 /// proposes a lease, an `ack` commits one, a `nak` refuses one.
 ///
 /// Unlike the two request counters this metric is new, so it uses the
@@ -348,7 +392,7 @@ struct DhcpV6RequestDropped {
     component = "carbide-dhcp",
     log = off,
     metric = counter,
-    describe = "Number of DHCP replies sent, by reply message type."
+    describe = "Number of DHCPv4 replies sent, by reply message type."
 )]
 struct DhcpReplySent {
     #[label]
@@ -532,6 +576,13 @@ pub(super) fn increment_total_requests() {
     }
 }
 
+/// Increment the DHCPv6 request counter for an incoming message type.
+pub(super) fn increment_v6_requests(message_type: V6RequestMessageType) {
+    if metrics_initialized() {
+        emit(DhcpV6RequestReceived { message_type });
+    }
+}
+
 pub(super) fn increment_dropped_requests(reason: DropReason) {
     if metrics_initialized() {
         emit(DhcpRequestDropped { reason });
@@ -646,6 +697,77 @@ mod tests {
                 },
             ],
             ReplyMessageType::from,
+        );
+    }
+
+    /// Verifies Kea's raw DHCPv6 request codes map onto the bounded request
+    /// labels exposed by the v6 request metric.
+    #[test]
+    fn v6_request_message_type_maps_dhcpv6_request_codes_and_buckets_the_rest() {
+        check_values(
+            [
+                // SOLICIT starts DHCPv6 allocation and keeps its own metric label.
+                Check {
+                    scenario: "SOLICIT (1)",
+                    input: 1u8,
+                    expect: V6RequestMessageType::Solicit,
+                },
+                // REQUEST commits an advertised binding and remains independently visible.
+                Check {
+                    scenario: "REQUEST (3)",
+                    input: 3,
+                    expect: V6RequestMessageType::Request,
+                },
+                // CONFIRM checks link validity without being folded into allocation traffic.
+                Check {
+                    scenario: "CONFIRM (4)",
+                    input: 4,
+                    expect: V6RequestMessageType::Confirm,
+                },
+                // RENEW targets the current server and keeps its refresh identity.
+                Check {
+                    scenario: "RENEW (5)",
+                    input: 5,
+                    expect: V6RequestMessageType::Renew,
+                },
+                // REBIND is a distinct refresh after the original server is unavailable.
+                Check {
+                    scenario: "REBIND (6)",
+                    input: 6,
+                    expect: V6RequestMessageType::Rebind,
+                },
+                // RELEASE ends a binding and must remain observable as lease-end traffic.
+                Check {
+                    scenario: "RELEASE (8)",
+                    input: 8,
+                    expect: V6RequestMessageType::Release,
+                },
+                // DECLINE reports an unusable address separately from RELEASE.
+                Check {
+                    scenario: "DECLINE (9)",
+                    input: 9,
+                    expect: V6RequestMessageType::Decline,
+                },
+                // INFORMATION-REQUEST carries only configuration options.
+                Check {
+                    scenario: "INFORMATION-REQUEST (11)",
+                    input: 11,
+                    expect: V6RequestMessageType::InformationRequest,
+                },
+                // RELAY-FORWARD is an envelope and must not impersonate a client request.
+                Check {
+                    scenario: "RELAY-FORWARD (12) is an outer wire envelope",
+                    input: 12,
+                    expect: V6RequestMessageType::Other,
+                },
+                // Unrecognized codes share the bounded fallback instead of adding cardinality.
+                Check {
+                    scenario: "unknown code buckets as other",
+                    input: 250,
+                    expect: V6RequestMessageType::Other,
+                },
+            ],
+            V6RequestMessageType::from,
         );
     }
 
@@ -934,6 +1056,9 @@ mod tests {
             emit(DhcpRequestDropped {
                 reason: DropReason::TooManyFailuresError,
             });
+            emit(DhcpV6RequestReceived {
+                message_type: V6RequestMessageType::Confirm,
+            });
             emit(DhcpV6RequestDropped {
                 reason: V6DropReason::NestedRelay,
             });
@@ -959,7 +1084,14 @@ mod tests {
         );
         assert_eq!(
             metrics.counter_delta(
-                "carbide_dropped_v6_requests_total",
+                "carbide_dhcp_v6_requests_total",
+                &[("message_type", "confirm")]
+            ),
+            1.0
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_dhcp_v6_requests_dropped_total",
                 &[("reason", "nested_relay")]
             ),
             1.0
@@ -1000,6 +1132,7 @@ mod tests {
             crate::carbide_increment_dropped_requests(c"NonRelayedPacket".as_ptr());
             crate::carbide_increment_dropped_v6_requests(c"nested_relay".as_ptr());
         }
+        crate::carbide_increment_v6_requests(4);
         crate::carbide_increment_reply_sent(5);
         crate::carbide_increment_v6_reply_sent(7);
         assert_eq!(
@@ -1015,7 +1148,14 @@ mod tests {
         );
         assert_eq!(
             metrics.counter_delta(
-                "carbide_dropped_v6_requests_total",
+                "carbide_dhcp_v6_requests_total",
+                &[("message_type", "confirm")]
+            ),
+            0.0
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_dhcp_v6_requests_dropped_total",
                 &[("reason", "nested_relay")]
             ),
             0.0
@@ -1043,6 +1183,7 @@ mod tests {
             crate::carbide_increment_dropped_v6_requests(c"nested_relay".as_ptr());
             crate::carbide_increment_dropped_v6_requests(c"not_a_v6_reason".as_ptr());
         }
+        crate::carbide_increment_v6_requests(4); // DHCPV6_CONFIRM
         crate::carbide_increment_reply_sent(5); // DHCPACK
         crate::carbide_increment_v6_reply_sent(7); // DHCPV6_REPLY
 
@@ -1066,14 +1207,21 @@ mod tests {
         );
         assert_eq!(
             metrics.counter_delta(
-                "carbide_dropped_v6_requests_total",
+                "carbide_dhcp_v6_requests_total",
+                &[("message_type", "confirm")]
+            ),
+            1.0
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_dhcp_v6_requests_dropped_total",
                 &[("reason", "nested_relay")]
             ),
             1.0
         );
         assert_eq!(
             metrics.counter_delta(
-                "carbide_dropped_v6_requests_total",
+                "carbide_dhcp_v6_requests_dropped_total",
                 &[("reason", "unknown")]
             ),
             1.0

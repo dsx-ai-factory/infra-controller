@@ -41,15 +41,25 @@ use vaultrs::{kv2, pki};
 use crate::SecretsError;
 use crate::certificates::{Certificate, CertificateProvider};
 use crate::credentials::{
-    CredentialKey, CredentialManager, CredentialReader, CredentialWriter, Credentials,
+    CredentialKey, CredentialManager, CredentialPrefix, CredentialReader, CredentialWriter,
+    Credentials,
 };
 
 const DEFAULT_VAULT_CA_PATH: &str = "/var/run/secrets/forge-roots/ca.crt";
 const VAULT_CACERT_ENV_VAR: &str = "VAULT_CACERT";
+const VAULT_NAMESPACE_ENV_VAR: &str = "VAULT_NAMESPACE";
 const DEFAULT_SPIFFE_TRUST_DOMAIN: &str = "nico.local";
 const DEFAULT_SPIFFE_MACHINE_BASE_PATH: &str = "/forge-system/machine/";
 const VAULT_SPIFFE_TRUST_DOMAIN_ENV_VAR: &str = "VAULT_SPIFFE_TRUST_DOMAIN";
 const VAULT_SPIFFE_MACHINE_BASE_PATH_ENV_VAR: &str = "VAULT_SPIFFE_MACHINE_BASE_PATH";
+
+/// Where `vault_token_refresh` writes its token-validation probe on every
+/// authentication (first login and every renewal), so it exists on every
+/// site from startup on. It is not a `Credentials`-shaped value -- reading it
+/// as one fails deserialization -- and bulk enumeration must never try:
+/// this path, not a real credential path, is excluded unconditionally rather
+/// than through the caller-supplied `CredentialPrefix` exclusions.
+const TOKEN_REFRESH_PROBE_PATH: &str = "machines/token_refresh/current_token";
 
 #[derive(Clone, Debug)]
 enum ForgeVaultAuthenticationType {
@@ -74,6 +84,7 @@ struct ForgeVaultClientConfig {
     pub kv_mount_location: String,
     pub pki_mount_location: String,
     pub pki_role_name: String,
+    namespace: Option<String>,
     spiffe_trust_domain: String,
     spiffe_machine_base_path: String,
     vault_root_ca_path: String,
@@ -469,6 +480,12 @@ where
         .ca_certs(vec![ca_path])
         .verify(true);
 
+    let vault_client_settings_builder = if let Some(namespace) = &vault_client_config.namespace {
+        vault_client_settings_builder.set_namespace(namespace.clone())
+    } else {
+        vault_client_settings_builder
+    };
+
     Ok(vault_client_settings_builder.build()?)
 }
 
@@ -485,7 +502,7 @@ async fn validate_vault_token_attempt(
     let response = kv2::set(
         vault_client,
         kv_mount_location,
-        "machines/token_refresh/current_token",
+        TOKEN_REFRESH_PROBE_PATH,
         data,
     )
     .await;
@@ -1136,6 +1153,37 @@ enum EnumerationMode {
     Strict,
 }
 
+/// Whether an enumerated path is skipped, and if so, whether the skip
+/// should count toward "something eligible was intentionally skipped"
+/// (the caller's `excluded_prefix_found`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathExclusion {
+    /// Not excluded; read and imported normally.
+    Included,
+    /// Skipped, and reported to the caller as an exclusion. Used for
+    /// caller-requested prefixes such as `CredentialPrefix::UfmAuth`.
+    ExcludedAndCounted,
+    /// Skipped, but never reported as an exclusion. The token-refresh
+    /// probe is not a credential, but it exists on every site that has
+    /// ever authenticated to Vault, so counting it would let a genuinely
+    /// empty or misconfigured import source pass the empty-vault guard in
+    /// `validate_vault_import_selection`.
+    ExcludedAndUncounted,
+}
+
+fn vault_path_exclusion(path: &str, excluded_prefixes: &[CredentialPrefix]) -> PathExclusion {
+    if path == TOKEN_REFRESH_PROBE_PATH {
+        return PathExclusion::ExcludedAndUncounted;
+    }
+    if excluded_prefixes
+        .iter()
+        .any(|prefix| path.starts_with(prefix.as_str()))
+    {
+        return PathExclusion::ExcludedAndCounted;
+    }
+    PathExclusion::Included
+}
+
 async fn list_vault_path(
     vault_client: &VaultClient,
     mount: &str,
@@ -1250,11 +1298,24 @@ impl ForgeVaultClient {
         path_prefix: &str,
         mode: EnumerationMode,
     ) -> Result<Vec<String>, SecretsError> {
+        let (paths, _) = self
+            .list_secrets_for_path_excluding(path_prefix, mode, &[])
+            .await?;
+        Ok(paths)
+    }
+
+    async fn list_secrets_for_path_excluding(
+        &self,
+        path_prefix: &str,
+        mode: EnumerationMode,
+        excluded_prefixes: &[CredentialPrefix],
+    ) -> Result<(Vec<String>, bool), SecretsError> {
         let vault_client = self.vault_client().await?;
         let mount = &self.vault_client_config.kv_mount_location;
 
         let mut paths = Vec::new();
         let mut stack = vec![path_prefix.to_string()];
+        let mut excluded_prefix_found = false;
 
         while let Some(dir) = stack.pop() {
             let Some(entries) = list_vault_path(vault_client.deref(), mount, &dir, mode).await?
@@ -1263,25 +1324,31 @@ impl ForgeVaultClient {
             };
 
             for entry in entries {
-                if entry.ends_with('/') {
-                    let subdir = if dir.is_empty() {
-                        entry
-                    } else {
-                        format!("{dir}{entry}")
-                    };
-                    stack.push(subdir);
+                let is_directory = entry.ends_with('/');
+                let full = if dir.is_empty() {
+                    entry
                 } else {
-                    let full = if dir.is_empty() {
-                        entry
-                    } else {
-                        format!("{dir}{entry}")
-                    };
+                    format!("{dir}{entry}")
+                };
+
+                match vault_path_exclusion(&full, excluded_prefixes) {
+                    PathExclusion::ExcludedAndCounted => {
+                        excluded_prefix_found = true;
+                        continue;
+                    }
+                    PathExclusion::ExcludedAndUncounted => continue,
+                    PathExclusion::Included => {}
+                }
+
+                if is_directory {
+                    stack.push(full);
+                } else {
                     paths.push(full);
                 }
             }
         }
 
-        Ok(paths)
+        Ok((paths, excluded_prefix_found))
     }
 
     /// get_secrets returns all secrets in the KV mount (paths plus
@@ -1299,10 +1366,23 @@ impl ForgeVaultClient {
     /// and leaves the completion marker unwritten -- rather than quietly
     /// importing a subset.
     pub async fn get_secrets_strict(&self) -> Result<Vec<(String, Credentials)>, SecretsError> {
-        let paths = self
-            .list_secrets_for_path("", EnumerationMode::Strict)
+        let (secrets, _) = self.get_secrets_strict_excluding_prefixes(&[]).await?;
+        Ok(secrets)
+    }
+
+    /// Returns all secrets outside `excluded_prefixes`, failing on the first
+    /// list or read error. Excluded directories are not traversed and excluded
+    /// credentials are not read. The boolean reports whether an excluded
+    /// prefix was found during enumeration.
+    pub async fn get_secrets_strict_excluding_prefixes(
+        &self,
+        excluded_prefixes: &[CredentialPrefix],
+    ) -> Result<(Vec<(String, Credentials)>, bool), SecretsError> {
+        let (paths, excluded_prefix_found) = self
+            .list_secrets_for_path_excluding("", EnumerationMode::Strict, excluded_prefixes)
             .await?;
-        self.read_secrets(&paths, EnumerationMode::Strict).await
+        let secrets = self.read_secrets(&paths, EnumerationMode::Strict).await?;
+        Ok((secrets, excluded_prefix_found))
     }
 
     /// get_secrets_for_prefix returns all secrets
@@ -1361,6 +1441,11 @@ pub struct VaultConfig {
     pub pki_role_name: Option<String>,
     pub token: Option<String>,
     pub vault_cacert: Option<String>,
+    /// HashiCorp Vault Enterprise or HCP Vault Dedicated namespace.
+    ///
+    /// When configured, this takes precedence over `VAULT_NAMESPACE` and is
+    /// sent as `X-Vault-Namespace` on every Vault API request.
+    pub namespace: Option<String>,
     /// SPIFFE trust domain for machine PKI URI SANs. Defaults to `nico.local`.
     pub spiffe_trust_domain: Option<String>,
     /// Path prefix after the trust domain, e.g. `/forge-system/machine/`.
@@ -1410,6 +1495,14 @@ impl VaultConfig {
             .context("VAULT_CACERT")
     }
 
+    /// Resolves the Vault namespace from configuration, then `VAULT_NAMESPACE`.
+    ///
+    /// An unset namespace preserves Vault OSS and root-namespace behavior.
+    pub fn namespace(&self) -> Option<String> {
+        normalize_vault_namespace(self.namespace.clone())
+            .or_else(|| normalize_vault_namespace(env::var(VAULT_NAMESPACE_ENV_VAR).ok()))
+    }
+
     pub fn spiffe_trust_domain(&self) -> String {
         self.spiffe_trust_domain
             .clone()
@@ -1423,6 +1516,14 @@ impl VaultConfig {
             .or_else(|| env::var(VAULT_SPIFFE_MACHINE_BASE_PATH_ENV_VAR).ok())
             .unwrap_or_else(|| DEFAULT_SPIFFE_MACHINE_BASE_PATH.to_string())
     }
+}
+
+/// Trims a Vault namespace and treats an empty value as unset.
+fn normalize_vault_namespace(namespace: Option<String>) -> Option<String> {
+    namespace.and_then(|namespace| {
+        let namespace = namespace.trim();
+        (!namespace.is_empty()).then(|| namespace.to_string())
+    })
 }
 
 pub fn create_vault_client(vault_config: &VaultConfig) -> eyre::Result<Arc<ForgeVaultClient>> {
@@ -1446,6 +1547,7 @@ pub fn create_vault_client(vault_config: &VaultConfig) -> eyre::Result<Arc<Forge
         kv_mount_location: vault_config.kv_mount_location()?,
         pki_mount_location: vault_config.pki_mount_location()?,
         pki_role_name: vault_config.pki_role_name()?,
+        namespace: vault_config.namespace(),
         spiffe_trust_domain: vault_config.spiffe_trust_domain(),
         spiffe_machine_base_path: vault_config.spiffe_machine_base_path(),
         vault_root_ca_path,
@@ -1471,9 +1573,11 @@ pub struct SpiffeIdentity {
 ///
 /// The connection-identifying fields are required (non-optional), so a value
 /// of this type cannot be constructed without naming the target Vault, its PKI
-/// mount, and its role. None of these fields fall back to the process-global
-/// `VAULT_*` environment variables — that fallback is exactly what would
-/// silently re-point a half-configured cert Vault back at the credential Vault.
+/// mount, and its role. Those fields do not fall back to process-global
+/// `VAULT_*` environment variables, so a half-configured cert Vault cannot be
+/// silently re-pointed to the credential Vault. The namespace is the exception:
+/// it inherits `VAULT_NAMESPACE` so the default deployment uses one Vault
+/// namespace consistently for credentials and certificates.
 #[derive(Clone)]
 pub struct DedicatedVaultConfig {
     /// Vault address, e.g. `https://vault.example:8200`. Required.
@@ -1490,6 +1594,18 @@ pub struct DedicatedVaultConfig {
     /// Defaults to the standard site root (`/var/run/secrets/forge-roots/ca.crt`,
     /// or `VAULT_CACERT`) — this is TLS trust material, not a Vault selector.
     pub vault_cacert: Option<String>,
+    /// Optional Vault Enterprise or HCP Vault Dedicated namespace for this
+    /// certificate Vault. Takes precedence over `VAULT_NAMESPACE`.
+    pub namespace: Option<String>,
+}
+
+impl DedicatedVaultConfig {
+    /// Resolves the dedicated Vault namespace from configuration, then the
+    /// shared `VAULT_NAMESPACE` environment setting.
+    fn namespace(&self) -> Option<String> {
+        normalize_vault_namespace(self.namespace.clone())
+            .or_else(|| normalize_vault_namespace(env::var(VAULT_NAMESPACE_ENV_VAR).ok()))
+    }
 }
 
 // Hand-rolled so the root `token` is never printed verbatim in logs or errors;
@@ -1502,6 +1618,7 @@ impl std::fmt::Debug for DedicatedVaultConfig {
             .field("pki_role_name", &self.pki_role_name)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .field("vault_cacert", &self.vault_cacert)
+            .field("namespace", &self.namespace)
             .finish()
     }
 }
@@ -1559,6 +1676,7 @@ pub fn create_dedicated_vault_client(
         kv_mount_location: String::new(),
         pki_mount_location: config.pki_mount_location.clone(),
         pki_role_name: config.pki_role_name.clone(),
+        namespace: config.namespace(),
         spiffe_trust_domain: spiffe.trust_domain,
         spiffe_machine_base_path: spiffe.machine_base_path,
         vault_root_ca_path,
@@ -1592,6 +1710,9 @@ pub fn create_raw_vault_client_settings(
         .timeout(Some(Duration::from_secs(60)))
         .ca_certs(vec![ca_path])
         .verify(true);
+    if let Some(namespace) = vault_config.namespace() {
+        builder.set_namespace(namespace);
+    }
     builder
         .build()
         .map_err(|e| eyre!("vault client settings: {e}"))
@@ -1599,15 +1720,191 @@ pub fn create_raw_vault_client_settings(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
     use std::time::Duration;
 
     use base64::Engine;
     use serde_json::json;
+    use serial_test::serial;
+    use vaultrs::client::VaultClient;
+    use vaultrs::{kv2, pki};
 
     use super::{
-        DedicatedVaultConfig, SpiffeIdentity, VaultTokenRefreshWindowObserved,
-        create_dedicated_vault_client, machine_spiffe_uri, service_account_role_name_from_jwt,
+        DedicatedVaultConfig, ForgeVaultAuthenticationType, ForgeVaultClientConfig, PathExclusion,
+        SpiffeIdentity, VaultConfig, VaultTokenRefreshWindowObserved,
+        create_dedicated_vault_client, create_vault_client_settings, machine_spiffe_uri,
+        service_account_role_name_from_jwt, vault_path_exclusion,
     };
+    use crate::credentials::CredentialPrefix;
+
+    #[test]
+    fn excluded_vault_prefix_covers_the_directory_and_its_credentials() {
+        for (path, expected) in [
+            ("ufm/", PathExclusion::ExcludedAndCounted),
+            ("ufm/default/auth", PathExclusion::ExcludedAndCounted),
+            ("machines/bmc/site/root", PathExclusion::Included),
+        ] {
+            assert_eq!(
+                vault_path_exclusion(path, &[CredentialPrefix::UfmAuth]),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    // Regression test for nvbugs 6786805: the token-refresh probe is not a
+    // `Credentials`-shaped value, so strict enumeration must always skip it,
+    // even when the caller passes no exclusions at all (the default case for
+    // a site with `ufm_source` unset to `"local"`). It must also never be
+    // counted as a caller-requested exclusion (unlike `UfmAuth`), or an
+    // otherwise-empty Vault would pass the empty-source guard in
+    // `validate_vault_import_selection` and permanently record nothing.
+    #[test]
+    fn token_refresh_probe_is_always_excluded_but_never_counted() {
+        for (path, excluded_prefixes, expected) in [
+            (
+                super::TOKEN_REFRESH_PROBE_PATH,
+                &[][..],
+                PathExclusion::ExcludedAndUncounted,
+            ),
+            (
+                super::TOKEN_REFRESH_PROBE_PATH,
+                &[CredentialPrefix::UfmAuth][..],
+                PathExclusion::ExcludedAndUncounted,
+            ),
+            ("machines/bmc/site/root", &[][..], PathExclusion::Included),
+        ] {
+            assert_eq!(
+                vault_path_exclusion(path, excluded_prefixes),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    /// Restores a process environment variable when a test finishes or panics.
+    struct EnvironmentVariableGuard {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvironmentVariableGuard {
+        /// Replaces an environment variable and records its prior value.
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            // SAFETY: callers mark tests `#[serial]` to avoid concurrent reads
+            // or mutations of this process-wide state.
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvironmentVariableGuard {
+        fn drop(&mut self) {
+            // SAFETY: this restores the prior state recorded by `set` in a
+            // `#[serial]` test, including while unwinding from a panic.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.name, value),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
+    /// Builds a minimal HTTP Vault client configuration for header tests.
+    fn vault_client_config(address: String, namespace: Option<&str>) -> ForgeVaultClientConfig {
+        ForgeVaultClientConfig {
+            auth_type: ForgeVaultAuthenticationType::Root("test-token".to_string()),
+            vault_address: address,
+            kv_mount_location: "secret".to_string(),
+            pki_mount_location: "pki".to_string(),
+            pki_role_name: "nico".to_string(),
+            namespace: namespace.map(str::to_string),
+            spiffe_trust_domain: "nico.local".to_string(),
+            spiffe_machine_base_path: "/forge-system/machine/".to_string(),
+            // The settings builder checks that a CA path is configured, but an
+            // HTTP address does not read it.
+            vault_root_ca_path: format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR")),
+        }
+    }
+
+    /// Starts a three-request HTTP server and returns its address, requests, and thread.
+    fn vault_header_server() -> (
+        String,
+        mpsc::Receiver<Vec<String>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind Vault test server");
+        let address = listener
+            .local_addr()
+            .expect("get Vault test server address");
+        let (sender, receiver) = mpsc::channel();
+
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().expect("accept Vault request");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set Vault request read timeout");
+
+                let mut request = Vec::new();
+                let mut buf = [0; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let bytes_read = stream.read(&mut buf).expect("read Vault request");
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..bytes_read]);
+                }
+                requests.push(String::from_utf8(request).expect("Vault request is UTF-8"));
+
+                stream
+                    .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .expect("respond to Vault request");
+            }
+            sender.send(requests).expect("send Vault requests");
+        });
+
+        (format!("http://{address}"), receiver, server)
+    }
+
+    /// Asserts that auth, KV, and PKI calls consistently carry the namespace header.
+    async fn assert_vault_namespace_headers(namespace: Option<&str>) {
+        let (address, requests, server) = vault_header_server();
+        let config = vault_client_config(address, namespace);
+        let settings = create_vault_client_settings("test-token", &config)
+            .expect("build Vault client settings");
+        let client = VaultClient::new(settings).expect("create Vault client");
+
+        let _ = vaultrs::auth::kubernetes::login(&client, "kubernetes", "nico", "jwt").await;
+        let data = HashMap::from([("key", "value")]);
+        let _ = kv2::set(&client, "secret", "machines/test", &data).await;
+        let _ = pki::cert::generate(&client, "pki", "nico", None).await;
+
+        let requests = requests
+            .recv_timeout(Duration::from_secs(5))
+            .expect("receive Vault requests");
+        server.join().expect("Vault test server panicked");
+        assert_eq!(requests.len(), 3);
+        for request in requests {
+            let request = request.to_ascii_lowercase();
+            match namespace {
+                Some(namespace) => assert!(request.contains(&format!(
+                    "x-vault-namespace: {}",
+                    namespace.to_ascii_lowercase()
+                ))),
+                None => assert!(!request.contains("x-vault-namespace:")),
+            }
+        }
+    }
 
     fn dedicated_config() -> DedicatedVaultConfig {
         DedicatedVaultConfig {
@@ -1616,6 +1913,7 @@ mod tests {
             pki_role_name: "machine".to_string(),
             token: None,
             vault_cacert: None,
+            namespace: None,
         }
     }
 
@@ -1671,6 +1969,23 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn dedicated_vault_namespace_inherits_environment_with_config_precedence() {
+        let _namespace = EnvironmentVariableGuard::set("VAULT_NAMESPACE", "from-environment");
+
+        assert_eq!(
+            dedicated_config().namespace().as_deref(),
+            Some("from-environment")
+        );
+
+        let configured = DedicatedVaultConfig {
+            namespace: Some("from-config".to_string()),
+            ..dedicated_config()
+        };
+        assert_eq!(configured.namespace().as_deref(), Some("from-config"));
+    }
+
+    #[test]
     fn machine_spiffe_uri_uses_trust_domain_and_base_path() {
         assert_eq!(
             machine_spiffe_uri("forge.local", "/forge-system/machine/", "abc-123"),
@@ -1688,10 +2003,63 @@ mod tests {
 
     #[test]
     fn vault_config_spiffe_trust_domain_defaults_to_nico_local() {
-        use super::VaultConfig;
-
         let config = VaultConfig::default();
         assert_eq!(config.spiffe_trust_domain(), "nico.local");
+    }
+
+    #[test]
+    #[serial]
+    fn vault_namespace_from_config_has_precedence() {
+        let _namespace = EnvironmentVariableGuard::set("VAULT_NAMESPACE", "from-environment");
+        let config = VaultConfig {
+            namespace: Some("admin/platform".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(config.namespace().as_deref(), Some("admin/platform"));
+    }
+
+    #[test]
+    fn vault_namespace_normalization_trims_and_ignores_blank_values() {
+        assert_eq!(
+            super::normalize_vault_namespace(Some("  admin/platform  ".to_string())).as_deref(),
+            Some("admin/platform")
+        );
+        assert_eq!(
+            super::normalize_vault_namespace(Some(" \t ".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn vault_namespace_ignores_blank_environment_value() {
+        let _namespace = EnvironmentVariableGuard::set("VAULT_NAMESPACE", " \t ");
+
+        assert_eq!(VaultConfig::default().namespace(), None);
+    }
+
+    #[test]
+    fn vault_client_settings_apply_nested_namespace() {
+        let config = vault_client_config(
+            "http://127.0.0.1:8200".to_string(),
+            Some("admin/platform/nico"),
+        );
+
+        let settings = create_vault_client_settings("test-token", &config)
+            .expect("build Vault client settings");
+
+        assert_eq!(settings.namespace.as_deref(), Some("admin/platform/nico"));
+    }
+
+    #[tokio::test]
+    async fn vault_client_sends_namespace_on_auth_kv_and_pki_requests() {
+        assert_vault_namespace_headers(Some("admin/platform/nico")).await;
+    }
+
+    #[tokio::test]
+    async fn vault_client_omits_namespace_when_not_configured() {
+        assert_vault_namespace_headers(None).await;
     }
 
     fn jwt_from_payload(payload_value: serde_json::Value) -> String {

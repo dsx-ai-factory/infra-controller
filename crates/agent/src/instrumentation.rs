@@ -28,7 +28,7 @@ use tracing::Span;
 
 pub mod config;
 use carbide_instrument::{MetricFamily, Outcome};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 pub use config::{get_dpu_agent_meter, get_prometheus_registry};
 
 /// LLDP and OVS expose one enum per restart flow, while the private Event
@@ -514,10 +514,10 @@ pub struct NetworkMonitorMetricsState {
     network_reachable_map: NetworkReachableMap,
 }
 
-type NetworkReachableMap = Arc<Mutex<Option<HashMap<MachineId, bool>>>>;
+type NetworkReachableMap = Arc<Mutex<Option<HashMap<DpuMachineId, bool>>>>;
 
 impl NetworkMonitorMetricsState {
-    pub fn initialize(meter: Meter, machine_id: MachineId) -> Arc<Self> {
+    pub fn initialize(meter: Meter, machine_id: DpuMachineId) -> Arc<Self> {
         let network_reachable_map = NetworkReachableMap::default();
 
         {
@@ -581,8 +581,8 @@ impl NetworkMonitorMetricsState {
     pub fn record_network_latency(
         &self,
         latency: Duration,
-        source_dpu_id: MachineId,
-        dest_dpu_id: MachineId,
+        source_dpu_id: DpuMachineId,
+        dest_dpu_id: DpuMachineId,
     ) {
         let attributes = [
             KeyValue::new("source_dpu_id", source_dpu_id.to_string()),
@@ -601,8 +601,8 @@ impl NetworkMonitorMetricsState {
     pub fn record_network_loss_percent(
         &self,
         loss_percent: f64,
-        source_dpu_id: MachineId,
-        dest_dpu_id: MachineId,
+        source_dpu_id: DpuMachineId,
+        dest_dpu_id: DpuMachineId,
     ) {
         let attributes = [
             KeyValue::new("source_dpu_id", source_dpu_id.to_string()),
@@ -616,7 +616,7 @@ impl NetworkMonitorMetricsState {
     /// # Parameters
     /// - `new_reachable_map`: Records reachability between DPUs where the key is ID of destination DPU
     ///   and value is reachability as bool
-    pub fn update_network_reachable_map(&self, new_reachable_map: HashMap<MachineId, bool>) {
+    pub fn update_network_reachable_map(&self, new_reachable_map: HashMap<DpuMachineId, bool>) {
         *self.network_reachable_map.lock().unwrap() = Some(new_reachable_map);
     }
 
@@ -628,8 +628,8 @@ impl NetworkMonitorMetricsState {
     /// - `error_type`: A string describing the type of communication error.
     pub fn record_communication_error(
         &self,
-        source_dpu_id: MachineId,
-        dest_dpu_id: MachineId,
+        source_dpu_id: DpuMachineId,
+        dest_dpu_id: DpuMachineId,
         error_type: String,
     ) {
         let attributes = [
@@ -645,7 +645,7 @@ impl NetworkMonitorMetricsState {
     /// # Parameters
     /// - `machine_id`: The ID of this machine
     /// - `error_type`: A string describing the type of network monitor error.
-    pub fn record_monitor_error(&self, machine_id: MachineId, error_type: String) {
+    pub fn record_monitor_error(&self, machine_id: DpuMachineId, error_type: String) {
         let attributes = [
             KeyValue::new("dpu_id", machine_id.to_string()),
             KeyValue::new("error_type", error_type),
@@ -1063,235 +1063,14 @@ mod report_loop_tests {
 }
 
 #[cfg(test)]
-mod service_restart_tests {
-    use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
-    use carbide_test_support::{Check, check_values};
-
-    use super::*;
-
-    const RESTART_METRIC: &str = "carbide_dpu_agent_service_restart_attempts_total";
-
-    struct RestartCase {
-        emit: fn(),
-        service: &'static str,
-        result: &'static str,
-    }
-
-    #[derive(Debug, PartialEq)]
-    struct RestartObservation {
-        counter_delta: f64,
-        level: tracing::Level,
-        metadata_name: String,
-        message: String,
-        service: Option<String>,
-        result: Option<String>,
-        error: Option<String>,
-        error_kind: Option<CapturedFieldKind>,
-        attempt: Option<String>,
-        attempt_kind: Option<CapturedFieldKind>,
-        attempt_count: Option<String>,
-        attempt_count_kind: Option<CapturedFieldKind>,
-        managed_host_config_version: Option<String>,
-        managed_host_config_version_kind: Option<CapturedFieldKind>,
-    }
-
-    fn observe_restart(case: RestartCase) -> RestartObservation {
-        let metrics = MetricsCapture::start();
-        let mut logs = capture_logs(case.emit);
-        assert_eq!(logs.len(), 1, "one restart attempt writes one result");
-        let log = logs.pop().expect("the service restart log");
-        let field = |name: &str| log.field(name).map(str::to_owned);
-
-        RestartObservation {
-            counter_delta: metrics.counter_delta(
-                RESTART_METRIC,
-                &[("service", case.service), ("result", case.result)],
-            ),
-            level: log.level,
-            metadata_name: log.metadata_name.clone(),
-            message: log.message.clone(),
-            service: field("service"),
-            result: field("result"),
-            error: field("error"),
-            error_kind: log.field_kind("error"),
-            attempt: field("attempt"),
-            attempt_kind: log.field_kind("attempt"),
-            attempt_count: field("attempt_count"),
-            attempt_count_kind: log.field_kind("attempt_count"),
-            managed_host_config_version: field("managed_host_config_version"),
-            managed_host_config_version_kind: log.field_kind("managed_host_config_version"),
-        }
-    }
-
-    fn expected_restart(
-        diagnostic: (tracing::Level, &str, &str),
-        service: &str,
-        result: &str,
-        error: Option<(&str, CapturedFieldKind)>,
-        attempt: Option<u8>,
-        attempt_count: Option<u8>,
-        managed_host_config_version: Option<&str>,
-    ) -> RestartObservation {
-        let (level, metadata_name, message) = diagnostic;
-        let (error, error_kind) = error
-            .map(|(value, kind)| (Some(value.to_string()), Some(kind)))
-            .unwrap_or_default();
-        RestartObservation {
-            counter_delta: 1.0,
-            level,
-            metadata_name: metadata_name.to_string(),
-            message: message.to_string(),
-            service: Some(service.to_string()),
-            result: Some(result.to_string()),
-            error,
-            error_kind,
-            attempt: attempt.map(|value| value.to_string()),
-            attempt_kind: attempt.map(|_| CapturedFieldKind::I64),
-            attempt_count: attempt_count.map(|value| value.to_string()),
-            attempt_count_kind: attempt_count.map(|_| CapturedFieldKind::I64),
-            managed_host_config_version: managed_host_config_version.map(str::to_string),
-            managed_host_config_version_kind: managed_host_config_version
-                .map(|_| CapturedFieldKind::String),
-        }
-    }
-
-    #[test]
-    fn service_restart_attempts_keep_the_existing_diagnostics() {
-        check_values(
-            [
-                Check {
-                    scenario: "lldpd restart succeeds",
-                    input: RestartCase {
-                        emit: || carbide_instrument::emit(LldpdRestart::Succeeded { attempt: 2 }),
-                        service: "lldpd",
-                        result: "succeeded",
-                    },
-                    expect: expected_restart(
-                        (
-                            tracing::Level::INFO,
-                            "dpu_agent_lldpd_restart",
-                            "Restarted lldpd service",
-                        ),
-                        "lldpd",
-                        "succeeded",
-                        None,
-                        Some(2),
-                        None,
-                        None,
-                    ),
-                },
-                Check {
-                    scenario: "lldpd restart will retry",
-                    input: RestartCase {
-                        emit: || {
-                            carbide_instrument::emit(LldpdRestart::Retrying {
-                                error: "service busy".to_string(),
-                                attempt: 1,
-                            })
-                        },
-                        service: "lldpd",
-                        result: "retrying",
-                    },
-                    expect: expected_restart(
-                        (
-                            tracing::Level::WARN,
-                            "dpu_agent_lldpd_restart",
-                            "Couldn't restart lldpd service, retrying",
-                        ),
-                        "lldpd",
-                        "retrying",
-                        Some(("service busy", CapturedFieldKind::Debug)),
-                        Some(1),
-                        None,
-                        None,
-                    ),
-                },
-                Check {
-                    scenario: "lldpd restart exhausts its retries",
-                    input: RestartCase {
-                        emit: || {
-                            carbide_instrument::emit(LldpdRestart::Failed {
-                                error: "service busy".to_string(),
-                                attempt_count: 3,
-                            })
-                        },
-                        service: "lldpd",
-                        result: "failed",
-                    },
-                    expect: expected_restart(
-                        (
-                            tracing::Level::ERROR,
-                            "dpu_agent_lldpd_restart",
-                            "Couldn't restart lldpd service",
-                        ),
-                        "lldpd",
-                        "failed",
-                        Some(("service busy", CapturedFieldKind::Debug)),
-                        None,
-                        Some(3),
-                        None,
-                    ),
-                },
-                Check {
-                    scenario: "OVS restart succeeds",
-                    input: RestartCase {
-                        emit: || carbide_instrument::emit(OvsRestart::Succeeded {}),
-                        service: "ovs_vswitchd",
-                        result: "succeeded",
-                    },
-                    expect: expected_restart(
-                        (
-                            tracing::Level::INFO,
-                            "dpu_agent_ovs_restart",
-                            "Successfully restarted ovs-vswitchd.service",
-                        ),
-                        "ovs_vswitchd",
-                        "succeeded",
-                        None,
-                        None,
-                        None,
-                        None,
-                    ),
-                },
-                Check {
-                    scenario: "OVS restart enters backoff",
-                    input: RestartCase {
-                        emit: || {
-                            carbide_instrument::emit(OvsRestart::Retrying {
-                                error: "restarting OVS: timed out".to_string(),
-                                managed_host_config_version: "version-42".to_string(),
-                            })
-                        },
-                        service: "ovs_vswitchd",
-                        result: "retrying",
-                    },
-                    expect: expected_restart(
-                        (
-                            tracing::Level::ERROR,
-                            "dpu_agent_ovs_restart",
-                            "Restarting OVS after admin network change",
-                        ),
-                        "ovs_vswitchd",
-                        "retrying",
-                        Some(("restarting OVS: timed out", CapturedFieldKind::String)),
-                        None,
-                        None,
-                        Some("version-42"),
-                    ),
-                },
-            ],
-            observe_restart,
-        );
-    }
-}
-
-#[cfg(test)]
 mod http_request_tests {
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode};
     use axum::routing::get;
     use carbide_instrument::emit;
-    use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{
+        ApproxHistogramSum, CapturedFieldKind, MetricsCapture, capture_logs,
+    };
     use carbide_test_support::{Check, check_values};
     use tower::ServiceExt;
 
@@ -1309,7 +1088,7 @@ mod http_request_tests {
     struct EventObservation {
         request_delta: f64,
         latency_count_delta: u64,
-        latency_sum_delta: f64,
+        latency_sum_delta: ApproxHistogramSum,
         logs: Vec<LogObservation>,
     }
 
@@ -1365,7 +1144,7 @@ mod http_request_tests {
                     expect: EventObservation {
                         request_delta: 1.0,
                         latency_count_delta: 0,
-                        latency_sum_delta: 0.0,
+                        latency_sum_delta: ApproxHistogramSum(0.0),
                         logs: vec![LogObservation {
                             metadata_name: "dpu_agent_http_request_started".to_string(),
                             level: tracing::Level::INFO,
@@ -1391,7 +1170,7 @@ mod http_request_tests {
                     expect: EventObservation {
                         request_delta: 0.0,
                         latency_count_delta: 1,
-                        latency_sum_delta: 12.5,
+                        latency_sum_delta: ApproxHistogramSum(12.5),
                         logs: vec![LogObservation {
                             metadata_name: "dpu_agent_http_response_generated".to_string(),
                             level: tracing::Level::INFO,

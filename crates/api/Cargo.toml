@@ -104,6 +104,7 @@ trace-propagation = { path = "../trace-propagation" }
 
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
 http = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

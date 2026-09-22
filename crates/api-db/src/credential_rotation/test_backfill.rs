@@ -186,8 +186,9 @@ async fn backfill_records_v0_for_existing_devices(pool: PgPool) {
         .await
         .unwrap();
 
-    // Site-wide targets: the legacy backfill seeds bmc + UEFI + lockdown. NVOS
-    // remains absent until its first target credential is stored and verified.
+    // Site-wide targets: the legacy backfill seeds bmc + UEFI + lockdown, and the
+    // dpu_bmc_service seed migration adds its own site-wide row. NVOS remains
+    // absent until its first target credential is stored and verified.
     let sitewide: Vec<String> = sqlx::query_scalar(
         "SELECT credential_type::text FROM sitewide_credential_rotation ORDER BY 1",
     )
@@ -196,8 +197,14 @@ async fn backfill_records_v0_for_existing_devices(pool: PgPool) {
     .unwrap();
     assert_eq!(
         sitewide,
-        vec!["bmc", "dpu_uefi", "host_uefi", "lockdown_ikm"],
-        "site-wide targets must cover bmc + UEFI + lockdown"
+        vec![
+            "bmc",
+            "dpu_bmc_service",
+            "dpu_uefi",
+            "host_uefi",
+            "lockdown_ikm"
+        ],
+        "site-wide targets must cover bmc + dpu_bmc_service + UEFI + lockdown"
     );
 
     // BMC: all three machines + the live switch + the live power shelf. The

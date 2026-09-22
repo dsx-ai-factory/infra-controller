@@ -247,6 +247,24 @@ impl StreamMetrics {
     }
 }
 
+/// Builds collector metric labels and includes `rack_id` only when available.
+pub(crate) fn collector_metric_labels(
+    collector_type: &str,
+    endpoint_key: String,
+    endpoint: &BmcEndpoint,
+) -> HashMap<String, String> {
+    let mut labels = HashMap::from([
+        ("collector_type".to_string(), collector_type.to_string()),
+        ("endpoint_key".to_string(), endpoint_key),
+    ]);
+
+    if let Some(rack_id) = endpoint.rack_id.as_ref() {
+        labels.insert("rack_id".to_string(), rack_id.to_string());
+    }
+
+    labels
+}
+
 /// RAII guard: increments the passed IntGauge on construction, decrements on drop.
 /// Ensures every exit path from a connected stream (cancel, error, end, reconnect) dec's.
 pub(crate) struct StreamingConnectionGuard(IntGauge);
@@ -300,14 +318,8 @@ impl Collector {
 
         let mut runner = C::new_runner(bmc, endpoint.clone(), config)?;
 
-        let endpoint_key = endpoint.key();
-        let const_labels = HashMap::from([
-            (
-                "collector_type".to_string(),
-                runner.collector_type().to_string(),
-            ),
-            ("endpoint_key".to_string(), endpoint_key),
-        ]);
+        let const_labels =
+            collector_metric_labels(runner.collector_type(), endpoint.key(), &endpoint);
 
         let registry = collector_registry.registry();
 
@@ -362,7 +374,12 @@ impl Collector {
             loop {
                 tokio::select! {
                     _ = cancel_token_clone.cancelled() => {
-                        tracing::info!(endpoint = ?endpoint.addr, "collector cancelled");
+                        tracing::info!(
+                            endpoint = ?endpoint.addr,
+                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                            "collector cancelled"
+                        );
+
                         runner.stop().await;
                         break;
                     }
@@ -401,6 +418,7 @@ impl Collector {
                                     error = ?e,
                                     endpoint = ?endpoint.addr,
                                     collector_type = collector_type,
+                                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                                     "Error during collector iteration"
                                 );
                             }
@@ -419,17 +437,23 @@ impl Collector {
         })
     }
 
+    /// Starts a streaming collector and reports failures to the caller.
+    ///
+    /// The callback receives `Err` when connection establishment fails and
+    /// `Ok(connected_for)` when an accepted stream ends or returns an error.
+    /// Cancellation does not invoke the callback. Returning `false` stops the
+    /// collector.
     pub fn start_streaming<S, F>(
         endpoint: Arc<BmcEndpoint>,
         bmc: Arc<BmcClient>,
         config: S::Config,
         data_sink: Arc<dyn DataSink>,
         start_context: StreamingCollectorStartContext,
-        mut on_connect_result: F,
+        mut on_stream_failure: F,
     ) -> Result<Self, HealthError>
     where
         S: StreamingCollector<BmcClient>,
-        F: FnMut(Result<(), &HealthError>) -> bool + Send + 'static,
+        F: FnMut(Result<Duration, &HealthError>) -> bool + Send + 'static,
     {
         let StreamingCollectorStartContext {
             backoff_config,
@@ -442,14 +466,8 @@ impl Collector {
         let mut collector = S::new_runner(Arc::clone(&bmc), endpoint.clone(), config)?;
         let event_context = EventContext::from_endpoint(&endpoint, collector.collector_type());
 
-        let endpoint_key = endpoint.key();
-        let const_labels = HashMap::from([
-            (
-                "collector_type".to_string(),
-                collector.collector_type().to_string(),
-            ),
-            ("endpoint_key".to_string(), endpoint_key),
-        ]);
+        let const_labels =
+            collector_metric_labels(collector.collector_type(), endpoint.key(), &endpoint);
 
         let registry = collector_registry.registry();
         let metrics = StreamMetrics::new(registry, collector_registry.prefix(), const_labels)?;
@@ -463,6 +481,7 @@ impl Collector {
                 tracing::info!(
                     collector_type,
                     endpoint = ?endpoint.addr,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                     "streaming collector connecting"
                 );
 
@@ -479,9 +498,11 @@ impl Collector {
                             error = ?e,
                             collector_type,
                             endpoint = ?endpoint.addr,
+                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                             "streaming collector connection failed"
                         );
-                        if !on_connect_result(Err(&e)) {
+
+                        if !on_stream_failure(Err(&e)) {
                             return;
                         }
                     }
@@ -497,10 +518,11 @@ impl Collector {
                             error = ?error,
                             collector_type,
                             endpoint = ?endpoint.addr,
+                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                             "streaming collector connection failed"
                         );
 
-                        if !on_connect_result(Err(&error)) {
+                        if !on_stream_failure(Err(&error)) {
                             return;
                         }
                     }
@@ -508,11 +530,13 @@ impl Collector {
                         // the guard lives exactly as long as we hold an open stream; Drop
                         // handles dec for every exit path (shutdown, error, stream end).
                         let _conn_guard = StreamingConnectionGuard::inc(metrics.connected.clone());
+                        let connected_at = Instant::now();
+
                         backoff.reset();
-                        on_connect_result(Ok(()));
                         tracing::info!(
                             collector_type,
                             endpoint = ?endpoint.addr,
+                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                             "streaming collector connected"
                         );
 
@@ -522,6 +546,7 @@ impl Collector {
                                 tracing::info!(
                                     collector_type,
                                     endpoint = ?endpoint.addr,
+                                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                                     "streaming collector shutting down"
                                 );
                                 return;
@@ -539,16 +564,28 @@ impl Collector {
                                         error = ?e,
                                         collector_type,
                                         endpoint = ?endpoint.addr,
+                                        rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                                         "streaming collector stream error, reconnecting"
                                     );
+
+                                    if !on_stream_failure(Ok(connected_at.elapsed())) {
+                                        return;
+                                    }
+
                                     break;
                                 }
                                 None => {
                                     tracing::info!(
                                         collector_type,
                                         endpoint = ?endpoint.addr,
+                                        rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                                         "streaming collector stream ended, reconnecting"
                                     );
+
+                                    if !on_stream_failure(Ok(connected_at.elapsed())) {
+                                        return;
+                                    }
+
                                     break;
                                 }
                             }
@@ -590,6 +627,10 @@ impl Collector {
         }
     }
 
+    pub(crate) async fn finished(&mut self) {
+        let _ = (&mut self.handle).await;
+    }
+
     pub async fn stop(self) {
         self.cancel_token.cancel();
         let _ = self.handle.await;
@@ -602,8 +643,11 @@ impl Collector {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    use carbide_uuid::rack::RackId;
 
     use super::*;
     use crate::endpoint::test_support::{mac, test_endpoint};
@@ -633,6 +677,42 @@ mod tests {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())
+        }
+    }
+
+    #[test]
+    fn collector_metric_labels_include_only_available_rack_id() {
+        struct TestCase {
+            name: &'static str,
+            rack_id: Option<RackId>,
+            expected_rack_id: Option<&'static str>,
+        }
+
+        let cases = [
+            TestCase {
+                name: "rack identity is available",
+                rack_id: Some(RackId::new("RACK_1")),
+                expected_rack_id: Some("RACK_1"),
+            },
+            TestCase {
+                name: "rack identity is unavailable",
+                rack_id: None,
+                expected_rack_id: None,
+            },
+        ];
+
+        for case in cases {
+            let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+            endpoint.rack_id = case.rack_id;
+
+            let labels = collector_metric_labels("test_collector", endpoint.key(), &endpoint);
+
+            assert_eq!(
+                labels.get("rack_id").map(String::as_str),
+                case.expected_rack_id,
+                "{}",
+                case.name
+            );
         }
     }
 
@@ -666,6 +746,53 @@ mod tests {
 
         fn collector_type(&self) -> &'static str {
             "test_streaming_collector"
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum StreamBehavior {
+        End,
+        Error,
+        Pending,
+    }
+
+    struct SessionStreamingCollector {
+        behaviors: VecDeque<StreamBehavior>,
+    }
+
+    #[async_trait]
+    impl StreamingCollector<BmcClient> for SessionStreamingCollector {
+        type Config = Vec<StreamBehavior>;
+
+        fn new_runner(
+            _bmc: Arc<BmcClient>,
+            _endpoint: Arc<BmcEndpoint>,
+            config: Self::Config,
+        ) -> Result<Self, HealthError> {
+            Ok(Self {
+                behaviors: config.into(),
+            })
+        }
+
+        async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError> {
+            let behavior = self
+                .behaviors
+                .pop_front()
+                .unwrap_or(StreamBehavior::Pending);
+
+            let stream: EventStream<'_> = match behavior {
+                StreamBehavior::End => Box::pin(futures::stream::empty()),
+                StreamBehavior::Error => Box::pin(futures::stream::once(async {
+                    Err(HealthError::GenericError("stream failed".to_string()))
+                })),
+                StreamBehavior::Pending => Box::pin(futures::stream::pending()),
+            };
+
+            Ok(StreamingConnectResult::Connected(stream))
+        }
+
+        fn collector_type(&self) -> &'static str {
+            "session_streaming_collector"
         }
     }
 
@@ -711,6 +838,53 @@ mod tests {
 
         assert!(!connected_callback);
         assert_eq!(sink.log_count(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_collector_reports_stream_end_and_error_but_not_cancellation()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:77")));
+        let bmc = Arc::clone(endpoint.bmc());
+        let metrics_manager = MetricsManager::new("test_streaming_runtime_stream_lifetime")?;
+
+        let collector_registry = Arc::new(metrics_manager.create_collector_registry(
+            "streaming_collector_stream_lifetime_test".to_string(),
+            "test_streaming_runtime_stream_lifetime",
+        )?);
+
+        let data_sink: Arc<dyn DataSink> = Arc::new(CountingSink::default());
+        let (callback_tx, mut callback_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let collector = Collector::start_streaming::<SessionStreamingCollector, _>(
+            endpoint,
+            bmc,
+            vec![
+                StreamBehavior::End,
+                StreamBehavior::Error,
+                StreamBehavior::Pending,
+            ],
+            data_sink,
+            StreamingCollectorStartContext {
+                backoff_config: BackoffConfig {
+                    initial: Duration::ZERO,
+                    max: Duration::ZERO,
+                },
+                collector_registry,
+            },
+            move |result| callback_tx.send(result.is_ok()).is_ok(),
+        )?;
+
+        let callbacks = tokio::time::timeout(Duration::from_secs(1), async {
+            [callback_rx.recv().await, callback_rx.recv().await]
+        })
+        .await?;
+
+        collector.stop().await;
+
+        assert_eq!(callbacks, [Some(true), Some(true)]);
+        assert!(callback_rx.try_recv().is_err());
 
         Ok(())
     }

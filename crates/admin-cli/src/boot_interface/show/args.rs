@@ -31,6 +31,6 @@ As JSON or YAML (the global --format flag):
 
 ")]
 pub(crate) struct Args {
-    #[clap(help = "The machine ID whose boot interfaces to gather")]
+    #[clap(help = "The machine ID for which to gather boot interfaces")]
     pub(super) machine: MachineId,
 }

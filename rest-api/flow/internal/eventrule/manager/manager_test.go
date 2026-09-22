@@ -7,144 +7,316 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/registry"
+	eventexecutor "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/executor"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
+	eventscheduler "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/scheduler"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/store/memory"
+	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+func TestNewArrangesBuiltInRules(t *testing.T) {
+	manager, err := New(testManagerConfig())
+	require.NoError(t, err)
+
+	expected := leakage.DefaultRule()
+	actual, err := manager.GetByID(context.Background(), expected.ID)
+	require.NoError(t, err)
+	require.Equal(t, expected, actual)
+}
+
 func TestManagerUnifiedReadsAndMutationRouting(t *testing.T) {
-	builtIn := testRule(uuid.New(), eventrule.RuleOriginBuiltIn, "test.event")
-	persisted := testRule(uuid.New(), eventrule.RuleOriginPersisted, "other.event")
-	builtIns, err := registry.New(builtIn)
-	require.NoError(t, err)
-	store := newTestStore(persisted)
-	bindings := newTestBindingStore()
-	manager, err := New(builtIns, store, bindings)
+	ctx := context.Background()
+	rackID := uuid.New()
+	config := testManagerConfig()
+	config.Inventory = testInventory{
+		rack: &rack.Rack{Info: deviceinfo.DeviceInfo{ID: rackID}},
+	}
+	manager, err := New(config)
 	require.NoError(t, err)
 
-	for _, id := range []uuid.UUID{persisted.ID, builtIn.ID} {
-		rule, err := manager.GetByID(context.Background(), id)
-		require.NoError(t, err)
-		assert.Equal(t, id, rule.ID)
-	}
-	rules, err := manager.List(context.Background(), eventrule.RuleFilter{})
+	input := testRuleCreate(leakage.TypeHardwareLeakDetected, "new rule")
+	created, err := manager.Create(ctx, input)
 	require.NoError(t, err)
-	assert.Len(t, rules, 2)
+	require.NotEqual(t, uuid.Nil, created.ID)
+	require.Equal(t, eventrule.RuleOriginPersisted, created.Origin)
+	require.False(t, created.Enabled)
 
-	input := eventrule.RuleCreate{
-		Metadata:  eventrule.RuleMetadata{Name: "new rule"},
-		EventType: "new.event",
-		Policy: eventrule.Policy{Actions: []eventrule.Action{
-			{Name: "noop", Spec: &eventrule.Noop{}},
-		}},
-	}
-	created, err := manager.Create(context.Background(), input)
-	require.NoError(t, err)
-	assert.NotEqual(t, uuid.Nil, created.ID)
-	assert.Equal(t, eventrule.RuleOriginPersisted, created.Origin)
-	assert.False(t, created.Enabled)
-	assert.Equal(t, 1, store.creates)
 	input.Policy.Actions[0].Name = "changed"
-	assert.Equal(t, "noop", created.Actions[0].Name)
+	require.Equal(t, "noop", created.Actions[0].Name)
 
-	_, err = manager.Create(context.Background(), eventrule.RuleCreate{})
+	builtIn := leakage.DefaultRule()
+	for _, id := range []uuid.UUID{created.ID, builtIn.ID} {
+		rule, err := manager.GetByID(ctx, id)
+		require.NoError(t, err)
+		require.Equal(t, id, rule.ID)
+	}
+
+	rules, err := manager.List(ctx, eventrule.RuleListRequest{Limit: 100})
+	require.NoError(t, err)
+	require.Equal(t, 2, rules.Total)
+	require.Len(t, rules.Rules, 2)
+	require.Equal(t, eventrule.RuleOriginPersisted, rules.Rules[0].Origin)
+	require.Equal(t, eventrule.RuleOriginBuiltIn, rules.Rules[1].Origin)
+
+	secondPage, err := manager.List(ctx, eventrule.RuleListRequest{Offset: 1, Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, 2, secondPage.Total)
+	require.Len(t, secondPage.Rules, 1)
+	require.Equal(t, eventrule.RuleOriginBuiltIn, secondPage.Rules[0].Origin)
+
+	_, err = manager.Create(ctx, eventrule.RuleCreate{})
 	require.Error(t, err)
-	assert.Equal(t, 1, store.creates)
+	_, err = manager.Create(ctx, testRuleCreate("unsupported.event", "unsupported"))
+	require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
+	require.ErrorContains(t, err, `unsupported event type "unsupported.event"`)
+
+	unsupportedEventType := eventrule.Type("unsupported.event")
+	_, err = manager.List(ctx, eventrule.RuleListRequest{
+		Filter: eventrule.RuleFilter{EventType: &unsupportedEventType},
+		Limit:  100,
+	})
+	require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
 
 	require.Error(t, manager.UpdateMetadata(
-		context.Background(),
-		persisted.ID,
+		ctx,
+		created.ID,
 		eventrule.RuleMetadata{},
 	))
-	assert.Equal(t, "test", persisted.Name)
+	require.Error(t, manager.ReplaceActions(ctx, created.ID, nil))
 
-	require.Error(t, manager.ReplaceActions(context.Background(), persisted.ID, nil))
-	assert.Len(t, persisted.Actions, 1)
+	metadata := eventrule.RuleMetadata{
+		Name:        "updated",
+		Description: "updated description",
+	}
+	require.NoError(t, manager.UpdateMetadata(ctx, created.ID, metadata))
 
-	metadata := eventrule.RuleMetadata{Name: "updated", Description: "updated description"}
-	require.NoError(t, manager.UpdateMetadata(context.Background(), persisted.ID, metadata))
-	assert.Equal(t, metadata.Name, persisted.Name)
-	assert.Equal(t, metadata.Description, persisted.Description)
+	updated, err := manager.GetByID(ctx, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, metadata.Name, updated.Name)
+	require.Equal(t, metadata.Description, updated.Description)
 
 	actions := []eventrule.Action{
 		{Name: "replacement", Spec: &eventrule.Noop{}},
 	}
-	require.NoError(t, manager.ReplaceActions(context.Background(), persisted.ID, actions))
-	assert.Equal(t, actions, persisted.Actions)
+	require.NoError(t, manager.ReplaceActions(ctx, created.ID, actions))
+
 	actions[0].Name = "changed"
-	assert.Equal(t, "replacement", persisted.Actions[0].Name)
-
-	require.NoError(t, manager.SetEnabled(context.Background(), persisted.ID, false))
-	assert.False(t, persisted.Enabled)
-
-	scope := eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: uuid.New()}
-	binding, err := manager.Bind(context.Background(), persisted.ID, scope)
+	updated, err = manager.GetByID(ctx, created.ID)
 	require.NoError(t, err)
-	assert.NotEqual(t, uuid.Nil, binding.ID)
-	assert.Equal(t, persisted.ID, binding.RuleID)
-	assert.Equal(t, persisted.EventType, binding.EventType)
-	assert.Equal(t, scope, binding.Scope)
-	require.Len(t, bindings.bound, 1)
-	assert.Equal(t, persisted.EventType, bindings.bound[0].EventType)
+	require.Equal(t, "replacement", updated.Actions[0].Name)
+
+	require.NoError(t, manager.SetEnabled(ctx, created.ID, true))
+	updated, err = manager.GetByID(ctx, created.ID)
+	require.NoError(t, err)
+	require.True(t, updated.Enabled)
+
+	scope := eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: rackID}
+	binding, err := manager.Bind(ctx, created.ID, scope)
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.Nil, binding.ID)
+	require.Equal(t, created.ID, binding.RuleID)
+	require.Equal(t, created.EventType, binding.EventType)
+	require.Equal(t, scope, binding.Scope)
 }
 
-func TestManagerEffectiveRulePrecedence(t *testing.T) {
-	eventType := eventrule.Type("test.event")
+func TestManager_SetEnabled(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	config := testManagerConfig()
+	config.Store = memory.NewWithClock(func() time.Time { return now })
+	manager, err := New(config)
+	require.NoError(t, err)
+	rule, err := manager.Create(
+		context.Background(),
+		testRuleCreate(leakage.TypeHardwareLeakDetected, "test rule"),
+	)
+	require.NoError(t, err)
+
+	now = now.Add(time.Minute)
+	require.NoError(t, manager.SetEnabled(context.Background(), rule.ID, true))
+	enabled, err := manager.GetByID(context.Background(), rule.ID)
+	require.NoError(t, err)
+	require.True(t, enabled.Enabled)
+	require.Equal(t, now, enabled.UpdatedAt)
+
+	now = now.Add(time.Minute)
+	require.NoError(t, manager.SetEnabled(context.Background(), rule.ID, true))
+	unchanged, err := manager.GetByID(context.Background(), rule.ID)
+	require.NoError(t, err)
+	require.Equal(t, enabled.UpdatedAt, unchanged.UpdatedAt)
+
+	require.NoError(t, manager.SetEnabled(context.Background(), rule.ID, false))
+	disabled, err := manager.GetByID(context.Background(), rule.ID)
+	require.NoError(t, err)
+	require.False(t, disabled.Enabled)
+	require.Equal(t, now, disabled.UpdatedAt)
+
+	now = now.Add(time.Minute)
+	require.NoError(t, manager.SetEnabled(context.Background(), rule.ID, false))
+	unchanged, err = manager.GetByID(context.Background(), rule.ID)
+	require.NoError(t, err)
+	require.Equal(t, disabled.UpdatedAt, unchanged.UpdatedAt)
+}
+
+func TestManager_Bind(t *testing.T) {
+	ctx := context.Background()
+	manager, err := New(testManagerConfig())
+	require.NoError(t, err)
+
+	rule, err := manager.Create(
+		ctx,
+		testRuleCreate(leakage.TypeHardwareLeakDetected, "rack binding"),
+	)
+	require.NoError(t, err)
+
+	missingRackID := uuid.New()
+	binding, err := manager.Bind(ctx, rule.ID, eventrule.Scope{
+		Type: eventrule.ScopeTypeRack,
+		ID:   missingRackID,
+	})
+
+	require.Nil(t, binding)
+	require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
+	require.ErrorContains(
+		t,
+		err,
+		fmt.Sprintf("rack scope id %s does not identify an existing rack", missingRackID),
+	)
+}
+
+func TestManager_GetEffective(t *testing.T) {
 	rackID := uuid.New()
-	builtIn := testRule(uuid.New(), eventrule.RuleOriginBuiltIn, eventType)
-	site := testRule(uuid.New(), eventrule.RuleOriginPersisted, eventType)
-	rack := testRule(uuid.New(), eventrule.RuleOriginPersisted, eventType)
-	builtIns, err := registry.New(builtIn)
-	require.NoError(t, err)
-	store := newTestStore()
-	bindings := newTestBindingStore()
-	manager, err := New(builtIns, store, bindings)
+	componentID := uuid.New()
+	config := testManagerConfig()
+	config.Inventory = testInventory{
+		rack: &rack.Rack{Info: deviceinfo.DeviceInfo{ID: rackID}},
+		component: &component.Component{
+			Info:   deviceinfo.DeviceInfo{ID: componentID},
+			Type:   devicetypes.ComponentTypeCompute,
+			RackID: rackID,
+		},
+	}
+	manager, err := New(config)
 	require.NoError(t, err)
 
-	rule, err := manager.GetEffective(context.Background(), eventType, rackID)
-	require.NoError(t, err)
-	assert.Equal(t, builtIn.ID, rule.ID)
+	tests := []struct {
+		name   string
+		target eventrule.ResourceIdentity
+	}{
+		{
+			name: "rack target",
+			target: eventrule.ResourceIdentity{
+				Kind: eventrule.ResourceKindRack,
+				ID:   rackID,
+			},
+		},
+		{
+			name: "component target",
+			target: eventrule.ResourceIdentity{
+				Kind: eventrule.ResourceKindComponent,
+				ID:   componentID,
+			},
+		},
+	}
 
-	store.byID[site.ID] = site
-	bindings.add(eventType, eventrule.Scope{Type: eventrule.ScopeTypeSite}, site.ID)
-	rule, err = manager.GetEffective(context.Background(), eventType, rackID)
-	require.NoError(t, err)
-	assert.Equal(t, site.ID, rule.ID)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule, err := manager.GetEffective(
+				context.Background(),
+				leakage.TypeHardwareLeakDetected,
+				test.target,
+			)
 
-	site.Enabled = false
-	rule, err = manager.GetEffective(context.Background(), eventType, rackID)
-	require.NoError(t, err)
-	assert.Equal(t, builtIn.ID, rule.ID)
-	site.Enabled = true
+			require.NoError(t, err)
+			require.Equal(t, leakage.DefaultRule().ID, rule.ID)
+		})
+	}
 
-	store.byID[rack.ID] = rack
-	bindings.add(eventType, eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: rackID}, rack.ID)
-	rule, err = manager.GetEffective(context.Background(), eventType, rackID)
-	require.NoError(t, err)
-	assert.Equal(t, rack.ID, rule.ID)
+	_, err = manager.GetEffective(
+		context.Background(),
+		leakage.TypeHardwareLeakDetected,
+		eventrule.ResourceIdentity{Kind: eventrule.ResourceKindRack, ID: uuid.New()},
+	)
+	require.ErrorIs(t, err, eventrule.ErrRuleTargetNotFound)
 
-	rack.Enabled = false
-	rule, err = manager.GetEffective(context.Background(), eventType, rackID)
-	require.NoError(t, err)
-	assert.Equal(t, site.ID, rule.ID)
+	_, err = manager.GetEffective(
+		context.Background(),
+		"unsupported.event",
+		eventrule.ResourceIdentity{Kind: eventrule.ResourceKindRack, ID: rackID},
+	)
+	require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
+	require.ErrorContains(t, err, `unsupported event type "unsupported.event"`)
+}
 
-	rule, err = manager.GetEffective(context.Background(), "unknown.event", rackID)
+func TestRuleResolver_GetEffective(t *testing.T) {
+	ctx := context.Background()
+	eventType := leakage.TypeHardwareLeakDetected
+	rackID := uuid.New()
+	config := testManagerConfig()
+	config.Inventory = testInventory{
+		rack: &rack.Rack{Info: deviceinfo.DeviceInfo{ID: rackID}},
+	}
+	manager, err := New(config)
 	require.NoError(t, err)
-	assert.Nil(t, rule)
+	resolver := &ruleResolver{builtIns: manager.builtIns, store: manager.store}
+
+	builtIn := leakage.DefaultRule()
+	rule, err := resolver.GetEffective(ctx, eventType, rackID)
+	require.NoError(t, err)
+	require.Equal(t, builtIn.ID, rule.ID)
+
+	site, err := manager.Create(ctx, testRuleCreate(eventType, "site"))
+	require.NoError(t, err)
+	_, err = manager.Bind(ctx, site.ID, eventrule.Scope{Type: eventrule.ScopeTypeSite})
+	require.NoError(t, err)
+	require.NoError(t, manager.SetEnabled(ctx, site.ID, true))
+
+	rule, err = resolver.GetEffective(ctx, eventType, rackID)
+	require.NoError(t, err)
+	require.Equal(t, site.ID, rule.ID)
+
+	rackRule, err := manager.Create(ctx, testRuleCreate(eventType, "rack"))
+	require.NoError(t, err)
+	_, err = manager.Bind(ctx, rackRule.ID, eventrule.Scope{
+		Type: eventrule.ScopeTypeRack,
+		ID:   rackID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.SetEnabled(ctx, rackRule.ID, true))
+
+	rule, err = resolver.GetEffective(ctx, eventType, rackID)
+	require.NoError(t, err)
+	require.Equal(t, rackRule.ID, rule.ID)
+
+	require.NoError(t, manager.SetEnabled(ctx, rackRule.ID, false))
+	rule, err = resolver.GetEffective(ctx, eventType, rackID)
+	require.NoError(t, err)
+	require.Equal(t, site.ID, rule.ID)
+
+	require.NoError(t, manager.SetEnabled(ctx, site.ID, false))
+	rule, err = resolver.GetEffective(ctx, eventType, rackID)
+	require.NoError(t, err)
+	require.Equal(t, builtIn.ID, rule.ID)
+
+	rule, err = resolver.GetEffective(ctx, "unknown.event", rackID)
+	require.NoError(t, err)
+	require.Nil(t, rule)
 }
 
 func TestManagerRejectsMissingIDs(t *testing.T) {
-	builtIns, err := registry.New()
-	require.NoError(t, err)
-	manager, err := New(builtIns, newTestStore(), newTestBindingStore())
+	manager, err := New(testManagerConfig())
 	require.NoError(t, err)
 
 	_, err = manager.GetByID(context.Background(), uuid.Nil)
 	require.ErrorContains(t, err, "event rule id is required")
-
 	require.ErrorContains(t, manager.UpdateMetadata(
 		context.Background(),
 		uuid.Nil,
@@ -157,30 +329,99 @@ func TestManagerRejectsMissingIDs(t *testing.T) {
 			{Name: "noop", Spec: &eventrule.Noop{}},
 		},
 	), "event rule id is required")
-	require.ErrorContains(t, manager.Delete(context.Background(), uuid.Nil), "event rule id is required")
+	require.ErrorContains(
+		t,
+		manager.Delete(context.Background(), uuid.Nil),
+		"event rule id is required",
+	)
 	require.ErrorContains(
 		t,
 		manager.SetEnabled(context.Background(), uuid.Nil, true),
 		"event rule id is required",
 	)
+
 	_, err = manager.Bind(
 		context.Background(),
 		uuid.Nil,
 		eventrule.Scope{Type: eventrule.ScopeTypeSite},
 	)
 	require.ErrorContains(t, err, "event rule id is required")
-	require.ErrorContains(
-		t,
-		manager.Unbind(context.Background(), uuid.Nil),
-		"event rule binding id is required",
-	)
+}
+
+func TestManager_Unbind(t *testing.T) {
+	manager, err := New(testManagerConfig())
+	require.NoError(t, err)
+
+	tests := map[string]struct {
+		eventType eventrule.Type
+		scope     eventrule.Scope
+		wantIs    error
+	}{
+		"invalid event type": {
+			eventType: "Invalid",
+			scope:     eventrule.Scope{Type: eventrule.ScopeTypeSite},
+			wantIs:    eventrule.ErrInvalidRuleInput,
+		},
+		"invalid scope": {
+			eventType: leakage.TypeHardwareLeakDetected,
+			scope:     eventrule.Scope{},
+			wantIs:    eventrule.ErrInvalidRuleInput,
+		},
+		"unsupported event type": {
+			eventType: "unsupported.event",
+			scope:     eventrule.Scope{Type: eventrule.ScopeTypeSite},
+			wantIs:    eventrule.ErrInvalidRuleInput,
+		},
+		"missing binding": {
+			eventType: leakage.TypeHardwareLeakDetected,
+			scope:     eventrule.Scope{Type: eventrule.ScopeTypeSite},
+			wantIs:    eventrule.ErrBindingNotFound,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := manager.Unbind(context.Background(), test.eventType, test.scope)
+			require.ErrorIs(t, err, test.wantIs)
+		})
+	}
+}
+
+func TestManager_GetBindingForScope(t *testing.T) {
+	manager, err := New(testManagerConfig())
+	require.NoError(t, err)
+
+	tests := map[string]struct {
+		eventType eventrule.Type
+		scope     eventrule.Scope
+	}{
+		"invalid event type": {
+			eventType: "Invalid",
+			scope:     eventrule.Scope{Type: eventrule.ScopeTypeSite},
+		},
+		"invalid scope": {
+			eventType: leakage.TypeHardwareLeakDetected,
+			scope:     eventrule.Scope{},
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			binding, err := manager.GetBindingForScope(
+				context.Background(),
+				test.eventType,
+				test.scope,
+			)
+
+			require.Nil(t, binding)
+			require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
+		})
+	}
 }
 
 func TestManagerRejectsBuiltInRuleMutations(t *testing.T) {
-	builtIn := testRule(uuid.New(), eventrule.RuleOriginBuiltIn, "test.event")
-	builtIns, err := registry.New(builtIn)
-	require.NoError(t, err)
-	manager, err := New(builtIns, newTestStore(), newTestBindingStore())
+	builtIn := leakage.DefaultRule()
+	manager, err := New(testManagerConfig())
 	require.NoError(t, err)
 
 	tests := map[string]func(context.Context) error{
@@ -209,6 +450,7 @@ func TestManagerRejectsBuiltInRuleMutations(t *testing.T) {
 				builtIn.ID,
 				eventrule.Scope{Type: eventrule.ScopeTypeSite},
 			)
+
 			return err
 		},
 		"set enabled": func(ctx context.Context) error {
@@ -224,148 +466,119 @@ func TestManagerRejectsBuiltInRuleMutations(t *testing.T) {
 	}
 }
 
-type scopeKey struct {
-	eventType eventrule.Type
-	scope     eventrule.Scope
-}
-
-type testStore struct {
-	byID    map[uuid.UUID]*eventrule.Rule
-	creates int
-}
-
-func newTestStore(rules ...*eventrule.Rule) *testStore {
-	store := &testStore{
-		byID: make(map[uuid.UUID]*eventrule.Rule, len(rules)),
+func TestManagerValidatesConfiguredActionExecutors(t *testing.T) {
+	tests := map[string]struct {
+		alertSender *testAlertSender
+		wantErr     string
+	}{
+		"rejects alert without sender": {
+			wantErr: "no executor registered for action type \"send_alert\"",
+		},
+		"accepts alert with sender": {
+			alertSender: &testAlertSender{},
+		},
 	}
-	for _, rule := range rules {
-		store.byID[rule.ID] = rule
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			config := testManagerConfig()
+			if test.alertSender != nil {
+				config.AlertSender = test.alertSender
+			}
+
+			manager, err := New(config)
+			require.NoError(t, err)
+
+			_, err = manager.Create(context.Background(), eventrule.RuleCreate{
+				Metadata:  eventrule.RuleMetadata{Name: "alert"},
+				EventType: leakage.TypeHardwareLeakDetected,
+				Policy: eventrule.Policy{Actions: []eventrule.Action{
+					{
+						Name: "send",
+						Spec: &eventrule.SendAlert{
+							Severity: eventrule.SeverityWarning,
+							Message:  "test alert",
+						},
+					},
+				}},
+			})
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
+				return
+			}
+
+			require.NoError(t, err)
+		})
 	}
-	return store
 }
 
-func (s *testStore) GetByID(_ context.Context, id uuid.UUID) (*eventrule.Rule, error) {
-	if rule, ok := s.byID[id]; ok {
-		return rule, nil
+func testManagerConfig() Config {
+	return Config{
+		Store: memory.New(),
+		Scheduler: SchedulerConfig{
+			InstanceID: "event-rule-manager-test",
+			Runtime:    eventscheduler.DefaultRuntimeConfig(),
+			Policy:     eventscheduler.DefaultPolicyConfig(),
+		},
+		Inventory:   testInventory{},
+		TaskManager: configTaskManager{},
 	}
-	return nil, fmt.Errorf("%w: %s", eventrule.ErrRuleNotFound, id)
 }
 
-func (s *testStore) List(context.Context, eventrule.RuleFilter) ([]*eventrule.Rule, error) {
-	rules := make([]*eventrule.Rule, 0, len(s.byID))
-	for _, rule := range s.byID {
-		rules = append(rules, rule)
-	}
-	return rules, nil
-}
-
-func (s *testStore) Create(_ context.Context, rule *eventrule.Rule) (*eventrule.Rule, error) {
-	s.creates++
-	s.byID[rule.ID] = rule
-	return rule, nil
-}
-
-func (s *testStore) UpdateMetadata(
-	_ context.Context,
-	id uuid.UUID,
-	metadata eventrule.RuleMetadata,
-) error {
-	rule, err := s.ruleForMutation(id)
-	if err != nil {
-		return err
-	}
-	rule.Name = metadata.Name
-	rule.Description = metadata.Description
-	return nil
-}
-
-func (s *testStore) ReplaceActions(
-	_ context.Context,
-	id uuid.UUID,
-	actions []eventrule.Action,
-) error {
-	rule, err := s.ruleForMutation(id)
-	if err != nil {
-		return err
-	}
-	rule.Actions = actions
-	return nil
-}
-
-func (s *testStore) Delete(_ context.Context, id uuid.UUID) error {
-	if _, err := s.ruleForMutation(id); err != nil {
-		return err
-	}
-	delete(s.byID, id)
-	return nil
-}
-
-func (s *testStore) SetEnabled(_ context.Context, id uuid.UUID, enabled bool) error {
-	rule, err := s.ruleForMutation(id)
-	if err != nil {
-		return err
-	}
-	rule.Enabled = enabled
-	return nil
-}
-
-func (s *testStore) ruleForMutation(id uuid.UUID) (*eventrule.Rule, error) {
-	rule, ok := s.byID[id]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", eventrule.ErrRuleNotFound, id)
-	}
-	return rule, nil
-}
-
-type testBindingStore struct {
-	byScope map[scopeKey]*eventrule.Binding
-	bound   []eventrule.Binding
-}
-
-func newTestBindingStore() *testBindingStore {
-	return &testBindingStore{byScope: make(map[scopeKey]*eventrule.Binding)}
-}
-
-func (s *testBindingStore) add(
+func testRuleCreate(
 	eventType eventrule.Type,
-	scope eventrule.Scope,
-	ruleID uuid.UUID,
-) {
-	s.byScope[scopeKey{eventType: eventType, scope: scope}] = &eventrule.Binding{
-		ID:        uuid.New(),
-		RuleID:    ruleID,
-		EventType: eventType,
-		Scope:     scope,
-	}
-}
-
-func (s *testBindingStore) Bind(_ context.Context, binding eventrule.Binding) error {
-	s.bound = append(s.bound, binding)
-	return nil
-}
-
-func (s *testBindingStore) Unbind(context.Context, uuid.UUID) error { return nil }
-
-func (s *testBindingStore) GetForScope(
-	_ context.Context,
-	eventType eventrule.Type,
-	scope eventrule.Scope,
-) (*eventrule.Binding, error) {
-	if binding, ok := s.byScope[scopeKey{eventType: eventType, scope: scope}]; ok {
-		return binding, nil
-	}
-	return nil, nil
-}
-
-func testRule(id uuid.UUID, origin eventrule.RuleOrigin, eventType eventrule.Type) *eventrule.Rule {
-	return &eventrule.Rule{
-		ID:        id,
-		Origin:    origin,
-		Name:      "test",
-		Enabled:   true,
+	name string,
+) eventrule.RuleCreate {
+	return eventrule.RuleCreate{
+		Metadata:  eventrule.RuleMetadata{Name: name},
 		EventType: eventType,
 		Policy: eventrule.Policy{Actions: []eventrule.Action{
 			{Name: "noop", Spec: &eventrule.Noop{}},
 		}},
 	}
+}
+
+type testInventory struct {
+	component *component.Component
+	rack      *rack.Rack
+}
+
+func (i testInventory) GetComponentByID(
+	_ context.Context,
+	id uuid.UUID,
+) (*component.Component, error) {
+	if i.component == nil || i.component.Info.ID != id {
+		return nil, nil
+	}
+
+	return i.component, nil
+}
+
+func (testInventory) GetComponentsByExternalIDs(
+	context.Context,
+	[]string,
+) ([]*component.Component, error) {
+	return nil, nil
+}
+
+func (i testInventory) GetRackByIdentifier(
+	_ context.Context,
+	ref identifier.Identifier,
+	_ bool,
+) (*rack.Rack, error) {
+	if i.rack == nil || i.rack.Info.ID != ref.ID {
+		return nil, nil
+	}
+
+	return i.rack, nil
+}
+
+type testAlertSender struct{}
+
+func (*testAlertSender) SendAlert(
+	context.Context,
+	eventexecutor.AlertRequest,
+) (string, error) {
+	return uuid.NewString(), nil
 }

@@ -8,24 +8,20 @@ import (
 
 	"go.temporal.io/sdk/client"
 
+	wfmgr "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/workflow"
 	sww "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/workflow"
 )
 
 const (
 	// InventoryQueuePrefix is the prefix for the inventory temporal queue.
 	InventoryQueuePrefix = "inventory-"
-	// InventoryDefaultSchedule is the default schedule for inventory discovery.
-	InventoryDefaultSchedule = "@every 3m"
 )
 
 // RegisterCron registers the Site Config inventory discovery cron.
 func (api *API) RegisterCron() error {
 	ManagerAccess.Data.EB.Log.Info().Msg("Site: Registering Site Config Inventory Discovery Cron")
 	workflowID := "inventory-site-config-" + ManagerAccess.Conf.EB.Temporal.TemporalSubscribeNamespace
-	cronSchedule := InventoryDefaultSchedule
-	if ManagerAccess.Conf.EB.Temporal.TemporalInventorySchedule != "" {
-		cronSchedule = ManagerAccess.Conf.EB.Temporal.TemporalInventorySchedule
-	}
+	cronSchedule := wfmgr.EffectiveCronSchedule()
 	ManagerAccess.Data.EB.Log.Info().Str("Schedule", cronSchedule).Msg("Site: Site Config Inventory Discovery Cron Schedule")
 
 	workflowOptions := client.StartWorkflowOptions{

@@ -22,7 +22,7 @@
 #   1. nico core        (separate helm release, if installed)
 #   1b. DPF stack          (DPF CRs, dpf-operator helm release — if installed)
 #   2. helmfile releases   (nico-prereqs, external-secrets, vault, cert-manager,
-#                           postgres-operator, DPF prereqs when installed)
+#                           postgres-operator, Contour/Envoy, DPF prereqs when installed)
 #   3. cluster-scoped hook resources (ClusterIssuers, ClusterSecretStore, etc.)
 #   4. vault init secrets  (vault-cluster-keys, vaultunsealkeys, vaultroottoken)
 #   5. namespaces          (nico-system, cert-manager, vault, external-secrets,
@@ -46,6 +46,12 @@ echo "=== [0/8] Uninstalling NICo REST stack ==="
 # from both nico-prereqs (DB creds, vault tokens) and the REST stack.
 helm uninstall flow                 -n flow                            2>/dev/null || true
 kubectl delete ns flow --wait=false --ignore-not-found                 2>/dev/null || true
+# --no-hooks: the rack-manager chart ships a pre-delete drop-database hook
+# (disabled in values/rms.yaml, but a hand-installed release may have it on)
+# that pulls postgres:15-alpine from Docker Hub — a mirror-only site would
+# hang here, and clean.sh drops the whole postgres namespace anyway.
+helm uninstall rack --no-hooks      -n rack-manager                    2>/dev/null || true
+kubectl delete ns rack-manager --wait=false --ignore-not-found         2>/dev/null || true
 helm uninstall nico-rest-site-agent -n nico-rest                       2>/dev/null || true
 helm uninstall nico-rest            -n nico-rest                       2>/dev/null || true
 helm uninstall temporal                -n temporal     2>/dev/null || true
@@ -164,7 +170,7 @@ fi
 # ---------------------------------------------------------------------------
 # 2. All helmfile releases in reverse dependency order:
 #    nico-prereqs → node-feature-discovery → maintenance-operator → kamaji →
-#    argo-cd → external-secrets → vault → cert-manager → metallb
+#    argo-cd → external-secrets → vault → cert-manager → contour → metallb
 # ---------------------------------------------------------------------------
 echo "=== [2/8] Destroying helmfile releases ==="
 
@@ -179,7 +185,28 @@ kubectl delete bgppeer --all \
 kubectl delete ipaddresspool --all \
     -n metallb-system --ignore-not-found 2>/dev/null || true
 
-helmfile destroy 2>/dev/null || true
+# Record whether this install owns Contour, before the destroy removes it.
+# --install-contour is opt-in because a site may already run its own ingress
+# controller, and `contour` in `projectcontour` is upstream Contour's default
+# release name and namespace, so neither identifies our install. The marker is
+# the commonLabels entry in operators/values/contour.yaml, which only a
+# NICo-installed Contour carries. An unlabelled Contour is treated as foreign
+# and left running, including one from a NICo version that predates the label.
+_CONTOUR_OWNED=false
+if [[ "$(kubectl get deployment contour-contour -n projectcontour \
+    -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null)" == "nico" ]]; then
+    _CONTOUR_OWNED=true
+fi
+echo "Contour owned by this install: ${_CONTOUR_OWNED}"
+
+# Scope the destroy when Contour is not ours. A bare `helmfile destroy` covers
+# every release in helmfile.yaml, so it would uninstall a site's own `contour`
+# release without this.
+if [[ "${_CONTOUR_OWNED}" == "true" ]]; then
+    helmfile destroy 2>/dev/null || true
+else
+    helmfile destroy -l 'name!=contour' 2>/dev/null || true
+fi
 
 # MetalLB CRDs — helm does not delete CRDs on uninstall.
 echo "Removing MetalLB CRDs..."
@@ -271,6 +298,19 @@ kubectl delete "clusterrole/cert-manager-policy:dpf-approval-policy" \
     "clusterrolebinding/cert-manager-policy:dpf-approval-policy" \
     --ignore-not-found 2>/dev/null || true
 
+# Contour cluster-scoped resources are normally removed by helm uninstall; these
+# deletes only catch stragglers. They are cluster-scoped, so deleting an
+# IngressClass or ClusterRole by name would reach a foreign Contour in any
+# namespace, which is why this waits on the ownership label checked above.
+if [[ "${_CONTOUR_OWNED}" == "true" ]]; then
+    echo "Removing Contour cluster-scoped resources..."
+    kubectl delete ingressclass contour --ignore-not-found 2>/dev/null || true
+    kubectl delete clusterrole contour-contour \
+        --ignore-not-found 2>/dev/null || true
+    kubectl delete clusterrolebinding contour-contour \
+        --ignore-not-found 2>/dev/null || true
+fi
+
 # ---------------------------------------------------------------------------
 # 3. Cluster-scoped resources created by helm hooks.
 #    These survive helm/helmfile uninstall because hook-delete-policy is
@@ -283,9 +323,11 @@ kubectl delete clusterissuer \
 kubectl delete clustersecretstore \
     cert-manager-ns-secretstore postgres-ns-secretstore \
     --ignore-not-found 2>/dev/null || true
+# Keep removed PSM/NSM hook names in cleanup so upgrades from older releases do
+# not strand their cluster-scoped resources.
 kubectl delete clusterexternalsecret \
     nico-roots-eso nico-db-eso \
-    flow-db-eso psm-db-eso nsm-db-eso \
+    flow-db-eso psm-db-eso nsm-db-eso rms-db-eso \
     --ignore-not-found 2>/dev/null || true
 kubectl delete clusterrole \
     vault-pki-config-reader eso-postgres-ns-role flow-vault-tokens-writer \
@@ -311,12 +353,18 @@ kubectl delete secret vault-cluster-keys vaultunsealkeys vaultroottoken \
 #    conflict with setup.sh's helmfile install into the external-secrets ns.
 # ---------------------------------------------------------------------------
 echo "=== [5/8] Deleting namespaces ==="
-kubectl delete ns nico-system cert-manager vault external-secrets postgres metallb-system dpf-operator-system \
+# projectcontour is appended only when we installed Contour. Every other
+# namespace here is created unconditionally by setup.sh, so its name is ours by
+# construction; projectcontour is upstream Contour's default and may hold a
+# controller this install never created.
+_DELETE_NS=(nico-system cert-manager vault external-secrets postgres metallb-system dpf-operator-system)
+[[ "${_CONTOUR_OWNED}" == "true" ]] && _DELETE_NS+=(projectcontour)
+
+kubectl delete ns "${_DELETE_NS[@]}" \
     --wait=false --ignore-not-found 2>/dev/null || true
 
 echo "Waiting for namespaces to terminate..."
-kubectl wait --for=delete \
-    ns/nico-system ns/cert-manager ns/vault ns/external-secrets ns/postgres ns/metallb-system ns/dpf-operator-system \
+kubectl wait --for=delete "${_DELETE_NS[@]/#/ns/}" \
     --timeout=180s 2>/dev/null || true
 
 echo "Purging default namespace (ESO and other non-kubespray resources)..."
@@ -437,6 +485,10 @@ fi
 # which is the bug this file exists to fix. loki and tempo in particular hold
 # real data. flow is included for the same reason even though it predated this
 # list: step 0 deletes that namespace.
+#
+# projectcontour is the one deliberate omission: Contour and Envoy declare no
+# PVC, so there is no storage to strand, and step 5 only deletes that namespace
+# when this install created it.
 _STACK_NS="nico-system cert-manager vault external-secrets postgres \
 metallb-system dpf-operator-system nico-rest temporal flow \
 loki tempo monitoring otel"

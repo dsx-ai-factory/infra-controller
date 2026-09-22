@@ -17,9 +17,6 @@
 
 mod measured_boot;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;

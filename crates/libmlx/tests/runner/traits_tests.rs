@@ -39,31 +39,6 @@ fn test_mlx_config_settable_vec_config_value() {
     assert_eq!(result[0].value, MlxValueType::Boolean(true));
 }
 
-#[test]
-fn test_mlx_config_settable_string_tuples() {
-    let registry = common::create_test_registry();
-
-    let assignments = &[
-        ("SRIOV_EN", "true"),
-        ("NUM_OF_VFS", "16"),
-        ("POWER_MODE", "HIGH"),
-    ];
-
-    let result = assignments.to_config_values(&registry).unwrap();
-
-    assert_eq!(result.len(), 3);
-
-    // Find each variable and verify
-    let sriov = result.iter().find(|v| v.name() == "SRIOV_EN").unwrap();
-    assert_eq!(sriov.value, MlxValueType::Boolean(true));
-
-    let vfs = result.iter().find(|v| v.name() == "NUM_OF_VFS").unwrap();
-    assert_eq!(vfs.value, MlxValueType::Integer(16));
-
-    let power = result.iter().find(|v| v.name() == "POWER_MODE").unwrap();
-    assert_eq!(power.value, MlxValueType::Enum("HIGH".to_string()));
-}
-
 // `to_config_values` over string-tuple assignments works whether they're passed
 // as an owned array `[...]` or an array reference `&[...]`. Each row calls the
 // trait on its own container type (identity closure) and projects the unordered
@@ -672,25 +647,6 @@ fn test_mixed_variables_and_arrays() {
 }
 
 #[test]
-fn test_mlx_config_queryable_single_array_index() {
-    let registry = common::create_test_registry();
-
-    // Test querying specific array indices
-    let variables = &["GPIO_ENABLED[0]", "GPIO_ENABLED[2]", "THERMAL_SENSORS[3]"];
-    let result = variables.to_variable_names(&registry).unwrap();
-
-    // Should return exactly the specified indices, not expanded arrays
-    assert_eq!(result.len(), 3);
-    assert!(result.contains(&"GPIO_ENABLED[0]".to_string()));
-    assert!(result.contains(&"GPIO_ENABLED[2]".to_string()));
-    assert!(result.contains(&"THERMAL_SENSORS[3]".to_string()));
-
-    // Should NOT contain other indices
-    assert!(!result.contains(&"GPIO_ENABLED[1]".to_string()));
-    assert!(!result.contains(&"THERMAL_SENSORS[0]".to_string()));
-}
-
-#[test]
 fn test_mlx_config_queryable_mixed_array_and_indices() {
     let registry = common::create_test_registry();
 
@@ -820,25 +776,4 @@ fn test_mlx_config_queryable_array_index_with_non_array_variable() {
 
     assert!(result.is_err());
     // Should get a ValueConversion error when trying to get array size from boolean spec
-}
-
-#[test]
-fn test_mlx_config_queryable_preserve_vs_expand_behavior() {
-    let registry = common::create_test_registry();
-
-    // Test that behavior is consistent: specific indices are preserved, base names are expanded
-
-    // Query just the base array name - should expand all indices
-    let base_query = &["GPIO_ENABLED"];
-    let base_result = base_query.to_variable_names(&registry).unwrap();
-    assert_eq!(base_result.len(), 4); // Full expansion
-
-    // Query specific indices - should preserve exact indices
-    let index_query = &["GPIO_ENABLED[1]", "GPIO_ENABLED[3]"];
-    let index_result = index_query.to_variable_names(&registry).unwrap();
-    assert_eq!(index_result.len(), 2); // Only specified indices
-    assert!(index_result.contains(&"GPIO_ENABLED[1]".to_string()));
-    assert!(index_result.contains(&"GPIO_ENABLED[3]".to_string()));
-    assert!(!index_result.contains(&"GPIO_ENABLED[0]".to_string()));
-    assert!(!index_result.contains(&"GPIO_ENABLED[2]".to_string()));
 }

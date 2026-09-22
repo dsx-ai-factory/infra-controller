@@ -28,6 +28,7 @@ use carbide_utils::HostPortPair;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use eyre::ContextCompat;
 use futures::future::join_all;
+use machine_a_tron::lifecycle_timings::{LifecycleTimingOverrides, PartialLifecycleTimings};
 use machine_a_tron::{
     BmcMockRegistry, DhcpType, LenovoGb300RackConfig, LogFormat, MachineATronConfig, RackConfig,
     RackModelConfig, WiwynnGb200RackConfig,
@@ -123,6 +124,23 @@ async fn run_machine_a_tron_racks_test(
                         simulation: WiwynnGb200RackConfig {
                             dpu_reboot_delay: 1,
                             host_reboot_delay: 1,
+                            timing_overrides: Some(LifecycleTimingOverrides {
+                                host: PartialLifecycleTimings {
+                                    reboot: Some(Duration::from_secs(1)),
+                                    // ZERO disables the BMC self-reset offline window entirely,
+                                    // keeping ingestion at its pre-feature pace
+                                    bmc_reset: Some(Duration::ZERO),
+                                    ..Default::default()
+                                },
+                                dpu: PartialLifecycleTimings {
+                                    reboot: Some(Duration::from_secs(1)),
+                                    // ZERO disables the BMC self-reset offline window entirely,
+                                    // keeping ingestion at its pre-feature pace
+                                    bmc_reset: Some(Duration::ZERO),
+                                    ..Default::default()
+                                },
+                            }),
+                            acceleration_factor: 1.0,
                             scout_run_interval: Duration::from_secs(1),
                             discovery_retry_interval: Duration::from_millis(100),
                             bmc_dhcp_relay_address: TEST_BMC_DHCP_RELAY_ADDRESS,
@@ -131,7 +149,6 @@ async fn run_machine_a_tron_racks_test(
                             run_interval_working: Duration::from_millis(100),
                             run_interval_idle: Duration::from_secs(1),
                             network_status_run_interval: Duration::from_secs(1),
-                            network_virtualization_type: None,
                             dpus_in_nic_mode: false,
                             dpu_firmware_versions: None,
                             dpu_agent_version: None,
@@ -148,6 +165,23 @@ async fn run_machine_a_tron_racks_test(
                         simulation: LenovoGb300RackConfig {
                             dpu_reboot_delay: 1,
                             host_reboot_delay: 1,
+                            timing_overrides: Some(LifecycleTimingOverrides {
+                                host: PartialLifecycleTimings {
+                                    reboot: Some(Duration::from_secs(1)),
+                                    // ZERO disables the BMC self-reset offline window entirely,
+                                    // keeping ingestion at its pre-feature pace
+                                    bmc_reset: Some(Duration::ZERO),
+                                    ..Default::default()
+                                },
+                                dpu: PartialLifecycleTimings {
+                                    reboot: Some(Duration::from_secs(1)),
+                                    // ZERO disables the BMC self-reset offline window entirely,
+                                    // keeping ingestion at its pre-feature pace
+                                    bmc_reset: Some(Duration::ZERO),
+                                    ..Default::default()
+                                },
+                            }),
+                            acceleration_factor: 1.0,
                             scout_run_interval: Duration::from_secs(1),
                             discovery_retry_interval: Duration::from_millis(100),
                             bmc_dhcp_relay_address: TEST_BMC_DHCP_RELAY_ADDRESS,
@@ -156,7 +190,6 @@ async fn run_machine_a_tron_racks_test(
                             run_interval_working: Duration::from_millis(100),
                             run_interval_idle: Duration::from_secs(1),
                             network_status_run_interval: Duration::from_secs(1),
-                            network_virtualization_type: None,
                             dpus_in_nic_mode: false,
                             dpu_firmware_versions: None,
                             dpu_agent_version: None,
@@ -172,7 +205,6 @@ async fn run_machine_a_tron_racks_test(
         log_format: LogFormat::Compact,
         bmc_mock_port: 0,
         bmc_mock_certs_dir: None,
-        tui_enabled: false,
         configure_carbide_bmc_proxy_host: None,
         persist_dir: None,
         cleanup_on_quit: false,
@@ -180,13 +212,13 @@ async fn run_machine_a_tron_racks_test(
         host_bmc_password: None,
         dpu_bmc_password: None,
         api_refresh_interval: Duration::from_millis(500),
+        scout_stream_reconnect_interval: Duration::from_secs(1),
         mock_bmc_ssh_server: false,
-        mock_bmc_ssh_port: None,
         enable_ipmi_simulation: false,
-        ipmi_reachable_port: None,
         hw_mac_address_ranges: None,
         mac_address_pool: None,
         ufm_mock: Default::default(),
+        rms_mock: Default::default(),
     };
 
     let (provisionable_handles, mat_handle) = api_test_helper::machine_a_tron::run_local(

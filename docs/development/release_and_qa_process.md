@@ -6,16 +6,16 @@ This page describes how the NVIDIA Infra Controller (NICo) project is branched, 
 
 - Use the latest final `vX.Y.Z` tag for production-style deployments.
 - `main`, `-pr`, and `-rc` builds are for prerelease testing.
-- Every month, `main` branches to `releases/vX.Y`; after one month of QA, that branch becomes the final `vX.Y.0` release.
-- Patch releases stay on the same `releases/vX.Y` branch and ship only when fixes warrant them.
+- Every month, `main` branches to `release/vX.Y`; after one month of QA, that branch becomes the final `vX.Y.0` release.
+- Patch releases stay on the same `release/vX.Y` branch and ship only when fixes warrant them.
 - NICo keeps three minor releases visible: Current, Maintenance, and EOL. Upgrades are supported from EOL to Maintenance or Current, from Maintenance to Current, and to newer patches within the same minor version. Anything older than EOL has no supported upgrade path.
 - Guaranteed public APIs stay backward-compatible within a major version. Breaking removals require a future major release and at least one full three-month roadmap window of notice.
 
 ## GitHub URLs
 
-- [**NICo releases**](https://github.com/NVIDIA/infra-controller/releases)
-- [**Issue tracker**](https://github.com/NVIDIA/infra-controller/issues)
-- [**Source code**](https://github.com/NVIDIA/infra-controller)
+- [**NICo releases**](https://github.com/dsx-ai-factory/infra-controller/releases)
+- [**Issue tracker**](https://github.com/dsx-ai-factory/infra-controller/issues)
+- [**Source code**](https://github.com/dsx-ai-factory/infra-controller)
 
 Every published minor and patch release is available on the GitHub releases page, tagged with its Semantic Versioning (SemVer) version (refer to [Tag Naming](#tag-naming) below).
 
@@ -26,7 +26,7 @@ NICo uses just two long-lived branch types — `main` and per-minor-version rele
 | Branch | Purpose | Stability |
 | ------ | ------- | --------- |
 | `main` | Ongoing development | No stability guarantee |
-| `releases/vX.Y` | Stabilization and release of `vX.Y.*` | Improves over QA window, becomes stable after a non-`-rc` tag is cut |
+| `release/vX.Y` | Stabilization and release of `vX.Y.*` | Improves over QA window, becomes stable after a non-`-rc` tag is cut |
 
 ### Main Branch — Ongoing Development
 
@@ -36,7 +36,7 @@ Use `main` if you want early access to in-progress features and you accept that 
 
 ### Release Branches
 
-When development for a minor version is feature-complete, a new long-lived release branch (for example, `releases/v2.1`) is cut from `main`. This single branch holds the entire life of that minor version:
+When development for a minor version is feature-complete, a new long-lived release branch (for example, `release/v2.1`) is cut from `main`. This single branch holds the entire life of that minor version:
 
 - **During the one-month QA window**, the branch carries `vX.Y.Z-rcN` tags as fixes land — these are *release candidates*, not final releases.
 - **After QA signs off**, a final `vX.Y.0` tag is cut on the same branch.
@@ -54,14 +54,14 @@ NICo uses [semantic versioning](https://semver.org/) of the form `vX.Y.Z`:
 
 The following tag forms appear in the repository:
 
-- **`vX.Y.0`** — A minor release. Published as a GitHub release from `releases/vX.Y`.
-- **`vX.Y.Z`** (where `Z > 0`) — A patch release on top of `vX.Y.0`. Also published as a GitHub release from `releases/vX.Y`.
-- **`vX.Y.Z-rcN`** (for example, `v2.1.0-rc1` or `v2.1.5-rc3`) — A release candidate. Applied to commits on `releases/vX.Y` during the QA window for whichever release is being prepared (initial `.0` or a later patch).
+- **`vX.Y.0`** — A minor release. Published as a GitHub release from `release/vX.Y`.
+- **`vX.Y.Z`** (where `Z > 0`) — A patch release on top of `vX.Y.0`. Also published as a GitHub release from `release/vX.Y`.
+- **`vX.Y.Z-rcN`** (for example, `v2.1.0-rc1` or `v2.1.5-rc3`) — A release candidate. Applied to commits on `release/vX.Y` during the QA window for whichever release is being prepared (initial `.0` or a later patch).
 
-  All four elements — major, minor, patch, and RC number — are always present. Patch releases live on the same `releases/vX.Y` branch and are distinguished only by the tag. So the first release candidate for `v2.1.5` is tagged `v2.1.5-rc1` on `releases/v2.1`, and the final tag (after QA signs off) is `v2.1.5`.
+  All four elements — major, minor, patch, and RC number — are always present. Patch releases live on the same `release/vX.Y` branch and are distinguished only by the tag. So the first release candidate for `v2.1.5` is tagged `v2.1.5-rc1` on `release/v2.1`, and the final tag (after QA signs off) is `v2.1.5`.
 - **`vX.Y.Z-pr`** (always with `Z = 0`, for example, `v2.2.0-pr`) — Applied to `main` immediately after a release branch is cut, to indicate that `main` is now the **prerelease** for the next minor version.
 
-  All three numeric elements are present for consistency with `-rcN` tags. For example, the day `releases/v2.1` is cut, `main` is tagged `v2.2.0-pr`, signaling that `main` is now pre-v2.2.0.
+  All three numeric elements are present for consistency with `-rcN` tags. For example, the day `release/v2.1` is cut, `main` is tagged `v2.2.0-pr`, signaling that `main` is now pre-v2.2.0.
 
 ## Release Cadence
 
@@ -84,32 +84,32 @@ The roadmap is refreshed at least once per month, typically after the monthly br
 
 Every month:
 
-1. **Code complete** (last day of each month): a new release branch (for example, `releases/v2.1`) is cut from `main`.
+1. **Code complete** (last day of each month): a new release branch (for example, `release/v2.1`) is cut from `main`.
 1. Immediately after the cut, `main` is tagged with `vX.(Y+1).0-pr` to mark the start of the next prerelease cycle on `main`.
-1. The release branch is **stabilized and QA tested for one month**. During this window, release-candidate tags (for example, `v2.1.0-rc1`, `v2.1.0-rc2`, …) are applied to commits on the branch as QA cycles through them.
-1. **Final minor release** (last day of the following month): when QA signs off, a `vX.Y.0` tag is cut on the same `releases/vX.Y` branch and published as a GitHub release.
+1. The release branch is **stabilized and QA tested for one month**. During this window, release-candidate tags (for example, `v2.1.0-rc1`, `v2.1.0-rc2`, and so on) are applied to commits on the branch as QA cycles through them.
+1. **Final minor release** (last day of the following month): when QA signs off, a `vX.Y.0` tag is cut on the same `release/vX.Y` branch and published as a GitHub release.
 
 In short: minor releases ship one month after code complete.
 
 ### Patch Releases (X.Y.Z)
 
-Patch releases happen on the `releases/vX.Y` branch after the corresponding `vX.Y.0` has shipped. They are cut **as needed** — primarily for critical bug fixes (data loss, security, production-blocking regressions) or significant issues that cannot wait for the next minor release. There is no fixed patch cadence; patches ship when the fixes warrant them.
+Patch releases happen on the `release/vX.Y` branch after the corresponding `vX.Y.0` has shipped. They are cut **as needed** — primarily for critical bug fixes (data loss, security, production-blocking regressions) or significant issues that cannot wait for the next minor release. There is no fixed patch cadence; patches ship when the fixes warrant them.
 
 Patch releases go through their own QA window, scoped to the changes being shipped. The mechanics are the same as for a minor release but use a patch-versioned RC tag:
 
-1. Candidate commits are tagged on `releases/vX.Y` as `vX.Y.Z-rcN` (for example, `v2.1.5-rc1`, `v2.1.5-rc2`).
+1. Candidate commits are tagged on `release/vX.Y` as `vX.Y.Z-rcN` (for example, `v2.1.5-rc1`, `v2.1.5-rc2`).
 1. QA executes the relevant test plans against the RC tag.
 1. After QA signs off, the final `vX.Y.Z` tag is cut on the same branch.
 
-Note that **patch releases do not get their own branch.** All `v2.1.*` work lives on `releases/v2.1`; only the tags distinguish a patch RC from the final patch release. Each final patch release is published on GitHub with a `vX.Y.Z` tag.
+Note that **patch releases do not get their own branch.** All `v2.1.*` work lives on `release/v2.1`; only the tags distinguish a patch RC from the final patch release. Each final patch release is published on GitHub with a `vX.Y.Z` tag.
 
 ## Which Version Should I Use?
 
 | Goal | What to run |
 | ---- | ----------- |
 | Early access to in-progress features | Latest `main` |
-| Slightly more stable, willing to help shake out bugs | Latest `vX.Y.Z-rcN` tag on `releases/vX.Y` |
-| Most stable, production-style use | Latest non-`-rc`, non-`-pr` tag on `releases/vX.Y` |
+| Slightly more stable, willing to help shake out bugs | Latest `vX.Y.Z-rcN` tag on `release/vX.Y` |
+| Most stable, production-style use | Latest non-`-rc`, non-`-pr` tag on `release/vX.Y` |
 
 Bugs found on a tagged release (`vX.Y.Z` with no `-rc` or `-pr` suffix) are treated with the highest priority and are tracked as **QA test escapes** — defects that slipped past the QA window and require a follow-up fix, typically in the next patch release.
 
@@ -175,7 +175,7 @@ When in doubt about whether a fix clears the Maintenance bar, default to "no" an
 In other words, you can skip the Maintenance tier when upgrading from EOL straight to Current, but you may not move backward to an older minor (or to an older patch within the same minor). If a Current release introduces a problem that blocks you, the supported recovery is a forward-fix in the next patch release, not a downgrade.
 
 <Info title="Downgrade support">
-Downgrade support is being tracked as a potential future capability in [issue 2019, *Graceful Rollbacks of NICo to the previous minor version*](https://github.com/NVIDIA/infra-controller/issues/2019); track that issue for the latest state.
+Downgrade support is being tracked as a potential future capability in [issue 2019, *Graceful Rollbacks of NICo to the previous minor version*](https://github.com/dsx-ai-factory/infra-controller/issues/2019); track that issue for the latest state.
 </Info>
 
 ## QA Workflow
@@ -248,7 +248,7 @@ stateDiagram-v2
 The two fields move semi-independently:
 
 - While dev is still working, `Status` is `In Progress` and `QA Test Status` is typically somewhere in the triage/test-design/signoff portion of its track.
-- When the PR merges, the linked issue's `Status` flips to `Verify | Item Completed` (through the automation in [PR #2584](https://github.com/NVIDIA/infra-controller/pull/2584)), signaling to QA that the fix is code-complete and ready to be exercised. `QA Test Status` is expected to be `Test Plan Approved` (or already in `QA Execution`) by this point.
+- When the PR merges, the linked issue's `Status` flips to `Verify | Item Completed` (through the automation in [PR #2584](https://github.com/dsx-ai-factory/infra-controller/pull/2584)), signaling to QA that the fix is code-complete and ready to be exercised. `QA Test Status` is expected to be `Test Plan Approved` (or already in `QA Execution`) by this point.
 - After `QA Test Status` becomes `QA Passed`, the issue's `Status` is moved to `Closed` with `Disposition: Item Completed`.
 - If `QA Test Status` becomes `QA Failed`, the issue typically moves back to `Status: In Progress` so engineering can address the failure.
 
@@ -290,7 +290,7 @@ The following are considered internal and can change without notice between rele
 - The **admin CLI** (also referred to as the *debug CLI*) — a lower-level tool intended for operators and developers, not end users.
 - The **admin UI** (also referred to as the *debug UI*) — same audience as the admin CLI.
 - The **Vault data model** — how secrets are laid out inside HashiCorp Vault.
-- The **PostgreSQL database schema** used by NICo services. Refer to [issue #2019](https://github.com/NVIDIA/infra-controller/issues/2019) for the current state of this guarantee (tracked alongside downgrade support, which depends on it).
+- The **PostgreSQL database schema** used by NICo services. Refer to [issue #2019](https://github.com/dsx-ai-factory/infra-controller/issues/2019) for the current state of this guarantee (tracked alongside downgrade support, which depends on it).
 - Any other internal API contract between NICo services, or persistent data formats used only by NICo itself.
 
 If you build automation that depends on any of the unguaranteed items above, expect to update it across NICo releases.
@@ -300,7 +300,7 @@ If you build automation that depends on any of the unguaranteed items above, exp
 A few terms used on this page that are not always obvious:
 
 - **Code complete** — the point in the cycle at which feature work for a minor version stops and stabilization begins. On this date, the release branch is cut from `main`.
-- **Release candidate (rc)** — a tagged build on a `releases/vX.Y` branch that is a candidate for release, pending QA sign-off. Identified by the `-rcN` suffix on the tag (for example, `v2.1.0-rc1`, `v2.1.5-rc2`). Note: `-rc` is a tag suffix only; there is no `releases/...-rc` branch.
+- **Release candidate (rc)** — a tagged build on a `release/vX.Y` branch that is a candidate for release, pending QA sign-off. Identified by the `-rcN` suffix on the tag (for example, `v2.1.0-rc1`, `v2.1.5-rc2`). Note: `-rc` is a tag suffix only; there is no `release/...-rc` branch.
 - **Prerelease (pr)** — a build of `main` that is on its way to becoming the next minor release. Identified by the `-pr` suffix on a tag (for example, `v2.2.0-pr`).
 - **QA sign-off** — the formal acknowledgment from QA that a release candidate has passed its test plan and can be promoted to a final release.
 - **QA test escape** — a defect discovered in a tagged, signed-off release that was not caught during the QA window. These are treated as high-priority and typically fixed in a subsequent patch release.

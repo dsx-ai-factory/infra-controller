@@ -23,9 +23,10 @@ func TestAPISubnetCreateRequest_Validate(t *testing.T) {
 	prefix32 := 32
 	prefix31 := 31
 	tests := []struct {
-		desc      string
-		obj       APISubnetCreateRequest
-		expectErr bool
+		desc           string
+		obj            APISubnetCreateRequest
+		expectErr      bool
+		expectedErrMsg string
 	}{
 		{
 			desc:      "error when Name is not provided",
@@ -53,12 +54,13 @@ func TestAPISubnetCreateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			desc:      "error when IPv6Block is specified",
-			obj:       APISubnetCreateRequest{Name: "ab", Description: cutil.GetPtr("abc"), VpcID: uuid.New().String(), IPv6BlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix24},
-			expectErr: true,
+			desc:           "REST Subnet creation rejects ipv6BlockId",
+			obj:            APISubnetCreateRequest{Name: "ab", Description: cutil.GetPtr("abc"), VpcID: uuid.New().String(), IPv4BlockID: cutil.GetPtr(uuid.New().String()), IPv6BlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix24},
+			expectErr:      true,
+			expectedErrMsg: "ipv6BlockId: " + validationErrorIPv6SubnetNotSupported + ".",
 		},
 		{
-			desc:      "error when neither IPv6Block nor IPv6Block are specified",
+			desc:      "REST Subnet creation requires ipv4BlockId",
 			obj:       APISubnetCreateRequest{Name: "ab", Description: cutil.GetPtr("abc"), VpcID: uuid.New().String(), PrefixLength: prefix24},
 			expectErr: true,
 		},
@@ -78,11 +80,6 @@ func TestAPISubnetCreateRequest_Validate(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			desc:      "ok when only IPv4BlockID is specified",
-			obj:       APISubnetCreateRequest{Name: "ab", Description: cutil.GetPtr("abc"), VpcID: uuid.New().String(), IPv4BlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix24},
-			expectErr: false,
-		},
-		{
 			desc:      "error when /32 subnet is created",
 			obj:       APISubnetCreateRequest{Name: "ab", Description: cutil.GetPtr("abc"), VpcID: uuid.New().String(), IPv4BlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix32},
 			expectErr: true,
@@ -98,6 +95,9 @@ func TestAPISubnetCreateRequest_Validate(t *testing.T) {
 			err := tc.obj.Validate()
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err != nil {
+				if tc.expectedErrMsg != "" {
+					assert.Equal(t, tc.expectedErrMsg, err.Error())
+				}
 				fmt.Println(err.Error())
 			}
 		})

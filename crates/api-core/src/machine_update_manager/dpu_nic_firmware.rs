@@ -21,7 +21,7 @@ use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use carbide_machine_controller::dpf::DpfOperations;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use db::dpu_machine_update;
 use model::dpu_machine_update::{DpuMachineUpdate, OutdatedDpfDpu};
 use model::machine::ManagedHostStateSnapshot;
@@ -57,7 +57,7 @@ pub(crate) struct DpuNicFirmwareUpdate {
     /// clears when the DPU's markers clear, so a later attempt that lands
     /// wrong again is a new outcome. In-memory: a restart re-reports at most
     /// once per stuck DPU.
-    pub(crate) reported_wrong_versions: std::sync::Mutex<HashSet<(MachineId, String)>>,
+    pub(crate) reported_wrong_versions: std::sync::Mutex<HashSet<(DpuMachineId, String)>>,
 }
 
 #[async_trait]
@@ -65,7 +65,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
     async fn get_updates_in_progress(
         &self,
         txn: &mut PgConnection,
-    ) -> CarbideResult<HashSet<MachineId>> {
+    ) -> CarbideResult<HashSet<HostMachineId>> {
         let current_updating_machines =
             match dpu_machine_update::get_reprovisioning_machines(txn).await {
                 Ok(current_updating_machines) => current_updating_machines,
@@ -88,9 +88,9 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
         available_updates: i32,
-        updating_host_machines: &HashSet<MachineId>,
-        snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
-    ) -> CarbideResult<HashSet<MachineId>> {
+        updating_host_machines: &HashSet<HostMachineId>,
+        snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
+    ) -> CarbideResult<HashSet<HostMachineId>> {
         let machine_updates: Vec<DpuMachineUpdate> = self
             .check_for_updates(snapshots, available_updates)
             .await
@@ -100,7 +100,8 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
 
         // The outcome is vec<DpuMachineUpdate>, let's convert it to HashMap<host_machine_id, vec<DpuMachineUpdate>>
         // This way we can run our loop based on host_machine id.
-        let mut host_machine_updates: HashMap<MachineId, Vec<DpuMachineUpdate>> = HashMap::new();
+        let mut host_machine_updates: HashMap<HostMachineId, Vec<DpuMachineUpdate>> =
+            HashMap::new();
 
         for machine_update in machine_updates {
             host_machine_updates
@@ -137,7 +138,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                         carbide_instrument::emit(FirmwareUpdateFailed {
                             target: FirmwareUpdateTarget::DpuNic,
                             cause: FirmwareUpdateFailureCause::NoUpdateMatch,
-                            machine_id: host_machine_id,
+                            machine_id: host_machine_id.into(),
                             unmatched_dpu_machine_id: id,
                             firmware_version: String::new(),
                         });
@@ -197,7 +198,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                         "Failed to remove machine update markers",
                     );
                 } else if let Ok(mut reported) = self.reported_wrong_versions.lock() {
-                    reported.retain(|(dpu, _)| *dpu != updated_machine.dpu_machine_id);
+                    reported.retain(|(dpu, _)| dpu != &updated_machine.dpu_machine_id);
                 }
             } else if self
                 .reported_wrong_versions
@@ -212,7 +213,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 carbide_instrument::emit(FirmwareUpdateFailed {
                     target: FirmwareUpdateTarget::DpuNic,
                     cause: FirmwareUpdateFailureCause::WrongVersionAfterUpdate,
-                    machine_id: updated_machine.dpu_machine_id,
+                    machine_id: updated_machine.host_machine_id.into(),
                     unmatched_dpu_machine_id: String::new(),
                     firmware_version: updated_machine.firmware_version,
                 });
@@ -224,7 +225,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
     async fn update_metrics(
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
-        snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+        snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<()> {
         let dpf_outdated = self.fetch_dpf_outdated().await;
         match DpuMachineUpdate::find_available_outdated_dpus(
@@ -246,7 +247,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         let outdated_dpus = DpuMachineUpdate::find_unavailable_outdated_dpus(
             &self.config.dpu_config.dpu_nic_firmware_update_versions,
             snapshots,
-        );
+        )?;
         if let Some(metrics) = &self.metrics {
             metrics
                 .unavailable_dpu_updates
@@ -298,7 +299,7 @@ impl DpuNicFirmwareUpdate {
 
     pub(crate) async fn check_for_updates(
         &self,
-        snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+        snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
         available_updates: i32,
     ) -> Vec<DpuMachineUpdate> {
         let dpf_outdated = self.fetch_dpf_outdated().await;

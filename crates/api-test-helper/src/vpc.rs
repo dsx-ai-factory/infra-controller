@@ -17,7 +17,10 @@
 
 use std::net::SocketAddr;
 
-use super::grpcurl::grpcurl_id;
+use eyre::ContextCompat;
+use rpc::forge::{Metadata, VpcCreationRequest, VpcVirtualizationType};
+
+use crate::api_client;
 
 pub async fn create(carbide_api_addrs: &[SocketAddr], tenant_org_id: &str) -> eyre::Result<String> {
     tracing::info!("Creating VPC");
@@ -26,11 +29,7 @@ pub async fn create(carbide_api_addrs: &[SocketAddr], tenant_org_id: &str) -> ey
     // API gate (it's FNN-only -- see `model::vpc::capability`), so this
     // fixture intentionally omits the field. The FNN-specific fixture
     // (`create_fnn`) sets it.
-    let data = serde_json::json!({
-        "metadata": { "name": "tenant_vpc" },
-        "tenantOrganizationId": tenant_org_id,
-    });
-    let vpc_id = grpcurl_id(carbide_api_addrs, "CreateVpc", &data.to_string()).await?;
+    let vpc_id = create_with_type(carbide_api_addrs, tenant_org_id, "tenant_vpc", None).await?;
     tracing::info!(
         vpc_id = %vpc_id,
         "VPC created",
@@ -44,13 +43,13 @@ pub async fn create_fnn(
 ) -> eyre::Result<String> {
     tracing::info!("Creating FNN VPC");
 
-    let data = serde_json::json!({
-        "metadata": { "name": "tenant_vpc_fnn" },
-        "tenantOrganizationId": tenant_org_id,
-        "routing_profile_type": "EXTERNAL".to_string(),
-        "network_virtualization_type": 5, // FNN
-    });
-    let vpc_id = grpcurl_id(carbide_api_addrs, "CreateVpc", &data.to_string()).await?;
+    let vpc_id = create_with_type(
+        carbide_api_addrs,
+        tenant_org_id,
+        "tenant_vpc_fnn",
+        Some((VpcVirtualizationType::Fnn, "EXTERNAL")),
+    )
+    .await?;
     tracing::info!(
         vpc_id = %vpc_id,
         "FNN VPC created",
@@ -66,15 +65,44 @@ pub async fn create_flat(
 
     // Flat VPCs reject `routing_profile_type` -- there's no NICo-managed
     // data plane to apply a routing profile to.
-    let data = serde_json::json!({
-        "metadata": { "name": "tenant_vpc_flat" },
-        "tenantOrganizationId": tenant_org_id,
-        "network_virtualization_type": 6, // FLAT
-    });
-    let vpc_id = grpcurl_id(carbide_api_addrs, "CreateVpc", &data.to_string()).await?;
+    let vpc_id = create_with_type(
+        carbide_api_addrs,
+        tenant_org_id,
+        "tenant_vpc_flat",
+        Some((VpcVirtualizationType::Flat, "")),
+    )
+    .await?;
     tracing::info!(
         vpc_id = %vpc_id,
         "Flat VPC created",
     );
     Ok(vpc_id)
+}
+
+async fn create_with_type(
+    carbide_api_addrs: &[SocketAddr],
+    tenant_org_id: &str,
+    name: &str,
+    virtualization: Option<(VpcVirtualizationType, &str)>,
+) -> eyre::Result<String> {
+    let request = VpcCreationRequest {
+        tenant_organization_id: tenant_org_id.to_string(),
+        network_virtualization_type: virtualization.map(|(kind, _)| kind as i32),
+        routing_profile_type: virtualization
+            .and_then(|(_, profile)| (!profile.is_empty()).then(|| profile.to_string())),
+        metadata: Some(Metadata {
+            name: name.to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let vpc = api_client::call(carbide_api_addrs, "CreateVpc", |mut client| async move {
+        client.create_vpc(request).await
+    })
+    .await?;
+
+    Ok(vpc
+        .id
+        .context("CreateVpc response has no VPC ID")?
+        .to_string())
 }

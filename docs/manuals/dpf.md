@@ -74,7 +74,7 @@ The following table maps the sections on this page to what the run does:
 | §3.2–3.4 CRs  | [DPFOperatorConfig](#32-dpfoperatorconfig) (API VIP/port derived from the `kubernetes` Endpoints unless `NICO_DPF_K8S_API_VIP/PORT` are set), [DPUCluster](#33-dpucluster), and the optional [VIP LoadBalancer Service](#34-vip-loadbalancer-service-and-endpoints) are applied from `helm-prereqs/operators/dpf/`. |
 | §3.5 [Site config](#35-enable-dpf-in-the-nico-site-config) + §4 [Enablement](#4-restart-carbide-api-to-create-the-dpf-initialization-objects) | **Two-phase (phase 6b).** The site-wide BMC root password can only be set through a running carbide-api, so DPF cannot be enabled on the very first Core deploy.<br/><br/>`setup.sh` deploys Core with `[dpf]` **off**, sets the BMC root password via `nico-admin-cli` (see below), upgrades Core to `[dpf]` **on**, then **restarts carbide-api**.<br/><br/>The upgrade only rewrites the ConfigMap; `[dpf]` is read at startup only. The restart ensures that the DPF SDK initializes and creates the BFB, DPUFlavor, and DPUDeployment. |
 
-[Per-host enablement](#36-mark-hosts-as-dpf-managed-in-expected-machines) (§3.6) and the [CLI appendix](#appendix-nico-admin-cli-dpf-command-reference) still apply unchanged. The sections below remain the reference for what is being installed, for manual installs, and for environments not using `setup.sh`.
+[Per-host enablement](#37-mark-hosts-as-dpf-managed-in-expected-machines) (§3.7) and the [CLI appendix](#appendix-nico-admin-cli-dpf-command-reference) still apply unchanged. The sections below remain the reference for what is being installed, for manual installs, and for environments not using `setup.sh`.
 
 ### BMC root precondition (why the enablement is two-phase)
 
@@ -454,6 +454,9 @@ rules:
     resources: ["dpuflavors"]
     verbs: ["get", "create"]
   - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpuflavortemplates"]
+    verbs: ["get", "create"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
     resources: ["dpusets"]
     verbs: ["get"]
   - apiGroups: ["provisioning.dpu.nvidia.com"]
@@ -476,7 +479,7 @@ rules:
     verbs: ["get", "create", "patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["create"]
+    verbs: ["get", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -511,7 +514,7 @@ spec:
   dpuDetector:
     disable: true
   provisioningController:
-    osInstallTimeout: "60m"
+    osInstallTimeout: "90m"
     installInterface:
       installViaRedfish:
         skipDPUNodeDiscovery: true
@@ -535,7 +538,7 @@ Field-by-field:
 | Field | Meaning |
 | --- | --- |
 | `dpuDetector.disable: true` | DPF normally polls hosts to discover new DPUs. NICo disables auto-discovery because DPUs are fed in via `DPUSet` CRs from the orchestrator. |
-| `provisioningController.osInstallTimeout: "60m"` | Total budget for the OS install flow per DPU. |
+| `provisioningController.osInstallTimeout: "90m"` | Total budget for the OS install flow per DPU. |
 | `provisioningController.installViaRedfish` | Provision DPUs by talking Redfish to the host BMC (vs. PXE-based). |
 | `skipDPUNodeDiscovery: true` | Do not auto-detect DPUs as Kubernetes nodes — DPF is told about them explicitly by NICo. |
 | `overrides.kubernetesAPIServerVIP` | Replace `REPLACE_ME` with the host-cluster API-server VIP that DPUs should reach. |
@@ -623,7 +626,7 @@ subsets:
 What this does and why it looks unusual:
 
 - The `Service` is type `LoadBalancer` with a fixed `loadBalancerIP` (the same VIP used by the `DPUCluster` keepalived). The `metallb.io/address-pool: REPLACE_ME` annotation should be updated with a correct pool name. It tells MetalLB to pull the IP from the updated pool defined elsewhere.
-- A **manually-created `Endpoints`** object with a single dummy RFC 5737 IP (`192.0.2.10`) is created **with the same name** as the Service. This is a Kubernetes idiom: when an `Endpoints` resource has the same name as a Service that has **no selector**, the kubelet uses those Endpoints verbatim.  Putting a dummy IP here means: *"reserve the VIP via MetalLB, but route nothing — keepalived is the actual front-end."*
+- A **manually-created `Endpoints`** object with a single dummy RFC 5737 IP (`192.0.2.10`) is created **with the same name** as the Service. This is a Kubernetes idiom: when an `Endpoints` resource has the same name as a Service that has **no selector**, the kubelet uses those Endpoints verbatim. Putting a dummy IP here means: *"reserve the VIP via MetalLB, but route nothing — keepalived is the actual front-end."*
 - Net effect: MetalLB advertises the VIP to the network so external machines (DPUs, BMCs) can reach it, while keepalived handles the actual TCP termination.
 
 If your environment uses a different LoadBalancer mechanism (kube-vip, a cloud-provider LB, etc.), use it to expose the VIP and point the `DPUCluster`'s `keepalived.vip` at the same address.
@@ -641,9 +644,9 @@ enabled = true
 docker_image_pull_secret = "nico-pull-secret"
 ```
 
-`docker_image_pull_secret` is an optional top-level override for the Kubernetes Secret used to pull the NICo (carbide-owned) service images: `dpu_agent`, `dhcp_server`, `fmds`, and `otel`. The `dts` and `doca_hbn` images are never affected by it; they take a pull secret only from their own per-service config — either `[dpf.services.*]` or a deployment's `[dpf.deployments.<name>.services.*]` override.
+`docker_image_pull_secret` is an optional top-level override for the Kubernetes Secret used to pull the NICo (carbide-owned) service images: `dpu_agent`, `dhcp_server`, `fmds`, and `otel`. It is also the fallback pull Secret for BF4 Astra's Weave DHCP agent, Weave flow controller, and Xplane services. The `dts` and `doca_hbn` images are never affected by it; they take a pull secret only from their own per-service config — either `[dpf.services.*]` or a deployment's `[dpf.deployments.<name>.services.*]` override. An extra service's `docker_image_pull_secret` takes precedence over the top-level value.
 
-By default, no mandatory service is given a pull secret, so their images are pulled from a **public registry**. Provide a pull secret only where a private registry needs it. You can use either this top-level override (carbide services only) or a service's own `docker_image_pull_secret` (any service).
+By default, no service is given a pull secret, so images are pulled from a **public registry**. Provide a pull secret only where a private registry needs it. The top-level override applies to the carbide services and is the fallback for Astra extra services; a service's own `docker_image_pull_secret` configures different credentials when needed.
 
 <Tip>
 When referencing a private Secret such as `dpf-pull-secret`, ensure it is configured with a legacy NGC API key for better compatibility.
@@ -671,6 +674,47 @@ it renders no `imagePullSecrets` for that service (public-registry pulls). Set i
 a Kubernetes image-pull Secret name when the service is served from a private registry.
 Use `extra_helm_values` for other chart settings.
 
+#### Deployment-specific extra services
+
+`[dpf.extra_services]` configures services that are not mandatory for every
+DPU deployment. Each entry has the same Helm/image fields as a mandatory
+service. NICo selects only the entries supported by a deployment type: the
+Weave DHCP agent, Weave flow controller, and Xplane are used by BF4 Astra;
+they are never deployed for BF3 or generic BF4.
+
+For example, pin the Weave chart and image version for BF4 Astra:
+
+```toml
+[dpf.extra_services.doca_weave_dhcp_agent]
+helm_repo_url    = "oci://nvcr.io/nvstaging/doca"
+helm_chart       = "dpf-weave"
+helm_version     = "v26.8.0-a02ded2e-nightly"
+docker_repo_url  = "nvcr.io/nvstaging/doca/weave-system"
+docker_image_tag = "v26.8.0-a02ded2e-nightly"
+```
+
+Supported keys are `doca_weave_dhcp_agent`, `doca_weave_flow_controller`, and
+`doca_xplane`. Every entry has built-in defaults, so an entry may override
+only the version, repository, or other fields that differ at a site. For a
+private image registry, configure the pull Secret for each service that needs
+different credentials than the top-level `[dpf].docker_image_pull_secret`:
+
+```toml
+[dpf.extra_services.doca_xplane]
+docker_image_pull_secret = "site-dpf-image-pull-secret"
+```
+
+A deployment can override selected fields from its site-wide extra-service
+definition. NICo resolves an extra service as built-in defaults, then the
+site-wide `[dpf.extra_services.<service>]` fields, then the deployment-local
+fields. For example, this leaves the site-wide image configuration in place
+but uses a different Astra chart version:
+
+```toml
+[dpf.deployments.bf4_astra.extra_services.doca_weave_dhcp_agent]
+helm_version = "v26.9.0"
+```
+
 #### Helm value overlays
 
 `extra_helm_values` uses keys from the selected chart's `values.yaml`. NICo merges
@@ -694,19 +738,64 @@ The DPU agent's generated `dhcp_server.service_name`, `fmds.service_name`, and
 `hbn.nvue_https_address` are deployment-specific and take precedence over these
 template overlays.
 
+#### DPU LLDP sidecar
+
+The DPU agent chart also runs `nico-lldp-sidecar` from the resolved DPU agent
+image. The sidecar executes the DPU host's `lldpcli`, atomically publishes its
+LLDP-MED output at `/data/lldp`, and shares that directory with
+`nico-dpu-agent`. A successful snapshot is refreshed every 120 seconds and a
+failed collection is retried after 30 seconds. Snapshots are retained for ten
+minutes and the last successful file is kept after a failure, but the agent
+rejects snapshots older than five minutes.
+
+The defaults request 10 millicores of CPU and 64 MiB of memory and limit the
+container to 250 millicores and 128 MiB. Override them through the DPU agent
+chart overlay when required:
+
+```toml
+[dpf.services.dpu_agent.extra_helm_values.lldpSidecar.resources.requests]
+cpu = "20m"
+memory = "96Mi"
+
+[dpf.services.dpu_agent.extra_helm_values.lldpSidecar.resources.limits]
+cpu = "500m"
+memory = "192Mi"
+```
+
+The sidecar mounts the host `/run`, `/usr/sbin`, and `/lib` paths read-only and
+the host `/sys` path read-only at `/host-sys`. Its security context drops all
+Linux capabilities and adds only `DAC_OVERRIDE`; it permits privilege
+escalation. These mounts and permissions are part of the collection design. Do
+not broaden them as a workaround for a collection failure without first
+checking the sidecar logs and the host `lldpd` service.
+
+The OpenTelemetry configuration collects this container's pod logs with
+`systemd.unit=nico-lldp-sidecar`. Keep its image aligned with
+`nico-dpu-agent`, because the snapshot is an internal interface between those
+two containers. Refer to
+[DPU LLDP Collection](../dpu-management/dpu_configuration.md#dpu-lldp-collection)
+for the native-agent comparison and freshness behavior.
+
 #### Per-deployment configuration (`[dpf.deployments.*]`)
 
 Each DPU generation is provisioned by its own `DPUDeployment`, configured under
 `[dpf.deployments.<name>]`. **BF3** is always present with built-in defaults;
 **BF4 (generic)** and **BF4 Astra** are opt-in and are activated by
 `[dpf.deployments.bf4_generic]` and `[dpf.deployments.bf4_astra]`,
-respectively. Active deployments run side-by-side, each with its own
-`DPUFlavor` and `DPUDeployment`. BF3 uses a BFB URL (`bfb_url`), while BF4
-uses a `[bluefield_software]` block instead of a BFB.
+respectively. Active deployments run side-by-side, each with its own flavor
+resource and `DPUDeployment`: BF3 and generic BF4 use `DPUFlavor`, while Astra
+uses `DPUFlavorTemplate`. BF3 uses a BFB URL (`bfb_url`), while BF4 uses a
+`[bluefield_software]` block instead of a BFB.
 
 Every active deployment must have a **unique** `deployment_name`, `flavor_name`,
 and `node_label_key`; carbide-api validates this at startup and refuses to start
 if any deployments collide.
+
+#### BF4 Astra Spectrum-X runtime ConfigMap
+
+BF4 Astra requires a `ra2.2-runtime` ConfigMap in the DPF operator namespace
+(normally `dpf-operator-system`) containing an `RA2.2-runtime.yaml` key.
+Create it before enabling `[dpf.deployments.bf4_astra]`.
 
 ```toml
 # BF3 is present by default. Override only if any change is needed.
@@ -728,8 +817,7 @@ node_label_key  = "carbide.nvidia.com/controlled.node.bf4"
 # Shared across all PSIDs
 os_iso = "https://artifacts.example.com/bfb.3.3.x.iso"
  
-# PSID -> PLDM firmware bundle URL.
-# Currently exactly one PSID entry is supported.
+# PSID -> PLDM firmware bundle URLs. Include one entry for each DPU model.
 [dpf.deployments.bf4_generic.bluefield_software.pldm_fw_bundle]
 "MT_000000xxxx" = "https://artifacts.example.com/bf4/mt_000000xxxx.pldm"
 ```
@@ -740,12 +828,41 @@ Per-deployment field reference:
 | --- | :---: | --- | --- |
 | `bfb_url` | no | BF3 bf-bundle URL | BlueField firmware bundle (BFB) used to provision the DPU. Mutually exclusive with `bluefield_software`. |
 | `bluefield_software.os_iso` | BF4 only | — | OS ISO URL used by BF4 deployments in place of a BFB. Required when `bluefield_software` is set. |
-| `bluefield_software.pldm_fw_bundle` | BF4 only | — | Map of PSID → PLDM firmware bundle URL. Currently exactly one entry is supported. |
-| `flavor_name` | yes | `carbide-dpu-flavor` | `DPUFlavor` CR name for this deployment. |
+| `bluefield_software.pldm_fw_bundle` | BF4 only | — | Non-empty map of PSID → PLDM firmware bundle URL. Include one entry for each DPU model served by the deployment. |
+| `flavor_name` | yes | `carbide-dpu-flavor` | Base name for the generated `DPUFlavor` (BF3/generic BF4) or `DPUFlavorTemplate` (Astra) CR. |
 | `deployment_name` | yes | `nico-deployment-v2` | `DPUDeployment` CR name. |
 | `node_label_key` | yes | `carbide.nvidia.com/controlled.node.v2` | Node-selector label key applied to this deployment's DPUNodes. |
 | `services` | no | inherit `[dpf.services]` | Optional per-deployment mandatory-services override (see below). |
-| `extra_services` | no | Weave DHCP agent, Weave flow controller, and Xplane for BF4 Astra; otherwise empty | Optional replacement definitions for deployment-specific services. |
+| `extra_services` | no | none | Optional deployment-local field overrides for extra services. Only extras supported by this deployment type are used. |
+
+##### Service VPC and additional SF capacity
+
+Two global `[dpu_config]` fields reserve SFs for BF3 and generic BF4:
+
+- `service_vpc_slot_count` generates stable HBN interface names from
+  `iface_svc_0` through `iface_svc_{N-1}`. These interfaces are added to HBN's
+  `DPUServiceConfiguration`, startup configuration, and `nvidia.com/bf_sf`
+  request. The generated and topology-derived HBN interfaces must total no more
+  than 32.
+- `additional_managed_sf` reserves SF capacity without generating an HBN
+  interface.
+
+NICo adds both values to the managed SF count. With intercept bridging, they
+increase `PF_TOTAL_SF`, change the `DPUFlavor`, and require controlled DPU
+reprovisioning. Without intercept bridging, they consume the unchanged legacy
+`pf_total_sf_reserved` pool; carbide-api rejects an overcommit at startup. BF4
+Astra ignores both fields.
+
+NICo does not create a bridge for now, or a `DPUServiceInterface`, service
+chain, IPAM, or application-service CR for these slots. An external controller
+must coordinate which service uses each deterministic interface. The values are
+read when carbide-api starts, so restart the API after changing them.
+
+```toml
+[dpu_config]
+service_vpc_slot_count = 5
+additional_managed_sf = 2
+```
 
 **Per-deployment services override.** By default every deployment inherits the
 top-level `[dpf.services]` mandatory services. A deployment can pin its own
@@ -755,8 +872,9 @@ sub-tables as `[dpf.services]` (`dts`, `doca_hbn`, `dpu_agent`, `dhcp_server`,
 deployment; any service sub-table you omit falls back to its **built-in
 default**, *not* to the top-level `[dpf.services]` value. Fields omitted from a
 configured service also use that service's built-in defaults. The top-level
-`docker_image_pull_secret` still applies on top of the resolved set (every
-service except `dts` and `doca_hbn`).
+`docker_image_pull_secret` still overrides every resolved mandatory service
+except `dts` and `doca_hbn`; it is a fallback rather than an override for
+resolved Astra extra services.
 
 ```toml
 # Pin a BF4-specific HBN chart/image while keeping the other services on defaults.
@@ -769,33 +887,25 @@ docker_repo_url          = "nvcr.io/nvidia/doca/doca_hbn"
 docker_image_tag         = "3.4.0-doca3.4.0"
 ```
 
-BF4 Astra includes three built-in deployment-specific services with no
-`extra_services` TOML required:
+BF4 Astra includes three built-in deployment-specific services. Configure their
+site-wide definitions under `[dpf.extra_services]`; a deployment-local
+`extra_services` entry remains available when one Astra deployment needs a
+different field value:
 
 - `doca_weave_dhcp_agent`
 - `doca_weave_flow_controller`
 - `doca_xplane`
 
 To pin a different chart/image for development without rebuilding NICo, provide
-a complete `DpfServiceConfig` for only the service being replaced:
+only the fields that differ from the site-wide service definition:
 
 ```toml
 [dpf.deployments.bf4_astra.extra_services.doca_weave_dhcp_agent]
-name             = "doca-weave-dhcp-agent"
-helm_repo_url    = "https://helm.ngc.nvidia.com/nvidia/doca"
-helm_chart       = "doca-weave-dhcp-agent"
-helm_version     = "1.0"
-docker_repo_url  = "nvcr.io/nvidia/doca/doca_weave_dhcp_agent"
-docker_image_tag = "3.2.1-doca3.2.1"
+helm_version = "1.0"
 # Optional; omit when the registry needs no Kubernetes pull secret.
 docker_image_pull_secret = "private-doca-pull-secret"
 
 [dpf.deployments.bf4_astra.extra_services.doca_weave_flow_controller]
-name             = "doca-weave-flow-controller"
-helm_repo_url    = "https://helm.ngc.nvidia.com/nvidia/doca"
-helm_chart       = "doca-weave-flow-controller"
-helm_version     = "1.0"
-docker_repo_url  = "nvcr.io/nvidia/doca/doca_weave_flow_controller"
 docker_image_tag = "3.2.1-doca3.2.1"
 ```
 
@@ -815,27 +925,132 @@ The proxy is part of the flavor spec — changing or adding `[dpf.proxy]` produc
 new flavor name (hash-derived) and triggers a full DPU reprovisioning. Set it before
 the first NICo startup with DPF enabled if possible.
 
+`extra_bfcfg_parameters` sets additional `bf.cfg` parameters on every DPU, most commonly
+a login password for the DPU's `ubuntu` user:
+
+```toml
+[dpf]
+extra_bfcfg_parameters = ["ubuntu_PASSWORD='$6$sa.lt$ha.sh'"]
+```
+
+Each string is appended verbatim to the `bfcfgParameters` of every deployment's
+`DPUFlavor`. NICo does not interpret or quote them, so the shell quoting `bf.cfg`
+requires is yours to supply: the BFB installer sources `bf.cfg` as a shell script, so a
+crypt(3) hash must be single-quoted or its `$` sections are expanded. Generate the hash
+with `openssl passwd -6`, never a plaintext password.
+
+The one value that cannot be passed through is the Go template opening delimiter,
+`{{`. BF4 Astra ships its flavor as a `DPUFlavorTemplate` whose body DPF renders as a
+Go template, so a `{{` there would be interpreted rather than reach `bf.cfg`. A
+parameter containing it is rejected at startup for every deployment type, so the same
+configuration stays valid across all of them. A lone `}}` is unaffected.
+
+Parameters that apply to one DPU generation but not the others go on that deployment
+instead. Each `[dpf.deployments.<name>]` entry owns exactly one `DPUFlavor`, so a
+per-deployment list is a per-flavor list:
+
+```toml
+[dpf.deployments.bf4_generic]
+extra_bfcfg_parameters = ["SOME_BF4_ONLY_PARAMETER=1"]
+```
+
+A deployment's list **appends to** the site-wide one rather than replacing it — unlike
+`[dpf.deployments.<name>.services]`, which replaces `[dpf.services]`. Site-wide entries
+come first, followed by the deployment's own. A site-wide password therefore stays
+declared once even for a deployment that adds parameters of its own, and only deployments
+whose resolved list changed are reprovisioned.
+
+> **Warning:** Changing, adding, reordering, or removing an entry generates a new
+> `DPUFlavor` and reprovisions that deployment's DPUs. Because `bf.cfg` is applied at
+> install time, that reprovision is also the only way a changed value reaches DPUs that
+> are already installed.
+
+These values are stored in the `DPUFlavor` CR in plain text, readable by anything that can
+read `dpuflavors` in `dpf-operator-system`; a `$6$` hash is not plaintext, but it is
+offline-crackable, so treat it as site-sensitive.
+
 Field reference (all under `[dpf]`):
 
 | TOML key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Master switch. Must be `true` to use DPF-based provisioning. |
-| `docker_image_pull_secret` | string (optional) | none | Top-level override for the image-pull Secret of the carbide services (`dpu_agent`, `dhcp_server`, `fmds`, `otel`); never applied to `dts`/`doca_hbn`. Unset by default: services pull from a public registry (no `imagePullSecrets`) unless a secret is given here or per-service. |
+| `docker_image_pull_secret` | string (optional) | none | Top-level override for the image-pull Secret of the carbide services (`dpu_agent`, `dhcp_server`, `fmds`, `otel`) and fallback for Astra extra services (Weave DHCP, Weave flow controller, Xplane); never applied to `dts`/`doca_hbn`. An extra service's own secret takes precedence. Unset by default: services pull from a public registry (no `imagePullSecrets`) unless a secret is given here or per-service. |
 | `dpu_agent_bootstrap_ca` | tagged table | `source = "legacy_download"` | Selects legacy download or mounted-object bootstrap trust for the DPU agent. |
 | `services.<svc>` | table | per-service defaults | Helm/image overrides for each mandatory DPUService. |
 | `deployments.bf3` | table | BF3 defaults | BF3 DPUDeployment config; always active. |
 | `deployments.bf4_generic` | table | — | BF4 (generic) DPUDeployment config; opt-in, active only when present. |
 | `deployments.bf4_astra` | table | — | BF4 Astra DPUDeployment config; opt-in, active only when present. |
 | `deployments.<name>.services.<svc>` | table | inherit `[dpf.services]` | Optional per-deployment mandatory-service override. |
-| `deployments.<name>.extra_services.<svc>` | table | Weave DHCP agent, Weave flow controller, and Xplane for BF4 Astra; otherwise empty | Complete replacement for one deployment-specific service. Supported keys are `doca_weave_dhcp_agent`, `doca_weave_flow_controller`, and `doca_xplane`. |
+| `extra_services.<svc>` | table | per-service defaults | Site-wide Helm/image overrides for deployment-specific services. Only services supported by the deployment type are rendered. |
+| `deployments.<name>.extra_services.<svc>` | table | none | Deployment-local field overrides for one deployment-specific service. Supported keys are `doca_weave_dhcp_agent`, `doca_weave_flow_controller`, and `doca_xplane`; unsupported services are ignored for that deployment type. |
 | `proxy.https_proxy` | string | — | HTTPS proxy URL for DPU image pulls (see section 3.5). |
 | `proxy.no_proxy` | list of strings | `[]` | Hosts/CIDRs that must bypass the proxy. |
+| `extra_bfcfg_parameters` | list of strings | `[]` | `bf.cfg` lines appended verbatim to every deployment's `DPUFlavor` `bfcfgParameters`. Not interpreted or quoted by NICo; entries containing `{{` are rejected at startup. Changing the list renames every flavor and reprovisions the site's DPUs. |
+| `deployments.<name>.extra_bfcfg_parameters` | list of strings | `[]` | `bf.cfg` lines for this deployment's `DPUFlavor` only. Appends to the site-wide `extra_bfcfg_parameters`; does not replace it. |
 
 Notes:
 
 - The DPF operator namespace (`dpf-operator-system`) and the kubeconfig used
   to talk to the host cluster are **not** configured here — carbide-api uses
   its in-cluster ServiceAccount and the fixed `dpf-operator-system` namespace.
+
+#### DPUService rollout gating
+
+A DPUService change, meaning a new Helm chart or container image version for a
+service running on the DPU, does not reach a DPU as soon as it is declared. NICo
+configures these updates as **disruptive**, which parks each affected DPU in the
+`NodeEffect` phase behind a DPF maintenance hold. The hold is lifted only once
+the DPU is confirmed to be running the software its `DPUDeployment` declares.
+
+The hold exists because a DPU still waiting to be reprovisioned is about to have
+its OS replaced, and the services paired with the new OS are not necessarily the
+services the current one can run. A BFB update brings a matching HBN version with
+it, and installing that HBN on a DPU still running the older BFB breaks the DPU.
+Reprovisioning is deliberately paced and tenant-aware, so a DPU can sit on the old
+BFB for days while the new services are already being pushed at it.
+
+A held DPU keeps serving traffic while it waits, so the hold is not a drain and
+nothing is disrupted by waiting.
+
+This governs **when** a declared service version reaches a DPU. It does not judge
+**whether** that version belongs there. The only question asked is whether a DPU
+matches its own `DPUDeployment`, so a deployment that pairs a service version with
+an incompatible BFB is rolled out faithfully. Keeping those coherent stays with
+whoever writes the config, deliberately: a compatibility check here would also
+reject the test builds that qualifying a new service version depends on.
+
+```toml
+[dpf]
+enabled = true
+# Default. Set false to hold every rollout for a deliberate operator release.
+dpu_service_sync_enabled = true
+```
+
+`dpu_service_sync_enabled` selects **who** opens the gate, never whether one
+exists:
+
+| Setting | Who releases the hold |
+| --- | --- |
+| `true` (default) | NICo releases it on its own, but only for a host that is `Ready`, carries no tenant instance, and whose DPUs all match their `DPUDeployment`. |
+| `false` | Nothing is released automatically. Every held DPU waits for an operator to run [`dpf service-sync release`](#dpf-service-sync-alias-ss--list-and-release-dpuservice-holds). |
+
+Hosts still awaiting reprovisioning, and hosts carrying a live tenant instance,
+keep their hold under either setting. The DPU currency check is never bypassed,
+however the release is asked for.
+
+<Warning>
+This behavior ships on and changes rollout timing **without any operator action**. On upgrade, existing `DPUServiceConfiguration` and `DPUDeployment` objects are re-applied as disruptive, so DPUs enter `NodeEffect` and NICo begins releasing holds for idle, up-to-date hosts. Sites that want to schedule that themselves should set `dpu_service_sync_enabled = false` **before** upgrading.
+</Warning>
+
+Two situations need the operator release path, because NICo cannot open the gate
+for them on its own:
+
+- **The site has set `dpu_service_sync_enabled = false`.** Nothing else can
+  release the held DPUs, so a rollout is finished by hand.
+- **A host never reaches `Ready`.** A DPUService version that breaks host
+  provisioning strands hosts in `HostInit`, and the fix is a new DPUService
+  version those hosts cannot receive while they are held. Releasing by hand is
+  how such a host is recovered.
 
 #### DPU Agent Bootstrap CA
 
@@ -1129,14 +1344,18 @@ DPF initialization objects are created in the host cluster.
 
 On startup with `[dpf].enabled = true`, carbide-api creates the following
 objects in the `dpf-operator-system` namespace. It does this **once for each active
-deployment** in `[dpf.deployments.*]` (BF3 always, plus `bf4_generic` when
-that table is present), using that deployment's own `bfb_url`, `flavor_name`,
-and `deployment_name`:
+deployment** in `[dpf.deployments.*]` (BF3 always, plus enabled BF4 generic or
+Astra deployments), using that deployment's own `bfb_url`, `flavor_name`, and
+`deployment_name`:
 
 - A `Secret` (`bmc-shared-password`) holding the shared BMC password (shared
   across deployments)
 - A `BFB` CR named `bf-bundle-<sha256(bfb_url)>`, from the deployment's `bfb_url`
-- A `DPUFlavor` CR named `<flavor_name>-<spec-hash>`. (The 16-character hex suffix is a SHA-256 digest of the spec. Any change to the flavor, including adding or changing `[dpf.proxy]`, produces a new name and triggers reprovisioning of that deployment's DPUs.)
+- A `DPUFlavor` CR (BF3/generic BF4) or `DPUFlavorTemplate` CR (Astra) named
+  `<flavor_name>-<spec-hash>`. The 16-character hex suffix is a SHA-256 digest
+  of the flavor spec or template; changing it, including adding or changing
+  `[dpf.proxy]` or `[dpf].extra_bfcfg_parameters`, produces a new name and
+  triggers reprovisioning.
 - A set of `DPUServiceInterface`, `DPUServiceTemplate`,
   `DPUServiceConfiguration`, and `DPUServiceNAD` CRs, one per mandatory
   DPUService (`dts`, `doca-hbn`, `carbide-dpu-agent`, `carbide-dhcp-server`,
@@ -1144,17 +1363,18 @@ and `deployment_name`:
   resolved services -- either its `[dpf.deployments.<name>.services]` override if
   set, otherwise the top-level `[dpf.services]`.
 - A `DPUDeployment` CR named after the deployment's `deployment_name`, which
-  references the BFB, the DPUFlavor, and the service templates above, and which
-  the DPF operator then reconciles into actual `DPUService` and per-DPU
-  resources.
+  references the BFB, its flavor resource, and the service templates above. For
+  Astra, it uses `flavorTemplate`, which the DPF operator renders into a
+  per-DPU `DPUFlavor`; otherwise it uses `flavor`. The operator then reconciles
+  these into actual `DPUService` and per-DPU resources.
 
 Because this path runs only at process start, **any change to `[dpf]`** —
 enabling DPF for the first time, changing a deployment's BFB URL, renaming a
-`DPUDeployment`/`DPUFlavor`, adding or removing `[dpf.deployments.bf4_generic]`,
+`DPUDeployment`/flavor resource, adding or removing BF4 deployment tables,
 pinning a different chart/image version under `[dpf.services.*]` or a
 deployment's `[dpf.deployments.<name>.services]`, or adding/changing
-`[dpf.proxy]` — **requires a carbide-api restart** for the new configuration to
-take effect.
+`[dpf.proxy]` or `[dpf].extra_bfcfg_parameters` — **requires a carbide-api
+restart** for the new configuration to take effect.
 
 ---
 
@@ -1212,13 +1432,13 @@ site-disabled case).
 # One host
 nico-admin-cli dpf show <host-machine-id>
 
-# All hosts (paginated by --page-size)
+# All hosts (paginated by --internal-page-size)
 nico-admin-cli dpf show
 ```
 
 | Argument | Required | Notes |
 |---|:---:|---|
-| `<host-machine-id>` | no | If omitted, lists DPF state for **every** host. DPU ids are rejected. |
+| `<host-machine-id>` | no | If omitted, lists DPF state for **every** host. DPU IDs are rejected. |
 
 Output for a single host prints `Enabled` and `Used For Ingestion` flags; the
 multi-host form prints a table with one row per host. DPUs are excluded
@@ -1232,7 +1452,7 @@ nico-admin-cli dpf snapshot <host-machine-id>
 
 | Argument | Required | Notes |
 |---|:---:|---|
-| `<host-machine-id>` | yes | Must be a host machine id; DPU ids are rejected. |
+| `<host-machine-id>` | yes | Must be a host machine ID; DPU IDs are rejected. |
 
 Calls the `GetDpfHostSnapshot` RPC and prints the `DPUNode`, `DPUDevice`, and
 `DPU` CRs that DPF currently has for the given host. Useful for diagnosing
@@ -1263,6 +1483,94 @@ A `DIFFERS` row indicates the running stack does not match the carbide-api
 config and that a carbide-api restart (section 4) is needed to reconcile the
 configured versions onto the cluster.
 
+### `dpf service-sync` (alias: `ss`) — list and release DPUService holds
+
+Inspects and releases the DPF maintenance holds described in
+[DPUService rollout gating](#dpuservice-rollout-gating). Use it when NICo cannot
+open the gate itself, which is either a site running with
+`dpu_service_sync_enabled = false` or a host that never reaches `Ready`.
+
+#### `dpf service-sync list`
+
+```bash
+# Every machine DPF is waiting on, longest wait first (paginated by --internal-page-size)
+nico-admin-cli dpf service-sync list
+
+# One host's recorded history instead of the outstanding worklist
+nico-admin-cli dpf service-sync list --machine-id <host-machine-id>
+```
+
+| Argument | Required | Notes |
+| -------- | :------: | ----- |
+| `--machine-id` (alias `--id`) | no | Prints that host's recorded sync history. Omit it for the fleet-wide worklist. |
+
+The worklist form is the only way to discover which machines to name, because the
+release call has no fleet-wide form. Its columns are:
+
+| Column | Meaning |
+| --- | --- |
+| `Machine Id` | The host DPF is waiting on. |
+| `State` | The host's managed state. NICo releases on its own only from `Ready`, so anything else here is a reason the machine is still waiting. It is not the whole story: a `Ready` host can still be held because one of its DPUs is not yet current, which this column does not show. |
+| `Waiting Since` | First time DPF was seen waiting on this machine. It survives repeat requests, so it measures the whole wait rather than the last observation. |
+| `Age` | How long that wait has run, rendered as `2d3h`, `4h5m`, or `6m`. |
+| `Instance` | Set when the host is currently allocated, so tenant impact is visible before any machine is named. |
+
+The history form prints `Requested At`, `Completed At` (or `outstanding`), and
+`Completed By`, newest first. `Completed By` reads `nico` for an automatic
+release, `operator` for one performed through this command, and `-` while the
+sync is still outstanding. It needs no paging, because the database caps the
+history retained per machine.
+
+#### `dpf service-sync release`
+
+```bash
+# One or more hosts, either after a single flag or by repeating it
+nico-admin-cli dpf service-sync release --machine-id <host-id> [<host-id> ...]
+
+# The hosts running these instances, accepting that their tenants are disrupted
+nico-admin-cli dpf service-sync release --instance-id <instance-id> [<instance-id> ...]
+```
+
+| Argument | Required | Notes |
+| -------- | :------: | ----- |
+| `--machine-id` (alias `--id`) | one of the two | One or more **host** machine IDs. DPU IDs are rejected, because the hold is per node and accepting one would silently widen the request from a single DPU to every DPU on its host. An assigned host is declined here; name its instance instead. |
+| `--instance-id` | one of the two | Releases the hosts currently running these instances even though they are assigned. Naming an instance is the acknowledgement that its tenant will be disrupted, and each consent covers only the instance named, so a host reallocated since is declined again. |
+
+The two selectors are mutually exclusive and exactly one is required. There is
+deliberately no fleet-wide form, and a single call releases at most **256**
+machines, so `list | xargs release` cannot reconstruct one. Batching stays
+possible, but only in visible, deliberate chunks.
+
+One row is printed per host, in request order, followed by a
+`N released, N deferred, N already handled, N failed` summary:
+
+| Result | Meaning |
+| --- | --- |
+| `released` | The hold was lifted and the pending sync completed. |
+| `not pending` | Nothing was owed for this machine. A repeat call reports this, which is what makes the command safe to run in a loop. |
+| `deferred: DPU awaits reprovisioning` | A DPU still differs from its `DPUDeployment`, so its OS is about to be replaced. The sync stays outstanding, and retrying achieves nothing until that DPU has been reprovisioned. |
+| `deferred: host assigned` | The host is assigned and was named by machine ID. Name its instance instead. The sync stays outstanding. |
+| `deferred: DPU could not be evaluated` | A DPU could not be checked at all, usually because Kubernetes was unreachable. Unlike an outdated DPU this is worth retrying. |
+| `failed` | The attempt failed part-way. The sync stays outstanding, so retry. |
+
+Among the per-host results, only a `failed` row makes the command exit
+non-zero. A deferral is a documented answer and `not pending` is what a repeat
+run reports, so neither breaks a drain-until-clean loop.
+
+A command-level failure also exits non-zero, but prints no result table at all.
+A batch over the cap, an unknown or DPU machine ID, a missing authorization, and
+an unreachable API all land here, because the request is rejected before any
+host is acted on. Treat an empty result table as "nothing was released", not as
+"nothing was owed".
+
+<Note>
+Releasing by hand relaxes the **host-state** requirement and nothing else. Every DPU is still checked against its `DPUDeployment` first, so a service update never lands on a DPU whose OS is about to be replaced. The whole request is also validated before anything is released, so a mistyped ID cannot leave half a batch released behind it.
+</Note>
+
+Both subcommands are operator-only. The underlying RPCs are granted to the admin
+CLI identity alone, because releasing a hold restarts DPU services and, for an
+assigned host, disrupts a tenant.
+
 ### Quick reference
 
 | Goal | Command |
@@ -1273,6 +1581,10 @@ configured versions onto the cluster.
 | List DPF state for all hosts | `nico-admin-cli dpf show` |
 | Snapshot DPF CRs for a host | `nico-admin-cli dpf snapshot <host-id>` |
 | Diff configured vs. deployed DPF service versions | `nico-admin-cli dpf service-version` |
+| List machines waiting on a DPUService rollout | `nico-admin-cli dpf service-sync list` |
+| Show one host's DPUService sync history | `nico-admin-cli dpf service-sync list --machine-id <host-id>` |
+| Release the DPUService hold for a host | `nico-admin-cli dpf service-sync release --machine-id <host-id>` |
+| Release it for an assigned host, disrupting its tenant | `nico-admin-cli dpf service-sync release --instance-id <instance-id>` |
 
 ---
 
@@ -1313,6 +1625,6 @@ The DTS (`doca-telemetry`) and `doca-hbn` services, and the DPF operator and
 operand images, are NVIDIA-published on NGC and **pull anonymously by default**
 — no build or registry needed. To mirror them into your own registry (air-gapped
 or one-registry setups), refer to
-[helm-prereqs → DPF images and registries](https://github.com/NVIDIA/infra-controller/blob/main/helm-prereqs/README.md#dpf-images-and-registries)
+[helm-prereqs → DPF images and registries](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf-images-and-registries)
 (`NICO_DPF_IMAGE_REPO`/`_TAG`/`_PULL_SECRET` for the operator image;
 `NICO_DPF_HELM_REPO_*` for the operand/service charts).

@@ -64,10 +64,12 @@ pub(in crate::extension_service) fn convert_extension_services_to_table(
         "Service ID",
         "Name",
         "Type",
+        "DPU Target",
         "Tenant Organization ID",
         "Version Counter",
         "Active Versions",
         "Description",
+        "Lifecycle State",
         "Created",
         "Updated",
     ]);
@@ -78,15 +80,35 @@ pub(in crate::extension_service) fn convert_extension_services_to_table(
             .unwrap_or("Unknown");
 
         let active_versions = service.active_versions.join(", ");
+        let lifecycle_state = service
+            .lifecycle_status
+            .as_ref()
+            .and_then(|status| {
+                serde_json::from_str::<serde_json::Value>(&status.state)
+                    .ok()
+                    .and_then(|state| state.get("state")?.as_str().map(str::to_string))
+                    .or_else(|| (!status.state.is_empty()).then(|| status.state.clone()))
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
 
         table.add_row(row![
             service.service_id,
             service.service_name,
             service_type_name,
+            match service
+                .dpu_target
+                .and_then(|value| ::rpc::forge::DpuExtensionServiceDpuTarget::try_from(value).ok())
+            {
+                Some(::rpc::forge::DpuExtensionServiceDpuTarget::Primary) => "primary",
+                Some(::rpc::forge::DpuExtensionServiceDpuTarget::AllActive) => "all-active",
+                Some(::rpc::forge::DpuExtensionServiceDpuTarget::All) => "all",
+                _ => "",
+            },
             service.tenant_organization_id,
             service.version_ctr,
             active_versions,
             service.description,
+            lifecycle_state,
             service.created,
             service.updated,
         ]);

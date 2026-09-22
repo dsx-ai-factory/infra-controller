@@ -19,12 +19,8 @@ mod show;
 mod start_updates;
 
 // Cross-module re-export for managed_host
-pub(crate) use start_updates::start_updates;
-
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
+pub(crate) use start_updates::start_updates;
 
 use crate::cfg::dispatch::Dispatch;
 

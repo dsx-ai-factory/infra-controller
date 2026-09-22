@@ -388,8 +388,9 @@ GetAllVpcPeering Retrieve all VPC peerings
 
 Get all VPC peerings.
 Tenant Admin can get all peerings where the tenant owns at least one VPC.
-Provider Admin can get all peerings in a site.
-User must have authorization role with `TENANT_ADMIN` or `PROVIDER_ADMIN` suffix.
+Provider Admin can retrieve all multi-Tenant VPC Peerings. It should be noted that
+only Provider Admins can create multi-Tenant Peerings. User must have authorization role
+with `TENANT_ADMIN` or `PROVIDER_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

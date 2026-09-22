@@ -767,10 +767,7 @@ func logGeneratedCommand(s *Session, info appcli.GeneratedCommandInfo, args []st
 
 func quoteShellCommandArgument(value string) string {
 	if value != "" && strings.IndexFunc(value, func(char rune) bool {
-		return (char < 'a' || char > 'z') &&
-			(char < 'A' || char > 'Z') &&
-			(char < '0' || char > '9') &&
-			!strings.ContainsRune("_@%+=:,./-", char)
+		return !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-", char)
 	}) == -1 {
 		return value
 	}

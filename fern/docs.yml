@@ -12,8 +12,11 @@ instances:
 
 title: NVIDIA Infra Controller
 
-# metadata:
-#   canonical-host: "docs.nvidia.com/infra-controller"
+announcement:
+  message: "🔔 Infra Controller's GitHub repository has moved to [dsx-ai-factory/infra-controller](https://github.com/dsx-ai-factory/infra-controller). Existing links redirect; update integrations that reference NVIDIA/infra-controller."
+
+metadata:
+  canonical-host: "docs.nvidia.com/infra-controller"
 
 check:
   rules:
@@ -21,7 +24,7 @@ check:
 
 navbar-links:
   - type: github
-    value: https://github.com/NVIDIA/infra-controller
+    value: https://github.com/dsx-ai-factory/infra-controller
 
 products:
   - display-name: NVIDIA Infra Controller
@@ -32,6 +35,8 @@ products:
     #     path: ../docs/index.yml
 
 redirects:
+  - source: "/infra-controller/documentation/operations-day-2/firmware-updates/flow-operation-rules"
+    destination: "/infra-controller/documentation/operations-day-2/flow-operations/operation-rules"
   - source: "/infra-controller/index.html"
     destination: "/infra-controller/"
   - source: "/infra-controller/dev/index.html"

@@ -15,9 +15,9 @@
  * limitations under the License.
  */
 
-//! Set a machine's boot interface by promoting the chosen interface to the
-//! machine's primary -- the designation `pick_boot_interface` keys on. A thin
-//! front for the same `SetPrimaryInterface` RPC behind
+//! Set a managed host's boot interface by promoting the chosen interface to
+//! the host's primary -- the designation `pick_boot_interface` keys on. A
+//! thin front for the same `SetPrimaryInterface` RPC behind
 //! `managed-host set-primary-interface`: the server commits the selected row
 //! and desired target together, then machine-controller converges Redfish.
 //! The only client-side work is resolving an operator-entered MAC to its
@@ -35,7 +35,9 @@ pub(super) async fn handle_set(args: Args, api_client: &ApiClient) -> CarbideCli
     let interface_id = match args.interface {
         InterfaceSelector::Id(id) => id,
         InterfaceSelector::Mac(mac) => {
-            let response = api_client.get_machine_boot_interfaces(args.machine).await?;
+            let response = api_client
+                .get_machine_boot_interfaces(args.machine.into())
+                .await?;
             resolve_mac_to_interface_id(&response, mac)?
         }
     };

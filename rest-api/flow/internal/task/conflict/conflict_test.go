@@ -18,6 +18,10 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
+func makeOp(opType taskcommon.TaskType, code string) operation.Wrapper {
+	return operation.Wrapper{Type: opType, Code: code}
+}
+
 // makeTask builds a minimal Task for conflict tests.
 // Component UUIDs, when provided, are stored under ComponentTypeCompute.
 // Pass no UUIDs to get a task with nil ComponentsByType (old-task fallback).
@@ -459,6 +463,33 @@ func TestBuiltinRule(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			// decommission uses a wildcard B entry so it blocks every
+			// operation type, including ones not explicitly listed in the
+			// rule (such as inject_expectation).
+			name: "decommission blocks unlisted operation type (wildcard B)",
+			incoming: makeTask(
+				rackID, taskcommon.TaskTypeInjectExpectation, "inject",
+			),
+			activeTasks: []*taskdef.Task{
+				makeTask(rackID,
+					taskcommon.TaskTypeDecommission, "decommission"),
+			},
+			expected: true,
+		},
+		{
+			// Symmetric: an incoming decommission blocks an active unlisted
+			// operation type via the wildcard.
+			name: "unlisted operation type blocked by incoming decommission (wildcard B symmetric)",
+			incoming: makeTask(
+				rackID, taskcommon.TaskTypeDecommission, "decommission",
+			),
+			activeTasks: []*taskdef.Task{
+				makeTask(rackID,
+					taskcommon.TaskTypeInjectExpectation, "inject"),
+			},
+			expected: true,
+		},
 		// --- Component-type-specific entries ---
 		{
 			// PowerShelf power cuts rack power → blocks any power op
@@ -679,6 +710,121 @@ func TestResolver_HasConflict(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, tc.expectedValue, hasConflict)
 			}
+		})
+	}
+}
+
+func TestResolver_HasScheduleConflict(t *testing.T) {
+	// HasScheduleConflict is a coarse-grained check that operates on
+	// operation.Wrapper values (type + code) without component-level detail.
+	// It uses the same builtinRule ConflictingPairs as HasConflict, but
+	// skips component-type and component-UUID checks.
+
+	tests := []struct {
+		name     string
+		incoming operation.Wrapper
+		existing []operation.Wrapper
+		expected bool
+	}{
+		{
+			name:     "no existing schedules — no conflict",
+			incoming: makeOp(taskcommon.TaskTypePowerControl, "power_on"),
+			existing: nil,
+			expected: false,
+		},
+		{
+			name:     "empty existing schedules — no conflict",
+			incoming: makeOp(taskcommon.TaskTypePowerControl, "power_on"),
+			existing: []operation.Wrapper{},
+			expected: false,
+		},
+		{
+			// bring_up has wildcard B so it conflicts with every operation
+			// type, including power_control.
+			name:     "bring_up conflicts with power",
+			incoming: makeOp(taskcommon.TaskTypePowerControl, "power_on"),
+			existing: []operation.Wrapper{
+				makeOp(taskcommon.TaskTypeBringUp, "bring_up"),
+			},
+			expected: true,
+		},
+		{
+			// Symmetric: incoming bring_up conflicts with active firmware.
+			name:     "bring_up conflicts with firmware (symmetric)",
+			incoming: makeOp(taskcommon.TaskTypeBringUp, "bring_up"),
+			existing: []operation.Wrapper{
+				makeOp(taskcommon.TaskTypeFirmwareControl, "upgrade"),
+			},
+			expected: true,
+		},
+		{
+			// decommission has wildcard B so it conflicts with every
+			// operation type.
+			name:     "decommission conflicts with firmware",
+			incoming: makeOp(taskcommon.TaskTypeDecommission, "decommission"),
+			existing: []operation.Wrapper{
+				makeOp(taskcommon.TaskTypeFirmwareControl, "upgrade"),
+			},
+			expected: true,
+		},
+		{
+			// decommission wildcard covers operation types not explicitly
+			// listed in the rule (such as inject_expectation).
+			name:     "decommission conflicts with unlisted operation type (wildcard B)",
+			incoming: makeOp(taskcommon.TaskTypeInjectExpectation, "inject"),
+			existing: []operation.Wrapper{
+				makeOp(taskcommon.TaskTypeDecommission, "decommission"),
+			},
+			expected: true,
+		},
+		{
+			// inject_expectation appears in no ConflictingPairs entry, so it
+			// does not conflict with power or firmware when those are not
+			// covered by a wildcard-B rule it sits on the other side of.
+			name:     "inject_expectation does not conflict with power",
+			incoming: makeOp(taskcommon.TaskTypeInjectExpectation, "inject"),
+			existing: []operation.Wrapper{
+				makeOp(taskcommon.TaskTypePowerControl, "power_on"),
+			},
+			expected: false,
+		},
+		{
+			name:     "inject_expectation does not conflict with firmware",
+			incoming: makeOp(taskcommon.TaskTypeInjectExpectation, "inject"),
+			existing: []operation.Wrapper{
+				makeOp(taskcommon.TaskTypeFirmwareControl, "upgrade"),
+			},
+			expected: false,
+		},
+		{
+			// Two inject_expectation schedules are always compatible.
+			name:     "inject_expectation does not conflict with itself",
+			incoming: makeOp(taskcommon.TaskTypeInjectExpectation, "inject"),
+			existing: []operation.Wrapper{
+				makeOp(taskcommon.TaskTypeInjectExpectation, "inject"),
+			},
+			expected: false,
+		},
+		{
+			// Only one of the existing schedules needs to conflict.
+			name:     "conflict detected when one of multiple existing schedules matches",
+			incoming: makeOp(taskcommon.TaskTypePowerControl, "power_on"),
+			existing: []operation.Wrapper{
+				makeOp(taskcommon.TaskTypeInjectExpectation, "inject"),
+				makeOp(taskcommon.TaskTypeBringUp, "bring_up"),
+			},
+			expected: true,
+		},
+	}
+
+	resolver := NewResolver(newMockStore())
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(
+				t, tc.expected,
+				resolver.HasScheduleConflict(tc.incoming, tc.existing),
+			)
 		})
 	}
 }

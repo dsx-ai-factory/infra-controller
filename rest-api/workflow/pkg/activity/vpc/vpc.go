@@ -139,6 +139,10 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 			vpc = existingVpcIDMap[controllerVpcIDStr]
 		}
 
+		// A VPC this run creates or undeletes carries the write time of that write, which the
+		// staleness gate below would read as a concurrent edit and defer to.
+		createdOrRestoredFromSite := false
+
 		// No active REST row for this inventory VPC: create one or undelete a soft-deleted match,
 		// then fall through so the main inventory loop applies Site-reported field updates.
 		if vpc == nil {
@@ -146,6 +150,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 			if vpc == nil {
 				continue
 			}
+			createdOrRestoredFromSite = true
 
 			// Keep in-memory maps in sync so later inventory entries and missing-on-Site detection see this VPC.
 			existingVpcIDMap[vpc.ID.String()] = vpc
@@ -198,6 +203,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 		reportedRoutingProfile := reportedVpc.RoutingProfile
 		reportedRoutingProfileOverrides := reportedVpc.RoutingProfileOverrides
 		reportedEffectiveRoutingProfile := reportedVpc.EffectiveRoutingProfile
+		reportedPowerResourceGroup := reportedVpc.PowerResourceGroup
 		reportedNSGID := reportedVpc.NetworkSecurityGroupID
 
 		needsUpdate := isMissingOnSite != nil ||
@@ -207,6 +213,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 			!util.PtrsEqual(vpc.RoutingProfile, reportedRoutingProfile) ||
 			!reflect.DeepEqual(vpc.RoutingProfileOverrides, reportedRoutingProfileOverrides) ||
 			!reflect.DeepEqual(vpc.EffectiveRoutingProfile, reportedEffectiveRoutingProfile) ||
+			!util.PtrsEqual(vpc.PowerResourceGroup, reportedPowerResourceGroup) ||
 			!util.PtrsEqual(vpc.NetworkSecurityGroupID, reportedNSGID) ||
 			!vpc.NetworkSecurityGroupPropagationDetails.Equal(sitePropagationStatus) ||
 			// Changing VNI isn't allowed after creation, and it should never go back to nil - that would be a bug.
@@ -214,7 +221,27 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 			// Status should never go back to nil - that would be a bug.
 			(controllerActiveVni != nil && !util.PtrsEqual(vpc.ActiveVni, controllerActiveVni))
 
+		// A row written since the Site collected this inventory holds changes the snapshot cannot
+		// know about, including any made through the API, so the clears and the write below would
+		// lose those edits. The Site-owned fields they carry are reported again next run.
+		if needsUpdate && !createdOrRestoredFromSite && site.IsTimeWithinStaleInventoryThreshold(vpc.Updated) {
+			slogger.Info().Msg("not updating VPC yet because it changed more recently than the inventory interval")
+
+			continue
+		}
+
 		if needsUpdate {
+			if vpc.PowerResourceGroup != nil && reportedPowerResourceGroup == nil {
+				vpc, err = vpcDAO.Clear(ctx, nil, cdbm.VpcClearInput{
+					VpcID:              vpc.ID,
+					PowerResourceGroup: true,
+				})
+				if err != nil {
+					slogger.Error().Err(err).Msg("failed to clear PowerResourceGroup for VPC in DB")
+					continue
+				}
+			}
+
 			// A nil Update field is ignored, so explicitly clear a stale NSG association.
 			if vpc.NetworkSecurityGroupID != nil && reportedNSGID == nil {
 				vpc, err = vpcDAO.Clear(ctx, nil, cdbm.VpcClearInput{
@@ -286,6 +313,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 				RoutingProfile:                         reportedRoutingProfile,
 				RoutingProfileOverrides:                reportedRoutingProfileOverrides,
 				EffectiveRoutingProfile:                reportedEffectiveRoutingProfile,
+				PowerResourceGroup:                     reportedPowerResourceGroup,
 				ControllerVpcID:                        controllerVpcID,
 				IsMissingOnSite:                        isMissingOnSite,
 				ActiveVni:                              controllerActiveVni,
@@ -388,7 +416,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 			}
 		} else if vpc.ControllerVpcID != nil {
 			// Was this created within inventory receipt interval? If so, we may be processing an older inventory
-			if time.Since(vpc.Created) < cwutil.InventoryReceiptInterval {
+			if site.IsTimeWithinStaleInventoryThreshold(vpc.Created) {
 				continue
 			}
 
@@ -477,6 +505,14 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 				logger.Warn().Msg(fmt.Sprintf("unable to create VPC found on Site: tenant organization differs in REST cache and Site record %s", reportedVpc.Org))
 				return nil, nil
 			}
+			// Deleted records when the delete happened, so a delete newer than the interval can
+			// postdate this inventory. Undeleting then would revive a VPC the snapshot never saw
+			// removed. A later inventory undeletes it if the Site still reports it.
+			if site.IsTimeWithinStaleInventoryThreshold(*existingVpc.Deleted) {
+				logger.Info().Msgf("not undeleting VPC %s yet because it was deleted more recently than the inventory interval", vpcID)
+				return nil, nil
+			}
+
 			// Undelete only; UpdateVpcsInDB applies Site-reported field updates.
 			restored, clearErr := vpcDAO.Clear(ctx, tx, cdbm.VpcClearInput{VpcID: existingVpc.ID, Deleted: true})
 			if clearErr != nil {
@@ -676,7 +712,7 @@ func NewManageVpc(dbSession *cdb.Session, siteClientPool *sc.ClientPool, tc clie
 type ManageVpcLifecycleMetrics struct {
 	dbSession            *cdb.Session
 	statusTransitionTime *prometheus.GaugeVec
-	siteIDNameMap        map[uuid.UUID]string
+	siteNames            *cwm.SiteNameCache
 }
 
 // RecordVpcStatusTransitionMetrics is a Temporal activity that records duration of important status transitions for VPCs
@@ -685,17 +721,10 @@ func (mvlm ManageVpcLifecycleMetrics) RecordVpcStatusTransitionMetrics(ctx conte
 
 	logger.Info().Msg("starting activity")
 
-	// Cache site name to avoid repeated DB call
-	siteName, ok := mvlm.siteIDNameMap[siteID]
-	if !ok {
-		siteDAO := cdbm.NewSiteDAO(mvlm.dbSession)
-		site, err := siteDAO.GetByID(context.Background(), nil, siteID, nil, false)
-		if err != nil {
-			logger.Error().Err(err).Str("Site ID", siteID.String()).Msg("failed to retrieve Site from DB")
-			return err
-		}
-		siteName = site.Name
-		mvlm.siteIDNameMap[siteID] = siteName
+	siteName, err := mvlm.siteNames.Get(ctx, mvlm.dbSession, siteID)
+	if err != nil {
+		logger.Error().Err(err).Str("Site ID", siteID.String()).Msg("failed to retrieve Site from DB")
+		return err
 	}
 
 	logger.Info().Int("EventCount", len(vpcLifecycleEvents)).Str("Site Name", siteName).Msg("processing vpc lifecycle events")
@@ -730,7 +759,7 @@ func (mvlm ManageVpcLifecycleMetrics) RecordVpcStatusTransitionMetrics(ctx conte
 				// Calculate duration from Deleting status to deletion time
 				duration := event.Deleted.Sub(deletingStatusDetail.Created)
 				// Note: VPC doesn't have VpcStatusDeleted constant, so we use string "Deleted"
-				mvlm.statusTransitionTime.WithLabelValues(siteName, cwm.InventoryOperationTypeDelete, cdbm.VpcStatusDeleting, "Deleted").Set(duration.Seconds())
+				mvlm.statusTransitionTime.WithLabelValues(siteName, siteID.String(), cwm.InventoryOperationTypeDelete, cdbm.VpcStatusDeleting, "Deleted").Set(duration.Seconds())
 				metricsRecorded++
 				logger.Info().
 					Str("VPC ID", event.ObjectID.String()).
@@ -751,18 +780,18 @@ func (mvlm ManageVpcLifecycleMetrics) RecordVpcStatusTransitionMetrics(ctx conte
 }
 
 // NewManageVpcLifecycleMetrics returns a new ManageVpcLifecycleMetrics activity
-func NewManageVpcLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb.Session) ManageVpcLifecycleMetrics {
+func NewManageVpcLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb.Session, namespace string) ManageVpcLifecycleMetrics {
 	lifecycleMetrics := ManageVpcLifecycleMetrics{
 		dbSession: dbSession,
 		statusTransitionTime: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: cwm.MetricsNamespace,
+				Namespace: namespace,
 				Name:      "vpc_operation_latency_seconds",
 				Help:      "Current latency of vpc operations",
 			},
-			[]string{"site", "operation_type", "from_status", "to_status"}),
+			[]string{"site", "site_id", "operation_type", "from_status", "to_status"}),
 
-		siteIDNameMap: map[uuid.UUID]string{},
+		siteNames: cwm.NewSiteNameCache(),
 	}
 	reg.MustRegister(lifecycleMetrics.statusTransitionTime)
 

@@ -550,6 +550,7 @@ func upgradeFirmwareOperationFrom(
 		RuleID:                 UUIDStringFrom(upgrade.GetRuleId()),
 		SubTargets:             append([]string(nil), upgrade.GetSubTargets()...),
 		OverrideReadinessCheck: upgrade.GetOverrideReadinessCheck(),
+		OverrideVersionCheck:   upgrade.GetOverrideVersionCheck(),
 	}
 	if upgrade.GetStartTime() != nil {
 		info.StartTime = upgrade.GetStartTime().AsTime().Unix()
@@ -960,6 +961,7 @@ func operationTo(
 			RuleId:                 optionalUUIDStringTo(info.RuleID),
 			SubTargets:             append([]string(nil), info.SubTargets...),
 			OverrideReadinessCheck: info.OverrideReadinessCheck,
+			OverrideVersionCheck:   info.OverrideVersionCheck,
 		}
 		if info.TargetVersion != "" {
 			targetVersion := info.TargetVersion

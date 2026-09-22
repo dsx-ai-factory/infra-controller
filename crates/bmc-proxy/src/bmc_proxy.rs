@@ -16,7 +16,6 @@
  */
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::net::{AddrParseError, IpAddr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -40,12 +39,12 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use mac_address::{MacAddress, MacParseError};
+use moka::future::Cache as MokaCache;
 use rpc::forge;
 use rpc::forge::find_bmc_ips_request::LookupBy;
 use rpc::forge_api_client::ForgeApiClient;
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::{RootCertStore, ServerConfig};
@@ -58,11 +57,31 @@ use tracing::Instrument;
 use crate::config::{AuthConfig, TlsConfig};
 use crate::metrics::{
     AuthContextMissing, MethodLabel, PrincipalAllowListDenied, RequestAclDenied,
-    UpstreamRequestCompleted, UpstreamStatus,
+    UpstreamAuthRetried, UpstreamRequestCompleted, UpstreamStatus,
 };
+use crate::span_isolation::SpanIsolationMiddleware;
 
 const TLS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
-const MAX_BODY_SIZE: usize = 8 * 1024 * 1024; // 8MiB body size limit (matches nginx ingress controller defaults)
+/// Redfish's session token header, per DMTF. Applied on egress and stripped
+/// on ingress by [`copy_request_headers`].
+const REDFISH_AUTH_TOKEN_HEADER: &str = "X-Auth-Token";
+/// Bodies up to this size are buffered and forwarded with the exact framing
+/// BMCs have always seen. Anything larger -- Redfish multipart firmware
+/// pushes, mainly -- is streamed through instead of being rejected, which the
+/// old 8 MiB hard cap did. (8 MiB matches nginx ingress controller defaults.)
+const MAX_BUFFERED_BODY_SIZE: usize = 8 * 1024 * 1024;
+/// Total-request budget for ordinary exchanges; the shared client's default
+/// and the base that streamed-upload timeouts build on.
+const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Floor transfer rate used to scale a streamed upload's timeout from its
+/// declared size, mirroring libredfish's firmware-upload heuristic. The
+/// shared client's 60-second default would abort any large image mid-push.
+const MIN_UPLOAD_BANDWIDTH_BYTES_PER_SEC: u64 = 10_000;
+/// Ceiling on a streamed upload's scaled timeout. The declared length is
+/// caller-supplied, so without a cap a lying `Content-Length` would let a
+/// stalled request pin a proxy task and a BMC connection indefinitely. Four
+/// hours covers any real firmware image at the floor rate.
+const MAX_UPLOAD_TIMEOUT: Duration = Duration::from_secs(4 * 60 * 60);
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum BmcProxyError {
@@ -89,13 +108,54 @@ struct BmcProxyState {
     config: Arc<crate::Config>,
     api_client: ForgeApiClient,
     credential_cache: CredentialCache,
-    client_cache: HttpClientCache,
+    /// One client for every upstream: reqwest pools connections per host
+    /// internally, so per-BMC clients bought nothing and grew without bound.
+    http_client: reqwest_middleware::ClientWithMiddleware,
     ip_cache: LookupToIpCache,
 }
 
-type CredentialCache = Arc<Mutex<HashMap<IpAddr, BmcCredentials>>>;
-type HttpClientCache = Arc<Mutex<HashMap<IpAddr, reqwest_middleware::ClientWithMiddleware>>>;
-type LookupToIpCache = Arc<Mutex<HashMap<LookupBy, IpAddr>>>;
+/// Cached BMC credentials by IP. Correctness comes from the 401/403 eviction
+/// in [`proxy_request`]. Expiry is idle-based, not lifetime-based: an entry
+/// a caller keeps using stays served even through a long nico-api outage
+/// (the availability the pre-cache-bound proxy provided), while an entry for
+/// a machine that stopped existing falls out once nothing asks for it. The
+/// capacity bounds memory.
+type CredentialCache = MokaCache<IpAddr, BmcCredentials>;
+/// Resolved `Forwarded: mac=`/`serial=` targets. A BMC that moves to a new
+/// IP produces connection errors, not 401s, so no request-path signal evicts
+/// these -- the TTL is what heals a stale resolution.
+type LookupToIpCache = MokaCache<LookupBy, IpAddr>;
+
+/// How long a resolved BMC IP may be served before the API is asked again.
+const IP_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+/// How long unused cached credentials linger before falling out.
+const CREDENTIAL_CACHE_IDLE_TTL: Duration = Duration::from_secs(60 * 60);
+/// Upper bound on cached entries; sized far above any realistic BMC fleet.
+const CACHE_MAX_ENTRIES: u64 = 100_000;
+
+fn bounded_cache<K, V>(ttl: Duration) -> MokaCache<K, V>
+where
+    K: std::hash::Hash + Eq + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    MokaCache::builder()
+        .time_to_live(ttl)
+        .max_capacity(CACHE_MAX_ENTRIES)
+        .build()
+}
+
+/// Like [`bounded_cache`], but expiry counts from last use rather than from
+/// insertion, so entries under active traffic never expire.
+fn idle_bounded_cache<K, V>(idle_ttl: Duration) -> MokaCache<K, V>
+where
+    K: std::hash::Hash + Eq + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    MokaCache::builder()
+        .time_to_idle(idle_ttl)
+        .max_capacity(CACHE_MAX_ENTRIES)
+        .build()
+}
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum ForwardedTarget<'a> {
@@ -174,9 +234,9 @@ pub(crate) async fn start(
     let state = BmcProxyState {
         config,
         api_client,
-        credential_cache: Default::default(),
-        client_cache: Default::default(),
-        ip_cache: Default::default(),
+        credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
+        http_client: build_http_client()?,
+        ip_cache: bounded_cache(IP_CACHE_TTL),
     };
 
     let app = Router::new()
@@ -663,25 +723,153 @@ async fn proxy_request_inner(
 
     let path_and_query = parts
         .uri
+        .clone()
         .into_parts()
         .path_and_query
         .ok_or_else(|| error_response((StatusCode::BAD_REQUEST, "missing path").into()))?;
 
+    // Buffer a replayable body once so a stale-credential rejection can be
+    // retried; streamed (large) bodies are sent as-is and never replayed.
+    let mut upstream_body = if method_supports_body(&parts.method) {
+        UpstreamBody::prepare(&parts.headers, body)
+            .await
+            .map_err(|e| error_response((StatusCode::BAD_REQUEST, e.to_string()).into()))?
+    } else {
+        UpstreamBody::None
+    };
+
+    let mut upstream_response = send_upstream(
+        &state,
+        target_ip,
+        &parts,
+        path_and_query.clone(),
+        &mut upstream_body,
+    )
+    .await?;
+
+    // A BMC that rejects the credential the proxy cached (an expired Redfish
+    // session, a rotated password) gets one replay with freshly resolved
+    // credentials, so callers never see a stale-session 401. Only replayable
+    // bodies qualify; a streamed body was consumed by the first attempt.
+    let rejected = |status: reqwest::StatusCode| {
+        status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+    };
+    if rejected(upstream_response.status()) && upstream_body.is_replayable() {
+        evict_cached_credentials(target_ip, &state.credential_cache).await;
+        emit(UpstreamAuthRetried {
+            method: MethodLabel::from(&parts.method),
+            bmc_ip_address: target_ip.to_string(),
+        });
+        upstream_response = send_upstream(
+            &state,
+            target_ip,
+            &parts,
+            path_and_query,
+            &mut upstream_body,
+        )
+        .await?;
+    }
+
+    let status = upstream_response.status();
+    let headers = upstream_response.headers().clone();
+    let body = Body::from_stream(upstream_response.bytes_stream());
+
+    if rejected(status) {
+        evict_cached_credentials(target_ip, &state.credential_cache).await;
+    }
+
+    Ok(build_response(status, &headers, body))
+}
+
+/// The caller's request body, in a form the proxy can attach to an upstream
+/// request -- and, when buffered, attach again for one retry.
+enum UpstreamBody {
+    None,
+    /// Small or unsized bodies, buffered up to [`MAX_BUFFERED_BODY_SIZE`].
+    Buffered(bytes::Bytes),
+    /// A large body with a declared length is streamed straight through and
+    /// can be sent only once; `None` once consumed.
+    Streamed {
+        body: Option<Body>,
+        declared_length: u64,
+    },
+}
+
+impl UpstreamBody {
+    async fn prepare(headers: &HeaderMap, body: Body) -> Result<Self, axum::Error> {
+        let declared_length = headers
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+        match declared_length {
+            Some(length) if length > MAX_BUFFERED_BODY_SIZE as u64 => Ok(Self::Streamed {
+                body: Some(body),
+                declared_length: length,
+            }),
+            _ => Ok(Self::Buffered(
+                axum::body::to_bytes(body, MAX_BUFFERED_BODY_SIZE).await?,
+            )),
+        }
+    }
+
+    fn is_replayable(&self) -> bool {
+        matches!(self, Self::None | Self::Buffered(_))
+    }
+
+    /// Attaches the body to `request`. A streamed body is handed over on the
+    /// first call; a later call finds it consumed and fails.
+    fn attach(
+        &mut self,
+        request: reqwest_middleware::RequestBuilder,
+    ) -> Result<reqwest_middleware::RequestBuilder, ProxyError> {
+        match self {
+            Self::None => Ok(request),
+            Self::Buffered(bytes) => Ok(request.body(bytes.clone())),
+            Self::Streamed {
+                body,
+                declared_length,
+            } => {
+                // A streamed body cannot be replayed, so reqwest's redirect
+                // layer forwards a BMC 307/308 to the caller as-is instead of
+                // following it the way buffered requests do. Callers pushing
+                // firmware should use the canonical UpdateService URI rather
+                // than rely on redirects.
+                let body = body.take().ok_or_else(|| {
+                    ProxyError::from((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "streamed request body already consumed".to_string(),
+                    ))
+                })?;
+                Ok(request
+                    .header(axum::http::header::CONTENT_LENGTH, *declared_length)
+                    .timeout(sized_upload_timeout(*declared_length))
+                    .body(reqwest::Body::wrap_stream(body.into_data_stream())))
+            }
+        }
+    }
+}
+
+/// One forwarding attempt: resolve credentials for `target_ip` (cached or
+/// freshly minted), build the upstream request from the caller's `parts`,
+/// attach the body, and send. Records the per-attempt upstream metric.
+async fn send_upstream(
+    state: &BmcProxyState,
+    target_ip: IpAddr,
+    parts: &http::request::Parts,
+    path_and_query: http::uri::PathAndQuery,
+    upstream_body: &mut UpstreamBody,
+) -> Result<reqwest::Response, Response<Body>> {
     let mut bmc_client_info = create_client(
         target_ip,
         &state.api_client,
         &state.credential_cache,
-        &state.client_cache,
+        state.http_client.clone(),
         &state.config.bmc_proxy,
     )
     .await
     .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
 
     copy_request_headers(&parts.headers, &mut bmc_client_info.header_map);
-
-    let body = axum::body::to_bytes(body, MAX_BODY_SIZE)
-        .await
-        .map_err(|e| error_response((StatusCode::BAD_REQUEST, e.to_string()).into()))?;
 
     let mut upstream_uri_parts = bmc_client_info.base_upstream_uri.into_parts();
     upstream_uri_parts.path_and_query = Some(path_and_query);
@@ -692,16 +880,15 @@ async fn proxy_request_inner(
         .http_client
         .request(parts.method.clone(), upstream_uri.to_string())
         .headers(bmc_client_info.header_map);
-    let mut upstream_request = bmc_client_info
+    let upstream_request = bmc_client_info
         .credentials
         .apply_to_request(upstream_request)
         .map_err(|e| {
             error_response((StatusCode::BAD_GATEWAY, format!("invalid credentials: {e}")).into())
         })?;
-
-    if method_supports_body(&parts.method) {
-        upstream_request = upstream_request.body(body);
-    }
+    let upstream_request = upstream_body
+        .attach(upstream_request)
+        .map_err(error_response)?;
 
     let started = Instant::now();
     let upstream_result = upstream_request.send().await;
@@ -710,18 +897,7 @@ async fn proxy_request_inner(
         status: UpstreamStatus::from_result(&upstream_result),
         took: started.elapsed(),
     });
-    let upstream_response = upstream_result
-        .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
-
-    let status = upstream_response.status();
-    let headers = upstream_response.headers().clone();
-    let body = Body::from_stream(upstream_response.bytes_stream());
-
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        evict_cached_credentials(target_ip, &state.credential_cache).await;
-    }
-
-    Ok(build_response(status, &headers, body))
+    upstream_result.map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))
 }
 
 async fn ip_for_forwarded_target(
@@ -737,8 +913,8 @@ async fn ip_for_forwarded_target(
         ForwardedTarget::Serial(serial) => LookupBy::Serial(serial.to_string()),
     };
 
-    if let Some(ip) = state.ip_cache.lock().await.get(&lookup_by) {
-        return Ok(Some(*ip));
+    if let Some(ip) = state.ip_cache.get(&lookup_by).await {
+        return Ok(Some(ip));
     }
 
     let lookup_by_str = match &lookup_by {
@@ -793,7 +969,7 @@ async fn ip_for_forwarded_target(
     };
 
     if let Some(ip) = ip {
-        state.ip_cache.lock().await.insert(lookup_by, ip);
+        state.ip_cache.insert(lookup_by, ip).await;
     }
     Ok(ip)
 }
@@ -873,6 +1049,7 @@ fn copy_request_headers(source: &HeaderMap, dest: &mut HeaderMap) {
             || is_propagated_header(name.as_str())
             || *name == axum::http::header::HOST
             || *name == axum::http::header::AUTHORIZATION
+            || name.as_str().eq_ignore_ascii_case(REDFISH_AUTH_TOKEN_HEADER)
             || name.as_str().eq_ignore_ascii_case("forwarded")
             || *name == axum::http::header::CONTENT_LENGTH
         {
@@ -886,6 +1063,14 @@ fn method_supports_body(method: &Method) -> bool {
     // Redfish services can accept DELETE payloads, so only the methods this
     // proxy treats as bodyless are excluded.
     !matches!(*method, Method::GET | Method::HEAD)
+}
+
+/// Time allowed for a streamed upload of `length` bytes: the ordinary
+/// request budget plus the transfer itself at worst-case OOB bandwidth,
+/// bounded by [`MAX_UPLOAD_TIMEOUT`] because `length` is caller-supplied.
+fn sized_upload_timeout(length: u64) -> Duration {
+    (UPSTREAM_REQUEST_TIMEOUT + Duration::from_secs(length / MIN_UPLOAD_BANDWIDTH_BYTES_PER_SEC))
+        .min(MAX_UPLOAD_TIMEOUT)
 }
 
 fn is_hop_by_hop_header(name: &str) -> bool {
@@ -956,6 +1141,7 @@ fn error_response(error: ProxyError) -> Response<Body> {
     (error.status, error.message).into_response()
 }
 
+#[derive(Debug)]
 struct ProxyError {
     status: StatusCode,
     message: String,
@@ -998,9 +1184,10 @@ impl BmcCredentials {
             Self::UsernamePassword { username, password } => {
                 Ok(request.basic_auth(username, Some(password)))
             }
-            Self::SessionToken { token } => {
-                Ok(request.header("X-Auth-Token", http::HeaderValue::from_str(&token)?))
-            }
+            Self::SessionToken { token } => Ok(request.header(
+                REDFISH_AUTH_TOKEN_HEADER,
+                http::HeaderValue::from_str(&token)?,
+            )),
         }
     }
 }
@@ -1054,7 +1241,7 @@ async fn create_client(
     ip: IpAddr,
     api_client: &ForgeApiClient,
     credential_cache: &CredentialCache,
-    client_cache: &HttpClientCache,
+    http_client: reqwest_middleware::ClientWithMiddleware,
     bmc_proxy: &Option<HostPortPair>,
 ) -> Result<BmcClientInfo, BmcProxyError> {
     // Bracket the BMC's own IP off its typed variant (IPv4 renders unchanged),
@@ -1077,8 +1264,6 @@ async fn create_client(
     if add_custom_header {
         header_map.insert("forwarded", format!("host={ip}").parse().unwrap());
     }
-    let http_client = get_http_client(ip, client_cache).await?;
-
     let credentials = get_bmc_credentials(ip, api_client, credential_cache).await?;
 
     let base_authority = build_authority(host, port);
@@ -1105,7 +1290,7 @@ async fn get_bmc_credentials(
     api_client: &ForgeApiClient,
     credential_cache: &CredentialCache,
 ) -> Result<BmcCredentials, BmcProxyError> {
-    if let Some(credentials) = credential_cache.lock().await.get(&ip).cloned() {
+    if let Some(credentials) = credential_cache.get(&ip).await {
         tracing::debug!(bmc_ip_address = %ip, "Using cached BMC credentials");
         return Ok(credentials);
     }
@@ -1129,10 +1314,7 @@ async fn get_bmc_credentials(
         .ok_or(BmcProxyError::NoCredentials(ip))?
         .try_into()?;
 
-    credential_cache
-        .lock()
-        .await
-        .insert(ip, credentials.clone());
+    credential_cache.insert(ip, credentials.clone()).await;
     Ok(credentials)
 }
 
@@ -1141,7 +1323,7 @@ fn build_http_client() -> Result<reqwest_middleware::ClientWithMiddleware, BmcPr
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::limited(5))
         .connect_timeout(std::time::Duration::from_secs(5)) // Limit connections to 5 seconds
-        .timeout(std::time::Duration::from_secs(60)) // Limit the overall request to 60 seconds
+        .timeout(UPSTREAM_REQUEST_TIMEOUT) // Limit the overall request; uploads override per request
         .pool_max_idle_per_host(4)
         .build()
         .map_err(|err| {
@@ -1150,27 +1332,12 @@ fn build_http_client() -> Result<reqwest_middleware::ClientWithMiddleware, BmcPr
         })?;
     Ok(reqwest_middleware::ClientBuilder::new(client)
         .with(reqwest_tracing::TracingMiddleware::default())
+        .with(SpanIsolationMiddleware)
         .build())
 }
 
-async fn get_http_client(
-    ip: IpAddr,
-    client_cache: &HttpClientCache,
-) -> Result<reqwest_middleware::ClientWithMiddleware, BmcProxyError> {
-    let mut client_cache = client_cache.lock().await;
-    if let Some(client) = client_cache.get(&ip) {
-        tracing::debug!(bmc_ip_address = %ip, "Using cached BMC HTTP client");
-        return Ok(client.clone());
-    }
-
-    tracing::debug!(bmc_ip_address = %ip, "Creating cached BMC HTTP client");
-    let client = build_http_client()?;
-    client_cache.insert(ip, client.clone());
-    Ok(client)
-}
-
 async fn evict_cached_credentials(ip: IpAddr, credential_cache: &CredentialCache) {
-    if credential_cache.lock().await.remove(&ip).is_some() {
+    if credential_cache.remove(&ip).await.is_some() {
         tracing::info!(bmc_ip_address = %ip, "Evicted cached BMC credentials after upstream auth failure");
     }
 }
@@ -1183,6 +1350,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::str::FromStr;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use axum::body::Body;
     use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
@@ -1201,18 +1369,18 @@ mod tests {
     use rpc::forge::find_bmc_ips_request::LookupBy;
     use rpc::forge_api_client::ForgeApiClient;
     use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
-    use tokio::sync::Mutex;
     use tokio_stream::iter;
 
     use super::{
-        BmcCredentials, BmcProxyState, ConnectionFailReason, CredentialCache, ForwardedTarget,
-        TcpAcceptFailed, TlsCertificateReloadFailed, TlsConnectionFailed,
-        authorize_principal_allow_list, bmc_proxy_request_span, build_authority, build_response,
-        copy_request_headers, create_client, evict_cached_credentials, forwarded_header_value,
-        get_http_client, ip_for_forwarded_target, is_hop_by_hop_header, method_supports_body,
+        BmcCredentials, BmcProxyState, CREDENTIAL_CACHE_IDLE_TTL, ConnectionFailReason,
+        CredentialCache, ForwardedTarget, IP_CACHE_TTL, MAX_BUFFERED_BODY_SIZE, MethodLabel,
+        TcpAcceptFailed, TlsCertificateReloadFailed, TlsConnectionFailed, UpstreamBody,
+        authorize_principal_allow_list, bmc_proxy_request_span, bounded_cache, build_authority,
+        build_http_client, build_response, copy_request_headers, create_client,
+        evict_cached_credentials, forwarded_header_value, idle_bounded_cache,
+        ip_for_forwarded_target, is_hop_by_hop_header, method_supports_body,
         parse_forwarded_host_value, request_principal_ids, span_status,
     };
-    use crate::metrics::MethodLabel;
 
     const TEST_CONFIG: &str = r#"
         [tls]
@@ -1270,6 +1438,7 @@ mod tests {
         Custom,
         Host,
         Authorization,
+        AuthToken,
         Forwarded,
         ContentLength,
         Connection,
@@ -1299,21 +1468,25 @@ mod tests {
         credentials: CredentialSummary,
     }
 
-    fn test_state_with_config(config: &str, ip_cache: HashMap<LookupBy, IpAddr>) -> BmcProxyState {
+    fn test_state_with_config(config: &str) -> BmcProxyState {
         let client_config = ForgeClientConfig::default();
         let api_config = ApiConfig::new("https://example.com", &client_config);
 
         BmcProxyState {
             config: Arc::new(crate::Config::parse(config).expect("test config should parse")),
             api_client: ForgeApiClient::new(&api_config),
-            credential_cache: Default::default(),
-            client_cache: Default::default(),
-            ip_cache: Arc::new(Mutex::new(ip_cache)),
+            credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
+            http_client: build_http_client().expect("test HTTP client builds"),
+            ip_cache: bounded_cache(IP_CACHE_TTL),
         }
     }
 
-    fn test_state_with_ip_cache(ip_cache: HashMap<LookupBy, IpAddr>) -> BmcProxyState {
-        test_state_with_config(TEST_CONFIG, ip_cache)
+    async fn test_state_with_ip_cache(seeded_ips: HashMap<LookupBy, IpAddr>) -> BmcProxyState {
+        let state = test_state_with_config(TEST_CONFIG);
+        for (lookup_by, ip) in seeded_ips {
+            state.ip_cache.insert(lookup_by, ip).await;
+        }
+        state
     }
 
     struct AuthorizationRequestCase {
@@ -1486,6 +1659,13 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 HeaderValue::from_static("Bearer secret"),
             ),
+            // One spelling suffices: `HeaderName` lowercases on construction,
+            // so a caller's "X-Auth-Token" and "x-auth-token" are the same
+            // key by the time the filter sees them.
+            HeaderCopyCase::AuthToken => (
+                HeaderName::from_static("x-auth-token"),
+                HeaderValue::from_static("caller-session"),
+            ),
             HeaderCopyCase::Forwarded => (
                 HeaderName::from_static("forwarded"),
                 HeaderValue::from_static("host=10.0.0.1"),
@@ -1556,14 +1736,16 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
         // Prepopulate the cache so this test never falls through to the real
         // ForgeApiClient path.
-        let credential_cache: CredentialCache = Arc::new(Mutex::new(HashMap::from([(
-            ip,
-            BmcCredentials::UsernamePassword {
-                username: "admin".to_string(),
-                password: "secret".to_string(),
-            },
-        )])));
-        let client_cache = Default::default();
+        let credential_cache: CredentialCache = idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL);
+        credential_cache
+            .insert(
+                ip,
+                BmcCredentials::UsernamePassword {
+                    username: "admin".to_string(),
+                    password: "secret".to_string(),
+                },
+            )
+            .await;
         let client_config = ForgeClientConfig::default();
         let api_config = ApiConfig::new("https://example.com", &client_config);
         let api_client = ForgeApiClient::new(&api_config);
@@ -1572,7 +1754,7 @@ mod tests {
             ip,
             &api_client,
             &credential_cache,
-            &client_cache,
+            build_http_client().expect("test HTTP client builds"),
             &proxy_override(case),
         )
         .await
@@ -1796,6 +1978,12 @@ mod tests {
                 HeaderCopyCase::Authorization => vec![],
             }
 
+            // The proxy authenticates upstream itself; forwarding a caller's
+            // own session token would reach the BMC alongside ours.
+            "redfish auth token filtered" {
+                HeaderCopyCase::AuthToken => vec![],
+            }
+
             "forwarded filtered" {
                 HeaderCopyCase::Forwarded => vec![],
             }
@@ -1961,7 +2149,7 @@ mod tests {
     /// still rejects the request but moves only the middleware-error counter.
     #[test]
     fn request_acl_authorization_emits_the_matching_event() {
-        let state = test_state_with_config(AUTHORIZATION_TEST_CONFIG, HashMap::new());
+        let state = test_state_with_config(AUTHORIZATION_TEST_CONFIG);
         let service_principal =
             || Principal::SpiffeServiceIdentifier("forge-system/carbide-api".to_string());
 
@@ -2019,7 +2207,7 @@ mod tests {
     /// response and is counted as an authorization wiring error instead.
     #[test]
     fn principal_allow_list_authorization_emits_the_matching_event() {
-        let state = test_state_with_config(AUTHORIZATION_TEST_CONFIG, HashMap::new());
+        let state = test_state_with_config(AUTHORIZATION_TEST_CONFIG);
         let service_principal =
             || Principal::SpiffeServiceIdentifier("forge-system/carbide-api".to_string());
 
@@ -2075,7 +2263,7 @@ mod tests {
     #[tokio::test]
     async fn forwarded_ip_target_resolves_without_lookup() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
-        let state = test_state_with_ip_cache(HashMap::new());
+        let state = test_state_with_ip_cache(HashMap::new()).await;
 
         assert_eq!(
             ip_for_forwarded_target(&ForwardedTarget::Ip(ip), &state)
@@ -2090,7 +2278,8 @@ mod tests {
         let mac = MacAddress::from_str("00:11:22:33:44:55").unwrap();
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
         let state =
-            test_state_with_ip_cache(HashMap::from([(LookupBy::MacAddress(mac.to_string()), ip)]));
+            test_state_with_ip_cache(HashMap::from([(LookupBy::MacAddress(mac.to_string()), ip)]))
+                .await;
 
         assert_eq!(
             ip_for_forwarded_target(&ForwardedTarget::Mac(mac), &state)
@@ -2105,7 +2294,8 @@ mod tests {
         let serial = "DGX-A100-0001";
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
         let state =
-            test_state_with_ip_cache(HashMap::from([(LookupBy::Serial(serial.to_string()), ip)]));
+            test_state_with_ip_cache(HashMap::from([(LookupBy::Serial(serial.to_string()), ip)]))
+                .await;
 
         assert_eq!(
             ip_for_forwarded_target(&ForwardedTarget::Serial(serial), &state)
@@ -2191,26 +2381,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_clients_are_cached_per_ip() {
-        let cache = Default::default();
-        let first_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
-        let second_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6));
-
-        get_http_client(first_ip, &cache)
-            .await
-            .expect("first client");
-        get_http_client(first_ip, &cache)
-            .await
-            .expect("cached client");
-        assert_eq!(cache.lock().await.len(), 1);
-
-        get_http_client(second_ip, &cache)
-            .await
-            .expect("second client");
-        assert_eq!(cache.lock().await.len(), 2);
-    }
-
-    #[tokio::test]
     async fn client_creation_applies_proxy_overrides() {
         check_cases_async(
             [
@@ -2268,21 +2438,141 @@ mod tests {
         .await;
     }
 
+    /// One observation of [`UpstreamBody::attach`]: whether the built request
+    /// carries a buffered body (`as_bytes()` is `Some`), an explicit
+    /// `Content-Length`, and a per-request timeout override.
+    #[derive(Debug, PartialEq)]
+    struct AttachedBodySummary {
+        buffered: bool,
+        explicit_content_length: Option<String>,
+        timeout_secs: Option<u64>,
+    }
+
+    async fn observe_attached_body(
+        declared_length: Option<u64>,
+    ) -> Result<AttachedBodySummary, String> {
+        let client = build_http_client().map_err(|e| e.to_string())?;
+        let mut headers = HeaderMap::new();
+        if let Some(length) = declared_length {
+            headers.insert(
+                axum::http::header::CONTENT_LENGTH,
+                HeaderValue::from_str(&length.to_string()).expect("valid header value"),
+            );
+        }
+
+        let request = UpstreamBody::prepare(&headers, Body::from("payload"))
+            .await
+            .map_err(|e| e.to_string())?
+            .attach(client.post("https://bmc.invalid/redfish/v1/UpdateService"))
+            .map_err(|e| e.message)?
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        Ok(AttachedBodySummary {
+            buffered: request.body().is_some_and(|b| b.as_bytes().is_some()),
+            explicit_content_length: request
+                .headers()
+                .get(axum::http::header::CONTENT_LENGTH)
+                .map(|v| v.to_str().expect("UTF-8 header").to_string()),
+            timeout_secs: request.timeout().map(Duration::as_secs),
+        })
+    }
+
+    // The framing contract: small and unsized bodies are buffered so BMCs see
+    // exactly what they always did; only a body declared larger than the
+    // buffer bound streams, with its length forwarded (hyper would otherwise
+    // switch to chunked transfer, which BMC firmwares commonly reject) and a
+    // timeout scaled to the transfer instead of the 60-second default.
+    #[tokio::test]
+    async fn request_bodies_buffer_small_and_stream_large() {
+        let large = (MAX_BUFFERED_BODY_SIZE as u64) + 1;
+        check_cases_async(
+            [
+                Case {
+                    scenario: "no declared length stays buffered",
+                    input: None,
+                    expect: Yields(AttachedBodySummary {
+                        buffered: true,
+                        explicit_content_length: None,
+                        timeout_secs: None,
+                    }),
+                },
+                Case {
+                    scenario: "small declared length stays buffered",
+                    input: Some(1024),
+                    expect: Yields(AttachedBodySummary {
+                        buffered: true,
+                        explicit_content_length: None,
+                        timeout_secs: None,
+                    }),
+                },
+                Case {
+                    scenario: "length at the bound stays buffered",
+                    input: Some(MAX_BUFFERED_BODY_SIZE as u64),
+                    expect: Yields(AttachedBodySummary {
+                        buffered: true,
+                        explicit_content_length: None,
+                        timeout_secs: None,
+                    }),
+                },
+                Case {
+                    scenario: "length past the bound streams",
+                    input: Some(large),
+                    expect: Yields(AttachedBodySummary {
+                        buffered: false,
+                        explicit_content_length: Some(large.to_string()),
+                        timeout_secs: Some(super::sized_upload_timeout(large).as_secs()),
+                    }),
+                },
+            ],
+            observe_attached_body,
+        )
+        .await;
+    }
+
+    #[test]
+    fn sized_upload_timeout_scales_with_declared_length() {
+        check_values(
+            [
+                Check {
+                    scenario: "tiny transfer keeps the base budget",
+                    input: 1024,
+                    expect: 60,
+                },
+                Check {
+                    scenario: "a 50 MB image gets its transfer time",
+                    input: 50_000_000,
+                    expect: 60 + 5_000,
+                },
+                // The declared length is caller-supplied; a lie must not buy
+                // an unbounded hold on a proxy task and a BMC connection.
+                Check {
+                    scenario: "a lying length is capped",
+                    input: u64::MAX,
+                    expect: 4 * 60 * 60,
+                },
+            ],
+            |length| super::sized_upload_timeout(length).as_secs(),
+        );
+    }
+
     #[tokio::test]
     async fn evict_cached_credentials_removes_entry_for_ip() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
-        let credential_cache: CredentialCache = Arc::new(Mutex::new(HashMap::new()));
-        credential_cache.lock().await.insert(
-            ip,
-            BmcCredentials::UsernamePassword {
-                username: "admin".to_string(),
-                password: "secret".to_string(),
-            },
-        );
+        let credential_cache: CredentialCache = idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL);
+        credential_cache
+            .insert(
+                ip,
+                BmcCredentials::UsernamePassword {
+                    username: "admin".to_string(),
+                    password: "secret".to_string(),
+                },
+            )
+            .await;
 
         evict_cached_credentials(ip, &credential_cache).await;
 
-        assert!(!credential_cache.lock().await.contains_key(&ip));
+        assert!(credential_cache.get(&ip).await.is_none());
     }
 
     #[tokio::test]
@@ -2478,5 +2768,51 @@ mod tests {
             ],
             observe_tls_failure,
         );
+    }
+
+    // The retry contract: a buffered body can be attached again for the one
+    // credential-refresh replay, a streamed body cannot (its bytes were
+    // consumed by the first attempt), and a bodyless request is trivially
+    // replayable.
+    #[tokio::test]
+    async fn only_buffered_or_absent_bodies_are_replayable() {
+        let client = build_http_client().expect("http client");
+        let post = || client.post("https://bmc.invalid/redfish/v1/Systems");
+
+        let mut none = UpstreamBody::None;
+        assert!(none.is_replayable());
+        let _ = none.attach(post()).expect("first attach");
+        let _ = none
+            .attach(post())
+            .expect("bodyless requests replay freely");
+
+        let mut buffered = UpstreamBody::prepare(&HeaderMap::new(), Body::from("payload"))
+            .await
+            .expect("small bodies buffer");
+        assert!(buffered.is_replayable());
+        let _ = buffered.attach(post()).expect("first attach");
+        let _ = buffered
+            .attach(post())
+            .expect("a buffered body replays for the credential-refresh retry");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_LENGTH,
+            HeaderValue::from_str(&(MAX_BUFFERED_BODY_SIZE as u64 + 1).to_string()).unwrap(),
+        );
+        let mut streamed = UpstreamBody::prepare(&headers, Body::from("payload"))
+            .await
+            .expect("large declared bodies stream");
+        assert!(
+            !streamed.is_replayable(),
+            "a streamed body must never be replayed"
+        );
+        let _ = streamed
+            .attach(post())
+            .expect("first attach consumes the stream");
+        let Err(err) = streamed.attach(post()) else {
+            panic!("a consumed stream cannot be attached again");
+        };
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

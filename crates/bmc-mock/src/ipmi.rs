@@ -24,8 +24,9 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::SystemPowerControl;
 use crate::bmc_state::BmcState;
+use crate::redfish::log_service::LogEntryDraft;
+use crate::{Callbacks, SystemPowerControl};
 
 /// Request body for IPMI mock endpoint.
 #[derive(Debug, Deserialize)]
@@ -58,12 +59,12 @@ impl IpmiResponse {
 }
 
 /// Add IPMI routes to the router.
-pub(super) fn add_routes(router: Router<BmcState>) -> Router<BmcState> {
-    router.route("/ipmi", post(handle_ipmi))
+pub(super) fn add_routes<C: Callbacks>(router: Router<BmcState<C>>) -> Router<BmcState<C>> {
+    router.route("/ipmi", post(handle_ipmi::<C>))
 }
 
-async fn handle_ipmi(
-    axum::extract::State(state): axum::extract::State<BmcState>,
+async fn handle_ipmi<C: Callbacks>(
+    axum::extract::State(state): axum::extract::State<BmcState<C>>,
     Json(req): Json<IpmiRequest>,
 ) -> Json<IpmiResponse> {
     tracing::debug!(action = %req.action, "IPMI mock request");
@@ -77,7 +78,15 @@ async fn handle_ipmi(
         "chassis_power_reset" => {
             tracing::info!("IPMI: chassis power reset");
             match callbacks.send_power_command(SystemPowerControl::ForceRestart) {
-                Ok(()) => IpmiResponse::ok(),
+                Ok(()) => {
+                    if let Some(system) = state.system_state.primary_system_odata_id() {
+                        state.record_event(LogEntryDraft::reset_requested(
+                            &system,
+                            SystemPowerControl::ForceRestart,
+                        ));
+                    }
+                    IpmiResponse::ok()
+                }
                 Err(e) => {
                     tracing::error!(error = ?e, "chassis power reset failed");
                     IpmiResponse::err(format!("power command failed: {:?}", e))
@@ -85,7 +94,11 @@ async fn handle_ipmi(
             }
         }
         "bmc_cold_reset" => {
-            tracing::info!("IPMI: bmc cold reset (mock no-op)");
+            if let Some(manager) = state.manager.primary_odata_id() {
+                state.record_log(LogEntryDraft::manager_resetting(&manager, "IPMI"));
+            }
+            let offline_for = state.reset();
+            tracing::info!(?offline_for, "IPMI: BMC cold reset");
             IpmiResponse::ok()
         }
         "dpu_legacy_boot" => {

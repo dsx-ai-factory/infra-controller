@@ -5,9 +5,7 @@ package util
 
 import (
 	"context"
-	"time"
 
-	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
@@ -42,11 +40,6 @@ func PtrsEqual[T comparable](i1 *T, i2 *T) bool {
 	}
 
 	return true
-}
-
-// IsTimeWithinStaleInventoryThreshold checks if the action time is within the threshold where we could be processing an older inventory
-func IsTimeWithinStaleInventoryThreshold(actionTime time.Time) bool {
-	return time.Since(actionTime) < cwutil.InventoryReceiptInterval+(time.Second*10)
 }
 
 // UpdateNVLinkLogicalPartitionStatusInDB updates the NVLinkLogicalPartition status in the DB and creates a new StatusDetail

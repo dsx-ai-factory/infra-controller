@@ -95,16 +95,38 @@ type DiscoveryInfo struct {
 	DpuInfo *DpuData `protobuf:"bytes,10,opt,name=dpu_info,json=dpuInfo,proto3,oneof" json:"dpu_info,omitempty"`
 	// Enumerates GPU devices on the host
 	Gpus []*Gpu `protobuf:"bytes,11,rep,name=gpus,proto3" json:"gpus,omitempty"`
-	// Enumerates Memory devices on the host
+	// Deprecated: legacy flat list, one entry per physical DIMM. Writers must
+	// emit only memory_device_groups (field 17) and leave this field empty.
+	// Readers must still accept this field: when memory_device_groups has no
+	// group with count > 0 (including when it is empty), readers fall back to
+	// condensing this field (see memory_device_groups for condensation
+	// rules). Otherwise this field is ignored.
+	//
+	// Deprecated: Marked as deprecated in machine_discovery_nico.proto.
 	MemoryDevices []*MemoryDevice `protobuf:"bytes,12,rep,name=memory_devices,json=memoryDevices,proto3" json:"memory_devices,omitempty"`
 	// output of dmidecode -t 43 (TPM description)
 	TpmDescription *TpmDescription  `protobuf:"bytes,13,opt,name=tpm_description,json=tpmDescription,proto3,oneof" json:"tpm_description,omitempty"`
 	MachineArch    *CpuArchitecture `protobuf:"varint,14,opt,name=machine_arch,json=machineArch,proto3,enum=machine_discovery.CpuArchitecture,oneof" json:"machine_arch,omitempty"`
 	AttestKeyInfo  *AttestKeyInfo   `protobuf:"bytes,15,opt,name=attest_key_info,json=attestKeyInfo,proto3" json:"attest_key_info,omitempty"`
 	// CPU info on the host per model (even though only one model is expected)
-	CpuInfo       []*CpuInfo `protobuf:"bytes,16,rep,name=cpu_info,json=cpuInfo,proto3" json:"cpu_info,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	CpuInfo []*CpuInfo `protobuf:"bytes,16,rep,name=cpu_info,json=cpuInfo,proto3" json:"cpu_info,omitempty"`
+	// Condensed memory devices: consecutive runs of identical DIMMs (same
+	// size_mb and mem_type) rolled up into a single group with a count. This
+	// is the preferred field for new writes; readers use it exclusively
+	// whenever it contains at least one group with count > 0 (see
+	// memory_devices, field 12, for the legacy fallback). Only adjacent
+	// identical devices are merged, so groups preserve the original discovery
+	// order and the same (size_mb, mem_type) pair may appear in more than one
+	// non-adjacent group. The sum of `count` across all groups is bounded
+	// (implementations should reject payloads whose total exceeds a fixed
+	// maximum, set far beyond any real DIMM slot count, to avoid unbounded
+	// allocation when a group is expanded back into individual devices; see
+	// MAX_MEMORY_DEVICE_COUNT in crates/api-model/src/hardware_info.rs for the
+	// current value). Groups with count == 0 carry no information and are
+	// dropped by readers rather than treated as an error.
+	MemoryDeviceGroups []*MemoryDeviceGroup `protobuf:"bytes,17,rep,name=memory_device_groups,json=memoryDeviceGroups,proto3" json:"memory_device_groups,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *DiscoveryInfo) Reset() {
@@ -200,6 +222,7 @@ func (x *DiscoveryInfo) GetGpus() []*Gpu {
 	return nil
 }
 
+// Deprecated: Marked as deprecated in machine_discovery_nico.proto.
 func (x *DiscoveryInfo) GetMemoryDevices() []*MemoryDevice {
 	if x != nil {
 		return x.MemoryDevices
@@ -231,6 +254,13 @@ func (x *DiscoveryInfo) GetAttestKeyInfo() *AttestKeyInfo {
 func (x *DiscoveryInfo) GetCpuInfo() []*CpuInfo {
 	if x != nil {
 		return x.CpuInfo
+	}
+	return nil
+}
+
+func (x *DiscoveryInfo) GetMemoryDeviceGroups() []*MemoryDeviceGroup {
+	if x != nil {
+		return x.MemoryDeviceGroups
 	}
 	return nil
 }
@@ -1449,10 +1479,15 @@ func (x *Gpu) GetPlatformInfo() *GpuPlatformInfo {
 	return nil
 }
 
+// A single physical memory device (DIMM). Deprecated in favor of
+// MemoryDeviceGroup; see DiscoveryInfo.memory_devices (field 12).
 type MemoryDevice struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SizeMb        *uint32                `protobuf:"varint,1,opt,name=size_mb,json=sizeMb,proto3,oneof" json:"size_mb,omitempty"`
-	MemType       *string                `protobuf:"bytes,2,opt,name=mem_type,json=memType,proto3,oneof" json:"mem_type,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Capacity in MiB. Absent when the size could not be determined.
+	SizeMb *uint32 `protobuf:"varint,1,opt,name=size_mb,json=sizeMb,proto3,oneof" json:"size_mb,omitempty"`
+	// Memory type, e.g. "DDR4", "DDR5". Absent when the type could not be
+	// determined.
+	MemType       *string `protobuf:"bytes,2,opt,name=mem_type,json=memType,proto3,oneof" json:"mem_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1501,11 +1536,79 @@ func (x *MemoryDevice) GetMemType() string {
 	return ""
 }
 
+// A run of `count` consecutive, identical DIMMs: same size_mb and same
+// mem_type (including both being absent). See DiscoveryInfo.memory_device_groups
+// (field 17) for condensation, ordering, and bounds semantics.
+type MemoryDeviceGroup struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Same semantics as MemoryDevice.size_mb; shared by every device in the group.
+	SizeMb *uint32 `protobuf:"varint,1,opt,name=size_mb,json=sizeMb,proto3,oneof" json:"size_mb,omitempty"`
+	// Same semantics as MemoryDevice.mem_type; shared by every device in the group.
+	MemType *string `protobuf:"bytes,2,opt,name=mem_type,json=memType,proto3,oneof" json:"mem_type,omitempty"`
+	// Number of identical devices this group represents. Zero-count groups
+	// are dropped by readers rather than rejected. The sum of `count` across
+	// all groups in a DiscoveryInfo is bounded; see field 17 above.
+	Count         uint32 `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemoryDeviceGroup) Reset() {
+	*x = MemoryDeviceGroup{}
+	mi := &file_machine_discovery_nico_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemoryDeviceGroup) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemoryDeviceGroup) ProtoMessage() {}
+
+func (x *MemoryDeviceGroup) ProtoReflect() protoreflect.Message {
+	mi := &file_machine_discovery_nico_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemoryDeviceGroup.ProtoReflect.Descriptor instead.
+func (*MemoryDeviceGroup) Descriptor() ([]byte, []int) {
+	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *MemoryDeviceGroup) GetSizeMb() uint32 {
+	if x != nil && x.SizeMb != nil {
+		return *x.SizeMb
+	}
+	return 0
+}
+
+func (x *MemoryDeviceGroup) GetMemType() string {
+	if x != nil && x.MemType != nil {
+		return *x.MemType
+	}
+	return ""
+}
+
+func (x *MemoryDeviceGroup) GetCount() uint32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
 var File_machine_discovery_nico_proto protoreflect.FileDescriptor
 
 const file_machine_discovery_nico_proto_rawDesc = "" +
 	"\n" +
-	"\x1cmachine_discovery_nico.proto\x12\x11machine_discovery\"\xf7\a\n" +
+	"\x1cmachine_discovery_nico.proto\x12\x11machine_discovery\"\xd3\b\n" +
 	"\rDiscoveryInfo\x12R\n" +
 	"\x12network_interfaces\x18\x01 \x03(\v2#.machine_discovery.NetworkInterfaceR\x11networkInterfaces\x12C\n" +
 	"\rblock_devices\x18\x03 \x03(\v2\x1e.machine_discovery.BlockDeviceR\fblockDevices\x12!\n" +
@@ -1516,12 +1619,13 @@ const file_machine_discovery_nico_proto_rawDesc = "" +
 	"\x15infiniband_interfaces\x18\t \x03(\v2&.machine_discovery.InfinibandInterfaceR\x14infinibandInterfaces\x12:\n" +
 	"\bdpu_info\x18\n" +
 	" \x01(\v2\x1a.machine_discovery.DpuDataH\x01R\adpuInfo\x88\x01\x01\x12*\n" +
-	"\x04gpus\x18\v \x03(\v2\x16.machine_discovery.GpuR\x04gpus\x12F\n" +
-	"\x0ememory_devices\x18\f \x03(\v2\x1f.machine_discovery.MemoryDeviceR\rmemoryDevices\x12O\n" +
+	"\x04gpus\x18\v \x03(\v2\x16.machine_discovery.GpuR\x04gpus\x12J\n" +
+	"\x0ememory_devices\x18\f \x03(\v2\x1f.machine_discovery.MemoryDeviceB\x02\x18\x01R\rmemoryDevices\x12O\n" +
 	"\x0ftpm_description\x18\r \x01(\v2!.machine_discovery.TpmDescriptionH\x02R\x0etpmDescription\x88\x01\x01\x12J\n" +
 	"\fmachine_arch\x18\x0e \x01(\x0e2\".machine_discovery.CpuArchitectureH\x03R\vmachineArch\x88\x01\x01\x12H\n" +
 	"\x0fattest_key_info\x18\x0f \x01(\v2 .machine_discovery.AttestKeyInfoR\rattestKeyInfo\x125\n" +
-	"\bcpu_info\x18\x10 \x03(\v2\x1a.machine_discovery.CpuInfoR\acpuInfoB\x15\n" +
+	"\bcpu_info\x18\x10 \x03(\v2\x1a.machine_discovery.CpuInfoR\acpuInfo\x12V\n" +
+	"\x14memory_device_groups\x18\x11 \x03(\v2$.machine_discovery.MemoryDeviceGroupR\x12memoryDeviceGroupsB\x15\n" +
 	"\x13_tpm_ek_certificateB\v\n" +
 	"\t_dpu_infoB\x12\n" +
 	"\x10_tpm_descriptionB\x0f\n" +
@@ -1651,6 +1755,13 @@ const file_machine_discovery_nico_proto_rawDesc = "" +
 	"\bmem_type\x18\x02 \x01(\tH\x01R\amemType\x88\x01\x01B\n" +
 	"\n" +
 	"\b_size_mbB\v\n" +
+	"\t_mem_type\"\x80\x01\n" +
+	"\x11MemoryDeviceGroup\x12\x1c\n" +
+	"\asize_mb\x18\x01 \x01(\rH\x00R\x06sizeMb\x88\x01\x01\x12\x1e\n" +
+	"\bmem_type\x18\x02 \x01(\tH\x01R\amemType\x88\x01\x01\x12\x14\n" +
+	"\x05count\x18\x03 \x01(\rR\x05countB\n" +
+	"\n" +
+	"\b_size_mbB\v\n" +
 	"\t_mem_type*7\n" +
 	"\x0fCpuArchitecture\x12\v\n" +
 	"\aAARCH64\x10\x00\x12\n" +
@@ -1671,7 +1782,7 @@ func file_machine_discovery_nico_proto_rawDescGZIP() []byte {
 }
 
 var file_machine_discovery_nico_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_machine_discovery_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_machine_discovery_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_machine_discovery_nico_proto_goTypes = []any{
 	(CpuArchitecture)(0),        // 0: machine_discovery.CpuArchitecture
 	(*DiscoveryInfo)(nil),       // 1: machine_discovery.DiscoveryInfo
@@ -1691,6 +1802,7 @@ var file_machine_discovery_nico_proto_goTypes = []any{
 	(*GpuPlatformInfo)(nil),     // 15: machine_discovery.GpuPlatformInfo
 	(*Gpu)(nil),                 // 16: machine_discovery.Gpu
 	(*MemoryDevice)(nil),        // 17: machine_discovery.MemoryDevice
+	(*MemoryDeviceGroup)(nil),   // 18: machine_discovery.MemoryDeviceGroup
 }
 var file_machine_discovery_nico_proto_depIdxs = []int32{
 	4,  // 0: machine_discovery.DiscoveryInfo.network_interfaces:type_name -> machine_discovery.NetworkInterface
@@ -1705,16 +1817,17 @@ var file_machine_discovery_nico_proto_depIdxs = []int32{
 	0,  // 9: machine_discovery.DiscoveryInfo.machine_arch:type_name -> machine_discovery.CpuArchitecture
 	2,  // 10: machine_discovery.DiscoveryInfo.attest_key_info:type_name -> machine_discovery.AttestKeyInfo
 	7,  // 11: machine_discovery.DiscoveryInfo.cpu_info:type_name -> machine_discovery.CpuInfo
-	11, // 12: machine_discovery.NetworkInterface.pci_properties:type_name -> machine_discovery.PciDeviceProperties
-	11, // 13: machine_discovery.InfinibandInterface.pci_properties:type_name -> machine_discovery.PciDeviceProperties
-	13, // 14: machine_discovery.LldpSwitchData.med_inventory:type_name -> machine_discovery.LldpMedInventory
-	12, // 15: machine_discovery.DpuData.switches:type_name -> machine_discovery.LldpSwitchData
-	15, // 16: machine_discovery.Gpu.platform_info:type_name -> machine_discovery.GpuPlatformInfo
-	17, // [17:17] is the sub-list for method output_type
-	17, // [17:17] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	18, // 12: machine_discovery.DiscoveryInfo.memory_device_groups:type_name -> machine_discovery.MemoryDeviceGroup
+	11, // 13: machine_discovery.NetworkInterface.pci_properties:type_name -> machine_discovery.PciDeviceProperties
+	11, // 14: machine_discovery.InfinibandInterface.pci_properties:type_name -> machine_discovery.PciDeviceProperties
+	13, // 15: machine_discovery.LldpSwitchData.med_inventory:type_name -> machine_discovery.LldpMedInventory
+	12, // 16: machine_discovery.DpuData.switches:type_name -> machine_discovery.LldpSwitchData
+	15, // 17: machine_discovery.Gpu.platform_info:type_name -> machine_discovery.GpuPlatformInfo
+	18, // [18:18] is the sub-list for method output_type
+	18, // [18:18] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_machine_discovery_nico_proto_init() }
@@ -1728,13 +1841,14 @@ func file_machine_discovery_nico_proto_init() {
 	file_machine_discovery_nico_proto_msgTypes[11].OneofWrappers = []any{}
 	file_machine_discovery_nico_proto_msgTypes[12].OneofWrappers = []any{}
 	file_machine_discovery_nico_proto_msgTypes[16].OneofWrappers = []any{}
+	file_machine_discovery_nico_proto_msgTypes[17].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_machine_discovery_nico_proto_rawDesc), len(file_machine_discovery_nico_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   17,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

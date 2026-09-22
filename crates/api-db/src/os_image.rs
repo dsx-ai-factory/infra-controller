@@ -148,3 +148,67 @@ async fn persist(
     };
     Ok(os_image)
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    const EXPAND_BOOT_DISK_MIGRATION: &str =
+        include_str!("../migrations/20260828202227_expand_os_image_boot_disk.sql");
+
+    #[crate::sqlx_test]
+    async fn boot_disk_migration_preserves_existing_value_and_accepts_long_path(pool: PgPool) {
+        sqlx::query("ALTER TABLE os_images ALTER COLUMN boot_disk TYPE varchar(64)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let id = Uuid::new_v4();
+        let original_boot_disk = "/dev/disk/by-id/nvme-short";
+        sqlx::query(
+            "INSERT INTO os_images
+                 (id, source_url, digest, organization_id, boot_disk)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id)
+        .bind("https://example.invalid/image")
+        .bind("sha256:test")
+        .bind("test-organization")
+        .bind(original_boot_disk)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(EXPAND_BOOT_DISK_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let stored_boot_disk: String =
+            sqlx::query_scalar("SELECT boot_disk FROM os_images WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored_boot_disk, original_boot_disk);
+
+        let long_boot_disk =
+            "/dev/disk/by-id/nvme-Dell_DC_NVMe_CD7_U.2_960GB_Z3W0A01DTXBH-extra-long";
+        assert!(long_boot_disk.len() > 64);
+        sqlx::query("UPDATE os_images SET boot_disk = $1 WHERE id = $2")
+            .bind(long_boot_disk)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let stored_boot_disk: String =
+            sqlx::query_scalar("SELECT boot_disk FROM os_images WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored_boot_disk, long_boot_disk);
+    }
+}

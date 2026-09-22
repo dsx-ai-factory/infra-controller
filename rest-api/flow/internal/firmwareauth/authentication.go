@@ -23,6 +23,10 @@ import (
 // or relocation between otherwise valid firmware operations.
 const authenticationAAD = "flow:firmware-authentication"
 
+// ErrDataCipherNotConfigured identifies an operation that requires firmware
+// authentication encryption or decryption while Flow has no data cipher.
+var ErrDataCipherNotConfigured = errors.New("data encryption cipher is not configured")
+
 // InvalidDataError identifies authentication data rejected at the API
 // boundary. Other errors returned by this package are internal failures.
 type InvalidDataError struct {
@@ -64,7 +68,7 @@ func Encrypt(
 		)}
 	}
 	if cipher == nil {
-		return nil, fmt.Errorf("data encryption cipher is not configured")
+		return nil, ErrDataCipherNotConfigured
 	}
 
 	plaintext, err := proto.MarshalOptions{Deterministic: true}.Marshal(
@@ -94,7 +98,7 @@ func DecryptFor(
 		return "", nil
 	}
 	if cipher == nil {
-		return "", fmt.Errorf("data encryption cipher is not configured")
+		return "", ErrDataCipherNotConfigured
 	}
 
 	plaintext, err := cipher.DecryptData(encrypted, []byte(authenticationAAD))

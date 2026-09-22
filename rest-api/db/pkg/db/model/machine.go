@@ -270,6 +270,8 @@ type MachineClearInput struct {
 	NetworkHealthMessage  bool
 	DefaultMacAddress     bool
 	Hostname              bool
+	// Deleted clears the soft-delete timestamp (undelete).
+	Deleted bool
 }
 
 // MachineFilterInput filtering options for GetAll method
@@ -287,8 +289,11 @@ type MachineFilterInput struct {
 	Statuses                  []string
 	SearchQuery               *string
 	MachineIDs                []string
+	Labels                    map[string]string
 	IsMissingOnSite           *bool
 	ExcludeMetadata           bool // When true, excludes the metadata JSONB column from SELECT to improve performance on bulk queries
+	// IncludeDeleted returns soft-deleted rows in addition to active ones.
+	IncludeDeleted bool
 }
 
 type MachineHealth struct {
@@ -381,6 +386,10 @@ type MachineDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input MachineClearInput) (*Machine, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput, includeRelations []string) ([]Machine, int, error)
+	// GetDistinctLabelKeys returns the distinct label keys based on the filter and page inputs
+	GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error)
+	// GetDistinctLabelValues returns the distinct values for a label key based on the filter and page inputs
+	GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error)
 	// GetByID returns row for specified ID
 	GetByID(ctx context.Context, tx *db.Tx, machineID string, includeRelations []string, forUpdate bool) (*Machine, error)
 	// GetCountByStatus returns row counts per status
@@ -684,11 +693,38 @@ func (msd MachineSQLDAO) setQueryWithFilter(filter MachineFilterInput, query *bu
 		query = query.Where("m.id IN (?)", bun.In(filter.MachineIDs))
 	}
 
+	// JSONB containment gives exact key/value AND semantics for the selector
+	// object and can use the machine labels GIN index.
+	if len(filter.Labels) > 0 {
+		labelsJSON, err := json.Marshal(filter.Labels)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode Machine label selector: %w", err)
+		}
+		query = query.Where("m.labels @> ?::jsonb", string(labelsJSON))
+		if machineDAOSpan != nil {
+			msd.tracerSpan.SetAttribute(machineDAOSpan, "machine_label_selector", string(labelsJSON))
+		}
+	}
+
 	if filter.ExcludeMetadata {
 		query = query.ExcludeColumn("metadata")
 	}
 
 	return query, nil
+}
+
+// MatchesLabelSelector reports whether all requested label key/value pairs are
+// present on the Machine. An empty selector matches every Machine.
+func (m *Machine) MatchesLabelSelector(selector map[string]string) bool {
+	if m == nil {
+		return false
+	}
+	for key, value := range selector {
+		if actual, ok := m.Labels[key]; !ok || actual != value {
+			return false
+		}
+	}
+	return true
 }
 
 // GetAll returns all Machines based on the filter and paging
@@ -713,6 +749,9 @@ func (msd MachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineFi
 	}
 
 	query := db.GetIDB(tx, msd.dbSession).NewSelect().Model(&machines)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 
 	query, err := msd.setQueryWithFilter(filter, query, machineDAOSpan)
 	if err != nil {
@@ -739,6 +778,92 @@ func (msd MachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineFi
 	}
 
 	return machines, machinePaginator.Total, nil
+}
+
+// GetDistinctLabelKeys returns paginated, distinct Machine label keys.
+func (msd MachineSQLDAO) GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error) {
+	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetDistinctLabelKeys")
+	if machineDAOSpan != nil {
+		defer machineDAOSpan.End()
+	}
+
+	keys := []string{}
+	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
+		return keys, 0, nil
+	}
+
+	idb := db.GetIDB(tx, msd.dbSession)
+	distinctQuery := idb.NewSelect().
+		TableExpr("machine AS m").
+		ColumnExpr("DISTINCT label.key AS key").
+		Join("CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(m.labels) = 'object' THEN m.labels ELSE '{}'::jsonb END) AS label(key)").
+		Where("m.deleted IS NULL")
+
+	distinctQuery, err := msd.setQueryWithFilter(filter, distinctQuery, machineDAOSpan)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	query := idb.NewSelect().
+		TableExpr("(?) AS distinct_machine_label_keys", distinctQuery).
+		Column("key")
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(LabelKeyOrderByDefault)
+	}
+	labelPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, LabelKeyOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = labelPaginator.Query.Limit(labelPaginator.Limit).Offset(labelPaginator.Offset).Scan(ctx, &keys)
+	if err != nil {
+		return nil, 0, err
+	}
+	return keys, labelPaginator.Total, nil
+}
+
+// GetDistinctLabelValues returns paginated, distinct Machine label values for a label key.
+func (msd MachineSQLDAO) GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error) {
+	ctx, machineDAOSpan := msd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineDAO.GetDistinctLabelValues")
+	if machineDAOSpan != nil {
+		defer machineDAOSpan.End()
+		msd.tracerSpan.SetAttribute(machineDAOSpan, "label_key", labelKey)
+	}
+
+	values := []string{}
+	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
+		return values, 0, nil
+	}
+
+	idb := db.GetIDB(tx, msd.dbSession)
+	distinctQuery := idb.NewSelect().
+		TableExpr("machine AS m").
+		ColumnExpr("DISTINCT jsonb_extract_path_text(m.labels, ?) AS value", labelKey).
+		Where("m.deleted IS NULL").
+		Where("m.labels \\? ?", labelKey).
+		Where("jsonb_extract_path_text(m.labels, ?) IS NOT NULL", labelKey)
+
+	distinctQuery, err := msd.setQueryWithFilter(filter, distinctQuery, machineDAOSpan)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	query := idb.NewSelect().
+		TableExpr("(?) AS distinct_machine_label_values", distinctQuery).
+		Column("value")
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(LabelValueOrderByDefault)
+	}
+	labelPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, LabelValueOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = labelPaginator.Query.Limit(labelPaginator.Limit).Offset(labelPaginator.Offset).Scan(ctx, &values)
+	if err != nil {
+		return nil, 0, err
+	}
+	return values, labelPaginator.Total, nil
 }
 
 // Update updates specified fields of an existing Machine
@@ -822,11 +947,20 @@ func (msd MachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineClea
 		m.Hostname = nil
 		updatedFields = append(updatedFields, "hostname")
 	}
+	if input.Deleted {
+		m.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, msd.dbSession).NewUpdate().Model(m).Column(updatedFields...).Where("id = ?", input.MachineID).Exec(ctx)
+		query := db.GetIDB(tx, msd.dbSession).NewUpdate().Model(m).Column(updatedFields...).Where("id = ?", input.MachineID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}

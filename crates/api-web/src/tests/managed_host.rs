@@ -141,7 +141,7 @@ async fn machine_detail_manages_the_desired_boot_interface(pool: sqlx::PgPool) {
     let app = make_test_app(&env.test_harness);
     let host = env.create_ready_managed_host(2).await.0;
     let machine_id = host.host.id;
-    let interfaces = load_machine_interfaces(&env, machine_id).await;
+    let interfaces = load_machine_interfaces(&env, machine_id.into()).await;
     let default_interface = model::machine::pick_default_boot_interface(&interfaces)
         .expect("managed host should have a system-default interface")
         .clone();
@@ -221,7 +221,8 @@ async fn machine_detail_manages_the_desired_boot_interface(pool: sqlx::PgPool) {
     // Selecting an exact row moves primary + desired state atomically, while
     // the request path leaves the BMC untouched.
     let redfish_timepoint = env.redfish_sim.timepoint();
-    let response = post_desired_boot_interface(&app, machine_id, selected_interface.id).await;
+    let response =
+        post_desired_boot_interface(&app, machine_id.into(), selected_interface.id).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert!(
         env.redfish_sim
@@ -245,7 +246,7 @@ async fn machine_detail_manages_the_desired_boot_interface(pool: sqlx::PgPool) {
         selected_interface.boot_interface_id.as_deref()
     );
     assert!(
-        load_machine_interfaces(&env, machine_id)
+        load_machine_interfaces(&env, machine_id.into())
             .await
             .iter()
             .find(|interface| interface.id == selected_interface.id)
@@ -293,7 +294,7 @@ async fn machine_detail_manages_the_desired_boot_interface(pool: sqlx::PgPool) {
     // `Use system default` is the same exact-row write with the server's
     // current default mapped back to its managed UUID.
     let redfish_timepoint = env.redfish_sim.timepoint();
-    let response = post_desired_boot_interface(&app, machine_id, default_interface.id).await;
+    let response = post_desired_boot_interface(&app, machine_id.into(), default_interface.id).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert!(
         env.redfish_sim

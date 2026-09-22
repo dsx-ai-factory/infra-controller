@@ -18,11 +18,11 @@ use std::collections::HashMap;
 
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge::ManagedHostNetworkConfigResponse;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use prettytable::{Table, format, row};
 
 use crate::async_write;
-use crate::errors::{CarbideCliError, CarbideCliResult};
+use crate::errors::CarbideCliResult;
 use crate::machine::network::Args as NetworkCommand;
 use crate::rpc::ApiClient;
 
@@ -55,14 +55,9 @@ fn deny_prefix(config: &ManagedHostNetworkConfigResponse) -> String {
 async fn show_dpu_network_config(
     api_client: &ApiClient,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
-    dpu_id: MachineId,
+    dpu_id: DpuMachineId,
     output_format: OutputFormat,
 ) -> CarbideCliResult<()> {
-    if !dpu_id.machine_type().is_dpu() {
-        return Err(CarbideCliError::GenericError(
-            "Only DPU id is allowed.".to_string(),
-        ));
-    }
     let config = api_client.0.get_managed_host_network_config(dpu_id).await?;
     match output_format {
         OutputFormat::Json => {
@@ -129,9 +124,9 @@ async fn show_dpu_network_config(
                 table.get_format().indent(4);
                 table.add_row(row!["Vlan ID", aintf.vlan_id]);
                 table.add_row(row!["VNI", aintf.vni]);
-                table.add_row(row!["IP", aintf.ip]);
-                table.add_row(row!["Gateway", aintf.gateway]);
-                table.add_row(row!["Prefix", aintf.prefix]);
+                table.add_row(row!["IP", aintf.ip()]);
+                table.add_row(row!["Gateway", aintf.gateway()]);
+                table.add_row(row!["Prefix", aintf.prefix()]);
                 table.add_row(row!["Is L2 Segment", aintf.is_l2_segment]);
                 table.add_row(row!["FQDN", aintf.fqdn]);
                 table.add_row(row!["VPC Prefixes", aintf.vpc_prefixes.join(", ")]);
@@ -162,9 +157,9 @@ async fn show_dpu_network_config(
                 ]);
                 table.add_row(row!["Vlan ID", tintf.vlan_id]);
                 table.add_row(row!["VNI", tintf.vni]);
-                table.add_row(row!["IP", tintf.ip]);
-                table.add_row(row!["Gateway", tintf.gateway]);
-                table.add_row(row!["Prefix", tintf.prefix]);
+                table.add_row(row!["IP", tintf.ip()]);
+                table.add_row(row!["Gateway", tintf.gateway()]);
+                table.add_row(row!["Prefix", tintf.prefix()]);
                 table.add_row(row!["Is L2 Segment", tintf.is_l2_segment]);
                 table.add_row(row!["FQDN", tintf.fqdn]);
                 table.add_row(row!["VPC Prefixes", tintf.vpc_prefixes.join(", ")]);
@@ -211,7 +206,7 @@ pub(crate) async fn show_dpu_status(
     if all_status.is_empty() {
         println!("No reported network status");
     } else {
-        let all_ids: Vec<MachineId> = all_status
+        let all_ids: Vec<DpuMachineId> = all_status
             .iter()
             .filter_map(|status| status.dpu_machine_id)
             .collect();
@@ -243,7 +238,7 @@ pub(crate) async fn show_dpu_status(
             let Some(dpu_id) = st.dpu_machine_id else {
                 continue;
             };
-            let Some(dpu) = dpus_by_id.get(&dpu_id) else {
+            let Some(dpu) = dpus_by_id.get(&MachineId::from(dpu_id)) else {
                 continue;
             };
             let observed_at = st

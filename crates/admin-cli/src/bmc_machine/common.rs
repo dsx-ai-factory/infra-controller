@@ -17,6 +17,34 @@
 
 use clap::{Parser, ValueEnum};
 
+/// Redfish `Manager.Reset` type selectable on the `bmc-reset` commands. Shared
+/// by `bmc-machine bmc-reset` and `redfish bmc-reset`. Omitting it leaves the
+/// reset type unspecified (the per-vendor default).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab_case")]
+pub(crate) enum ResetTypeArg {
+    Graceful,
+    Force,
+}
+
+impl From<ResetTypeArg> for rpc::forge::admin_bmc_reset_request::ResetType {
+    fn from(arg: ResetTypeArg) -> Self {
+        match arg {
+            ResetTypeArg::Graceful => Self::GracefulRestart,
+            ResetTypeArg::Force => Self::ForceRestart,
+        }
+    }
+}
+
+impl From<ResetTypeArg> for libredfish::ManagerResetType {
+    fn from(arg: ResetTypeArg) -> Self {
+        match arg {
+            ResetTypeArg::Graceful => Self::GracefulRestart,
+            ResetTypeArg::Force => Self::ForceRestart,
+        }
+    }
+}
+
 #[derive(ValueEnum, Parser, Debug, Clone)]
 pub(super) enum AdminPowerControlAction {
     On,

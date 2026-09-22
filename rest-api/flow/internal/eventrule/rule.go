@@ -30,6 +30,27 @@ func (o RuleOrigin) Validate() error {
 	}
 }
 
+// Policy defines how a selected event rule responds to an event. EventType
+// remains on the owning rule because it controls selection.
+type Policy struct {
+	Actions []Action
+}
+
+// Clone returns an independent copy of the policy and its mutable data.
+func (p Policy) Clone() Policy {
+	cloned := p
+	cloned.Actions = CloneActions(p.Actions)
+
+	return cloned
+}
+
+// Validate checks each present action and action-name uniqueness. An empty
+// policy is structurally valid; owning types decide whether they require an
+// action.
+func (p Policy) Validate() error {
+	return ValidateActions(p.Actions)
+}
+
 // Rule is the in-memory domain type for a persisted or built-in event policy.
 type Rule struct {
 	ID          uuid.UUID
@@ -64,6 +85,9 @@ func (c RuleCreate) Validate() error {
 
 	if err := c.EventType.Validate(); err != nil {
 		return err
+	}
+	if len(c.Policy.Actions) == 0 {
+		return fmt.Errorf("actions are required")
 	}
 
 	return c.Policy.Validate()
@@ -107,5 +131,70 @@ func (r *Rule) Validate() error {
 	if err := r.EventType.Validate(); err != nil {
 		return err
 	}
+	if len(r.Policy.Actions) == 0 {
+		return fmt.Errorf("actions are required")
+	}
 	return r.Policy.Validate()
+}
+
+// ScopeType identifies an event-rule binding scope.
+type ScopeType string
+
+const (
+	ScopeTypeSite ScopeType = "site"
+	ScopeTypeRack ScopeType = "rack"
+)
+
+// Scope identifies either the site-wide scope or one rack.
+type Scope struct {
+	Type ScopeType
+	ID   uuid.UUID
+}
+
+// HasID reports whether the scope carries a resource identifier.
+func (s Scope) HasID() bool {
+	return s.ID != uuid.Nil
+}
+
+// Validate checks the scope type and identifier contract.
+func (s Scope) Validate() error {
+	switch s.Type {
+	case ScopeTypeSite:
+		if s.HasID() {
+			return fmt.Errorf("site scope must not have an id")
+		}
+	case ScopeTypeRack:
+		if !s.HasID() {
+			return fmt.Errorf("rack scope requires an id")
+		}
+	default:
+		return fmt.Errorf("unknown event rule scope type %q", s.Type)
+	}
+
+	return nil
+}
+
+// Binding associates a persisted rule with an event-rule scope.
+type Binding struct {
+	ID        uuid.UUID
+	RuleID    uuid.UUID
+	EventType Type
+	Scope     Scope
+}
+
+// Validate checks binding identity, event type, and scope.
+func (b Binding) Validate() error {
+	if b.ID == uuid.Nil {
+		return fmt.Errorf("event rule binding id is required")
+	}
+
+	if b.RuleID == uuid.Nil {
+		return fmt.Errorf("event rule binding rule id is required")
+	}
+
+	if err := b.EventType.Validate(); err != nil {
+		return fmt.Errorf("event rule binding event type: %w", err)
+	}
+
+	return b.Scope.Validate()
 }

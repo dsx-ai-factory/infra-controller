@@ -32,6 +32,7 @@
 //! mTLS client cert remains the only credential.
 
 use std::io::Cursor;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -50,6 +51,19 @@ pub const NODE_JWT_AUDIENCE: &str = "nico-api";
 /// re-mint locally, so a leaked one ages out in minutes.
 pub const NODE_JWT_TTL_SECS: u64 = 300;
 
+/// Maximum certificates carried in a node-auth JWT's `x5c` header.
+///
+/// Node certificates normally include a leaf and issuing CA. This leaves room
+/// for additional intermediates while bounding the verifier's work on an
+/// untrusted request.
+pub const NODE_JWT_MAX_X5C_CERTIFICATES: usize = 4;
+
+/// Avoid repeatedly warning from the per-request token-minting path for the
+/// same persistent certificate-bundle configuration error.
+const OVER_LIMIT_WARNING_INTERVAL_SECS: u64 = NODE_JWT_TTL_SECS;
+
+static LAST_OVER_LIMIT_WARNING_AT: AtomicU64 = AtomicU64::new(0);
+
 /// A cached token is reused until it has less than this long left, then
 /// re-minted. Comfortably above per-request latency, comfortably below TTL.
 const REMINT_MARGIN_SECS: u64 = 60;
@@ -66,6 +80,9 @@ pub enum NodeJwtError {
     BadKey(String),
     #[error("client private key does not match the certificate's public key")]
     KeyCertMismatch,
+    /// The client certificate bundle exceeds the node-auth JWT header limit.
+    #[error("client certificate file has {actual} certificates; maximum is {maximum}")]
+    TooManyCertificates { actual: usize, maximum: usize },
     #[error("JWT signing failed: {0}")]
     Sign(#[from] jsonwebtoken::errors::Error),
     #[error("system clock is before the UNIX epoch")]
@@ -124,9 +141,11 @@ impl NodeJwtMinter {
     }
 
     /// Returns a currently-valid token, re-minting if the cached one is
-    /// missing or close to expiry. Returns `None` (and logs at debug) when
-    /// minting is impossible — e.g. the cert/key files don't exist yet — so
-    /// callers degrade gracefully to mTLS-only.
+    /// missing or close to expiry. Returns `None` when minting is impossible
+    /// — e.g. the cert/key files don't exist yet — so callers degrade
+    /// gracefully to mTLS-only. Transient failures log at debug; an
+    /// over-limit certificate bundle logs at most once every five minutes per
+    /// process because it requires an operator configuration change.
     pub fn current(&self) -> Option<String> {
         self.current_with_expiry().map(|(token, _)| token)
     }
@@ -158,6 +177,17 @@ impl NodeJwtMinter {
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(minted);
                 Some(result)
             }
+            Err(error @ NodeJwtError::TooManyCertificates { .. }) => {
+                if should_log_over_limit_warning(now, &LAST_OVER_LIMIT_WARNING_AT) {
+                    tracing::warn!(
+                        target: "node_auth",
+                        cert_path = %self.cert_path,
+                        %error,
+                        "node-auth: client certificate bundle cannot mint node JWT; continuing with mTLS only"
+                    );
+                }
+                None
+            }
             Err(error) => {
                 tracing::debug!(
                     target: "node_auth",
@@ -178,6 +208,12 @@ impl NodeJwtMinter {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| NodeJwtError::BadCertificate(e.to_string()))?;
         let leaf = chain.first().ok_or(NodeJwtError::NoCertificate)?;
+        if chain.len() > NODE_JWT_MAX_X5C_CERTIFICATES {
+            return Err(NodeJwtError::TooManyCertificates {
+                actual: chain.len(),
+                maximum: NODE_JWT_MAX_X5C_CERTIFICATES,
+            });
+        }
         let sub = spiffe_uri_from_cert(leaf.as_ref())?;
         let secret = parse_secret_key(&key_pem)?;
 
@@ -212,6 +248,20 @@ fn unix_now() -> Result<u64, NodeJwtError> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .map_err(|_| NodeJwtError::Clock)
+}
+
+fn should_log_over_limit_warning(now: u64, last_warning_at: &AtomicU64) -> bool {
+    let mut last = last_warning_at.load(Ordering::Relaxed);
+    loop {
+        if last != 0 && now.saturating_sub(last) < OVER_LIMIT_WARNING_INTERVAL_SECS {
+            return false;
+        }
+        match last_warning_at.compare_exchange_weak(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return true,
+            Err(current) => last = current,
+        }
+    }
 }
 
 /// Extracts the single SPIFFE URI SAN from the certificate — the same field
@@ -356,6 +406,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU64;
+
+    use carbide_test_support::{Check, check_values};
     use jsonwebtoken::{DecodingKey, Validation};
     use serde::Deserialize;
 
@@ -448,6 +501,81 @@ mod tests {
         let claims = decode_against_own_cert(&token);
         assert_eq!(claims.sub, SPIFFE_URI);
         assert_eq!(claims.exp - claims.iat, NODE_JWT_TTL_SECS);
+    }
+
+    #[test]
+    fn certificate_chain_length_must_fit_the_node_jwt_header() {
+        #[derive(Debug, Eq, PartialEq)]
+        enum Outcome {
+            Mints,
+            TooManyCertificates { actual: usize, maximum: usize },
+        }
+
+        let (cert_pem, key_pem) = cert_and_key();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        check_values(
+            [
+                Check {
+                    scenario: "the maximum certificate count is minted",
+                    input: NODE_JWT_MAX_X5C_CERTIFICATES,
+                    expect: Outcome::Mints,
+                },
+                Check {
+                    scenario: "one certificate above the limit is rejected",
+                    input: NODE_JWT_MAX_X5C_CERTIFICATES + 1,
+                    expect: Outcome::TooManyCertificates {
+                        actual: NODE_JWT_MAX_X5C_CERTIFICATES + 1,
+                        maximum: NODE_JWT_MAX_X5C_CERTIFICATES,
+                    },
+                },
+            ],
+            |certificate_count| {
+                let minter = NodeJwtMinter::new(
+                    write_temp(&dir, "cert.pem", &cert_pem.repeat(certificate_count)),
+                    write_temp(&dir, "key.pem", &key_pem),
+                );
+
+                match minter.mint(unix_now().expect("system clock")) {
+                    Ok(_) => Outcome::Mints,
+                    Err(NodeJwtError::TooManyCertificates { actual, maximum }) => {
+                        Outcome::TooManyCertificates { actual, maximum }
+                    }
+                    Err(error) => panic!("unexpected node-token mint error: {error:?}"),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn over_limit_bundle_warning_is_rate_limited() {
+        check_values(
+            [
+                Check {
+                    scenario: "the first process-wide failure is reported",
+                    input: (0, 1_000),
+                    expect: true,
+                },
+                Check {
+                    scenario: "a failure one second later is suppressed",
+                    input: (1_000, 1_001),
+                    expect: false,
+                },
+                Check {
+                    scenario: "a failure just before the interval ends is suppressed",
+                    input: (1_000, 1_000 + OVER_LIMIT_WARNING_INTERVAL_SECS - 1),
+                    expect: false,
+                },
+                Check {
+                    scenario: "a failure at the interval boundary is reported",
+                    input: (1_000, 1_000 + OVER_LIMIT_WARNING_INTERVAL_SECS),
+                    expect: true,
+                },
+            ],
+            |(last_warning_at, now)| {
+                should_log_over_limit_warning(now, &AtomicU64::new(last_warning_at))
+            },
+        );
     }
 
     #[test]

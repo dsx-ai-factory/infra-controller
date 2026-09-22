@@ -19,6 +19,7 @@
 
 pub mod configuring;
 pub mod context;
+mod decommissioning;
 pub mod deleting;
 pub mod error_state;
 pub mod fetching_data;

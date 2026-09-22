@@ -36,6 +36,8 @@ For complete step-by-step deployment instructions, see the **[Quick Start Guide]
 
 For manual phase-by-phase installation (re-running individual phases, debugging failures), see the **[Reference Installation](https://docs.nvidia.com/infra-controller/documentation/getting-started/installation-options/reference-installation)** guide.
 
+To upgrade an existing NICo installation to a new release using `setup.sh`, refer to the **[Upgrading NICo](https://docs.nvidia.com/infra-controller/documentation/operations-day-2/upgrading-nico)** guide. `setup.sh` is idempotent and handles upgrades in place — the same script and values files used for initial installation are the upgrade mechanism.
+
 For the optional site-local monitoring stack (metrics + logs + traces: Prometheus, Grafana, Loki, Tempo, OTEL), see **[observability/README.md](observability/README.md)**.
 
 ## Directory structure
@@ -56,7 +58,7 @@ helm-prereqs/
 │   ├── nico-site-agent.yaml     # Site-agent deployment values (DB config, gRPC settings)
 │   └── metallb-config.yaml     # MetalLB IP pools, BGP peers, and advertisements
 ├── templates/                  # nico-prereqs Helm chart templates (PKI, ESO, PostgreSQL)
-├── operators/                  # Raw manifests and operator values (local-path, MetalLB, cert-manager, Vault, ESO)
+├── operators/                  # Raw manifests and operator values (local-path, MetalLB, Contour/Envoy, cert-manager, Vault, ESO)
 │   └── dpf/                    # DPF manifests/templates (DPF installs by default; --skip-dpf to opt out)
 ├── keycloak/                   # Dev Keycloak deployment and token helper scripts
 └── observability/              # Optional monitoring stack (Loki, Tempo, OTEL, Prometheus, Grafana)
@@ -105,8 +107,52 @@ config it edits.
    vars only for your own/mirrored registry. See *DPF* below. Sites with no
    DPUs (or still on iPXE) run `./setup.sh -y --skip-dpf` and can ignore these.
 
+9. **[RMS (Rack Management Service)](https://docs.nvidia.com/rms/documentation/home/) - on by default.**
+   Unless you pass `--skip-rms`, export `NICO_RMS_IMAGE_TAG` (required; the
+   image tag is decoupled from the chart).
+
+   Phase 5c installs the rack-manager chart from the `helm-prereqs/nv-rms` git
+   submodule (pinned to a reviewed
+   [nv-rms](https://github.com/dsx-ai-factory/nv-rms) commit; initialized
+   automatically) with mTLS issued from `vault-nico-issuer`, and provisions the
+   `rms` database on `nico-pg-cluster`.
+
+   Airgapped sites clone nv-rms out-of-band and set
+   `NICO_RMS_CHART=<clone>/helm` instead. Refer to *Building the RMS image*
+   below.
+
+   NICo Core's chart defaults already point the component manager at
+   `rms-api-server.rack-manager.svc.cluster.local:8801`; the namespace is fixed
+   to `rack-manager` to match, so no Core config change is needed. Set
+   `NICO_RMS_IMAGE_REPO` only for a mirrored or self-built image (the default
+   NGC image is entitlement-gated).
+
+### Building the RMS image
+
+The default `rms-api` image on NGC is entitlement-gated. Most sites build it
+themselves and push it to the same registry as the other NICo images:
+
+```bash
+git submodule update --init helm-prereqs/nv-rms   # or your own nv-rms clone
+cd helm-prereqs/nv-rms
+# One version for the binary metadata, the image tag, and NICO_RMS_IMAGE_TAG,
+# derived from the pinned checkout (for example, v0.10.0-rc2):
+RMS_VERSION="$(git describe --tags --always)"
+docker build \
+  --build-arg VERGEN_GIT_SHA="$(git rev-parse HEAD)" \
+  --build-arg VERGEN_GIT_DESCRIBE="${RMS_VERSION}" \
+  -t "${NICO_IMAGE_REGISTRY}/rms-api:${RMS_VERSION}" .
+docker push "${NICO_IMAGE_REGISTRY}/rms-api:${RMS_VERSION}"
+export NICO_RMS_IMAGE_REPO="${NICO_IMAGE_REGISTRY}/rms-api"
+export NICO_RMS_IMAGE_TAG="${RMS_VERSION}"
+```
+
+Build from the submodule commit (or your pinned clone) so the image matches
+the chart. The `VERGEN_*` build args stamp version metadata; the build works
+without a `.git` directory because of them.
+
 Once the above is done, run `./setup.sh -y` (DPF installs by default; add
-`--skip-dpf` to opt out).
+`--skip-dpf` / `--skip-rms` to opt out of those stacks).
 
 ## Configuration reference
 
@@ -127,8 +173,11 @@ The tables below summarize the keys that must be set per site.
 | `NICO_SITE_UUID` | No | Stable UUID for this site. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
 | `NICO_MANAGE_DEFAULT_STORAGE_CLASS` | No | Whether `setup.sh` marks `local-path` as the default StorageClass. Defaults to `true`. Set to `false` when the cluster already has an operator-managed default StorageClass. |
 | `NICO_STORAGE_CLASS` | No | StorageClass used by Vault data/audit PVCs. Defaults to `local-path-persistent`. |
+| `NICO_INSTALL_CONTOUR` | No | Install the optional Contour/Envoy ingress controller after MetalLB. Defaults to `false`; set to `true` only when the cluster does not already provide an ingress controller. |
 | `PREFLIGHT_CHECK_IMAGE` | No | Image used for preflight per-node checks. Defaults to `busybox:1.36`; set to a local mirror for air-gapped clusters. |
 | `NICO_SKIP_DPF` | No | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Same as `--skip-dpf`. Defaults to `false`. |
+| `NICO_SKIP_RMS` | No | Skip the Rack Management Service (rack-manager chart, phase 5c), which installs **by default**. Same as `--skip-rms`. Defaults to `false`. |
+| `NICO_RMS_IMAGE_TAG` | Unless RMS is skipped (`--skip-rms` / `NICO_SKIP_RMS=true`) | RMS API server image tag (git-describe style, e.g. `v0.10.0-rc2`). No default - the chart fails at render without one. See `setup.sh` header for the full `NICO_RMS_*` family (chart override, image repo, NGC key). The namespace is fixed to `rack-manager` - NICo Core dials the service by that name. |
 | `NICO_DPF_VERSION` | No | `NVIDIA/doca-platform` tag that setup.sh clones and installs. Defaults to `v26.4.0`. |
 | `NICO_DPF_SRC_DIR` | No | Cache directory for the doca-platform clone. Defaults to `helm-prereqs/.dpf-src`. |
 | `NICO_DPF_NGC_API_KEY` | No | NGC API key for `dpf-pull-secret` and the Argo CD helm repository secrets. Defaults to `REGISTRY_PULL_SECRET`. |
@@ -156,8 +205,12 @@ The tables below summarize the keys that must be set per site.
 | `postgresql.instances` | `3` | No | Number of PostgreSQL replicas |
 | `postgresql.volumeSize` | `"10Gi"` | No | PVC size per PostgreSQL replica |
 | `postgresql.storageClass` | `"local-path-persistent"` | No | StorageClass for the nico-prereqs PostgreSQL PVCs. Override through Helm values when using a non-local StorageClass. |
+| `temporal.useHaPostgres` | `false` | No | Move Temporal's default/visibility stores onto `nico-pg-cluster` instead of `postgres.postgres`. Named `useHaPostgres`, not `enabled`, because it only moves the database — it doesn't gate whether Temporal is deployed. See [Consolidating Temporal/Keycloak onto nico-pg-cluster](#consolidating-temporalkeycloak-onto-nico-pg-cluster). |
+| `keycloak.useHaPostgres` | `false` | No | Move Keycloak's database onto `nico-pg-cluster` instead of `postgres.postgres`. Distinct from `nico-rest-api.config.keycloak.enabled` in `values/nico-rest.yaml`, which controls whether Keycloak is deployed at all — this toggle provisions the database regardless, so it just goes unused if Keycloak itself isn't deployed. |
 
 ### `values/nico-core.yaml`
+
+VIP requirements below apply to enabled external `LoadBalancer` Services.
 
 | Key | Default | Must change? | Description |
 |-----|---------|-------------|-------------|
@@ -167,12 +220,13 @@ The tables below summarize the keys that must be set per site.
 | `siteConfig.initial_domain_name` | `"examplesite.example.com"` | **Yes** | Base DNS domain for the site |
 | `siteConfig.dhcp_servers` | `["10.180.126.160"]` | **Yes** | DHCP service VIP(s) from your MetalLB internal pool |
 | `siteConfig.site_fabric_prefixes` | `["10.180.62.72/29"]` | **Yes** | CIDRs for site fabric (instance-to-instance traffic) |
+| `siteConfig.site_fabric_null_routes` | omitted | No | FNN isolation CIDRs. Omission inherits, retains, and collapses operator roots. Explicit lists preserve distinct prefix boundaries, while `[]` installs no null routes |
 | `siteConfig.deny_prefixes` | `["10.180.62.64/29", ...]` | **Yes** | CIDRs instances must not reach (OOB, mgmt, underlay) |
 | `siteConfig.[pools.lo-ip]` ranges | `{ start = "10.180.62.84", end = "10.180.62.86" }` | **Yes** | Loopback IP range for bare-metal hosts |
 | `siteConfig.[pools.vlan-id]` ranges | `{ start = "100", end = "501" }` | **Yes** | VLAN ID allocation range |
 | `siteConfig.[pools.vni]` ranges | `{ start = "1024500", end = "1024800" }` | **Yes** | VXLAN Network Identifier range |
-| `siteConfig.[networks.admin]` | example values | **Yes** | Admin/OOB network: `prefix` (CIDR), `gateway`, `mtu`, `reserve_first`. `prefix` and `gateway` must not be empty — nico-api crashes on startup if they are. |
-| `siteConfig.[networks.<underlay>]` | `[networks.RNO1-M04-D04-IPMITOR-01]` | **Yes** | One block per underlay data-plane L3 segment: `type = "underlay"`, `prefix`, `gateway`, `mtu`, `reserve_first`. Rename the block to match your site segment name. Add additional blocks for each underlay segment. |
+| `siteConfig.[networks.admin]` | example values | **Yes** | Admin network: `type = "admin"`, `prefix`, `mtu`, and `reserve_first`. Every IPv4 prefix requires a `gateway`. DPU provisioning requires an IPv4 admin prefix. Refer to [Initial Network Configuration](../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration) for IPv6 fields, valid combinations, and compatibility. |
+| `siteConfig.[networks.<underlay>]` | `[networks.RNO1-M04-D04-IPMITOR-01]` | **Yes** | One block per underlay data-plane L3 segment to create at startup, with `type = "underlay"` and the same field requirements. Rename the block to match your site segment name. Add additional blocks for each underlay segment. |
 | `nico-api / nico-dhcp / nico-dns / nico-pxe / nico-ssh-console-rs .externalService.annotations.metallb.universe.tf/loadBalancerIPs` | example IPs | **Yes** | Single MetalLB VIP per service. Must be inside the matching IPAddressPool from `metallb-config.yaml` (external pool for `nico-api`, internal pool for the rest). |
 | `nico-ntp.externalService.perPodAnnotations` | 3-element example list | **Yes** | `nico-ntp` is a StatefulSet — one MetalLB VIP per replica (3 by default). List entry `[0]` goes on the LB Service for pod `nico-ntp-0`, `[1]` on `nico-ntp-1`, etc. These three VIPs are what DPUs sync clocks against. |
 | `nico-dhcp.config.kea.hookParameters.nameservers` | `"127.0.0.1"` (chart default) | **Yes** | IP(s) advertised to DHCP clients as their DNS resolver. Must be the `nico-dns` VIP (or whichever DNS the DPUs should use). Leaving the `127.0.0.1` chart default silently breaks DPU name resolution. |
@@ -213,6 +267,8 @@ The tables below summarize the keys that must be set per site.
 ## Setup options
 
 `setup.sh` runs preflight validation automatically before making cluster changes.
+Core VIP validation requires Python 3 with PyYAML installed in the `python3` environment. It parses `--core-values` as YAML, so indentation and Boolean capitalization do not affect VIP validation for enabled external `LoadBalancer` Services. Existing `externalService` configurations may omit VIP annotations for automatic allocation; explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs; the DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`.
+
 It supports these common deployment modes:
 
 | Option | Description |
@@ -225,6 +281,7 @@ It supports these common deployment modes:
 | `--core-values <file>` | Use site-specific Core values instead of `helm-prereqs/values/nico-core.yaml`. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--skip-dpf` | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Use for sites with no DPUs or that still use the deprecated iPXE DPU path. See [DPF](#dpf). |
+| `--install-contour` | Install the optional Contour/Envoy ingress controller. The Envoy Service is `LoadBalancer` and is pinned to the `vip-pool-external` MetalLB pool, so that pool must have addresses before the install. Setup aborts if `projectcontour` already runs a Contour that NICo does not manage, rather than upgrading it with these values. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Core deploys. |
 | `--with-observability` | Also install the local monitoring stack (metrics + logs + traces) after Core. Runs in every mode, including `--skip-rest`. Can also be run standalone at any time: `observability/install-observability.sh`. See [observability/README.md](observability/README.md). |
 | `--debug` | Enable bash tracing. This can print secrets, so avoid it in shared logs. |
@@ -247,12 +304,75 @@ errors, as does a missing `curl` when validation is required), and an
 unreachable registry host skips the image checks entirely
 (air-gapped/preloaded installs).
 
+## Upgrading deployments that bundled PSM and NSM
+
+The Flow chart no longer deploys PSM or NSM, and `setup.sh` does not support an
+automatic upgrade from a Flow Deployment that still contains either manager
+container. This check runs before preflight or any cluster mutation, including
+when `--skip-flow` or `--skip-rest` is set.
+
+To preserve the bundled managers, leave the existing Flow release unchanged
+and stop the upgrade. `setup.sh` cannot upgrade the other components while that
+predecessor topology remains.
+
+To replace the bundled managers with Flow only, first handle any site-specific
+dependencies outside `setup.sh`. In particular, inspect custom Core values and
+configuration for `componentManager.nvSwitchBackend: nsm`,
+`componentManager.powerShelfBackend: psm`, `nv_switch_backend = "nsm"`, or
+`power_shelf_backend = "psm"`. Move those roles to
+[RMS](../docs/configuration/component-manager-rms.md) or to an externally
+managed endpoint, and deploy and verify that Core change using the site's
+existing process. This release does not provide a Core or manager data
+migration. An external endpoint must not resolve to the `psm` or `nsm` Service
+removed by the Flow upgrade.
+
+After those dependencies are handled, upgrade only the existing Flow release
+from the repository root. Reusing the release values preserves site-specific
+image and registry settings; the explicit repository and tag select the target
+Flow image. This is a normal Helm rolling upgrade: do not use `--force` and do
+not patch the Deployment or upgrade `nico-prereqs` first.
+
+```bash
+helm upgrade flow ./helm/charts/nico-flow \
+  --namespace flow \
+  --reuse-values \
+  --set global.image.repository="${NICO_IMAGE_REGISTRY}" \
+  --set global.image.tag="${NICO_REST_IMAGE_TAG}" \
+  --timeout 300s \
+  --wait
+
+kubectl rollout status deployment/flow -n flow --timeout=300s
+
+kubectl get pods -n flow -l app=flow \
+  --field-selector=status.phase!=Succeeded,status.phase!=Failed \
+  -o jsonpath='{range .items[*]}{.metadata.name}{": "}{.spec.containers[*].name}{"\n"}{end}'
+```
+
+Helm replaces the old three-container Pod with a Flow-only Pod and deletes the
+PSM and NSM Services. Stop and resolve or roll back any failed rollout. Before
+continuing, every active Pod returned by the second verification command must
+omit `psm` and `nsm`.
+
+Then rerun the exact `setup.sh` invocation used for the site, with the same
+environment, values files, site overlay, DPF choice, and other options. Setup
+verifies the Deployment rollout and active Pods again before mutation. After
+preflight and the Core phase completes or is skipped, it removes any remaining
+legacy Vault tokens, policies, Secrets, and cluster-wide RBAC even when
+`--skip-rest` or `--skip-flow` is set.
+
+Upgrading `nico-prereqs` removes the retired ExternalSecret resources and may
+garbage-collect their generated PSM/NSM database credential Secrets. The
+Zalando Postgres operator retains the databases and users themselves for manual
+rollback or recovery, but the chart no longer manages them or their
+credentials. Retain any credentials needed for that recovery before choosing
+the overwrite path.
+
 ## What gets deployed
 
 ```text
 local-path-provisioner     (raw manifest - StorageClasses for Vault + PostgreSQL PVCs)
 metallb                    (metallb/metallb 0.14.5 - LoadBalancer IPs via BGP or L2)
-postgres-operator          (zalando/postgres-operator 1.10.1 - manages nico-pg-cluster)
+postgres-operator          (zalando/postgres-operator 1.11.0 - manages nico-pg-cluster)
 cert-manager               (jetstack/cert-manager v1.17.1)
 vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS)
 external-secrets           (external-secrets/external-secrets 0.14.3)
@@ -275,10 +395,10 @@ NICo Core                  (../helm - nico-core.yaml values)
   └── unbound               (Deployment - .forge zone DNS, opt-in)
 NICo REST                  (../helm/rest/nico-rest)
   ├── nico-rest-ca-issuer   (ClusterIssuer - cert-manager.io)
-  ├── postgres StatefulSet  (temporal + keycloak + NICo databases)
+  ├── postgres StatefulSet  (legacy standalone DB; default target for Temporal when temporal.useHaPostgres is false and for Keycloak when keycloak.useHaPostgres is false — the two are independent)
   ├── keycloak              (dev OIDC IdP, nico-dev realm)
   ├── temporal              (temporal-helm/temporal, mTLS)
-  └── nico-rest             (API, cert-manager, workflow, site-manager)
+  └── nico-rest             (API, cert-manager, workflow, site-manager - DB on nico-pg-cluster)
 NICo Flow                  (../helm/charts/nico-flow - Flow, PSM, and NSM)
 NICo REST site-agent       (../helm/rest/nico-rest-site-agent - StatefulSet, bootstrap via site-manager)
 Observability (opt-in)     (observability/ - only with --with-observability; also standalone)
@@ -288,6 +408,85 @@ Observability (opt-in)     (observability/ - only with --with-observability; als
   ├── otel-agent            (opentelemetry-collector 0.106.0 - pod logs -> Loki, spans -> Tempo)
   └── otel-collector-gateway (optional, WITH_DPU=true - DPU OTLP/mTLS receiver)
 ```
+
+## Consolidating Temporal/Keycloak onto nico-pg-cluster
+
+The NICo REST API database was consolidated onto the shared, Zalando-managed
+`nico-pg-cluster` in #3081/#3182. Temporal and Keycloak still default to a
+separate, standalone `postgres.postgres` StatefulSet — both targets are
+supported side by side so existing sites are not forced onto a new database
+on their next `setup.sh` run.
+
+Two toggles in `helm-prereqs/values.yaml` opt a site in:
+
+- `temporal.useHaPostgres`
+- `keycloak.useHaPostgres` (also has a `namespace` field — see the caveat below)
+
+The leaf field is `useHaPostgres`, not `enabled`: these toggles only move
+where the *database* lives, not whether Temporal/Keycloak are deployed at
+all. `keycloak.enabled` already means something else, in
+`values/nico-rest.yaml` (whether Keycloak is deployed) — reusing that name
+here for a different meaning would be confusing.
+
+Sites that don't opt in need no changes: `setup.sh` keeps deploying the
+legacy `postgres.postgres` StatefulSet and pointing Temporal/Keycloak at it,
+exactly as before.
+
+### Migrating an existing site's data
+
+1. Set `temporal.useHaPostgres: true` and/or `keycloak.useHaPostgres: true`, then run
+   `helmfile sync -l name=nico-prereqs` (or `setup.sh` through Phase 6). This
+   provisions the `temporal.nico`/`keycloak.nico` users and empty
+   `temporal`/`temporal_visibility`/`keycloak` databases on `nico-pg-cluster`,
+   and the ESO `ClusterExternalSecret`s that sync their credentials.
+2. Run `helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db temporal`,
+   `--db keycloak`, or `--db both` — matching whichever toggle(s) you just
+   enabled; the default (`both`) fails if you only provisioned one target.
+   This scales the workload(s) to zero, dumps the existing database(s) off
+   `postgres.postgres`, and restores them into `nico-pg-cluster`. It's a
+   stop-the-world cutover: Temporal workflow processing / Keycloak logins are
+   unavailable while it runs, and stay down afterward — see "Why does the
+   migration script leave things scaled down?" below.
+3. Re-run `setup.sh`. Phases 7d/7f detect the enabled toggles, point
+   Temporal/Keycloak at `nico-pg-cluster` instead of `postgres.postgres`, and
+   scale the workloads back up already on the new database.
+
+A fresh site can instead set both toggles to `true` before the first
+`setup.sh` run and skip the migration script — there is no existing data to
+move.
+
+`preflight.sh` guards against skipping step 2 by mistake: if a toggle is
+`true` and `postgres.postgres` still has real Temporal/Keycloak data that the
+matching `nico-pg-cluster` database doesn't fully have yet (missing, empty,
+or fewer rows than the legacy source), it fails with an error pointing at the
+migration script, instead of letting `setup.sh` silently start against an
+empty or incomplete database.
+
+### Why does the migration script leave things scaled down?
+
+Scaling Temporal/Keycloak back up right after the dump/restore would resume
+them against their *old* `postgres.postgres` configuration — they don't
+repoint to `nico-pg-cluster` until the step-3 `setup.sh` run applies that
+config. Any workflow activity or Keycloak login in that window would write to
+`postgres.postgres` and be silently lost once `setup.sh` switches the
+endpoint over. So the migration script leaves a successfully-migrated
+workload at zero replicas, and step 3 is what brings it back up. A *failed*
+migration is the exception: the script restores the original replica count
+immediately, since nothing was cut over.
+
+### Namespace caveats
+
+- **Temporal's namespace is not configurable.** It's hardcoded `temporal`
+  throughout `setup.sh` (TLS bootstrap, rollout waits, admintools execs) and
+  in the vendored `temporal-helm/namespace.yaml` manifest, so there's no
+  `temporal.namespace` value to set.
+- **Keycloak's namespace is `keycloak.namespace`** (default `nico-rest`),
+  consumed consistently by `setup.sh`, the ESO sync, and the migration
+  script. It is **not** propagated automatically to
+  `values/nico-rest.yaml`'s `nico-rest-api.config.keycloak.baseURL` /
+  `externalBaseURL` (a hand-edited site value, not templated) — if you change
+  it from `nico-rest`, update that hostname to match, or REST won't be able
+  to reach Keycloak.
 
 ## DPF
 
@@ -500,8 +699,9 @@ helm-prereqs/health-check.sh
 ```
 
 The script auto-detects the Core, Vault, Postgres, cert-manager, External
-Secrets, and MetalLB namespaces. Override namespace detection if your deployment
-uses non-default namespaces:
+Secrets, MetalLB, and Contour/Envoy namespaces. Contour is optional, so its
+checks are skipped when no `contour-contour` Deployment is found. Override
+namespace detection if your deployment uses non-default namespaces:
 
 ```bash
 NICO_NS=nico-system \
@@ -510,6 +710,7 @@ POSTGRES_NS=postgres \
 CERT_MANAGER_NS=cert-manager \
 ESO_NS=external-secrets \
 METALLB_NS=metallb-system \
+CONTOUR_NS=projectcontour \
 helm-prereqs/health-check.sh
 ```
 
@@ -531,6 +732,13 @@ probes are reported without failing the run.
 ```
 
 Removes all components in reverse dependency order: NICo REST → NICo Core → helmfile releases → CRDs → namespaces → PVs → local-path-provisioner → host-directory sweep.
+
+Contour is the exception: `clean.sh` removes it only when NICo installed it. It
+checks for the `app.kubernetes.io/part-of: nico` label from
+`operators/values/contour.yaml`, because `contour` in `projectcontour` is
+upstream Contour's default release name and namespace and so cannot distinguish
+the two. An unlabelled Contour keeps running, along with its namespace,
+IngressClass, and RBAC.
 
 The final step reclaims the on-disk PV data under `/opt/local-path-provisioner`
 on every node. `local-path-persistent` PVs use `reclaimPolicy: Retain`, so their

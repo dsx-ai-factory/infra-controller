@@ -108,6 +108,7 @@ workspace = true
 # test-only crates not needed by the library itself (e.g. the sqlx_test macro and request-body
 # helpers). `db`/`model` resolve via carbide-api-db/carbide-api-model's lib names, already normal
 # deps.
+carbide-api-model = { path = "../api-model", features = ["test-support"] }
 carbide-macros = { path = "../macros" }
 carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }

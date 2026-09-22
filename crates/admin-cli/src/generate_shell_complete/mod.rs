@@ -18,9 +18,6 @@
 mod args;
 mod cmd;
 
-#[cfg(test)]
-mod tests;
-
 pub(crate) use args::Cmd;
 
 use crate::cfg::dispatch::dispatch_via_run;

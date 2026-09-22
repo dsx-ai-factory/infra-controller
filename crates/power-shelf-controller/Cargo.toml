@@ -45,5 +45,19 @@ opentelemetry = { workspace = true }
 sqlx = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+carbide-api-model = { path = "../api-model", features = ["test-support"] }
+carbide-rack = { path = "../rack", features = ["test-support"] }
+carbide-redfish = { path = "../redfish", features = ["test-support"] }
+carbide-secrets = { path = "../secrets", features = ["test-support"] }
+carbide-test-harness = { path = "../test-harness" }
+state-controller = { path = "../state-controller", features = ["test-support"] }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true }
+
 [lints]
 workspace = true

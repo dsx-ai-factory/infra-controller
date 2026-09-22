@@ -157,7 +157,11 @@ impl FileCredentialsWatcher {
     pub async fn new(config: FileCredentialsConfig) -> Result<Self, SecretsError> {
         let path = config.path();
         let poll_interval = config.poll_interval();
-        let credentials = Arc::new(ArcSwap::from_pointee(Self::load_file(&path).await?));
+        if poll_interval.is_zero() {
+            return Err(SecretsError::GenericError(eyre::eyre!(
+                "credentials.file.poll_interval must be greater than zero"
+            )));
+        }
         let (tx, mut rx) = mpsc::channel(4);
 
         let tx_clone = tx.clone();
@@ -195,6 +199,20 @@ impl FileCredentialsWatcher {
             .watch(&path, RecursiveMode::NonRecursive)
             .map_err(|err| SecretsError::GenericError(err.into()))?;
 
+        // Arm both watchers before reading the initial snapshot. Otherwise a
+        // replacement between the read and watcher registration could remain
+        // invisible until the file changes again. Events received while this
+        // read is in flight remain queued for the reload task below.
+        let initial = match Self::load_file(&path).await {
+            Ok(initial) => initial,
+            Err(error) => {
+                // Close the receiver before dropping the watchers so callbacks
+                // blocked on a full channel can exit during watcher teardown.
+                drop(rx);
+                return Err(error);
+            }
+        };
+        let credentials = Arc::new(ArcSwap::from_pointee(initial));
         let watched_path = path.clone();
         let credentials_clone = credentials.clone();
         tokio::spawn(async move {
@@ -246,9 +264,16 @@ impl FileCredentialsWatcher {
         }
 
         let parsed = serde_yaml::from_slice::<CredentialSnapshot>(&content).map_err(|err| {
-            SecretsError::GenericError(eyre::eyre!(
-                "failed to parse static credential file as JSON or YAML: {err}"
-            ))
+            let message = match err.location() {
+                Some(location) => format!(
+                    "failed to parse static credential file as JSON or YAML at line {}, column {}; parse details redacted",
+                    location.line(),
+                    location.column()
+                ),
+                None => "failed to parse static credential file as JSON or YAML; parse details redacted"
+                    .to_string(),
+            };
+            SecretsError::GenericError(eyre::eyre!(message))
         })?;
         Ok(parsed)
     }
@@ -340,6 +365,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reloads_ufm_credentials_after_atomic_file_replacement() {
+        let dir = tempdir().expect("create temp dir");
+        let file_path = dir.path().join("credentials.yaml");
+        tokio::fs::write(
+            &file_path,
+            r#"ufm_auth_by_fabric:
+  default:
+    username: ignored-by-ufm
+    password: token-before-rotation
+"#,
+        )
+        .await
+        .expect("write initial credentials file");
+
+        let provider = FileCredentialsWatcher::new(FileCredentialsConfig {
+            path: Some(file_path.clone()),
+            poll_interval: Some(Duration::from_millis(50)),
+            ..Default::default()
+        })
+        .await
+        .expect("create file provider");
+        let key = CredentialKey::UfmAuth {
+            fabric: "default".to_string(),
+        };
+
+        let replacement_path = dir.path().join("credentials.next.yaml");
+        tokio::fs::write(
+            &replacement_path,
+            r#"ufm_auth_by_fabric:
+  default:
+    username: ignored-by-ufm
+    password: token-after-rotation
+"#,
+        )
+        .await
+        .expect("write replacement credentials file");
+        tokio::fs::rename(&replacement_path, &file_path)
+            .await
+            .expect("atomically replace credentials file");
+
+        let expected = Some(Credentials::UsernamePassword {
+            username: "ignored-by-ufm".to_string(),
+            password: "token-after-rotation".to_string(),
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if provider
+                    .get_credentials(&key)
+                    .await
+                    .expect("read reloaded UFM credentials")
+                    == expected
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("watcher must reload atomically replaced UFM credentials");
+    }
+
+    #[tokio::test]
     async fn missing_file_returns_error() {
         let dir = tempdir().expect("create temp dir");
         let file_path = dir.path().join("does-not-exist.yaml");
@@ -349,6 +436,54 @@ mod tests {
         })
         .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_initial_file_error_redacts_scalar_values() {
+        let dir = tempdir().expect("create temp dir");
+        let file_path = dir.path().join("credentials.yaml");
+        let credential_fragment = "credential-fragment-987654321";
+        tokio::fs::write(
+            &file_path,
+            format!(
+                "mqtt_auth_by_credential_type:\n  {credential_fragment}:\n    username: mqtt-user\n    password: mqtt-password\n"
+            ),
+        )
+        .await
+        .expect("write invalid credentials file");
+
+        let error = FileCredentialsWatcher::new(FileCredentialsConfig {
+            path: Some(file_path),
+            ..Default::default()
+        })
+        .await
+        .err()
+        .expect("invalid initial file must fail");
+
+        let message = error.to_string();
+        assert!(message.contains("failed to parse"));
+        assert!(message.contains("parse details redacted"));
+        assert!(!message.contains(credential_fragment));
+    }
+
+    #[tokio::test]
+    async fn zero_poll_interval_returns_error() {
+        let dir = tempdir().expect("create temp dir");
+        let file_path = dir.path().join("credentials.yaml");
+        tokio::fs::write(&file_path, "{}")
+            .await
+            .expect("write credentials file");
+
+        let error = FileCredentialsWatcher::new(FileCredentialsConfig {
+            path: Some(file_path),
+            poll_interval: Some(Duration::ZERO),
+            ..Default::default()
+        })
+        .await
+        .err()
+        .expect("zero poll interval must fail");
+
+        assert!(error.to_string().contains("greater than zero"));
     }
 
     #[tokio::test]

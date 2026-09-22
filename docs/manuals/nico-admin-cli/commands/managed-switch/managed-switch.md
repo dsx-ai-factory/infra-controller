@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-switch`
 
-_[Hardware commands](../../hardware.md) › **managed-switch**_
+*[Hardware commands](../../hardware.md) › **managed-switch***
 
 ## NAME
 
@@ -8,8 +8,10 @@ nico-admin-cli-managed-switch - Managed switch related handling
 
 ## SYNOPSIS
 
-**nico-admin-cli managed-switch** \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*subcommands*\>
+```text
+nico-admin-cli managed-switch [--extended] [--sort-by]
+[-h|--help] <subcommands>
+```
 
 ## DESCRIPTION
 
@@ -17,24 +19,26 @@ Managed switch related handling
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ## Subcommands
@@ -44,7 +48,8 @@ Print help (see a summary with -h)
 | [`show`](./managed-switch-show.md) | Display managed switch information |
 | [`list`](./managed-switch-list.md) | List all managed switches |
 | [`delete`](./managed-switch-delete.md) | Delete a managed switch |
+| [`decommission`](./managed-switch-decommission.md) | Start decommissioning a managed switch |
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

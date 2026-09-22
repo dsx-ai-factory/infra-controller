@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::{MachineId, MachineType};
+use carbide_uuid::machine::{HostMachineId, MachineId, MachineType};
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
 use mac_address::MacAddress;
@@ -26,7 +26,7 @@ use model::machine_boot_interface::{
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
-use crate::{DatabaseError, DatabaseResult};
+use crate::{ConditionalWrite, DatabaseError, DatabaseResult};
 
 #[derive(Debug, sqlx::FromRow)]
 struct DesiredBootInterfaceRow {
@@ -52,7 +52,10 @@ impl DesiredBootInterfaceRow {
     /// `None` means the child row has not been initialized. Any other
     /// incomplete combination is persisted corruption rather than an absent
     /// desired target.
-    fn decode(self, machine_id: &MachineId) -> DatabaseResult<Option<DecodedDesiredBootInterface>> {
+    fn decode(
+        self,
+        machine_id: &HostMachineId,
+    ) -> DatabaseResult<Option<DecodedDesiredBootInterface>> {
         match (
             self.desired_mac_address,
             self.desired_interface_id,
@@ -98,17 +101,6 @@ impl DesiredBootInterfaceRow {
     }
 }
 
-fn validate_machine_id(machine_id: &MachineId) -> DatabaseResult<()> {
-    let machine_type = machine_id.machine_type();
-    if machine_type.is_host() || machine_type.is_predicted_host() {
-        Ok(())
-    } else {
-        Err(DatabaseError::InvalidArgument(format!(
-            "desired boot interfaces apply only to hosts, not {machine_type} machine {machine_id}"
-        )))
-    }
-}
-
 fn validate_target(target: &MachineBootInterfaceTarget) -> DatabaseResult<()> {
     if let Some(interface_id) = target.interface_id()
         && canonical_redfish_boot_interface_id(interface_id) != Some(interface_id)
@@ -123,7 +115,7 @@ fn validate_target(target: &MachineBootInterfaceTarget) -> DatabaseResult<()> {
 
 async fn load(
     db: impl DbReader<'_>,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
 ) -> DatabaseResult<DesiredBootInterfaceRow> {
     let query = r#"
         SELECT
@@ -156,7 +148,7 @@ async fn load(
 
 async fn load_for_update(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
 ) -> DatabaseResult<DesiredBootInterfaceRow> {
     let query = r#"
         SELECT
@@ -192,9 +184,8 @@ async fn load_for_update(
 /// Explorer has initialized it.
 pub async fn get(
     db: impl DbReader<'_>,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
 ) -> Result<Option<Versioned<MachineBootInterfaceTarget>>, DatabaseError> {
-    validate_machine_id(machine_id)?;
     Ok(load(db, machine_id)
         .await?
         .decode(machine_id)?
@@ -205,9 +196,8 @@ pub async fn get(
 /// the rest of the caller's transaction.
 pub async fn lock(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
 ) -> Result<Option<Versioned<MachineBootInterfaceTarget>>, DatabaseError> {
-    validate_machine_id(machine_id)?;
     Ok(load_for_update(txn, machine_id)
         .await?
         .decode(machine_id)?
@@ -218,9 +208,9 @@ pub async fn lock(
 /// lacks a Redfish id.
 pub async fn find_incomplete_machine_ids(
     db: impl DbReader<'_>,
-    after_id: Option<&MachineId>,
+    after_id: Option<&HostMachineId>,
     limit: i64,
-) -> DatabaseResult<Vec<MachineId>> {
+) -> DatabaseResult<Vec<HostMachineId>> {
     let query = r#"
         SELECT machine.id
         FROM machines machine
@@ -323,7 +313,7 @@ pub struct SetDesiredBootInterfaceOutcome {
 /// acquiring it, so a missing update indicates an internal locking violation.
 async fn bump_machine_version(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     current_machine_version: ConfigVersion,
 ) -> DatabaseResult<()> {
     let machine_version = current_machine_version.increment();
@@ -358,7 +348,7 @@ async fn bump_machine_version(
 /// means the expected child generation no longer matches.
 async fn write_desired_generation(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     current_machine_version: ConfigVersion,
     expected_version: Option<ConfigVersion>,
     target: &MachineBootInterfaceTarget,
@@ -473,7 +463,7 @@ async fn write_desired_generation(
 /// `false` means the expected desired generation no longer matches.
 async fn update_selection_source(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     current_machine_version: ConfigVersion,
     expected_version: ConfigVersion,
     source: BootInterfaceSelectionSource,
@@ -512,12 +502,11 @@ async fn update_selection_source(
 /// another writer changed the target first.
 pub async fn try_set(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     expected_version: Option<ConfigVersion>,
     target: &MachineBootInterfaceTarget,
     source: BootInterfaceSelectionSource,
 ) -> Result<bool, DatabaseError> {
-    validate_machine_id(machine_id)?;
     validate_target(target)?;
 
     let row = load_for_update(txn, machine_id).await?;
@@ -567,7 +556,7 @@ pub async fn try_set(
 /// keeps an existing pair so an operator retry cannot discard its Redfish ID.
 pub async fn set(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     target: &MachineBootInterfaceTarget,
     source: BootInterfaceSelectionSource,
 ) -> Result<SetDesiredBootInterfaceOutcome, DatabaseError> {
@@ -582,7 +571,7 @@ pub async fn set(
 /// learned.
 pub async fn force_set(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     target: &MachineBootInterfaceTarget,
     source: BootInterfaceSelectionSource,
 ) -> Result<SetDesiredBootInterfaceOutcome, DatabaseError> {
@@ -599,7 +588,7 @@ pub async fn force_set(
 /// [`BootInterfaceSelectionSource::LegacyUnknown`].
 pub async fn force_reconcile(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     target: &MachineBootInterfaceTarget,
     authority: BootInterfaceSelectionAuthority,
 ) -> Result<SetDesiredBootInterfaceOutcome, DatabaseError> {
@@ -630,10 +619,9 @@ pub async fn force_reconcile(
 /// [`BootInterfaceSelectionSource::LegacyUnknown`] selection.
 async fn force_reconcile_existing(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     target: &MachineBootInterfaceTarget,
 ) -> Result<SetDesiredBootInterfaceOutcome, DatabaseError> {
-    validate_machine_id(machine_id)?;
     validate_target(target)?;
 
     let row = load_for_update(txn, machine_id).await?;
@@ -709,12 +697,11 @@ enum SetMode {
 /// policy without weakening a complete interface pair.
 async fn set_with_mode(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     target: &MachineBootInterfaceTarget,
     source: BootInterfaceSelectionSource,
     mode: SetMode,
 ) -> Result<SetDesiredBootInterfaceOutcome, DatabaseError> {
-    validate_machine_id(machine_id)?;
     validate_target(target)?;
 
     let row = load_for_update(txn, machine_id).await?;
@@ -803,16 +790,15 @@ async fn set_with_mode(
 /// `HostInit`, so newly provisioned hosts remain pending real verification.
 pub async fn initialize_if_unset(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     target: &MachineBootInterfaceTarget,
     source: BootInterfaceSelectionSource,
 ) -> Result<Versioned<MachineBootInterfaceTarget>, DatabaseError> {
-    validate_machine_id(machine_id)?;
     validate_target(target)?;
 
     let row = load_for_update(txn, machine_id).await?;
     let current_machine_version = row.machine_version;
-    let assume_verified = machine_id.machine_type().is_host() && row.rollout_baseline_eligible;
+    let assume_verified = machine_id.is_stable_host() && row.rollout_baseline_eligible;
     let verification_policy = if assume_verified {
         VerificationPolicy::AssumeVerified
     } else {
@@ -865,11 +851,10 @@ pub async fn initialize_if_unset(
 /// physical target's identity; stale or pending status remains unchanged.
 pub async fn enrich_interface_id(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     mac_address: MacAddress,
     interface_id: &str,
 ) -> Result<Option<Versioned<MachineBootInterfaceTarget>>, DatabaseError> {
-    validate_machine_id(machine_id)?;
     let Some(interface_id) = canonical_redfish_boot_interface_id(interface_id) else {
         return Err(DatabaseError::InvalidArgument(
             "desired boot interface id must not be blank".to_string(),
@@ -918,32 +903,55 @@ pub async fn enrich_interface_id(
     }))
 }
 
-/// Tries to reopen an inspected target as a new pending generation after
-/// Redfish drift.
+/// `BootInterfaceObservationNotApplicable` identifies why a Redfish observation
+/// cannot update the desired boot configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootInterfaceObservationNotApplicable {
+    /// No desired boot-interface target is set for the machine.
+    TargetUnset,
+    /// The desired generation or target differs from the one inspected.
+    TargetMismatch,
+    /// The matching desired generation is not verified and cannot be reopened.
+    AlreadyPending,
+}
+
+/// `try_reopen_after_observed_drift` opens a new pending generation when
+/// Redfish reports host BIOS settings or boot order that no longer match
+/// NICo's desired boot configuration.
 ///
 /// The parent machine lock and exact desired generation check make this an
 /// observation result, not a blind `force_set`: newer operator intent wins.
 /// The verified-version check also makes replay a no-op once a generation is
-/// already pending. `None` means either condition changed before this result
-/// could be persisted.
+/// already pending. `NotApplied` distinguishes an unset target (`TargetUnset`),
+/// a different target/version (`TargetMismatch`), and an unverified generation
+/// (`AlreadyPending`). `Applied` returns the same target with its new version.
+/// A missing parent machine is a `DatabaseError::NotFoundError`.
+/// A child CAS miss after both rows are locked is a `DatabaseError::Internal`.
 pub async fn try_reopen_after_observed_drift(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     inspected_boot_interface: &Versioned<MachineBootInterfaceTarget>,
-) -> Result<Option<Versioned<MachineBootInterfaceTarget>>, DatabaseError> {
-    validate_machine_id(machine_id)?;
+) -> Result<
+    ConditionalWrite<Versioned<MachineBootInterfaceTarget>, BootInterfaceObservationNotApplicable>,
+    DatabaseError,
+> {
     validate_target(&inspected_boot_interface.value)?;
 
     let desired_boot_interface_row = load_for_update(txn, machine_id).await?;
     let current_machine_version = desired_boot_interface_row.machine_version;
-    let Some(current_desired_boot_interface) = desired_boot_interface_row.decode(machine_id)?
-    else {
-        return Ok(None);
+    // The joined child columns can predate a wait for the parent lock. Read the
+    // target again under that lock so rejection describes the current target.
+    let Some(current_desired_boot_interface) = get(&mut *txn, machine_id).await? else {
+        return Ok(ConditionalWrite::NotApplied(
+            BootInterfaceObservationNotApplicable::TargetUnset,
+        ));
     };
-    if current_desired_boot_interface.desired.version != inspected_boot_interface.version
-        || current_desired_boot_interface.desired.value != inspected_boot_interface.value
+    if current_desired_boot_interface.version != inspected_boot_interface.version
+        || current_desired_boot_interface.value != inspected_boot_interface.value
     {
-        return Ok(None);
+        return Ok(ConditionalWrite::NotApplied(
+            BootInterfaceObservationNotApplicable::TargetMismatch,
+        ));
     }
 
     // Read and lock the child status only after `load_for_update` has acquired
@@ -960,44 +968,49 @@ pub async fn try_reopen_after_observed_drift(
         .fetch_one(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(verified_version_query, error))?;
-    if verified_version != Some(current_desired_boot_interface.desired.version) {
-        return Ok(None);
+    if verified_version != Some(current_desired_boot_interface.version) {
+        return Ok(ConditionalWrite::NotApplied(
+            BootInterfaceObservationNotApplicable::AlreadyPending,
+        ));
     }
 
     let Some(reopened_version) = write_desired_generation(
         txn,
         machine_id,
         current_machine_version,
-        Some(current_desired_boot_interface.desired.version),
-        &current_desired_boot_interface.desired.value,
+        Some(current_desired_boot_interface.version),
+        &current_desired_boot_interface.value,
         VerificationPolicy::Pending,
         SelectionSourceUpdate::Preserve,
     )
     .await?
     else {
-        return Ok(None);
+        return Err(DatabaseError::Internal {
+            message: format!(
+                "failed to reopen desired boot interface for locked machine {machine_id}"
+            ),
+        });
     };
 
-    Ok(Some(Versioned {
-        value: current_desired_boot_interface.desired.value,
+    Ok(ConditionalWrite::Applied(Versioned {
+        value: current_desired_boot_interface.value,
         version: reopened_version,
     }))
 }
 
-/// Records a Redfish observation only if the desired boot-interface version
-/// still matches the version the caller observed.
+/// `mark_verified` records a Redfish observation only if the desired
+/// boot-interface version still matches the version the caller observed.
 ///
-/// A `false` return means the desired target was removed or replaced before
-/// the observation could be committed. The caller must not treat that newer
-/// target as verified.
+/// `NotApplied` distinguishes an unset target (`TargetUnset`) from a different
+/// desired version (`TargetMismatch`); this operation never returns
+/// `AlreadyPending`. The caller must not treat a newer target as verified.
+/// A missing parent machine is a `DatabaseError::NotFoundError`.
 pub async fn mark_verified(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     expected_desired_version: ConfigVersion,
     observed_at: DateTime<Utc>,
-) -> Result<bool, DatabaseError> {
-    validate_machine_id(machine_id)?;
-
+) -> Result<ConditionalWrite<(), BootInterfaceObservationNotApplicable>, DatabaseError> {
     // Desired-target writers lock the parent machine row before touching this
     // child row. Preserve that order so a concurrent operator write cannot
     // deadlock verification against the state-controller transition, which
@@ -1017,15 +1030,35 @@ pub async fn mark_verified(
         .bind(observed_at)
         .bind(machine_id)
         .bind(expected_desired_version)
-        .fetch_optional(txn)
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
 
-    Ok(updated.is_some())
+    if updated.is_some() {
+        return Ok(ConditionalWrite::Applied(()));
+    }
+
+    // The parent lock keeps desired-target writers out until commit. Check
+    // absence here rather than using the joined child snapshot from before a
+    // possible lock wait; a present row must have a different desired version.
+    let target_exists_query =
+        "SELECT EXISTS (SELECT 1 FROM machine_boot_interfaces WHERE machine_id = $1)";
+    let target_exists: bool = sqlx::query_scalar(target_exists_query)
+        .bind(machine_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(target_exists_query, error))?;
+    let reason = if target_exists {
+        BootInterfaceObservationNotApplicable::TargetMismatch
+    } else {
+        BootInterfaceObservationNotApplicable::TargetUnset
+    };
+    Ok(ConditionalWrite::NotApplied(reason))
 }
 
 #[cfg(test)]
 mod tests {
+    use BootInterfaceObservationNotApplicable::{AlreadyPending, TargetMismatch, TargetUnset};
     use BootInterfaceSelectionAuthority::Existing;
     use BootInterfaceSelectionSource::{Operator, RedfishUefiPci};
     use carbide_uuid::machine::{MachineIdSource, MachineType};
@@ -1043,13 +1076,37 @@ mod tests {
     const SELECTION_MIGRATION: &str =
         include_str!("../migrations/20260819221226_boot_interface_selection_source.sql");
 
-    fn machine_id(machine_type: MachineType, marker: u8) -> MachineId {
+    fn host_machine_id(marker: u8) -> HostMachineId {
         let mut hardware_id = [0u8; 32];
         hardware_id[0] = marker;
         MachineId::new(
             MachineIdSource::ProductBoardChassisSerial,
             hardware_id,
-            machine_type,
+            MachineType::Host,
+        )
+        .try_into()
+        .expect("tests should only construct host and predicted hosts")
+    }
+
+    fn predicted_host_machine_id(marker: u8) -> HostMachineId {
+        let mut hardware_id = [0u8; 32];
+        hardware_id[0] = marker;
+        MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            hardware_id,
+            MachineType::PredictedHost,
+        )
+        .try_into()
+        .expect("tests should only construct host and predicted hosts")
+    }
+
+    fn dpu_machine_id(marker: u8) -> MachineId {
+        let mut hardware_id = [0u8; 32];
+        hardware_id[0] = marker;
+        MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            hardware_id,
+            MachineType::Dpu,
         )
     }
 
@@ -1073,7 +1130,7 @@ mod tests {
 
     async fn versions(
         txn: &mut PgConnection,
-        machine_id: &MachineId,
+        machine_id: &HostMachineId,
     ) -> Result<(ConfigVersion, Option<ConfigVersion>), sqlx::Error> {
         sqlx::query_as(
             "SELECT machine.version, boot_interface.desired_version
@@ -1089,7 +1146,7 @@ mod tests {
 
     async fn set_controller_state(
         txn: &mut PgConnection,
-        machine_id: &MachineId,
+        machine_id: &HostMachineId,
         state: ManagedHostState,
     ) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE machines SET controller_state = $1 WHERE id = $2")
@@ -1102,7 +1159,7 @@ mod tests {
 
     async fn status_observation(
         txn: &mut PgConnection,
-        machine_id: &MachineId,
+        machine_id: &HostMachineId,
     ) -> Result<(Option<ConfigVersion>, Option<DateTime<Utc>>, bool), sqlx::Error> {
         sqlx::query_as(
             "SELECT verified_version, observed_at, assumed
@@ -1117,7 +1174,7 @@ mod tests {
     /// Test helper that decodes persisted selection metadata for assertions.
     async fn load_persisted_selection(
         txn: &mut PgConnection,
-        machine_id: &MachineId,
+        machine_id: &HostMachineId,
     ) -> Result<BootInterfaceSelection, DatabaseError> {
         load(txn, machine_id)
             .await?
@@ -1132,7 +1189,7 @@ mod tests {
     /// exercising production selection or version update behavior.
     async fn overwrite_selection_updated_at(
         txn: &mut PgConnection,
-        machine_id: &MachineId,
+        machine_id: &HostMachineId,
         updated_at: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
@@ -1159,7 +1216,7 @@ mod tests {
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let machine_id = machine_id(MachineType::Host, 1);
+        let machine_id = host_machine_id(1);
         let initial_machine_version = seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 1]);
         let initial_target = MachineBootInterfaceTarget::MacOnly(mac_address);
@@ -1204,27 +1261,23 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let cases = [
+            (host_machine_id(30), ManagedHostState::Ready, true),
             (
-                machine_id(MachineType::Host, 30),
-                ManagedHostState::Ready,
-                true,
-            ),
-            (
-                machine_id(MachineType::Host, 31),
+                host_machine_id(31),
                 ManagedHostState::Assigned {
                     instance_state: InstanceState::Init,
                 },
                 true,
             ),
             (
-                machine_id(MachineType::Host, 32),
+                host_machine_id(32),
                 ManagedHostState::HostInit {
                     machine_state: MachineState::WaitingForPlatformConfiguration { retry_count: 0 },
                 },
                 false,
             ),
             (
-                machine_id(MachineType::PredictedHost, 33),
+                predicted_host_machine_id(33),
                 ManagedHostState::Ready,
                 false,
             ),
@@ -1269,8 +1322,19 @@ mod tests {
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let machine_id = machine_id(MachineType::Host, 34);
+        let machine_id = host_machine_id(34);
         seed_machine(txn.as_mut(), &machine_id).await?;
+        assert_eq!(
+            mark_verified(
+                txn.as_mut(),
+                &machine_id,
+                ConfigVersion::invalid(),
+                Utc::now(),
+            )
+            .await?,
+            ConditionalWrite::NotApplied(TargetUnset)
+        );
+        assert!(get(txn.as_mut(), &machine_id).await?.is_none());
         let target = MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 3, 4]));
         let initialized =
             initialize_if_unset(txn.as_mut(), &machine_id, &target, RedfishUefiPci).await?;
@@ -1280,21 +1344,25 @@ mod tests {
         let observed_at =
             DateTime::from_timestamp(1_722_000_000, 123_000_000).expect("fixture timestamp");
 
-        assert!(
-            !mark_verified(
+        assert_eq!(
+            mark_verified(
                 txn.as_mut(),
                 &machine_id,
                 ConfigVersion::invalid(),
                 observed_at,
             )
-            .await?
+            .await?,
+            ConditionalWrite::NotApplied(TargetMismatch)
         );
         assert_eq!(
             status_observation(txn.as_mut(), &machine_id).await?,
             (None, None, false)
         );
 
-        assert!(mark_verified(txn.as_mut(), &machine_id, initialized.version, observed_at,).await?);
+        assert_eq!(
+            mark_verified(txn.as_mut(), &machine_id, initialized.version, observed_at).await?,
+            ConditionalWrite::Applied(())
+        );
         assert_eq!(
             status_observation(txn.as_mut(), &machine_id).await?,
             (Some(initialized.version), Some(observed_at), false)
@@ -1324,7 +1392,10 @@ mod tests {
             .await?
             .desired;
         assert_ne!(updated.version, initialized.version);
-        assert!(!mark_verified(txn.as_mut(), &machine_id, initialized.version, Utc::now(),).await?);
+        assert_eq!(
+            mark_verified(txn.as_mut(), &machine_id, initialized.version, Utc::now()).await?,
+            ConditionalWrite::NotApplied(TargetMismatch)
+        );
         assert_eq!(
             status_observation(txn.as_mut(), &machine_id).await?,
             (Some(initialized.version), Some(observed_at), false),
@@ -1340,25 +1411,35 @@ mod tests {
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let machine_id = machine_id(MachineType::Host, 44);
+        let machine_id = host_machine_id(44);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let inspected_target = MachineBootInterfaceTarget::Pair(MachineBootInterface {
             mac_address: MacAddress::new([2, 0, 0, 0, 4, 4]),
             interface_id: "NIC.Slot.4-1-1".to_string(),
         });
+        let unset_desired = Versioned {
+            value: inspected_target.clone(),
+            version: ConfigVersion::invalid(),
+        };
+        assert!(matches!(
+            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &unset_desired).await?,
+            ConditionalWrite::NotApplied(TargetUnset)
+        ));
+        assert!(get(txn.as_mut(), &machine_id).await?.is_none());
         let inspected_desired = set(txn.as_mut(), &machine_id, &inspected_target, Operator)
             .await?
             .desired;
         let observed_at =
             DateTime::from_timestamp(1_722_000_300, 123_000_000).expect("fixture timestamp");
-        assert!(
+        assert_eq!(
             mark_verified(
                 txn.as_mut(),
                 &machine_id,
                 inspected_desired.version,
                 observed_at,
             )
-            .await?
+            .await?,
+            ConditionalWrite::Applied(())
         );
 
         let operator_target =
@@ -1366,11 +1447,10 @@ mod tests {
         let operator_desired = set(txn.as_mut(), &machine_id, &operator_target, Operator)
             .await?
             .desired;
-        assert!(
-            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &inspected_desired)
-                .await?
-                .is_none()
-        );
+        assert!(matches!(
+            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &inspected_desired).await?,
+            ConditionalWrite::NotApplied(TargetMismatch)
+        ));
         let persisted_desired = get(txn.as_mut(), &machine_id)
             .await?
             .expect("operator-selected target");
@@ -1390,7 +1470,7 @@ mod tests {
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let machine_id = machine_id(MachineType::Host, 45);
+        let machine_id = host_machine_id(45);
         let initial_machine_version = seed_machine(txn.as_mut(), &machine_id).await?;
         let inspected_target = MachineBootInterfaceTarget::Pair(MachineBootInterface {
             mac_address: MacAddress::new([2, 0, 0, 0, 4, 6]),
@@ -1404,20 +1484,22 @@ mod tests {
         overwrite_selection_updated_at(txn.as_mut(), &machine_id, selection_time).await?;
         let observed_at =
             DateTime::from_timestamp(1_722_000_400, 123_000_000).expect("fixture timestamp");
-        assert!(
+        assert_eq!(
             mark_verified(
                 txn.as_mut(),
                 &machine_id,
                 inspected_desired.version,
                 observed_at,
             )
-            .await?
+            .await?,
+            ConditionalWrite::Applied(())
         );
 
-        let pending_desired =
-            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &inspected_desired)
-                .await?
-                .expect("fresh pending generation");
+        let ConditionalWrite::Applied(pending_desired) =
+            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &inspected_desired).await?
+        else {
+            panic!("drift should reopen a pending generation");
+        };
         assert_target(&pending_desired, &inspected_target);
         assert_eq!(
             pending_desired.version.version_nr(),
@@ -1445,9 +1527,11 @@ mod tests {
         assert_eq!(desired_version_after_reopen, Some(pending_desired.version));
 
         assert!(
-            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &pending_desired)
-                .await?
-                .is_none(),
+            matches!(
+                try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &pending_desired)
+                    .await?,
+                ConditionalWrite::NotApplied(AlreadyPending)
+            ),
             "an already-pending generation must not be reopened",
         );
         assert_eq!(
@@ -1459,251 +1543,115 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn concurrent_set_and_mark_verified_use_parent_first_lock_order(
+    async fn observation_rejection_uses_target_after_waiting_for_machine_lock(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let machine_id = machine_id(MachineType::Host, 35);
-        let initial_target =
-            MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 3, 6]));
-        let replacement = MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 3, 7]));
-
-        let mut setup_txn = pool.begin().await?;
-        seed_machine(setup_txn.as_mut(), &machine_id).await?;
-        let initial = initialize_if_unset(
-            setup_txn.as_mut(),
-            &machine_id,
-            &initial_target,
-            RedfishUefiPci,
-        )
-        .await?;
-        setup_txn.commit().await?;
-
-        // Hold the parent lock as `set` does. `mark_verified` must wait here,
-        // before it can lock the child intent row.
-        let mut setter_txn = pool.begin().await?;
-        let setter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(setter_txn.as_mut())
-            .await?;
-        load_for_update(setter_txn.as_mut(), &machine_id).await?;
-
-        let (verification_pid_tx, verification_pid_rx) = tokio::sync::oneshot::channel();
-        let verification_pool = pool.clone();
-        let mut verification_task = tokio::spawn(async move {
-            let mut txn = verification_pool
-                .begin()
-                .await
-                .map_err(|error| error.to_string())?;
-            let verification_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(txn.as_mut())
-                .await
-                .map_err(|error| error.to_string())?;
-            verification_pid_tx
-                .send(verification_pid)
-                .map_err(|_| "could not signal verification backend pid".to_string())?;
-
-            let marked = mark_verified(txn.as_mut(), &machine_id, initial.version, Utc::now())
-                .await
-                .map_err(|error| error.to_string())?;
-
-            // The real state-controller transaction updates the parent state
-            // after recording verification. This remains safe because
-            // mark_verified already owns the parent lock.
-            sqlx::query("UPDATE machines SET updated = updated WHERE id = $1")
-                .bind(machine_id)
-                .execute(txn.as_mut())
-                .await
-                .map_err(|error| error.to_string())?;
-            txn.commit().await.map_err(|error| error.to_string())?;
-
-            Ok::<bool, String>(marked)
-        });
-
-        let verification_pid = verification_pid_rx
-            .await
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let wait_for_parent_lock = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let blocked_by_setter: bool =
-                    sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
-                        .bind(setter_pid)
-                        .bind(verification_pid)
-                        .fetch_one(&pool)
-                        .await?;
-                if blocked_by_setter {
-                    return Ok::<(), sqlx::Error>(());
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await;
-        match wait_for_parent_lock {
-            Ok(result) => result?,
-            Err(_) => {
-                verification_task.abort();
-                let _ = verification_task.await;
-                return Err(std::io::Error::other(
-                    "verification did not wait on the setter's parent lock",
-                )
-                .into());
-            }
+        #[derive(Clone, Copy, Debug)]
+        enum Observation {
+            Verify,
+            Reopen,
         }
 
-        let updated = set(setter_txn.as_mut(), &machine_id, &replacement, Operator)
+        for (marker, observation) in [(46, Observation::Verify), (47, Observation::Reopen)] {
+            let machine_id = host_machine_id(marker);
+            let mut setup = pool.begin().await?;
+            seed_machine(setup.as_mut(), &machine_id).await?;
+            setup.commit().await?;
+
+            let inspected_desired = Versioned {
+                value: MachineBootInterfaceTarget::MacOnly(MacAddress::new([
+                    2, 0, 0, 0, 4, marker,
+                ])),
+                version: ConfigVersion::invalid(),
+            };
+            let mut holder = pool.begin().await?;
+            let newer_desired = set(
+                holder.as_mut(),
+                &machine_id,
+                &inspected_desired.value,
+                Operator,
+            )
             .await?
             .desired;
-        setter_txn.commit().await?;
+            let expected_versions = versions(holder.as_mut(), &machine_id).await?;
+            let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(holder.as_mut())
+                .await?;
+            let mut waiter = pool.begin().await?;
+            let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(waiter.as_mut())
+                .await?;
 
-        let marked =
-            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut verification_task)
-                .await
-            {
-                Ok(result) => result
-                    .map_err(|error| std::io::Error::other(error.to_string()))?
-                    .map_err(std::io::Error::other)?,
-                Err(_) => {
-                    verification_task.abort();
-                    let _ = verification_task.await;
-                    return Err(std::io::Error::other("set and verification deadlocked").into());
-                }
+            // The child's insert is still uncommitted when the observation
+            // waits for the parent lock. Its joined snapshot sees no target,
+            // but rejection must describe the target committed during the wait.
+            let record_observation = async {
+                let result = match observation {
+                    Observation::Verify => {
+                        mark_verified(
+                            waiter.as_mut(),
+                            &machine_id,
+                            inspected_desired.version,
+                            Utc::now(),
+                        )
+                        .await?
+                    }
+                    Observation::Reopen => {
+                        match try_reopen_after_observed_drift(
+                            waiter.as_mut(),
+                            &machine_id,
+                            &inspected_desired,
+                        )
+                        .await?
+                        {
+                            ConditionalWrite::Applied(_) => ConditionalWrite::Applied(()),
+                            ConditionalWrite::NotApplied(reason) => {
+                                ConditionalWrite::NotApplied(reason)
+                            }
+                        }
+                    }
+                };
+                waiter.commit().await?;
+                Ok::<_, Box<dyn std::error::Error>>(result)
             };
-
-        assert!(!marked, "a superseded desired version must not be verified");
-        let desired = get(&pool, &machine_id).await?.expect("replacement target");
-        assert_target(&desired, &replacement);
-        assert_eq!(desired.version, updated.version);
-        let mut conn = pool.acquire().await?;
-        assert_eq!(
-            status_observation(conn.as_mut(), &machine_id).await?,
-            (None, None, false),
-            "stale verification must not stamp the replacement version",
-        );
-
-        Ok(())
-    }
-
-    #[crate::sqlx_test]
-    async fn selection_time_advances_after_waiting_for_the_machine_lock(
-        pool: PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let machine_id = machine_id(MachineType::Host, 64);
-        let target = MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 6, 5]));
-        let mut setup_txn = pool.begin().await?;
-        seed_machine(setup_txn.as_mut(), &machine_id).await?;
-        initialize_if_unset(
-            setup_txn.as_mut(),
-            &machine_id,
-            &target,
-            BootInterfaceSelectionSource::RedfishSerialNumber,
-        )
-        .await?;
-        setup_txn.commit().await?;
-
-        // Start this transaction first so its transaction timestamp predates
-        // the selection written by the lock holder below. After it resumes,
-        // its write must still advance the stored decision time.
-        let mut waiting_txn = pool.begin().await?;
-        let waiting_started_at: DateTime<Utc> = sqlx::query_scalar("SELECT CURRENT_TIMESTAMP")
-            .fetch_one(waiting_txn.as_mut())
-            .await?;
-
-        let mut holder_txn = pool.begin().await?;
-        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(holder_txn.as_mut())
-            .await?;
-        set(holder_txn.as_mut(), &machine_id, &target, Operator).await?;
-        let holder_selection = load_persisted_selection(holder_txn.as_mut(), &machine_id).await?;
-        assert!(
-            holder_selection
-                .updated_at
-                .is_some_and(|time| time > waiting_started_at),
-            "the newer lock holder should establish a decision after the waiting transaction began",
-        );
-
-        let (waiting_pid_tx, waiting_pid_rx) = tokio::sync::oneshot::channel();
-        let mut waiting_task = tokio::spawn(async move {
-            let waiting_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(waiting_txn.as_mut())
-                .await
-                .map_err(|error| error.to_string())?;
-            waiting_pid_tx
-                .send(waiting_pid)
-                .map_err(|_| "could not signal waiting backend pid".to_string())?;
-            set(
-                waiting_txn.as_mut(),
-                &machine_id,
-                &target,
-                BootInterfaceSelectionSource::ScoutReportPci,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-            let selection = load_persisted_selection(waiting_txn.as_mut(), &machine_id)
-                .await
-                .map_err(|error| error.to_string())?;
-            waiting_txn
-                .commit()
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok::<BootInterfaceSelection, String>(selection)
-        });
-
-        let waiting_pid = waiting_pid_rx
-            .await
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let wait_for_lock = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let blocked_by_holder: bool =
-                    sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
-                        .bind(holder_pid)
-                        .bind(waiting_pid)
-                        .fetch_one(&pool)
-                        .await?;
-                if blocked_by_holder {
-                    return Ok::<(), sqlx::Error>(());
+            let commit_target = async {
+                loop {
+                    let blocked_by_holder: bool =
+                        sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                            .bind(holder_pid)
+                            .bind(waiter_pid)
+                            .fetch_one(&pool)
+                            .await?;
+                    if blocked_by_holder {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await;
-        match wait_for_lock {
-            Ok(result) => result?,
-            Err(_) => {
-                waiting_task.abort();
-                let _ = waiting_task.await;
-                return Err(std::io::Error::other(
-                    "selection writer did not wait on the machine lock",
-                )
-                .into());
-            }
+                holder.commit().await
+            };
+            let (observation_result, target_commit) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    tokio::join!(record_observation, commit_target)
+                })
+                .await?;
+            target_commit?;
+            assert_eq!(
+                observation_result?,
+                ConditionalWrite::NotApplied(TargetMismatch),
+                "{observation:?} must classify the target after the lock wait"
+            );
+
+            let mut conn = pool.acquire().await?;
+            let persisted_desired = get(&mut *conn, &machine_id)
+                .await?
+                .expect("operator-selected target");
+            assert_target(&persisted_desired, &newer_desired.value);
+            assert_eq!(versions(&mut conn, &machine_id).await?, expected_versions);
+            assert_eq!(
+                status_observation(&mut conn, &machine_id).await?,
+                (None, None, false)
+            );
         }
-
-        holder_txn.commit().await?;
-        let final_selection = match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            &mut waiting_task,
-        )
-        .await
-        {
-            Ok(result) => result
-                .map_err(|error| std::io::Error::other(error.to_string()))?
-                .map_err(std::io::Error::other)?,
-            Err(_) => {
-                waiting_task.abort();
-                let _ = waiting_task.await;
-                return Err(std::io::Error::other(
-                    "selection writer did not resume after the machine lock was released",
-                )
-                .into());
-            }
-        };
-
-        assert_eq!(
-            final_selection.source,
-            BootInterfaceSelectionSource::ScoutReportPci,
-        );
-        assert!(
-            final_selection.updated_at > holder_selection.updated_at,
-            "a writer that resumes after a newer selection must advance the stored decision time",
-        );
 
         Ok(())
     }
@@ -1713,7 +1661,7 @@ mod tests {
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let machine_id = machine_id(MachineType::PredictedHost, 2);
+        let machine_id = predicted_host_machine_id(2);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 3]);
         let pair = MachineBootInterfaceTarget::Pair(MachineBootInterface {
@@ -1825,7 +1773,7 @@ mod tests {
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let machine_id = machine_id(MachineType::Host, 5);
+        let machine_id = host_machine_id(5);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 8]);
         let pair = MachineBootInterfaceTarget::Pair(MachineBootInterface {
@@ -1859,184 +1807,6 @@ mod tests {
         .desired;
         assert_target(&unchanged, &pair);
         assert_eq!(unchanged.version, paired.version);
-
-        Ok(())
-    }
-
-    #[crate::sqlx_test]
-    async fn explicit_writes_change_only_the_affected_generations_and_selection_time(
-        pool: PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        #[derive(Clone, Copy)]
-        enum WriteKind {
-            Set,
-            Force,
-        }
-
-        struct Case {
-            scenario: &'static str,
-            write: WriteKind,
-            replace_target: bool,
-            source: BootInterfaceSelectionSource,
-            expect_desired_changed: bool,
-            expect_selection_changed: bool,
-        }
-
-        let cases = [
-            Case {
-                scenario: "exact retry",
-                write: WriteKind::Set,
-                replace_target: false,
-                source: RedfishUefiPci,
-                expect_desired_changed: false,
-                expect_selection_changed: false,
-            },
-            Case {
-                scenario: "same-target operator takeover",
-                write: WriteKind::Set,
-                replace_target: false,
-                source: Operator,
-                expect_desired_changed: false,
-                expect_selection_changed: true,
-            },
-            Case {
-                scenario: "different selected MAC with the same source",
-                write: WriteKind::Set,
-                replace_target: true,
-                source: RedfishUefiPci,
-                expect_desired_changed: true,
-                expect_selection_changed: true,
-            },
-            Case {
-                scenario: "different selected MAC and source",
-                write: WriteKind::Set,
-                replace_target: true,
-                source: Operator,
-                expect_desired_changed: true,
-                expect_selection_changed: true,
-            },
-            Case {
-                scenario: "forced convergence for the same selection",
-                write: WriteKind::Force,
-                replace_target: false,
-                source: RedfishUefiPci,
-                expect_desired_changed: true,
-                expect_selection_changed: false,
-            },
-            Case {
-                scenario: "forced convergence with a source takeover",
-                write: WriteKind::Force,
-                replace_target: false,
-                source: Operator,
-                expect_desired_changed: true,
-                expect_selection_changed: true,
-            },
-            Case {
-                scenario: "forced different MAC with the same source",
-                write: WriteKind::Force,
-                replace_target: true,
-                source: RedfishUefiPci,
-                expect_desired_changed: true,
-                expect_selection_changed: true,
-            },
-            Case {
-                scenario: "forced different MAC and source",
-                write: WriteKind::Force,
-                replace_target: true,
-                source: Operator,
-                expect_desired_changed: true,
-                expect_selection_changed: true,
-            },
-        ];
-        let sentinel_selection_time =
-            DateTime::from_timestamp(1_700_000_000, 123_000_000).expect("fixture timestamp");
-        let sentinel_observation_time =
-            DateTime::from_timestamp(1_700_000_100, 123_000_000).expect("fixture timestamp");
-
-        let mut txn = pool.begin().await?;
-        for (index, case) in cases.into_iter().enumerate() {
-            let machine_id = machine_id(MachineType::Host, 50 + index as u8);
-            let initial_machine_version = seed_machine(txn.as_mut(), &machine_id).await?;
-            let initial_target =
-                MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 5, index as u8]));
-            let initial =
-                initialize_if_unset(txn.as_mut(), &machine_id, &initial_target, RedfishUefiPci)
-                    .await?;
-            overwrite_selection_updated_at(txn.as_mut(), &machine_id, sentinel_selection_time)
-                .await?;
-            assert!(
-                mark_verified(
-                    txn.as_mut(),
-                    &machine_id,
-                    initial.version,
-                    sentinel_observation_time,
-                )
-                .await?
-            );
-            assert_eq!(
-                load_persisted_selection(txn.as_mut(), &machine_id)
-                    .await?
-                    .updated_at,
-                Some(sentinel_selection_time),
-                "{} verification must preserve the selection time",
-                case.scenario,
-            );
-
-            let target = if case.replace_target {
-                MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 6, index as u8]))
-            } else {
-                initial_target.clone()
-            };
-            let before_versions = versions(txn.as_mut(), &machine_id).await?;
-            let before_status = status_observation(txn.as_mut(), &machine_id).await?;
-            let outcome = match case.write {
-                WriteKind::Set => set(txn.as_mut(), &machine_id, &target, case.source).await?,
-                WriteKind::Force => {
-                    force_set(txn.as_mut(), &machine_id, &target, case.source).await?
-                }
-            };
-
-            assert_eq!(
-                outcome.desired_changed, case.expect_desired_changed,
-                "{} desired-generation result",
-                case.scenario,
-            );
-            let after_versions = versions(txn.as_mut(), &machine_id).await?;
-            assert_eq!(
-                after_versions.0.version_nr(),
-                before_versions.0.version_nr()
-                    + u64::from(case.expect_desired_changed || case.expect_selection_changed),
-                "{} aggregate version",
-                case.scenario,
-            );
-            assert_eq!(
-                after_versions.1 != before_versions.1,
-                case.expect_desired_changed,
-                "{} desired version",
-                case.scenario,
-            );
-            assert_eq!(
-                status_observation(txn.as_mut(), &machine_id).await?,
-                before_status,
-                "{} verification status",
-                case.scenario,
-            );
-
-            let selection = load_persisted_selection(txn.as_mut(), &machine_id).await?;
-            assert_eq!(selection.source, case.source, "{} source", case.scenario);
-            assert_eq!(
-                selection.updated_at != Some(sentinel_selection_time),
-                case.expect_selection_changed,
-                "{} selection time",
-                case.scenario,
-            );
-            assert_eq!(
-                before_versions.0.version_nr(),
-                initial_machine_version.version_nr() + 1,
-                "{} setup aggregate version",
-                case.scenario,
-            );
-        }
 
         Ok(())
     }
@@ -2093,7 +1863,7 @@ mod tests {
         let mut txn = pool.begin().await?;
 
         for (index, case) in cases.into_iter().enumerate() {
-            let machine_id = machine_id(MachineType::PredictedHost, 70 + index as u8);
+            let machine_id = predicted_host_machine_id(70 + index as u8);
             seed_machine(txn.as_mut(), &machine_id).await?;
             let target =
                 MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 7, index as u8]));
@@ -2141,7 +1911,7 @@ mod tests {
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let machine_id = machine_id(MachineType::Host, 37);
+        let machine_id = host_machine_id(37);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 3, 10]);
         let pair = MachineBootInterfaceTarget::Pair(MachineBootInterface {
@@ -2153,7 +1923,10 @@ mod tests {
             .desired;
         let observed_at =
             DateTime::from_timestamp(1_722_000_200, 123_000_000).expect("fixture timestamp");
-        assert!(mark_verified(txn.as_mut(), &machine_id, paired.version, observed_at).await?);
+        assert_eq!(
+            mark_verified(txn.as_mut(), &machine_id, paired.version, observed_at).await?,
+            ConditionalWrite::Applied(())
+        );
         let versions_before = versions(txn.as_mut(), &machine_id).await?;
 
         let forced = force_reconcile(
@@ -2196,7 +1969,7 @@ mod tests {
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let attributed_machine_id = machine_id(MachineType::Host, 61);
+        let attributed_machine_id = host_machine_id(61);
         seed_machine(txn.as_mut(), &attributed_machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 6, 1]);
         let pair = MachineBootInterfaceTarget::Pair(MachineBootInterface {
@@ -2216,14 +1989,15 @@ mod tests {
             .await?;
         let observed_at =
             DateTime::from_timestamp(1_700_003_100, 123_000_000).expect("fixture timestamp");
-        assert!(
+        assert_eq!(
             mark_verified(
                 txn.as_mut(),
                 &attributed_machine_id,
                 initial.version,
                 observed_at,
             )
-            .await?
+            .await?,
+            ConditionalWrite::Applied(())
         );
 
         let reconciled = force_reconcile(
@@ -2263,7 +2037,7 @@ mod tests {
             "a mismatched reconciliation request must not change desired or aggregate versions",
         );
 
-        let uninitialized_machine_id = machine_id(MachineType::Host, 62);
+        let uninitialized_machine_id = host_machine_id(62);
         seed_machine(txn.as_mut(), &uninitialized_machine_id).await?;
         let unknown = force_reconcile(
             txn.as_mut(),
@@ -2292,7 +2066,7 @@ mod tests {
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let machine_id = machine_id(MachineType::Host, 63);
+        let machine_id = host_machine_id(63);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 6, 4]);
         let initial = initialize_if_unset(
@@ -2355,7 +2129,7 @@ mod tests {
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let machine_id = machine_id(MachineType::Host, 3);
+        let machine_id = host_machine_id(3);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 5]);
         let target = MachineBootInterfaceTarget::MacOnly(mac_address);
@@ -2430,7 +2204,7 @@ mod tests {
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let machine_id = machine_id(MachineType::Host, 36);
+        let machine_id = host_machine_id(36);
         seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 3, 8]);
         let initialized = initialize_if_unset(
@@ -2442,7 +2216,10 @@ mod tests {
         .await?;
         let observed_at =
             DateTime::from_timestamp(1_722_000_100, 123_000_000).expect("fixture timestamp");
-        assert!(mark_verified(txn.as_mut(), &machine_id, initialized.version, observed_at,).await?);
+        assert_eq!(
+            mark_verified(txn.as_mut(), &machine_id, initialized.version, observed_at).await?,
+            ConditionalWrite::Applied(())
+        );
 
         let enriched =
             enrich_interface_id(txn.as_mut(), &machine_id, mac_address, "NIC.Slot.8-1-1")
@@ -2474,63 +2251,15 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn desired_targets_reject_dpu_ids(
-        pool: PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
-        let machine_id = machine_id(MachineType::Dpu, 4);
-        seed_machine(txn.as_mut(), &machine_id).await?;
-        let mac_address = MacAddress::new([2, 0, 0, 0, 0, 7]);
-        let target = MachineBootInterfaceTarget::MacOnly(mac_address);
-
-        assert!(matches!(
-            get(txn.as_mut(), &machine_id).await,
-            Err(DatabaseError::InvalidArgument(_))
-        ));
-        assert!(matches!(
-            lock(txn.as_mut(), &machine_id).await,
-            Err(DatabaseError::InvalidArgument(_))
-        ));
-        assert!(matches!(
-            try_set(txn.as_mut(), &machine_id, None, &target, Operator,).await,
-            Err(DatabaseError::InvalidArgument(_))
-        ));
-        assert!(matches!(
-            set(txn.as_mut(), &machine_id, &target, Operator).await,
-            Err(DatabaseError::InvalidArgument(_))
-        ));
-        assert!(matches!(
-            initialize_if_unset(txn.as_mut(), &machine_id, &target, RedfishUefiPci).await,
-            Err(DatabaseError::InvalidArgument(_))
-        ));
-        assert!(matches!(
-            enrich_interface_id(txn.as_mut(), &machine_id, mac_address, "id").await,
-            Err(DatabaseError::InvalidArgument(_))
-        ));
-        assert!(matches!(
-            mark_verified(
-                txn.as_mut(),
-                &machine_id,
-                ConfigVersion::initial(),
-                Utc::now(),
-            )
-            .await,
-            Err(DatabaseError::InvalidArgument(_))
-        ));
-
-        Ok(())
-    }
-
-    #[crate::sqlx_test]
     async fn incomplete_targets_are_keyset_paged(
         pool: PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
-        let unset_host = machine_id(MachineType::Host, 10);
-        let mac_only_host = machine_id(MachineType::Host, 11);
-        let unset_prediction = machine_id(MachineType::PredictedHost, 12);
-        let complete_host = machine_id(MachineType::Host, 13);
-        let dpu = machine_id(MachineType::Dpu, 14);
+        let unset_host = host_machine_id(10);
+        let mac_only_host = host_machine_id(11);
+        let unset_prediction = predicted_host_machine_id(12);
+        let complete_host = host_machine_id(13);
+        let dpu = dpu_machine_id(14);
         for machine_id in [
             &unset_host,
             &mac_only_host,
@@ -2587,8 +2316,8 @@ mod tests {
             .await?;
 
         let mut txn = pool.begin().await?;
-        let predicted_id = machine_id(MachineType::PredictedHost, 20);
-        let dpu_id = machine_id(MachineType::Dpu, 21);
+        let predicted_id = predicted_host_machine_id(20);
+        let dpu_id = dpu_machine_id(21);
         seed_machine(txn.as_mut(), &predicted_id).await?;
         seed_machine(txn.as_mut(), &dpu_id).await?;
         txn.commit().await?;
@@ -2647,13 +2376,13 @@ mod tests {
         .await;
         assert!(dpu_result.is_err(), "the table must reject DPU targets");
 
-        let stable_id = machine_id(MachineType::Host, 22);
+        let stable_id = host_machine_id(22);
         sqlx::query("UPDATE machines SET id = $1 WHERE id = $2")
             .bind(stable_id)
             .bind(predicted_id)
             .execute(&pool)
             .await?;
-        let stored_machine_id: MachineId =
+        let stored_machine_id: HostMachineId =
             sqlx::query_scalar("SELECT machine_id FROM machine_boot_interfaces")
                 .fetch_one(&pool)
                 .await?;
@@ -2673,8 +2402,8 @@ mod tests {
             .execute(&pool)
             .await?;
 
-        let preexisting_id = machine_id(MachineType::PredictedHost, 60);
-        let defaulted_insert_id = machine_id(MachineType::Host, 61);
+        let preexisting_id = predicted_host_machine_id(60);
+        let defaulted_insert_id = host_machine_id(61);
         let mut txn = pool.begin().await?;
         seed_machine(txn.as_mut(), &preexisting_id).await?;
         seed_machine(txn.as_mut(), &defaulted_insert_id).await?;
@@ -2779,8 +2508,8 @@ mod tests {
             .await?;
 
         let mut txn = pool.begin().await?;
-        let existing_host = machine_id(MachineType::Host, 40);
-        let in_flight_host = machine_id(MachineType::Host, 42);
+        let existing_host = host_machine_id(40);
+        let in_flight_host = host_machine_id(42);
         seed_machine(txn.as_mut(), &existing_host).await?;
         seed_machine(txn.as_mut(), &in_flight_host).await?;
         set_controller_state(txn.as_mut(), &existing_host, ManagedHostState::Ready).await?;

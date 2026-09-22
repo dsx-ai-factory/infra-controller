@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -30,6 +31,11 @@ func TestAPIOperatingSystemCreateRequest_Validate(t *testing.T) {
 		{
 			desc:      "error when Name is not provided",
 			obj:       APIOperatingSystemCreateRequest{Description: cutil.GetPtr("ab"), InfrastructureProviderID: nil, TenantID: cutil.GetPtr(uuid.New().String()), IpxeScript: cutil.GetPtr("ipxe"), UserData: cutil.GetPtr("ud"), IsCloudInit: true, AllowOverride: false},
+			expectErr: true,
+		},
+		{
+			desc:      "error when userData exceeds max length",
+			obj:       APIOperatingSystemCreateRequest{Name: "abc", InfrastructureProviderID: nil, TenantID: cutil.GetPtr(uuid.New().String()), IpxeScript: cutil.GetPtr("ipxe"), UserData: cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1)), IsCloudInit: true, AllowOverride: false},
 			expectErr: true,
 		},
 		{
@@ -178,6 +184,21 @@ func TestAPIOperatingSystemCreateRequest_Validate(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			desc:      "ok when ImageDisk is a virtio disk",
+			obj:       APIOperatingSystemCreateRequest{Name: "abc", TenantID: cutil.GetPtr(uuid.New().String()), ImageURL: cutil.GetPtr("http://iso.net/iso"), SiteIDs: []string{uuid.NewString()}, ImageSHA: cutil.GetPtr("a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980"), ImageDisk: cutil.GetPtr("/dev/vda"), RootFsLabel: cutil.GetPtr("root")},
+			expectErr: false,
+		},
+		{
+			desc:      "ok when ImageDisk is a by-id path",
+			obj:       APIOperatingSystemCreateRequest{Name: "abc", TenantID: cutil.GetPtr(uuid.New().String()), ImageURL: cutil.GetPtr("http://iso.net/iso"), SiteIDs: []string{uuid.NewString()}, ImageSHA: cutil.GetPtr("a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980"), ImageDisk: cutil.GetPtr("/dev/disk/by-id/nvme-Dell_DC_NVMe_CD7_U.2_960GB_Z3W0A01DTXBH-extra-long"), RootFsID: cutil.GetPtr("666c2eee-193d-42db-a490-4c444342bd4e")},
+			expectErr: false,
+		},
+		{
+			desc:      "error when ImageDisk is a by-id partition alias",
+			obj:       APIOperatingSystemCreateRequest{Name: "abc", TenantID: cutil.GetPtr(uuid.New().String()), ImageURL: cutil.GetPtr("http://iso.net/iso"), SiteIDs: []string{uuid.NewString()}, ImageSHA: cutil.GetPtr("a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980"), ImageDisk: cutil.GetPtr("/dev/disk/by-id/nvme-Dell_DC_NVMe_CD7_U.2_960GB_Z3W0A01DTXBH-part1"), RootFsID: cutil.GetPtr("666c2eee-193d-42db-a490-4c444342bd4e")},
+			expectErr: true,
+		},
+		{
 			desc:      "ok when empty strings specified for optional image fields",
 			obj:       APIOperatingSystemCreateRequest{Name: "abc", TenantID: cutil.GetPtr(uuid.New().String()), ImageURL: cutil.GetPtr("http://iso.net/iso"), SiteIDs: []string{uuid.NewString()}, ImageSHA: cutil.GetPtr("a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980"), RootFsID: cutil.GetPtr("666c2eee-193d-42db-a490-4c444342bd4e"), IsCloudInit: true, AllowOverride: false, ImageDisk: cutil.GetPtr(""), ImageAuthType: cutil.GetPtr(""), ImageAuthToken: cutil.GetPtr("")},
 			expectErr: false,
@@ -231,6 +252,12 @@ func TestAPIOperatingSystemUpdateRequest_Validate(t *testing.T) {
 		existingOS *cdbm.OperatingSystem
 		expectErr  bool
 	}{
+		{
+			desc:       "error when userData exceeds max length",
+			obj:        APIOperatingSystemUpdateRequest{UserData: cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1))},
+			existingOS: existingIpxeBasedOS,
+			expectErr:  true,
+		},
 		{
 			desc:      "ok when Name is not provided",
 			obj:       APIOperatingSystemUpdateRequest{Description: cutil.GetPtr("ab")},
@@ -337,6 +364,21 @@ func TestAPIOperatingSystemUpdateRequest_Validate(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			desc:      "ok when ImageDisk is a virtio disk",
+			obj:       APIOperatingSystemUpdateRequest{ImageDisk: cutil.GetPtr("/dev/vda")},
+			expectErr: false,
+		},
+		{
+			desc:      "error when ImageDisk is a virtio partition",
+			obj:       APIOperatingSystemUpdateRequest{ImageDisk: cutil.GetPtr("/dev/vda1")},
+			expectErr: true,
+		},
+		{
+			desc:      "ok when ImageDisk selects the smallest disk",
+			obj:       APIOperatingSystemUpdateRequest{Name: cutil.GetPtr("ab"), ImageDisk: cutil.GetPtr("smallest")},
+			expectErr: false,
+		},
+		{
 			desc:      "ok when optional image fields are empty",
 			obj:       APIOperatingSystemUpdateRequest{Name: cutil.GetPtr("ab"), ImageURL: cutil.GetPtr("https://oldimagepath.iso"), ImageSHA: cutil.GetPtr("a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980"), RootFsID: cutil.GetPtr("666c2eee-193d-42db-a490-4c444342bd4e"), ImageDisk: cutil.GetPtr(""), ImageAuthType: cutil.GetPtr(""), ImageAuthToken: cutil.GetPtr("")},
 			expectErr: false,
@@ -410,6 +452,19 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 				TenantID:          cutil.GetPtr(uuid.NewString()),
 				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
 				UserData:          cutil.GetPtr("test"),
+				PhoneHomeEnabled:  cutil.GetPtr(true),
+			},
+			wantErr:      true,
+			phoneHomeUrl: cutil.GetPtr("http://localhost/local"),
+		},
+		{
+			name: "error when effective userData exceeds max length after phone home insertion",
+			fields: fields{
+				Name:              "test-name",
+				Description:       cutil.GetPtr("Test description"),
+				TenantID:          cutil.GetPtr(uuid.NewString()),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				UserData:          cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes-10)),
 				PhoneHomeEnabled:  cutil.GetPtr(true),
 			},
 			wantErr:      true,
@@ -534,6 +589,23 @@ func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData(t *testing.T) {
 		CreatedBy:        uuid.New(),
 	}
 
+	// Phone-home is enabled and the stored user-data has a phone-home URL,
+	// but it is not the default one.
+	existingPhoneHomeEnabledOSStaleURL := &cdbm.OperatingSystem{
+		ID:         uuid.New(),
+		Name:       "ab",
+		IpxeScript: cutil.GetPtr("original ipxe"),
+		UserData: cutil.GetPtr(`#cloud-config
+package_update: true
+phone_home:
+  url: http://169.254.169.254:7777/latest/meta-data/phone_home
+  post: all`),
+		PhoneHomeEnabled: true,
+		Status:           cdbm.OperatingSystemStatusReady,
+		Type:             cdbm.OperatingSystemTypeIPXE,
+		CreatedBy:        uuid.New(),
+	}
+
 	existingPhoneHomeEnabledOSUserdataNil := &cdbm.OperatingSystem{
 		ID:               uuid.New(),
 		Name:             "ab",
@@ -589,10 +661,33 @@ func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData(t *testing.T) {
 		CreatedBy:        uuid.New(),
 	}
 
+	// Phone-home was enabled and the stored user-data carries a stale URL,
+	// but the request replaces user-data with a phone-home block of its own.
+	callerPhoneHomeUserData := cutil.GetPtr(`#cloud-config
+package_update: true
+phone_home:
+    post: all
+    url: https://collector.example.com/hook
+`)
+
+	// Phone-home was never enabled, so the stored phone-home block is the
+	// caller's, not NICo's.
+	existingForeignPhoneHomeOS := &cdbm.OperatingSystem{
+		ID:               uuid.New(),
+		Name:             "ab",
+		IpxeScript:       cutil.GetPtr("original ipxe"),
+		UserData:         callerPhoneHomeUserData,
+		PhoneHomeEnabled: false,
+		Status:           cdbm.OperatingSystemStatusReady,
+		Type:             cdbm.OperatingSystemTypeIPXE,
+		CreatedBy:        uuid.New(),
+	}
+
 	tests := []struct {
 		name                     string
 		fields                   fields
 		phoneHomeUrl             string
+		userDataSearches         []string
 		userDataNegativeSearches []string
 		wantErr                  bool
 		existingOS               *cdbm.OperatingSystem
@@ -609,6 +704,78 @@ func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData(t *testing.T) {
 			wantErr:      false,
 			phoneHomeUrl: "http://localhost/local",
 			existingOS:   existingPhoneHomeEnabledOS,
+		},
+		{
+			name: "error when merged userData from existing OS exceeds max length after phone home insertion",
+			fields: fields{
+				Name:             "test-name",
+				Description:      cutil.GetPtr("Test description"),
+				UserData:         nil,
+				PhoneHomeEnabled: cutil.GetPtr(true),
+			},
+			wantErr:      true,
+			phoneHomeUrl: "http://localhost/local",
+			existingOS: &cdbm.OperatingSystem{
+				ID:               uuid.New(),
+				Name:             "ab",
+				IpxeScript:       cutil.GetPtr("original ipxe"),
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+				PhoneHomeEnabled: false,
+				Status:           cdbm.OperatingSystemStatusReady,
+				Type:             cdbm.OperatingSystemTypeIPXE,
+				CreatedBy:        uuid.New(),
+			},
+		},
+		{
+			name: "test valid Operating System PhoneHome disabled update request when existing OS has enabled and its stored phone-home URL is stale",
+			fields: fields{
+				Name:              "test-name",
+				Description:       cutil.GetPtr("Test description"),
+				OperatingSystemID: cutil.GetPtr(existingPhoneHomeEnabledOSStaleURL.ID.String()),
+				UserData:          nil,
+				PhoneHomeEnabled:  cutil.GetPtr(false),
+			},
+			wantErr:      false,
+			phoneHomeUrl: config.DefaultSitePhoneHomeUrl,
+			// NICo authored the block, so it is removed by key without
+			// matching the URL: neither the key nor the stale URL survives,
+			// while the rest of the document is preserved.
+			userDataSearches:         []string{"package_update"},
+			userDataNegativeSearches: []string{"phone_home", "169.254.169.254:7777"},
+			existingOS:               existingPhoneHomeEnabledOSStaleURL,
+		},
+		{
+			name: "test valid PhoneHome disabled update request with caller-supplied userData when existing OS has enabled with a stale stored URL",
+			fields: fields{
+				Name:              "test-name",
+				Description:       cutil.GetPtr("Test description"),
+				OperatingSystemID: cutil.GetPtr(existingPhoneHomeEnabledOSStaleURL.ID.String()),
+				UserData:          callerPhoneHomeUserData,
+				PhoneHomeEnabled:  cutil.GetPtr(false),
+			},
+			wantErr:      false,
+			phoneHomeUrl: config.DefaultSitePhoneHomeUrl,
+			// The stored blob is NICo's, but the document being edited is the
+			// caller's, so removal stays URL-matched and their hook survives.
+			userDataSearches:         []string{"collector.example.com", "package_update"},
+			userDataNegativeSearches: []string{"169.254.169.254"},
+			existingOS:               existingPhoneHomeEnabledOSStaleURL,
+		},
+		{
+			name: "test valid PhoneHome disabled update request with caller-supplied userData when existing OS never had phone-home enabled",
+			fields: fields{
+				Name:              "test-name",
+				Description:       cutil.GetPtr("Test description"),
+				OperatingSystemID: cutil.GetPtr(existingForeignPhoneHomeOS.ID.String()),
+				UserData:          callerPhoneHomeUserData,
+				PhoneHomeEnabled:  cutil.GetPtr(false),
+			},
+			wantErr:      false,
+			phoneHomeUrl: config.DefaultSitePhoneHomeUrl,
+			// Nothing here is NICo's, so the URL filter applies both before
+			// and after the ownership fix and the caller's block survives.
+			userDataSearches: []string{"collector.example.com", "package_update"},
+			existingOS:       existingForeignPhoneHomeOS,
 		},
 		{
 			name: "test valid PhoneHome enabled, request userData is nil, existing OS userdata is nil, and existing OS has phonehome enabled",
@@ -780,6 +947,48 @@ func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData(t *testing.T) {
 			userDataNegativeSearches: []string{"TestCommonPhoneHomeOnlyCloudInit"}, // It's looking for a comment in the TestCommonPhoneHomeOnlyCloudInit value.
 			wantErr:                  false,
 		},
+		// The two cases below reach the early returns that skip the rewrite,
+		// where the stored blob is what the Site receives. Every other
+		// oversized case here is caught after phone-home insertion instead.
+		{
+			name: "fail unrelated update when stored user-data is over max length and phone-home was never enabled",
+			fields: fields{
+				Name:        "renamed",
+				Description: cutil.GetPtr("test"),
+			},
+			phoneHomeUrl: "http://localhost/local",
+			existingOS: &cdbm.OperatingSystem{
+				ID:               uuid.New(),
+				Name:             "ab",
+				IpxeScript:       cutil.GetPtr("original ipxe"),
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+				PhoneHomeEnabled: false,
+				Status:           cdbm.OperatingSystemStatusReady,
+				Type:             cdbm.OperatingSystemTypeIPXE,
+				CreatedBy:        uuid.New(),
+			},
+			wantErr: true,
+		},
+		{
+			name: "fail phonehome disabled request when stored user-data is over max length and is not valid YAML",
+			fields: fields{
+				Name:             "test-name",
+				Description:      cutil.GetPtr("test"),
+				PhoneHomeEnabled: cutil.GetPtr(false),
+			},
+			phoneHomeUrl: "http://localhost/local",
+			existingOS: &cdbm.OperatingSystem{
+				ID:               uuid.New(),
+				Name:             "ab",
+				IpxeScript:       cutil.GetPtr("original ipxe"),
+				UserData:         cutil.GetPtr(util.TestCommonXMLUserData + strings.Repeat("<!-- pad -->", util.MaxUserDataBytes/12)),
+				PhoneHomeEnabled: false,
+				Status:           cdbm.OperatingSystemStatusReady,
+				Type:             cdbm.OperatingSystemTypeIPXE,
+				CreatedBy:        uuid.New(),
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -796,6 +1005,13 @@ func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData(t *testing.T) {
 				return
 			} else {
 				require.NoError(t, err)
+			}
+
+			if len(tt.userDataSearches) > 0 {
+				require.NotNil(t, osur.UserData)
+				for _, search := range tt.userDataSearches {
+					assert.Contains(t, *osur.UserData, search)
+				}
 			}
 
 			if len(tt.userDataNegativeSearches) > 0 {

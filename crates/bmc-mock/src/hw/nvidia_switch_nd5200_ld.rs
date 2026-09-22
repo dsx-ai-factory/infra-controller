@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use mac_address::MacAddress;
 
-use crate::redfish;
+use crate::{Callbacks, redfish};
 
 pub(crate) struct NvidiaSwitchNd5200Ld<'a> {
     pub(crate) bmc_mac_address_eth0: MacAddress,
@@ -30,6 +30,10 @@ pub(crate) struct NvidiaSwitchNd5200Ld<'a> {
 }
 
 impl NvidiaSwitchNd5200Ld<'_> {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let manager_id = "BMC_0";
         let eth_builder = |eth| {
@@ -62,7 +66,7 @@ impl NvidiaSwitchNd5200Ld<'_> {
         }
     }
 
-    pub(crate) fn system_config(&self) -> redfish::computer_system::Config {
+    pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
         let system_id = "System_0";
 
         redfish::computer_system::Config {
@@ -70,6 +74,7 @@ impl NvidiaSwitchNd5200Ld<'_> {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
+                bios_version: None,
                 eth_interfaces: None,
                 serial_number: None,
                 boot_order_mode: redfish::computer_system::BootOrderMode::Generic,

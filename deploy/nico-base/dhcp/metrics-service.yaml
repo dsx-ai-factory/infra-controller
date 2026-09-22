@@ -23,6 +23,7 @@ metadata:
     app: nico-dhcp
     app.kubernetes.io/metrics: nico-dhcp
 spec:
+  ipFamilyPolicy: PreferDualStack
   ports:
     - port: 1089
       name: http

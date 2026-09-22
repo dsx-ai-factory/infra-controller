@@ -105,6 +105,14 @@ updates occur entirely out of band without disrupting active tenants. NICo
 applies updates against the site baseline and tracks them in the per-machine
 firmware inventory.
 
+### Platform Upgrades
+
+Upgrading NICo itself is also a Day 2 operation. Re-running `setup.sh` from a
+newer release upgrades each component in place while preserving Vault state,
+PostgreSQL data, and the site configuration. Refer to the
+[Upgrading NICo](../manuals/upgrade.md) guide for the pre-upgrade checklist,
+version-specific migration notes, and rollback procedure.
+
 ### Tenant Transitions (Sanitization)
 
 When a tenant releases a host, NICo performs a full cleanup sequence before the

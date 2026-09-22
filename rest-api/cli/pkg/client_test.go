@@ -9,10 +9,156 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (rtf roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return rtf(req)
+}
+
+type errorReadCloser struct {
+	err    error
+	closed bool
+}
+
+func (erc *errorReadCloser) Read([]byte) (int, error) {
+	return 0, erc.err
+}
+
+func (erc *errorReadCloser) Close() error {
+	erc.closed = true
+	return nil
+}
+
+type observedRequest struct {
+	protocol      int
+	method        string
+	authorization string
+	pageSize      string
+}
+
+func newHTTP2ResetServer(t *testing.T) (*httptest.Server, *http.Transport, <-chan observedRequest) {
+	t.Helper()
+
+	requests := make(chan observedRequest, 2)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests <- observedRequest{
+			protocol:      req.ProtoMajor,
+			method:        req.Method,
+			authorization: req.Header.Get("Authorization"),
+			pageSize:      req.URL.Query().Get("pageSize"),
+		}
+
+		if req.ProtoMajor == 2 {
+			w.WriteHeader(http.StatusOK)
+			assert.NoError(t, http.NewResponseController(w).Flush())
+			panic(http.ErrAbortHandler)
+		}
+
+		_, err := w.Write([]byte(`[{"id":"instance-1"}]`))
+		assert.NoError(t, err)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	transport.Protocols.SetHTTP2(true)
+
+	return server, transport, requests
+}
+
+func TestClient_Do(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "retries an HTTP/2 INTERNAL_ERROR once over HTTP/1.1",
+			run: func(t *testing.T) {
+				server, transport, requests := newHTTP2ResetServer(t)
+
+				client := NewClient(server.URL, "test-org", "test-token", nil, false)
+				client.HTTPClient.Transport = transport
+				client.HTTPClient.Timeout = time.Second
+
+				body, _, err := client.Do(
+					http.MethodGet,
+					"/v2/org/{org}/nico/instance",
+					nil,
+					map[string]string{"pageSize": "100"},
+					nil,
+				)
+
+				require.NoError(t, err)
+				require.JSONEq(t, `[{"id":"instance-1"}]`, string(body))
+				require.Equal(t, observedRequest{2, http.MethodGet, "Bearer test-token", "100"}, <-requests)
+				require.Equal(t, observedRequest{1, http.MethodGet, "Bearer test-token", "100"}, <-requests)
+				require.Empty(t, requests)
+			},
+		},
+		{
+			name: "does not retry a mutation",
+			run: func(t *testing.T) {
+				server, transport, requests := newHTTP2ResetServer(t)
+
+				client := NewClient(server.URL, "test-org", "test-token", nil, false)
+				client.HTTPClient.Transport = transport
+
+				_, _, err := client.Do(
+					http.MethodPost,
+					"/v2/org/{org}/nico/instance",
+					nil,
+					nil,
+					[]byte(`{"name":"instance-1"}`),
+				)
+
+				require.ErrorContains(t, err, "INTERNAL_ERROR")
+				require.Equal(t, observedRequest{2, http.MethodPost, "Bearer test-token", ""}, <-requests)
+				require.Empty(t, requests)
+			},
+		},
+		{
+			name: "does not retry a non-HTTP/2 read error",
+			run: func(t *testing.T) {
+				body := &errorReadCloser{err: errors.New("non-HTTP/2 read failure")}
+				requests := 0
+				client := NewClient("https://api.example.com", "test-org", "test-token", nil, false)
+				client.HTTPClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+					requests++
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       body,
+					}, nil
+				})
+
+				_, _, err := client.Do(
+					http.MethodGet,
+					"/v2/org/{org}/nico/instance",
+					nil,
+					nil,
+					nil,
+				)
+
+				require.ErrorContains(t, err, "non-HTTP/2 read failure")
+				require.Equal(t, 1, requests)
+				require.True(t, body.closed)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
 
 func TestClientDoRefreshesTokenOnUnauthorizedAndRetries(t *testing.T) {
 	requests := 0

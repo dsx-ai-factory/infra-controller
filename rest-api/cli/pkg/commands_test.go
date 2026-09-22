@@ -420,6 +420,8 @@ func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
 	}
 
 	assert.Equal(t, "machine-power-control-machine", operations["machine power"])
+	assert.Equal(t, "get-all-dpu-machines", operations["dpu-machine list"])
+	assert.Equal(t, "get-dpu-machine", operations["dpu-machine get"])
 	assert.Equal(t,
 		"machine-power-control-machine",
 		operations["machine power-control-machine machine-power-control-machine"],
@@ -445,18 +447,65 @@ func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
 	}
 }
 
-// TestBuildActionCommand_ReservedBodyPropertyPrefixed verifies that when a
-// request body schema has a property whose kebab-cased name collides with a
-// reserved CLI-wrapper flag (data, data-file, output, all), the generated
-// command registers the body property under a "body-" prefix instead of
-// creating a duplicate flag.
-func TestBuildActionCommand_ReservedBodyPropertyPrefixed(t *testing.T) {
+func TestNewApp_VpcRoutingProfileCommands(t *testing.T) {
+	tests := []struct {
+		action string
+		flags  []string
+	}{
+		{action: "get"},
+		{action: "update", flags: []string{"--routing-profile", "--vni"}},
+		{action: "release-inactive-vni", flags: []string{"--if-version-match", "--expected-inactive-vni"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			vpc := app.Command("vpc")
+			require.NotNil(t, vpc)
+			routingProfile := vpc.Command("routing-profile")
+			require.NotNil(t, routingProfile)
+			command := routingProfile.Command(tt.action)
+			require.NotNil(t, command)
+			require.NotNil(t, command.Action)
+
+			var output bytes.Buffer
+			app.Writer = &output
+			app.ErrWriter = &output
+			err = app.Run([]string{"nicocli", "vpc", "routing-profile", tt.action, "--help"})
+			require.NoError(t, err)
+			assert.Contains(t, output.String(), "nicocli vpc routing-profile "+tt.action)
+			for _, name := range tt.flags {
+				assert.Contains(t, output.String(), name)
+			}
+			if tt.action == "update" {
+				assert.NotContains(t, output.String(), "--if-version-match")
+			}
+		})
+	}
+}
+
+// TestBuildActionCommand_BodyPropertyFlags verifies body-property flag naming
+// for reserved names and scalar-compatible, single-item arrays.
+func TestBuildActionCommand_BodyPropertyFlags(t *testing.T) {
+	one := 1
+	two := 2
 	spec := &Spec{
 		Paths: map[string]PathItem{
 			"/v2/org/{org}/nico/widget": {
 				Post: &Operation{
 					OperationID: "create-widget",
 					Tags:        []string{"Widget"},
+					Parameters: []Parameter{
+						{
+							Name:        "legacyFilter",
+							In:          "query",
+							Deprecated:  true,
+							Description: "Legacy filter",
+							Schema: &Schema{
+								Type: "string",
+							},
+						},
+					},
 					RequestBody: &RequestBody{
 						Content: map[string]MediaType{
 							"application/json": {
@@ -468,6 +517,24 @@ func TestBuildActionCommand_ReservedBodyPropertyPrefixed(t *testing.T) {
 										"dataFile": {Type: "string"},
 										"output":   {Type: "string"},
 										"all":      {Type: "boolean"},
+										"legacyBodyParam": {
+											Type:       "boolean",
+											Deprecated: true,
+										},
+										"rackIds": {
+											Type: "array",
+											Items: &Schema{
+												Type: "string",
+											},
+											MaxItems: &one,
+										},
+										"tagIds": {
+											Type: "array",
+											Items: &Schema{
+												Type: "string",
+											},
+											MaxItems: &two,
+										},
 									},
 									Required: []string{"name"},
 								},
@@ -511,6 +578,88 @@ func TestBuildActionCommand_ReservedBodyPropertyPrefixed(t *testing.T) {
 
 	// Non-colliding body property stays unprefixed.
 	assert.Equal(t, 1, counts["name"], "--name (non-reserved body property)")
+
+	// A primitive array constrained to one item is presented as a scalar flag.
+	// Arrays that permit multiple items still require JSON input.
+	assert.Equal(t, 1, counts["rack-ids"], "--rack-ids (single-item array property)")
+	assert.Equal(t, 0, counts["tag-ids"], "multi-item arrays do not get scalar flags")
+
+	app := &cli.App{
+		Name: "nicocli",
+		Commands: []*cli.Command{
+			{
+				Name: "widget",
+				Subcommands: []*cli.Command{
+					cmd,
+				},
+			},
+		},
+	}
+	var output bytes.Buffer
+	app.Writer = &output
+	err := app.Run([]string{
+		"nicocli",
+		"widget",
+		"create",
+		"-h",
+	})
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"--legacy-body-param value legacyBodyParam (deprecated)",
+		normalizedOptionHelpLine(output.String(), "--legacy-body-param value"),
+	)
+	assert.Equal(
+		t,
+		"--legacy-filter value legacyFilter (deprecated): Legacy filter",
+		normalizedOptionHelpLine(output.String(), "--legacy-filter value"),
+	)
+	assert.Equal(
+		t,
+		"--rack-ids value rackIds",
+		normalizedOptionHelpLine(output.String(), "--rack-ids value"),
+	)
+	assert.NotContains(t, output.String(), "[ --rack-ids value ]")
+}
+
+func TestBuildRequestBody(t *testing.T) {
+	var body []byte
+	app := &cli.App{
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name: "data",
+			},
+			&cli.StringFlag{
+				Name: "data-file",
+			},
+			&cli.StringFlag{
+				Name: "resource-ids",
+			},
+		},
+		Action: func(c *cli.Context) error {
+			var err error
+			body, err = buildRequestBody(c, []bodyField{
+				{
+					jsonName: "resourceIds",
+					flagName: "resource-ids",
+					schema: &Schema{
+						Type: "array",
+					},
+					wrapInList: true,
+					itemType:   "string",
+				},
+			})
+			return err
+		},
+	}
+
+	err := app.Run([]string{
+		"test",
+		"--resource-ids",
+		"resource-1",
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"resourceIds":["resource-1"]}`, string(body))
 }
 
 // TestNewApp_DpuExtensionServiceCreate_DoesNotPanic loads the real embedded
@@ -918,31 +1067,41 @@ func TestNewApp_UEFICredentialCreateCommand(t *testing.T) {
 	require.NotNil(t, create, "UEFI credential must expose a create command")
 }
 
-// TestBuildCommands_CurrentSingletonsAreRunnable asserts that every
-// get-current-<resource> singleton in the embedded spec is reachable from the
-// non-interactive CLI under the `current` action that the interactive TUI
-// prints (NVBug 6100988). Driven off the spec so it stays honest as singletons
-// are added or removed.
-func TestBuildCommands_CurrentSingletonsAreRunnable(t *testing.T) {
+// TestBuildCommands_RunnablePaths asserts that reviewed generated command paths
+// reach executable leaves in the non-interactive CLI.
+func TestBuildCommands_RunnablePaths(t *testing.T) {
 	spec, err := ParseSpec(openapi.Spec)
 	require.NoError(t, err)
 	cmds := BuildCommands(spec)
 
-	cmdByName := func(list []*cli.Command, name string) *cli.Command {
-		for _, c := range list {
-			if c.HasName(name) {
-				return c
-			}
-		}
-		return nil
+	tests := []struct {
+		name string
+		path []string
+	}{
+		{name: "tenant current", path: []string{"tenant", "current"}},
+		{name: "infrastructure provider current", path: []string{"infrastructure-provider", "current"}},
+		{name: "service account current", path: []string{"service-account", "current"}},
+		{name: "machine health report delete", path: []string{"machine", "health-report", "delete"}},
+		{name: "machine health report list", path: []string{"machine", "health-report", "list"}},
+		{name: "machine health report update", path: []string{"machine", "health-report", "update"}},
 	}
 
-	for _, tag := range []string{"tenant", "infrastructure-provider", "service-account"} {
-		t.Run(tag, func(t *testing.T) {
-			parent := cmdByName(cmds, tag)
-			require.NotNilf(t, parent, "tag %q must be a top-level command", tag)
-			assert.NotNilf(t, cmdByName(parent.Subcommands, "current"),
-				"tag %q must expose a `current` command runnable from the CLI", tag)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			children := cmds
+			var command *cli.Command
+			for _, component := range test.path {
+				command = nil
+				for _, candidate := range children {
+					if candidate.HasName(component) {
+						command = candidate
+						break
+					}
+				}
+				require.NotNilf(t, command, "command path %q is missing component %q", strings.Join(test.path, " "), component)
+				children = command.Subcommands
+			}
+			require.NotNilf(t, command.Action, "command path %q must be executable", strings.Join(test.path, " "))
 		})
 	}
 }
@@ -1102,6 +1261,16 @@ func TestNewApp_MachineValidationStartExecutesRESTRequest(t *testing.T) {
 	assert.Equal(t, "/v2/org/test-org/nico/machine/machine-1/validation/run", path)
 	assert.Equal(t, "Bearer test-token", authorization)
 	assert.JSONEq(t, `{"allowedTests":["gpu_bandwidth"],"runUnverifiedTests":true}`, body)
+}
+
+func normalizedOptionHelpLine(output, option string) string {
+	for _, line := range strings.Split(output, "\n") {
+		normalized := strings.Join(strings.Fields(line), " ")
+		if strings.HasPrefix(normalized, option) {
+			return normalized
+		}
+	}
+	return ""
 }
 
 func TestNewApp_MachineValidationReadCommandsExecuteRESTRequests(t *testing.T) {

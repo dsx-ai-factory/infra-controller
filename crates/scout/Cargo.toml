@@ -52,7 +52,6 @@ hex = { workspace = true }
 http = { workspace = true }
 lazy_static = { workspace = true }
 once_cell = { workspace = true }
-pwhash = { workspace = true }
 regex = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }

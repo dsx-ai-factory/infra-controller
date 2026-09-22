@@ -51,8 +51,8 @@ pub struct HardwareInfo {
     pub dpu_info: Option<DpuData>,
     #[serde(default)]
     pub gpus: Vec<Gpu>,
-    #[serde(default)]
-    pub memory_devices: Vec<MemoryDevice>,
+    #[serde(default, deserialize_with = "deserialize_and_condense_memory_devices")]
+    pub memory_devices: Vec<MemoryDeviceGroup>,
     #[serde(default)]
     pub tpm_description: Option<TpmDescription>,
 }
@@ -226,10 +226,127 @@ pub struct GpuPlatformInfo {
     pub fabric_guid: String,
 }
 
+/// An individual memory device (DIMM slot). Used in the "expanded" view for
+/// callers that expect a flat list; obtain by calling
+/// [`MemoryDeviceGroup::rehydrate`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryDevice {
     pub size_mb: Option<u32>,
     pub mem_type: Option<String>,
+}
+
+/// Serde default for [`MemoryDeviceGroup::count`]: treats legacy entries without a `count`
+/// field as a single device.
+fn default_count_one() -> u32 {
+    1
+}
+
+/// Upper bound on [`MemoryDeviceGroup::count`] accepted from an RPC boundary. Far beyond any
+/// real DIMM slot count (even the largest multi-socket servers top out in the low hundreds), so
+/// this only exists to keep [`MemoryDeviceGroup::rehydrate`] from allocating an unbounded number
+/// of [`MemoryDevice`]s for a malicious or corrupted `count`.
+///
+/// Re-exported from `carbide_utils` so `rpc::protos::machine_discovery::MemoryDeviceGroup`
+/// (`crates/rpc/src/protos/mod.rs`) can use the same value without depending on
+/// `carbide-api-model`, which is only an optional dependency of `carbide-rpc`.
+pub const MAX_MEMORY_DEVICE_COUNT: u32 = carbide_utils::MAX_MEMORY_DEVICE_COUNT;
+
+/// Condensed representation of one or more identical memory devices. This is the internal and
+/// storage form stored in [`HardwareInfo`]. Use [`condense_memory_devices`] to build from a flat
+/// list and [`MemoryDeviceGroup::rehydrate`] to expand back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryDeviceGroup {
+    pub size_mb: Option<u32>,
+    pub mem_type: Option<String>,
+    /// Number of identical DIMMs. Defaults to 1 when deserializing pre-condensed data.
+    #[serde(default = "default_count_one")]
+    pub count: u32,
+}
+
+impl carbide_utils::memory_device_group::MemoryDeviceGroupLike for MemoryDeviceGroup {
+    fn size_mb(&self) -> Option<u32> {
+        self.size_mb
+    }
+
+    fn mem_type(&self) -> &Option<String> {
+        &self.mem_type
+    }
+
+    fn count(&self) -> u32 {
+        self.count
+    }
+
+    fn add_count(&mut self, extra: u32) {
+        self.count = self.count.saturating_add(extra);
+    }
+}
+
+impl MemoryDeviceGroup {
+    /// Returns `Some(self)` when `count > 0`, `None` otherwise.
+    ///
+    /// Use at ingestion boundaries to drop proto or stored groups that carry no devices.
+    pub fn nonzero(self) -> Option<Self> {
+        (self.count > 0).then_some(self)
+    }
+
+    /// Expands this group back into a flat iterator of individual [`MemoryDevice`]s.
+    pub fn rehydrate(&self) -> impl Iterator<Item = MemoryDevice> + '_ {
+        std::iter::repeat_n(
+            MemoryDevice {
+                size_mb: self.size_mb,
+                mem_type: self.mem_type.clone(),
+            },
+            self.count.min(MAX_MEMORY_DEVICE_COUNT) as usize,
+        )
+    }
+}
+
+/// Rolls up already-grouped [`MemoryDeviceGroup`]s, merging consecutive groups with the same
+/// `(size_mb, mem_type)` and dropping zero-count groups. This is the single point through which
+/// every path that produces stored [`MemoryDeviceGroup`]s (condensing a flat device list,
+/// deserializing, converting from the RPC `memory_device_groups` field) must pass, so
+/// `total count > MAX_MEMORY_DEVICE_COUNT` can never be persisted and every ingestion path yields
+/// the same normalized form.
+pub fn condense_groups(
+    groups: impl IntoIterator<Item = MemoryDeviceGroup>,
+) -> Result<Vec<MemoryDeviceGroup>, HardwareInfoError> {
+    carbide_utils::memory_device_group::condense_memory_device_groups(
+        groups,
+        MAX_MEMORY_DEVICE_COUNT,
+        HardwareInfoError::MemoryDeviceCountExceeded,
+    )
+}
+
+/// Rolls up a flat sequence of [`MemoryDevice`]s into condensed [`MemoryDeviceGroup`]s.
+/// Consecutive devices with the same `(size_mb, mem_type)` are combined into a single group, so
+/// the original discovery order is preserved, and the same `(size_mb, mem_type)` pair may appear
+/// in several non-adjacent groups. Fails if the total device count exceeds
+/// [`MAX_MEMORY_DEVICE_COUNT`].
+pub fn condense_memory_devices(
+    devices: impl IntoIterator<Item = MemoryDevice>,
+) -> Result<Vec<MemoryDeviceGroup>, HardwareInfoError> {
+    condense_groups(devices.into_iter().map(|device| MemoryDeviceGroup {
+        size_mb: device.size_mb,
+        mem_type: device.mem_type,
+        count: 1,
+    }))
+}
+
+/// Serde deserializer for `HardwareInfo.memory_devices` that handles both the condensed
+/// (`{size_mb, mem_type, count}`) format and the legacy flat format (`{size_mb, mem_type}` with
+/// no `count`, stored as multiple identical objects). Old rows without a `count` field
+/// deserialize each element with `count = 1` via the struct-level default, then identical groups
+/// are merged here.
+fn deserialize_and_condense_memory_devices<'de, D>(
+    deserializer: D,
+) -> Result<Vec<MemoryDeviceGroup>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    use serde::de::Error;
+    let raw = Vec::<MemoryDeviceGroup>::deserialize(deserializer)?;
+    condense_groups(raw).map_err(D::Error::custom)
 }
 
 /// TPM endorsement key certificate
@@ -295,6 +412,9 @@ pub enum HardwareInfoError {
 
     #[error("missing hardware info: {0}")]
     MissingHardwareInfo(#[from] MissingHardwareInfo),
+
+    #[error("total memory device count {0} exceeds maximum of {MAX_MEMORY_DEVICE_COUNT}")]
+    MemoryDeviceCountExceeded(u64),
 }
 
 impl HardwareInfo {
@@ -1212,6 +1332,250 @@ mod tests {
                     device_id: 0,
                     guid: 0,
                 },
+            }
+        );
+    }
+
+    #[test]
+    fn memory_device_group_nonzero() {
+        value_scenarios!(
+            run = |count| MemoryDeviceGroup {
+                size_mb: Some(8192),
+                mem_type: Some("DDR5".into()),
+                count,
+            }
+            .nonzero();
+            "zero count produces None" {
+                0u32 => None,
+            }
+
+            "nonzero count produces Some preserving all fields" {
+                4u32 => Some(MemoryDeviceGroup {
+                    size_mb: Some(8192),
+                    mem_type: Some("DDR5".into()),
+                    count: 4,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn deserialize_memory_devices_count_handling() {
+        let half_max = MAX_MEMORY_DEVICE_COUNT / 2;
+        value_scenarios!(
+            run = |json: String| serde_json::from_str::<HardwareInfo>(&json).unwrap().memory_devices;
+
+            // Pre-condensed JSON (written before `count` existed) omits the field
+            // entirely; it must deserialize as a single device rather than failing or
+            // defaulting to zero.
+            "omitted count defaults to one" {
+                r#"{
+                    "machine_type": "x86_64",
+                    "memory_devices": [
+                        {"size_mb": 8192, "mem_type": "DDR4"}
+                    ]
+                }"#.to_string() => vec![MemoryDeviceGroup {
+                    size_mb: Some(8192),
+                    mem_type: Some("DDR4".into()),
+                    count: 1,
+                }],
+            }
+
+            // Zero-count entries in stored JSON are silently dropped:
+            //   - a zero-count group with a unique key is absent from the output entirely
+            //   - nonzero groups with the same key merge normally
+            //   - a zero-count group followed by a nonzero group with the same key does not
+            //     increase the merged count
+            "zero-count groups are dropped" {
+                r#"{
+                    "machine_type": "x86_64",
+                    "memory_devices": [
+                        {"size_mb": 8192,  "mem_type": "DDR4", "count": 0},
+                        {"size_mb": 16384, "mem_type": "DDR5", "count": 2},
+                        {"size_mb": 16384, "mem_type": "DDR5", "count": 1},
+                        {"size_mb": 32768, "mem_type": "DDR5", "count": 0},
+                        {"size_mb": 32768, "mem_type": "DDR5", "count": 5}
+                    ]
+                }"#.to_string() => vec![
+                    MemoryDeviceGroup {
+                        size_mb: Some(16384),
+                        mem_type: Some("DDR5".into()),
+                        count: 3,
+                    },
+                    MemoryDeviceGroup {
+                        size_mb: Some(32768),
+                        mem_type: Some("DDR5".into()),
+                        count: 5,
+                    },
+                ],
+            }
+
+            // Two consecutive identical groups whose merged total is still within the
+            // max must merge correctly.
+            "consecutive identical groups within max count are merged" {
+                format!(
+                    r#"{{
+                        "machine_type": "x86_64",
+                        "memory_devices": [
+                            {{"size_mb": 8192, "mem_type": "DDR4", "count": {half_max}}},
+                            {{"size_mb": 8192, "mem_type": "DDR4", "count": {half_max}}}
+                        ]
+                    }}"#
+                ) => vec![MemoryDeviceGroup {
+                    size_mb: Some(8192),
+                    mem_type: Some("DDR4".into()),
+                    count: half_max.saturating_add(half_max),
+                }],
+            }
+
+            "non-consecutive groups are preserved" {
+                r#"{
+                    "machine_type": "x86_64",
+                    "memory_devices": [
+                        {"size_mb": 8192, "mem_type": "DDR4", "count": 2},
+                        {"size_mb": 32768, "mem_type": "DDR5", "count": 4},
+                        {"size_mb": 8192, "mem_type": "DDR4", "count": 1},
+                        {"size_mb": 32768, "mem_type": "DDR5", "count": 2}
+                    ]
+                }"#.to_string() => vec![
+                    MemoryDeviceGroup {
+                        size_mb: Some(8192),
+                        mem_type: Some("DDR4".into()),
+                        count: 2,
+                    },
+                    MemoryDeviceGroup {
+                        size_mb: Some(32768),
+                        mem_type: Some("DDR5".into()),
+                        count: 4,
+                    },
+                    MemoryDeviceGroup {
+                        size_mb: Some(8192),
+                        mem_type: Some("DDR4".into()),
+                        count: 1,
+                    },
+                    MemoryDeviceGroup {
+                        size_mb: Some(32768),
+                        mem_type: Some("DDR5".into()),
+                        count: 2,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn condense_memory_devices_preserves_non_consecutive_groups() {
+        let devices = vec![
+            MemoryDevice {
+                size_mb: Some(8192),
+                mem_type: Some("DDR4".into()),
+            },
+            MemoryDevice {
+                size_mb: Some(8192),
+                mem_type: Some("DDR4".into()),
+            },
+            MemoryDevice {
+                size_mb: Some(32768),
+                mem_type: Some("DDR5".into()),
+            },
+            MemoryDevice {
+                size_mb: Some(32768),
+                mem_type: Some("DDR5".into()),
+            },
+            MemoryDevice {
+                size_mb: Some(32768),
+                mem_type: Some("DDR5".into()),
+            },
+            MemoryDevice {
+                size_mb: Some(32768),
+                mem_type: Some("DDR5".into()),
+            },
+            MemoryDevice {
+                size_mb: Some(8192),
+                mem_type: Some("DDR4".into()),
+            },
+            MemoryDevice {
+                size_mb: Some(32768),
+                mem_type: Some("DDR5".into()),
+            },
+            MemoryDevice {
+                size_mb: Some(32768),
+                mem_type: Some("DDR5".into()),
+            },
+        ];
+        assert_eq!(
+            condense_memory_devices(devices).unwrap(),
+            vec![
+                MemoryDeviceGroup {
+                    size_mb: Some(8192),
+                    mem_type: Some("DDR4".into()),
+                    count: 2,
+                },
+                MemoryDeviceGroup {
+                    size_mb: Some(32768),
+                    mem_type: Some("DDR5".into()),
+                    count: 4,
+                },
+                MemoryDeviceGroup {
+                    size_mb: Some(8192),
+                    mem_type: Some("DDR4".into()),
+                    count: 1,
+                },
+                MemoryDeviceGroup {
+                    size_mb: Some(32768),
+                    mem_type: Some("DDR5".into()),
+                    count: 2,
+                },
+            ]
+        );
+    }
+
+    // The total device count bound (`MAX_MEMORY_DEVICE_COUNT`) must hold regardless of
+    // how the count is distributed across the input: in a single group, split across
+    // consecutive (mergeable) groups, or split across distinct (non-mergeable) groups.
+    // Otherwise `rehydrate` could be made to allocate an unbounded number of
+    // `MemoryDevice`s. serde_json::Error is not PartialEq, so failures are asserted as
+    // `Fails`.
+    #[test]
+    fn deserialize_memory_devices_rejects_excessive_counts() {
+        scenarios!(
+            run = |json: String| serde_json::from_str::<HardwareInfo>(&json).map(drop).map_err(drop);
+            "single group count above max is rejected" {
+                format!(
+                    r#"{{
+                        "machine_type": "x86_64",
+                        "memory_devices": [
+                            {{"size_mb": 8192, "mem_type": "DDR4", "count": {}}}
+                        ]
+                    }}"#,
+                    MAX_MEMORY_DEVICE_COUNT + 1
+                ) => Fails,
+            }
+
+            "merged count of consecutive identical groups above max is rejected" {
+                format!(
+                    r#"{{
+                        "machine_type": "x86_64",
+                        "memory_devices": [
+                            {{"size_mb": 8192, "mem_type": "DDR4", "count": {max}}},
+                            {{"size_mb": 8192, "mem_type": "DDR4", "count": {max}}}
+                        ]
+                    }}"#,
+                    max = MAX_MEMORY_DEVICE_COUNT
+                ) => Fails,
+            }
+
+            "distinct groups summing above max is rejected" {
+                format!(
+                    r#"{{
+                        "machine_type": "x86_64",
+                        "memory_devices": [
+                            {{"size_mb": 8192, "mem_type": "DDR4", "count": {above_half_max}}},
+                            {{"size_mb": 32768, "mem_type": "DDR5", "count": {above_half_max}}}
+                        ]
+                    }}"#,
+                    above_half_max = MAX_MEMORY_DEVICE_COUNT / 2 + 1
+                ) => Fails,
             }
         );
     }

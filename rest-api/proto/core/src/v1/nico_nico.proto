@@ -9,6 +9,7 @@ import "common_nico.proto";
 import "dns_nico.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
+import "google/protobuf/field_mask.proto";
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 import "health_nico.proto";
@@ -50,10 +51,21 @@ service Forge {
   // VPC
   rpc CreateVpc(VpcCreationRequest) returns (Vpc);
   rpc UpdateVpc(VpcUpdateRequest) returns (VpcUpdateResult);
+  // Changes an FNN VPC's named profile and active VNI while retaining the old
+  // allocation. Success means Core committed, not that the dataplane converged.
+  rpc ChangeVpcRoutingProfile(VpcChangeRoutingProfileRequest) returns (VpcRoutingState);
+  // Operator cleanup after independently verifying that no DPU or fabric route
+  // still uses the retained VNI. Core does not verify dataplane convergence.
+  rpc ReleaseVpcInactiveVni(VpcReleaseInactiveVniRequest) returns (VpcReleaseInactiveVniResult);
   rpc UpdateVpcVirtualization(VpcUpdateVirtualizationRequest) returns (VpcUpdateVirtualizationResult);
+  // Deletion does not release a retained VNI implicitly. Call
+  // ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+  // Retained or inconsistent owned allocations cause FailedPrecondition.
   rpc DeleteVpc(VpcDeletionRequest) returns (VpcDeletionResult);
   rpc FindVpcIds(VpcSearchFilter) returns (VpcIdList);
   rpc FindVpcsByIds(VpcsByIdsRequest) returns (VpcList);
+  // Reads persisted VPC routing and allocation state without changing it.
+  rpc GetVpcRoutingState(VpcRoutingStateRequest) returns (VpcRoutingState);
 
   rpc CreateSpxPartition(SpxPartitionCreationRequest) returns (SpxPartition);
   rpc DeleteSpxPartition(SpxPartitionDeletionRequest) returns (SpxPartitionDeletionResult);
@@ -104,8 +116,11 @@ service Forge {
   rpc FindPowerShelves(PowerShelfQuery) returns (PowerShelfList);
   rpc FindPowerShelfIds(PowerShelfSearchFilter) returns (PowerShelfIdList);
   rpc FindPowerShelvesByIds(PowerShelvesByIdsRequest) returns (PowerShelfList);
+  // Starts the decommissioning workflow for a Ready managed power shelf.
+  rpc DecommissionPowerShelf(DecommissionPowerShelfRequest) returns (DecommissionPowerShelfResponse);
   rpc DeletePowerShelf(PowerShelfDeletionRequest) returns (PowerShelfDeletionResult);
-  // Force deletes a Power Shelf and optionally its associated interfaces from the database.
+  // Force deletes a Power Shelf and optionally its associated interfaces
+  // and BMC suppressions from the database.
   rpc AdminForceDeletePowerShelf(AdminForceDeletePowerShelfRequest) returns (AdminForceDeletePowerShelfResponse);
   // Request a maintenance operation (PowerOn / PowerOff) for a Power Shelf.
   // When the power shelf is in Ready state, the power shelf state controller
@@ -117,6 +132,9 @@ service Forge {
   rpc FindSwitchIds(SwitchSearchFilter) returns (SwitchIdList);
   rpc FindSwitchesByIds(SwitchesByIdsRequest) returns (SwitchList);
   rpc DeleteSwitch(SwitchDeletionRequest) returns (SwitchDeletionResult);
+  // Starts managed-switch decommissioning. The switch must be Ready and the
+  // Component Manager switch backend must be RMS.
+  rpc DecommissionSwitch(DecommissionSwitchRequest) returns (DecommissionSwitchResponse);
   // Force deletes a Switch and optionally its associated interfaces from the database.
   rpc AdminForceDeleteSwitch(AdminForceDeleteSwitchRequest) returns (AdminForceDeleteSwitchResponse);
 
@@ -131,6 +149,13 @@ service Forge {
   rpc AllocateInstances(BatchInstanceAllocationRequest) returns (BatchInstanceAllocationResponse);
   // Releases an instance that has been allocated by a tenant
   rpc ReleaseInstance(InstanceReleaseRequest) returns (InstanceReleaseResult);
+  // Releases multiple instances in a single call. Best-effort per instance --
+  // one instance failing to release (e.g. already released, or blocked by a
+  // health check) does not roll back or block the release of the rest of the
+  // batch. Compare AllocateInstances, which is all-or-nothing: that semantic
+  // does not fit release, where callers need partial progress rather than a
+  // single bad ID aborting an entire large batch.
+  rpc ReleaseInstances(BatchInstanceReleaseRequest) returns (BatchInstanceReleaseResponse);
   // Updates the network interface configuration for an instance
   // The update will take effect asynchronously. Users should monitor `Instance.status.network_status.synced`
   // to determine whether all updates have been applied.
@@ -239,8 +264,11 @@ service Forge {
   rpc FindMachineStateHistories(MachineStateHistoriesRequest) returns (MachineStateHistories);
   rpc FindMachineHealthHistories(MachineHealthHistoriesRequest) returns (HealthHistories);
   rpc FindPowerShelfStateHistories(PowerShelfStateHistoriesRequest) returns (StateHistories);
+  rpc FindPowerShelfHealthHistories(PowerShelfHealthHistoriesRequest) returns (HealthHistories);
   rpc FindRackStateHistories(RackStateHistoriesRequest) returns (StateHistories);
+  rpc FindRackHealthHistories(RackHealthHistoriesRequest) returns (HealthHistories);
   rpc FindSwitchStateHistories(SwitchStateHistoriesRequest) returns (StateHistories);
+  rpc FindSwitchHealthHistories(SwitchHealthHistoriesRequest) returns (HealthHistories);
   rpc FindNetworkSegmentStateHistories(NetworkSegmentStateHistoriesRequest) returns (StateHistories);
   rpc FindVpcPrefixStateHistories(VpcPrefixStateHistoriesRequest) returns (StateHistories);
   rpc FindSitePrefixStateHistories(SitePrefixStateHistoriesRequest) returns (StateHistories);
@@ -399,6 +427,11 @@ service Forge {
   // withdraws a not-yet-consumed request -- it does not undo or reset any UEFI
   // credential that a prior sweep already rotated.
   rpc TriggerUefiCredentialRotation(UefiCredentialRotationRequest) returns (google.protobuf.Empty);
+  // Operator "force-converge this host's NIC lockdown keys now" escape hatch
+  // for a single host. This is asynchronous: the handler only persists (Set) or
+  // removes (Clear) a flag maintained per host to determine whether to initiate NIC lockdown key rotation.
+  // A later machine-controller sweep observes a set flag and facilitates rotation.
+  rpc TriggerNicLockdownCredentialRotation(NicLockdownCredentialRotationRequest) returns (google.protobuf.Empty);
   // TODO: Remove when manual upgrade feature is removed
   // Mark host as having completed manual firmware upgrade
   rpc MarkManualFirmwareUpgradeComplete(common.MachineId) returns (google.protobuf.Empty);
@@ -470,6 +503,8 @@ service Forge {
   rpc DeleteExpectedMachine(ExpectedMachineRequest) returns (google.protobuf.Empty);
   // Update the BMC credentials for a specific username/password
   rpc UpdateExpectedMachine(ExpectedMachine) returns (google.protobuf.Empty);
+  // Atomically update only the selected fields; omitted fields remain unchanged.
+  rpc PatchExpectedMachine(PatchExpectedMachineRequest) returns (google.protobuf.Empty);
   // Get the BMC credentials for a specific expected machine
   rpc GetExpectedMachine(ExpectedMachineRequest) returns (ExpectedMachine);
   // Get the BMC credentials for all expected machines
@@ -491,6 +526,8 @@ service Forge {
   rpc CreateExpectedMachines(BatchExpectedMachineOperationRequest) returns (BatchExpectedMachineOperationResponse);
   // Batch update expected machines
   rpc UpdateExpectedMachines(BatchExpectedMachineOperationRequest) returns (BatchExpectedMachineOperationResponse);
+  // Apply every patch in one transaction. Any failure rolls back the whole batch.
+  rpc PatchExpectedMachines(PatchExpectedMachinesRequest) returns (google.protobuf.Empty);
 
   // Expected Power Shelf Management
   // Add expected power shelf
@@ -499,6 +536,8 @@ service Forge {
   rpc DeleteExpectedPowerShelf(ExpectedPowerShelfRequest) returns (google.protobuf.Empty);
   // Update the BMC credentials for a specific username/password
   rpc UpdateExpectedPowerShelf(ExpectedPowerShelf) returns (google.protobuf.Empty);
+  // Atomically update only the selected fields; omitted fields remain unchanged.
+  rpc PatchExpectedPowerShelf(PatchExpectedPowerShelfRequest) returns (google.protobuf.Empty);
   // Get the BMC credentials for a specific expected power shelf
   rpc GetExpectedPowerShelf(ExpectedPowerShelfRequest) returns (ExpectedPowerShelf);
   // Get the BMC credentials for all expected power shelves
@@ -517,6 +556,8 @@ service Forge {
   rpc DeleteExpectedSwitch(ExpectedSwitchRequest) returns (google.protobuf.Empty);
   // Update the BMC credentials for a specific username/password
   rpc UpdateExpectedSwitch(ExpectedSwitch) returns (google.protobuf.Empty);
+  // Atomically update only the selected fields; omitted fields remain unchanged.
+  rpc PatchExpectedSwitch(PatchExpectedSwitchRequest) returns (google.protobuf.Empty);
   // Get the BMC credentials for a specific expected switch
   rpc GetExpectedSwitch(ExpectedSwitchRequest) returns (ExpectedSwitch);
   // Get the BMC credentials for all expected switches
@@ -678,6 +719,12 @@ service Forge {
   // Machine-Validation attempt detail
   rpc GetMachineValidationAttempt(MachineValidationAttemptGetRequest) returns (MachineValidationAttempt);
 
+  // Append the next ordered stdout or stderr chunk while an attempt is active.
+  rpc AppendMachineValidationAttemptLog(MachineValidationAttemptLogAppendRequest) returns (MachineValidationAttemptLogAppendResponse);
+
+  // Read a cursor-based page of persisted attempt logs.
+  rpc GetMachineValidationAttemptLogs(MachineValidationAttemptLogGetRequest) returns (MachineValidationAttemptLogList);
+
   // Machine-Validation run and active attempt heartbeat
   rpc HeartbeatMachineValidationRun(MachineValidationHeartbeatRequest) returns (MachineValidationHeartbeatResponse);
 
@@ -686,15 +733,24 @@ service Forge {
   // Machine-Validation test list
   rpc GetMachineValidationTests(MachineValidationTestsGetRequest) returns (MachineValidationTestsGetResponse);
 
+  // A request without plugin creates a legacy test. A plugin creates an immutable
+  // revision that starts unverified and disabled; it must be verified before enablement.
   rpc AddMachineValidationTest(MachineValidationTestAddRequest) returns (MachineValidationTestAddUpdateResponse);
 
   rpc UpdateMachineValidationTest(MachineValidationTestUpdateRequest) returns (MachineValidationTestAddUpdateResponse);
 
+  // Verifies one immutable plugin revision. Verification is required before enablement.
   rpc MachineValidationTestVerfied(MachineValidationTestVerfiedRequest) returns (MachineValidationTestVerfiedResponse);
 
   rpc MachineValidationTestNextVersion(MachineValidationTestNextVersionRequest) returns (MachineValidationTestNextVersionResponse);
 
+  // Enables or disables a revision. Plugin enablement requires verification and,
+  // for host_access_full, separate approval of the exact revision.
   rpc MachineValidationTestEnableDisableTest(MachineValidationTestEnableDisableTestRequest) returns (MachineValidationTestEnableDisableTestResponse);
+
+  // Approves the writable host-root mount for one verified plugin revision.
+  // The request fails unless that exact immutable revision requests host_access_full.
+  rpc MachineValidationTestApproveFullHost(MachineValidationTestFullHostApprovalRequest) returns (MachineValidationTestFullHostApprovalResponse);
 
   rpc UpdateMachineValidationRun(MachineValidationRunRequest) returns (MachineValidationRunResponse);
 
@@ -703,6 +759,22 @@ service Forge {
   rpc AdminBmcReset(AdminBmcResetRequest) returns (AdminBmcResetResponse);
   // Admin Power Control
   rpc AdminPowerControl(AdminPowerControlRequest) returns (AdminPowerControlResponse);
+  // Queues a Redfish Chassis.Reset request for later execution by the machine
+  // controller through Maintenance state. Success means the request was accepted,
+  // not that the reset completed. Requests are accepted only for hosts in Ready.
+  // The controller returns the host to Ready after the Redfish command succeeds,
+  // and to Failed if execution fails.
+  // Operator maintenance must be enabled with SetMaintenance and is preserved
+  // after execution. Disable it only after verifying target chassis readiness.
+  //
+  // v1 accepts only ForceRestart. An omitted action has proto3's On default and
+  // is rejected with INVALID_ARGUMENT, as are a missing/invalid machine_id or
+  // missing chassis_id.
+  // NOT_FOUND means the machine does not exist. FAILED_PRECONDITION means
+  // operator maintenance is disabled, an instance exists, or the host is not in Ready.
+  //
+  // This replaces the unused AdminGpuReset RPC; no compatibility alias is kept.
+  rpc AdminChassisReset(AdminChassisResetRequest) returns (AdminChassisResetResponse);
   // Disable Secure Boot
   rpc DisableSecureBoot(BmcEndpointRequest) returns (DisableSecureBootResponse);
   // Set Lockdown (Enable or Disable)
@@ -1012,7 +1084,8 @@ service Forge {
   // Helm/docker versions for the nico DPF mandatory services, from both
   // the nico config and the live DPUServiceTemplate CRs.
   rpc GetDPFServiceVersions(GetDPFServiceVersionsRequest) returns (DPFServiceVersionsResponse);
-  // Machines DPF is waiting on before a changed DPUService can roll out.
+  // Predicted or stable host machines DPF is waiting on before a changed
+  // DPUService can roll out.
   //
   // Required rather than convenient: the release RPC has no fleet-wide form, so
   // this is the only way to discover which machines to name. Split ids-then-
@@ -1382,6 +1455,8 @@ enum CredentialType {
   NmxM = 10;
   BgpSiteWideLeafPassword = 11;
   SiteWideNicLockdownIkm = 12;
+  // Named credential used to authorize firmware artifact downloads.
+  FirmwareArtifactAccessToken = 13;
 }
 
 message CredentialCreationRequest {
@@ -1393,16 +1468,29 @@ message CredentialCreationRequest {
   optional string username = 2;
   // The password of credential for HostBMC, DPUBMC, DpuUefi.
   // For UFM, the password is the token of UFM.
+  // For FirmwareArtifactAccessToken, the password is the non-empty artifact
+  // access token. Its contents are stored verbatim, including whitespace and
+  // line endings.
   string password = 3;
   // For the BMC factory default credential: "dell", "lenovo", "hpe", "supermicro", etc
   optional string vendor = 4;
   optional string mac_address = 5;
+  // Required and non-empty for FirmwareArtifactAccessToken. The server returns
+  // InvalidArgument when this field is omitted or empty. This is an opaque,
+  // non-secret lookup name. Setting the same name replaces the stored token;
+  // username, vendor, and mac_address are ignored for this credential type.
+  optional string credential_name = 6;
 }
 
 message CredentialDeletionRequest {
   CredentialType credential_type = 1;
   optional string username = 2;
   optional string mac_address = 3;
+  // Required and non-empty for FirmwareArtifactAccessToken. The server returns
+  // InvalidArgument when this field is omitted or empty. This opaque,
+  // non-secret lookup name selects the token to delete; username and
+  // mac_address are ignored for this credential type.
+  optional string credential_name = 4;
 }
 
 message CredentialCreationResult {
@@ -1426,6 +1514,10 @@ enum RotationCredentialType {
   ROTATION_DPU_UEFI = 3;
   ROTATION_NVOS = 4;
   ROTATION_LOCKDOWN_IKM = 5;
+  // BF4 DPU BMC `service` account password. Only BF4 DPUs expose this account;
+  // other devices are never enrolled, so a rotation converges just the BF4 DPU
+  // BMCs.
+  ROTATION_DPU_BMC_SERVICE = 6;
 }
 
 message RotateCredentialRequest {
@@ -1585,7 +1677,8 @@ message RuntimeConfig {
 
   repeated string dpu_nic_firmware_update_versions=37;
 
-  bool dpa_enabled = 38;
+  reserved 38;
+  reserved "dpa_enabled";
   string mqtt_endpoint = 39;
 
   optional string sitename = 40;
@@ -1610,6 +1703,17 @@ message RuntimeConfig {
   string compile_time_docker_version = 52;
   bool restart_ovs_on_use_admin_network_change = 53;
   uint32 max_site_prefixes_per_tenant = 54;
+
+  bool svpc_enabled = 55;
+  bool astra_enabled = 56;
+  bool ewethers_enabled = 57;
+
+  // Effective FNN null-route set. When site_fabric_null_routes is omitted from
+  // site configuration, this includes site_fabric_prefixes and removed
+  // operator-managed roots while they contain a VpcPrefix or VPC-attached
+  // direct NetworkPrefix. Older Core versions omit this field; an empty items
+  // list is authoritative.
+  optional common.StringList site_fabric_null_routes = 58;
 }
 
 message EchoRequest {
@@ -1742,9 +1846,8 @@ message VpcConfig {
 }
 
 message VpcStatus {
-  // The actual VNI allocated to the VPC. If a VNI had been
-  // explicitly requested, we'd expect this to match config.vni.
-  // If not explicitly requested, we'd expect config.vni to be unset.
+  // Active VNI allocated to the VPC. `config.vni` retains the optional
+  // creation-time request and can differ after a routing-profile change.
   optional uint32 vni = 1;
   // Computed from the API server's current named profile and the persisted
   // VPC overrides. This value is not persisted and may change when the API
@@ -1798,6 +1901,7 @@ message Vpc {
 
 message VpcCreationRequest {
   string name = 2; // Removed in v0.9.x and above, retained here for backwards compatibility
+  // Must identify an existing tenant with a routing profile when creating an FNN VPC.
   string tenantOrganizationId = 3; // protolint:disable:this FIELD_NAMES_LOWER_SNAKE_CASE
   // this keyset will enable any key contained within it to access any instance associated with this VPC.
   optional string tenantKeysetId = 4; // protolint:disable:this FIELD_NAMES_LOWER_SNAKE_CASE
@@ -2072,6 +2176,8 @@ message VpcPeeringList {
 }
 
 message VpcPeeringCreationRequest {
+  // ETV and FNN VPCs are incompatible. Requests that pair them return
+  // INVALID_ARGUMENT regardless of the configured VPC peering policy.
   common.VpcId vpc_id = 1;
   common.VpcId peer_vpc_id = 2;
 
@@ -2288,6 +2394,10 @@ message PowerShelf {
   optional common.RackId rack_id = 10;
 
   reserved 11, 12;
+
+  // NVLink domain UUID of the shelf's rack, as last reported by the rack's
+  // NMX-C endpoint. Unset until a valid domain has been observed.
+  common.NVLinkDomainId nvlink_domain_uuid = 13;
 }
 
 message PowerShelfList {
@@ -2300,6 +2410,13 @@ message PowerShelfCreationRequest {
   // a random ID.
   // The PowerShelf ID must be unique within the NICo site.
   optional common.PowerShelfId id = 2;
+}
+
+message DecommissionPowerShelfRequest {
+  common.PowerShelfId power_shelf_id = 1;
+}
+
+message DecommissionPowerShelfResponse {
 }
 
 message PowerShelfDeletionRequest {
@@ -2330,6 +2447,14 @@ message PowerShelfMaintenanceRequest {
 
 message PowerShelfStateHistoriesRequest {
   repeated common.PowerShelfId power_shelf_ids = 1;
+}
+
+message PowerShelfHealthHistoriesRequest {
+  repeated common.PowerShelfId power_shelf_ids = 1;
+  // Optional: Start time of the range (inclusive) for filtering health history
+  google.protobuf.Timestamp start_time = 2;
+  // Optional: End time of the range (inclusive) for filtering health history
+  google.protobuf.Timestamp end_time = 3;
 }
 
 message PowerShelfQuery {
@@ -2526,6 +2651,13 @@ message SwitchDeletionRequest {
 message SwitchDeletionResult {
 }
 
+message DecommissionSwitchRequest {
+  common.SwitchId switch_id = 1;
+}
+
+message DecommissionSwitchResponse {
+}
+
 // The state that a object/resource had at a certain point in time
 message StateHistoryRecord {
   string state = 1;
@@ -2539,6 +2671,14 @@ message StateHistoryRecords {
 
 message SwitchStateHistoriesRequest {
   repeated common.SwitchId switch_ids = 1;
+}
+
+message SwitchHealthHistoriesRequest {
+  repeated common.SwitchId switch_ids = 1;
+  // Optional: Start time of the range (inclusive) for filtering health history
+  google.protobuf.Timestamp start_time = 2;
+  // Optional: End time of the range (inclusive) for filtering health history
+  google.protobuf.Timestamp end_time = 3;
 }
 
 message StateHistories {
@@ -3137,6 +3277,7 @@ message InstanceDpuExtensionServiceConfig {
 message InstanceDpuExtensionServicesConfig {
   repeated InstanceDpuExtensionServiceConfig service_configs = 1;
 }
+
 // Desired nvlink configuration for an instance
 message InstanceNVLinkConfig {
   // Configures how instance nvlink gpus are set up
@@ -3563,10 +3704,9 @@ message InstanceInterfaceStatus {
   // and therefore the address is unknown.
   optional string mac_address = 2;
 
-  // The list of IP addresses that had been assigned to this interface,
-  // based on the requested subnet.
-  // IPv4 precedes IPv6 when both families are assigned.
-  // The list will be empty if interface configuration hasn't been completed
+  // The IP addresses reported for this interface, ordered IPv4 before IPv6.
+  // This list is independent from `prefixes` and is empty when no address is
+  // available.
   repeated string addresses = 3;
 
   // The explicitly configured gateways, in CIDR notation. There is at most one
@@ -3576,12 +3716,12 @@ message InstanceInterfaceStatus {
   // IPv6 when both gateways are explicitly configured.
   repeated string gateways = 4;
 
-  // The list of IP prefixes that have been assigned to this interface
-  // out of the requested subnet (where the prefix allocated to the interface
-  // may be a /30 in the case of FNN, or just a /32 in the case of ETV).
-  //
-  // There is one prefix for each entry in `addresses`, in the same
-  // IPv4-before-IPv6 order.
+  // The prefixes reported for this interface in CIDR notation, ordered IPv4
+  // before IPv6. Prefix lengths follow the selected network and allocation
+  // policy. This list is independent from `addresses`: SLAAC reports an IPv6
+  // prefix without a fixed host address. Consumers must match values by address
+  // family rather than list position. The list is empty when no prefix is
+  // available.
   repeated string prefixes = 5;
 
   optional string device = 6;
@@ -3685,6 +3825,71 @@ message InstanceReleaseRequest {
 }
 
 message InstanceReleaseResult {
+}
+
+// Batch instance release request
+message BatchInstanceReleaseRequest {
+  // List of instance release requests. Processed best-effort: a failure on
+  // one does not prevent the rest from being attempted. An empty list is not
+  // an error -- the response comes back with an empty `results`. An entry
+  // with no `id` set is reported as a failed result with `id` unset, rather
+  // than silently skipped.
+  repeated InstanceReleaseRequest release_requests = 1;
+}
+
+// Machine-readable outcome of one instance's release attempt within a batch.
+// Mirrors `ComponentManagerStatusCode`'s pattern of a stable status enum
+// instead of string-matching an error message, so callers can distinguish
+// retryable outcomes (e.g. INSTANCE_RELEASE_STATUS_CODE_UNAVAILABLE,
+// INSTANCE_RELEASE_STATUS_CODE_RESOURCE_EXHAUSTED) from terminal ones (e.g.
+// INSTANCE_RELEASE_STATUS_CODE_NOT_FOUND) without parsing free text.
+//
+// SUCCESS is deliberately NOT the zero value: proto3 sends no wire bytes for
+// a field equal to its default, so an omitted or accidentally-uninitialized
+// `status` is indistinguishable on the wire from one explicitly set to the
+// zero value. If SUCCESS were 0, that ambiguity would silently read as
+// success for a destructive, fleet-scale operation. UNSPECIFIED occupying 0
+// makes a missing status an obviously-wrong value instead.
+enum InstanceReleaseStatusCode {
+  INSTANCE_RELEASE_STATUS_CODE_UNSPECIFIED = 0;
+  INSTANCE_RELEASE_STATUS_CODE_SUCCESS = 1;
+  INSTANCE_RELEASE_STATUS_CODE_INVALID_ARGUMENT = 2;
+  INSTANCE_RELEASE_STATUS_CODE_NOT_FOUND = 3;
+  INSTANCE_RELEASE_STATUS_CODE_FAILED_PRECONDITION = 4;
+  INSTANCE_RELEASE_STATUS_CODE_RESOURCE_EXHAUSTED = 5;
+  INSTANCE_RELEASE_STATUS_CODE_PERMISSION_DENIED = 6;
+  INSTANCE_RELEASE_STATUS_CODE_UNAVAILABLE = 7;
+  INSTANCE_RELEASE_STATUS_CODE_INTERNAL_ERROR = 8;
+}
+
+// One ordered result per requested release, in the same order as
+// `BatchInstanceReleaseRequest.release_requests`. Mirrors
+// `ExpectedMachineOperationResult`'s one-result-per-operation shape so
+// callers get explicit request/result correlation instead of having to
+// search two separate lists by ID.
+//
+// Retry lifecycle: release only soft-deletes an instance (marks it deleted;
+// the row and its history persist while an async reconciler completes
+// secure-erase). Retrying the same id while that row still exists returns
+// SUCCESS again -- release is idempotent, safe to retry with the exact same
+// batch request after any failure, including a partial one. Only once the
+// row is eventually purged does the same id start returning NOT_FOUND
+// instead. There is no bound on how long that takes in practice, but callers
+// should not assume SUCCESS is available forever for an id already released.
+message InstanceReleaseOutcome {
+  // Echoes the request's id. Unset only when the corresponding request
+  // itself had no id set (see `status` in that case:
+  // INSTANCE_RELEASE_STATUS_CODE_INVALID_ARGUMENT).
+  common.InstanceId id = 1;
+  InstanceReleaseStatusCode status = 2;
+  // Human-readable detail. Empty on success.
+  string error = 3;
+}
+
+// Batch instance release response
+message BatchInstanceReleaseResponse {
+  // One result per requested release, in request order.
+  repeated InstanceReleaseOutcome results = 1;
 }
 
 message MachinesByIdsRequest {
@@ -4637,8 +4842,16 @@ message ManagedHostNetworkConfigResponse {
   // IP prefixes to be denied in the DPU ACL rules.
   repeated string deny_prefixes = 18;
 
-  // List of IP prefixes (in CIDR notation) that are assigned for tenant
-  // use within this site.
+  // Legacy site-prefix field. Core continues to send the configured
+  // site_fabric_prefixes here unchanged so older agents retain their existing
+  // behavior during a rolling upgrade. New FNN agents prefer the
+  // presence-bearing site_fabric_null_routes field below. When that field is
+  // absent in a response from an older Core, a new FNN agent reduces this list
+  // to its minimal exact union before rendering fallback blackhole routes.
+  // Other virtualizers consume this field directly. With mutual isolation,
+  // FNN installs floating blackhole routes while ETV enforces an IPv4
+  // isolation ACL only when the rendered configuration has no NSG. Open
+  // isolation installs neither form of enforcement.
   repeated string site_fabric_prefixes = 19;
 
   // Level of VPC isolation to apply
@@ -4653,6 +4866,18 @@ message ManagedHostNetworkConfigResponse {
   // If empty, the agent may fall back to resolving nico-ntp.nico for compatibility.
   repeated string ntp_servers = 22;
 
+  // True when Core authoritatively applied its stored-peering activation
+  // policy to every FlatInterfaceConfig.vpc_peer_vnis list in this response.
+  // Agents must ignore those lists when this is false. Older Core versions do
+  // not send this field, so rolling upgrades fail closed.
+  bool vpc_peer_vnis_authoritative = 23;
+
+  // Final FNN blackhole routes resolved by Core. Presence is authoritative,
+  // including a present empty list, and each distinct prefix boundary must be
+  // rendered. New agents fall back to site_fabric_prefixes only when this is
+  // absent in a response from an older Core. Non-FNN responses omit it.
+  optional common.StringList site_fabric_null_routes = 24;
+
   // Enable nico DHCP on HBN.
   // Deprecated: It is always enabled now.
   bool enable_dhcp = 100;
@@ -4660,8 +4885,11 @@ message ManagedHostNetworkConfigResponse {
   // Host primary interface id
   optional string host_interface_id = 102;
 
-  // temporary flag for telling a DPU how many links it needs to have up to be considered healthy.
-  // if not set, all links must be up.
+  // Minimum number of functioning DPU ToR links. The default is two. Zero
+  // disables ToR uplink health checks, one allows either link to satisfy the
+  // minimum, and values above two produce a configuration health alert. When
+  // checks are enabled, a failed primary link is still reported because PXE
+  // boot depends on it.
   optional uint32 min_dpu_functioning_links = 103;
 
   // Is it a primary DPU
@@ -4727,8 +4955,8 @@ message ManagedHostNetworkConfigResponse {
 
   // Due to limitations in Cumulus Linux route-leaking,
   // some sites may require all VRFs to use the same VNI.
-  // Isolation is still possible via ACLs, and route-imports
-  // will still use the dynamically allocated VNI for deriving
+  // FNN isolation still uses per-VRF site-fabric null routes, and
+  // route-imports still use the dynamically allocated VNI for deriving
   // route-targets.
   optional uint32 site_global_vpc_vni = 117;
 
@@ -4824,17 +5052,17 @@ message FlatInterfaceConfig {
 
   // Deprecated: use addresses.
   // In CIDR notation.
-  string gateway = 4 [deprecated = true];
+  optional string gateway = 4 [deprecated = true];
   // Deprecated: use addresses.
   // Host admin IP for admin network, host IP for tenant.
-  string ip = 5 [deprecated = true];
+  optional string ip = 5 [deprecated = true];
   // Deprecated: use addresses.
   // The interface-specific prefix allocation (which may be a /32 for
   // just the host IP, or a larger allocation, like a /30, for FNN). The
   // `ip` as configured above will be contained within the `interface_prefix`
   // provided here, and the `interface_prefix` will be contained within
   // the `prefix` below (field 8).
-  string interface_prefix = 11 [deprecated = true];
+  optional string interface_prefix = 11 [deprecated = true];
   // If the interface is defined as a virtual function (associated
   // `function_type == InterfaceFunctionType::VIRTUAL_FUNCTION`,
   // then this value is set and specifies the virtual function ID that is configured
@@ -4856,7 +5084,7 @@ message FlatInterfaceConfig {
   // ultimately do want a DPU-specific prefix allocation to be its
   // own prefix entry in the `network_prefixes` table (or something
   // similar).
-  string prefix = 8 [deprecated = true];
+  optional string prefix = 8 [deprecated = true];
   // FQDN
   string fqdn = 9;
   // boot_url
@@ -4880,20 +5108,27 @@ message FlatInterfaceConfig {
   // tenant_vrf_loopback_ip is an administrative IP assigned from
   // the FNN L3 allocated /30 DPU prefix. The tenant is not expected
   // to be able to access this IP; it is intended for monitoring
-  // and debugging by operators.
-  optional string tenant_vrf_loopback_ip = 14;
+  // and debugging by operators. This IPv4-only compatibility field
+  // is absent when the loopback is IPv6; use addresses for that value.
+  // Deprecated: use addresses.
+  optional string tenant_vrf_loopback_ip = 14 [deprecated = true];
 
   // Is this interface using L2 or L3.
   bool is_l2_segment = 15;
 
+  // Peer prefixes retained for ETV and older DPU agents. Current FNN agents
+  // establish peering only by importing the peer VNIs below.
   repeated string vpc_peer_prefixes = 16;
+  // Peer VNIs imported as EVPN route targets by FNN. Empty when stored VPC
+  // peerings are disabled by vpc_peering_policy_on_existing.
   repeated uint32 vpc_peer_vnis = 17;
 
   // MTU size
   optional uint32 mtu = 18;
 
   // IPv6 configuration for FNN interfaces that include IPv6.
-  optional FlatInterfaceIpv6Config ipv6_interface_config = 19;
+  // Deprecated: use addresses.
+  optional FlatInterfaceIpv6Config ipv6_interface_config = 19 [deprecated = true];
 
   // Route imports and tagging details for exports used by FNN configs.
   // This is scoped to the VPC that owns this interface.
@@ -4903,11 +5138,14 @@ message FlatInterfaceConfig {
   // profile for this interface.
   optional FlatInterfaceRoutingProfile interface_routing_profile = 21;
 
-  // Family-neutral replacement for gateway, ip, interface_prefix, prefix, svi_ip,
-  // and ipv6_interface_config. An empty list identifies a legacy payload. Writers
-  // must emit at most one entry per family, ordered V4 before V6. A family absent
-  // from this list has empty deprecated compatibility fields. Readers must select
-  // entries by address_family rather than position.
+  // Family-neutral replacement for gateway, ip, interface_prefix, prefix,
+  // svi_ip, tenant_vrf_loopback_ip, and ipv6_interface_config. An empty list
+  // identifies a legacy payload. Writers must emit at most one entry per
+  // family, ordered V4 before V6. Readers must select entries by address_family
+  // rather than position. Writers leave a family's deprecated compatibility
+  // fields absent when that family is absent. Readers may preserve a deprecated
+  // tenant_vrf_loopback_ip or prefixless IPv6 sidecar when a populated list
+  // omits that value. At most one entry may contain tenant_vrf_loopback_ip.
   repeated InterfaceAddressConfig addresses = 22;
 
   // The details of the network security group associated with
@@ -5123,13 +5361,28 @@ message AdminRebootRequest {
 message AdminRebootResponse {
 }
 
-// Must provide either machine_id or ip/mac pair
+// Must provide exactly one target: bmc_endpoint_request or device_id (the
+// deprecated machine_id is still accepted as sugar for device_id.machine_id).
 message AdminBmcResetRequest {
+  // Redfish Manager.Reset type. Unspecified = per-vendor default
+  // (GracefulRestart for the standard/switch/power-shelf path).
+  enum ResetType {
+    Unspecified = 0;
+    GracefulRestart = 1;
+    ForceRestart = 2;
+  }
+  // A direct BMC endpoint (IP/MAC), resolved server-side. Alternative to device_id.
   optional BmcEndpointRequest bmc_endpoint_request = 1;
-  optional string machine_id = 2;
+  // Deprecated: use device_id (DeviceId.machine_id) instead. Still accepted.
+  optional string machine_id = 2 [deprecated = true];
   // When true, reset the BMC via ipmitool instead of Redfish.
   // ipmitool bmc reset requests may be silently ignored if the BMC is in lockdown mode.
   bool use_ipmitool = 3;
+  // ID of the device that owns the target BMC: a machine (host or DPU BMC), a
+  // switch (switch BMC), or a power shelf (its PMC).
+  common.DeviceId device_id = 4;
+  // Redfish Manager.Reset type. Applies to the Redfish path only (not ipmitool).
+  ResetType reset_type = 5;
 }
 
 message AdminBmcResetResponse {
@@ -5469,12 +5722,18 @@ message CloudInitDiscoveryInstructions {
   // How the DPU obtains the CA used to authenticate NICo. The zero value
   // preserves the legacy download behavior for rolling upgrades.
   BootstrapCaSource bootstrap_ca_source = 13;
+
+  // Fixed platform mlxconfig profile to apply while provisioning the DPU.
+  // Omitting this field is equivalent to DPU_NV_CONFIG_PROFILE_UNSPECIFIED
+  // and applies no additional platform settings.
+  DpuNvConfigProfile dpu_nvconfig_profile = 14;
 }
 
 message CloudInitMetaData {
   string instance_id = 1;
   string cloud_name = 2;
   string platform = 3;
+  optional string local_hostname = 4;
 }
 
 message CloudInitInstructionsRequest {
@@ -5675,10 +5934,9 @@ message InstanceInterfaceStatusObservation {
   // and therefore the address is unknown.
   optional string mac_address = 3;
 
-  // The list of IP addresses that had been assigned to this interface,
-  // based on the requested subnet.
-  // IPv4 precedes IPv6 when both families are assigned.
-  // The list will be empty if interface configuration hasn't been completed
+  // The IP addresses reported for this interface, ordered IPv4 before IPv6.
+  // This list is independent from `prefixes` and is empty when no address is
+  // available.
   repeated string addresses = 4;
 
   // The explicitly configured gateways, in CIDR notation. There is at most one
@@ -5688,12 +5946,12 @@ message InstanceInterfaceStatusObservation {
   // IPv6 when both gateways are explicitly configured.
   repeated string gateways = 5;
 
-  // The list of IP prefixes that have been assigned to this interface
-  // out of the requested subnet (where the prefix allocated to the interface
-  // may be a /30 in the case of FNN, or just a /32 in the case of ETV).
-  //
-  // There is one prefix for each entry in `addresses`, in the same
-  // IPv4-before-IPv6 order.
+  // The prefixes reported for this interface in CIDR notation, ordered IPv4
+  // before IPv6. Prefix lengths follow the selected network and allocation
+  // policy. This list is independent from `addresses`: SLAAC reports an IPv6
+  // prefix without a fixed host address. Consumers must match values by address
+  // family rather than list position. The list is empty when no prefix is
+  // available.
   repeated string prefixes = 6;
 
   // The NSG details for the observed NSG of the interface
@@ -5752,7 +6010,9 @@ message UpdateTenantRequest {
 
   reserved 4;
 
-  // Updating will only be allowed if the tenant has no active VPCs
+  // Core treats omission as a replacement with no profile, not patch-preserve behavior.
+  // When FNN is enabled, omission is rejected. When FNN is disabled, omission clears any existing
+  // profile, subject to the restriction against profile changes while active FNN VPCs exist.
   optional string routing_profile_type = 5;
 }
 message UpdateTenantResponse {
@@ -5765,6 +6025,12 @@ message FindTenantRequest {
 }
 message FindTenantResponse {
   Tenant tenant = 1;
+  // Named VPC routing profiles whose access tier is permitted for this Tenant.
+  // Omitted and empty are equivalent. The list is empty when the Tenant, FNN,
+  // or the Tenant's configured routing profile is unavailable. Otherwise it
+  // includes that profile and every profile with an equal or higher access
+  // tier, sorted by profile name.
+  repeated string permitted_routing_profile_types = 2;
 }
 
 message TenantKeysetIdentifier {
@@ -6079,6 +6345,18 @@ message UefiCredentialRotationRequest {
   // `machine_id` as a cross-check (they must identify the same machine). At
   // least one of `machine_id` / `bmc_mac` must be set (enforced server-side).
   optional string bmc_mac = 3;
+}
+
+message NicLockdownCredentialRotationRequest {
+  enum Mode {
+    // Explicit zero value so an omitted `mode` decodes here and is rejected,
+    // rather than silently defaulting to a real action (see the handler).
+    Unspecified = 0;
+    Set = 1;
+    Clear = 2;
+  }
+  Mode mode = 1;
+  common.MachineId machine_id = 2;
 }
 
 message HostReprovisioningListRequest {
@@ -6871,6 +7149,19 @@ message AdminPowerControlResponse {
   optional string msg = 1;
 }
 
+message AdminChassisResetRequest {
+  // Machine whose BMC is targeted. Required.
+  common.MachineId machine_id = 1;
+  // Redfish Chassis id to reset, e.g. "HGX_Chassis_0". Required.
+  string chassis_id = 2;
+  // Required. v1 accepts only ForceRestart; omission uses proto3's On default
+  // and is rejected with INVALID_ARGUMENT.
+  AdminPowerControlRequest.SystemPowerControl action = 3;
+}
+
+message AdminChassisResetResponse {
+}
+
 message GetRedfishJobStateRequest {
   common.MachineId machine_id = 1;
   string job_id = 2;
@@ -6931,6 +7222,10 @@ message MachineValidationRunItem {
   optional string skip_reason = 16;
   optional string failure_reason = 17;
   common.UUID current_attempt_id = 18;
+  // Immutable plugin configuration selected when the run plan was created.
+  optional MachineValidationPlugin plugin = 19;
+  // Full-host approval captured with the selected plugin revision.
+  bool plugin_full_host_approved = 20;
 }
 
 message MachineValidationAttemptGetRequest {
@@ -7005,6 +7300,9 @@ message MachineValidationTestUpdateRequest {
     repeated string custom_tags = 16;
     repeated string components = 17;
     optional bool is_enabled = 19;
+    // Plugin revisions are immutable. This field is accepted only when creating
+    // a new revision and cannot modify an existing plugin revision.
+    optional MachineValidationPlugin plugin = 20;
   }
   string test_id = 1;
   string version = 2;
@@ -7030,6 +7328,7 @@ message MachineValidationTestAddRequest {
   repeated string custom_tags = 16;
   repeated string components = 17;
   optional bool is_enabled = 18;
+  optional MachineValidationPlugin plugin = 19;
 }
 message MachineValidationTestAddUpdateResponse {
   string test_id = 1;
@@ -7071,6 +7370,32 @@ message MachineValidationTest {
   repeated string components = 21;
   string last_modified_at = 22;
   bool is_enabled = 23;
+  // OCI plugin configuration for this immutable revision, if plugin-backed.
+  optional MachineValidationPlugin plugin = 24;
+  // Server-managed approval required for plugin.host_access_full.
+  bool full_host_approved = 25;
+}
+
+// A generic OCI plugin. The image is an immutable digest-pinned reference and
+// entrypoint arguments are passed directly to the container runtime.
+message MachineValidationPlugin {
+  string image = 1;
+  repeated string entrypoint = 2;
+  // JSON object of non-secret site-defined values included in input.json.
+  string parameters_json = 3;
+  bool privileged = 4;
+  bool host_access_full = 5;
+  // Plugin implementation type. `container` is the currently supported type.
+  string type = 6;
+}
+
+message MachineValidationTestFullHostApprovalRequest {
+  string test_id = 1;
+  string version = 2;
+}
+
+message MachineValidationTestFullHostApprovalResponse {
+  string message = 1;
 }
 message MachineValidationTestNextVersionResponse {
   string test_id = 1;
@@ -7100,10 +7425,14 @@ message MachineValidationRunResponse {
   string message = 1;
 }
 
+// Machine capability device categories. SPECTRUM_X identifies DPA-interface
+// inventory that can supply attachment selectors; it does not indicate
+// site-level enablement or full reference-architecture readiness.
 enum MachineCapabilityDeviceType {
   MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN = 0;
   MACHINE_CAPABILITY_DEVICE_TYPE_DPU = 1;
   MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK = 2;
+  MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X = 3;
 }
 
 message MachineCapabilityAttributesCpu {
@@ -7141,7 +7470,9 @@ message MachineCapabilityAttributesStorage {
 }
 
 message MachineCapabilityAttributesNetwork {
+  // For SPECTRUM_X, the exact value accepted by InstanceSpxAttachment.device.
   string name                                                   = 1;
+  // For SPECTRUM_X, valid device_instance values are [0, count), resolved in PCI-name order.
   uint32 count                                                  = 2;
   optional string vendor                                        = 3;
   optional MachineCapabilityDeviceType device_type              = 4;
@@ -8033,6 +8364,14 @@ message RackStateHistoriesRequest {
   repeated common.RackId rack_ids = 1;
 }
 
+message RackHealthHistoriesRequest {
+  repeated common.RackId rack_ids = 1;
+  // Optional: Start time of the range (inclusive) for filtering health history
+  google.protobuf.Timestamp start_time = 2;
+  // Optional: End time of the range (inclusive) for filtering health history
+  google.protobuf.Timestamp end_time = 3;
+}
+
 message DeleteRackRequest {
   string id = 1;
 }
@@ -8654,9 +8993,32 @@ message SetPrimaryInterfaceRequest {
 }
 
 // DPU Extension Service Types and Messages
+// Immutable registration placement policy; required for DPF_HELM_CHART only.
+enum DpuExtensionServiceDpuTarget {
+  // The host's primary attached DPU.
+  DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY = 0;
+  // DPUs used by the instance network configuration (including its legacy fallbacks).
+  DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE = 1;
+  // Every attached DPU, including DPUs unused by the instance network configuration.
+  DPU_EXTENSION_SERVICE_DPU_TARGET_ALL = 2;
+}
+
 enum DpuExtensionServiceType {
   KUBERNETES_POD = 0;
-  // Add supported service types in the future
+  DPF_HELM_CHART = 1;
+}
+
+// Enumerates the lifecycle states of an extension service registration.
+//
+// This is distinct from DpuExtensionServiceDeploymentStatus, which describes
+// an individual service deployment on an instance.
+enum DpuExtensionServiceLifecycleState {
+  DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_CREATING = 0;
+  DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_READY = 1;
+  DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_UPDATING = 2;
+  DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_DELETING = 3;
+  DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_DELETED = 4;
+  DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_FAILED = 5;
 }
 
 message UsernamePassword {
@@ -8708,6 +9070,13 @@ message DpuExtensionService {
   string description = 8;
   string created = 9;
   string updated = 10;
+
+  // The lifecycle of the extension service registration itself. This is
+  // independent from deployment status on individual instances.
+  LifecycleStatus lifecycle_status = 11;
+
+  // Required primary/all-active/all policy for Helm; absent for Kubernetes Pod services.
+  optional DpuExtensionServiceDpuTarget dpu_target = 12;
 }
 
 message CreateDpuExtensionServiceRequest {
@@ -8726,6 +9095,9 @@ message CreateDpuExtensionServiceRequest {
   // Metrics configuration to be added to the existing
   // metrics collection service that runs on the DPU.
   optional DpuExtensionServiceObservability observability = 8;
+
+  // Required for Helm: PRIMARY, ALL_ACTIVE, or ALL. Immutable; forbidden for Kubernetes Pod.
+  optional DpuExtensionServiceDpuTarget dpu_target = 9;
 }
 
 message UpdateDpuExtensionServiceRequest {
@@ -9154,15 +9526,16 @@ message DPFServiceVersionsResponse {
 // services under every tenant at once.
 message ReleaseDPUServiceSyncHoldRequest {
   oneof target {
-    // Host machines to release. DPU machine ids are rejected: the hold is per
-    // node, so accepting one would silently widen the request from a single DPU
-    // to every DPU on its host. Assigned hosts are declined -- name the instance
-    // instead.
+    // Predicted or stable host machines to release. DPU machine ids are
+    // rejected: the hold is per node, so accepting one would silently widen the
+    // request from a single DPU to every DPU on its host. Assigned hosts are
+    // declined -- name the instance instead.
     common.MachineIdList machine_ids = 1;
     // Release the hosts currently holding these instances, even though they are
     // assigned. Naming an instance is the acknowledgement that its tenant will
     // be disrupted, and each consent covers only the instance named: if a host
-    // has since been reallocated, that release is declined.
+    // has since been reallocated, that release is declined. Instances resolve
+    // only to stable host machines.
     InstanceIdList instance_ids = 2;
   }
 }
@@ -9190,6 +9563,7 @@ enum DPUServiceSyncReleaseStatus {
 }
 
 message DPUServiceSyncReleaseResult {
+  // The predicted or stable host acted on.
   common.MachineId machine_id = 1;
   DPUServiceSyncReleaseStatus status = 2;
   // Names the DPU or instance responsible on the deferred statuses, and the
@@ -9207,17 +9581,20 @@ message FindPendingDPUServiceSyncIdsRequest {
 }
 
 message FindPendingDPUServiceSyncsByIdsRequest {
-  // Bounded by the server's `max_find_by_ids`, like every other by-ids call.
+  // Predicted and stable host IDs are accepted. Bounded by the server's
+  // `max_find_by_ids`, like every other by-ids call.
   repeated common.MachineId machine_ids = 1;
 }
 
 message ListDPUServiceSyncHistoryRequest {
+  // The predicted or stable host whose history to return.
   common.MachineId machine_id = 1;
 }
 
 // One recorded DPU service sync. Completed entries appear only in the history
 // form.
 message PendingDPUServiceSync {
+  // The predicted or stable host waiting for service sync.
   common.MachineId machine_id = 1;
   // First time DPF was seen waiting on this machine. Survives repeat requests,
   // so it measures the whole wait rather than the last observation.
@@ -9252,9 +9629,13 @@ enum ComponentManagerStatusCode {
 }
 
 message ComponentResult {
-  string component_id = 1;
+  // Absent when the target was a MAC with no ingested component row yet.
+  optional string component_id = 1;
   ComponentManagerStatusCode status = 2;
   string error = 3;
+  // Echoed for MAC-targeted requests so callers can correlate results when
+  // component_id is absent. Populated for ID targets too when known.
+  optional string mac_address = 4;
 }
 
 message SwitchIdList {
@@ -9265,6 +9646,11 @@ message PowerShelfIdList {
   repeated common.PowerShelfId ids = 1;
 }
 
+// A list of device MAC addresses used to target component operations (BMC MAC for compute/switch, PMC MAC for power shelf).
+message MacAddressList {
+  repeated string mac_addresses = 1;
+}
+
 // --- Component inventory ---
 
 message GetComponentInventoryRequest {
@@ -9272,6 +9658,9 @@ message GetComponentInventoryRequest {
     common.MachineIdList machine_ids = 1;
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
+    MacAddressList compute_bmc_macs = 4;
+    MacAddressList switch_bmc_macs = 5;
+    MacAddressList power_shelf_pmc_macs = 6;
   }
 }
 
@@ -9291,6 +9680,9 @@ message ComponentPowerControlRequest {
     common.MachineIdList machine_ids = 1;
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
+    MacAddressList compute_bmc_macs = 6;
+    MacAddressList switch_bmc_macs = 7;
+    MacAddressList power_shelf_pmc_macs = 8;
   }
   common.SystemPowerControl action = 4;
   // When true, bypass the state controller and dispatch directly to the
@@ -9363,18 +9755,35 @@ enum ComputeTrayComponent {
 }
 
 message UpdateComputeTrayFirmwareTarget {
+  // Exactly one of machine_ids or bmc_macs must be set (the server rejects
+  // neither/both). machine_ids targets ingested trays; bmc_macs targets by BMC
+  // MAC, including pre-ingestion. These are plain fields rather than a oneof so
+  // field 1 stays wire-compatible with earlier releases that predate bmc_macs.
   common.MachineIdList machine_ids = 1;
   repeated ComputeTrayComponent components = 2;
+  MacAddressList bmc_macs = 3;
 }
 
 message UpdateSwitchFirmwareTarget {
+  // Exactly one of switch_ids or bmc_macs must be set (the server rejects
+  // neither/both). switch_ids targets ingested switches; bmc_macs targets by
+  // BMC MAC, including pre-ingestion. These are plain fields rather than a oneof
+  // so field 1 stays wire-compatible with earlier releases that predate
+  // bmc_macs.
   SwitchIdList switch_ids = 1;
   repeated NvSwitchComponent components = 2;
+  MacAddressList bmc_macs = 3;
 }
 
 message UpdatePowerShelfFirmwareTarget {
+  // Exactly one of power_shelf_ids or pmc_macs must be set (the server rejects
+  // neither/both). power_shelf_ids targets ingested power shelves; pmc_macs
+  // targets by PMC MAC, including pre-ingestion. These are plain fields rather
+  // than a oneof so field 1 stays wire-compatible with earlier releases that
+  // predate pmc_macs.
   PowerShelfIdList power_shelf_ids = 1;
   repeated PowerShelfComponent components = 2;
+  MacAddressList pmc_macs = 3;
 }
 
 // Whole-rack firmware update target. All eligible compute and switch devices
@@ -9416,6 +9825,9 @@ message GetComponentFirmwareStatusRequest {
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     RackIdList rack_ids = 4;
+    MacAddressList compute_bmc_macs = 5;
+    MacAddressList switch_bmc_macs = 6;
+    MacAddressList power_shelf_pmc_macs = 7;
   }
 }
 
@@ -9429,6 +9841,9 @@ message ListComponentFirmwareVersionsRequest {
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     RackIdList rack_ids = 4;
+    MacAddressList compute_bmc_macs = 5;
+    MacAddressList switch_bmc_macs = 6;
+    MacAddressList power_shelf_pmc_macs = 7;
   }
 }
 
@@ -9496,7 +9911,12 @@ message AdminForceDeleteSwitchRequest {
   // The Switch ID to force delete.
   common.SwitchId switch_id = 1;
   // Should we delete the machine interfaces associated with this switch?
+  // When set, also deletes interfaces whose MACs match the switch BMC MAC or
+  // declared NVOS MACs.
   bool delete_interfaces = 2;
+  // Should we delete BMC suppressions (DHCP and Site Explorer) for the switch
+  // BMC MAC and declared NVOS MACs?
+  bool delete_bmc_suppressions = 3;
 }
 
 message AdminForceDeleteSwitchResponse {
@@ -9506,12 +9926,16 @@ message AdminForceDeleteSwitchResponse {
   uint32 interfaces_deleted = 2;
 }
 
-// Force deletes a Power Shelf and optionally its associated interfaces.
+// Force deletes a Power Shelf and optionally its associated interfaces
+// and BMC suppressions.
 message AdminForceDeletePowerShelfRequest {
   // The Power Shelf ID to force delete.
   common.PowerShelfId power_shelf_id = 1;
   // Should we delete the machine interfaces associated with this power shelf?
   bool delete_interfaces = 2;
+  // Should we delete BMC suppressions (site explorer and DHCP) for this power
+  // shelf's BMC MAC?
+  bool delete_bmc_suppressions = 3;
 }
 
 message AdminForceDeletePowerShelfResponse {
@@ -10037,16 +10461,319 @@ message InterfaceAddressConfig {
 
   // Family shared by every address and prefix in this entry. Must be V4 or V6.
   AddressFamily address_family = 1;
-  // IPv4 gateway CIDR. For IPv6, the DPU-side port/linknet CIDR used as
-  // gateway_cidr, matching FlatInterfaceIpv6Config.interface_prefix.
-  string gateway = 2;
-  // Host address, without a prefix length. Empty only for a V6 entry whose
-  // owning VPC has SLAAC enabled; interface_prefix remains populated then.
+  // IPv4 gateway CIDR. IPv6 entries omit this value; their DPU-side link
+  // prefix remains in interface_prefix, which the agent renders as gateway_cidr.
+  optional string gateway = 2;
+  // Host address, without a prefix length. This may be empty for SLAAC or an
+  // entry that contains only a loopback.
   string ip = 3;
   // Prefix allocated to this interface, such as an FNN linknet or host route.
+  // This may be empty for a prefixless persisted IPv6 interface or an entry
+  // that contains only a loopback.
   string interface_prefix = 4;
-  // Prefix for the network segment that contains this interface.
+  // Prefix for the network segment that contains this interface. This may be
+  // empty when the entry contains only a loopback.
   string prefix = 5;
   // DPU-hosted SVI address used as the host gateway when configured.
   optional string svi_ip = 6;
+  // Administrative FNN tenant VRF loopback used by operators for monitoring
+  // and debugging; the tenant is not expected to access this address. Writers
+  // must set this value on at most one family entry.
+  optional string tenant_vrf_loopback_ip = 7;
+}
+
+// Selects a fixed, versioned mlxconfig profile for DPU provisioning.
+enum DpuNvConfigProfile {
+  // No platform profile is selected.
+  DPU_NV_CONFIG_PROFILE_UNSPECIFIED = 0;
+  // Version 1 of the validated GB200/B3240 CPU as Root Complex profile.
+  DPU_NV_CONFIG_PROFILE_GB200_B3240_V1 = 1;
+}
+
+// Releases the VNI retained after a routing-profile change. The active VNI and
+// VPC configuration remain unchanged. Before calling, operators must verify
+// that affected DPUs (including peers) and fabric routes no longer use the
+// inactive VNI, and prevent attachment, peering, and routing changes through
+// cleanup. Unreachable consumers require retaining the allocation unless they
+// have been isolated. Core validates ownership, not dataplane convergence.
+message VpcReleaseInactiveVniRequest {
+  // Required VPC whose inactive allocation will be released.
+  common.VpcId id = 1;
+  // Required version from the operator's original observation. Repeating that
+  // exact request cannot release a later allocation. A lost response leaves the
+  // outcome unknown: a stale-version error does not prove whether cleanup ran.
+  // Inspect current state; never substitute a fresh version in an automatic retry.
+  optional string if_version_match = 2;
+  // Required exact inactive VNI observed with this version, in 1..16777215.
+  // It must differ from the active VNI and match the VPC-owned allocation in
+  // the other pool. Cleanup fails on missing or inconsistent allocations.
+  optional uint32 expected_inactive_vni = 3;
+}
+
+message VpcReleaseInactiveVniResult {
+  // Authoritative VPC with its advanced version after cleanup committed.
+  Vpc vpc = 1;
+  // Exact inactive allocation released by this operation.
+  uint32 released_inactive_vni = 2;
+}
+
+// Selects one VPC for authoritative allocation inspection.
+message VpcRoutingStateRequest {
+  // Required VPC ID. Missing IDs fail INVALID_ARGUMENT; unknown or deleted
+  // VPCs fail NOT_FOUND.
+  common.VpcId id = 1;
+}
+
+// Persisted routing state, read together with the VPC-owned allocations.
+// Supports any virtualization type with one owned allocation matching its
+// active VNI and at most one distinct allocation in the other pool. Missing,
+// duplicate, or inconsistent ownership fails instead of reporting no retained
+// allocation. VPCs without pool ownership (including configured admin VPCs)
+// fail FAILED_PRECONDITION. Pool values that cannot be parsed as signed 32-bit
+// integers fail INTERNAL; parsed negative values fail FAILED_PRECONDITION.
+// This is not an effective routing profile or evidence of DPU/fabric convergence;
+// a site-global VNI override is not reflected here. Inspection must not silently
+// replace the version or VNI an operator approved for a mutation.
+message VpcRoutingState {
+  // VPC whose persisted state was read.
+  common.VpcId id = 1;
+  // VPC version observed with these allocations. Profile changes advance it;
+  // inspection does not.
+  string version = 2;
+  // Persisted profile name, omitted when none is configured on the VPC.
+  // The name is returned even if its runtime profile definition is unavailable.
+  optional string routing_profile_type = 3;
+  // Persisted active VNI, verified against exact pool ownership. Inspection
+  // accepts stored nonnegative values, including zero in non-FNN pools.
+  uint32 active_vni = 4;
+  // Omitted only when the valid active allocation is the VPC's sole allocation.
+  VpcRetainedVniAllocation retained_allocation = 5;
+}
+
+// Allocation retained by the VPC in the pool other than its active allocation.
+message VpcRetainedVniAllocation {
+  // Exact resource-pool name: vpc-vni or external-vpc-vni.
+  string pool_name = 1;
+  // Persisted nonnegative VNI. Distinct from the active VNI; inspection does
+  // not establish whether it is valid for a routing-profile transition.
+  uint32 vni = 2;
+}
+
+// Changes a supported FNN VPC between configured profiles with opposite
+// internal settings. The destination must satisfy the persisted tenant's
+// access tier (omitted tiers retain the creation-time default of zero).
+// Reuses an existing destination allocation, otherwise claims the requested
+// VNI or automatically selects an available VNI from the destination pool.
+// The previous allocation remains reserved; ReleaseVpcInactiveVni is a
+// separate operator action.
+//
+// Requires FNN configuration, named source/destination profiles, distinct
+// nonoverlapping materialized pools, and VNIs in 1..16777215. Site-global VNIs,
+// substantive VPC/interface routing overrides, and tenant-managed SitePrefix
+// attachments are unsupported. Empty override reset objects are allowed.
+// Same-polarity changes and a destination pool already holding the active VNI
+// are rejected. Unsupported configurations and inconsistent ownership fail
+// FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; automatic allocation
+// from an exhausted pool fails RESOURCE_EXHAUSTED. Rejected requests commit
+// no changes.
+//
+// Preserves the VPC ID, prefixes, instances, addresses, NSGs, metadata, and
+// creation-time requested VNI. External routing does not supply public
+// addressing, NAT, fabric routes, or firewall changes.
+//
+// Operators must hold attachment, peering, deletion, and profile-definition
+// changes until all attached and directly peered DPUs and fabric routes have
+// been independently verified and the inactive allocation released. Core
+// does not enforce that hold or verify convergence. A later change back must
+// name the desired profile and pass current validation; retained ownership
+// does not guarantee reversal or authorize broader tenant access.
+message VpcChangeRoutingProfileRequest {
+  // Required live VPC ID. Omission fails INVALID_ARGUMENT.
+  common.VpcId id = 1;
+  // Required version from the original observation; missing/malformed values
+  // fail INVALID_ARGUMENT and stale versions fail FAILED_PRECONDITION. Keep this exact
+  // version on retries. A lost response leaves commit status unknown: inspect
+  // GetVpcRoutingState and never automatically substitute a fresh version.
+  optional string if_version_match = 2;
+  // Required nonempty configuration-defined destination name, not a closed
+  // INTERNAL/EXTERNAL enum. Omission or an empty name fails INVALID_ARGUMENT.
+  string routing_profile_type = 3;
+  // Optional exact destination VNI. Omission reuses a retained destination,
+  // otherwise allocates automatically. A retained destination must match an
+  // explicit request; a different value fails FAILED_PRECONDITION even if free.
+  // Without a retained destination, the requested value must be a free
+  // materialized destination-pool entry, regardless of its auto_assign flag.
+  // Missing or occupied entries and the active VNI fail FAILED_PRECONDITION
+  // without falling back. Zero and values above 16777215 fail INVALID_ARGUMENT.
+  // Use only when every serving Core supports this field: older Core ignores
+  // it and may choose another VNI. Verify the returned profile and active VNI;
+  // a mismatched or lost response does not undo a committed change.
+  optional uint32 vni = 4;
+}
+
+// Partial update of an existing expected power shelf, selected by ID.
+message PatchExpectedPowerShelfRequest {
+  // Required. expected_power_shelf_id identifies the row. A nonempty BMC MAC
+  // may reassert the stored identity but cannot change it.
+  ExpectedPowerShelf expected_power_shelf = 1;
+  // Required; an empty mask checks existence without changing the row.
+  // Paths: bmc_username, bmc_password, shelf_serial_number, bmc_ip_address,
+  // bmc_retain_credentials, rack_id, metadata.name, metadata.description,
+  // metadata.labels.
+  // Unselected values are ignored. Selected values replace the stored field,
+  // including empty labels, an absent `rack_id` (clear), and an empty BMC IP
+  // (clear). Nonempty IPs must parse as IPv4 or IPv6. A selected
+  // `bmc_retain_credentials` must be present; false is an update.
+  // BMC username and password must be selected together and both be nonempty;
+  // clearing credentials is unsupported. Only the listed paths are accepted;
+  // duplicate paths have no additional effect.
+  // Selected metadata leaves use empty values when metadata is absent.
+  // Selected labels replace the collection; keys must be unique, and absent
+  // label values become empty strings. Label order is not preserved.
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+// Partial update of an existing expected switch, selected by ID.
+message PatchExpectedSwitchRequest {
+  // Required. expected_switch_id identifies the row. A nonempty BMC MAC
+  // may reassert the stored identity but cannot change it.
+  ExpectedSwitch expected_switch = 1;
+  // Required; an empty mask checks existence without changing the row.
+  // Paths: bmc_username, bmc_password, switch_serial_number, bmc_ip_address,
+  // bmc_retain_credentials, rack_id, nvos_mac_addresses, nvos_ip_address,
+  // nvos_username, nvos_password, metadata.name, metadata.description,
+  // metadata.labels.
+  // Unselected values are ignored. Selected values replace the stored field,
+  // including empty collections, an absent `rack_id` (clear), and an empty BMC
+  // IP (clear). A selected `nvos_ip_address` clears with an absent or empty value.
+  // Nonempty IPs must parse as IPv4 or IPv6. A selected `bmc_retain_credentials`
+  // must be present; false is an update. Each username/password pair must be
+  // selected together with both values present and nonempty; clearing
+  // credentials is unsupported. BMC and NVOS pairs can change independently.
+  // The merged NVOS IP, when set, requires exactly one NVOS MAC; both fields
+  // can change in the same patch. Only the listed paths are accepted;
+  // duplicate paths have no additional effect.
+  // Selected metadata leaves use empty values when metadata is absent.
+  // Selected labels replace the collection; keys must be unique, and absent
+  // label values become empty strings. Label order is not preserved.
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+// Partial update of an existing expected machine, selected by ID.
+message PatchExpectedMachineRequest {
+  // Required. id identifies the row. A nonempty BMC MAC may reassert the stored
+  // identity but cannot change it.
+  ExpectedMachine expected_machine = 1;
+  // Required; an empty mask checks existence without changing the row.
+  // Paths: bmc_username, bmc_password, chassis_serial_number,
+  // fallback_dpu_serial_numbers, sku_id, rack_id, is_dpf_enabled,
+  // default_pause_ingestion_and_poweron, bmc_retain_credentials, dpu_mode,
+  // bmc_ip_address, bmc_ip_allocation, host_nics,
+  // host_lifecycle_profile.disable_lockdown,
+  // metadata.name, metadata.description, metadata.labels.
+  //
+  // Unselected values are ignored. Selected values replace the stored field,
+  // including empty collections, false, and absent `sku_id` or `rack_id` (clear).
+  // A selected `bmc_ip_address` must be present: an empty string clears it,
+  // otherwise it must parse as IPv4 or IPv6. Selected optional booleans and
+  // enums must be present. False disables the selected setting; for
+  // `disable_lockdown`, it restores lockdown. `DPU_MODE_UNSPECIFIED` resets to
+  // site inheritance. Selecting only `bmc_ip_address` preserves the merged
+  // allocation policy; an address incompatible with that policy is rejected.
+  // Select `bmc_ip_allocation` with `BMC_IP_ALLOCATION_TYPE_UNSPECIFIED` to
+  // reset allocation to inference from the BMC address. Unknown enum values
+  // are rejected.
+  // Selecting Dynamic or Retained allocation clears a stored fixed address;
+  // selecting a nonempty BMC address with either policy is invalid.
+  //
+  // Selecting `host_nics` replaces the entire list, including an empty list.
+  // Matched interfaces retain omitted roles and allocation policies under
+  // `ExpectedHostNic`'s update rules; explicit Unspecified resets them.
+  // Selected top-level `bmc_ip_address` and `bmc_ip_allocation` override the
+  // nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
+  // only the mask selects interface replacement.
+  //
+  // A selected `chassis_serial_number` must contain 4-64 ASCII letters,
+  // digits, hyphens, or underscores. Selected `fallback_dpu_serial_numbers`
+  // must not contain duplicate strings.
+  //
+  // Selected metadata leaves use empty values when metadata is absent.
+  // Selected labels replace the collection; keys must be unique, and absent
+  // label values become empty strings. Label order is not preserved.
+  // Every nonempty patch validates the complete merged metadata. The name
+  // must contain 0-256 ASCII bytes; the description may contain up to 1024
+  // UTF-8 bytes. At most 16 labels are allowed. Label keys must contain
+  // 1-255 ASCII bytes, and label values may contain up to 255 UTF-8 bytes.
+  //
+  // BMC username and password must be selected together and both be nonempty;
+  // clearing credentials is unsupported. Only the listed paths are accepted;
+  // duplicate paths have no additional effect.
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+// Atomic batch of expected-machine patches. Each ID may appear only once.
+message PatchExpectedMachinesRequest {
+  // Each item follows PatchExpectedMachineRequest. All validation and writes
+  // succeed together or no row changes. No resource or credentials are echoed
+  // in the response. An empty list is invalid.
+  repeated PatchExpectedMachineRequest patches = 1;
+}
+
+// The source stream for a Machine Validation attempt-log chunk.
+enum MachineValidationAttemptLogStream {
+  MACHINE_VALIDATION_ATTEMPT_LOG_STREAM_UNSPECIFIED = 0;
+  MACHINE_VALIDATION_ATTEMPT_LOG_STREAM_STDOUT = 1;
+  MACHINE_VALIDATION_ATTEMPT_LOG_STREAM_STDERR = 2;
+}
+
+// One stdout or stderr chunk emitted by a running validation attempt. Sequence
+// numbers start at one, are contiguous within an attempt, and are assigned by
+// the producer. Retrying an accepted sequence with identical stream and content
+// succeeds without adding a duplicate; reusing it with different data fails.
+// Timestamps are set by the server when the chunk is first accepted.
+message MachineValidationAttemptLogChunk {
+  common.UUID attempt_id = 1;
+  uint32 sequence = 2;
+  MachineValidationAttemptLogStream stream = 3;
+  google.protobuf.Timestamp created_at = 4;
+  string content = 5;
+}
+
+message MachineValidationAttemptLogAppendRequest {
+  common.UUID attempt_id = 1;
+  // The next positive, contiguous sequence number for this attempt.
+  uint32 sequence = 2;
+  // The stdout or stderr source stream. UNSPECIFIED is invalid.
+  MachineValidationAttemptLogStream stream = 3;
+  // Non-empty UTF-8 content within the site's configured chunk limit.
+  string content = 4;
+}
+
+message MachineValidationAttemptLogAppendResponse {
+  // True when the chunk was accepted, including an idempotent retry.
+  // False when logging is disabled, the attempt is no longer active, or the
+  // per-attempt size limit was reached. Disabled storage and inactive attempts
+  // both return accepted=false and truncated=false. Invalid input returns an
+  // RPC error.
+  bool accepted = 1;
+  // True only when the per-attempt size limit prevented acceptance.
+  bool truncated = 2;
+}
+
+message MachineValidationAttemptLogGetRequest {
+  common.UUID attempt_id = 1;
+  // Return chunks with a sequence strictly greater than this value. Use zero
+  // for the first page and the last returned sequence for the next page.
+  uint32 after_sequence = 2;
+  // Maximum chunks to return. Zero defaults to 100; values from 1 through 100
+  // are accepted and larger values return INVALID_ARGUMENT, even when storage
+  // is disabled. Disabled storage otherwise returns an empty page.
+  uint32 limit = 3;
+}
+
+message MachineValidationAttemptLogList {
+  // Chunks in ascending sequence order.
+  repeated MachineValidationAttemptLogChunk chunks = 1;
+  // True when more chunks remain after this page's last sequence.
+  bool has_more = 2;
 }

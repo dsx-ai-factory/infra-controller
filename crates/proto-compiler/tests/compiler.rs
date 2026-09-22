@@ -37,8 +37,16 @@ fn compile_fixture(name: &str) -> Result<Schema, Error> {
 fn compile_codegen_fixtures(names: &[&str]) -> Result<Schema, Error> {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let annotations = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rpc/proto");
+    let mut proto_files = names
+        .iter()
+        .map(|name| fixtures.join(name))
+        .collect::<Vec<_>>();
+    proto_files.push(annotations.join("codegen/v1/rust_type.proto"));
+    if names.iter().any(|name| name.contains("rust_type_override")) {
+        proto_files.push(annotations.join("codegen/v1/machine_id_types.proto"));
+    }
     compile(&CompilerConfig {
-        proto_files: names.iter().map(|name| fixtures.join(name)).collect(),
+        proto_files,
         include_paths: vec![fixtures, annotations],
         protoc_args: Vec::new(),
     })
@@ -383,5 +391,214 @@ fn invalid_rust_derive_is_reported_with_its_protobuf_type() {
             ..
         }) if protobuf_type == "carbide.proto.compiler.fixture.invalid.InvalidMessage"
             && derive == "serde::Serialize +"
+    ));
+}
+
+#[test]
+fn applies_owned_enum_and_imported_external_type_mappings() {
+    let schema =
+        compile_codegen_fixtures(&["extern_paths.proto"]).expect("external path fixture compiles");
+    let codegen = schema.collect_codegen().expect("external paths are valid");
+    let extern_paths = codegen.extern_paths();
+
+    for (protobuf_type, expected_rust_type) in [
+        (
+            ".carbide.proto.compiler.fixture.extern_paths.ExternalMessage",
+            ":: fixture_types :: ExternalMessage",
+        ),
+        (
+            ".carbide.proto.compiler.fixture.extern_paths.ExternalEnum",
+            ":: fixture_types :: ExternalEnum",
+        ),
+        (".google.protobuf.Timestamp", "crate :: Timestamp"),
+    ] {
+        let rust_type = extern_paths
+            .get(protobuf_type)
+            .unwrap_or_else(|| panic!("mapping for `{protobuf_type}` exists"));
+        assert_eq!(quote::quote!(#rust_type).to_string(), expected_rust_type);
+    }
+
+    let output = generate_with_codegen(schema);
+    let generated = std::fs::read_to_string(
+        output
+            .path()
+            .join("carbide.proto.compiler.fixture.extern_paths.rs"),
+    )
+    .expect("generated package exists");
+    for rust_type in ["::fixture_types::ExternalMessage", "crate::Timestamp"] {
+        assert!(
+            generated.contains(rust_type),
+            "generated field uses external type `{rust_type}`"
+        );
+    }
+    assert!(!generated.contains("pub struct ExternalMessage"));
+    assert!(!generated.contains("pub enum ExternalEnum"));
+}
+
+#[test]
+fn invalid_rust_extern_path_is_reported_with_its_protobuf_type() {
+    let schema = compile_codegen_fixtures(&["invalid_extern_path.proto"])
+        .expect("invalid Rust path is valid protobuf");
+    assert!(matches!(
+        schema.collect_codegen(),
+        Err(Error::InvalidRustExternPath {
+            protobuf_type,
+            rust_type,
+            ..
+        }) if protobuf_type
+            == ".carbide.proto.compiler.fixture.invalid_extern_path.InvalidMessage"
+            && rust_type == "::invalid::Type +"
+    ));
+}
+
+#[test]
+fn unknown_external_mapping_target_is_reported() {
+    let schema = compile_codegen_fixtures(&["unknown_extern_path.proto"])
+        .expect("unknown mapping target is valid protobuf");
+    assert!(matches!(
+        schema.collect_codegen(),
+        Err(Error::UnknownExternPathTarget { protobuf_type })
+            if protobuf_type == ".unknown.Missing"
+    ));
+}
+
+#[test]
+fn redeclared_external_mapping_is_reported() {
+    for (fixture, protobuf_type) in [
+        (
+            "duplicate_extern_path.proto",
+            ".carbide.proto.compiler.fixture.duplicate_extern_path.ExternalMessage",
+        ),
+        (
+            "conflicting_extern_path.proto",
+            ".carbide.proto.compiler.fixture.conflicting_extern_path.ExternalMessage",
+        ),
+    ] {
+        let schema =
+            compile_codegen_fixtures(&[fixture]).expect("redeclared mapping is valid protobuf");
+        assert!(matches!(
+            schema.collect_codegen(),
+            Err(Error::RedeclaredExternPath { protobuf_type: actual }) if actual == protobuf_type
+        ));
+    }
+}
+
+#[test]
+fn invalid_external_mapping_extension_shape_is_reported() {
+    let schema = compile_codegen_fixtures(&["invalid_extern_path_extension.proto"])
+        .expect("invalid extension shape is valid protobuf");
+    assert!(matches!(
+        schema.collect_codegen(),
+        Err(Error::InvalidCodegenExtension(name))
+            if name == "carbide.codegen.v1.imported_extern_path"
+    ));
+}
+
+#[test]
+fn rust_type_overrides_change_only_the_rust_descriptor_view() {
+    let schema = compile_codegen_fixtures(&["rust_type_overrides.proto"])
+        .expect("Rust type override fixture compiles");
+    let public_request = schema
+        .descriptor_pool
+        .get_message_by_name(&format!("{FIXTURE_PACKAGE}.rust_type_overrides.Request"))
+        .expect("public request exists");
+    for field_name in ["singular", "optional_id", "repeated_ids", "list"] {
+        let Kind::Message(message) = public_request
+            .get_field_by_name(field_name)
+            .expect("public field exists")
+            .kind()
+        else {
+            panic!("public field is a message");
+        };
+        assert!(
+            message.full_name().contains("PublicMachineId"),
+            "the public descriptor remains unchanged"
+        );
+    }
+
+    let codegen = schema.collect_codegen().expect("overrides are valid");
+    let rust_descriptor_set = codegen
+        .rust_file_descriptor_set(&schema.file_descriptor_set)
+        .expect("Rust descriptor is transformed");
+    let rust_pool = DescriptorPool::from_file_descriptor_set(rust_descriptor_set)
+        .expect("transformed descriptor resolves");
+    let rust_request = rust_pool
+        .get_message_by_name(&format!("{FIXTURE_PACKAGE}.rust_type_overrides.Request"))
+        .expect("Rust request exists");
+    for (field_name, expected) in [
+        ("singular", "common.DpuMachineId"),
+        ("optional_id", "common.HostMachineId"),
+        ("repeated_ids", "common.StableHostMachineId"),
+        ("list", "common.HostMachineIdList"),
+    ] {
+        let Kind::Message(actual) = rust_request
+            .get_field_by_name(field_name)
+            .expect("Rust field exists")
+            .kind()
+        else {
+            panic!("Rust field is a message");
+        };
+        assert_eq!(actual.full_name(), expected);
+    }
+    let nested = rust_pool
+        .get_message_by_name(&format!(
+            "{FIXTURE_PACKAGE}.rust_type_overrides.Request.Nested"
+        ))
+        .expect("nested message exists");
+    let Kind::Message(nested_id) = nested.get_field_by_name("id").unwrap().kind() else {
+        panic!("nested field is a message");
+    };
+    assert_eq!(nested_id.full_name(), "common.DpuMachineId");
+
+    let method = rust_pool
+        .get_service_by_name(&format!(
+            "{FIXTURE_PACKAGE}.rust_type_overrides.FixtureService"
+        ))
+        .expect("service exists")
+        .methods()
+        .next()
+        .expect("method exists");
+    assert_eq!(method.input().full_name(), "common.StableHostMachineId");
+    assert_eq!(method.output().full_name(), "common.DpuMachineId");
+}
+
+#[test]
+fn unknown_rust_type_override_is_reported() {
+    let schema = compile_codegen_fixtures(&["invalid_rust_type_overrides.proto"])
+        .expect("unknown target is valid protobuf");
+    assert!(matches!(
+        schema.collect_codegen(),
+        Err(Error::UnknownRustTypeOverride { target, replacement })
+            if target.ends_with("UnknownTarget.id") && replacement == ".missing.MachineId"
+    ));
+}
+
+#[test]
+fn wire_incompatible_rust_type_override_is_reported() {
+    let schema = compile_codegen_fixtures(&["incompatible_rust_type_override.proto"])
+        .expect("incompatible target is valid protobuf");
+    assert!(matches!(
+        schema.collect_codegen(),
+        Err(Error::IncompatibleRustTypeOverride { target, .. })
+            if target.ends_with("Target.id")
+    ));
+}
+
+#[test]
+fn non_message_rust_type_override_is_reported() {
+    let schema = compile_codegen_fixtures(&["non_message_rust_type_override.proto"])
+        .expect("non-message target is valid protobuf");
+    assert!(matches!(
+        schema.collect_codegen(),
+        Err(Error::IncompatibleRustTypeOverride { target, .. })
+            if target.ends_with("Target.id")
+    ));
+}
+
+#[test]
+fn duplicate_rust_type_override_is_rejected_by_protoc() {
+    assert!(matches!(
+        compile_codegen_fixtures(&["duplicate_rust_type_override.proto"]),
+        Err(Error::CompileProtobuf { .. })
     ));
 }

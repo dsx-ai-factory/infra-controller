@@ -372,7 +372,7 @@ func TestManageOsImage_UpdateOsImageInDB_IgnoresIpxeAssociations(t *testing.T) {
 
 	// Backdate both associations past the inventory-receipt grace window so the
 	// missing-on-Site path is reachable.
-	past := time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval * 2))
+	past := time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval * 2))
 	_, err = dbSession.DB.Exec("UPDATE operating_system_site_association SET created = ? WHERE id IN (?, ?)", past, imgOssa.ID.String(), ipxeOssa.ID.String())
 	require.NoError(t, err)
 
@@ -527,6 +527,19 @@ func TestManageOsImage_UpdateOperatingSystemStatusInDB(t *testing.T) {
 
 		})
 	}
+}
+
+// backdateOssaCreated ages a Site association past the staleness threshold. The create input
+// carries no creation time, so a freshly created association would otherwise defer deletion.
+func backdateOssaCreated(ctx context.Context, t *testing.T, dbSession *cdb.Session, osID uuid.UUID, age time.Duration) {
+	t.Helper()
+
+	_, err := dbSession.DB.NewUpdate().
+		Model((*cdbm.OperatingSystemSiteAssociation)(nil)).
+		Set("created = ?", time.Now().Add(-age)).
+		Where("operating_system_id = ?", osID).
+		Exec(ctx)
+	require.NoError(t, err)
 }
 
 // TestManageOsImage_UpdateOperatingSystemsInDB exercises the Operating System
@@ -785,6 +798,7 @@ func TestManageOsImage_UpdateOperatingSystemsInDB(t *testing.T) {
 			CreatedBy:         ipu.ID,
 		})
 		require.NoError(t, err)
+		backdateOssaCreated(ctx, t, dbSession, osID, 2*cutil.DefaultInventoryReceiptInterval)
 
 		// Empty inventory: the Site no longer reports the OS, so it must be soft-deleted.
 		inventory := &corev1.OperatingSystemInventory{
@@ -798,6 +812,46 @@ func TestManageOsImage_UpdateOperatingSystemsInDB(t *testing.T) {
 
 		_, err = osDAO.GetByID(ctx, nil, osID, nil)
 		assert.ErrorIs(t, err, cdb.ErrDoesNotExist, "single-site OS absent from Site inventory should be soft-deleted")
+	})
+
+	t.Run("does not soft-delete an iPXE OS associated to the Site more recently than the inventory interval", func(t *testing.T) {
+		ip := util.TestBuildInfrastructureProvider(t, dbSession, "provider-fresh", "provider-fresh-org", ipu)
+		st := util.TestBuildSite(t, dbSession, ip, "site-fresh", cdbm.SiteStatusRegistered, nil, ipu)
+
+		osID := uuid.New()
+		_, err := osDAO.Create(ctx, nil, cdbm.OperatingSystemCreateInput{
+			ID:                       osID,
+			Name:                     "freshly-associated-single-site-os",
+			Org:                      st.Org,
+			InfrastructureProviderID: &ip.ID,
+			OsType:                   cdbm.OperatingSystemTypeIPXE,
+			IpxeScript:               cutil.GetPtr("#!ipxe\n"),
+			Status:                   cdbm.OperatingSystemStatusReady,
+			CreatedBy:                ipu.ID,
+		})
+		require.NoError(t, err)
+
+		// Left at its creation time, so the association is newer than the staleness threshold.
+		_, err = ossaDAO.Create(ctx, nil, cdbm.OperatingSystemSiteAssociationCreateInput{
+			OperatingSystemID: osID,
+			SiteID:            st.ID,
+			Status:            cdbm.OperatingSystemSiteAssociationStatusSynced,
+			CreatedBy:         ipu.ID,
+		})
+		require.NoError(t, err)
+
+		// The inventory was collected before the association existed, so it cannot report it.
+		inventory := &corev1.OperatingSystemInventory{
+			InventoryStatus:  corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			OperatingSystems: []*corev1.OperatingSystem{},
+			Timestamp:        timestamppb.Now(),
+		}
+
+		err = newManageOsImage().UpdateOperatingSystemsInDB(ctx, st.ID, inventory)
+		require.NoError(t, err)
+
+		_, err = osDAO.GetByID(ctx, nil, osID, nil)
+		require.NoError(t, err, "an OS associated to the Site within the inventory interval must survive")
 	})
 
 	t.Run("does not soft-delete an OS associated with a different Site", func(t *testing.T) {
@@ -864,6 +918,7 @@ func TestManageOsImage_UpdateOperatingSystemsInDB(t *testing.T) {
 				OperatingSystemID: id, SiteID: st.ID, Status: cdbm.OperatingSystemSiteAssociationStatusSynced, CreatedBy: ipu.ID,
 			})
 			require.NoError(t, err)
+			backdateOssaCreated(ctx, t, dbSession, id, 2*cutil.DefaultInventoryReceiptInterval)
 			return id
 		}
 		osA := mkOS("paged-os-a")

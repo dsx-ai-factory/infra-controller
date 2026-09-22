@@ -4,6 +4,7 @@
 package operation
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -20,6 +21,14 @@ type Wrapper struct {
 	Info json.RawMessage // Serialized operation details
 }
 
+// Clone returns an independent copy of the operation wrapper and its serialized
+// information.
+func (w Wrapper) Clone() Wrapper {
+	cloned := w
+	cloned.Info = bytes.Clone(w.Info)
+	return cloned
+}
+
 // ConflictStrategy controls how a task behaves when a conflict is detected.
 type ConflictStrategy int
 
@@ -29,6 +38,33 @@ const (
 	// ConflictStrategyQueue queues the task until the conflicting task completes.
 	ConflictStrategyQueue
 )
+
+// String returns the stable name of the conflict strategy.
+func (s ConflictStrategy) String() string {
+	switch s {
+	case ConflictStrategyReject:
+		return "reject"
+	case ConflictStrategyQueue:
+		return "queue"
+	default:
+		return fmt.Sprintf("ConflictStrategy(%d)", s)
+	}
+}
+
+// ParseConflictStrategy parses a conflict strategy's stable name.
+func ParseConflictStrategy(value string) (ConflictStrategy, error) {
+	switch value {
+	case "reject":
+		return ConflictStrategyReject, nil
+	case "queue":
+		return ConflictStrategyQueue, nil
+	default:
+		return ConflictStrategyReject, fmt.Errorf(
+			"unknown conflict strategy %q",
+			value,
+		)
+	}
+}
 
 // Request represents the specification of an operation submitted by the user.
 // The Task Manager resolves the TargetSpec, splits by rack, and creates one
@@ -66,6 +102,12 @@ type Request struct {
 	// IdempotencyKey, when set, makes submission create or return one task for
 	// this request. It is only valid for requests constrained to one rack.
 	IdempotencyKey string
+
+	// TriggerType and TriggerID identify the upstream resource that caused this
+	// request. Each supported trigger type defines whether an occurrence ID is
+	// required or prohibited.
+	TriggerType TriggerType
+	TriggerID   *uuid.UUID
 }
 
 func (r *Request) HasIdempotencyKey() bool {
@@ -87,6 +129,10 @@ func (r *Request) Validate() error {
 
 	if r.HasIdempotencyKey() && r.RequiredRackID == uuid.Nil {
 		return fmt.Errorf("idempotency key requires RequiredRackID")
+	}
+
+	if err := ValidateTrigger(r.TriggerType, r.TriggerID); err != nil {
+		return err
 	}
 
 	return nil

@@ -24,7 +24,7 @@ mod kea;
 mod kea_v6;
 
 use std::io::{Read, Write};
-use std::net::{Ipv6Addr, SocketAddr, TcpStream};
+use std::net::{Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
 
 use dhcp::mock_api_server::DHCP_RESPONSE_FQDN;
@@ -42,12 +42,61 @@ pub(super) use kea_v6::{Kea6, Kea6Config, Kea6ExpiredLeasesProcessing};
 #[allow(dead_code)]
 const METRICS_READ_TIMEOUT: Duration = Duration::from_millis(500);
 
+// Send one relayed DHCPv6 packet, returning None only for a timeout or
+// WouldBlock while preserving transport and decoding failures as errors.
+pub(super) fn send_and_recv_v6(
+    socket: &UdpSocket,
+    packet: Vec<u8>,
+) -> Result<Option<Message>, eyre::Report> {
+    socket.send(&packet)?;
+    let mut buf = [0u8; 1500];
+    let n = match socket.recv(&mut buf) {
+        Ok(n) => n,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Some(DHCPv6Factory::decode_reply(&buf[..n])?))
+}
+
+/// Return the Kea hook built by the same Cargo invocation as this integration test.
+fn hook_library_path() -> String {
+    let test_executable =
+        std::env::current_exe().expect("cannot locate integration test executable");
+    let deps_dir = test_executable
+        .parent()
+        .expect("integration test executable has no parent directory");
+    let library_name = format!(
+        "{}dhcp{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let hook_library = deps_dir.join(library_name);
+
+    assert!(
+        hook_library.is_file(),
+        "Kea hook library was not built next to the integration test executable: {}",
+        hook_library.display()
+    );
+
+    hook_library.to_string_lossy().into_owned()
+}
+
 /// Return the DHCPv6 dropped-request counter value for a reason label.
 #[allow(dead_code)]
 pub(super) fn v6_drop_metric_value(endpoint: SocketAddr, reason: &str) -> f64 {
-    scrape_metrics(endpoint)
-        .map(|metrics| drop_counter_value(&metrics, reason))
-        .unwrap_or(0.0)
+    labeled_counter_value(
+        endpoint,
+        "carbide_dhcp_v6_requests_dropped_total",
+        "reason",
+        reason,
+    )
 }
 
 /// Wait until the DHCPv6 dropped-request counter reaches the expected value.
@@ -58,16 +107,14 @@ pub(super) fn wait_for_v6_drop_metric_at_least(
     minimum: f64,
     timeout: Duration,
 ) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if v6_drop_metric_value(endpoint, reason) >= minimum {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_for_labeled_counter_at_least(
+        endpoint,
+        "carbide_dhcp_v6_requests_dropped_total",
+        "reason",
+        reason,
+        minimum,
+        timeout,
+    )
 }
 
 /// Scrape the Prometheus text endpoint from a Kea child process.
@@ -84,16 +131,45 @@ fn scrape_metrics(endpoint: SocketAddr) -> Option<String> {
     Some(response)
 }
 
-/// Return the parsed DHCPv6 dropped-request counter value for a reason label.
-#[allow(dead_code)]
-fn drop_counter_value(metrics: &str, reason: &str) -> f64 {
-    let prefix = format!("carbide_dropped_v6_requests_total{{reason=\"{reason}\"}} ");
+// Return one labeled counter value from the Prometheus endpoint, or zero when
+// the scrape fails or contains no parseable matching sample.
+pub(super) fn labeled_counter_value(
+    endpoint: SocketAddr,
+    metric_name: &str,
+    label_name: &str,
+    label_value: &str,
+) -> f64 {
+    let Some(metrics) = scrape_metrics(endpoint) else {
+        return 0.0;
+    };
+    let prefix = format!("{metric_name}{{{label_name}=\"{label_value}\"}} ");
     metrics
         .lines()
         .filter_map(|line| line.strip_prefix(&prefix))
         .filter_map(|value| value.split_whitespace().next())
         .filter_map(|value| value.parse::<f64>().ok())
         .sum()
+}
+
+// Wait until one labeled Prometheus counter reaches the expected value.
+pub(super) fn wait_for_labeled_counter_at_least(
+    endpoint: SocketAddr,
+    metric_name: &str,
+    label_name: &str,
+    label_value: &str,
+    minimum: f64,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if labeled_counter_value(endpoint, metric_name, label_name, label_value) >= minimum {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Assert that the DHCPv6 response carries hook-configured DNS servers.

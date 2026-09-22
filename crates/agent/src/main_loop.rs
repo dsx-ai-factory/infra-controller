@@ -32,7 +32,7 @@ use carbide_host_support::agent_config::AgentConfig;
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_rpc_utils::dhcp::{DhcpTimestamps, DhcpTimestampsFilePath};
 use carbide_systemd::systemd;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use eyre::WrapErr;
 use forge_certs::cert_renewal::ClientCertRenewer;
 use forge_dpu_remediation::remediation::{MachineInfo, RemediationExecutor};
@@ -53,7 +53,7 @@ use crate::duppet::{SummaryFormat, SyncOptions};
 use crate::ethernet_virtualization::{
     InterfaceTranslationMode, NvueClientContext, NvueUpdateFlavor, ServiceAddresses,
 };
-use crate::fmds_client::FmdsUpdater;
+use crate::fmds_client::{FmdsUpdater, register_external_connection_metric};
 use crate::health::HealthCheckParams;
 use crate::host_machine_id::get_host_machine_id_retry;
 use crate::instrumentation::{
@@ -78,7 +78,7 @@ use crate::{
 // metadata service use the information fetched be the periodic fetcher by reading
 // the information stored by the periodic config fetcher.
 pub(super) async fn setup_and_run(
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
     factory_mac_address: MacAddress,
     forge_client_config: Arc<ForgeClientConfig>,
     agent_config: AgentConfig,
@@ -174,34 +174,13 @@ pub(super) async fn setup_and_run(
             fmds_address = fmds_addr,
             "Using FmdsUpdater::External FMDS service"
         );
-        let updater = match crate::fmds_client::FmdsGrpcClient::connect(
-            fmds_addr,
-            agent_config.machine_identity.clone(),
-        )
-        .await
-        {
-            Ok(fmds_client) => FmdsUpdater::External(Box::new(fmds_client)),
-            Err(e) => {
-                tracing::warn!(
-                    error = format!("{e:#}"),
-                    "Failed to connect to external FMDS service, falling back to embedded"
-                );
-                FmdsUpdater::Embedded(instance_metadata_state.clone())
-            }
-        };
-        // External FMDS was configured: expose whether we reached it (1) or fell
-        // back to embedded (0). A gauge, not a counter -- the fallback is decided
-        // once at startup, so a single pre-scrape counter bump would be invisible
-        // to rate()/increase(); a gauge reports the state at every scrape.
-        let reached_external = matches!(updater, FmdsUpdater::External(_));
-        get_dpu_agent_meter()
-            .u64_observable_gauge("carbide_dpu_agent_fmds_external_connected")
-            .with_description(
-                "Whether the DPU agent reached its configured external FMDS (1) or fell back to embedded (0)",
-            )
-            .with_callback(move |observer| observer.observe(reached_external as u64, &[]))
-            .build();
-        updater
+        let last_connect_succeeded = register_external_connection_metric(&get_dpu_agent_meter());
+        FmdsUpdater::External {
+            address: fmds_addr.clone(),
+            machine_identity: agent_config.machine_identity.clone(),
+            connect_timeout: Duration::from_secs(options.fmds_connect_timeout_secs),
+            last_connect_succeeded,
+        }
     } else {
         if options.enable_metadata_service {
             crate::metadata_service::spawn_metadata_service(
@@ -449,7 +428,7 @@ pub(super) async fn setup_and_run(
 
 struct MainLoop {
     forge_client_config: Arc<ForgeClientConfig>,
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
     factory_mac_address: MacAddress,
     build_version: String,
     periodic_config_reader: Box<periodic_config_fetcher::PeriodicConfigFetcherReader>,
@@ -625,6 +604,16 @@ impl CurrentNetworkVersion {
         // DHCP is always enabled; this deprecated flag no longer controls
         // rendering.
         config.enable_dhcp = false;
+
+        // HBN rendering does not consume the family-neutral address list. Exclude
+        // it from the fingerprint so changes to that staged field do not trigger
+        // an apply that cannot render them.
+        if let Some(admin_interface) = &mut config.admin_interface {
+            admin_interface.addresses.clear();
+        }
+        for interface in &mut config.tenant_interfaces {
+            interface.addresses.clear();
+        }
     }
 
     /// `normalize_set_like_inputs` sorts inputs that HBN treats as sets, but
@@ -634,6 +623,9 @@ impl CurrentNetworkVersion {
         config.route_servers.sort_unstable();
         config.deny_prefixes.sort_unstable();
         config.site_fabric_prefixes.sort_unstable();
+        if let Some(site_fabric_null_routes) = &mut config.site_fabric_null_routes {
+            site_fabric_null_routes.items.sort_unstable();
+        }
         config.anycast_site_prefixes.sort_unstable();
         config
             .additional_route_target_imports
@@ -932,7 +924,8 @@ impl MainLoop {
                 let proposed_routes: Vec<_> = conf
                     .tenant_interfaces
                     .iter()
-                    .filter_map(|x| IpNetwork::from_str(x.prefix.as_str()).ok())
+                    .filter_map(|interface| interface.prefix.as_deref())
+                    .filter_map(|prefix| IpNetwork::from_str(prefix).ok())
                     .collect();
 
                 let tenant_peers = ethernet_virtualization::tenant_peers(&conf);
@@ -1086,9 +1079,10 @@ impl MainLoop {
                         .await
                     };
 
-                    let astra_config_status =
-                        astra_weave::update_weave_ew_vpc_astra_config(conf.astra_config.as_ref())
-                            .await;
+                    let astra_config_status = astra_weave::build_notify_weave_ew_vpc_astra_config(
+                        conf.astra_config.as_ref(),
+                    )
+                    .await;
 
                     let joined_result = match (update_result, dhcp_result, astra_config_status) {
                         (Ok(hbn_changed), Ok(dhcp_changed), Ok(spx_net_status)) => {

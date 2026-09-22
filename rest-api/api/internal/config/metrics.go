@@ -7,10 +7,17 @@ import (
 	"fmt"
 )
 
-// TemporalConfig holds configuration for Temporal communication
+// DefaultMetricsNamespace prefixes every metric this server exposes and matches
+// its nico-rest-api Helm service name. Operators override it with
+// metrics.namespace. Deliberately independent of api.name, which is the URL path
+// segment callers route on and has no bearing on how these series are named.
+const DefaultMetricsNamespace = "nico_rest_api"
+
+// MetricsConfig holds configuration of Metrics
 type MetricsConfig struct {
-	Enabled bool
-	Port    int
+	Enabled   bool
+	Port      int
+	Namespace string
 }
 
 // GetListenAddr returns the local address for listen socket.
@@ -19,9 +26,10 @@ func (mcfg *MetricsConfig) GetListenAddr() string {
 }
 
 // NewMetricsConfig initializes and returns a configuration object for managing Metrics
-func NewMetricsConfig(enabled bool, port int) *MetricsConfig {
+func NewMetricsConfig(enabled bool, port int, namespace string) *MetricsConfig {
 	return &MetricsConfig{
-		Enabled: enabled,
-		Port:    port,
+		Enabled:   enabled,
+		Port:      port,
+		Namespace: namespace,
 	}
 }

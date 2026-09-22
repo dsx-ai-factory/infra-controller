@@ -7,10 +7,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
@@ -25,9 +26,14 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	echo "github.com/labstack/echo/v4"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // Test_ProxyTimeoutsFitWriteTimeout guards the ceiling that the gRPC proxy
@@ -81,51 +87,58 @@ func Test_InitAPIServer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			InitAPIServer(tt.args.cfg, tt.args.dbSession, tt.args.tc, tt.args.tnc, tt.args.scp)
+			InitAPIServer(tt.args.cfg, tt.args.dbSession, tt.args.tc, tt.args.tnc, tt.args.scp, nil)
 		})
 	}
 }
 
 func Test_InitTemporalClients(t *testing.T) {
-	keyPath, certPath := config.SetupTestCerts(t)
-	defer os.Remove(keyPath)
-	defer os.Remove(certPath)
-
-	cfg := common.GetTestConfig()
-	cfg.SetTemporalCertPath(certPath)
-	cfg.SetTemporalKeyPath(keyPath)
-	cfg.SetTemporalCaPath(certPath)
-
-	tcfg, err := cfg.GetTemporalConfig()
-	assert.NoError(t, err)
-	defer cfg.Close()
-
-	type args struct {
-		tConfig *cconfig.TemporalConfig
-	}
-
 	tests := []struct {
 		name string
-		args args
+		host string
 	}{
-		{
-			name: "test initTemporalClient success",
-			args: args{
-				tConfig: tcfg,
-			},
-		},
+		{name: "IPv6 connection", host: "::1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			InitTemporalClients(tt.args.tConfig, true)
+			listener, err := net.Listen("tcp", net.JoinHostPort(tt.host, "0"))
+			require.NoError(t, err)
+
+			grpcServer := grpc.NewServer()
+			healthServer := health.NewServer()
+			healthServer.SetServingStatus("temporal.api.workflowservice.v1.WorkflowService", healthpb.HealthCheckResponse_SERVING)
+			healthpb.RegisterHealthServer(grpcServer, healthServer)
+			serverDone := make(chan error, 1)
+			go func() {
+				serverDone <- grpcServer.Serve(listener)
+			}()
+			t.Cleanup(func() {
+				grpcServer.Stop()
+				assert.NoError(t, <-serverDone)
+			})
+
+			tcfg := &cconfig.TemporalConfig{
+				Host:      tt.host,
+				Port:      listener.Addr().(*net.TCPAddr).Port,
+				Namespace: "cloud",
+			}
+			client, namespaceClient, err := InitTemporalClients(tcfg, true)
+			require.NoError(t, err)
+			t.Cleanup(client.Close)
+			t.Cleanup(namespaceClient.Close)
+
+			// Lazy construction alone does not check the connection target.
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			_, err = client.CheckHealth(ctx, &temporalClient.CheckHealthRequest{})
+			require.NoError(t, err)
 		})
 	}
 }
 
 func Test_InitMetricsServer(t *testing.T) {
 	type args struct {
-		e   *echo.Echo
-		cfg *config.Config
+		e *echo.Echo
 	}
 	tests := []struct {
 		name string
@@ -134,14 +147,32 @@ func Test_InitMetricsServer(t *testing.T) {
 		{
 			name: "test initMetricsServer success",
 			args: args{
-				e:   echo.New(),
-				cfg: common.GetTestConfig(),
+				e: echo.New(),
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			InitMetricsServer(tt.args.e, tt.args.cfg)
+			// A tracked route, since MetricsURLSkipper only records /v2/ and /metrics.
+			tt.args.e.GET("/v2/probe", func(c echo.Context) error {
+				return c.NoContent(http.StatusOK)
+			})
+
+			InitMetricsServer(tt.args.e, config.DefaultMetricsNamespace)
+
+			tt.args.e.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v2/probe", nil))
+
+			// The prefix is the published contract. An empty Subsystem would
+			// silently produce echo_requests_total instead.
+			families, err := prometheus.DefaultGatherer.Gather()
+			assert.NoError(t, err)
+
+			names := make([]string, 0, len(families))
+			for _, family := range families {
+				names = append(names, family.GetName())
+			}
+			assert.Contains(t, names, "nico_rest_api_requests_total")
+			assert.Contains(t, names, "nico_rest_api_request_duration_seconds")
 		})
 	}
 }
@@ -169,7 +200,7 @@ func Test_Audit(t *testing.T) {
 
 	t.Setenv("SENTRY_DSN", "https://bfe69b59461e44059a533274a6393155@glitchtip.test.com/3")
 
-	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp)
+	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp, nil)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/wdksahew1rqv/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), nil)
@@ -196,7 +227,7 @@ func Test_BodyLimit(t *testing.T) {
 	tcfg, _ := cfg.GetTemporalConfig()
 	scp := sc.NewClientPool(tcfg)
 
-	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp)
+	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp, nil)
 
 	oversizedBody := make([]byte, 11<<20) // 11 MiB, exceeds the 10 MiB limit
 	rec := httptest.NewRecorder()
@@ -224,7 +255,7 @@ func Test_NotFoundHandler(t *testing.T) {
 	tcfg, _ := cfg.GetTemporalConfig()
 	scp := sc.NewClientPool(tcfg)
 
-	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp)
+	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp, nil)
 	rec := httptest.NewRecorder()
 
 	// Arbitrary path that should return 404

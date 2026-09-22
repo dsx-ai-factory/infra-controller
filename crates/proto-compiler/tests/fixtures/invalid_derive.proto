@@ -6,6 +6,7 @@ syntax = "proto3";
 package carbide.proto.compiler.fixture.invalid;
 
 import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
 
 message InvalidMessage {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize +";

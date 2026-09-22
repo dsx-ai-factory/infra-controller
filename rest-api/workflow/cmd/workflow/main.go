@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -61,7 +60,9 @@ import (
 	sshKeyGroupWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/sshkeygroup"
 
 	ibpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/infinibandpartition"
+	sxpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/spectrumxpartition"
 	ibpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/infinibandpartition"
+	sxpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/spectrumxpartition"
 
 	expectedMachineActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedmachine"
 	expectedMachineWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedmachine"
@@ -104,6 +105,8 @@ import (
 
 	nvLinkLogicalPartitionActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/nvlinklogicalpartition"
 	nvLinkLogicalPartitionWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/nvlinklogicalpartition"
+
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/tracing"
 )
 
 const (
@@ -114,6 +117,10 @@ const (
 )
 
 func main() {
+	// First: interceptors and handlers below capture the global propagator.
+	tracing.InstallPropagator()
+	// No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
+	defer tracing.InstallExporter("nico-rest-workflow")()
 	// Initialize context
 	ctx := context.Background()
 
@@ -188,6 +195,7 @@ func main() {
 	}
 
 	var tInterceptors []interceptor.ClientInterceptor
+	var wInterceptors []interceptor.WorkerInterceptor
 
 	if cfg.GetTracingEnabled() {
 		otelInterceptor, err := opentelemetry.NewTracingInterceptor(opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
@@ -195,10 +203,11 @@ func main() {
 			log.Panic().Err(err).Msg("unable to get otelInterceptor")
 		}
 		tInterceptors = append(tInterceptors, otelInterceptor)
+		wInterceptors = append(wInterceptors, otelInterceptor)
 	}
 
 	tc, err = tsdkClient.NewLazyClient(tsdkClient.Options{
-		HostPort:  fmt.Sprintf("%v:%v", tcfg.Host, tcfg.Port),
+		HostPort:  tcfg.GetHostPort(),
 		Namespace: tcfg.Namespace,
 		ConnectionOptions: tsdkClient.ConnectionOptions{
 			TLS: tcfg.ClientTLSCfg,
@@ -212,8 +221,8 @@ func main() {
 			tsdkConverter.NewProtoPayloadConverter(),
 			tsdkConverter.NewJSONPayloadConverter(),
 		),
-		// Interceptors: tInterceptors,
-		Logger: tLogger,
+		Interceptors: tInterceptors,
+		Logger:       tLogger,
 	})
 
 	if err != nil {
@@ -224,8 +233,9 @@ func main() {
 
 	w := tsdkWorker.New(tc, tcfg.Queue, tsdkWorker.Options{
 		WorkflowPanicPolicy:              tsdkWorker.FailWorkflow,
-		MaxConcurrentActivityTaskPollers: 10,
+		MaxConcurrentActivityTaskPollers: cfg.GetMaxConcurrentActivityPollers(),
 		MaxConcurrentWorkflowTaskPollers: 10,
+		Interceptors:                     wInterceptors,
 	})
 
 	siteClientPool := sc.NewClientPool(tcfg)
@@ -276,13 +286,17 @@ func main() {
 
 		// Site workflows
 		w.RegisterWorkflow(siteWorkflow.UpdateAgentCertExpiry)
+		// V1 stays registered for the rollout window, where Cloud upgrades ahead of the Site
+		// Agents still publishing it.
 		w.RegisterWorkflow(siteWorkflow.UpdateSiteConfigInventory)
+		w.RegisterWorkflow(siteWorkflow.UpdateSiteConfigInventoryV2)
 
 		// SSHKeyGroup workflows
 		w.RegisterWorkflow(sshKeyGroupWorkflow.UpdateSSHKeyGroupInventory)
 
 		// InfiniBandPartition workflows
 		w.RegisterWorkflow(ibpWorkflow.UpdateInfiniBandPartitionInventory)
+		w.RegisterWorkflow(sxpWorkflow.UpdateSpectrumXPartitionInventory)
 
 		// Tenant workflow
 		w.RegisterWorkflow(tenantWorkflow.UpdateTenantInventory)
@@ -330,6 +344,46 @@ func main() {
 		w.RegisterWorkflow(nvLinkLogicalPartitionWorkflow.UpdateNVLinkLogicalPartitionInventory)
 	}
 
+	// Metric setup has to precede the activity registrations below, because the
+	// activities hold their own metric handles and the worker will not accept a
+	// registration once it is running. Only serving can wait for the goroutine
+	// further down.
+	mconfig := cfg.GetMetricsConfig()
+
+	var reg *prometheus.Registry
+	var siteHealthMetrics *cwm.SiteHealthMetrics
+
+	if mconfig.Enabled {
+		reg = prometheus.NewRegistry()
+		reg.MustRegister(collectors.NewGoCollector())
+
+		// Register core metrics
+		cm := cwm.NewCoreMetrics(reg, mconfig.Namespace)
+		// TODO: Set version here when available
+		cm.Info.With(prometheus.Labels{"version": "unknown", "namespace": tcfg.Namespace}).Set(1)
+
+		// Published by the Site health monitor cron, which runs on the Cloud queue.
+		siteHealthMetrics = cwm.NewSiteHealthMetrics(reg, mconfig.Namespace)
+
+		if tcfg.Namespace == cwfn.SiteNamespace {
+			// The inventory workflows that report these metrics only run here.
+
+			// Register common inventory metrics activity
+			inventoryMetricsManager := cwm.NewManageInventoryMetrics(reg, dbSession, mconfig.Namespace)
+			w.RegisterActivity(inventoryMetricsManager)
+
+			// Register inventory operation metrics activity
+			vpcLifecycleMetricsManager := vpcActivity.NewManageVpcLifecycleMetrics(reg, dbSession, mconfig.Namespace)
+			w.RegisterActivity(&vpcLifecycleMetricsManager)
+
+			subnetLifecycleMetricsManager := subnetActivity.NewManageSubnetLifecycleMetrics(reg, dbSession, mconfig.Namespace)
+			w.RegisterActivity(&subnetLifecycleMetricsManager)
+
+			instanceLifecycleMetricsManager := instanceActivity.NewManageInstanceLifecycleMetrics(reg, dbSession, mconfig.Namespace)
+			w.RegisterActivity(&instanceLifecycleMetricsManager)
+		}
+	}
+
 	// Register activities
 	// Common activities
 	machineManager := machineActivity.NewManageMachine(dbSession, siteClientPool)
@@ -344,7 +398,7 @@ func main() {
 	instanceManager := instanceActivity.NewManageInstance(dbSession, siteClientPool, tc, cfg)
 	w.RegisterActivity(&instanceManager)
 
-	siteManager := siteActivity.NewManageSite(dbSession, siteClientPool, tc, cfg)
+	siteManager := siteActivity.NewManageSite(dbSession, siteClientPool, tc, cfg, siteHealthMetrics)
 	w.RegisterActivity(&siteManager)
 
 	sshKeyGroupManager := sshKeyGroupActivity.NewManageSSHKeyGroup(dbSession, siteClientPool)
@@ -352,6 +406,9 @@ func main() {
 
 	ibpManager := ibpActivity.NewManageInfiniBandPartition(dbSession, siteClientPool)
 	w.RegisterActivity(&ibpManager)
+
+	sxpManager := sxpActivity.NewManageSpectrumXPartition(dbSession, siteClientPool)
+	w.RegisterActivity(&sxpManager)
 
 	tenantManager := tenantActivity.NewManageTenant(dbSession, siteClientPool)
 	w.RegisterActivity(&tenantManager)
@@ -423,35 +480,10 @@ func main() {
 		}()
 	}
 
-	mconfig := cfg.GetMetricsConfig()
 	if mconfig.Enabled {
 		// Serve Prometheus metrics
 		go func() {
 			log.Info().Msg("starting Prometheus metrics server")
-
-			reg := prometheus.NewRegistry()
-			reg.MustRegister(collectors.NewGoCollector())
-
-			// Register core metrics
-			cm := cwm.NewCoreMetrics(reg)
-			// TODO: Set version here when available
-			cm.Info.With(prometheus.Labels{"version": "unknown", "namespace": tcfg.Namespace}).Set(1)
-
-			if tcfg.Namespace == cwfn.SiteNamespace {
-				// Register common inventory metrics activity
-				inventoryMetricsManager := cwm.NewManageInventoryMetrics(reg, dbSession)
-				w.RegisterActivity(&inventoryMetricsManager)
-
-				// Register inventory operation metrics activity
-				vpcLifecycleMetricsManager := vpcActivity.NewManageVpcLifecycleMetrics(reg, dbSession)
-				w.RegisterActivity(&vpcLifecycleMetricsManager)
-
-				subnetLifecycleMetricsManager := subnetActivity.NewManageSubnetLifecycleMetrics(reg, dbSession)
-				w.RegisterActivity(&subnetLifecycleMetricsManager)
-
-				instanceLifecycleMetricsManager := instanceActivity.NewManageInstanceLifecycleMetrics(reg, dbSession)
-				w.RegisterActivity(&instanceLifecycleMetricsManager)
-			}
 
 			promHandler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg})
 

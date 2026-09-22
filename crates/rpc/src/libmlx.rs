@@ -19,12 +19,22 @@ use std::str::FromStr;
 
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
+use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use mac_address::MacAddress;
 
+use crate::forge::DpuNvConfigProfile as DpuNvConfigProfilePb;
 use crate::protos::mlx_device::{
     FirmwareFlashReport as FirmwareFlashReportPb, MlxDeviceInfo as MlxDeviceInfoPb,
 };
+
+impl From<DpuNvConfigProfile> for DpuNvConfigProfilePb {
+    fn from(profile: DpuNvConfigProfile) -> Self {
+        match profile {
+            DpuNvConfigProfile::Gb200B3240V1 => Self::Gb200B3240V1,
+        }
+    }
+}
 
 // Implement conversion from Rust MlxDeviceInfo to protobuf.
 impl From<MlxDeviceInfo> for MlxDeviceInfoPb {

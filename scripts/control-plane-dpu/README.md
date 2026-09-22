@@ -3,8 +3,10 @@
 This toolchain provisions a BlueField DPU from scratch on a site controller host.
 It is designed to be run **manually** by an operator from the host's BMC remote console.
 
-> **Note:** This is for *initial DPU install* only — not for firmware upgrades on
-> already-running deployments. The host has no network at this stage; networking
+> **Note:** This is for *initial DPU install* only. For firmware upgrades on
+> already-running deployments, use the upgrade toolchain in
+> [`upgrade/README.md`](upgrade/README.md), which preserves the DPU's existing
+> configuration. The host has no network at this stage; networking
 > is established as part of the provisioning process.
 
 ---
@@ -89,9 +91,13 @@ fnn:
   commonSiteControllerRouteTarget: 50100
   commonAdminNetworkTarget: 50400
   # Optional: additional EVPN route-targets to import (e.g. jumphosts, UFM, tenants).
+  # Keep this key INSIDE the fnn block, indented like the keys above. At the top
+  # level of the file it is rejected by the build ("Unsupported field in site
+  # config (top level)") and would not be rendered.
+  # Each key is the full numeric target <asn>:<n>; nothing is substituted.
   # routeTargetsToImport:
-  #   datacenterAsn:101: {}   # Jumphosts
-  #   datacenterAsn:1002: {}  # UFM
+  #   4266030000:101: {}   # Jumphosts
+  #   4266030000:1002: {}  # UFM
 
 forgeDpuLoopbackPrefix: 7.243.97.64/26
 forgeServiceVipPrefix: 7.243.86.224/27

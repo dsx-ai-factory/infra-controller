@@ -15,9 +15,12 @@
  * limitations under the License.
  */
 
+use config_version::ConfigVersion;
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
-    ExtensionServiceObservability, ExtensionServiceObservabilityConfig,
-    ExtensionServiceObservabilityConfigType, ExtensionServiceObservabilityConfigTypeLogging,
+    ExtensionServiceLifecycleState, ExtensionServiceObservability,
+    ExtensionServiceObservabilityConfig, ExtensionServiceObservabilityConfigType,
+    ExtensionServiceObservabilityConfigTypeLogging,
     ExtensionServiceObservabilityConfigTypePrometheus, ExtensionServiceSnapshot,
     ExtensionServiceType, ExtensionServiceVersionInfo,
 };
@@ -37,6 +40,7 @@ impl From<ExtensionServiceType> for rpc::DpuExtensionServiceType {
     fn from(service_type: ExtensionServiceType) -> Self {
         match service_type {
             ExtensionServiceType::KubernetesPod => rpc::DpuExtensionServiceType::KubernetesPod,
+            ExtensionServiceType::DpfHelmChart => rpc::DpuExtensionServiceType::DpfHelmChart,
         }
     }
 }
@@ -45,7 +49,69 @@ impl From<rpc::DpuExtensionServiceType> for ExtensionServiceType {
     fn from(service_type: rpc::DpuExtensionServiceType) -> Self {
         match service_type {
             rpc::DpuExtensionServiceType::KubernetesPod => ExtensionServiceType::KubernetesPod,
+            rpc::DpuExtensionServiceType::DpfHelmChart => ExtensionServiceType::DpfHelmChart,
         }
+    }
+}
+
+impl From<model::extension_service::DpuTarget> for rpc::DpuExtensionServiceDpuTarget {
+    fn from(target: model::extension_service::DpuTarget) -> Self {
+        match target {
+            model::extension_service::DpuTarget::Primary => Self::Primary,
+            model::extension_service::DpuTarget::AllActive => Self::AllActive,
+            model::extension_service::DpuTarget::All => Self::All,
+        }
+    }
+}
+
+impl From<rpc::DpuExtensionServiceDpuTarget> for model::extension_service::DpuTarget {
+    fn from(target: rpc::DpuExtensionServiceDpuTarget) -> Self {
+        match target {
+            rpc::DpuExtensionServiceDpuTarget::Primary => Self::Primary,
+            rpc::DpuExtensionServiceDpuTarget::AllActive => Self::AllActive,
+            rpc::DpuExtensionServiceDpuTarget::All => Self::All,
+        }
+    }
+}
+
+impl From<ExtensionServiceLifecycleState> for rpc::DpuExtensionServiceLifecycleState {
+    fn from(state: ExtensionServiceLifecycleState) -> Self {
+        match state {
+            ExtensionServiceLifecycleState::Creating => Self::Creating,
+            ExtensionServiceLifecycleState::Ready => Self::Ready,
+            ExtensionServiceLifecycleState::Updating => Self::Updating,
+            ExtensionServiceLifecycleState::Deleting => Self::Deleting,
+            ExtensionServiceLifecycleState::Deleted => Self::Deleted,
+            ExtensionServiceLifecycleState::Failed => Self::Failed,
+        }
+    }
+}
+
+/// Converts the durable registration lifecycle into the generic lifecycle
+/// payload used by the public API. The dedicated protobuf enum is the source
+/// of truth for the state names placed in the JSON `state` field.
+pub fn lifecycle_status(
+    state: ExtensionServiceLifecycleState,
+    version: ConfigVersion,
+    outcome: Option<PersistentStateHandlerOutcome>,
+) -> rpc::LifecycleStatus {
+    let state = match rpc::DpuExtensionServiceLifecycleState::from(state) {
+        rpc::DpuExtensionServiceLifecycleState::Creating => "creating",
+        rpc::DpuExtensionServiceLifecycleState::Ready => "ready",
+        rpc::DpuExtensionServiceLifecycleState::Updating => "updating",
+        rpc::DpuExtensionServiceLifecycleState::Deleting => "deleting",
+        rpc::DpuExtensionServiceLifecycleState::Deleted => "deleted",
+        rpc::DpuExtensionServiceLifecycleState::Failed => "failed",
+    };
+
+    rpc::LifecycleStatus {
+        state: serde_json::json!({ "state": state }).to_string(),
+        version: version.version_string(),
+        state_reason: outcome.map(Into::into),
+        sla: Some(rpc::StateSla {
+            sla: None,
+            time_in_state_above_sla: false,
+        }),
     }
 }
 
@@ -65,6 +131,9 @@ impl From<ExtensionServiceSnapshot> for rpc::DpuExtensionService {
     fn from(snapshot: ExtensionServiceSnapshot) -> Self {
         Self {
             service_id: snapshot.service_id.into(),
+            dpu_target: snapshot
+                .dpu_target
+                .map(|target| rpc::DpuExtensionServiceDpuTarget::from(target) as i32),
             service_type: snapshot.service_type as i32,
             service_name: snapshot.service_name,
             tenant_organization_id: snapshot.tenant_organization_id.to_string(),
@@ -78,6 +147,11 @@ impl From<ExtensionServiceSnapshot> for rpc::DpuExtensionService {
             description: snapshot.description,
             created: snapshot.created.to_string(),
             updated: snapshot.updated.to_string(),
+            lifecycle_status: Some(lifecycle_status(
+                snapshot.lifecycle_state,
+                snapshot.lifecycle_state_version,
+                snapshot.lifecycle_state_outcome,
+            )),
         }
     }
 }
@@ -226,6 +300,48 @@ mod tests {
             endpoint: endpoint.into(),
             scrape_interval_seconds: 30,
         })
+    }
+
+    #[test]
+    fn extension_service_type_conversions() {
+        let cases = [
+            (
+                ExtensionServiceType::KubernetesPod,
+                rpc::DpuExtensionServiceType::KubernetesPod,
+            ),
+            (
+                ExtensionServiceType::DpfHelmChart,
+                rpc::DpuExtensionServiceType::DpfHelmChart,
+            ),
+        ];
+
+        for (service_type, rpc_type) in cases {
+            assert_eq!(
+                rpc::DpuExtensionServiceType::from(service_type.clone()),
+                rpc_type
+            );
+            assert_eq!(ExtensionServiceType::from(rpc_type), service_type);
+        }
+    }
+
+    #[test]
+    fn extension_service_lifecycle_states_use_the_proto_defined_names() {
+        let cases = [
+            (ExtensionServiceLifecycleState::Creating, "creating"),
+            (ExtensionServiceLifecycleState::Ready, "ready"),
+            (ExtensionServiceLifecycleState::Updating, "updating"),
+            (ExtensionServiceLifecycleState::Deleting, "deleting"),
+            (ExtensionServiceLifecycleState::Deleted, "deleted"),
+            (ExtensionServiceLifecycleState::Failed, "failed"),
+        ];
+
+        for (state, expected) in cases {
+            let lifecycle = lifecycle_status(state, ConfigVersion::initial(), None);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&lifecycle.state).unwrap()["state"],
+                expected
+            );
+        }
     }
 
     #[test]

@@ -22,10 +22,12 @@ use std::net::{IpAddr, SocketAddr};
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc};
 use carbide_nvlink_manager::DEFAULT_NMX_M_NAME;
+use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     BgpCredentialType, BmcCredentialType, CredentialKey, CredentialReader, CredentialType,
     Credentials, NicLockdownIkm,
 };
+use carbide_uuid::machine::MachineId;
 use mac_address::MacAddress;
 use model::ConfigValidationError;
 use model::ib::DEFAULT_IB_FABRIC_NAME;
@@ -46,10 +48,9 @@ const DEFAULT_FORGE_ADMIN_BMC_USERNAME: &str = "root";
 /// on the DPU.  This was directly verified by checking the maximum accepted
 /// by FRR on the DPU.  NVUE will silently accept seemingly any length,
 /// but FRR reloads fail above this length.
-const MAX_BGP_PASSWORD_LENGTH: usize = 80;
-
-#[cfg(test)]
-pub(crate) const TEST_MAX_BGP_PASSWORD_LENGTH: usize = MAX_BGP_PASSWORD_LENGTH;
+pub(crate) const MAX_BGP_PASSWORD_LENGTH: usize = 80;
+const MISSING_FIRMWARE_ARTIFACT_CREDENTIAL_NAME: &str =
+    "firmware artifact access token credential name is required";
 
 pub(crate) async fn create_credential(
     api: &Api,
@@ -105,12 +106,11 @@ pub(crate) async fn create_credential(
                         },
                     )
                     .await
-                    .map_err(|e| {
-                        CarbideError::internal(format!(
-                            "error setting credential for ufm {}: {:?} ",
-                            username.clone(),
-                            e
-                        ))
+                    .map_err(|error| {
+                        map_ufm_credential_mutation_error(
+                            format!("error setting credential for ufm {username}"),
+                            error,
+                        )
                     })?;
             } else if req.username.is_none() && password.is_empty() && req.vendor.is_some() {
                 write_ufm_certs(api, req.vendor.unwrap_or_default()).await?;
@@ -318,6 +318,35 @@ pub(crate) async fn create_credential(
                     CarbideError::internal(format!("error setting BGP credential: {e:?}"))
                 })?;
         }
+        rpc::CredentialType::FirmwareArtifactAccessToken => {
+            let name = req
+                .credential_name
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    CarbideError::InvalidArgument(MISSING_FIRMWARE_ARTIFACT_CREDENTIAL_NAME.into())
+                })?;
+
+            if password.is_empty() {
+                return Err(CarbideError::InvalidArgument(
+                    "firmware artifact access token must not be empty".to_string(),
+                )
+                .into());
+            }
+
+            let key = CredentialKey::FirmwareArtifactAccessToken { name };
+
+            // Artifact tokens are opaque, while the credential store uses a
+            // username/password record. The empty username has no authentication
+            // meaning, and set_credentials replaces a token with the same name.
+            api.credential_manager
+                .set_credentials(&key, &Credentials::new("", password))
+                .await
+                .map_err(|error| {
+                    CarbideError::internal(format!(
+                        "error setting firmware artifact access token credential: {error:?}"
+                    ))
+                })?;
+        }
     };
 
     Ok(Response::new(rpc::CredentialCreationResult {}))
@@ -351,12 +380,11 @@ pub(crate) async fn delete_credential(
                         },
                     )
                     .await
-                    .map_err(|e| {
-                        CarbideError::internal(format!(
-                            "error deleting credential for ufm {}: {:?} ",
-                            username.clone(),
-                            e
-                        ))
+                    .map_err(|error| {
+                        map_ufm_credential_mutation_error(
+                            format!("error deleting credential for ufm {username}"),
+                            error,
+                        )
                     })?;
             } else {
                 return Err(CarbideError::InvalidArgument("missing UFM url".to_string()).into());
@@ -404,9 +432,35 @@ pub(crate) async fn delete_credential(
                     CarbideError::internal(format!("error deleting BGP credential: {e:?}"))
                 })?;
         }
+        rpc::CredentialType::FirmwareArtifactAccessToken => {
+            let name = req
+                .credential_name
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    CarbideError::InvalidArgument(MISSING_FIRMWARE_ARTIFACT_CREDENTIAL_NAME.into())
+                })?;
+
+            api.credential_manager
+                .delete_credentials(&CredentialKey::FirmwareArtifactAccessToken { name })
+                .await
+                .map_err(|error| {
+                    CarbideError::internal(format!(
+                        "error deleting firmware artifact access token credential: {error:?}"
+                    ))
+                })?;
+        }
     };
 
     Ok(Response::new(rpc::CredentialDeletionResult {}))
+}
+
+fn map_ufm_credential_mutation_error(context: String, error: SecretsError) -> CarbideError {
+    match error {
+        error @ SecretsError::UfmCredentialMutationBlocked { .. } => {
+            CarbideError::FailedPrecondition(error.to_string())
+        }
+        error => CarbideError::internal(format!("{context}: {error:?}")),
+    }
 }
 
 pub(crate) async fn update_machine_credentials(
@@ -418,7 +472,7 @@ pub(crate) async fn update_machine_credentials(
     tracing::Span::current().record("request", "MachineCredentialsUpdateRequest { }");
 
     let request = request.into_inner();
-    let machine_id = convert_and_log_machine_id(request.machine_id.as_ref())?;
+    let machine_id: MachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
     let mac_address = match request.mac_address {
         Some(v) => Some(v.parse().map_err(|_| {
@@ -626,7 +680,7 @@ async fn set_sitewide_bmc_root_credentials(
 async fn set_sitewide_nic_lockdown_ikm(api: &Api, password: String) -> Result<(), CarbideError> {
     let credential_key = CredentialKey::NicLockdownIkm {
         credential_type: NicLockdownIkm::SiteWide {
-            version: crate::dpa::lockdown::CURRENT_LOCKDOWN_IKM_VERSION,
+            version: crate::dpa::lockdown::SEED_LOCKDOWN_IKM_VERSION,
         },
     };
 

@@ -114,6 +114,13 @@ API GET /v2/org/{org}/nico/machine the `items/machineCapabilities/items/threads`
 API GET /v2/org/{org}/nico/machine-capability the `items/cores` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
 API GET /v2/org/{org}/nico/machine-capability the `items/count` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
 API GET /v2/org/{org}/nico/machine-capability the `items/threads` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `CREATED_ASC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `CREATED_DESC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `STATUS_ASC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `STATUS_DESC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `UPDATED_ASC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability removed the enum value `UPDATED_DESC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability for the `query` request parameter `orderBy`, default value `TYPE_ASC` was added
 API GET /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/cores` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
 API GET /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/count` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
 API GET /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/threads` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
@@ -127,6 +134,8 @@ API GET /v2/org/{org}/nico/subnet the `items/usageStats/acquiredIPs` response's 
 API GET /v2/org/{org}/nico/subnet the `items/usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
 API GET /v2/org/{org}/nico/subnet the `items/usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
 API GET /v2/org/{org}/nico/subnet the `items/usageStats/availableSmallestPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `200`
+API POST /v2/org/{org}/nico/subnet the request property `ipv4BlockId` became not nullable
+API POST /v2/org/{org}/nico/subnet the request property `ipv4BlockId` became required
 API POST /v2/org/{org}/nico/subnet the `usageStats/acquiredIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
 API POST /v2/org/{org}/nico/subnet the `usageStats/acquiredPrefixes` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
 API POST /v2/org/{org}/nico/subnet the `usageStats/availableIPs` response's property type/format changed from `integer`/`int64` to `integer`/`uint64` for status `201`
@@ -216,3 +225,63 @@ API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverr
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetImports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/asn` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfileOverrides/oneOf[subschema #1: VpcRoutingProfileOverrides]/routeTargetsOnExports/items/vni` response's property type/format changed from `integer`/`int64` to `integer`/`uint32` for status `200`
+GET /v2/org/{org}/nico/rack the `items/components/items/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack the `items/components/items/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack the `items/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the `diffs/items/actual/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the `diffs/items/actual/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the `diffs/items/expected/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the `diffs/items/expected/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the `diffs/items/id` response's property type/format changed from `string`/`uuid` to `string, null`/`` for status `200`
+GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/id` became nullable for the status `200`
+GET /v2/org/{org}/nico/rack/{id} the `components/items/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id} the `components/items/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id} the `id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the `diffs/items/actual/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the `diffs/items/actual/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the `diffs/items/expected/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the `diffs/items/expected/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the `diffs/items/id` response's property type/format changed from `string`/`uuid` to `string, null`/`` for status `200`
+GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/id` became nullable for the status `200`
+GET /v2/org/{org}/nico/task/run/{id}/target the `items/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray the `items/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray the `items/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the `diffs/items/actual/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the `diffs/items/actual/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the `diffs/items/expected/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the `diffs/items/expected/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the `diffs/items/id` response's property type/format changed from `string`/`uuid` to `string, null`/`` for status `200`
+GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/id` became nullable for the status `200`
+GET /v2/org/{org}/nico/tray/{id} the `id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id} the `rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the `diffs/items/actual/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the `diffs/items/actual/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the `diffs/items/expected/id` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the `diffs/items/expected/rackId` response's property type/format changed from `string`/`uuid` to `string`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the `diffs/items/id` response's property type/format changed from `string`/`uuid` to `string, null`/`` for status `200`
+GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/id` became nullable for the status `200`
+API POST /v2/org/{org}/nico/operating-system added the pattern `^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$` to the request property `imageDisk`
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} added the pattern `^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$` to the request property `imageDisk`
+API POST /v2/org/{org}/nico/instance removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
+API POST /v2/org/{org}/nico/instance/batch removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
+API GET /v2/org/{org}/nico/vpc the `items/vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API GET /v2/org/{org}/nico/vpc the `items/routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API POST /v2/org/{org}/nico/vpc the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `201`
+API POST /v2/org/{org}/nico/vpc the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `201`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API GET /v2/org/{org}/nico/dpu the `items/bmcInfo/oneOf[subschema #1: MachineBMCInfo]/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the `bmcInfo/oneOf[subschema #1: MachineBMCInfo]/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/machine the `items/metadata/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the `metadata/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `metadata/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/audit the `items/body` response's property `type` changed from `string` to `object` for status `200`
+API GET /v2/org/{org}/nico/audit the `items/queryParams` response's property `type` changed from `string` to `object` for status `200`
+API GET /v2/org/{org}/nico/audit/{auditEntryId} the `body` response's property `type` changed from `string` to `object` for status `200`
+API GET /v2/org/{org}/nico/audit/{auditEntryId} the `queryParams` response's property `type` changed from `string` to `object` for status `200`

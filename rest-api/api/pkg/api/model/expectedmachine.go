@@ -267,7 +267,7 @@ type APIExpectedMachine struct {
 	// ChassisSerialNumber is the serial number of the expected machine's chassis
 	ChassisSerialNumber string `json:"chassisSerialNumber"`
 	// FallbackDPUSerialNumbers is the serial numbers of the expected machine's fallback DPUs
-	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers"`
+	FallbackDPUSerialNumbers APIList[string] `json:"fallbackDPUSerialNumbers"`
 	// SkuID is the ID of the SKU
 	SkuID *string `json:"skuId"`
 	// Sku is the SKU information
@@ -294,10 +294,10 @@ type APIExpectedMachine struct {
 	TrayIdx *int32 `json:"trayIdx"`
 	// HostID is the optional host identifier
 	HostID *int32 `json:"hostId"`
-	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning
-	IsDpfEnabled *bool `json:"isDpfEnabled"`
+	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning, defaulting to true when unset.
+	IsDpfEnabled bool `json:"isDpfEnabled"`
 	// Labels is the labels of the expected machine
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
 	HostLifecycleProfile *APIHostLifecycleProfile `json:"hostLifecycleProfile,omitempty"`
 	// Created indicates the ISO datetime string for when the ExpectedMachine was created
@@ -325,8 +325,8 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 		SlotID:                   dibp.SlotID,
 		TrayIdx:                  dibp.TrayIdx,
 		HostID:                   dibp.HostID,
-		IsDpfEnabled:             dibp.IsDpfEnabled,
-		Labels:                   dibp.Labels,
+		IsDpfEnabled:             dibp.IsDpfEnabled == nil || *dibp.IsDpfEnabled,
+		Labels:                   APILabels(dibp.Labels),
 		HostLifecycleProfile:     NewAPIHostLifecycleProfile(dibp.HostLifecycleProfile),
 		Created:                  dibp.Created,
 		Updated:                  dibp.Updated,

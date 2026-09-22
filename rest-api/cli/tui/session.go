@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -84,6 +85,13 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("instance", s.fetchInstances)
 	s.Resolver.RegisterFetcher("operating-system", s.fetchOperatingSystems)
 	s.Resolver.RegisterFetcher("machine", s.fetchMachines)
+	s.Resolver.RegisterFetcher("dpu-machine", s.fetchDPUMachines)
+	s.Resolver.RegisterFetcher("machine-label-key", func(context.Context) ([]NamedItem, error) {
+		return s.fetchLabelKeys("machine")
+	})
+	s.Resolver.RegisterFetcher("expected-machine-label-key", func(context.Context) ([]NamedItem, error) {
+		return s.fetchLabelKeys("expected-machine")
+	})
 	s.Resolver.RegisterFetcher("ip-block", s.fetchIPBlocks)
 	s.Resolver.RegisterFetcher("network-security-group", s.fetchNSGs)
 	s.Resolver.RegisterFetcher("audit", s.fetchAudits)
@@ -100,6 +108,7 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("expected-power-shelf", s.fetchExpectedPowerShelves)
 	s.Resolver.RegisterFetcher("infiniband-partition", s.fetchInfiniBandPartitions)
 	s.Resolver.RegisterFetcher("nvlink-logical-partition", s.fetchNVLinkLogicalPartitions)
+	s.Resolver.RegisterFetcher("spectrumx-partition", s.fetchSpectrumXPartitions)
 	s.Resolver.RegisterFetcher("instance-type", s.fetchInstanceTypes)
 	s.Resolver.RegisterFetcher("dpu-extension-service", s.fetchDPUExtensionServices)
 	s.Resolver.RegisterFetcher("tray", s.fetchTrays)
@@ -125,8 +134,9 @@ func (s *Session) fetchAll(path string, extraQuery map[string]string) ([]map[str
 			return nil, err
 		}
 		var items []map[string]interface{}
-		if err := json.Unmarshal(body, &items); err != nil {
-			return all, nil
+		err = json.Unmarshal(body, &items)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s page %d: %w", path, page, err)
 		}
 		all = append(all, items...)
 		if pag := hdrs.Get("X-Pagination"); pag != "" {
@@ -232,6 +242,109 @@ func (s *Session) getTenantID(_ context.Context) (string, error) {
 	return id, nil
 }
 
+// tenantHasTargetedInstanceCreationAtSite resolves the current Tenant's
+// effective targeted-instance-creation capability for one Site. The API
+// enforces this capability using a Ready Tenant Account for the Site's
+// Infrastructure Provider plus any site-specific override, so the TUI mirrors
+// that resolution before offering specific Machines.
+func (s *Session) tenantHasTargetedInstanceCreationAtSite(ctx context.Context, siteID string) (bool, error) {
+	isSiteContext := s.Scope.VpcID != ""
+	if siteID == "" {
+		message := "site ID is missing"
+		if isSiteContext {
+			message = "selected VPC has no site ID"
+		}
+		return false, errors.New(message)
+	}
+
+	tenantID, err := s.getTenantID(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	body, _, err := s.Client.Do(
+		"GET",
+		apiPath(s, "site/{id}"),
+		map[string]string{
+			"id": siteID,
+		},
+		nil,
+		nil,
+	)
+	var siteString string
+	if isSiteContext {
+		siteString = "selected VPC site"
+	} else {
+		siteString = "site"
+	}
+	if err != nil {
+		return false, fmt.Errorf("fetching %s: %w", siteString, err)
+	}
+	var site map[string]interface{}
+	err = json.Unmarshal(body, &site)
+	if err != nil {
+		return false, fmt.Errorf("parsing %s: %w", siteString, err)
+	}
+	providerID := str(site, "infrastructureProviderId")
+	if providerID == "" {
+		return false, fmt.Errorf("%s has no infrastructure provider ID", siteString)
+	}
+
+	accounts, err := s.fetchAll(
+		apiPath(s, "tenant/account"),
+		map[string]string{
+			"infrastructureProviderId": providerID,
+			"tenantId":                 tenantID,
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("fetching tenant accounts for %s: %w", siteString, err)
+	}
+	for _, account := range accounts {
+		status := str(account, "status")
+		if !strings.EqualFold(status, "Ready") {
+			continue
+		}
+		accountProviderID := str(account, "infrastructureProviderId")
+		if accountProviderID != providerID {
+			continue
+		}
+		accountTenantID := str(account, "tenantId")
+		if accountTenantID != tenantID {
+			continue
+		}
+
+		rawCapabilities, ok := account["siteCapabilities"].([]interface{})
+		if !ok {
+			return false, nil
+		}
+
+		defaultEnabled := false
+		for _, rawCapability := range rawCapabilities {
+			capability, ok := rawCapability.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			enabled, ok := capability["targetedInstanceCreation"].(bool)
+			if !ok {
+				continue
+			}
+			siteIDs := stringSlice(capability["siteIds"])
+			if len(siteIDs) == 0 {
+				defaultEnabled = enabled
+				continue
+			}
+			for _, capabilitySiteID := range siteIDs {
+				if capabilitySiteID == siteID {
+					return enabled, nil
+				}
+			}
+		}
+		return defaultEnabled, nil
+	}
+	return false, nil
+}
+
 // getInfrastructureProviderID returns the current infrastructure provider ID, caching it for the session.
 func (s *Session) getInfrastructureProviderID(_ context.Context) (string, error) {
 	if cached := s.Cache.LookupByName("_infra_provider", s.Org); cached != nil {
@@ -308,9 +421,15 @@ func (s *Session) fetchVPCs(_ context.Context) ([]NamedItem, error) {
 	result := make([]NamedItem, len(items))
 	for i, m := range items {
 		result[i] = NamedItem{
-			Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"),
+			Name:   str(m, "name"),
+			ID:     str(m, "id"),
+			Status: str(m, "status"),
 			Labels: extractLabels(m),
-			Extra:  map[string]string{"siteId": str(m, "siteId")}, Raw: m,
+			Extra: map[string]string{
+				"networkVirtualizationType": str(m, "networkVirtualizationType"),
+				"siteId":                    str(m, "siteId"),
+			},
+			Raw: m,
 		}
 	}
 	return result, nil
@@ -433,7 +552,12 @@ func (s *Session) fetchOperatingSystems(_ context.Context) ([]NamedItem, error) 
 	}
 	result := make([]NamedItem, len(items))
 	for i, m := range items {
-		result[i] = NamedItem{Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"), Raw: m}
+		result[i] = NamedItem{
+			Name:   str(m, "name"),
+			ID:     str(m, "id"),
+			Status: str(m, "status"),
+			Extra:  map[string]string{"type": str(m, "type")}, Raw: m,
+		}
 	}
 	return result, nil
 }
@@ -494,7 +618,7 @@ func (s *Session) fetchIPBlocks(ctx context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchVPCPrefixIPBlocks(ctx context.Context) ([]NamedItem, string, error) {
+func (s *Session) fetchTenantIPBlocks(ctx context.Context) ([]NamedItem, string, error) {
 	tenantID, err := s.getTenantID(ctx)
 	if err != nil {
 		return nil, "", err
@@ -511,7 +635,12 @@ func (s *Session) fetchVPCPrefixIPBlocks(ctx context.Context) ([]NamedItem, stri
 	for i, m := range items {
 		result[i] = NamedItem{
 			Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"),
-			Extra: map[string]string{"siteId": str(m, "siteId"), "tenantId": str(m, "tenantId")}, Raw: m,
+			Extra: map[string]string{
+				"siteId":          str(m, "siteId"),
+				"tenantId":        str(m, "tenantId"),
+				"protocolVersion": str(m, "protocolVersion"),
+			},
+			Raw: m,
 		}
 	}
 	return result, tenantID, nil
@@ -941,9 +1070,13 @@ func (s *Session) fetchDPUExtensionServices(_ context.Context) ([]NamedItem, err
 }
 
 func (s *Session) fetchIPXETemplates(_ context.Context) ([]NamedItem, error) {
+	return s.fetchIPXETemplatesForSite(s.Scope.SiteID)
+}
+
+func (s *Session) fetchIPXETemplatesForSite(siteID string) ([]NamedItem, error) {
 	q := map[string]string{}
-	if s.Scope.SiteID != "" {
-		q["siteId"] = s.Scope.SiteID
+	if siteID != "" {
+		q["siteId"] = siteID
 	}
 	items, err := s.fetchAll(apiPath(s, "ipxe-template"), q)
 	if err != nil {

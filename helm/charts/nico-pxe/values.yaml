@@ -45,6 +45,11 @@ legacyAlias:
 
 replicas: 1
 
+## Soft open-file limit applied before startup. Clamped to the runtime hard
+## limit when it exceeds it. null falls back to 65536; non-null values must be
+## a positive integer (validated at render).
+fileDescriptorLimit: 65536
+
 ## Optional init containers (general-purpose pass-through)
 initContainers: []
 

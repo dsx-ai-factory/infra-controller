@@ -38,6 +38,13 @@ rootCaFile: forge_root.pem
 useNodeTokens: false
 
 ### Service specific values ###
+# Optional primary tenant metadata listener address override. Unset by default.
+restAddress: null
+
+# Optional additional tenant metadata listener address for compatibility.
+# Unset by default.
+compatibilityRestAddress: null
+
 # Prometheus /metrics listen port (must match nico-otelcol scrape target).
 metricsPort: 8888
 image:

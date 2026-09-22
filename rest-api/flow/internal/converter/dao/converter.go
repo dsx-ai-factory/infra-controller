@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
@@ -92,13 +93,14 @@ func ComponentFrom(dao model.Component) *component.Component {
 		bmcsByType[t] = append(bmcsByType[t], BMCFrom(bd))
 	}
 
-	var componentID string
-	if dao.ComponentID != nil {
-		componentID = *dao.ComponentID
-	}
 	var nvlDomainID uuid.UUID
 	if dao.Rack != nil && dao.Rack.NVLDomainID != uuid.Nil {
 		nvlDomainID = dao.Rack.NVLDomainID
+	}
+
+	rackExternalID := ""
+	if dao.Rack != nil && dao.Rack.ExternalID != nil {
+		rackExternalID = *dao.Rack.ExternalID
 	}
 
 	return &component.Component{
@@ -117,13 +119,14 @@ func ComponentFrom(dao model.Component) *component.Component {
 			TrayIndex: dao.TrayIndex,
 			HostID:    dao.HostID,
 		},
-		BmcsByType:  bmcsByType,
-		ComponentID: componentID,
-		RackID:      dao.RackID,
-		NVLDomainID: nvlDomainID,
-		PowerState:  powerStateFromDAO(dao.PowerState),
-		Status:      dao.Status,
-		LeakStatus:  dao.LeakStatus,
+		BmcsByType:     bmcsByType,
+		ComponentID:    cutil.GetValueOrZero(dao.ComponentID),
+		RackID:         dao.RackID,
+		RackExternalID: rackExternalID,
+		NVLDomainID:    nvlDomainID,
+		PowerState:     powerStateFromDAO(dao.PowerState),
+		Status:         dao.Status,
+		LeakStatus:     dao.LeakStatus,
 	}
 }
 
@@ -137,6 +140,7 @@ func RackFrom(dao *model.Rack) *rack.Rack {
 	components := make([]component.Component, 0, len(dao.Components))
 	for _, c := range dao.Components {
 		converted := ComponentFrom(c)
+		converted.RackExternalID = cutil.GetValueOrZero(dao.ExternalID)
 		if dao.NVLDomainID != uuid.Nil {
 			converted.NVLDomainID = dao.NVLDomainID
 		}
@@ -152,6 +156,7 @@ func RackFrom(dao *model.Rack) *rack.Rack {
 			SerialNumber: dao.SerialNumber,
 			Description:  description,
 		},
+		ExternalID: cutil.GetValueOrZero(dao.ExternalID),
 		Loc: location.New(
 			[]byte(utils.MapToJSONString(dao.Location)),
 		),
@@ -199,9 +204,19 @@ func NVLDomainFrom(dao *model.NVLDomain) *nvldomain.NVLDomain {
 	}
 }
 
-func TaskFrom(dao *model.Task) *taskdef.Task {
+// TaskFrom converts a persisted task to its domain representation and rejects
+// invalid trigger metadata.
+func TaskFrom(dao *model.Task) (*taskdef.Task, error) {
 	if dao == nil {
-		return nil
+		return nil, nil
+	}
+
+	triggerType, err := operation.TriggerTypeFromString(dao.TriggerType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid persisted task trigger: %w", err)
+	}
+	if err := operation.ValidateTrigger(triggerType, dao.TriggerID); err != nil {
+		return nil, fmt.Errorf("invalid persisted task trigger: %w", err)
 	}
 
 	// Extract operation code from the serialized information
@@ -231,8 +246,10 @@ func TaskFrom(dao *model.Task) *taskdef.Task {
 		StartedAt:      dao.StartedAt,
 		FinishedAt:     dao.FinishedAt,
 		QueueExpiresAt: dao.QueueExpiresAt,
+		TriggerType:    triggerType,
+		TriggerID:      dao.TriggerID,
 		IdempotencyKey: dao.IdempotencyKey,
-	}
+	}, nil
 }
 
 // BMCTypeTo converts BMC type from internal model to DAO model
@@ -294,10 +311,7 @@ func ComponentTo(c *component.Component, rackID uuid.UUID) *model.Component {
 		TrayIndex:       c.Position.TrayIndex,
 		HostID:          c.Position.HostID,
 		RackID:          rackID,
-	}
-
-	if c.ComponentID != "" {
-		compDAO.ComponentID = &c.ComponentID
+		ComponentID:     cutil.GetPtrIfNotZero(c.ComponentID),
 	}
 
 	for _, t := range devicetypes.BMCTypes() {
@@ -331,6 +345,7 @@ func RackTo(r *rack.Rack) *model.Rack {
 
 	return &model.Rack{
 		ID:           r.Info.ID,
+		ExternalID:   cutil.GetPtrIfNotZero(r.ExternalID),
 		Name:         r.Info.Name,
 		Manufacturer: r.Info.Manufacturer,
 		SerialNumber: r.Info.SerialNumber,
@@ -373,6 +388,8 @@ func TaskTo(task *taskdef.Task) *model.Task {
 		Report:         task.Report,
 		AppliedRuleID:  task.AppliedRuleID,
 		QueueExpiresAt: task.QueueExpiresAt,
+		TriggerType:    string(task.TriggerType),
+		TriggerID:      task.TriggerID,
 		IdempotencyKey: task.IdempotencyKey,
 	}
 }

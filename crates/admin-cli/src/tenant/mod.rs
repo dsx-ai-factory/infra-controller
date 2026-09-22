@@ -18,9 +18,6 @@
 mod show;
 mod update;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;

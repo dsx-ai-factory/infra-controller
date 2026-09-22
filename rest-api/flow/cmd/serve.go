@@ -222,6 +222,14 @@ func doServe() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to load Flow data encryption key")
 	}
+	if dataCipher == nil {
+		log.Warn().
+			Str("env_var", secret.EncryptionKeyPathEnvVar).
+			Msg(
+				"Flow data encryption key is not configured; requests with firmware " +
+					"authentication data and existing encrypted operations will fail",
+			)
+	}
 
 	ctx := context.Background()
 
@@ -350,9 +358,14 @@ func doServe() {
 }
 
 func loadDataCipherFromEnv() (*secret.Cipher, error) {
-	path := strings.TrimSpace(os.Getenv(secret.EncryptionKeyPathEnvVar))
+	path, configured := os.LookupEnv(secret.EncryptionKeyPathEnvVar)
+	if !configured {
+		return nil, nil
+	}
+
+	path = strings.TrimSpace(path)
 	if path == "" {
-		return nil, fmt.Errorf("%s is not set", secret.EncryptionKeyPathEnvVar)
+		return nil, fmt.Errorf("%s is set but empty", secret.EncryptionKeyPathEnvVar)
 	}
 
 	return secret.NewCipherFromFile(path)

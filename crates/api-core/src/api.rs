@@ -34,19 +34,21 @@ use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
-use carbide_redfish::libredfish::RedfishClientPool;
+use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
 use carbide_secrets::certificates::CertificateProvider;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, CredentialType, Credentials,
 };
-use carbide_site_explorer::{EndpointExplorationService, EndpointExplorer};
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_site_explorer::{AuthenticatedBmc, EndpointExplorationService, EndpointExplorer};
+use carbide_uuid::machine::{
+    AsMachineId, DpuMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
+};
 use db::db_read::PgPoolReader;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{DatabaseError, DatabaseResult, WithTransaction};
 use libnmxc::NmxcPool;
 use librms::RmsApi;
-use model::machine::Machine;
+use model::machine::AnyMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::resource_pool::common::CommonPools;
 use sqlx::PgTransaction;
@@ -68,16 +70,29 @@ pub struct Api {
     pub database_connection: sqlx::PgPool,
     pub(crate) credential_manager: Arc<dyn CredentialManager>,
     pub(crate) certificate_provider: Arc<dyn CertificateProvider>,
+    /// Ordinary BMC Redfish traffic: nico-bmc-proxy when `[bmc_proxy]` is
+    /// enabled, the direct pool otherwise.
     pub(crate) redfish_pool: Arc<dyn RedfishClientPool>,
+    /// Credential-lifecycle operations (password set/rotate/clear, candidate
+    /// validation). A sealed trait implemented only by the direct pool, so
+    /// handing these to a wrapper pool is a compile error (a wrong-pool
+    /// guard, not a wire-path guarantee -- see [`BmcCredentialOps`]).
+    pub(crate) bmc_credential_ops: Arc<dyn BmcCredentialOps>,
+    /// HTTP client for the raw Redfish passthrough when `[bmc_proxy]` is
+    /// enabled; `None` keeps the passthrough dialing BMCs directly.
+    pub(crate) bmc_proxy_passthrough: Option<Arc<crate::bmc_proxy::PassthroughClient>>,
     pub(crate) bmc_session_manager: Arc<crate::credentials::BmcSessionManager>,
     pub(crate) eth_data: EthVirtData,
     pub(crate) common_pools: Arc<CommonPools>,
     pub(crate) ib_fabric_manager: Arc<dyn IBFabricManager>,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI for config-derived display.
     pub runtime_config: Arc<CarbideConfig>,
-    pub(crate) dpu_health_log_limiter: LogLimiter<MachineId>,
+    pub(crate) dpu_health_log_limiter: LogLimiter<DpuMachineId>,
     pub dynamic_settings: DynamicSettings,
     pub(crate) endpoint_explorer: Arc<dyn EndpointExplorer>,
+    /// Authenticated BMC client for admin operations, supplied independently of
+    /// endpoint exploration.
+    pub(crate) bmc_client: Arc<dyn AuthenticatedBmc>,
     pub(crate) endpoint_exploration_service: Arc<EndpointExplorationService>,
     pub(crate) scout_stream_registry: ConnectionRegistry,
     #[allow(unused)]
@@ -107,7 +122,7 @@ impl Forge for Api {
         &self,
         request: Request<rpc::VersionRequest>,
     ) -> Result<Response<rpc::BuildInfo>, Status> {
-        crate::handlers::api::version(self, request)
+        crate::handlers::api::version(self, request).await
     }
 
     async fn create_domain(
@@ -182,6 +197,20 @@ impl Forge for Api {
         crate::handlers::vpc::update(self, request).await
     }
 
+    async fn change_vpc_routing_profile(
+        &self,
+        request: Request<rpc::VpcChangeRoutingProfileRequest>,
+    ) -> Result<Response<rpc::VpcRoutingState>, Status> {
+        crate::handlers::vpc::change_routing_profile(self, request).await
+    }
+
+    async fn release_vpc_inactive_vni(
+        &self,
+        request: Request<rpc::VpcReleaseInactiveVniRequest>,
+    ) -> Result<Response<rpc::VpcReleaseInactiveVniResult>, Status> {
+        crate::handlers::vpc::release_inactive_vni(self, request).await
+    }
+
     async fn update_vpc_virtualization(
         &self,
         request: Request<rpc::VpcUpdateVirtualizationRequest>,
@@ -208,6 +237,13 @@ impl Forge for Api {
         request: Request<rpc::VpcsByIdsRequest>,
     ) -> Result<Response<rpc::VpcList>, Status> {
         crate::handlers::vpc::find_by_ids(self, request).await
+    }
+
+    async fn get_vpc_routing_state(
+        &self,
+        request: Request<rpc::VpcRoutingStateRequest>,
+    ) -> Result<Response<rpc::VpcRoutingState>, Status> {
+        crate::handlers::vpc::get_routing_state(self, request).await
     }
 
     async fn find_site_prefix_ids(
@@ -412,6 +448,13 @@ impl Forge for Api {
         crate::handlers::power_shelf::find_by_ids(self, request).await
     }
 
+    async fn decommission_power_shelf(
+        &self,
+        request: Request<rpc::DecommissionPowerShelfRequest>,
+    ) -> Result<Response<rpc::DecommissionPowerShelfResponse>, Status> {
+        crate::handlers::power_shelf::decommission_power_shelf(self, request).await
+    }
+
     async fn delete_power_shelf(
         &self,
         request: Request<rpc::PowerShelfDeletionRequest>,
@@ -459,6 +502,13 @@ impl Forge for Api {
         request: Request<rpc::SwitchDeletionRequest>,
     ) -> Result<Response<rpc::SwitchDeletionResult>, Status> {
         crate::handlers::switch::delete_switch(self, request).await
+    }
+
+    async fn decommission_switch(
+        &self,
+        request: Request<rpc::DecommissionSwitchRequest>,
+    ) -> Result<Response<rpc::DecommissionSwitchResponse>, Status> {
+        crate::handlers::switch::decommission_switch(self, request).await
     }
 
     async fn admin_force_delete_switch(
@@ -564,6 +614,13 @@ impl Forge for Api {
         request: Request<rpc::InstanceReleaseRequest>,
     ) -> Result<Response<rpc::InstanceReleaseResult>, Status> {
         crate::handlers::instance::release(self, request).await
+    }
+
+    async fn release_instances(
+        &self,
+        request: Request<rpc::BatchInstanceReleaseRequest>,
+    ) -> Result<Response<rpc::BatchInstanceReleaseResponse>, Status> {
+        crate::handlers::instance::batch_release(self, request).await
     }
 
     async fn update_instance_phone_home_last_contact(
@@ -934,6 +991,13 @@ impl Forge for Api {
         crate::handlers::power_shelf::find_power_shelf_state_histories(self, request).await
     }
 
+    async fn find_power_shelf_health_histories(
+        &self,
+        request: Request<rpc::PowerShelfHealthHistoriesRequest>,
+    ) -> Result<Response<rpc::HealthHistories>, Status> {
+        crate::handlers::power_shelf::find_power_shelf_health_histories(self, request).await
+    }
+
     async fn find_rack_state_histories(
         &self,
         request: tonic::Request<rpc::RackStateHistoriesRequest>,
@@ -941,11 +1005,25 @@ impl Forge for Api {
         crate::handlers::rack::find_rack_state_histories(self, request).await
     }
 
+    async fn find_rack_health_histories(
+        &self,
+        request: Request<rpc::RackHealthHistoriesRequest>,
+    ) -> Result<Response<rpc::HealthHistories>, Status> {
+        crate::handlers::rack::find_rack_health_histories(self, request).await
+    }
+
     async fn find_switch_state_histories(
         &self,
         request: Request<rpc::SwitchStateHistoriesRequest>,
     ) -> Result<Response<rpc::StateHistories>, Status> {
         crate::handlers::switch::find_switch_state_histories(self, request).await
+    }
+
+    async fn find_switch_health_histories(
+        &self,
+        request: Request<rpc::SwitchHealthHistoriesRequest>,
+    ) -> Result<Response<rpc::HealthHistories>, Status> {
+        crate::handlers::switch::find_switch_health_histories(self, request).await
     }
 
     async fn find_machine_health_histories(
@@ -1409,6 +1487,16 @@ impl Forge for Api {
             .await
     }
 
+    async fn trigger_nic_lockdown_credential_rotation(
+        &self,
+        request: Request<rpc::NicLockdownCredentialRotationRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::nic_lockdown_credential_rotation::trigger_nic_lockdown_credential_rotation(
+            self, request,
+        )
+        .await
+    }
+
     async fn mark_manual_firmware_upgrade_complete(
         &self,
         request: Request<MachineId>,
@@ -1481,6 +1569,13 @@ impl Forge for Api {
         request: Request<rpc::AdminBmcResetRequest>,
     ) -> Result<Response<rpc::AdminBmcResetResponse>, Status> {
         crate::handlers::bmc_endpoint_explorer::admin_bmc_reset(self, request).await
+    }
+
+    async fn admin_chassis_reset(
+        &self,
+        request: Request<rpc::AdminChassisResetRequest>,
+    ) -> Result<Response<rpc::AdminChassisResetResponse>, Status> {
+        crate::handlers::chassis_reset::admin_chassis_reset(self, request).await
     }
 
     async fn disable_secure_boot(
@@ -1683,6 +1778,13 @@ impl Forge for Api {
         crate::handlers::expected_machine::update(self, request).await
     }
 
+    async fn patch_expected_machine(
+        &self,
+        request: Request<rpc::PatchExpectedMachineRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_machine::patch_expected_machine(self, request).await
+    }
+
     async fn replace_all_expected_machines(
         &self,
         request: Request<rpc::ExpectedMachineList>,
@@ -1732,6 +1834,13 @@ impl Forge for Api {
         crate::handlers::expected_machine::update_expected_machines(self, request).await
     }
 
+    async fn patch_expected_machines(
+        &self,
+        request: Request<rpc::PatchExpectedMachinesRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_machine::patch_expected_machines(self, request).await
+    }
+
     async fn get_expected_power_shelf(
         &self,
         request: Request<rpc::ExpectedPowerShelfRequest>,
@@ -1758,6 +1867,13 @@ impl Forge for Api {
         request: Request<rpc::ExpectedPowerShelf>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::expected_power_shelf::update_expected_power_shelf(self, request).await
+    }
+
+    async fn patch_expected_power_shelf(
+        &self,
+        request: Request<rpc::PatchExpectedPowerShelfRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_power_shelf::patch_expected_power_shelf(self, request).await
     }
 
     async fn replace_all_expected_power_shelves(
@@ -1817,6 +1933,13 @@ impl Forge for Api {
         request: Request<rpc::ExpectedSwitch>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::expected_switch::update_expected_switch(self, request).await
+    }
+
+    async fn patch_expected_switch(
+        &self,
+        request: Request<rpc::PatchExpectedSwitchRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_switch::patch_expected_switch(self, request).await
     }
 
     async fn replace_all_expected_switches(
@@ -1898,7 +2021,7 @@ impl Forge for Api {
 
     async fn find_connected_devices_by_dpu_machine_ids(
         &self,
-        request: Request<::rpc::common::MachineIdList>,
+        request: Request<::rpc::common::DpuMachineIdList>,
     ) -> Result<Response<rpc::ConnectedDeviceList>, Status> {
         crate::handlers::network_devices::find_connected_devices_by_dpu_machine_ids(self, request)
             .await
@@ -2425,6 +2548,22 @@ impl Forge for Api {
         crate::handlers::machine_validation::get_machine_validation_attempt(self, request).await
     }
 
+    async fn append_machine_validation_attempt_log(
+        &self,
+        request: Request<rpc::MachineValidationAttemptLogAppendRequest>,
+    ) -> Result<Response<rpc::MachineValidationAttemptLogAppendResponse>, Status> {
+        crate::handlers::machine_validation::append_machine_validation_attempt_log(self, request)
+            .await
+    }
+
+    async fn get_machine_validation_attempt_logs(
+        &self,
+        request: Request<rpc::MachineValidationAttemptLogGetRequest>,
+    ) -> Result<Response<rpc::MachineValidationAttemptLogList>, Status> {
+        crate::handlers::machine_validation::get_machine_validation_attempt_logs(self, request)
+            .await
+    }
+
     async fn heartbeat_machine_validation_run(
         &self,
         request: Request<rpc::MachineValidationHeartbeatRequest>,
@@ -2538,6 +2677,16 @@ impl Forge for Api {
         request: Request<rpc::MachineValidationTestEnableDisableTestRequest>,
     ) -> Result<Response<rpc::MachineValidationTestEnableDisableTestResponse>, Status> {
         crate::handlers::machine_validation::machine_validation_test_enable_disable_test(
+            self, request,
+        )
+        .await
+    }
+
+    async fn machine_validation_test_approve_full_host(
+        &self,
+        request: Request<rpc::MachineValidationTestFullHostApprovalRequest>,
+    ) -> Result<Response<rpc::MachineValidationTestFullHostApprovalResponse>, Status> {
+        crate::handlers::machine_validation::machine_validation_test_approve_full_host(
             self, request,
         )
         .await
@@ -2833,7 +2982,7 @@ impl Forge for Api {
 
     async fn reset_host_reprovisioning(
         &self,
-        request: Request<MachineId>,
+        request: Request<StableHostMachineId>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::host_reprovisioning::reset_host_reprovisioning(self, request).await
     }
@@ -3321,7 +3470,7 @@ impl Forge for Api {
     async fn find_pending_dpu_service_sync_ids(
         &self,
         request: Request<rpc::FindPendingDpuServiceSyncIdsRequest>,
-    ) -> Result<Response<::rpc::common::MachineIdList>, Status> {
+    ) -> Result<Response<::rpc::common::HostMachineIdList>, Status> {
         crate::handlers::dpu_service_sync::find_pending_dpu_service_sync_ids(self, request).await
     }
 
@@ -3702,7 +3851,7 @@ pub struct DefaultCredential {
     _key: String,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl DefaultCredential {
     pub(crate) fn key(&self) -> &str {
         &self._key
@@ -3793,9 +3942,9 @@ impl Api {
         &self,
         machine_id: &MachineId,
         search_config: MachineSearchConfig,
-    ) -> impl Future<Output = CarbideResult<(Machine, db::Transaction<'_>)>> {
+    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'_>)>> {
         let loc = Location::caller();
-        let machine_id = *machine_id;
+        let machine_id = machine_id.to_machine_id();
         async move {
             let mut txn =
                 db::Transaction::begin_with_location(&self.database_connection, loc).await?;

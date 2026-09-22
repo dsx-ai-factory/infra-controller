@@ -42,6 +42,7 @@ carbide-utils = { path = "../utils", default-features = false }
 carbide-firmware = { path = "../firmware", default-features = false }
 carbide-instrument = { path = "../instrument" }
 carbide-ipmi = { path = "../ipmi", default-features = false }
+carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-measured-boot = { path = "../measured-boot", default-features = false }
 carbide-redfish = { path = "../redfish", default-features = false }
 carbide-secrets = { path = "../secrets" }
@@ -78,7 +79,9 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 version-compare = { workspace = true }
 
 [dev-dependencies]
-carbide-api-model = { path = "../api-model", default-features = false, features = ["test-support"] }
+carbide-api-model = { path = "../api-model", default-features = false, features = [
+  "test-support",
+] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }

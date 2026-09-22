@@ -121,6 +121,9 @@ impl DpuRepository for MaintenanceFlowMock {
     async fn delete(&self, _: &str, _: &str) -> Result<(), DpfError> {
         Ok(())
     }
+    async fn delete_if_uid(&self, name: &str, _ns: &str, _uid: &str) -> Result<(), DpfError> {
+        Err(DpfError::not_found("DPU", name))
+    }
     fn watch<F, Fut>(
         &self,
         _: &str,
@@ -255,6 +258,15 @@ impl K8sConfigRepository for MaintenanceFlowMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for MaintenanceFlowMock {
+    async fn get(
+        &self,
+        _name: &str,
+        _ns: &str,
+    ) -> Result<Option<crate::crds::dpfoperatorconfigs_generated::DPFOperatorConfig>, DpfError>
+    {
+        Ok(None)
+    }
+
     async fn patch(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), DpfError> {
         Ok(())
     }

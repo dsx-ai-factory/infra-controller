@@ -17,7 +17,10 @@
 
 use std::net::SocketAddr;
 
-use super::grpcurl::grpcurl_id;
+use eyre::ContextCompat;
+use rpc::forge::{Metadata, VpcPrefixConfig, VpcPrefixCreationRequest};
+
+use crate::api_client;
 
 pub async fn create(
     carbide_api_addrs: &[SocketAddr],
@@ -27,20 +30,30 @@ pub async fn create(
 ) -> eyre::Result<String> {
     tracing::info!(prefix, vpc_prefix_name = name, "Creating VPC prefix",);
 
-    let data = serde_json::json!({
-        "vpc_id": { "value": vpc_id },
-        "config": {
-            "prefix": prefix,
-        },
-        "metadata": {
-            "name": name,
-            "description": format!("VPC prefix for {prefix}"),
-        },
-    });
-    let prefix_id = grpcurl_id(carbide_api_addrs, "CreateVpcPrefix", &data.to_string()).await?;
+    let request = VpcPrefixCreationRequest {
+        vpc_id: Some(vpc_id.parse()?),
+        config: Some(VpcPrefixConfig {
+            prefix: prefix.to_string(),
+        }),
+        metadata: Some(Metadata {
+            name: name.to_string(),
+            description: format!("VPC prefix for {prefix}"),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let vpc_prefix = api_client::call(
+        carbide_api_addrs,
+        "CreateVpcPrefix",
+        |mut client| async move { client.create_vpc_prefix(request).await },
+    )
+    .await?;
+    let prefix_id = vpc_prefix
+        .id
+        .context("CreateVpcPrefix response has no VPC prefix ID")?;
     tracing::info!(
         vpc_prefix_id = %prefix_id,
         "VPC prefix created",
     );
-    Ok(prefix_id)
+    Ok(prefix_id.to_string())
 }

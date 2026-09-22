@@ -31,7 +31,7 @@ use base64::prelude::*;
 use carbide_utils::{BF2_PRODUCT_NAME, BF3_PRODUCT_NAME};
 use libudev::Device;
 use procfs::{CpuInfo, FromRead};
-use rpc::machine_discovery::MemoryDevice;
+use rpc::machine_discovery::{MemoryDevice, MemoryDeviceGroup};
 use tracing::warn;
 use uname::uname;
 
@@ -64,6 +64,8 @@ pub enum HardwareEnumerationError {
     InvalidMacAddress(String),
     #[error("{0}")]
     UnsupportedCpuArchitecture(String),
+    #[error("discovered memory device count {total} exceeds maximum of {max}")]
+    MemoryDeviceCountExceeded { total: u64, max: u32 },
     #[error("command error {0}")]
     CmdError(#[from] CmdError),
 }
@@ -913,10 +915,35 @@ fn enumerate_hardware_inner(
         tpm_ek_certificate,
         dpu_info: dpu_vpd,
         gpus,
-        memory_devices,
+        #[allow(deprecated)]
+        memory_devices: vec![],
+        memory_device_groups: condense_rpc_memory_devices(memory_devices)?,
         tpm_description: None,
         attest_key_info: None,
     })
+}
+
+/// Rolls up a flat list of RPC [`MemoryDevice`]s into [`MemoryDeviceGroup`]s, merging consecutive
+/// devices with the same `(size_mb, mem_type)` into a single group.
+///
+/// Fails if the total device count exceeds [`MemoryDeviceGroup::MAX_REHYDRATE_COUNT`], so a
+/// malformed SMBIOS table can't produce discovery data that only fails later, at RPC conversion.
+fn condense_rpc_memory_devices(
+    devices: Vec<MemoryDevice>,
+) -> Result<Vec<MemoryDeviceGroup>, HardwareEnumerationError> {
+    let groups = devices.into_iter().map(|device| MemoryDeviceGroup {
+        size_mb: device.size_mb,
+        mem_type: device.mem_type,
+        count: 1,
+    });
+    carbide_utils::memory_device_group::condense_memory_device_groups(
+        groups,
+        MemoryDeviceGroup::MAX_REHYDRATE_COUNT,
+        |total| HardwareEnumerationError::MemoryDeviceCountExceeded {
+            total,
+            max: MemoryDeviceGroup::MAX_REHYDRATE_COUNT,
+        },
+    )
 }
 
 /// Path where the host's `/proc/cpuinfo` is bind-mounted inside the init container.
@@ -1508,6 +1535,53 @@ mod tests {
                     dpu_info: Some(Default::default()),
                     ..Default::default()
                 } => Yields(()),
+            }
+        );
+    }
+
+    #[test]
+    fn condense_rpc_memory_devices_cases() {
+        scenarios!(
+            run = |devices| condense_rpc_memory_devices(devices).map_err(drop);
+
+            "empty input yields empty output" {
+                vec![] => Yields(vec![]),
+            }
+
+            "identical consecutive devices are merged" {
+                vec![
+                    MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) },
+                    MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) },
+                    MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) },
+                ] => Yields(vec![MemoryDeviceGroup { size_mb: Some(16384), mem_type: Some("DDR5".into()), count: 3 }]),
+            }
+
+            "non-consecutive identical devices are not merged" {
+                vec![
+                    MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) },
+                    MemoryDevice { size_mb: Some(32768), mem_type: Some("DDR4".into()) },
+                    MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) },
+                ] => Yields(vec![
+                    MemoryDeviceGroup { size_mb: Some(16384), mem_type: Some("DDR5".into()), count: 1 },
+                    MemoryDeviceGroup { size_mb: Some(32768), mem_type: Some("DDR4".into()), count: 1 },
+                    MemoryDeviceGroup { size_mb: Some(16384), mem_type: Some("DDR5".into()), count: 1 },
+                ]),
+            }
+
+            "total exactly at the max is accepted" {
+                (0..rpc::machine_discovery::MemoryDeviceGroup::MAX_REHYDRATE_COUNT)
+                    .map(|_| MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) })
+                    .collect::<Vec<_>>() => Yields(vec![MemoryDeviceGroup {
+                        size_mb: Some(16384),
+                        mem_type: Some("DDR5".into()),
+                        count: rpc::machine_discovery::MemoryDeviceGroup::MAX_REHYDRATE_COUNT,
+                    }]),
+            }
+
+            "total above the max is rejected" {
+                (0..rpc::machine_discovery::MemoryDeviceGroup::MAX_REHYDRATE_COUNT + 1)
+                    .map(|_| MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) })
+                    .collect::<Vec<_>>() => Fails,
             }
         );
     }

@@ -26,17 +26,28 @@
 //!   staged site-wide target. The gate keeps the steady state at one cheap
 //!   aggregate query per TTL window (see the engine crate docs).
 //! - *Do one rotation tick.* [`rotate_managed_host_bmcs`] converges the host BMC
-//!   and each DPU BMC toward the target via [`rotate_bmc`], then reports whether
-//!   the tick settled (every device reached a terminal outcome) or hit a
-//!   transient bookkeeping failure worth retrying.
+//!   and each DPU BMC toward the BMC-root target via [`rotate_bmc`], and each DPU
+//!   BMC toward the `service`-account target via [`rotate_dpu_bmc_service`], then
+//!   reports whether the tick settled (every device reached a terminal outcome)
+//!   or hit a transient bookkeeping failure worth retrying.
+//!
+//! The DPU BMC `service` account (BF4 only) rides this same `RotatingBmc` state
+//! rather than a state of its own: converging it is a single root-authenticated
+//! Redfish call with no host-power impact, exactly like BMC root, and only BF4
+//! DPUs are ever enrolled (non-BF4 devices return
+//! [`RotateOutcome::NoWork`]). The two families keep independent rotation rows,
+//! secrets, and backoff, so a lagging or quarantined `service` account never
+//! blocks BMC-root convergence or vice versa.
 //!
 //! A BMC password change never touches host power or the running OS, so this is
 //! safe both for pool hosts (top-level [`ManagedHostState::RotatingBmc`]) and
 //! under live tenancy (`Assigned/RotatingBmc`).
 
-use carbide_credential_rotation::{BmcEndpoint, BmcRotationTick, RotateOutcome, rotate_bmc};
-use carbide_uuid::machine::MachineId;
-use model::machine::{Machine, ManagedHostStateSnapshot};
+use carbide_credential_rotation::{
+    BmcEndpoint, BmcRotationTick, RotateOutcome, rotate_bmc, rotate_dpu_bmc_service,
+};
+use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait};
+use model::machine::ManagedHostStateSnapshot;
 use sqlx::PgConnection;
 use state_controller::state_handler::StateHandlerError;
 
@@ -53,14 +64,19 @@ use crate::context::MachineStateHandlerServices;
 pub(crate) fn managed_host_bmc_endpoints(
     mh: &ManagedHostStateSnapshot,
 ) -> impl Iterator<Item = BmcEndpoint> + '_ {
-    std::iter::once(&mh.host_snapshot)
-        .chain(mh.dpu_snapshots.iter())
-        .filter_map(BmcEndpoint::from_machine)
+    BmcEndpoint::from_machine(&mh.host_snapshot)
+        .into_iter()
+        .chain(
+            mh.dpu_snapshots
+                .iter()
+                .filter_map(BmcEndpoint::from_machine),
+        )
 }
 
 /// `true` when the host BMC or any DPU BMC is behind the staged site-wide target
 /// and not currently quarantined -- i.e. the machine should enter its
-/// BMC-rotation state.
+/// BMC-rotation state. Covers both the BMC-root family (host + every DPU) and
+/// the DPU BMC `service` family (each DPU only); either lagging enters the state.
 pub(crate) async fn bmc_rotation_needed(
     services: &MachineStateHandlerServices,
     mh: &ManagedHostStateSnapshot,
@@ -72,6 +88,28 @@ pub(crate) async fn bmc_rotation_needed(
             .await
             .map_err(|e| {
                 StateHandlerError::GenericError(eyre::eyre!("bmc rotation gate query: {e}"))
+            })?;
+        if needed {
+            return Ok(true);
+        }
+    }
+
+    // NICo only configures the service BMC account on BF4s and only BF4s have
+    // rows in the device_credential_rotation table.
+    for endpoint in mh
+        .dpu_snapshots
+        .iter()
+        .filter_map(BmcEndpoint::from_machine)
+    {
+        let needed = services
+            .dpu_bmc_service_rotation_gate
+            .rotation_needed(&services.db_pool, endpoint.device_mac)
+            .await
+            .map_err(|e| {
+                StateHandlerError::GenericError(eyre::eyre!(
+                    "dpu bmc service rotation gate query for {}: {e}",
+                    endpoint.device_mac
+                ))
             })?;
         if needed {
             return Ok(true);
@@ -112,12 +150,26 @@ pub(crate) async fn rotate_managed_host_bmcs(
 ) -> BmcRotationTick {
     let is_sitewide_bmc_rotation_enabled = services.site_config.bmc_rotation_enabled;
     let mut tick = BmcRotationTick::Settled;
-    for machine in std::iter::once(&mh.host_snapshot).chain(mh.dpu_snapshots.iter()) {
-        let force = machine.bmc_credential_rotation_requested;
+    // Host first (BMC root only), then each DPU (BMC root *and* the BF4-only
+    // `service` account).
+    let host = std::iter::once((
+        mh.host_snapshot.id.to_machine_id(),
+        mh.host_snapshot.bmc_credential_rotation_requested,
+        BmcEndpoint::from_machine(&mh.host_snapshot),
+    ));
+    let dpus = mh.dpu_snapshots.iter().map(|machine| {
+        (
+            machine.id.to_machine_id(),
+            machine.bmc_credential_rotation_requested,
+            BmcEndpoint::from_machine(machine),
+        )
+    });
+    for (machine_id, force, endpoint) in host.chain(dpus) {
+        let is_dpu = machine_id.is_dpu();
         if !force && !is_sitewide_bmc_rotation_enabled {
             continue;
         }
-        match BmcEndpoint::from_machine(machine) {
+        match endpoint {
             Some(endpoint) => {
                 // Fold each device outcome in, strongest wins: a store-reconcile
                 // hold or a transient retry from any one BMC carries the whole
@@ -125,13 +177,19 @@ pub(crate) async fn rotate_managed_host_bmcs(
                 // persist). `merge` keeps a lagging store dominant so the tick
                 // never settles out of the rotation state while any BMC's
                 // hardware is ahead of its stored secret.
-                tick = tick.merge(rotate_endpoint(services, endpoint, force).await);
+                tick = tick.merge(rotate_endpoint(services, endpoint.clone(), force).await);
+                // A DPU additionally converges its `service` account under the
+                // same force flag. Non-BF4 DPUs are never enrolled, so the engine
+                // returns `NoWork` (a cheap, settled skip).
+                if is_dpu {
+                    tick = tick.merge(rotate_dpu_service_endpoint(services, endpoint, force).await);
+                }
             }
             // A forced request announces a missing BMC so its one-shot flag
             // still clears; a passive sweep silently skips an unaddressable
             // device, exactly as `managed_host_bmc_endpoints` does.
             None if force => tracing::warn!(
-                machine_id = %machine.id,
+                machine_id = %machine_id,
                 "force-converge request on a machine with no addressable BMC; clearing the request without action"
             ),
             None => {}
@@ -144,23 +202,30 @@ pub(crate) async fn rotate_managed_host_bmcs(
 /// that carry a pending operator force-converge request. Each such machine owns
 /// exactly one BMC, so the flag's location names the target device -- no MAC is
 /// needed in the request payload.
-fn forced_bmc_machines(mh: &ManagedHostStateSnapshot) -> impl Iterator<Item = &Machine> {
-    std::iter::once(&mh.host_snapshot)
-        .chain(mh.dpu_snapshots.iter())
-        .filter(|m| m.bmc_credential_rotation_requested)
-}
-
 /// `true` when an operator has recorded a force-converge request against the host
 /// machine or any of its DPU machines. Presence alone drives entry into
 /// `RotatingBmc`.
 pub(crate) fn bmc_rotation_force_requested(mh: &ManagedHostStateSnapshot) -> bool {
-    forced_bmc_machines(mh).next().is_some()
+    mh.host_snapshot.bmc_credential_rotation_requested
+        || mh
+            .dpu_snapshots
+            .iter()
+            .any(|machine| machine.bmc_credential_rotation_requested)
 }
 
 /// The machine ids carrying a pending force-converge request, so the controller
 /// can clear exactly those rows once the forced tick settles.
 fn forced_bmc_machine_ids(mh: &ManagedHostStateSnapshot) -> impl Iterator<Item = MachineId> + '_ {
-    forced_bmc_machines(mh).map(|m| m.id)
+    mh.host_snapshot
+        .bmc_credential_rotation_requested
+        .then(|| mh.host_snapshot.id.into())
+        .into_iter()
+        .chain(
+            mh.dpu_snapshots
+                .iter()
+                .filter(|machine| machine.bmc_credential_rotation_requested)
+                .map(|machine| machine.id.into()),
+        )
 }
 
 /// Clear the one-shot force-converge flag on exactly the machines that carried a
@@ -177,7 +242,7 @@ pub(crate) async fn clear_forced_bmc_requests(
     mh: &ManagedHostStateSnapshot,
 ) -> Result<(), StateHandlerError> {
     for machine_id in forced_bmc_machine_ids(mh) {
-        db::machine::clear_bmc_credential_rotation_requested(&mut *txn, machine_id).await?;
+        db::machine::clear_bmc_credential_rotation_requested(&mut *txn, &machine_id).await?;
     }
     Ok(())
 }
@@ -199,7 +264,7 @@ async fn rotate_endpoint(
     match rotate_bmc(
         &services.db_pool,
         services.credential_manager.as_ref(),
-        services.redfish_client_pool.as_ref(),
+        services.bmc_credential_ops.as_ref(),
         &target,
         force,
     )
@@ -230,6 +295,57 @@ async fn rotate_endpoint(
                 mac = %target.device_mac,
                 error = %e,
                 "transient BMC rotation bookkeeping failure; will retry the tick"
+            );
+            BmcRotationTick::Retry
+        }
+    }
+}
+
+/// Rotate a single DPU BMC's `service` account toward the staged
+/// `dpu_bmc_service` target. `force` bypasses the device's backoff quarantine
+/// (operator escape hatch). A non-BF4 DPU (or any unenrolled device) returns
+/// [`RotateOutcome::NoWork`], which is `Settled`. Returns
+/// [`BmcRotationTick::Retry`] only on a transient bookkeeping error; device
+/// faults are quarantined inside [`rotate_dpu_bmc_service`] and reported as
+/// `Settled`. The engine writes no per-device secret, so it never returns
+/// [`RotateOutcome::CredentialStoreReconcilePending`].
+async fn rotate_dpu_service_endpoint(
+    services: &MachineStateHandlerServices,
+    endpoint: BmcEndpoint,
+    force: bool,
+) -> BmcRotationTick {
+    let mac = endpoint.device_mac;
+    match rotate_dpu_bmc_service(
+        &services.db_pool,
+        services.credential_manager.as_ref(),
+        services.bmc_credential_ops.as_ref(),
+        &endpoint,
+        force,
+    )
+    .await
+    {
+        Ok(RotateOutcome::Converged) => {
+            tracing::info!(%mac, force, "DPU BMC service account converged to site-wide rotation target");
+            BmcRotationTick::Settled
+        }
+        Ok(RotateOutcome::Quarantined { until }) => {
+            tracing::warn!(
+                %mac,
+                %until,
+                "DPU BMC service rotation attempt failed; quarantined until backoff elapses"
+            );
+            BmcRotationTick::Settled
+        }
+        // No per-device secret write means the hardware can never be ahead of the
+        // store, so this variant is unreachable here; treat it as settled rather
+        // than holding the state.
+        Ok(RotateOutcome::CredentialStoreReconcilePending) => BmcRotationTick::Settled,
+        Ok(RotateOutcome::NoWork) => BmcRotationTick::Settled,
+        Err(e) => {
+            tracing::warn!(
+                %mac,
+                error = %e,
+                "transient DPU BMC service rotation bookkeeping failure; will retry the tick"
             );
             BmcRotationTick::Retry
         }

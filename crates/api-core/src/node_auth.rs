@@ -70,6 +70,8 @@ enum RejectReason {
     Algorithm(Algorithm),
     #[error("no x5c certificate chain in the JWT header")]
     NoChain,
+    #[error("x5c chain has {actual} certificates; maximum is {maximum}")]
+    ChainTooLong { actual: usize, maximum: usize },
     #[error("x5c chain did not verify against the trusted roots: {0}")]
     Chain(rustls::Error),
     #[error("leaf certificate could not be parsed as X.509")]
@@ -98,8 +100,6 @@ struct NodeClaims {
 
 /// Validates node-auth JWTs against the client-certificate PKI.
 pub(crate) struct NodeJwtValidator {
-    /// Kept so the trust anchors can be re-read when the bundle rotates.
-    root_cafile_path: String,
     /// Swapped in place by [`NodeJwtValidator::install_roots`]. The validator
     /// is shared (the authn layer holds one `Arc` for the process lifetime),
     /// so the refresh has to be interior, not a rebuild of the whole struct.
@@ -128,57 +128,17 @@ impl NodeJwtValidator {
         validation.set_required_spec_claims(&["exp", "sub", "aud"]);
 
         Ok(Self {
-            root_cafile_path: root_cafile_path.to_string(),
             cert_verifier: RwLock::new(cert_verifier),
             validation,
             max_token_ttl_sec: u64::from(cfg.max_token_ttl_sec),
         })
     }
 
-    /// Re-reads the root CA bundle from disk and returns a verifier built from
-    /// it, without installing it.
+    /// Installs a previously built verifier.
     ///
-    /// The TLS listener reloads the same file every five minutes to pick up
-    /// cert-manager rotations; without this the validator would keep its
-    /// startup snapshot and start rejecting tokens whose `x5c` chains to the
-    /// new CA — which, with `mtls_enabled = false`, locks nodes out until the
-    /// API restarts.
-    ///
-    /// The fallible read is split from [`install_roots`](Self::install_roots)
-    /// so the listener can build this and its new TLS acceptor before
-    /// committing either. Both derive from this same bundle, and the listener
-    /// must never end up trusting one generation of it on the TLS path and
-    /// another on the token path — nor drop the acceptor and serve plaintext
-    /// while bearer auth stays armed. A failed build leaves the previous
-    /// verifier in place: a half-written bundle must not disarm node auth.
-    /// Test-only convenience. Production goes through
-    /// [`build_roots_from_pem`](Self::build_roots_from_pem) so the listener can
-    /// share one read of the bundle with the TLS acceptor.
-    #[cfg(test)]
-    pub(crate) fn build_roots(&self) -> Result<Arc<dyn ClientCertVerifier>, NodeAuthError> {
-        let pem =
-            std::fs::read(&self.root_cafile_path).map_err(|error| NodeAuthError::RootCaRead {
-                path: self.root_cafile_path.clone(),
-                error,
-            })?;
-        self.build_roots_from_pem(&pem)
-    }
-
-    /// Builds anchors from a bundle the caller already read.
-    ///
-    /// The listener uses this so the TLS acceptor and this validator are built
-    /// from the *same* bytes: reading the file twice lets a rotation land
-    /// between the two reads, leaving each path trusting a different generation
-    /// of the client CA.
-    pub(crate) fn build_roots_from_pem(
-        &self,
-        pem: &[u8],
-    ) -> Result<Arc<dyn ClientCertVerifier>, NodeAuthError> {
-        Self::verifier_from_pem(&self.root_cafile_path, pem)
-    }
-
-    /// Installs anchors from [`build_roots`](Self::build_roots). Infallible, so
-    /// it is safe to call in a commit phase alongside other swaps.
+    /// The listener calls this only after it has also built a TLS acceptor from
+    /// the same bundle. Because this method is infallible, it is safe in the
+    /// commit phase that keeps TLS and bearer token trust anchors in sync.
     pub(crate) fn install_roots(&self, cert_verifier: Arc<dyn ClientCertVerifier>) {
         *self
             .cert_verifier
@@ -198,7 +158,7 @@ impl NodeJwtValidator {
 
     /// Parses an already-read bundle into a verifier. `root_cafile_path` is
     /// carried only for error messages.
-    fn verifier_from_pem(
+    pub(crate) fn verifier_from_pem(
         root_cafile_path: &str,
         pem: &[u8],
     ) -> Result<Arc<dyn ClientCertVerifier>, NodeAuthError> {
@@ -229,10 +189,20 @@ impl NodeJwtValidator {
         }
 
         // 1. The certificate chain must verify against the trusted roots.
+        let encoded_chain = header
+            .x5c
+            .as_ref()
+            .filter(|chain| !chain.is_empty())
+            .ok_or(RejectReason::NoChain)?;
+        if encoded_chain.len() > ::rpc::node_jwt::NODE_JWT_MAX_X5C_CERTIFICATES {
+            return Err(RejectReason::ChainTooLong {
+                actual: encoded_chain.len(),
+                maximum: ::rpc::node_jwt::NODE_JWT_MAX_X5C_CERTIFICATES,
+            });
+        }
         let chain = header
             .x5c_der()
             .map_err(RejectReason::Malformed)?
-            .filter(|chain| !chain.is_empty())
             .ok_or(RejectReason::NoChain)?;
         let leaf = CertificateDer::from(chain[0].clone());
         let intermediates: Vec<CertificateDer> = chain[1..]
@@ -430,7 +400,7 @@ mod tests {
         );
 
         std::fs::write(&ca_path, &new_pki.ca_pem).expect("rotate the bundle on disk");
-        validator.install_roots(validator.build_roots().expect("roots reload"));
+        validator.install_roots(NodeJwtValidator::build_verifier(&ca_path).expect("roots reload"));
 
         assert_eq!(
             validator.spiffe_id_from_bearer(&token).as_deref(),
@@ -450,8 +420,7 @@ mod tests {
         let token = mint_with(&dir, &pki);
 
         std::fs::write(&ca_path, "not a certificate").expect("truncate the bundle");
-        validator
-            .build_roots()
+        NodeJwtValidator::build_verifier(&ca_path)
             .expect_err("a bundle with no trust anchors must not be accepted");
 
         assert_eq!(
@@ -509,6 +478,57 @@ mod tests {
         )
         .expect("token");
         assert!(validator.spiffe_id_from_bearer(&no_chain).is_none());
+    }
+
+    /// The encoded list is checked before Base64 decoding so an untrusted
+    /// header cannot make certificate-path validation scale with its length.
+    #[test]
+    fn x5c_certificate_count_is_capped_before_decoding() {
+        #[derive(Debug, Eq, PartialEq)]
+        enum Rejection {
+            Malformed,
+            ChainTooLong { actual: usize, maximum: usize },
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pki = test_pki(MACHINE_PATH);
+        let validator = validator_for(&dir, &pki.ca_pem);
+        let encoding_key =
+            jsonwebtoken::EncodingKey::from_ec_pem(pki.key_pem.as_bytes()).expect("encoding key");
+
+        check_values(
+            [
+                Check {
+                    scenario: "the maximum certificate count still reaches decoding",
+                    input: ::rpc::node_jwt::NODE_JWT_MAX_X5C_CERTIFICATES,
+                    expect: Rejection::Malformed,
+                },
+                Check {
+                    scenario: "one certificate above the limit is rejected before decoding",
+                    input: ::rpc::node_jwt::NODE_JWT_MAX_X5C_CERTIFICATES + 1,
+                    expect: Rejection::ChainTooLong {
+                        actual: ::rpc::node_jwt::NODE_JWT_MAX_X5C_CERTIFICATES + 1,
+                        maximum: ::rpc::node_jwt::NODE_JWT_MAX_X5C_CERTIFICATES,
+                    },
+                },
+            ],
+            |certificate_count| {
+                let mut header = jsonwebtoken::Header::new(Algorithm::ES256);
+                // This string is deliberately invalid Base64: only the overlong
+                // case may reach `ChainTooLong` without trying to decode it.
+                header.x5c = Some(vec!["@".to_string(); certificate_count]);
+                let token = jsonwebtoken::encode(&header, &serde_json::json!({}), &encoding_key)
+                    .expect("token encodes");
+
+                match validator.validate(&token) {
+                    Err(RejectReason::Malformed(_)) => Rejection::Malformed,
+                    Err(RejectReason::ChainTooLong { actual, maximum }) => {
+                        Rejection::ChainTooLong { actual, maximum }
+                    }
+                    result => panic!("unexpected node-token validation result: {result:?}"),
+                }
+            },
+        );
     }
 
     /// Both the identity cross-check and algorithm pin are independent of the

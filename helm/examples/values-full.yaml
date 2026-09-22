@@ -152,6 +152,8 @@ nico-api:
   ## Create Vault and DB ConfigMaps from values (alternative to external ConfigMaps)
   vaultClusterInfo:
     VAULT_SERVICE: "https://vault.example.com"
+    # Optional. Used for Vault Enterprise/HCP Vault Dedicated; not a Kubernetes namespace.
+    # VAULT_NAMESPACE: "admin/nico"
     NICO_VAULT_MOUNT: "secrets"
     NICO_VAULT_PKI_MOUNT: "nicoca"
   databaseConfig:

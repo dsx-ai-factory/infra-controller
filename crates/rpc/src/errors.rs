@@ -106,6 +106,8 @@ pub enum RpcDataConversionError {
     InvalidNvlPartitionId(String),
     #[error("logical partition ID {0} is not valid")]
     InvalidLogicalPartitionId(String),
+    #[error("total memory device count {0} exceeds maximum of {1}")]
+    MemoryDeviceCountExceeded(u64, u32),
 }
 
 impl From<RpcDataConversionError> for tonic::Status {

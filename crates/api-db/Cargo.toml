@@ -92,6 +92,9 @@ carbide-version = { path = "../version" }
 
 [dev-dependencies]
 base64 = { workspace = true }
+carbide-api-model = { path = "../api-model", default-features = false, features = [
+  "test-support",
+] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-secrets = { path = "../secrets" }
 carbide-test-support = { path = "../test-support" }

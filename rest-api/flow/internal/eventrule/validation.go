@@ -11,7 +11,9 @@ import (
 
 var identifierSegmentRE = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
-func validateIdentifier(name string, value string) error {
+// ValidateIdentifier checks that value is a non-empty lower-snake-case
+// identifier and uses name to identify the value in validation errors.
+func ValidateIdentifier(name string, value string) error {
 	if err := validateRequiredString(name, value); err != nil {
 		return err
 	}

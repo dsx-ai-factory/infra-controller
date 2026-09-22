@@ -8,7 +8,7 @@ PXE/HTTP boot, DPU agent, BGP/HBN, or API reachability.
 | Path | Why it matters | First check |
 |---|---|---|
 | Operator to `nico-api` | CLI and incident response. | `nico-admin-cli version` |
-| `nico-api` to Vault | BMC and platform credentials. | Vault metrics and `nico-api` logs. |
+| `nico-api` to Vault | Certificate issuance, and BMC and platform credentials when Vault is the credential store or KEK provider. | Vault metrics and `nico-api` logs. |
 | `nico-api` to BMC | Redfish power, inventory, firmware, and discovery. | Site Explorer and `redfish browse`. |
 | Host or DPU to `nico-dhcp` | discovery, install, admin and OOB leases. | DHCP logs and IP pool metrics. |
 | Host or DPU to `nico-pxe` | discovery image, iPXE, BFB or HTTP boot content. | PXE logs and boot console. |
@@ -31,7 +31,7 @@ Common causes:
 
 - BMC is powered off or on the wrong network.
 - OOB route or VLAN is missing.
-- Vault credential lookup failed.
+- Credential lookup failed in the credential store (Vault or Postgres).
 - BMC certificate or TLS settings changed.
 - Redfish endpoint is slow or rate-limited.
 
@@ -67,6 +67,41 @@ because the lease is temporarily marked unavailable.
 nico-dhcp.config.kea.declineProbationPeriod now defaults to 900 seconds,
 instead of the kea default of 24 hours, limiting how long the address
 remains quarantined.
+
+## Scout Boot NIC Selection
+
+During discovery, Scout keeps network configuration only on the interface
+whose MAC address NICo supplied as the single `mac=` kernel command-line
+argument. The script requires exactly one valid `mac=` value, exactly one
+matching interface, carrier on that interface, and at least one global IP
+address before it changes any other interface.
+
+For other predictable Ethernet interface names (`enx*`, `enp*`, and `enP*`)
+that are using Scout's default DHCP network definition, Scout writes
+`/run/systemd/network/00-forge-scout-nonpreferred.network`. This runtime rule
+disables DHCP and IPv6 router advertisements and then reloads systemd-networkd.
+Scout waits roughly 30 seconds for global addresses and routes on those
+interfaces to disappear.
+
+This networkd cleanup is MAC-based and does not administratively bring the
+other links down. Scout separately classifies auxiliary interfaces during
+registration using Mellanox SF/VF and PCI virtual-function metadata. If
+validation, networkd reload, or address removal fails, Scout logs the
+reason and continues startup so discovery remains fail-open.
+
+When Scout uses the wrong path or retains multiple global routes, check:
+
+```bash
+cat /proc/cmdline
+networkctl status
+cat /run/systemd/network/00-forge-scout-nonpreferred.network
+ip address show scope global
+ip route show
+```
+
+Look in the Scout console or journal for `Selected preferred network interface`
+and `Skipping Scout network configuration`. A skip message includes a `reason`
+that identifies which prerequisite was not met.
 
 ## PXE and HTTP Boot
 

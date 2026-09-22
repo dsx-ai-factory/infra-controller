@@ -17,7 +17,7 @@
 
 use std::future::Future;
 
-use model::machine::{Machine, ManagedHostState};
+use model::machine::{AnyMachine, ManagedHostState};
 use sqlx::PgTransaction;
 
 pub trait DbMachineExt {
@@ -34,7 +34,7 @@ pub trait DbMachineExt {
     ) -> impl Future<Output = ()> + 'a;
 }
 
-impl DbMachineExt for Machine {
+impl DbMachineExt for AnyMachine {
     async fn advance_state<'txn>(&self, txn: &mut PgTransaction<'txn>, state: ManagedHostState) {
         db::machine::advance(self, txn.as_mut(), &state, None)
             .await
@@ -42,7 +42,8 @@ impl DbMachineExt for Machine {
     }
 
     async fn update_state<'txn>(&self, txn: &mut PgTransaction<'txn>, state: ManagedHostState) {
-        db::machine::update_state(txn.as_mut(), &self.id, &state)
+        let host_machine_id = self.id.try_into().expect("machine should be a host");
+        db::machine::update_state(txn.as_mut(), &host_machine_id, &state)
             .await
             .expect("machine state should be updated");
     }

@@ -702,4 +702,100 @@ mod tests {
 
         Ok(())
     }
+
+    /// `find_by_object_ids` filters by the inclusive `[start_time, end_time]`
+    /// window. The filter SQL is table-agnostic, so exercising one table proves
+    /// it for all `HealthHistoryTableId` variants.
+    #[crate::sqlx_test]
+    async fn find_by_object_ids_filters_by_time_range(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut conn = pool.acquire().await?;
+        let object_id = "health-history-range-test";
+        let ids = [object_id];
+
+        // Two records with distinct content (so neither is deduplicated) written
+        // at distinct times, with a boundary captured between them.
+        let before = chrono::Utc::now();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        persist(
+            &mut conn,
+            HealthHistoryTableId::Machine,
+            &object_id,
+            &health_with_alert("AlertA"),
+        )
+        .await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let between = chrono::Utc::now();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        persist(
+            &mut conn,
+            HealthHistoryTableId::Machine,
+            &object_id,
+            &health_with_alert("AlertB"),
+        )
+        .await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let after = chrono::Utc::now();
+
+        // The full window returns both records.
+        let all = find_by_object_ids(
+            &mut conn,
+            HealthHistoryTableId::Machine,
+            &ids,
+            Some(before),
+            Some(after),
+        )
+        .await?;
+        assert_eq!(all.get(object_id).map(Vec::len).unwrap_or(0), 2);
+
+        // An end_time before the second write excludes it, leaving only AlertA.
+        let first_only = find_by_object_ids(
+            &mut conn,
+            HealthHistoryTableId::Machine,
+            &ids,
+            None,
+            Some(between),
+        )
+        .await?
+        .remove(object_id)
+        .unwrap_or_default();
+        assert_eq!(first_only.len(), 1);
+        assert_eq!(
+            first_only[0].health.alerts[0].message.as_str(),
+            "AlertA message"
+        );
+
+        // A start_time after the first write excludes it, leaving only AlertB.
+        let second_only = find_by_object_ids(
+            &mut conn,
+            HealthHistoryTableId::Machine,
+            &ids,
+            Some(between),
+            None,
+        )
+        .await?
+        .remove(object_id)
+        .unwrap_or_default();
+        assert_eq!(second_only.len(), 1);
+        assert_eq!(
+            second_only[0].health.alerts[0].message.as_str(),
+            "AlertB message"
+        );
+
+        // A window entirely after both writes returns nothing.
+        let future = find_by_object_ids(
+            &mut conn,
+            HealthHistoryTableId::Machine,
+            &ids,
+            Some(after + chrono::Duration::hours(1)),
+            None,
+        )
+        .await?;
+        assert_eq!(future.get(object_id).map(Vec::len).unwrap_or(0), 0);
+
+        Ok(())
+    }
 }

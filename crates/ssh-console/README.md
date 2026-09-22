@@ -4,8 +4,7 @@ An SSH server that acts as a proxy to BMC (Baseboard Management Controller) seri
 supports multiple BMC vendors (Dell, Lenovo, HPE, NVIDIA) and handles authentication through either OpenSSH certificates
 or public key validation via a nico-api.
 
-This is a rust reimplementation of the old [ssh-console](https://gitlab-master.nvidia.com/nvmetal/ssh-console/),
-focusing on simplicity, security, and re-using existing nico libraries whenever possible.
+The Rust implementation focuses on simplicity, security, and re-using existing nico libraries whenever possible.
 
 It is part of the nico repo so that we can take advantage of the `rpc` crate and get an instance of `NicoApiClient`
 without needing to publish a crate anywhere.
@@ -50,12 +49,11 @@ orphaned tasks running in the background.
 
 ## TODO (roughly in order)
 
-- [x] Deploy in dev environments as a separate endpoint from the old ssh-console
-- [x] Support IMPI-based connections (currently only works with SSH'able BMC's)
-- [x] Implement metrics similarly to legacy SSH console
+- [x] Deploy in development environments
+- [x] Support IPMI-based connections (currently only supports SSH-capable BMCs)
+- [x] Implement metrics
 - [x] Better architecture docs/diagram in this README file
-- [ ] (NICo UI) Deploy to production environments, offer up the new ssh-console URL to users as a beta URL to use
-- [ ] Decommission old ssh-console once we're satisfied/confident
+- [ ] (NICo UI) Deploy to production environments and offer the SSH console URL to users as a beta URL
 
 ## Testing
 

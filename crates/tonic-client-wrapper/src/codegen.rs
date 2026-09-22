@@ -446,6 +446,8 @@ impl<'a> CodeGenerator<'a> {
         let operation_label = method.name().to_snake_case();
         let input_type = self.convert_protobuf_type_to_rust_type(method.input_type())?;
         let output_type = self.convert_protobuf_type_to_rust_type(method.output_type())?;
+        let input_is_unit =
+            matches!(input_type.as_ref(), syn::Type::Tuple(tuple) if tuple.elems.is_empty());
 
         let is_client_streaming = method.client_streaming.unwrap_or(false);
         let is_server_streaming = method.server_streaming.unwrap_or(false);
@@ -483,9 +485,8 @@ impl<'a> CodeGenerator<'a> {
                 })
             }
             (false, true) => {
-                let unit: syn::Type = syn::parse_quote!(());
                 // Server streaming.
-                let token_stream = if input_type.as_ref() == &unit {
+                let token_stream = if input_is_unit {
                     quote! {
                         pub async fn #method_name(&self) -> Result<tonic::codec::Streaming<#output_type>, tonic::Status> {
                                 ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
@@ -537,8 +538,7 @@ impl<'a> CodeGenerator<'a> {
             }
             (false, false) => {
                 // Unary - your existing code.
-                let unit = syn::parse_quote!(());
-                let token_stream = if input_type.as_ref() == &unit {
+                let token_stream = if input_is_unit {
                     quote! {
                         pub async fn #method_name(&self) -> Result<#output_type, tonic::Status> {
                                 ::carbide_instrument::red::instrumented(#service_label, #operation_label, async move {
@@ -678,9 +678,18 @@ fn write_token_stream_if_not_up_to_date<T: AsRef<Path>>(
 
 #[cfg(test)]
 mod tests {
-    use carbide_proto_compiler::ExternPaths;
-
     use super::*;
+
+    struct TestExternPaths(Vec<(String, syn::Type)>);
+
+    impl TestExternPaths {
+        fn index(&self) -> ExternPathSearchIndex<'_> {
+            self.0
+                .iter()
+                .map(|(protobuf_type, rust_type)| (protobuf_type.as_str(), rust_type))
+                .collect()
+        }
+    }
 
     fn descriptor_set(proto_files: &[(&str, &str)]) -> FileDescriptorSet {
         let proto_dir = temp_dir::TempDir::new().expect("Could not create temporary directory");
@@ -699,23 +708,26 @@ mod tests {
             .expect("Could not compile test descriptors")
     }
 
-    fn extern_paths() -> ExternPaths {
-        ExternPaths::new([(".ExternType", syn::parse_quote!(crate::CustomExternType))].into_iter())
+    fn extern_paths() -> TestExternPaths {
+        TestExternPaths(vec![(
+            ".ExternType".to_owned(),
+            syn::parse_quote!(crate::CustomExternType),
+        )])
     }
 
-    fn test_config<'a>(root_files: Vec<String>, extern_paths: &'a ExternPaths) -> Config<'a> {
+    fn test_config<'a>(root_files: Vec<String>, extern_paths: &'a TestExternPaths) -> Config<'a> {
         Config {
             wrapper_name: "TestWrapper".to_string(),
             inner_rpc_client_type: "TestInnerClient".to_string(),
             generated_types_path_within_crate: "test".to_string(),
             root_files,
-            extern_paths: extern_paths.build_index(),
+            extern_paths: extern_paths.index(),
         }
     }
 
     fn test_generator<'a>(
         descriptor_set: &'a FileDescriptorSet,
-        extern_paths: &'a ExternPaths,
+        extern_paths: &'a TestExternPaths,
     ) -> CodeGenerator<'a> {
         CodeGenerator::new(
             test_config(vec!["test.proto".to_string()], extern_paths),

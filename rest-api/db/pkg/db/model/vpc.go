@@ -317,6 +317,7 @@ type Vpc struct {
 	NetworkVirtualizationType              *string                                 `bun:"network_virtualization_type"`
 	SlaacEnabled                           bool                                    `bun:"slaac_enabled,notnull"`
 	RoutingProfile                         *string                                 `bun:"routing_profile"`
+	PowerResourceGroup                     *string                                 `bun:"power_resource_group"`
 	RoutingProfileOverrides                *VpcRoutingProfileOverrides             `bun:"routing_profile_overrides,type:jsonb"`
 	EffectiveRoutingProfile                *VpcEffectiveRoutingProfile             `bun:"effective_routing_profile,type:jsonb"`
 	ControllerVpcID                        *uuid.UUID                              `bun:"controller_vpc_id,type:uuid"`
@@ -389,6 +390,7 @@ func (vpc *Vpc) ToProto() *corev1.Vpc {
 		Vni:                             cutil.IntPtrToUint32Ptr(vpc.Vni),
 		RoutingProfileType:              vpc.RoutingProfile,
 		RoutingProfileOverrides:         vpc.RoutingProfileOverrides.ToProto(),
+		PowerResourceGroup:              vpc.PowerResourceGroup,
 		NetworkVirtualizationType:       networkVirtualizationType,
 		SlaacEnabled:                    cutil.GetPtr(vpc.SlaacEnabled),
 	}
@@ -456,6 +458,7 @@ func (vpc *Vpc) FromProto(proto *corev1.Vpc) {
 	vpc.SlaacEnabled = cfg.GetSlaacEnabled()
 	vpc.NetworkSecurityGroupID = cfg.NetworkSecurityGroupId
 	vpc.RoutingProfile = cfg.RoutingProfileType
+	vpc.PowerResourceGroup = cfg.PowerResourceGroup
 	vpc.RoutingProfileOverrides = nil
 	if cfg.RoutingProfileOverrides != nil {
 		vpc.RoutingProfileOverrides = &VpcRoutingProfileOverrides{}
@@ -517,6 +520,7 @@ type VpcCreateInput struct {
 	NetworkVirtualizationType              *string
 	SlaacEnabled                           bool
 	RoutingProfile                         *string
+	PowerResourceGroup                     *string
 	RoutingProfileOverrides                *VpcRoutingProfileOverrides
 	ControllerVpcID                        *uuid.UUID
 	ActiveVni                              *int
@@ -537,6 +541,7 @@ type VpcUpdateInput struct {
 	NetworkVirtualizationType              *string
 	SlaacEnabled                           *bool
 	RoutingProfile                         *string
+	PowerResourceGroup                     *string
 	RoutingProfileOverrides                *VpcRoutingProfileOverrides
 	EffectiveRoutingProfile                *VpcEffectiveRoutingProfile
 	ControllerVpcID                        *uuid.UUID
@@ -556,6 +561,7 @@ type VpcClearInput struct {
 	Description                            bool
 	ControllerVpcID                        bool
 	RoutingProfile                         bool
+	PowerResourceGroup                     bool
 	RoutingProfileOverrides                bool
 	EffectiveRoutingProfile                bool
 	NVLinkLogicalPartitionID               bool
@@ -907,6 +913,7 @@ func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput
 		NetworkVirtualizationType:              input.NetworkVirtualizationType,
 		SlaacEnabled:                           input.SlaacEnabled,
 		RoutingProfile:                         input.RoutingProfile,
+		PowerResourceGroup:                     input.PowerResourceGroup,
 		RoutingProfileOverrides:                input.RoutingProfileOverrides,
 		ControllerVpcID:                        input.ControllerVpcID,
 		ActiveVni:                              input.ActiveVni,
@@ -989,6 +996,12 @@ func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput
 		v.RoutingProfile = input.RoutingProfile
 		updatedFields = append(updatedFields, "routing_profile")
 		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "routing_profile", *input.RoutingProfile)
+	}
+
+	if input.PowerResourceGroup != nil {
+		v.PowerResourceGroup = input.PowerResourceGroup
+		updatedFields = append(updatedFields, "power_resource_group")
+		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "power_resource_group", *input.PowerResourceGroup)
 	}
 
 	if input.RoutingProfileOverrides != nil {
@@ -1094,6 +1107,11 @@ func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) 
 	if input.RoutingProfile {
 		v.RoutingProfile = nil
 		updatedFields = append(updatedFields, "routing_profile")
+	}
+
+	if input.PowerResourceGroup {
+		v.PowerResourceGroup = nil
+		updatedFields = append(updatedFields, "power_resource_group")
 	}
 
 	if input.RoutingProfileOverrides {

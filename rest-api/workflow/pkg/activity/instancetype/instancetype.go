@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -102,10 +101,17 @@ func (mv ManageInstanceType) UpdateInstanceTypesInDB(ctx context.Context, siteID
 
 		} else if instanceType.Version != controllerInstanceType.Version {
 
-			err := mv.UpdateInstanceTypeInCloud(ctx, site, instanceTypeDAO, macCapDAO, instanceType, controllerInstanceType)
-			if err != nil {
-				slogger.Error().Err(err).Msg("failed to update instance type in DB")
-				continue
+			// The update overwrites Name and Description from the report, so a row written since
+			// the Site collected this inventory would lose an edit made through the API. Skipping
+			// only the update keeps the reported-ID bookkeeping below intact.
+			if site.IsTimeWithinStaleInventoryThreshold(instanceType.Updated) {
+				slogger.Info().Msg("not updating InstanceType yet because it changed more recently than the inventory interval")
+			} else {
+				err := mv.UpdateInstanceTypeInCloud(ctx, site, instanceTypeDAO, macCapDAO, instanceType, controllerInstanceType)
+				if err != nil {
+					slogger.Error().Err(err).Msg("failed to update instance type in DB")
+					continue
+				}
 			}
 
 		}
@@ -130,7 +136,7 @@ func (mv ManageInstanceType) UpdateInstanceTypesInDB(ctx context.Context, siteID
 				// inventory, so make sure the object has existed for at least as
 				// long as our inventory interval with a little buffer to make
 				// sure we aren't in lock-step.
-				if time.Since(instanceType.Created) < cwutil.InventoryReceiptInterval+(time.Second*5) {
+				if site.IsTimeWithinStaleInventoryThreshold(instanceType.Created) {
 					continue
 				}
 
@@ -162,13 +168,8 @@ func (mv ManageInstanceType) UpdateInstanceTypeInCloud(ctx context.Context, site
 	controllerCapMap := map[string]*cdbm.MachineCapability{}
 	cloudCapMap := map[string]*cdbm.MachineCapability{}
 
-	// Build a map of name -> capability for the caps from site.
+	// Build a map of canonical capability identity -> capability for the caps from site.
 	for idx, controllerCap := range controllerInstanceType.GetAttributes().GetDesiredCapabilities() {
-
-		if controllerCapMap[controllerCap.GetName()] != nil {
-			return errors.New("site returned multiple capabilities with the same name")
-		}
-
 		machineCap := &cdbm.MachineCapability{}
 		machineCap.FromProto(controllerCap, idx)
 		err := machineCap.Validate()
@@ -176,14 +177,22 @@ func (mv ManageInstanceType) UpdateInstanceTypeInCloud(ctx context.Context, site
 			return fmt.Errorf("failed to convert NICo machine capability into MachineCapability: %w", err)
 		}
 
-		macCapName := machineCap.Name
-		controllerCapMap[macCapName] = machineCap
+		macCapKey := machineCap.MapKey()
+		if controllerCapMap[macCapKey] != nil {
+			return errors.New("site returned multiple capabilities with the same identity")
+		}
+
+		controllerCapMap[macCapKey] = machineCap
 	}
 
-	// Build a map of name -> capability for the caps in cloud.
+	// Build a map of canonical capability identity -> capability for the caps in cloud.
 	for _, cloudCap := range cloudCaps {
-		macCapName := cloudCap.Name
-		cloudCapMap[macCapName] = &cloudCap
+		macCapKey := cloudCap.MapKey()
+		if cloudCapMap[macCapKey] != nil {
+			return errors.New("cloud contains multiple capabilities with the same identity")
+		}
+
+		cloudCapMap[macCapKey] = &cloudCap
 	}
 
 	if instanceType.Description == nil || *instanceType.Description != controllerInstanceType.GetMetadata().GetDescription() {
@@ -219,9 +228,9 @@ func (mv ManageInstanceType) UpdateInstanceTypeInCloud(ctx context.Context, site
 
 	// Go through the caps reported by the site for this
 	// instance type and sync up the diff.
-	for macCapName, controllerCap := range controllerCapMap {
+	for macCapKey, controllerCap := range controllerCapMap {
 
-		cloudCap := cloudCapMap[macCapName]
+		cloudCap := cloudCapMap[macCapKey]
 
 		if cloudCap == nil || !cloudCap.Equal(controllerCap) {
 
@@ -257,7 +266,7 @@ func (mv ManageInstanceType) UpdateInstanceTypeInCloud(ctx context.Context, site
 		// Remove the entry.
 		// This will leave us with a map that only contains
 		// entries that weren't known to the site.
-		delete(cloudCapMap, macCapName)
+		delete(cloudCapMap, macCapKey)
 	}
 
 	// The remaining cloudCapMap entries are all
@@ -328,12 +337,6 @@ func (mv ManageInstanceType) AddInstanceTypeToCloud(ctx context.Context, site *c
 			return nil, errors.New("skipping update for InstanceType with capability with empty name sent from Site")
 		}
 
-		if controllerCapMap[controllerCap.GetName()] {
-			return nil, errors.New("site returned multiple capabilities with the same name")
-		}
-
-		controllerCapMap[controllerCap.GetName()] = true
-
 		// Build the entity, then Validate before going to the DB --
 		// mirrors the UpdateInstanceTypeInCloud flow so unsupported
 		// site-supplied enums get rejected here rather than landing as
@@ -343,6 +346,13 @@ func (mv ManageInstanceType) AddInstanceTypeToCloud(ctx context.Context, site *c
 		if err := machineCap.Validate(); err != nil {
 			return nil, fmt.Errorf("failed to convert NICo machine capability into MachineCapability: %w", err)
 		}
+
+		macCapKey := machineCap.MapKey()
+		if controllerCapMap[macCapKey] {
+			return nil, errors.New("site returned multiple capabilities with the same identity")
+		}
+
+		controllerCapMap[macCapKey] = true
 
 		_, err := macCapDAO.Create(ctx, tx, cdbm.MachineCapabilityCreateInput{
 			InstanceTypeID:   &instanceType.ID,

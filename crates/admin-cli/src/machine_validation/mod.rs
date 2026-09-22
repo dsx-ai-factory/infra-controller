@@ -17,6 +17,7 @@
 
 mod external_config;
 mod on_demand;
+mod plugins;
 mod results;
 mod runs;
 mod tests_cmd;
@@ -48,4 +49,6 @@ pub(crate) enum Cmd {
     Runs(runs::Args),
     #[clap(about = "Supported Tests ", subcommand, visible_alias = "mvs")]
     Tests(tests_cmd::Args),
+    #[clap(about = "Manage OCI Machine Validation plugins", subcommand)]
+    Plugins(plugins::Args),
 }

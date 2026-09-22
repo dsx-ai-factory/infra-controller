@@ -23,7 +23,6 @@ import (
 const (
 	validationErrorInfrastructureProviderIDExpectNil = "Specifying InfrastructureProviderID is currently not supported"
 	errMsgInvalidImageSHA                            = "not a valid SHA hash"
-	errMsgInvalidImageDiskPath                       = "not a valid disk path"
 	errMsgExactlyOneRootFsField                      = "exactly one of 'rootFsId' and 'rootFsLabel' must be specified"
 	errMsgOnlyOneRootFsField                         = "only one of 'rootFsId' and 'rootFsLabel' may be specified"
 	errMsgNotEmpty                                   = "cannot be empty"
@@ -291,6 +290,10 @@ func (oscr *APIOperatingSystemCreateRequest) Validate() error {
 		validation.Field(&oscr.InfrastructureProviderID,
 			// infrastructure provider id must be nil
 			validation.Nil.Error(validationErrorInfrastructureProviderIDExpectNil)),
+		validation.Field(&oscr.UserData,
+			validation.When(oscr.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
+		),
 	)
 	if err != nil {
 		return err
@@ -375,7 +378,7 @@ func (oscr *APIOperatingSystemCreateRequest) Validate() error {
 			validation.Field(&oscr.ImageAuthToken,
 				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.ImageAuthToken)) && util.IsNilOrEmptyStrPtr(oscr.ImageAuthType), validation.Required.Error("imageAuthType must be specified when imageAuthToken is specified"))),
 			validation.Field(&oscr.ImageDisk,
-				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.ImageDisk)), validation.Match(util.DiskImagePathRegex).Error(errMsgInvalidImageDiskPath))),
+				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.ImageDisk)), validation.By(util.ValidateDiskImagePath))),
 			validation.Field(&oscr.RootFsID,
 				validation.When(util.IsNilOrEmptyStrPtr(oscr.RootFsLabel), validation.Required.Error(errMsgExactlyOneRootFsField)),
 				validation.When(!(util.IsNilOrEmptyStrPtr(oscr.RootFsLabel)), validation.Empty.Error(errMsgExactlyOneRootFsField))),
@@ -467,7 +470,7 @@ func (oscr *APIOperatingSystemCreateRequest) ValidateAndSetUserData(phonehomeUrl
 		}
 	}
 
-	byteUserData, err := yaml.Marshal(userDataMap)
+	byteUserData, err := util.MarshalUserData(userDataMap)
 	if err != nil {
 		return validation.Errors{
 			"userData": errors.New("failed to re-construct userData after processing phone home config"),
@@ -477,7 +480,7 @@ func (oscr *APIOperatingSystemCreateRequest) ValidateAndSetUserData(phonehomeUrl
 	// Render it back out.
 	oscr.UserData = cutil.GetPtr(string(byteUserData))
 
-	return nil
+	return util.ValidateEffectiveUserData(oscr.UserData)
 }
 
 // ToImageProto builds the workflow request that asks a Site to create the
@@ -548,6 +551,10 @@ func (osur *APIOperatingSystemUpdateRequest) Validate(existingOS *cdbm.Operating
 			validation.When(osur.Name != nil, validation.Required.Error(validationErrorStringLength)),
 			validation.When(osur.Name != nil, validation.By(util.ValidateNameCharacters)),
 			validation.When(osur.Name != nil, validation.Length(2, 256).Error(validationErrorStringLength))),
+		validation.Field(&osur.UserData,
+			validation.When(osur.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
+		),
 	)
 	if err != nil {
 		return err
@@ -718,7 +725,7 @@ func (osur *APIOperatingSystemUpdateRequest) Validate(existingOS *cdbm.Operating
 			validation.Field(&osur.ImageAuthToken,
 				validation.When(!(util.IsNilOrEmptyStrPtr(osur.ImageAuthToken)) && util.IsNilOrEmptyStrPtr(osur.ImageAuthType), validation.Required.Error("imageAuthType must be specified when imageAuthToken is specified"))),
 			validation.Field(&osur.ImageDisk,
-				validation.When(!(util.IsEmptyStrPtr(osur.ImageDisk)), validation.Match(util.DiskImagePathRegex).Error(errMsgInvalidImageDiskPath))),
+				validation.When(!(util.IsEmptyStrPtr(osur.ImageDisk)), validation.By(util.ValidateDiskImagePath))),
 			validation.Field(&osur.RootFsID,
 				validation.When(!(util.IsNilOrEmptyStrPtr(osur.RootFsLabel)), validation.Empty.Error(errMsgOnlyOneRootFsField))),
 			validation.Field(&osur.RootFsLabel,
@@ -727,17 +734,17 @@ func (osur *APIOperatingSystemUpdateRequest) Validate(existingOS *cdbm.Operating
 	} else {
 		err = validation.ValidateStruct(osur,
 			validation.Field(&osur.ImageSHA,
-				validation.Nil.Error("imageSHA cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageSHA cannot be specified unless OS is image-based")),
 			validation.Field(&osur.ImageAuthType,
-				validation.Nil.Error("imageAuthType cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageAuthType cannot be specified unless OS is image-based")),
 			validation.Field(&osur.ImageAuthToken,
-				validation.Nil.Error("imageAuthToken cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageAuthToken cannot be specified unless OS is image-based")),
 			validation.Field(&osur.ImageDisk,
-				validation.Nil.Error("imageDisk cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageDisk cannot be specified unless OS is image-based")),
 			validation.Field(&osur.RootFsID,
-				validation.Nil.Error("rootFsID cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("rootFsID cannot be specified unless OS is image-based")),
 			validation.Field(&osur.RootFsLabel,
-				validation.Nil.Error("rootFsLabel cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("rootFsLabel cannot be specified unless OS is image-based")),
 		)
 	}
 
@@ -759,14 +766,22 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 		mergedUserData = existingOS.UserData
 	}
 
+	// If phone-home was enabled, it can be removed by key instead of by URL.
+	//
+	// Ownership is a property of the stored blob. A request that supplies its own
+	// user-data replaces that blob outright, so the flag says nothing about the
+	// document actually being edited and removal there stays URL-matched.
+	nicoAuthoredPhoneHome := existingOS.PhoneHomeEnabled && osur.UserData == nil
+
 	if mergedPhoneHomeEnabled == nil {
 		mergedPhoneHomeEnabled = &existingOS.PhoneHomeEnabled
 
 		// If phone-home has never been enabled, then
 		// any user-data content was always acceptable,
-		// so do nothing and return.
+		// so there is nothing to rewrite. The stored blob still reaches the
+		// Site, so its size is checked before returning.
 		if !*mergedPhoneHomeEnabled {
-			return nil
+			return util.ValidateEffectiveUserData(mergedUserData)
 		}
 	}
 
@@ -824,7 +839,15 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 		// but the UI will always send false if phone-home is unchecked,
 		// so we want to do this check silently and not alert people who
 		// are using non-YAML user-data.
-		if err := util.RemovePhoneHomeFromUserData(documentRoot, &phonehomeUrl); err != nil {
+
+		// Our own block is removed by key, because the URL frozen into it may
+		// predate a change to site.phoneHomeUrl.
+		var phoneHomeURLFilter *string = nil
+		if !nicoAuthoredPhoneHome {
+			phoneHomeURLFilter = &phonehomeUrl
+		}
+
+		if err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
 			return validation.Errors{
 				"userData": errors.New("failed to remove phone home config from userData"),
 			}
@@ -832,8 +855,9 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 	} else {
 		// If we've arrived here, then phone-home is being disabled,
 		// and the user-data is NOT valid YAML,
-		// but we don't care, so don't touch user-data and just return.
-		return nil
+		// but we don't care, so don't touch user-data.
+		// Its size still applies, valid YAML or not.
+		return util.ValidateEffectiveUserData(mergedUserData)
 	}
 
 	if len(documentRoot.Content) == 0 {
@@ -846,7 +870,7 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 	}
 
 	// Render any data that still exists.
-	byteUserData, err := yaml.Marshal(userDataMap)
+	byteUserData, err := util.MarshalUserData(userDataMap)
 	if err != nil {
 		return validation.Errors{
 			"userData": errors.New("failed to re-construct userData after processing phone home config"),
@@ -856,7 +880,7 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 	// Set it in the request.
 	osur.UserData = cutil.GetPtr(string(byteUserData))
 
-	return nil
+	return util.ValidateEffectiveUserData(osur.UserData)
 }
 
 // ToImageProto builds the workflow request that asks a Site to update the

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -183,6 +184,94 @@ func TestFilterOutIDs(t *testing.T) {
 	assert.Equal(t, []string{"a", "c"}, filterOutIDs([]string{"a", "b", "c"}, exclude))
 	assert.Equal(t, []string{"a"}, filterOutIDs([]string{"a"}, nil))
 	assert.Nil(t, filterOutIDs(nil, exclude))
+}
+
+func TestInstanceManager_GetInstances(t *testing.T) {
+	instanceName := "host-1"
+	ipAddress := "10.0.0.5"
+	query := "02c241b7-d2e3-4bf5-8384-07137f4f3410"
+	explicitVpcID := "vpc-2"
+	pageNumber := 2
+	pageSize := 25
+	orderBy := "NAME_ASC"
+
+	tests := []struct {
+		name         string
+		defaultVpcID string
+		filter       *InstanceFilter
+		pagination   *PaginationFilter
+		wantQuery    url.Values
+	}{
+		{
+			name:         "query uses the default VPC",
+			defaultVpcID: "vpc-1",
+			filter:       &InstanceFilter{Query: &query},
+			wantQuery: url.Values{
+				"pageNumber": {"1"},
+				"query":      {query},
+				"siteId":     {"site-1"},
+				"vpcId":      {"vpc-1"},
+			},
+		},
+		{
+			name:         "query composes with filters and pagination",
+			defaultVpcID: "vpc-1",
+			filter: &InstanceFilter{
+				Name:      &instanceName,
+				Query:     &query,
+				VpcID:     &explicitVpcID,
+				IPAddress: &ipAddress,
+			},
+			pagination: &PaginationFilter{
+				PageNumber: &pageNumber,
+				PageSize:   &pageSize,
+				OrderBy:    &orderBy,
+			},
+			wantQuery: url.Values{
+				"ipAddress":  {ipAddress},
+				"name":       {instanceName},
+				"orderBy":    {orderBy},
+				"pageNumber": {"2"},
+				"pageSize":   {"25"},
+				"query":      {query},
+				"siteId":     {"site-1"},
+				"vpcId":      {explicitVpcID},
+			},
+		},
+		{
+			name:   "nil filter omits query",
+			filter: nil,
+			wantQuery: url.Values{
+				"pageNumber": {"1"},
+				"siteId":     {"site-1"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodGet, r.Method)
+				assert.Equal(t, "/v2/org/test-org/nico/instance", r.URL.Path)
+				assert.Equal(t, tt.wantQuery, r.URL.Query())
+
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("x-pagination", `{"pageNumber":1,"pageSize":20,"total":1}`)
+				_, _ = io.WriteString(w, `[{"id":"instance-1","name":"host-1"}]`)
+			}))
+			defer server.Close()
+
+			client := newSimpleTestClient(server.URL)
+			client.apiMetadata.VpcID = tt.defaultVpcID
+			instances, pagination, apiErr := NewInstanceManager(client).GetInstances(context.Background(), tt.filter, tt.pagination)
+
+			require.Nil(t, apiErr)
+			require.Len(t, instances, 1)
+			assert.Equal(t, "instance-1", instances[0].GetId())
+			require.NotNil(t, pagination)
+			assert.Equal(t, 1, pagination.Total)
+		})
+	}
 }
 
 func TestInstanceManagerDeleteCleansUpAutoCreatedSSHKeyGroup(t *testing.T) {

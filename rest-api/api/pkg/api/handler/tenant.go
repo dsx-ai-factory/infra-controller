@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/google/uuid"
 	temporalClient "go.temporal.io/sdk/client"
 
 	"github.com/rs/zerolog"
@@ -21,8 +22,10 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // ~~~~~ Create Handler ~~~~~ //
@@ -217,6 +220,125 @@ func (gcth GetCurrentTenantHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("finishing API handler")
 
 	return c.JSON(http.StatusOK, apiInstance)
+}
+
+// ~~~~~ Get Current Routing Profile Handler ~~~~~ //
+
+// GetCurrentTenantRoutingProfileHandler retrieves the routing profiles the
+// current Tenant may use at one Site.
+type GetCurrentTenantRoutingProfileHandler struct {
+	dbSession  *cdb.Session
+	scp        *sc.ClientPool
+	tracerSpan *cutil.TracerSpan
+}
+
+// NewGetCurrentTenantRoutingProfileHandler initializes the routing-profile handler.
+func NewGetCurrentTenantRoutingProfileHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetCurrentTenantRoutingProfileHandler {
+	return GetCurrentTenantRoutingProfileHandler{
+		dbSession:  dbSession,
+		scp:        scp,
+		tracerSpan: cutil.NewTracerSpan(),
+	}
+}
+
+// Handle godoc
+// @Summary Retrieve current Tenant routing profiles for a Site
+// @Description Retrieve the Tenant's default VPC routing profile and the profiles it may select at one Site.
+// @Tags tenant
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param siteId query string true "ID of Site"
+// @Success 200 {object} model.APITenantRoutingProfile
+// @Router /v2/org/{org}/nico/tenant/current/routing-profile [get]
+func (gctrph GetCurrentTenantRoutingProfileHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantRoutingProfile", "GetCurrent", c, gctrph.tracerSpan)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+	if dbUser == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	ok, err := auth.ValidateOrgMembership(dbUser, org)
+	if !ok {
+		if err != nil {
+			logger.Error().Err(err).Msg("error validating org membership for User in request")
+		} else {
+			logger.Warn().Msg("could not validate org membership for user, access denied")
+		}
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
+	}
+
+	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole)
+	if !ok {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Tenant Admin role with org", nil)
+	}
+
+	siteID := c.QueryParam("siteId")
+	site, err := common.GetSiteFromIDString(ctx, nil, siteID, gctrph.dbSession)
+	if err != nil {
+		if err == cdb.ErrDoesNotExist {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find Site with ID specified in query", nil)
+		}
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Site ID in query", nil)
+	}
+	if site.Status != cdbm.SiteStatusRegistered {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in query must be in Registered state", nil)
+	}
+	if site.Config == nil || !site.Config.NativeNetworking {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in query must have native networking enabled", nil)
+	}
+
+	tenant, err := common.GetTenantForOrg(ctx, nil, gctrph.dbSession, org)
+	if err != nil {
+		if err == common.ErrOrgTenantNotFound {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Org does not have a Tenant associated", nil)
+		}
+		logger.Error().Err(err).Msg("error retrieving Tenant for this org")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
+	}
+
+	allocationDAO := cdbm.NewAllocationDAO(gctrph.dbSession)
+	allocationCount, err := allocationDAO.GetCount(ctx, nil, cdbm.AllocationFilterInput{
+		TenantIDs: []uuid.UUID{tenant.ID},
+		SiteIDs:   []uuid.UUID{site.ID},
+	})
+	if err != nil {
+		logger.Error().Err(err).Msg("error retrieving Allocations count from DB for Tenant and Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site Allocations count for Tenant", nil)
+	}
+	if allocationCount == 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have any Allocations with Site specified in query", nil)
+	}
+
+	stc, err := gctrph.scp.GetClientByID(site.ID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+
+	coreResponse := &corev1.FindTenantResponse{}
+	apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindTenant_FullMethodName, &corev1.FindTenantRequest{
+		TenantOrganizationId: org,
+	}, coreResponse, site.ID.String())
+	if apiErr != nil {
+		logAPIError(logger, apiErr, "failed to retrieve Tenant routing profiles")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+	if coreResponse.GetTenant() == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Tenant was not found on Site", nil)
+	}
+
+	allowAlternatives, err := common.TenantHasTargetedInstanceCreation(ctx, nil, gctrph.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if err != nil {
+		logger.Error().Err(err).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to verify privileges for Site", nil)
+	}
+
+	response := &model.APITenantRoutingProfile{}
+	response.FromProto(coreResponse, allowAlternatives)
+	return c.JSON(http.StatusOK, response)
 }
 
 // ~~~~~ Get Current Stats Handler ~~~~~ //

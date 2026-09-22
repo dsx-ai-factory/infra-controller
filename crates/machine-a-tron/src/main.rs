@@ -17,9 +17,9 @@
 #![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 mod logging;
+mod rms_mock;
 mod ufm_mock;
 
-use std::borrow::Cow;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -29,7 +29,7 @@ use bmc_mock::mac_address_pool::{
     Config as MacAddressConfig, MacAddressPool, PoolConfig as MacAddressPoolConfig,
     RangesConfig as MacAddressRangesConfig,
 };
-use bmc_mock::{CombinedServer, HostnameQuerying, ListenerOrAddress};
+use bmc_mock::{CombinedServer, ListenerOrAddress};
 use clap::Parser;
 use figment::Figment;
 use figment::providers::{Format, Toml};
@@ -38,10 +38,9 @@ use forge_tls::client_config::{
 };
 use mac_address::MacAddress;
 use machine_a_tron::{
-    AppEvent, BmcMockRegistry, ControlState, DeviceStatusConfig, DhcpClient, MachineATron,
-    MachineATronArgs, MachineATronConfig, MachineATronContext, MockSshServerHandle, PromptBehavior,
-    SimulatorLifecycle, Tui, TuiHostLogs, api_throttler, append_control_routes,
-    spawn_mock_ssh_server,
+    BmcMockRegistry, ControlState, DeviceStatusConfig, DhcpClient, MachineATron, MachineATronArgs,
+    MachineATronConfig, MachineATronContext, SimulatorLifecycle, api_throttler,
+    append_control_routes,
 };
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use rpc::protos::forge_api_client::ForgeApiClient;
@@ -49,6 +48,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::logging::init_logging;
+use crate::rms_mock::HostedRmsMock;
 use crate::ufm_mock::HostedUfmMock;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 32)]
@@ -62,17 +62,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let app_config: MachineATronConfig = fig.extract()?;
     app_config.validate()?;
     let ufm_config = app_config.ufm_mock.clone();
-    let tui_host_logs = if app_config.tui_enabled {
-        Some(TuiHostLogs::start_new(100))
-    } else {
-        None
-    };
 
-    init_logging(
-        app_config.log_format,
-        app_config.log_file.as_deref(),
-        tui_host_logs.as_ref(),
-    )?;
+    init_logging(app_config.log_format, app_config.log_file.as_deref())?;
 
     let file_config = get_config_from_file();
 
@@ -119,7 +110,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let bmc_mock_port = app_config.bmc_mock_port;
-    let tui_enabled = app_config.tui_enabled;
     let hw_mac_address_ranges = app_config
         .hw_mac_address_ranges
         .as_ref()
@@ -151,6 +141,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let bmc_mock_certs_dir = app_config.bmc_mock_certs_dir.clone();
+    let rms_mock_config = app_config.rms_mock.clone();
 
     let app_context = Arc::new(MachineATronContext {
         app_config,
@@ -158,12 +149,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         bmc_mock_certs_dir,
         bmc_registry,
         api_throttler,
-        desired_firmware_versions,
+        desired_firmware_versions: std::sync::RwLock::new(desired_firmware_versions),
         forge_api_client,
         dhcp_client,
         mac_address_pool: Mutex::new(mac_address_pool).into(),
-        combined_bmc_ssh_port: std::sync::OnceLock::new(),
     });
+
+    machine_a_tron::spawn_desired_firmware_refresher(app_context.clone());
 
     let info = app_context.forge_api_client.version(false).await?;
     tracing::info!(
@@ -176,7 +168,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Machines are created paused here. While paused, their actors do not advance the FSM, so
     // BMC DHCP and shared-router registration cannot run before the combined BMC mock listener is
     // started below.
-    let simulators = mat.make_devices(true).await?;
+    let (simulators, expected_inventory) = mat.make_devices(true).await?;
 
     // Persist them once in case of unclean shutdown
     app_context.app_config.write_persisted_devices(
@@ -195,11 +187,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         simulators.clone(),
         DeviceStatusConfig::new(bmc_mock_port),
         inventory_id.into(),
-    );
+    )
+    .with_expected_inventory(expected_inventory);
     // Hosted mode mounts the shared UFM mock router on machine-a-tron's control server. Its
     // ControlState can be injected as an in-process inventory provider; the standalone binary
     // initializes the same mock without this provider and relies on configured HTTP sources.
     let hosted_ufm = HostedUfmMock::start(ufm_config, &control_state)?;
+    let hosted_rms = HostedRmsMock::start(rms_mock_config, &control_state);
     let ufm_router = hosted_ufm.as_ref().map(HostedUfmMock::router);
     let certs_dir = app_context
         .bmc_mock_certs_dir
@@ -210,7 +204,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .parent()
                 .map(Path::to_path_buf)
         });
-    let server_handles: (CombinedServer, Option<MockSshServerHandle>) = {
+    let mut server_handle: CombinedServer = {
         let server_config = bmc_mock::tls::server_config(certs_dir.clone())?;
         let bmc_router = bmc_mock::combined_router(app_context.bmc_registry.clone());
         let bmc_router = match ufm_router.clone() {
@@ -218,118 +212,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
             None => bmc_router,
         };
         let router = append_control_routes(Some(bmc_router), control_state.clone());
-        let bmc_https_mock = bmc_mock::CombinedServer::run_router(
+        // Merged onto the outermost router, and deliberately after the control
+        // routes. Those add a `/{*all}` catch-all, but axum matches the RMS
+        // services' static first segment ahead of it. Merging any lower would
+        // put gRPC behind a handler that rebuilds the request and resets it to
+        // HTTP/1.1, which fails without an obvious cause.
+        let router = router.merge(hosted_rms.router());
+        bmc_mock::CombinedServer::run_router(
             "bmc-mock",
             router,
             Some(ListenerOrAddress::Address(
                 format!("0.0.0.0:{bmc_mock_port}").parse().unwrap(),
             )),
             server_config,
-        );
-
-        let bmc_ssh_mock = if app_context.app_config.mock_bmc_ssh_server {
-            // Spawn a single mock SSH server too. ssh-console can be configured to talk to
-            // this instead of the carbide-assigned BMC IP for each host, so that
-            // machine-a-tron-based dev environments can have a "working" ssh-console too.
-            Some(
-                spawn_mock_ssh_server(
-                    app_context.app_config.mock_bmc_ssh_port,
-                    Arc::new(KnownHostname("shared-bmc-mock".to_string())),
-                    // Accept any credentials. We don't support mocking changing BMC
-                    // credentials, so we can't properly emulate BMC SSH credentials in dev
-                    // environments today. (Only ssh-console integration tests use
-                    // credentials here as of today.)
-                    None,
-                    PromptBehavior::Dell,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-        (bmc_https_mock, bmc_ssh_mock)
+        )
     };
 
-    if let Some(ssh_handle) = &server_handles.1 {
-        app_context
-            .combined_bmc_ssh_port
-            .set(ssh_handle.port)
-            .expect("combined BMC SSH port must only be initialized once");
-    }
+    let (stop_tx, stop_rx) = mpsc::channel(1);
+    // Create a signal stream for SIGTERM and SIGINT.
+    let mut sigterm =
+        signal(SignalKind::terminate()).expect("Failed to create SIGTERM signal stream");
+    let mut sigint =
+        signal(SignalKind::interrupt()).expect("Failed to create SIGINT signal stream");
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+        stop_tx.send(()).await.ok();
+    });
 
-    // Run TUI
-    let (app_tx, app_rx) = mpsc::channel(5000);
-    let (tui_handle, tui_event_tx, tui_quit_tx) = if tui_enabled {
-        let (ui_tx, ui_rx) = mpsc::channel(5000);
-        let (quit_tx, quit_rx) = mpsc::channel(1);
-
-        let tui_handle = Some(tokio::spawn(async {
-            let mut tui = Tui::new(ui_rx, quit_rx, app_tx, tui_host_logs);
-            _ = tui.run().await.inspect_err(|e| {
-                let estr = format!("Error running TUI: {e}");
-                tracing::error!(error = %e, "TUI failed");
-                eprintln!("{estr}"); // dump it to stderr in case logs are getting redirected
-            })
-        }));
-        (tui_handle, Some(ui_tx), Some(quit_tx))
-    } else {
-        // Create a signal stream for SIGTERM and SIGINT.
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("Failed to create SIGTERM signal stream");
-        let mut sigint =
-            signal(SignalKind::interrupt()).expect("Failed to create SIGINT signal stream");
-
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = sigterm.recv() => {}
-                _ = sigint.recv() => {}
-            }
-            app_tx.send(AppEvent::Quit).await.ok();
-        });
-
-        (None, None, None)
-    };
-
-    let mat_result = mat.run(simulators, tui_event_tx.clone(), app_rx).await;
+    let mat_result = mat.run(simulators, stop_rx).await;
 
     if let Some(hosted_ufm) = hosted_ufm {
         hosted_ufm.shutdown().await?;
     }
 
-    if let Some(tui_handle) = tui_handle {
-        if let Some(tui_quit_tx) = tui_quit_tx.as_ref() {
-            _ = tui_quit_tx.try_send(()).inspect_err(|e| {
-                tracing::warn!(
-                    error = %e,
-                    "Could not send quit signal to TUI",
-                )
-            });
-        }
-        tui_handle
-            .await
-            .inspect_err(|e| {
-                tracing::warn!(
-                    error = %e,
-                    "Error running TUI",
-                )
-            })
-            .ok();
-    }
-
-    let (mut server_handle, _mock_ssh_server_handle) = server_handles;
     server_handle.stop().await?;
     if let Some(dhcp_service) = dhcp_service {
         dhcp_service.shutdown().await?;
     }
     mat_result?;
     Ok(())
-}
-
-#[derive(Debug)]
-struct KnownHostname(String);
-
-impl HostnameQuerying for KnownHostname {
-    fn get_hostname(&'_ self) -> Cow<'_, str> {
-        Cow::Borrowed(self.0.as_str())
-    }
 }

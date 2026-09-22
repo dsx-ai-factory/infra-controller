@@ -1746,6 +1746,7 @@ type InstanceWithAllocation struct {
 	TpmEkCertificate                       *string                                 `bun:"tpm_ek_certificate"`
 	Status                                 string                                  `bun:"status,notnull"`
 	PowerStatus                            *string                                 `bun:"power_status"`
+	PowerProfile                           *string                                 `bun:"power_profile"`
 	IsMissingOnSite                        bool                                    `bun:"is_missing_on_site,notnull"`
 	Created                                time.Time                               `bun:"created,nullzero,notnull,default:current_timestamp"`
 	Updated                                time.Time                               `bun:"updated,nullzero,notnull,default:current_timestamp"`

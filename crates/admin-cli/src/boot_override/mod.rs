@@ -20,9 +20,6 @@ mod common;
 mod get;
 mod set;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;

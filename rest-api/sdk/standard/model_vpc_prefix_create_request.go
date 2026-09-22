@@ -28,9 +28,9 @@ type VpcPrefixCreateRequest struct {
 	Name string `json:"name"`
 	// ID of the VPC
 	VpcId string `json:"vpcId"`
-	// ID of the IP Block to allocate the VPC Prefix from
+	// ID of the Ready tenant IPv4 or IPv6 IP Block to allocate the VPC Prefix from. The block must be at the FNN VPC's Site.
 	IpBlockId string `json:"ipBlockId"`
-	// Prefix length for the VPC Prefix. Valid range is 8 to 31, and max usable value depends on prefix length of parent IP Block.
+	// Prefix length for the VPC Prefix. IPv4 accepts 8 through 31. IPv6 accepts 8 through 63 when the FNN VPC has `slaacEnabled=true`, or 8 through 126 otherwise. The selected IP Block must contain a prefix of the requested length.
 	PrefixLength int32 `json:"prefixLength"`
 }
 

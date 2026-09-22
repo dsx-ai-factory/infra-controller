@@ -65,9 +65,8 @@ fn retired_membership(fabric: &str, pkey: PartitionKey, guid: &str) -> IbMembers
     }
 }
 
-/// `insert_retired_membership` is a test-specific helper that seeds the
-/// monitor's durable input directly. The production writer is tracked by
-/// https://github.com/NVIDIA/infra-controller/issues/5147.
+/// `insert_retired_membership` seeds the monitor's durable input directly so
+/// these tests stay focused on monitor behavior rather than lifecycle writers.
 async fn insert_retired_membership(pool: &sqlx::PgPool, membership: &IbMembership) {
     sqlx::query("INSERT INTO retired_ib_memberships (fabric, pkey, guid) VALUES ($1, $2, $3)")
         .bind(membership.fabric.clone())
@@ -712,7 +711,6 @@ async fn live_membership_is_unbound_after_instance_deletion_while_retired_record
 async fn membership_reused_after_snapshot_is_not_unbound(pool: sqlx::PgPool) {
     let (env, _, instance_id, pkey, guid) = live_ib_instance(pool.clone()).await;
     let retired = retired_membership(DEFAULT_IB_FABRIC_NAME, pkey, &guid);
-    insert_retired_membership(&pool, &retired).await;
     let fabric = env
         .ib_fabric_manager
         .new_client(DEFAULT_IB_FABRIC_NAME)
@@ -738,38 +736,69 @@ async fn membership_reused_after_snapshot_is_not_unbound(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    // Hold the retired membership query after the monitor has captured the
-    // empty IB configuration and its pending unbind.
-    let mut query_gate = pool.begin().await.unwrap();
-    let query_gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(query_gate.as_mut())
-        .await
-        .unwrap();
-    sqlx::query("LOCK TABLE retired_ib_memberships IN ACCESS EXCLUSIVE MODE")
-        .execute(query_gate.as_mut())
+    // Hold only this retired record. The reuse transaction can acquire the
+    // Instance and then its owning Machine, then pause when it removes the
+    // retirement.
+    let mut membership_guard = pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT fabric FROM retired_ib_memberships \
+         WHERE fabric = $1 AND pkey = $2 AND guid = $3 FOR UPDATE",
+    )
+    .bind(&retired.fabric)
+    .bind(i32::from(u16::from(retired.pkey)))
+    .bind(&retired.guid)
+    .fetch_one(membership_guard.as_mut())
+    .await
+    .unwrap();
+    let membership_guard_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(membership_guard.as_mut())
         .await
         .unwrap();
 
-    let monitor = new_ib_monitor(&env);
-    let monitor_iteration = tokio::spawn(async move { monitor.run_single_iteration().await });
-    wait_for_blocked_query(&pool, query_gate_pid, "retired_ib_memberships").await;
+    let reuse_request = rpc::forge::InstanceConfigUpdateRequest {
+        instance_id: instance_id.into(),
+        if_version_match: None,
+        config: Some(original_config),
+        metadata: Some(instance.metadata().clone()),
+    };
+    let reuse_api = env.api.clone();
+    let (reuse_result, monitor_result) =
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            tokio::join!(
+                async {
+                    reuse_api
+                        .update_instance_config(tonic::Request::new(reuse_request))
+                        .await
+                },
+                async {
+                    let reuse_pid = wait_for_blocked_query(
+                        &pool,
+                        membership_guard_pid,
+                        "DELETE FROM retired_ib_memberships",
+                    )
+                    .await;
 
-    env.api
-        .update_instance_config(tonic::Request::new(
-            rpc::forge::InstanceConfigUpdateRequest {
-                instance_id: instance_id.into(),
-                if_version_match: None,
-                config: Some(original_config),
-                metadata: Some(instance.metadata().clone()),
-            },
-        ))
+                    // The monitor snapshots the still-committed empty
+                    // configuration, then its locked reread waits for the reuse
+                    // transaction that owns the Machine after its Instance.
+                    let monitor = new_ib_monitor(&env);
+                    let (monitor_result, ()) =
+                        tokio::join!(monitor.run_single_iteration(), async {
+                            wait_for_blocked_query(&pool, reuse_pid, MACHINE_LOCK_QUERY_MARKER)
+                                .await;
+                            membership_guard.commit().await.unwrap();
+                        });
+                    monitor_result
+                }
+            )
+        })
         .await
-        .unwrap();
-    query_gate.commit().await.unwrap();
+        .expect("membership reuse race should finish after both lock waits");
 
-    assert_eq!(monitor_iteration.await.unwrap().unwrap(), 0);
+    reuse_result.unwrap();
+    assert_eq!(monitor_result.unwrap(), 0);
     assert!(membership_is_present(&fabric, pkey, &guid).await);
-    assert!(retired_membership_exists(&pool, &retired).await);
+    assert!(!retired_membership_exists(&pool, &retired).await);
 }
 
 /// `membership_removed_from_hardware_after_snapshot_stays_retired` is a
@@ -941,9 +970,9 @@ async fn deleted_instance_keeps_the_retired_membership(pool: sqlx::PgPool) {
         .unwrap();
     assert!(membership_is_present(&fabric, pkey, &guid).await);
 
-    // Normal release first marks the `Instance` deleted. Until the membership
-    // is retired, the existing monitor behavior still treats its IB
-    // configuration as expected.
+    // Model legacy or incomplete state where an `Instance` was marked deleted
+    // without atomically recording its membership. Until the membership is
+    // retired, the monitor still treats its IB configuration as expected.
     let mut txn = pool.begin().await.unwrap();
     db::instance::mark_as_deleted(instance_id, txn.as_mut())
         .await
@@ -990,7 +1019,7 @@ async fn test_ib_port_down_sets_prevent_allocations_alert(
         txn.commit().await?;
     }
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let discovery_info = machine
         .status
         .as_ref()
@@ -1000,7 +1029,7 @@ async fn test_ib_port_down_sets_prevent_allocations_alert(
         .unwrap();
     let guid1 = discovery_info.infiniband_interfaces[0].guid.clone();
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()
@@ -1019,7 +1048,7 @@ async fn test_ib_port_down_sets_prevent_allocations_alert(
 
     env.run_ib_fabric_monitor_iteration().await;
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()
@@ -1051,7 +1080,7 @@ async fn test_ib_port_down_sets_prevent_allocations_alert(
     env.run_ib_fabric_monitor_iteration().await;
 
     // Verify IbPortDown alert is cleared
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()
@@ -1085,7 +1114,7 @@ async fn test_ib_multiple_ports_down(pool: sqlx::PgPool) -> Result<(), Box<dyn s
         txn.commit().await?;
     }
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let discovery_info = machine
         .status
         .as_ref()
@@ -1103,7 +1132,7 @@ async fn test_ib_multiple_ports_down(pool: sqlx::PgPool) -> Result<(), Box<dyn s
 
     env.run_ib_fabric_monitor_iteration().await;
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()
@@ -1140,7 +1169,7 @@ async fn test_ib_multiple_ports_down(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     ib_manager.set_port_state(&guid1, true);
     env.run_ib_fabric_monitor_iteration().await;
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()
@@ -1170,7 +1199,7 @@ async fn test_ib_multiple_ports_down(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     ib_manager.set_port_state(&guid2, true);
     env.run_ib_fabric_monitor_iteration().await;
 
-    let machine = env.find_machine(host_machine_id).await.remove(0);
+    let machine = env.find_machine(&host_machine_id).await.remove(0);
     let health = machine
         .status
         .as_ref()

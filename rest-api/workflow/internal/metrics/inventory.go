@@ -11,7 +11,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 )
 
 const (
@@ -37,9 +36,9 @@ type InventoryObjectLifecycleEvent struct {
 
 // ManageInventoryMetrics is a wrapper for managing inventory metrics activities
 type ManageInventoryMetrics struct {
-	dbSession     *cdb.Session
-	latency       *prometheus.HistogramVec
-	siteIDNameMap map[uuid.UUID]string
+	dbSession *cdb.Session
+	latency   *prometheus.HistogramVec
+	siteNames *SiteNameCache
 }
 
 // RecordLatency is a Temporal activity that records the latency of inventory processing activities
@@ -51,37 +50,33 @@ func (mim *ManageInventoryMetrics) RecordLatency(ctx context.Context, siteID uui
 		status = InventoryStatusFailed
 	}
 
-	// Cache site name to avoid repeated DB call
-	siteName, ok := mim.siteIDNameMap[siteID]
-	if !ok {
-		siteDAO := cdbm.NewSiteDAO(mim.dbSession)
-		site, err := siteDAO.GetByID(context.Background(), nil, siteID, nil, false)
-		if err != nil {
-			return err
-		}
-		siteName = site.Name
-		mim.siteIDNameMap[siteID] = siteName
+	siteName, err := mim.siteNames.Get(ctx, mim.dbSession, siteID)
+	if err != nil {
+		return err
 	}
 
-	mim.latency.WithLabelValues(siteName, activity, status).Observe(duration.Seconds())
+	mim.latency.WithLabelValues(siteName, siteID.String(), activity, status).Observe(duration.Seconds())
 
 	return nil
 }
 
 // InitInventoryMetrics initializes inventory activity metrics
-func NewManageInventoryMetrics(reg prometheus.Registerer, dbSession *cdb.Session) ManageInventoryMetrics {
-	inventoryMetrics := ManageInventoryMetrics{
+func NewManageInventoryMetrics(reg prometheus.Registerer, dbSession *cdb.Session, namespace string) *ManageInventoryMetrics {
+	inventoryMetrics := &ManageInventoryMetrics{
 		dbSession: dbSession,
 		latency: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: MetricsNamespace,
+				Namespace: namespace,
 				Name:      "inventory_latency_seconds",
-				Help:      "Latency of each inventory call",
-				Buckets:   []float64{0.0005, 0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0},
+				Help:      "Latency of each inventory call, measured across the whole workflow including activity retries",
+				// Top bucket covers a fully retried run under the shared inventory
+				// budget, which is 2 x 60s plus 5s of backoff. Only SSH Key Group sets
+				// its own longer timeout, so its slowest runs fall in +Inf.
+				Buckets: []float64{0.0005, 0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 125.0},
 			},
-			[]string{"site", "activity", "status"}),
+			[]string{"site", "site_id", "activity", "status"}),
 
-		siteIDNameMap: map[uuid.UUID]string{},
+		siteNames: NewSiteNameCache(),
 	}
 	reg.MustRegister(inventoryMetrics.latency)
 

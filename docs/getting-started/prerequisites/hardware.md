@@ -29,8 +29,8 @@ DPUs are generally preferred in nodes hosting the NICo control plane components,
 - You have the correct DPU power cable from the server vendor.
 - The Bluefield-3's operating mode is DPU mode.
 - For BF3 DPUs, verify link speed and optics: BF3 runs at 200 Gb, so match ports to 200 Gb-capable optics, fiber, or DACs.
-- Verify that the DPU can connect to the outside world (curl -I https://www.nvidia.com)
-- The DPUs are at the latest tested firmware version: DOCA 3.2.2 and HBN 3.2.2
+- Verify that the DPU can connect to the outside world (`curl -I https://www.nvidia.com`).
+- The DPUs use the [tested BlueField-3 software versions](../../hcl.md#dpus).
 
 ### NICo Pod Network Reachability
 

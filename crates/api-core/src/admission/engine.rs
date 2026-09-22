@@ -260,7 +260,8 @@ impl FairAdmission {
     /// ```
     ///
     /// Admission applies global and per-client hard queue bounds before enqueueing.
-    /// It also rejects requests whose estimated wait exceeds their pending timeout.
+    /// It also rejects requests whose estimated wait in their per-client FIFO
+    /// exceeds their pending timeout.
     /// Every rejection carries retry guidance derived from the stricter of client
     /// and global pressure.
     ///
@@ -338,16 +339,14 @@ impl FairAdmission {
                 max_work_in_flight: self.limits.max_work_in_flight(),
                 execution_duration_ewma: self.global_execution_ewma.duration(),
             };
-            let scopes = [
-                (RejectionScope::Client, client_pressure),
-                (RejectionScope::Global, global_pressure),
-            ];
-
             // Phase 3: Apply client hard capacity and predictive backpressure.
             //
-            // The hard bound protects memory. The EWMA checks reject earlier
-            // when the queue is technically available but the request is not
-            // expected to receive a grant before its pending timeout.
+            // The hard bound protects memory. The per-client FIFO provides a
+            // meaningful queue position, so its EWMA can reject earlier when
+            // the request is not expected to receive a grant before its pending
+            // timeout. Global pending depth cannot provide the same prediction:
+            // the root scheduler serves runnable client queues round-robin and
+            // skips queues blocked by their per-client concurrency limits.
             if client_stats.depth >= client.limits.max_pending() {
                 return Err(AdmissionRejection {
                     reason: RejectionReason::QueueFull(RejectionScope::Client),
@@ -355,17 +354,11 @@ impl FairAdmission {
                 });
             }
 
-            for (scope, pressure) in scopes {
-                if pressure.estimated_wait() > client.limits.pending_timeout() {
-                    return Err(AdmissionRejection {
-                        reason: RejectionReason::EstimatedQueueDelay(scope),
-                        retry: retry_advice(
-                            client_pressure,
-                            global_pressure,
-                            random_retry_jitter(),
-                        ),
-                    });
-                }
+            if client_pressure.estimated_wait() > client.limits.pending_timeout() {
+                return Err(AdmissionRejection {
+                    reason: RejectionReason::EstimatedQueueDelay(RejectionScope::Client),
+                    retry: retry_advice(client_pressure, global_pressure, random_retry_jitter()),
+                });
             }
 
             // Phase 4: Enqueue the grant bridge, not the business handler.
@@ -748,6 +741,7 @@ impl Drop for PendingEntry {
 mod tests {
     use std::num::{NonZeroU32, NonZeroUsize};
 
+    use futures::poll;
     use nv_redfish_dispatcher::{Completion, QueueEventSink, Readiness, Scheduler};
     use tokio::sync::Notify;
     use tokio::task::JoinHandle;
@@ -880,5 +874,84 @@ mod tests {
             .await
             .expect("shutdown interrupts the distant SleepUntil deadline")
             .expect("dispatcher task exits cleanly");
+    }
+
+    #[tokio::test]
+    async fn non_runnable_backlog_does_not_reject_independent_client_at_global_saturation() {
+        let pending_timeout = Duration::from_secs(5);
+        let limits = AdmissionLimits::new(4, 16, 1, 4, pending_timeout, Duration::from_secs(60))
+            .expect("test admission limits are valid");
+        let client_limits = limits.default_client();
+        let unused_global_capacity =
+            limits.max_work_in_flight() - client_limits.max_work_in_flight();
+        let shutdown = CancellationToken::new();
+        let mut join_set = JoinSet::new();
+        let engine = FairAdmission::start(limits, shutdown, Arc::new(NoopObserver), &mut join_set);
+
+        let mut slow_sample = engine
+            .acquire(ClientKeyRef::ServiceId("slow-client"), client_limits)
+            .await
+            .expect("the first request is admitted");
+        // Record a historical slow handler without making this unit test wait
+        // for the wall-clock duration.
+        slow_sample.started = slow_sample
+            .started
+            .checked_sub(pending_timeout + Duration::from_secs(1))
+            .expect("test execution start remains representable");
+        drop(slow_sample);
+
+        let backlogged_request = engine
+            .acquire(ClientKeyRef::ServiceId("backlogged-client"), client_limits)
+            .await
+            .expect("the backlogged client's first request is admitted");
+        let mut backlog = Vec::new();
+        for _ in 0..unused_global_capacity {
+            let mut request = Box::pin(
+                engine.acquire(ClientKeyRef::ServiceId("backlogged-client"), client_limits),
+            );
+            assert!(poll!(request.as_mut()).is_pending());
+            backlog.push(request);
+        }
+
+        let mut other_active_requests = Vec::new();
+        for client in ["active-client-a", "active-client-b", "active-client-c"] {
+            other_active_requests.push(
+                engine
+                    .acquire(ClientKeyRef::ServiceId(client), client_limits)
+                    .await
+                    .expect("request is admitted while global capacity remains"),
+            );
+        }
+        assert_eq!(
+            engine.snapshot(),
+            AdmissionSnapshot {
+                work_in_flight: limits.max_work_in_flight(),
+                pending: unused_global_capacity,
+            }
+        );
+
+        let mut idle_client_request =
+            Box::pin(engine.acquire(ClientKeyRef::ServiceId("idle-client"), client_limits));
+        assert!(poll!(idle_client_request.as_mut()).is_pending());
+        assert_eq!(
+            engine.snapshot(),
+            AdmissionSnapshot {
+                work_in_flight: limits.max_work_in_flight(),
+                pending: unused_global_capacity + 1,
+            }
+        );
+
+        drop(
+            other_active_requests
+                .pop()
+                .expect("one active request releases a global execution slot"),
+        );
+        let idle_client_request = idle_client_request
+            .await
+            .expect("an independent client receives the next global execution slot");
+        drop(idle_client_request);
+        drop(other_active_requests);
+        drop(backlogged_request);
+        drop(backlog);
     }
 }

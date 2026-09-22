@@ -19,6 +19,7 @@ mod auto_update;
 mod common;
 mod force_delete;
 mod hardware_info;
+mod health_history;
 mod health_report;
 mod metadata;
 pub(crate) mod network;
@@ -37,7 +38,7 @@ pub(crate) use common::{MachineQuery, NetworkConfigQuery};
 pub(crate) use health_report::args::HealthReportTemplates;
 pub(crate) use health_report::cmd::{get_empty_template, get_health_report};
 pub(crate) use show::args::Args as ShowMachine;
-pub(crate) use show::cmd::{get_next_free_machine, handle_show};
+pub(crate) use show::cmd::{get_next_free_machine, get_next_free_machine_prefetched, handle_show};
 
 use crate::cfg::dispatch::Dispatch;
 
@@ -84,6 +85,8 @@ pub(crate) enum Cmd {
             - Power shelf ID: Associated power shelf"
     )]
     Positions(positions::Args),
-    #[clap(subcommand, about = "Update/show NVLink info for an MNNVL machine")]
+    #[clap(subcommand, about = "Show NVLink info for an MNNVL machine")]
     NvlinkInfo(nvlink_info::Args),
+    #[clap(about = "Show machine health history")]
+    HealthHistory(health_history::Args),
 }

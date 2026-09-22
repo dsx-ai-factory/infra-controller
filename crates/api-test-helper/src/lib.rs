@@ -15,14 +15,16 @@
  * limitations under the License.
  */
 
+mod api_client;
+
 pub mod api_server;
 pub mod domain;
-pub mod grpcurl;
 pub mod instance;
 pub mod machine;
 pub mod machine_a_tron;
 pub mod metrics;
 pub mod mock_rms;
+pub mod scout_stream;
 pub mod subnet;
 pub mod tenant;
 pub mod utils;

@@ -37,6 +37,10 @@ use crate::metrics::MetricLabel;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, carbide_instrument::LabelValue)]
 pub enum HealthReportTarget {
     Machine,
+
+    /// NVLink domain identified by the event context.
+    NvLinkDomain,
+
     PowerShelf,
     Rack,
     Switch,
@@ -46,6 +50,7 @@ impl HealthReportTarget {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Machine => "machine",
+            Self::NvLinkDomain => "nvlink-domain",
             Self::PowerShelf => "power-shelf",
             Self::Rack => "rack",
             Self::Switch => "switch",
@@ -138,7 +143,8 @@ impl EventContext {
         match &self.metadata {
             Some(EndpointMetadata::Machine(machine)) => machine.nvlink_domain_uuid,
             Some(EndpointMetadata::Switch(switch)) => switch.nvlink_domain_uuid,
-            _ => None,
+            Some(EndpointMetadata::PowerShelf(power_shelf)) => power_shelf.nvlink_domain_uuid,
+            None => None,
         }
     }
 
@@ -411,10 +417,26 @@ pub struct FirmwareInfo {
     pub attributes: Vec<MetricLabel>,
 }
 
+/// Placement of the sensor behind a sensor probe result.
+///
+/// Lets a consumer attribute a reading to its power supply without parsing
+/// the sensor name. Each field is present only when the sensor carries it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SensorAttribution {
+    /// Redfish `PowerSupply` `Id` the sensor belongs to. `None` when the sensor
+    /// is not related to a power supply.
+    pub powersupply_id: Option<String>,
+    /// Sensor `PhysicalContext` in snake case, for example `power_supply`.
+    /// `None` for probes that are not sensors.
+    pub physical_context: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct HealthReportSuccess {
     pub probe_id: Probe,
     pub target: Option<String>,
+    /// Sensor placement; `None` for probes that are not sensor readings.
+    pub attribution: Option<SensorAttribution>,
 }
 
 #[derive(Clone, Debug)]
@@ -423,6 +445,8 @@ pub struct HealthReportAlert {
     pub target: Option<String>,
     pub message: String,
     pub classifications: Vec<Classification>,
+    /// Sensor placement; `None` for probes that are not sensor readings.
+    pub attribution: Option<SensorAttribution>,
 }
 
 #[derive(Clone, Debug)]
@@ -456,6 +480,10 @@ pub enum ReportSource {
     BmcSensors,
     BmcEvents,
     BmcLeakDetectors,
+
+    /// NMX-C `DomainStateInfo` health observations.
+    NmxcDomainState,
+
     TrayLeakDetection,
     RackLeakDetection,
     NvueLeakage,
@@ -468,6 +496,7 @@ impl ReportSource {
             Self::BmcSensors => "bmc-sensors",
             Self::BmcEvents => "bmc-events",
             Self::BmcLeakDetectors => "bmc-leak-detectors",
+            Self::NmxcDomainState => "nmxc-domain-state",
             Self::TrayLeakDetection => "tray-leak-detection",
             Self::RackLeakDetection => "rack-leak-detection",
             Self::NvueLeakage => "nvue-leakage",
@@ -481,6 +510,10 @@ pub enum Probe {
     Sensor,
     IntrusionSensorTriggered,
     LeakDetection,
+
+    /// Health state reported by the NMX-C controller.
+    NmxControllerHealth,
+
     NvueLeakage,
     GpuInventory,
 }
@@ -491,6 +524,7 @@ impl Probe {
             Self::Sensor => "BmcSensor",
             Self::IntrusionSensorTriggered => "IntrusionSensorTriggered",
             Self::LeakDetection => "BmcLeakDetection",
+            Self::NmxControllerHealth => "NmxControllerHealth",
             Self::NvueLeakage => "NvueLeakage",
             // Reuse the existing shared "SkuValidation" probe id so OOB GPU-count
             // alerts dedup with the machine-controller's in-band SKU alerts.
@@ -716,7 +750,7 @@ mod tests {
         BmcAddr {
             ip: IpAddr::from_str("10.0.0.1").expect("valid IP"),
             port: Some(443),
-            mac: MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC"),
+            mac: Some(MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC")),
         }
     }
 
@@ -745,7 +779,8 @@ mod tests {
             })),
             ContextKind::PowerShelf => Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: Some(power_shelf_id()),
-                serial: "PS-001".to_string(),
+                serial: Some("PS-001".to_string()),
+                nvlink_domain_uuid: None,
             })),
         };
 
@@ -819,12 +854,14 @@ mod tests {
     fn convert_alert(case: AlertCase) -> AlertSummary {
         let alert = match case {
             AlertCase::WithTarget => HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("fan0".to_string()),
                 message: "fan warning".to_string(),
                 classifications: vec![Classification::SensorWarning, Classification::SensorFailure],
             },
             AlertCase::Intrusion => HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::IntrusionSensorTriggered,
                 target: Some("HostBMC".to_string()),
                 message: "Physical Chassis Intrusion Alert".to_string(),
@@ -834,6 +871,7 @@ mod tests {
                 ],
             },
             AlertCase::WithoutClassifications => HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: None,
                 message: "rack leak".to_string(),
@@ -857,10 +895,12 @@ mod tests {
             },
             observed_at: Some(observed_at),
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: Some("tray-1".to_string()),
             }],
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("temp0".to_string()),
                 message: "temperature critical".to_string(),
@@ -915,6 +955,10 @@ mod tests {
                 ReportSource::BmcLeakDetectors => "bmc-leak-detectors",
             }
 
+            "NMX-C domain state" {
+                ReportSource::NmxcDomainState => "nmxc-domain-state",
+            }
+
             "tray leak detection" {
                 ReportSource::TrayLeakDetection => "tray-leak-detection",
             }
@@ -939,6 +983,10 @@ mod tests {
             run = HealthReportTarget::as_str;
             "machine" {
                 HealthReportTarget::Machine => "machine",
+            }
+
+            "NVLink domain" {
+                HealthReportTarget::NvLinkDomain => "nvlink-domain",
             }
 
             "power shelf" {
@@ -983,6 +1031,13 @@ mod tests {
                 Probe::LeakDetection => ProbeSummary {
                     as_str: "BmcLeakDetection",
                     health_report_id: "BmcLeakDetection".to_string(),
+                },
+            }
+
+            "NMX-C controller health" {
+                Probe::NmxControllerHealth => ProbeSummary {
+                    as_str: "NmxControllerHealth",
+                    health_report_id: "NmxControllerHealth".to_string(),
                 },
             }
 
@@ -1096,6 +1151,7 @@ mod tests {
                     target: Some(HealthReportTarget::Machine),
                     observed_at: None,
                     successes: vec![HealthReportSuccess {
+                        attribution: None,
                         probe_id: Probe::Sensor,
                         target: None,
                     }],
@@ -1110,6 +1166,7 @@ mod tests {
                     observed_at: None,
                     successes: vec![],
                     alerts: vec![HealthReportAlert {
+                        attribution: None,
                         probe_id: Probe::Sensor,
                         target: None,
                         message: "alert".to_string(),
@@ -1129,6 +1186,7 @@ mod tests {
             };
             "success with target" {
                 HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::Sensor,
                     target: Some("fan0".to_string()),
                 } => ("BmcSensor".to_string(), Some("fan0".to_string())),
@@ -1136,6 +1194,7 @@ mod tests {
 
             "success without target" {
                 HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                 } => ("BmcLeakDetection".to_string(), None),

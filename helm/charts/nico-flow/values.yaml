@@ -1,10 +1,8 @@
 ## =============================================================================
-## flow — rack lifecycle orchestrator (formerly RLA)
+## flow — task, policy, and automation service
 ## =============================================================================
-## Single pod with three gRPC containers: flow (50051), psm (50052), nsm (50053).
-## Each container has its own Postgres database (flow, psm, nsm) on the shared
-## nico-pg-cluster.  PSM and NSM also need a Vault token (provisioned by the
-## helm-prereqs vault-config-job).
+## Flow listens for gRPC requests on port 50051 and stores its state in Postgres
+## on the shared nico-pg-cluster.
 ##
 ## Deploys into a dedicated `flow` namespace.  The namespace must carry the
 ## label nico.nvidia.com/managed=true so ESO syncs nico-roots in.
@@ -46,25 +44,14 @@ automountServiceAccountToken: true
 ## flow container to exit on startup validation. Override per environment.
 flowEnv: production
 
-## Per-component image overrides.
-## Repositories default to <global.image.repository>/nico-flow etc, but each can
-## be overridden independently if you want to pin one container to a different tag.
+## Flow image override.
 images:
   flow:
     repository: ""   # defaults to <global.image.repository>/nico-flow
     tag: ""          # defaults to global.image.tag
-  psm:
-    repository: ""   # defaults to <global.image.repository>/nico-psm
-    tag: ""
-  nsm:
-    repository: ""   # defaults to <global.image.repository>/nico-nsm
-    tag: ""
 
-## Ports the three containers listen on (must stay distinct — same pod).
 ports:
   flow: 50051
-  psm: 50052
-  nsm: 50053
 
 resources:
   flow:
@@ -74,22 +61,7 @@ resources:
     limits:
       cpu: 1
       memory: 1Gi
-  psm:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
-  nsm:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
-
-## SPIFFE certificate covering all three Service DNS names.
+## SPIFFE certificate for the Flow Service DNS name.
 ##
 ## Two identities live in this struct:
 ##   - serviceName + extraDnsNames drive the *intra-cluster* identity: Service
@@ -104,10 +76,7 @@ resources:
 certificate:
   name: flow-certificate
   serviceName: flow
-  ## Additional DNS names — psm + nsm services live in the same namespace.
-  extraDnsNames:
-    - psm
-    - nsm
+  extraDnsNames: []
   ## SPIFFE URI components — emitted as the single URI SAN on the cert.
   ## Defaults target nico-api with the upstream RBAC rename (PR #1907) in
   ## place: serviceName `nico-flow` is accepted by the matcher alongside the
@@ -137,7 +106,7 @@ temporalCert:
     name: nico-rest-ca-issuer
     group: cert-manager.io
 
-## Database connection settings (shared host; per-container DB and secret).
+## Database connection settings.
 database:
   host: nico-pg-cluster.postgres.svc.cluster.local
   port: 5432
@@ -147,12 +116,6 @@ database:
   flow:
     name: flow
     credentialsSecret: flow.nico.nico-pg-cluster.credentials
-  psm:
-    name: psm
-    credentialsSecret: psm.nico.nico-pg-cluster.credentials
-  nsm:
-    name: nsm
-    credentialsSecret: nsm.nico.nico-pg-cluster.credentials
 
 ## NICo Core API endpoint (gRPC) that flow calls.
 nicoCoreApi:
@@ -183,34 +146,29 @@ dataEncryption:
     existingSecret: ""
     value: ""
 
-## Vault for PSM/NSM dynamic secrets.
-vault:
-  address: https://vault.vault.svc.cluster.local:8200
-  psmTokenSecret: psm-vault-token
-  nsmTokenSecret: nsm-vault-token
-
-## Firmware staging volumes (emptyDir by default; override with hostPath for sites
-## that need a persistent firmware repo).
-firmware:
-  psm:
-    volume:
-      emptyDir: {}
-    mountPath: /var/lib/psm/firmware
-  nsm:
-    volume:
-      emptyDir: {}
-    mountPath: /var/lib/nsm
-
-## Optional flowconfig.yaml — when set, becomes the flow-config-files ConfigMap.
-flowConfig: ""
+## Runtime settings rendered into the flow-config-files ConfigMap and mounted
+## at /etc/flow/flowconfig.yaml. Defaults match the built-in defaults in
+## rest-api/flow/internal/config/config.go, so an unchanged block behaves the
+## same as running without a config file.
+##
+## Intervals are Go duration strings such as "30s", "1m", or "1h30m" and must
+## be greater than zero; the toggles must be YAML booleans. The chart rejects
+## other values at render time. Changing any value rolls the Flow Deployment.
+flowConfig:
+  ## Interval between inventory synchronisation runs. Duration, default 1m.
+  inventoryRunFrequency: 1m
+  ## Skip the periodic inventory synchronisation job. Boolean, default false.
+  disableInventory: false
+  ## Interval between leak detection runs. Duration, default 1m.
+  leakDetectionInterval: 1m
+  ## Skip the periodic leak detection job. Boolean, default false.
+  disableLeakDetection: false
 
 extraEnv:
   flow: []
-  psm: []
-  nsm: []
 
 ## Docker registry pull secret created by the chart in the flow namespace.
-## setup.sh phase 7i renders dockerconfigjson from REGISTRY_PULL_SECRET and
+## setup.sh phase 7h renders dockerconfigjson from REGISTRY_PULL_SECRET and
 ## passes it via --set. The default placeholder ({"auths":{}}) lets the
 ## chart install on air-gapped / pre-loaded clusters without overrides.
 ## Set create=false to skip if the secret is provisioned out of band.

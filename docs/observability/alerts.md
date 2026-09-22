@@ -102,11 +102,11 @@ These are operational SLO targets, separate from alert thresholds:
 ### Metrics for SLO monitoring
 
 **API availability** uses `carbide_api_grpc_server_duration_milliseconds` histogram. Compute
-error rate from the `_count` series split by gRPC status:
+availability as one minus the error rate from the `_count` series split by gRPC status:
 
 ```text
 1 - (
-  sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status!="OK"}[5m]))
+  sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status_code!="Ok"}[5m]))
   /
   sum(rate(carbide_api_grpc_server_duration_milliseconds_count[5m]))
 )
@@ -142,7 +142,7 @@ Use these as starting points and tune based on your site characteristics:
 ## 4. Deploying alert rules
 
 A start set of alert rules with production-validated thresholds is available at
-[`helm/observability/alerts/nico-alerts.yaml`](https://github.com/NVIDIA/infra-controller/blob/main/helm/observability/alerts/nico-alerts.yaml).
+[`helm/observability/alerts/nico-alerts.yaml`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/observability/alerts/nico-alerts.yaml).
 
 The file uses `PrometheusRule` as the CRD kind. For VictoriaMetrics Operator deployments,
 change `apiVersion` to `operator.victoriametrics.com/v1beta1` and `kind` to `VMRule` -
@@ -288,7 +288,7 @@ For detailed troubleshooting of health alerts, see the
 
 ## 7. References
 
-- [NICo alerting rules](https://github.com/NVIDIA/infra-controller/blob/main/helm/observability/alerts/nico-alerts.yaml) - Prometheus-compatible rule examples
+- [NICo alerting rules](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/observability/alerts/nico-alerts.yaml) - Prometheus-compatible rule examples
 - [Health alerts playbook](../playbooks/stuck_objects/health_alerts.md)
 - [Health alert classifications](../architecture/health/health_alert_classifications.md)
 - [Full metrics reference](core_metrics.md)

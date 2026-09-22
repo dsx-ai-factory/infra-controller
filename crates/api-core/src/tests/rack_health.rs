@@ -28,12 +28,12 @@ use rpc::forge::{self as rpc_forge};
 use tonic::Request;
 
 use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
+use crate::test_support::health::{HealthCrud, HealthStatusView, check_health_aggregation};
 use crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder;
 use crate::tests::common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_managed_host, create_managed_host_with_config,
     create_test_env_with_overrides, get_config, send_health_report_entry,
 };
-use crate::tests::common::health_crud::{HealthCrud, HealthStatusView, check_health_aggregation};
 
 fn leak_alert_report(source: &str) -> HealthReport {
     HealthReport {
@@ -78,7 +78,7 @@ async fn new_rack(pool: &sqlx::PgPool) -> Result<RackId, Box<dyn std::error::Err
 }
 
 /// Builds the rack health-override CRUD surface over `env` for `id`. The shared
-/// checks in [`crate::tests::common::health_crud`] drive these closures.
+/// checks in [`crate::test_support::health`] drive these closures.
 // The four `impl AsyncFn` members are intentionally distinct unnameable closure
 // types; there is nothing to factor into a `type` alias.
 #[allow(clippy::type_complexity)]
@@ -202,6 +202,152 @@ async fn test_rack_health_visible_in_find_racks_by_ids(
     let env = test_env(pool.clone()).await;
     let rack_id = new_rack(&pool).await?;
     rack_crud(&env, rack_id).check_visible_in_find().await;
+    Ok(())
+}
+
+async fn insert_rack_health(env: &TestEnv, id: RackId, report: HealthReport) {
+    let report: rpc::health::HealthReport = report.into();
+    env.api
+        .insert_rack_health_report(Request::new(rpc_forge::InsertRackHealthReportRequest {
+            rack_id: Some(id),
+            health_report_entry: Some(rpc_forge::HealthReportEntry {
+                report: Some(report),
+                mode: rpc_forge::HealthReportApplyMode::Replace as i32,
+            }),
+        }))
+        .await
+        .unwrap();
+}
+
+async fn rack_health_history(
+    env: &TestEnv,
+    id: RackId,
+    start_time: Option<chrono::DateTime<chrono::Utc>>,
+    end_time: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<rpc_forge::HealthHistoryRecord> {
+    env.api
+        .find_rack_health_histories(Request::new(rpc_forge::RackHealthHistoriesRequest {
+            rack_ids: vec![id.clone()],
+            start_time: start_time.map(Into::into),
+            end_time: end_time.map(Into::into),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .histories
+        .remove(&id.to_string())
+        .unwrap_or_default()
+        .records
+}
+
+/// The rack controller records a health-history snapshot each iteration; the
+/// DB layer deduplicates unchanged observations and only appends when the
+/// aggregate health content changes. This exercises that path end-to-end
+/// through the `FindRackHealthHistories` RPC.
+#[crate::sqlx_test]
+async fn test_rack_health_history_records_and_deduplicates(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = test_env(pool.clone()).await;
+    let id = new_rack(&pool).await?;
+
+    insert_rack_health(&env, id.clone(), leak_alert_report("dsx-exchange-consumer")).await;
+    env.run_rack_controller_iteration().await;
+    let after_first = rack_health_history(&env, id.clone(), None, None)
+        .await
+        .len();
+    assert!(
+        after_first >= 1,
+        "expected at least one health-history record after the first iteration"
+    );
+
+    env.run_rack_controller_iteration().await;
+    let after_second = rack_health_history(&env, id.clone(), None, None)
+        .await
+        .len();
+    assert_eq!(
+        after_first, after_second,
+        "unchanged aggregate health must not add a new record"
+    );
+
+    insert_rack_health(
+        &env,
+        id.clone(),
+        empty_healthy_report("dsx-exchange-consumer"),
+    )
+    .await;
+    env.run_rack_controller_iteration().await;
+    let after_change = rack_health_history(&env, id.clone(), None, None)
+        .await
+        .len();
+    assert_eq!(
+        after_change,
+        after_second + 1,
+        "changed aggregate health must append exactly one record"
+    );
+
+    Ok(())
+}
+
+/// The `FindRackHealthHistories` handler must forward both time bounds from the
+/// request into the shared query. This proves the rack-specific wiring; the
+/// shared range-filtering query in `find_by_object_ids` is also exercised by
+/// the machine time-range test.
+#[crate::sqlx_test]
+async fn test_rack_health_history_respects_time_range(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = test_env(pool.clone()).await;
+    let id = new_rack(&pool).await?;
+
+    let before = chrono::Utc::now();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    insert_rack_health(&env, id.clone(), leak_alert_report("dsx-exchange-consumer")).await;
+    env.run_rack_controller_iteration().await;
+
+    let in_range =
+        rack_health_history(&env, id.clone(), Some(before), Some(chrono::Utc::now())).await;
+    assert!(
+        !in_range.is_empty(),
+        "a range bracketing the write must return the record"
+    );
+
+    let ended_before = rack_health_history(&env, id.clone(), None, Some(before)).await;
+    assert!(
+        ended_before.is_empty(),
+        "records written after end_time must be excluded"
+    );
+
+    let starts_future = rack_health_history(
+        &env,
+        id.clone(),
+        Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        None,
+    )
+    .await;
+    assert!(
+        starts_future.is_empty(),
+        "records written before start_time must be excluded"
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_find_rack_health_histories_rejects_empty_ids(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = test_env(pool).await;
+    let status = env
+        .api
+        .find_rack_health_histories(Request::new(rpc_forge::RackHealthHistoriesRequest {
+            rack_ids: vec![],
+            start_time: None,
+            end_time: None,
+        }))
+        .await
+        .expect_err("empty rack_ids must be rejected");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
     Ok(())
 }
 

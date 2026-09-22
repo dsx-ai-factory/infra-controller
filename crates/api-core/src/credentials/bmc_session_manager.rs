@@ -17,24 +17,35 @@
 
 //! Per-SPIFFE-caller BMC Redfish session token manager.
 //!
-//! Issues one live `X-Auth-Token` per `(SPIFFE service id, BMC MAC)` pair by
-//! calling `nv-redfish` directly. Every call to [`BmcSessionManager::rotate`]
-//! revokes the prior session (if any) and creates a new one.
+//! Every call to [`BmcSessionManager::issue_credentials`] mints a **fresh**
+//! Redfish session by calling `nv-redfish` directly, and never touches a
+//! session it did not just create. Redfish's `SessionService` supports
+//! concurrent sessions, so replicas that share a SPIFFE identity each hold
+//! their own token instead of revoking each other's -- the failure mode a
+//! one-session-per-identity discipline created, where two `bmc-proxy`
+//! replicas alternately invalidated one another and looped on 401s.
+//!
+//! ## Slot bounding
+//!
+//! Session slots on a BMC are finite, so minting is paired with a cap:
+//! after a successful mint, the caller's oldest sessions beyond
+//! `max_sessions_per_caller` (per `(SPIFFE service id, BMC MAC)`) are
+//! best-effort revoked, oldest first. Sessions whose owners vanished
+//! without revocation expire via the BMC's own idle timeout.
 //!
 //! ## Persistence model
 //!
-//! The outstanding session `@odata.id` for each pair is persisted in the
+//! Each outstanding session's `@odata.id` is persisted as one row in the
 //! `bmc_redfish_sessions` Postgres table behind the [`BmcSessionStore`]
 //! trait. The `X-Auth-Token` itself is returned to the caller once and is
-//! never stored anywhere by this manager. The DB row exists purely so the
-//! next rotate (and [`BmcSessionManager::flush_mac`]) knows which session
-//! resource to `DELETE` on the BMC before issuing a new one.
+//! never stored anywhere by this manager. The rows exist purely so a later
+//! revoke -- cap enforcement or [`BmcSessionManager::flush_mac`] -- knows
+//! which session resources to `DELETE` on the BMC.
 //!
-//! Multiple API replicas may concurrently rotate the same pair. We do not
-//! serialize across replicas: in the worst case a race produces one orphan
-//! session on the BMC that expires via the BMC's idle-timeout. Within a
-//! single replica, a per-BMC `tokio::sync::Mutex` serializes all rotates
-//! against the same MAC.
+//! Multiple API replicas may concurrently mint for the same pair; nothing
+//! needs to serialize across replicas, since no replica touches a session
+//! it did not create. Within a single replica, a per-BMC
+//! `tokio::sync::Mutex` serializes all mints against the same MAC.
 //!
 //! ## Lifecycle hooks
 //!
@@ -44,19 +55,19 @@
 //!   wiped). Orphans expire via the BMC idle timer.
 //! * [`BmcSessionManager::note_credentials_updated`] -- intended for use
 //!   when the BMC root credentials are set or rotated. Rows are
-//!   intentionally retained so the next rotate revokes the now-stale
-//!   sessions with the new credentials before issuing a fresh one.
+//!   intentionally retained so a later mint's cap enforcement can clean up
+//!   the now-stale sessions with the new credentials.
 //!
 //! ## Lockout-avoidance circuit breaker
 //!
 //! Each [`BmcSessionManager`] tracks an in-memory per-BMC counter of
 //! consecutive HTTP 401/403 responses returned during session creation.
 //! Once that counter reaches the configured threshold the breaker trips and
-//! any subsequent [`BmcSessionManager::rotate`] call for the same BMC
-//! short-circuits with [`BmcSessionError::AvoidLockout`] rather than
-//! attempting another login (which could exhaust the BMC root account's
-//! retry budget). The breaker is cleared by:
-//!   * a successful [`BmcSessionManager::rotate`] (online recovery),
+//! any subsequent mint for the same BMC short-circuits with
+//! [`BmcSessionError::AvoidLockout`] rather than attempting another login
+//! (which could exhaust the BMC root account's retry budget). The breaker
+//! is cleared by:
+//!   * a successful mint (online recovery),
 //!   * [`BmcSessionManager::flush_mac`] (credentials deleted), or
 //!   * [`BmcSessionManager::note_credentials_updated`] (credentials set or
 //!     rotated).
@@ -78,12 +89,13 @@ use carbide_redfish::nv_redfish::{BmcError, NvRedfishClientPool, RedfishBmc};
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
-use db::bmc_redfish_session;
+use db::ConditionalWrite;
+use db::bmc_redfish_session::{self, SessionNotOwned};
 use mac_address::MacAddress;
 use model::bmc_redfish_session::StoredSession;
 use nv_redfish::Error as NvError;
 use nv_redfish::core::{EntityTypeRef as _, ODataId};
-use nv_redfish::session_service::SessionCreate;
+use nv_redfish::session_service::{SessionCollection, SessionCreate};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
@@ -214,10 +226,10 @@ impl carbide_instrument::DynamicMessage for BmcSessionCleanupFailed {
     fn message(&self) -> &'static str {
         match self.operation {
             BmcSessionCleanupOperation::RevokePriorSession => {
-                "failed to revoke prior BMC session; continuing with new session creation"
+                "failed to revoke an excess BMC session; it will leak until BMC idle timeout"
             }
             BmcSessionCleanupOperation::ListSessionsForRevoke => {
-                "failed to list BMC sessions for prior-session revoke; continuing"
+                "failed to list BMC sessions for excess-session revoke; continuing"
             }
             BmcSessionCleanupOperation::RevokeUnpersistedSession => {
                 "failed to revoke just-created session after store upsert failed; it will leak until BMC idle timeout"
@@ -323,18 +335,33 @@ struct LockoutState {
 /// [`BmcSessionError::Store`] so the manager's surface stays uniform.
 #[async_trait]
 pub(crate) trait BmcSessionStore: Send + Sync {
-    async fn get(
+    /// Every outstanding session for `(spiffe_service_id, bmc_mac)`,
+    /// oldest first.
+    async fn find_by_owner(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
-    ) -> Result<Option<StoredSession>, BmcSessionError>;
+    ) -> Result<Vec<StoredSession>, BmcSessionError>;
 
-    async fn upsert(
+    /// Records a newly created session as one more row for its owner.
+    /// A row already naming this `(bmc_mac, session_odata_id)` describes a
+    /// session the BMC has since replaced, so the insert takes it over.
+    async fn insert(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
         session_odata_id: &str,
     ) -> Result<(), BmcSessionError>;
+
+    /// `delete_session` removes one session row only if it belongs to this owner.
+    /// A missing or differently owned row returns `NotApplied`; the caller must
+    /// leave the remote session alone.
+    async fn delete_session(
+        &self,
+        spiffe_service_id: &str,
+        bmc_mac: MacAddress,
+        session_odata_id: &str,
+    ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError>;
 
     async fn delete_by_mac(&self, bmc_mac: MacAddress) -> Result<(), BmcSessionError>;
 }
@@ -352,22 +379,22 @@ impl PgBmcSessionStore {
 
 #[async_trait]
 impl BmcSessionStore for PgBmcSessionStore {
-    async fn get(
+    async fn find_by_owner(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
-    ) -> Result<Option<StoredSession>, BmcSessionError> {
+    ) -> Result<Vec<StoredSession>, BmcSessionError> {
         let mut conn = self
             .pool
             .acquire()
             .await
             .map_err(|err| BmcSessionError::Store(err.to_string()))?;
-        bmc_redfish_session::get(conn.as_mut(), spiffe_service_id, bmc_mac)
+        bmc_redfish_session::find_by_owner(conn.as_mut(), spiffe_service_id, bmc_mac)
             .await
             .map_err(|err| BmcSessionError::Store(err.to_string()))
     }
 
-    async fn upsert(
+    async fn insert(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
@@ -378,9 +405,30 @@ impl BmcSessionStore for PgBmcSessionStore {
             .acquire()
             .await
             .map_err(|err| BmcSessionError::Store(err.to_string()))?;
-        bmc_redfish_session::upsert(conn.as_mut(), spiffe_service_id, bmc_mac, session_odata_id)
+        bmc_redfish_session::insert(conn.as_mut(), spiffe_service_id, bmc_mac, session_odata_id)
             .await
             .map_err(|err| BmcSessionError::Store(err.to_string()))
+    }
+
+    async fn delete_session(
+        &self,
+        spiffe_service_id: &str,
+        bmc_mac: MacAddress,
+        session_odata_id: &str,
+    ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|err| BmcSessionError::Store(err.to_string()))?;
+        bmc_redfish_session::delete_session(
+            conn.as_mut(),
+            spiffe_service_id,
+            bmc_mac,
+            session_odata_id,
+        )
+        .await
+        .map_err(|err| BmcSessionError::Store(err.to_string()))
     }
 
     async fn delete_by_mac(&self, bmc_mac: MacAddress) -> Result<(), BmcSessionError> {
@@ -404,6 +452,9 @@ pub(crate) struct BmcSessionManager {
     lockouts: Mutex<HashMap<MacAddress, LockoutState>>,
     lockout_threshold: u32,
     allow_basic_auth_fallback: bool,
+    /// Cap on outstanding sessions per `(SPIFFE service id, BMC MAC)`;
+    /// a mint that pushes past it revokes the caller's oldest sessions.
+    max_sessions_per_caller: usize,
     no_session_service: Mutex<HashSet<MacAddress>>,
 }
 
@@ -414,6 +465,7 @@ impl BmcSessionManager {
         store: Arc<dyn BmcSessionStore>,
         lockout_threshold: u32,
         allow_basic_auth_fallback: bool,
+        max_sessions_per_caller: usize,
     ) -> Self {
         Self {
             redfish_pool,
@@ -423,21 +475,25 @@ impl BmcSessionManager {
             lockouts: Mutex::new(HashMap::new()),
             lockout_threshold: lockout_threshold.max(1),
             allow_basic_auth_fallback,
+            max_sessions_per_caller: max_sessions_per_caller.max(1),
             no_session_service: Mutex::new(HashSet::new()),
         }
     }
 
-    /// Revoke the prior session (if any) for the given `(spiffe_service_id,
-    /// bmc_mac)` pair, then create a brand new session against the BMC at
-    /// `bmc_addr` and return its token.
-    async fn rotate(
+    /// Create a brand new session against the BMC at `bmc_addr` and return
+    /// its token, then revoke this caller's oldest sessions beyond the cap.
+    ///
+    /// Never touches a session another mint created below the cap, so any
+    /// number of callers sharing `spiffe_service_id` can hold live tokens
+    /// concurrently.
+    async fn mint_session(
         &self,
         spiffe_service_id: &str,
         bmc_mac: MacAddress,
         bmc_addr: SocketAddr,
     ) -> Result<SessionEntry, BmcSessionError> {
         let mac_lock = self.acquire_mac_lock(bmc_mac).await;
-        let _mac_guard = mac_lock.lock().await;
+        let mac_guard = mac_lock.lock().await;
 
         if let Some(err) = self.check_not_locked_out(bmc_mac).await {
             return Err(err);
@@ -450,7 +506,7 @@ impl BmcSessionManager {
             }
         };
 
-        let service_root = match self.redfish_pool.service_root(bmc_addr, creds).await {
+        let service_root = match self.redfish_pool.service_root(bmc_addr, Some(creds)).await {
             Ok(root) => root,
             Err(err) => return Err(self.classify_and_map(err, bmc_mac, bmc_addr).await),
         };
@@ -471,47 +527,6 @@ impl BmcSessionManager {
             }
             Err(err) => return Err(self.classify_and_map(err, bmc_mac, bmc_addr).await),
         };
-
-        // We try to revoke previous session, best effort, if we fail we still try to
-        // create a new session
-        if let Some(prior) = self.store.get(spiffe_service_id, bmc_mac).await? {
-            let prior_id = ODataId::from(prior.session_odata_id);
-            match sessions.members().await {
-                Ok(members) => {
-                    if let Some(prior_session) = members
-                        .into_iter()
-                        .find(|m| m.raw().odata_id() == &prior_id)
-                    {
-                        if let Err(err) = prior_session.delete().await {
-                            carbide_instrument::emit(BmcSessionCleanupFailed {
-                                operation: BmcSessionCleanupOperation::RevokePriorSession,
-                                bmc_mac_address: bmc_mac,
-                                spiffe_service_id: Some(spiffe_service_id.to_owned()),
-                                session: Some(prior_id),
-                                error: format!("{err:?}"),
-                            });
-                        }
-                    } else {
-                        tracing::info!(
-                            bmc_mac_address = %bmc_mac,
-                            spiffe_service_id,
-                            session = %prior_id,
-                            "prior BMC session no longer present in Sessions collection; \
-                             skipping revoke"
-                        );
-                    }
-                }
-                Err(err) => {
-                    carbide_instrument::emit(BmcSessionCleanupFailed {
-                        operation: BmcSessionCleanupOperation::ListSessionsForRevoke,
-                        bmc_mac_address: bmc_mac,
-                        spiffe_service_id: Some(spiffe_service_id.to_owned()),
-                        session: None,
-                        error: format!("{err:?}"),
-                    });
-                }
-            }
-        }
 
         let created = match sessions
             .create_session(&SessionCreate::builder(username, password).build())
@@ -539,7 +554,7 @@ impl BmcSessionManager {
         // If persist fails we revoke token to avoid exhaust of session limit
         if let Err(store_err) = self
             .store
-            .upsert(spiffe_service_id, bmc_mac, &location.to_string())
+            .insert(spiffe_service_id, bmc_mac, &location.to_string())
             .await
         {
             if let Err(revoke_err) = created.delete().await {
@@ -556,10 +571,120 @@ impl BmcSessionManager {
 
         self.clear_lockout(bmc_mac).await;
 
+        // Cap enforcement is best-effort housekeeping that cannot change the
+        // token being returned, and on BMCs without $expand it costs one GET
+        // per live session -- so release the per-MAC lock first rather than
+        // stalling every concurrent mint for this BMC behind it.
+        drop(mac_guard);
+
+        self.revoke_sessions_beyond_cap(spiffe_service_id, bmc_mac, &location, &sessions)
+            .await;
+
         Ok(SessionEntry {
             token,
             session_odata_id: location,
         })
+    }
+
+    /// Best-effort revoke of this caller's oldest sessions beyond
+    /// `max_sessions_per_caller`, so a caller that refetches -- restarts,
+    /// 401 recoveries, extra replicas -- cannot grow its session count
+    /// without bound. Failures are counted and logged, never propagated:
+    /// the fresh session was already minted and belongs to the caller
+    /// regardless.
+    ///
+    /// Runs outside the per-MAC lock; concurrent passes at worst revoke the
+    /// same already-dead session, which the missing-member check tolerates.
+    ///
+    /// Claiming a row before its remote `DELETE` leaves one residual window
+    /// (a single request round-trip wide): a concurrent mint can be handed
+    /// the same reused `@odata.id` between the two, and the `DELETE` then
+    /// hits that fresh session. All that costs is one 401 on a token whose
+    /// caller refetches and re-mints -- the recovery every caller already
+    /// implements. Closing the window would take either a cross-instance
+    /// per-MAC lock held across BMC I/O, or `If-Match` preconditions on
+    /// nv-redfish's session delete; neither is worth it for that failure.
+    async fn revoke_sessions_beyond_cap(
+        &self,
+        spiffe_service_id: &str,
+        bmc_mac: MacAddress,
+        just_minted: &ODataId,
+        sessions: &SessionCollection<RedfishBmc>,
+    ) {
+        let outstanding = match self.store.find_by_owner(spiffe_service_id, bmc_mac).await {
+            Ok(rows) => rows,
+            Err(err) => {
+                carbide_instrument::emit(BmcSessionCleanupFailed {
+                    operation: BmcSessionCleanupOperation::ListSessionsForRevoke,
+                    bmc_mac_address: bmc_mac,
+                    spiffe_service_id: Some(spiffe_service_id.to_owned()),
+                    session: None,
+                    error: err.to_string(),
+                });
+                return;
+            }
+        };
+
+        let excess = sessions_beyond_cap(outstanding, self.max_sessions_per_caller, just_minted);
+        if excess.is_empty() {
+            return;
+        }
+
+        let members = match sessions.members().await {
+            Ok(members) => members,
+            Err(err) => {
+                carbide_instrument::emit(BmcSessionCleanupFailed {
+                    operation: BmcSessionCleanupOperation::ListSessionsForRevoke,
+                    bmc_mac_address: bmc_mac,
+                    spiffe_service_id: Some(spiffe_service_id.to_owned()),
+                    session: None,
+                    error: format!("{err:?}"),
+                });
+                return;
+            }
+        };
+
+        for row in excess {
+            let session_id = ODataId::from(row.session_odata_id);
+
+            // Delete the owned row before deleting the session on the BMC. If the
+            // row is missing or belongs to another caller, skip the remote DELETE.
+            // When the BMC reuses `@odata.id`, the old session is already gone.
+            match self
+                .store
+                .delete_session(spiffe_service_id, bmc_mac, &session_id.to_string())
+                .await
+            {
+                Ok(ConditionalWrite::Applied(())) => {}
+                Ok(ConditionalWrite::NotApplied(SessionNotOwned)) => continue,
+                Err(err) => {
+                    carbide_instrument::emit(BmcSessionCleanupFailed {
+                        operation: BmcSessionCleanupOperation::DeleteSessionRows,
+                        bmc_mac_address: bmc_mac,
+                        spiffe_service_id: Some(spiffe_service_id.to_owned()),
+                        session: Some(session_id),
+                        error: err.to_string(),
+                    });
+                    continue;
+                }
+            }
+
+            // A missing member means the BMC already expired the session. A
+            // failed delete leaks it until the BMC idle timeout -- the row is
+            // already claimed, and re-inserting it could stomp a takeover, so
+            // best effort ends here.
+            if let Some(session) = members.iter().find(|m| m.raw().odata_id() == &session_id)
+                && let Err(err) = session.delete().await
+            {
+                carbide_instrument::emit(BmcSessionCleanupFailed {
+                    operation: BmcSessionCleanupOperation::RevokePriorSession,
+                    bmc_mac_address: bmc_mac,
+                    spiffe_service_id: Some(spiffe_service_id.to_owned()),
+                    session: Some(session_id),
+                    error: format!("{err:?}"),
+                });
+            }
+        }
     }
 
     pub(crate) async fn issue_credentials(
@@ -570,7 +695,7 @@ impl BmcSessionManager {
     ) -> Result<BmcAuthMaterial, BmcSessionError> {
         if !self.allow_basic_auth_fallback {
             return self
-                .rotate(spiffe_service_id, bmc_mac, bmc_addr)
+                .mint_session(spiffe_service_id, bmc_mac, bmc_addr)
                 .await
                 .map(BmcAuthMaterial::Session);
         }
@@ -581,7 +706,10 @@ impl BmcSessionManager {
             return Ok(BmcAuthMaterial::Basic(creds));
         }
 
-        match self.rotate(spiffe_service_id, bmc_mac, bmc_addr).await {
+        match self
+            .mint_session(spiffe_service_id, bmc_mac, bmc_addr)
+            .await
+        {
             Ok(entry) => Ok(BmcAuthMaterial::Session(entry)),
             Err(BmcSessionError::NoSessionService { .. }) => {
                 let newly_cached = self.no_session_service.lock().await.insert(bmc_mac);
@@ -740,6 +868,30 @@ impl BmcSessionManager {
     }
 }
 
+/// The sessions a caller must give up to fit under `cap`: the oldest ones,
+/// keeping the newest `cap`. `outstanding` is expected oldest-first, as
+/// [`BmcSessionStore::find_by_owner`] returns it, and to contain the row for
+/// `just_minted`.
+///
+/// `just_minted` is excluded *before* the excess is selected: concurrent
+/// replicas can mint within the same server-side `now()`, and an `issued_at`
+/// tie is broken lexically, which can sort the just-minted row among the
+/// "oldest". The session whose token is about to be handed out must survive,
+/// and skipping it may not shrink the revocation count -- otherwise a tie
+/// would leave the caller one over the cap.
+fn sessions_beyond_cap(
+    outstanding: Vec<StoredSession>,
+    cap: usize,
+    just_minted: &ODataId,
+) -> Vec<StoredSession> {
+    let excess = outstanding.len().saturating_sub(cap);
+    outstanding
+        .into_iter()
+        .filter(|row| ODataId::from(row.session_odata_id.clone()) != *just_minted)
+        .take(excess)
+        .collect()
+}
+
 fn classify_unauthorized(err: &NvError<RedfishBmc>) -> Option<u16> {
     let NvError::Bmc(BmcError::InvalidResponse { status, .. }) = err else {
         return None;
@@ -766,6 +918,8 @@ mod tests {
     };
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::{Check, check_values, value_scenarios};
+    use db::ConditionalWrite;
+    use db::bmc_redfish_session::SessionNotOwned;
     use mac_address::MacAddress;
     use sqlx::types::chrono::Utc;
     use tokio::sync::Mutex;
@@ -780,54 +934,91 @@ mod tests {
     }
 
     const TEST_LOCKOUT_THRESHOLD: u32 = 3;
+    const TEST_MAX_SESSIONS_PER_CALLER: usize = 4;
     const CLEANUP_FAILURE_METRIC: &str = "carbide_bmc_session_cleanup_failures_total";
 
+    /// One row per session, insertion-ordered like the Postgres store's
+    /// `issued_at` ordering (rows are only ever appended).
     #[derive(Default)]
     struct InMemoryBmcSessionStore {
-        rows: Mutex<HashMap<(String, MacAddress), StoredSession>>,
+        rows: Mutex<Vec<StoredSession>>,
     }
 
     impl InMemoryBmcSessionStore {
         fn new() -> Arc<Self> {
             Arc::new(Self::default())
         }
+
+        async fn rows(&self) -> Vec<StoredSession> {
+            self.rows.lock().await.clone()
+        }
     }
 
     #[async_trait]
     impl BmcSessionStore for InMemoryBmcSessionStore {
-        async fn get(
+        async fn find_by_owner(
             &self,
             spiffe_service_id: &str,
             bmc_mac: MacAddress,
-        ) -> Result<Option<StoredSession>, BmcSessionError> {
+        ) -> Result<Vec<StoredSession>, BmcSessionError> {
             Ok(self
                 .rows
                 .lock()
                 .await
-                .get(&(spiffe_service_id.to_owned(), bmc_mac))
-                .cloned())
+                .iter()
+                .filter(|row| {
+                    row.spiffe_service_id == spiffe_service_id && row.bmc_mac_address == bmc_mac
+                })
+                .cloned()
+                .collect())
         }
 
-        async fn upsert(
+        async fn insert(
             &self,
             spiffe_service_id: &str,
             bmc_mac: MacAddress,
             session_odata_id: &str,
         ) -> Result<(), BmcSessionError> {
-            self.rows.lock().await.insert(
-                (spiffe_service_id.to_owned(), bmc_mac),
-                StoredSession {
-                    spiffe_service_id: spiffe_service_id.to_owned(),
-                    bmc_mac_address: bmc_mac,
-                    session_odata_id: session_odata_id.to_owned(),
-                    issued_at: Utc::now(),
-                },
-            );
+            let mut rows = self.rows.lock().await;
+            // Mirror the Postgres ON CONFLICT: a colliding row describes a
+            // session the BMC has already replaced, so it is taken over.
+            rows.retain(|row| {
+                row.bmc_mac_address != bmc_mac || row.session_odata_id != session_odata_id
+            });
+            rows.push(StoredSession {
+                spiffe_service_id: spiffe_service_id.to_owned(),
+                bmc_mac_address: bmc_mac,
+                session_odata_id: session_odata_id.to_owned(),
+                issued_at: Utc::now(),
+            });
             Ok(())
         }
 
+        async fn delete_session(
+            &self,
+            spiffe_service_id: &str,
+            bmc_mac: MacAddress,
+            session_odata_id: &str,
+        ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError> {
+            let mut rows = self.rows.lock().await;
+            let before = rows.len();
+            rows.retain(|row| {
+                row.spiffe_service_id != spiffe_service_id
+                    || row.bmc_mac_address != bmc_mac
+                    || row.session_odata_id != session_odata_id
+            });
+            Ok(if rows.len() < before {
+                ConditionalWrite::Applied(())
+            } else {
+                ConditionalWrite::NotApplied(SessionNotOwned)
+            })
+        }
+
         async fn delete_by_mac(&self, bmc_mac: MacAddress) -> Result<(), BmcSessionError> {
-            self.rows.lock().await.retain(|(_, m), _| *m != bmc_mac);
+            self.rows
+                .lock()
+                .await
+                .retain(|row| row.bmc_mac_address != bmc_mac);
             Ok(())
         }
     }
@@ -836,21 +1027,30 @@ mod tests {
 
     #[async_trait]
     impl BmcSessionStore for DeleteFailingBmcSessionStore {
-        async fn get(
+        async fn find_by_owner(
             &self,
             _spiffe_service_id: &str,
             _bmc_mac: MacAddress,
-        ) -> Result<Option<StoredSession>, BmcSessionError> {
-            Ok(None)
+        ) -> Result<Vec<StoredSession>, BmcSessionError> {
+            Ok(Vec::new())
         }
 
-        async fn upsert(
+        async fn insert(
             &self,
             _spiffe_service_id: &str,
             _bmc_mac: MacAddress,
             _session_odata_id: &str,
         ) -> Result<(), BmcSessionError> {
             Ok(())
+        }
+
+        async fn delete_session(
+            &self,
+            _spiffe_service_id: &str,
+            _bmc_mac: MacAddress,
+            _session_odata_id: &str,
+        ) -> Result<ConditionalWrite<(), SessionNotOwned>, BmcSessionError> {
+            Ok(ConditionalWrite::Applied(()))
         }
 
         async fn delete_by_mac(&self, _bmc_mac: MacAddress) -> Result<(), BmcSessionError> {
@@ -888,8 +1088,81 @@ mod tests {
             store.clone(),
             threshold,
             allow_basic_auth_fallback,
+            TEST_MAX_SESSIONS_PER_CALLER,
         ));
         (manager, store)
+    }
+
+    fn cap_row(n: u8) -> StoredSession {
+        StoredSession {
+            spiffe_service_id: "svc".to_string(),
+            bmc_mac_address: mac(0x10),
+            session_odata_id: format!("/sessions/{n}"),
+            // Explicit, distinct timestamps document the oldest-first input
+            // ordering the function's contract assumes.
+            issued_at: Utc::now() + chrono::Duration::seconds(i64::from(n)),
+        }
+    }
+
+    /// Runs the selection over rows `/sessions/0..rows` with the row at
+    /// index `minted` playing the just-minted session.
+    fn observe_sessions_beyond_cap((rows, cap, minted): (u8, usize, u8)) -> Vec<String> {
+        let just_minted = nv_redfish::core::ODataId::from(format!("/sessions/{minted}"));
+        super::sessions_beyond_cap((0..rows).map(cap_row).collect(), cap, &just_minted)
+            .into_iter()
+            .map(|row| row.session_odata_id)
+            .collect()
+    }
+
+    #[test]
+    fn sessions_beyond_cap_keeps_the_newest_cap_sessions() {
+        // The just-minted row is the newest (last index) except where the
+        // scenario says otherwise.
+        check_values(
+            [
+                Check {
+                    scenario: "under cap",
+                    input: (3, 4, 2),
+                    expect: vec![],
+                },
+                Check {
+                    scenario: "exactly at cap",
+                    input: (4, 4, 3),
+                    expect: vec![],
+                },
+                Check {
+                    scenario: "one over revokes the oldest",
+                    input: (5, 4, 4),
+                    expect: vec!["/sessions/0".to_string()],
+                },
+                // Regression: an issued_at tie can sort the just-minted row
+                // among the "oldest". It must survive, and the caller must
+                // still land on the cap -- the next-oldest goes instead.
+                Check {
+                    scenario: "minted row sorted oldest survives, next-oldest goes",
+                    input: (5, 4, 0),
+                    expect: vec!["/sessions/1".to_string()],
+                },
+                Check {
+                    scenario: "many over revoke oldest first",
+                    input: (7, 4, 6),
+                    expect: vec![
+                        "/sessions/0".to_string(),
+                        "/sessions/1".to_string(),
+                        "/sessions/2".to_string(),
+                    ],
+                },
+                // The constructor clamps the configured cap to >= 1, so 0 is
+                // unreachable in production; the function itself still
+                // behaves sanely: everything but the minted row goes.
+                Check {
+                    scenario: "cap of zero revokes everything else",
+                    input: (2, 0, 1),
+                    expect: vec!["/sessions/0".to_string()],
+                },
+            ],
+            observe_sessions_beyond_cap,
+        );
     }
 
     #[test]
@@ -907,9 +1180,9 @@ mod tests {
         session_odata_id: &str,
     ) {
         store
-            .upsert(spiffe_service_id, bmc_mac, session_odata_id)
+            .insert(spiffe_service_id, bmc_mac, session_odata_id)
             .await
-            .expect("in-memory upsert never fails");
+            .expect("in-memory insert never fails");
     }
 
     #[tokio::test]
@@ -927,10 +1200,9 @@ mod tests {
         manager.flush_mac(mac_a).await;
 
         // mac_a rows are gone, mac_b survives.
-        let rows = store.rows.lock().await;
+        let rows = store.rows().await;
         assert_eq!(rows.len(), 1);
-        assert!(rows.keys().all(|(_, m)| *m == mac_b));
-        drop(rows);
+        assert!(rows.iter().all(|row| row.bmc_mac_address == mac_b));
         // lockout was cleared along with the rows.
         assert!(manager.check_not_locked_out(mac_a).await.is_none());
     }
@@ -953,6 +1225,7 @@ mod tests {
             Arc::new(DeleteFailingBmcSessionStore),
             TEST_LOCKOUT_THRESHOLD,
             false,
+            TEST_MAX_SESSIONS_PER_CALLER,
         ));
         let bmc_mac = mac(0xAF);
 
@@ -1017,26 +1290,61 @@ mod tests {
 
         manager.note_credentials_updated(bmc_mac).await;
 
-        // Row is still present so the next rotate can revoke it with the
-        // new creds; the breaker has been cleared.
-        let rows = store.rows.lock().await;
-        assert!(rows.contains_key(&("svc-1".to_string(), bmc_mac)));
-        drop(rows);
+        // Row is still present so a later mint's cap pass can clean up the
+        // stale session with the new creds; the breaker has been cleared.
+        let rows = store.rows().await;
+        assert!(
+            rows.iter()
+                .any(|row| row.spiffe_service_id == "svc-1" && row.bmc_mac_address == bmc_mac)
+        );
         assert!(manager.check_not_locked_out(bmc_mac).await.is_none());
     }
 
+    // The regression this change exists for: callers sharing one SPIFFE
+    // identity each keep their own session row. Under the old
+    // one-row-per-identity model the second insert overwrote (and the
+    // manager then revoked) the first caller's session.
     #[tokio::test]
-    async fn in_memory_store_upsert_replaces_existing_row() {
+    async fn store_keeps_one_row_per_session_for_one_identity() {
         let store = InMemoryBmcSessionStore::new();
         let bmc_mac = mac(0xDD);
-        store.upsert("svc", bmc_mac, "/sessions/v1").await.unwrap();
-        store.upsert("svc", bmc_mac, "/sessions/v2").await.unwrap();
-        let row = store
-            .get("svc", bmc_mac)
+        store.insert("svc", bmc_mac, "/sessions/v1").await.unwrap();
+        store.insert("svc", bmc_mac, "/sessions/v2").await.unwrap();
+
+        let rows = store
+            .find_by_owner("svc", bmc_mac)
             .await
-            .expect("ok")
-            .expect("row present");
-        assert_eq!(row.session_odata_id, "/sessions/v2");
+            .expect("in-memory find never fails");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.session_odata_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/sessions/v1", "/sessions/v2"],
+            "both sessions must coexist, oldest first"
+        );
+    }
+
+    #[tokio::test]
+    async fn store_delete_session_removes_only_that_session() {
+        let store = InMemoryBmcSessionStore::new();
+        let bmc_mac = mac(0xDE);
+        store.insert("svc", bmc_mac, "/sessions/v1").await.unwrap();
+        store.insert("svc", bmc_mac, "/sessions/v2").await.unwrap();
+
+        assert_eq!(
+            store
+                .delete_session("svc", bmc_mac, "/sessions/v1")
+                .await
+                .expect("in-memory delete never fails"),
+            ConditionalWrite::Applied(())
+        );
+
+        let rows = store
+            .find_by_owner("svc", bmc_mac)
+            .await
+            .expect("in-memory find never fails");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_odata_id, "/sessions/v2");
     }
 
     #[tokio::test]
@@ -1051,12 +1359,13 @@ mod tests {
             store,
             TEST_LOCKOUT_THRESHOLD,
             false,
+            TEST_MAX_SESSIONS_PER_CALLER,
         );
 
         let bmc_mac = mac(0xCE);
         let bmc_addr = "127.0.0.1:9999".parse().unwrap();
         let err = manager
-            .rotate("svc-x", bmc_mac, bmc_addr)
+            .mint_session("svc-x", bmc_mac, bmc_addr)
             .await
             .expect_err("should fail with missing root credentials");
         match err {
@@ -1256,6 +1565,7 @@ mod tests {
             store,
             TEST_LOCKOUT_THRESHOLD,
             false,
+            TEST_MAX_SESSIONS_PER_CALLER,
         ));
 
         let bmc_mac = mac(0xAB);
@@ -1266,7 +1576,7 @@ mod tests {
             let manager = manager.clone();
             let spiffe = format!("svc-{i}");
             handles.push(tokio::spawn(async move {
-                let _ = manager.rotate(&spiffe, bmc_mac, bmc_addr).await;
+                let _ = manager.mint_session(&spiffe, bmc_mac, bmc_addr).await;
             }));
         }
         for h in handles {
@@ -1485,7 +1795,7 @@ mod tests {
             "prior session revoke fails" {
                 CleanupFailureCase::RevokePriorSession => expected_cleanup_failure(
                     "bmc_session_cleanup_failed",
-                    "failed to revoke prior BMC session; continuing with new session creation",
+                    "failed to revoke an excess BMC session; it will leak until BMC idle timeout",
                     "revoke_prior_session",
                     Some(TEST_SPIFFE_SERVICE_ID),
                     Some(TEST_SESSION_ID),
@@ -1495,7 +1805,7 @@ mod tests {
             "session listing for prior revoke fails" {
                 CleanupFailureCase::ListSessionsForRevoke => expected_cleanup_failure(
                     "bmc_session_cleanup_failed",
-                    "failed to list BMC sessions for prior-session revoke; continuing",
+                    "failed to list BMC sessions for excess-session revoke; continuing",
                     "list_sessions_for_revoke",
                     Some(TEST_SPIFFE_SERVICE_ID),
                     None,
@@ -1760,7 +2070,7 @@ mod tests {
 
         let bmc_addr = "127.0.0.1:9999".parse().unwrap();
         let err = manager
-            .rotate("svc-locked", bmc_mac, bmc_addr)
+            .mint_session("svc-locked", bmc_mac, bmc_addr)
             .await
             .expect_err("rotate must refuse to contact a locked-out BMC");
         match err {
@@ -1828,6 +2138,7 @@ mod tests {
             store,
             TEST_LOCKOUT_THRESHOLD,
             false,
+            TEST_MAX_SESSIONS_PER_CALLER,
         );
 
         let bmc_mac = mac(0xA1);

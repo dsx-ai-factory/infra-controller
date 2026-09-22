@@ -22,6 +22,7 @@ pub mod auth;
 pub mod conv;
 pub mod dpu_bios;
 pub mod error;
+pub mod host_interface;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
@@ -35,7 +36,7 @@ use carbide_instrument::{Event, LabelValue, emit};
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialType, Credentials};
 use carbide_utils::HostPortPair;
 use carbide_utils::redfish::BmcAccessInfo;
-pub use error::RedfishClientCreationError;
+pub use error::{CredentialOpError, RedfishClientCreationError};
 use libredfish::Redfish;
 use libredfish::model::service_root::RedfishVendor;
 
@@ -97,15 +98,40 @@ fn emit_dpu_uefi_password_setup_skipped_if_needed(
     true
 }
 
-pub fn new_pool(
+/// The direct pool and its credential-operations handle, backed by one
+/// object. Only this constructor yields a [`BmcCredentialOps`]: it is built
+/// from the raw `libredfish` pool, which an intermediary-routing pool does
+/// not have -- credential operations always authenticate to the BMC itself.
+pub fn new_pool_with_credential_ops(
     credential_reader: Arc<dyn CredentialReader>,
     pool: libredfish::RedfishClientPool,
     proxy_address: Arc<ArcSwap<Option<HostPortPair>>>,
-) -> Arc<dyn RedfishClientPool> {
-    Arc::new(implementation::RedfishClientPoolImpl::new(
+) -> (Arc<dyn RedfishClientPool>, Arc<dyn BmcCredentialOps>) {
+    let inner = Arc::new(implementation::RedfishClientPoolImpl::new(
         credential_reader,
         pool,
         proxy_address,
+    ));
+    (inner.clone(), inner)
+}
+
+/// A pool whose clients all target nico-bmc-proxy: the proxy resolves the
+/// BMC from the RFC 7239 `Forwarded` header and authenticates upstream
+/// itself, so these clients carry no BMC credentials, and the pool rejects
+/// `RedfishAuth::Direct` and non-443 BMC ports loudly. It implements only
+/// [`RedfishClientPool`], never the sealed [`BmcCredentialOps`]. `pool`
+/// should be built with the client identity the proxy's mTLS listener
+/// expects, and *without* `danger_accept_invalid_certs` -- the proxy,
+/// unlike a BMC, presents a verifiable certificate.
+pub fn new_proxied_pool(
+    credential_reader: Arc<dyn CredentialReader>,
+    pool: libredfish::RedfishClientPool,
+    proxy: HostPortPair,
+) -> Arc<dyn RedfishClientPool> {
+    Arc::new(implementation::ProxiedRedfishClientPoolImpl::new(
+        credential_reader,
+        pool,
+        proxy,
     ))
 }
 
@@ -165,20 +191,54 @@ pub trait RedfishClientPool: Send + Sync + 'static {
         )
         .await
     }
+}
 
-    // clear_host_uefi_password updates the UEFI password from Forge's sitewide password to an empty string
-    // The assumption is that this function will only be called on a machine that already updated the UEFI password to match the Forge sitewide password.
-    //
-    // `current_device_credentials` is the credential the device currently
-    // carries (the host UEFI password to authenticate the clear with). The
-    // caller resolves it -- this low-level crate intentionally knows nothing
-    // about credential versions or the rotation table; it just applies the
-    // password it is handed.
+// Seals `BmcCredentialOps`: implementations outside this crate would defeat
+// the wrong-pool guard the trait exists to provide.
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Credential-lifecycle operations against BMCs and UEFI firmware: setting,
+/// rotating, validating, and clearing passwords, plus the vendor probing the
+/// rotation engine needs.
+///
+/// Split off [`RedfishClientPool`] so the type system, not call-site
+/// discipline, decides who may perform them: the trait is sealed, and only
+/// the direct (BMC-authenticating) pool implements it. Handing these
+/// operations to a pool that routes through an intermediary such as
+/// nico-bmc-proxy is then a compile error rather than a runtime guard.
+/// (The clients the direct pool builds can still be *redirected* -- e.g. the
+/// dynamic `site_explorer.bmc_proxy` dev redirect applies to it too -- so
+/// this is a wrong-pool guard, not a wire-path guarantee.)
+///
+/// Every operation creates its own client from `self` (the direct pool), so
+/// a caller cannot accidentally pair a credential operation with a client
+/// built by some other pool.
+#[async_trait]
+pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
+    /// Updates the host UEFI password from Forge's sitewide password to an
+    /// empty string. Assumes the machine has already updated its UEFI
+    /// password to match the Forge sitewide password.
+    ///
+    /// `current_device_credentials` is the credential the device currently
+    /// carries (the host UEFI password to authenticate the clear with). The
+    /// caller resolves it -- this low-level crate intentionally knows nothing
+    /// about credential versions or the rotation table; it just applies the
+    /// password it is handed.
+    ///
+    /// Builds its own Redfish client from `access`; [`CredentialOpError`]
+    /// separates client-creation failures from device-level ones.
     async fn clear_host_uefi_password(
         &self,
-        client: &dyn Redfish,
+        access: &BmcAccessInfo,
         current_device_credentials: Credentials,
-    ) -> Result<Option<String>, RedfishClientCreationError> {
+    ) -> Result<Option<String>, CredentialOpError> {
+        let client = self
+            .client_by_info(access)
+            .await
+            .map_err(CredentialOpError::ClientCreation)?;
+        let client = client.as_ref();
         let Credentials::UsernamePassword {
             password: current_password,
             ..
@@ -189,30 +249,40 @@ pub trait RedfishClientPool: Send + Sync + 'static {
             .await
             .map_err(|err| redact_password(err, current_password.as_str()))
             .map_err(RedfishClientCreationError::RedfishError)
+            .map_err(CredentialOpError::Operation)
     }
 
-    // `sitewide_uefi_credentials` is the site-wide UEFI credential to set on the
-    // device (host_uefi when `dpu` is false, dpu_uefi when true). The caller
-    // resolves it -- this crate knows nothing about credential versions or the
-    // rotation table. The DPU's factory-default password (the credential the
-    // device still carries before this runs) is a hardware constant, so it is
-    // still read here.
+    /// Sets the device's UEFI (BIOS setup) password to the site-wide value.
+    ///
+    /// `sitewide_uefi_credentials` is the site-wide UEFI credential to set on
+    /// the device (host_uefi when `dpu` is false, dpu_uefi when true). The
+    /// caller resolves it -- this crate knows nothing about credential
+    /// versions or the rotation table. The DPU's factory-default password
+    /// (the credential the device still carries before this runs) is a
+    /// hardware constant, so it is still read here.
+    ///
+    /// Builds its own Redfish client from `access`; [`CredentialOpError`]
+    /// separates client-creation failures from device-level ones.
     async fn uefi_setup(
         &self,
-        client: &dyn Redfish,
+        access: &BmcAccessInfo,
         dpu: bool,
         sitewide_uefi_credentials: Credentials,
-    ) -> Result<Option<String>, RedfishClientCreationError> {
+    ) -> Result<Option<String>, CredentialOpError> {
+        let client = self
+            .client_by_info(access)
+            .await
+            .map_err(CredentialOpError::ClientCreation)?;
+        let client = client.as_ref();
         let Credentials::UsernamePassword {
             password: new_password,
             ..
         } = sitewide_uefi_credentials;
         let mut current_password = String::new();
         if dpu {
-            let bios_attrs = client
-                .bios()
-                .await
-                .map_err(RedfishClientCreationError::RedfishError)?;
+            let bios_attrs = client.bios().await.map_err(|err| {
+                CredentialOpError::Operation(RedfishClientCreationError::RedfishError(err))
+            })?;
 
             // Preserve the non-fatal return for now, but this should become a hard
             // failure once callers can reject DPUs that retain factory credentials.
@@ -234,7 +304,10 @@ pub trait RedfishClientPool: Send + Sync + 'static {
                         model: bmc_vendor::DpuModel::Unknown,
                     },
                 })
-                .await?
+                .await
+                // A store read failure is the transient class: the
+                // operation never reached the device.
+                .map_err(|err| CredentialOpError::ClientCreation(err.into()))?
                 .unwrap_or(Credentials::UsernamePassword {
                     username: "".to_string(),
                     password: "bluefield".to_string(),
@@ -254,6 +327,7 @@ pub trait RedfishClientPool: Send + Sync + 'static {
                 .map_err(|err| redact_password(err, new_password.as_str()))
                 .map_err(|err| redact_password(err, current_password.as_str()))
                 .map_err(RedfishClientCreationError::RedfishError)
+                .map_err(CredentialOpError::Operation)
                 .map(|job_id| Some(job_id.unwrap_or_default()));
         } else {
             // For hosts, first try with empty current password (assuming no
@@ -285,6 +359,7 @@ pub trait RedfishClientPool: Send + Sync + 'static {
             .map_err(|err| redact_password(err, new_password.as_str()))
             .map_err(|err| redact_password(err, current_password.as_str()))
             .map_err(RedfishClientCreationError::RedfishError)
+            .map_err(CredentialOpError::Operation)
     }
 
     /// Rotate a UEFI (BIOS setup) password to the site-wide target,
@@ -307,10 +382,15 @@ pub trait RedfishClientPool: Send + Sync + 'static {
     /// handed. All errors are password-redacted before they leave this method.
     async fn rotate_uefi_password(
         &self,
-        client: &dyn Redfish,
+        access: &BmcAccessInfo,
         current_password_candidates: &[String],
         new_password: String,
-    ) -> Result<Option<String>, RedfishClientCreationError> {
+    ) -> Result<Option<String>, CredentialOpError> {
+        let client = self
+            .client_by_info(access)
+            .await
+            .map_err(CredentialOpError::ClientCreation)?;
+        let client = client.as_ref();
         let mut last_err = None;
         for candidate in current_password_candidates {
             match client
@@ -332,9 +412,13 @@ pub trait RedfishClientPool: Send + Sync + 'static {
         // The caller contract guarantees at least one candidate (empty for a
         // never-set host, the factory default for a never-set DPU), so `last_err`
         // is populated whenever the loop fell through without an Ok.
-        Err(RedfishClientCreationError::RedfishError(last_err.expect(
-            "rotate_uefi_password requires at least one current-password candidate",
-        )))
+        Err(CredentialOpError::Operation(
+            RedfishClientCreationError::RedfishError(
+                last_err.expect(
+                    "rotate_uefi_password requires at least one current-password candidate",
+                ),
+            ),
+        ))
     }
 
     /// Rotate a BMC's root password in place, then apply the vendor-specific
@@ -451,6 +535,8 @@ pub trait RedfishClientPool: Send + Sync + 'static {
                     .map_err(|err| redact_password(err, curr_password.as_str()))
                     .map_err(RedfishClientCreationError::RedfishError)?;
             }
+            // Sushy is a development emulator without an AccountService.
+            RedfishVendor::Sushy => {}
             RedfishVendor::Unknown => {
                 // Defensive guard: callers resolve the vendor via
                 // `probe_bmc_vendor` (or site-explorer's `get_redfish_vendor`),
@@ -534,7 +620,7 @@ pub trait RedfishClientPool: Send + Sync + 'static {
     /// BMC rejects them as unauthorized (401/403), and `Err` for a transport or
     /// other failure the caller should treat as a transient tick error.
     ///
-    /// [`set_bmc_root_password`]: RedfishClientPool::set_bmc_root_password
+    /// [`set_bmc_root_password`]: BmcCredentialOps::set_bmc_root_password
     async fn bmc_credentials_valid(
         &self,
         host: &str,
@@ -553,6 +639,63 @@ pub trait RedfishClientPool: Send + Sync + 'static {
 
         match client.get_accounts().await {
             Ok(_) => Ok(true),
+            Err(err) if err.is_unauthorized() => Ok(false),
+            Err(err) => Err(RedfishClientCreationError::RedfishError(err)),
+        }
+    }
+
+    /// Whether the BF4 DPU `service` account authenticates with
+    /// `service_password`, without changing anything.
+    ///
+    /// [`set_bf4_dpu_service_password`] is a single root-authenticated change, so
+    /// a crash after the hardware password changed but before the rotation was
+    /// recorded leaves the `service` account already at the rotate-to value.
+    /// Re-applying that change is a same-value change some BMCs reject with a
+    /// password-reuse policy error, which would falsely quarantine a device that
+    /// is in fact converged. The `dpu_bmc_service` engine calls this on the
+    /// PATCH-failure path to tell that benign rejection from a real failure:
+    /// authenticating as `service` with the rotate-to password proves the
+    /// hardware already carries it.
+    ///
+    /// Reads the account collection (`AccountService/Accounts`) through an
+    /// uninitialized `Unknown` client. Unlike [`bmc_credentials_valid`] -- which
+    /// probes the fully privileged `root` account and so treats any 401/403 as a
+    /// failed login -- a `403` here counts as **authenticated**: the `service`
+    /// role may be forbidden from listing accounts, but a `403` still proves the
+    /// password was accepted. Only a `401` (or a non-`Direct` credential) means
+    /// the password was rejected.
+    ///
+    /// Returns `Ok(true)` when the password authenticates (`2xx` or `403`),
+    /// `Ok(false)` on `401`, and `Err` for a transport or other failure the
+    /// caller should treat as a transient tick error.
+    ///
+    /// [`set_bf4_dpu_service_password`]: BmcCredentialOps::set_bf4_dpu_service_password
+    /// [`bmc_credentials_valid`]: BmcCredentialOps::bmc_credentials_valid
+    async fn bf4_dpu_service_credentials_valid(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        service_password: String,
+    ) -> Result<bool, RedfishClientCreationError> {
+        let client = self
+            .create_client(
+                host,
+                port,
+                RedfishAuth::Direct("service".to_string(), service_password),
+                Some(RedfishVendor::Unknown),
+            )
+            .await?;
+
+        match client.get_accounts().await {
+            Ok(_) => Ok(true),
+            // Authenticated but not authorized to list accounts: the password is
+            // correct, which is all this probe asks. Must precede the 401 arm
+            // because `is_unauthorized` also matches 403.
+            Err(libredfish::RedfishError::HTTPErrorCode { status_code, .. })
+                if status_code == http::StatusCode::FORBIDDEN =>
+            {
+                Ok(true)
+            }
             Err(err) if err.is_unauthorized() => Ok(false),
             Err(err) => Err(RedfishClientCreationError::RedfishError(err)),
         }
@@ -1179,7 +1322,7 @@ mod tests {
             let sim = RedfishSim::default();
             // Force the anonymous service-root probe to yield an unrecognized
             // vendor so probing falls through to the Chassis Manufacturer.
-            sim.set_service_root_vendor(Some("Contoso".to_string()));
+            sim.set_service_root_vendor(Some("Unrecognized Vendor".to_string()));
             sim.set_chassis_manufacturer(Some(manufacturer.to_string()));
 
             let vendor = sim
@@ -1196,7 +1339,7 @@ mod tests {
     #[tokio::test]
     async fn probe_bmc_vendor_errors_when_vendor_unresolvable() {
         let sim = RedfishSim::default();
-        sim.set_service_root_vendor(Some("Contoso".to_string()));
+        sim.set_service_root_vendor(Some("Unrecognized Vendor".to_string()));
         sim.set_chassis_manufacturer(Some("Acme".to_string()));
 
         let err = sim
@@ -1260,6 +1403,115 @@ mod tests {
                 RedfishClientCreationError::RedfishError(ref e) if !e.is_unauthorized()
             ),
             "expected a non-unauthorized RedfishError, got {err:?}",
+        );
+    }
+
+    /// Minimal in-crate pool double for driving the `BmcCredentialOps`
+    /// *default* bodies (which `RedfishSim` overrides): client creation
+    /// delegates to an inner sim, and the credential store always fails, so
+    /// each test isolates one failure source and asserts its
+    /// [`CredentialOpError`] class.
+    struct ClassificationDouble {
+        sim: RedfishSim,
+        reader: FailingCredentialReader,
+    }
+
+    struct FailingCredentialReader;
+
+    #[async_trait]
+    impl CredentialReader for FailingCredentialReader {
+        async fn get_credentials(
+            &self,
+            _key: &CredentialKey,
+        ) -> Result<Option<Credentials>, carbide_secrets::SecretsError> {
+            Err(carbide_secrets::SecretsError::UfmCredentialReadBlocked {
+                fabric: "store unavailable".to_string(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RedfishClientPool for ClassificationDouble {
+        async fn create_client(
+            &self,
+            host: &str,
+            port: Option<u16>,
+            auth: RedfishAuth,
+            vendor: Option<RedfishVendor>,
+        ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+            self.sim.create_client(host, port, auth, vendor).await
+        }
+
+        fn credential_reader(&self) -> &dyn CredentialReader {
+            &self.reader
+        }
+    }
+
+    impl sealed::Sealed for ClassificationDouble {}
+
+    #[async_trait]
+    impl BmcCredentialOps for ClassificationDouble {}
+
+    fn double_access() -> BmcAccessInfo {
+        BmcAccessInfo {
+            host: "192.0.2.1".to_string(),
+            port: None,
+            mac_address: "00:11:22:33:44:55".parse().unwrap(),
+        }
+    }
+
+    fn site_creds() -> Credentials {
+        Credentials::UsernamePassword {
+            username: String::new(),
+            password: "site-secret".to_string(),
+        }
+    }
+
+    /// A failed client build inside a credential op is the transient
+    /// ([`CredentialOpError::ClientCreation`]) class: call sites retry it
+    /// instead of quarantining the device.
+    #[tokio::test]
+    async fn uefi_setup_client_creation_failure_is_client_creation_class() {
+        let double = ClassificationDouble {
+            sim: RedfishSim::default(),
+            reader: FailingCredentialReader,
+        };
+        double.sim.set_create_client_error("bmc probe timed out");
+        let err = double
+            .uefi_setup(&double_access(), true, site_creds())
+            .await
+            .expect_err("client creation failure must fail the op");
+        assert!(
+            matches!(err, CredentialOpError::ClientCreation(_)),
+            "a failed client build must be the transient class, got {err:?}"
+        );
+    }
+
+    /// The DPU factory-default store read inside `uefi_setup` fails before
+    /// the operation reaches the device, so it is also the transient
+    /// ([`CredentialOpError::ClientCreation`]) class, not a device-level
+    /// `Operation` failure.
+    #[tokio::test]
+    async fn uefi_setup_dpu_store_read_failure_is_client_creation_class() {
+        let double = ClassificationDouble {
+            sim: RedfishSim::default(),
+            reader: FailingCredentialReader,
+        };
+        // Attributes expose a UEFI password field, so the DPU body proceeds
+        // past its probe to the factory-default store read, which fails.
+        double
+            .sim
+            .set_bios_attributes(std::collections::HashMap::from([(
+                "Attributes".to_string(),
+                serde_json::json!({ "CurrentUefiPassword": "" }),
+            )]));
+        let err = double
+            .uefi_setup(&double_access(), true, site_creds())
+            .await
+            .expect_err("store read failure must fail the op");
+        assert!(
+            matches!(err, CredentialOpError::ClientCreation(_)),
+            "a store read failure never reached the device, got {err:?}"
         );
     }
 }

@@ -17,6 +17,7 @@
 
 mod delete;
 mod force_delete;
+mod health_history;
 mod list;
 mod maintenance;
 mod metadata;
@@ -49,4 +50,6 @@ pub(crate) enum Cmd {
     Maintenance(maintenance::Args),
     #[clap(about = "Show rack state history")]
     StateHistory(state_history::Args),
+    #[clap(about = "Show rack health history")]
+    HealthHistory(health_history::Args),
 }

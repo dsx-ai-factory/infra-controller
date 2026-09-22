@@ -186,14 +186,14 @@ func TestAPIVpcCreateRequest_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "test invalid VPC create request - routing profile is unsupported",
+			name: "test valid VPC create request - site-configured routing profile",
 			fields: fields{
 				Name:                      "test-name",
 				SiteID:                    uuid.NewString(),
 				NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
 				RoutingProfile:            cutil.GetPtr("tenant-edge"),
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "test invalid VPC create request - invalid VNI",
@@ -616,11 +616,13 @@ func TestNewAPIVpc(t *testing.T) {
 			},
 		},
 		{
-			name: "get new APIVpc includes routing profile for FNN VPC",
+			name: "get new APIVpc preserves short custom profile and 24-bit active VNI",
 			args: args{
 				dbVpc: func() cdbm.Vpc {
 					fnnVpc := dbVpc
 					fnnVpc.NetworkVirtualizationType = cutil.GetPtr(cdbm.VpcFNN)
+					fnnVpc.RoutingProfile = cutil.GetPtr("x")
+					fnnVpc.ActiveVni = cutil.GetPtr(70000)
 					return fnnVpc
 				}(),
 				dbsds: dbsds,
@@ -635,10 +637,10 @@ func TestNewAPIVpc(t *testing.T) {
 				SiteID:                    util.GetUUIDPtrToStrPtr(&dbVpc.SiteID),
 				NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
 				SlaacEnabled:              true,
-				RoutingProfile:            cutil.GetPtr(APIVpcRoutingProfileInternal),
+				RoutingProfile:            cutil.GetPtr("x"),
 				ControllerVpcID:           util.GetUUIDPtrToStrPtr(dbVpc.ControllerVpcID),
 				RequestedVni:              dbVpc.Vni,
-				Vni:                       dbVpc.ActiveVni,
+				Vni:                       cutil.GetPtr(70000),
 				Status:                    dbVpc.Status,
 				Labels: map[string]string{
 					"zone": "1",
@@ -811,6 +813,15 @@ func TestAPIVpcCreateRequest_ToProto(t *testing.T) {
 		assert.False(t, *got.RoutingProfileOverrides.LeakTenantHostRoutesToUnderlay)
 		require.NotNil(t, got.RoutingProfileOverrides.AllowedAnycastPrefixes)
 	})
+
+	t.Run("forwards persisted power resource group", func(t *testing.T) {
+		persistedPowerResourceGroup := "power-rg-persisted"
+		requestedPowerResourceGroup := "power-rg-requested"
+		vpc := &cdbm.Vpc{ID: id, Org: "org-1", Name: "vpc-a", PowerResourceGroup: &persistedPowerResourceGroup}
+		got := (APIVpcCreateRequest{PowerResourceGroup: &requestedPowerResourceGroup}).ToProto(vpc)
+		require.NotNil(t, got.PowerResourceGroup)
+		assert.Equal(t, persistedPowerResourceGroup, *got.PowerResourceGroup)
+	})
 }
 
 func TestVpcResponseIncludesDisabledSlaacField(t *testing.T) {
@@ -924,4 +935,41 @@ func TestAPIVpcUpdateRequest_ToProto(t *testing.T) {
 		got := (APIVpcUpdateRequest{RoutingProfileOverrides: &APIVpcRoutingProfileOverrides{}}).ToProto(vpc)
 		require.NotNil(t, got.RoutingProfileOverrides)
 	})
+
+	t.Run("preserves power resource group update presence", func(t *testing.T) {
+		vpc := &cdbm.Vpc{ID: id, Name: "vpc-a"}
+		set := "power-rg-a"
+
+		got := (APIVpcUpdateRequest{}).ToProto(vpc)
+		assert.Nil(t, got.PowerResourceGroup)
+
+		got = (APIVpcUpdateRequest{PowerResourceGroup: &set}).ToProto(vpc)
+		require.NotNil(t, got.PowerResourceGroup)
+		assert.Equal(t, set, *got.PowerResourceGroup)
+
+		got = (APIVpcUpdateRequest{PowerResourceGroup: &empty}).ToProto(vpc)
+		require.NotNil(t, got.PowerResourceGroup)
+		assert.Equal(t, "", *got.PowerResourceGroup)
+	})
+}
+
+func TestAPIVpcUpdateRequest_PowerResourceGroupJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    *string
+	}{
+		{name: "omitted", payload: `{}`},
+		{name: "null", payload: `{"powerResourceGroup":null}`},
+		{name: "clear", payload: `{"powerResourceGroup":""}`, want: cutil.GetPtr("")},
+		{name: "set", payload: `{"powerResourceGroup":"power-rg-a"}`, want: cutil.GetPtr("power-rg-a")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var request APIVpcUpdateRequest
+			require.NoError(t, json.Unmarshal([]byte(tt.payload), &request))
+			assert.Equal(t, tt.want, request.PowerResourceGroup)
+		})
+	}
 }

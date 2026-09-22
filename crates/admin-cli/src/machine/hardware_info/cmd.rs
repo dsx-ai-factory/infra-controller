@@ -50,9 +50,17 @@ pub(super) async fn handle_show_machine_hardware_info(
     machine_id: MachineId,
 ) -> CarbideCliResult<()> {
     let machine = api_client.get_machine(machine_id).await?;
-    let discovery_info = machine.discovery_info.ok_or_else(|| {
+    let mut discovery_info = machine.discovery_info.ok_or_else(|| {
         CarbideCliError::GenericError(format!("Machine {machine_id} has no hardware info"))
     })?;
+
+    // `memory_device_groups` didn't exist before condensing was introduced; rehydrate and clear
+    // it here so this raw dump stays byte-for-byte identical to the pre-condensing output, which
+    // only ever had `memory_devices`. The field is `#[serde(skip_serializing_if = "Vec::is_empty")]`
+    // (see rpc/build.rs), so clearing it drops the key entirely. Serializing `discovery_info`
+    // directly (rather than through `serde_json::Value`) keeps the remaining fields in their
+    // original struct declaration order without needing the `preserve_order` feature.
+    discovery_info.rehydrate_memory_devices()?;
 
     match output_format {
         OutputFormat::Json => {

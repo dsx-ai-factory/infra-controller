@@ -90,7 +90,7 @@ Common causes:
 
 | Symptom | Likely cause |
 |---|---|
-| no `nvlink_info` | pre-existing machine has not been populated. |
+| no `nvlink_info` | the NVLink partition manager has not yet populated the machine; check its NMX-C connectivity and reconcile metrics. |
 | NMX-C connect error | TLS, endpoint, or network issue. |
 | partition cleanup pending | stale binding or delayed fabric observation. |
 | placement failure | topology, domain health, or requested instance shape mismatch. |

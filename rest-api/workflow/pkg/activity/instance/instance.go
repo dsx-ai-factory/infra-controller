@@ -55,6 +55,16 @@ func resolvedVpcPrefixIDs(prefixes *corev1.InstanceInterfaceResolvedVpcPrefixes)
 	return prefixes.Ipv6VpcPrefixId, nil
 }
 
+func getDevicelessInterfaceKey(networkResourceID string, isPhysical bool, virtualFunctionID *int) string {
+	if isPhysical {
+		return networkResourceID + "-physical"
+	}
+	if virtualFunctionID == nil {
+		return networkResourceID + "-virtual"
+	}
+	return fmt.Sprintf("%s-virtual-%d", networkResourceID, *virtualFunctionID)
+}
+
 // Activity functions
 
 // UpdateInstancesInDB is a Temporal activity that takes a collection of Instance data pushed by Site Agent and updates the DB
@@ -143,6 +153,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 	ethernetInterfacesToDelete := []*cdbm.Interface{}
 	infiniBandInterfacesToDelete := []*cdbm.InfiniBandInterface{}
+	spectrumXAttachmentsToDelete := []*cdbm.SpectrumXAttachment{}
 	nvLinkInterfacesToDelete := []*cdbm.NVLinkInterface{}
 
 	// Iterate through Instances in the inventory and update them in DB
@@ -177,8 +188,13 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 		// We'll add a 5 second buffer to account for a little clock skew/drift.
 		// The only thing that might be safe to perform is propagation status clearing,
 		// but only if we never allow multiple inventory processes to run concurrently.
-		if time.Since(instance.Updated) < cwutil.InventoryReceiptInterval+(time.Second*5) {
+		if site.IsTimeWithinStaleInventoryThreshold(instance.Updated) {
 			slogger.Warn().Msg("instance updated more recently than inventory received time, skipping processing")
+			continue
+		}
+
+		if controllerInstance.Config == nil {
+			slogger.Warn().Msg("instance config missing from Site inventory, skipping processing")
 			continue
 		}
 
@@ -233,6 +249,11 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			tpmEkCertificateUpdated = cwutil.GetPtr(true)
 		}
 
+		var reportedPowerProfile *string
+		if controllerInstance.Config != nil {
+			reportedPowerProfile = controllerInstance.Config.PowerProfile
+		}
+
 		// NOTE:  When adding new properties, make sure to explicitly check for changes between
 		// the DB instance and the site-reported instance here.
 		//
@@ -241,9 +262,21 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			controllerInstanceID != nil ||
 			isUpdatePending != nil ||
 			tpmEkCertificateUpdated != nil ||
+			!util.PtrsEqual(instance.PowerProfile, reportedPowerProfile) ||
 			!instance.NetworkSecurityGroupPropagationDetails.Equal(sitePropagationStatus)
 
 		if needsUpdate {
+			if instance.PowerProfile != nil && reportedPowerProfile == nil {
+				instance, err = instanceDAO.Clear(ctx, nil, cdbm.InstanceClearInput{
+					InstanceID:   instance.ID,
+					PowerProfile: true,
+				})
+				if err != nil {
+					slogger.Error().Err(err).Msg("failed to clear PowerProfile for Instance in DB")
+					continue
+				}
+			}
+
 			// If the Instance in the DB has propagation details but the site reported no propagation details
 			// then we should clear it in the DB.  Passing along the nil to the Update call would
 			// just ignore the field.
@@ -271,6 +304,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					IsUpdatePending:                        isUpdatePending,
 					IsMissingOnSite:                        isMissingOnSite,
 					TpmEkCertificate:                       controllerInstance.TpmEkCertificate,
+					PowerProfile:                           reportedPowerProfile,
 				},
 			})
 			if serr != nil {
@@ -381,8 +415,10 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 						}
 						interfaceMap[deviceInstanceId] = &curIfc
 					} else if ifc.VpcID == nil && ifc.VpcPrefixID != nil {
-						// FNN interface
-						interfaceMap[ifc.VpcPrefixID.String()] = &curIfc
+						// Device-less FNN interfaces may share a VPC Prefix, so include
+						// the function identity in the reconciliation key.
+						key := getDevicelessInterfaceKey(ifc.VpcPrefixID.String(), ifc.IsPhysical, ifc.VirtualFunctionID)
+						interfaceMap[key] = &curIfc
 					}
 
 					if ifc.SubnetID != nil && ifc.Status != cdbm.InterfaceStatusDeleting {
@@ -423,8 +459,15 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 							// Multi DPU interface
 							ifc, ok = interfaceMap[deviceInstanceId]
 						} else {
-							// FNN interface
-							ifc, ok = interfaceMap[networkDetails.VpcPrefixId.Value]
+							// Device-less FNN interface
+							var virtualFunctionID *int
+							if interfaceConfig.VirtualFunctionId != nil {
+								value := int(*interfaceConfig.VirtualFunctionId)
+								virtualFunctionID = &value
+							}
+							isPhysical := interfaceConfig.FunctionType == corev1.InterfaceFunctionType_PHYSICAL_FUNCTION
+							key := getDevicelessInterfaceKey(networkDetails.VpcPrefixId.Value, isPhysical, virtualFunctionID)
+							ifc, ok = interfaceMap[key]
 						}
 					case *corev1.InstanceInterfaceConfig_SegmentId:
 						ifc, ok = interfaceMap[networkDetails.SegmentId.Value]
@@ -674,12 +717,155 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 		// Determine which InfiniBand Interfaces in Deleting state can be deleted
 		if isInfiniBandConfigStatusEmpty || isInfiniBandConfigSynced {
 			for _, ibifc := range deletingInfiniBandInterfaces {
-				if util.IsTimeWithinStaleInventoryThreshold(ibifc.Updated) {
+				if site.IsTimeWithinStaleInventoryThreshold(ibifc.Updated) {
 					// If the InfiniBand Interface was modified within stale inventory threshold, defer to next inventory update
 					continue
 				}
 				// Continue with deletion
 				infiniBandInterfacesToDelete = append(infiniBandInterfacesToDelete, ibifc)
+			}
+		}
+
+		// Populate a map of existing SpectrumX Attachments by key
+		sxaDAO := cdbm.NewSpectrumXAttachmentDAO(mi.dbSession)
+		spectrumXAttachments, _, serr := sxaDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SpectrumXAttachmentFilterInput{
+				InstanceIDs: []uuid.UUID{instance.ID},
+			},
+			paginator.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if serr != nil {
+			slogger.Error().Err(serr).Msg("Failed to get SpectrumX Attachments for Instance, DB error")
+			continue
+		}
+
+		spectrumXAttachmentMap := map[string]*cdbm.SpectrumXAttachment{}
+		deletingSpectrumXAttachments := []*cdbm.SpectrumXAttachment{}
+		for _, sxa := range spectrumXAttachments {
+			curSxA := sxa
+			// Add the SpectrumX Attachment to the list to be deleted if it is in Deleting state
+			if sxa.Status == cdbm.SpectrumXAttachmentStatusDeleting {
+				deletingSpectrumXAttachments = append(deletingSpectrumXAttachments, &curSxA)
+				continue
+			}
+
+			// An attachment whose Partition the Site has not created yet simply matches
+			// nothing and stays Pending.
+			spectrumXAttachmentMap[curSxA.Key()] = &curSxA
+		}
+
+		isSpectrumXConfigStatusEmpty := true
+		isSpectrumXConfigSynced := false
+		reportedSxaKeys := map[string]bool{}
+		if controllerInstance.Config.Spxconfig != nil && controllerInstance.Status.SpxStatus != nil {
+			for idx, attachmentConfig := range controllerInstance.Config.Spxconfig.SpxAttachments {
+				// If the SpectrumX Config as well as Status is not empty, set the flag to false
+				isSpectrumXConfigStatusEmpty = false
+
+				if attachmentConfig == nil {
+					slogger.Warn().Int("Index", idx).Msg("SpectrumX Attachment Config is nil, skipping update")
+					continue
+				}
+
+				// Normalized onto the fields a persisted row carries, so the reported
+				// attachment and its row produce the same key.
+				reportedSxA := &cdbm.SpectrumXAttachment{}
+				reportedSxA.FromProto(attachmentConfig)
+				sxaKey := reportedSxA.Key()
+
+				// Every reported attachment is recorded, matched or not, so the retirement
+				// sweep below can tell whether the Site has actually dropped one.
+				reportedSxaKeys[sxaKey] = true
+
+				sxa, ok := spectrumXAttachmentMap[sxaKey]
+				if !ok {
+					continue
+				}
+
+				// Config and status attachment indices are aligned by Core. A partial
+				// inventory must not shift status onto a different attachment.
+				if idx >= len(controllerInstance.Status.SpxStatus.AttachmentStatuses) {
+					slogger.Warn().Int("SpectrumX Attachment Index", idx).Msg("Site Controller Instance is missing matching SpectrumX Attachment status")
+					continue
+				}
+
+				attachmentStatus := controllerInstance.Status.SpxStatus.AttachmentStatuses[idx]
+				if attachmentStatus == nil {
+					continue
+				}
+
+				var macAddress *string
+				if attachmentStatus.MacAddr != nil && (sxa.MacAddress == nil || *sxa.MacAddress != *attachmentStatus.MacAddr) {
+					macAddress = attachmentStatus.MacAddr
+				}
+
+				var ipAddress *string
+				if attachmentStatus.IpAddress != nil && (sxa.IPAddress == nil || *sxa.IPAddress != *attachmentStatus.IpAddress) {
+					ipAddress = attachmentStatus.IpAddress
+				}
+
+				// VirtualFunctionId is not optional on the wire, so 0 cannot be told apart
+				// from unset. Only a non-zero value is taken, which keeps a persisted VF
+				// from being clobbered by a Site that reports nothing for it.
+				var virtualFunctionID *int
+				if attachmentStatus.VirtualFunctionId != 0 {
+					reported := int(attachmentStatus.VirtualFunctionId)
+					if sxa.VirtualFunctionID == nil || *sxa.VirtualFunctionID != reported {
+						virtualFunctionID = &reported
+					}
+				}
+
+				var status *string
+				if controllerInstance.Status.SpxStatus.ConfigsSynced == corev1.SyncState_SYNCED {
+					isSpectrumXConfigSynced = true
+					if sxa.Status != cdbm.SpectrumXAttachmentStatusReady {
+						status = cwutil.GetPtr(cdbm.SpectrumXAttachmentStatusReady)
+					}
+				}
+
+				if macAddress == nil && ipAddress == nil && virtualFunctionID == nil && status == nil {
+					continue
+				}
+
+				_, serr := sxaDAO.Update(
+					ctx,
+					nil,
+					cdbm.SpectrumXAttachmentUpdateInput{
+						SpectrumXAttachmentID: sxa.ID,
+						MacAddress:            macAddress,
+						IPAddress:             ipAddress,
+						VirtualFunctionID:     virtualFunctionID,
+						Status:                status,
+					},
+				)
+				if serr != nil {
+					slogger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("failed to update SpectrumX Attachment in DB")
+				}
+			}
+		}
+
+		// Determine which SpectrumX Attachments in Deleting state can be deleted
+		if isSpectrumXConfigStatusEmpty || isSpectrumXConfigSynced {
+			for _, sxa := range deletingSpectrumXAttachments {
+				if site.IsTimeWithinStaleInventoryThreshold(sxa.Updated) {
+					// If the SpectrumX Attachment was modified within stale inventory threshold, defer to next inventory update
+					continue
+				}
+
+				// A synced config and an aged row do not show that this attachment is gone,
+				// only that some attachment synced and that the row has not changed
+				// recently. Deleting a row the Site still reports would also drop the last
+				// link its Partition has to a live Instance, which is what the REST
+				// deletion guard counts.
+				if reportedSxaKeys[sxa.Key()] {
+					continue
+				}
+
+				// Continue with deletion
+				spectrumXAttachmentsToDelete = append(spectrumXAttachmentsToDelete, sxa)
 			}
 		}
 
@@ -751,7 +937,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 			if !exists {
 				// If the DPU Extension Service Deployment was modified within stale inventory threshold, defer to next inventory update
-				if util.IsTimeWithinStaleInventoryThreshold(desd.Updated) {
+				if site.IsTimeWithinStaleInventoryThreshold(desd.Updated) {
 					continue
 				}
 
@@ -887,7 +1073,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 		// Delete NVLink Interfaces that are not present in the controller Instance
 		if isNVLinkConfigStatusEmpty || isNVLinkConfigSynced {
 			for _, nvlifc := range deletingNVLinkInterfaces {
-				if util.IsTimeWithinStaleInventoryThreshold(nvlifc.Updated) {
+				if site.IsTimeWithinStaleInventoryThreshold(nvlifc.Updated) {
 					// If the NVLink Interface was modified within stale inventory threshold, defer to next inventory update
 					continue
 				}
@@ -995,7 +1181,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			}
 		} else if instance.ControllerInstanceID != nil {
 			// Was this created within inventory receipt interval? If so, we may be processing an older inventory
-			if time.Since(instance.Created) < cwutil.InventoryReceiptInterval {
+			if site.IsTimeWithinStaleInventoryThreshold(instance.Created) {
 				continue
 			}
 
@@ -1049,6 +1235,17 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			serr := ibifcDAO.Delete(ctx, nil, ibfc.ID)
 			if serr != nil {
 				logger.Error().Err(serr).Str("InfiniBand Interface ID", ibfc.ID.String()).Msg("Failed to delete InfiniBand Interface, DB error")
+			}
+		}
+	}
+
+	// Delete eligible SpectrumX Attachments which are in Deleting state
+	if len(spectrumXAttachmentsToDelete) > 0 {
+		sxaDeleteDAO := cdbm.NewSpectrumXAttachmentDAO(mi.dbSession)
+		for _, sxa := range spectrumXAttachmentsToDelete {
+			serr := sxaDeleteDAO.Delete(ctx, nil, sxa.ID)
+			if serr != nil {
+				logger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("Failed to delete SpectrumX Attachment, DB error")
 			}
 		}
 	}
@@ -1121,6 +1318,29 @@ func (mi ManageInstance) deleteInstanceFromDB(ctx context.Context, tx *cdb.Tx, i
 		serr := ibiDAO.Delete(ctx, tx, ibi.ID)
 		if serr != nil {
 			logger.Error().Err(serr).Msg("failed to delete InfiniBand interface for instance from DB")
+			terr := tx.Rollback()
+			if terr != nil {
+				logger.Error().Err(terr).Msg("failed to rollback transaction")
+			}
+			return serr
+		}
+	}
+
+	// Delete SpectrumX attachment(s) corresponding to instance
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(mi.dbSession)
+	sxas, _, err := sxaDAO.GetAll(ctx, tx, cdbm.SpectrumXAttachmentFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve SpectrumX attachments from DB")
+		terr := tx.Rollback()
+		if terr != nil {
+			logger.Error().Err(terr).Msg("failed to rollback transaction")
+		}
+		return err
+	}
+	for _, sxa := range sxas {
+		serr := sxaDAO.Delete(ctx, tx, sxa.ID)
+		if serr != nil {
+			logger.Error().Err(serr).Msg("failed to delete SpectrumX attachment for instance from DB")
 			terr := tx.Rollback()
 			if terr != nil {
 				logger.Error().Err(terr).Msg("failed to rollback transaction")
@@ -1380,7 +1600,7 @@ func NewManageInstance(dbSession *cdb.Session, siteClientPool *sc.ClientPool, tc
 type ManageInstanceLifecycleMetrics struct {
 	dbSession            *cdb.Session
 	statusTransitionTime *prometheus.GaugeVec
-	siteIDNameMap        map[uuid.UUID]string
+	siteNames            *cwm.SiteNameCache
 }
 
 // RecordInstanceStatusTransitionMetrics is a Temporal activity that records duration of important status transitions for Instances
@@ -1389,16 +1609,10 @@ func (milm ManageInstanceLifecycleMetrics) RecordInstanceStatusTransitionMetrics
 
 	logger.Info().Msg("starting activity")
 
-	siteName, ok := milm.siteIDNameMap[siteID]
-	if !ok {
-		siteDAO := cdbm.NewSiteDAO(milm.dbSession)
-		site, err := siteDAO.GetByID(context.Background(), nil, siteID, nil, false)
-		if err != nil {
-			logger.Error().Err(err).Str("Site ID", siteID.String()).Msg("failed to retrieve Site from DB")
-			return err
-		}
-		siteName = site.Name
-		milm.siteIDNameMap[siteID] = siteName
+	siteName, err := milm.siteNames.Get(ctx, milm.dbSession, siteID)
+	if err != nil {
+		logger.Error().Err(err).Str("Site ID", siteID.String()).Msg("failed to retrieve Site from DB")
+		return err
 	}
 
 	logger.Info().Int("EventCount", len(instanceLifecycleEvents)).Str("Site Name", siteName).Msg("processing instance lifecycle events")
@@ -1439,7 +1653,7 @@ func (milm ManageInstanceLifecycleMetrics) RecordInstanceStatusTransitionMetrics
 			// Only emit metric if we have exactly 1 Ready and at least 1 Pending
 			if readySD != nil && pendingSD != nil && readyStatusCount == 1 {
 				dur := readySD.Created.Sub(pendingSD.Created)
-				milm.statusTransitionTime.WithLabelValues(siteName, cwm.InventoryOperationTypeCreate, cdbm.InstanceStatusPending, cdbm.InstanceStatusReady).Set(dur.Seconds())
+				milm.statusTransitionTime.WithLabelValues(siteName, siteID.String(), cwm.InventoryOperationTypeCreate, cdbm.InstanceStatusPending, cdbm.InstanceStatusReady).Set(dur.Seconds())
 				metricsRecorded++
 				logger.Info().
 					Str("Instance ID", event.ObjectID.String()).
@@ -1465,7 +1679,7 @@ func (milm ManageInstanceLifecycleMetrics) RecordInstanceStatusTransitionMetrics
 			if terminatingSD != nil {
 				// Calculate duration from Terminating status to deletion time
 				dur := event.Deleted.Sub(terminatingSD.Created)
-				milm.statusTransitionTime.WithLabelValues(siteName, cwm.InventoryOperationTypeDelete, cdbm.InstanceStatusTerminating, cdbm.InstanceStatusTerminated).Set(dur.Seconds())
+				milm.statusTransitionTime.WithLabelValues(siteName, siteID.String(), cwm.InventoryOperationTypeDelete, cdbm.InstanceStatusTerminating, cdbm.InstanceStatusTerminated).Set(dur.Seconds())
 				metricsRecorded++
 				logger.Info().
 					Str("Instance ID", event.ObjectID.String()).
@@ -1485,17 +1699,17 @@ func (milm ManageInstanceLifecycleMetrics) RecordInstanceStatusTransitionMetrics
 }
 
 // NewManageInstanceLifecycleMetrics returns a new ManageInstanceLifecycleMetrics activity
-func NewManageInstanceLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb.Session) ManageInstanceLifecycleMetrics {
+func NewManageInstanceLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb.Session, namespace string) ManageInstanceLifecycleMetrics {
 	inventoryMetrics := ManageInstanceLifecycleMetrics{
 		dbSession: dbSession,
 		statusTransitionTime: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: cwm.MetricsNamespace,
+				Namespace: namespace,
 				Name:      "instance_operation_latency_seconds",
 				Help:      "Current latency of instance operations",
 			},
-			[]string{"site", "operation_type", "from_status", "to_status"}),
-		siteIDNameMap: map[uuid.UUID]string{},
+			[]string{"site", "site_id", "operation_type", "from_status", "to_status"}),
+		siteNames: cwm.NewSiteNameCache(),
 	}
 	reg.MustRegister(inventoryMetrics.statusTransitionTime)
 	return inventoryMetrics

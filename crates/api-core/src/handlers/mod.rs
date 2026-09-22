@@ -22,6 +22,7 @@ pub(super) mod bmc_credential_rotation;
 pub(super) mod bmc_endpoint_explorer;
 pub(super) mod bmc_metadata;
 pub(super) mod boot_override;
+pub(super) mod chassis_reset;
 mod client_resolution;
 pub(super) mod component_manager;
 pub(super) mod compute_allocation;
@@ -35,6 +36,7 @@ pub(super) mod dpf;
 pub(super) mod dpu;
 pub(super) mod dpu_remediation;
 pub(super) mod dpu_service_sync;
+mod expected_component_patch;
 pub(super) mod expected_machine;
 pub(super) mod expected_power_shelf;
 pub(super) mod expected_rack;
@@ -65,6 +67,7 @@ pub(super) mod mlx_admin;
 pub(super) mod network_devices;
 pub(super) mod network_security_group;
 pub(super) mod network_segment;
+pub(super) mod nic_lockdown_credential_rotation;
 pub(super) mod nmxc_browse;
 pub(super) mod nvl_partition;
 pub(super) mod nvlink_domain;
@@ -72,6 +75,7 @@ pub(super) mod nvlink_nmxc_endpoints;
 pub(super) mod operating_system;
 pub(super) mod power_options;
 pub(super) mod power_shelf;
+mod primary_interface;
 pub(super) mod pxe;
 pub(super) mod rack;
 pub(super) mod redfish;
@@ -89,6 +93,7 @@ pub(super) mod switch;
 pub(super) mod tenant;
 pub(super) mod tenant_identity_config;
 pub(super) mod tenant_keyset;
+pub(super) mod tenant_prefix_overlap;
 pub(super) mod tpm_ca;
 pub(super) mod uefi;
 pub(super) mod uefi_credential_rotation;
@@ -105,10 +110,22 @@ pub(crate) async fn resolve_machine_interface_for_test(
     client_resolution::resolve_machine_interface(conn, client_ip).await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn process_scout_req_for_test(
     api: &crate::Api,
-    machine_id: carbide_uuid::machine::MachineId,
+    machine_id: carbide_uuid::machine::HostMachineId,
 ) -> crate::CarbideResult<rpc::forge_agent_control_response::Action> {
     svpc::process_scout_req(api, machine_id).await
+}
+
+/// Exposes the private scout update path to crate-level database race tests.
+#[cfg(test)]
+pub(crate) async fn update_primary_interface_from_scout_for_test(
+    api: &crate::Api,
+    machine_id: carbide_uuid::machine::StableHostMachineId,
+    hardware_info: &model::hardware_info::HardwareInfo,
+) -> crate::CarbideResult<bool> {
+    primary_interface::update_primary_interface_from_scout(api, machine_id, hardware_info)
+        .await
+        .map(|update| update.reconciliation_needed)
 }

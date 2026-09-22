@@ -179,6 +179,10 @@ func (m *mockTaskStore) ListTasks(_ context.Context, _ *taskcommon.TaskListOptio
 	panic("mockTaskStore.ListTasks: not implemented")
 }
 
+func (m *mockTaskStore) ListNonTerminalTasksForRacks(_ context.Context, _ []uuid.UUID) ([]*taskdef.Task, error) {
+	panic("mockTaskStore.ListNonTerminalTasksForRacks: not implemented")
+}
+
 func (m *mockTaskStore) UpdateScheduledTask(_ context.Context, _ *taskdef.Task) error {
 	panic("mockTaskStore.UpdateScheduledTask: not implemented")
 }

@@ -19,7 +19,7 @@ use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
 
 use carbide_utils::HostPortPair;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtypeTrait};
 use tokio::net::lookup_host;
 
 use crate::CarbideError;
@@ -86,16 +86,23 @@ fn invalid_bmc_address(address: &str, reason: impl std::fmt::Display) -> Carbide
 
 /// Converts a MachineID from RPC format to Model format
 /// and logs the MachineID as MachineID for the current request.
-pub(super) fn convert_and_log_machine_id(
-    id: Option<&MachineId>,
-) -> Result<MachineId, CarbideError> {
+pub(super) fn convert_and_log_machine_id<FromId, ToId>(
+    id: Option<&FromId>,
+) -> Result<ToId, CarbideError>
+where
+    FromId: Copy,
+    MachineId: From<FromId>,
+    ToId: MachineIdSubtypeTrait,
+    ToId: TryFrom<MachineId>,
+    CarbideError: From<<ToId as TryFrom<MachineId>>::Error>,
+{
     let machine_id = match id {
-        Some(id) => *id,
+        Some(id) => ToId::try_from(MachineId::from(*id))?,
         None => {
             return Err(CarbideError::MissingArgument("machine ID"));
         }
     };
-    log_machine_id(&machine_id);
+    log_machine_id(machine_id.as_machine_id());
 
     Ok(machine_id)
 }
@@ -141,7 +148,7 @@ pub(super) struct StateHandlerWakeupFailed {
 /// without failing an otherwise successful API request.
 pub(super) async fn enqueue_boot_interface_reconciliation(
     api: &Api,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     eligible: bool,
 ) {
     if !eligible {
@@ -155,7 +162,7 @@ pub(super) async fn enqueue_boot_interface_reconciliation(
     {
         carbide_instrument::emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::BootInterfaceIntent,
-            machine_id,
+            machine_id: machine_id.into(),
             err: err.to_string(),
         });
     }

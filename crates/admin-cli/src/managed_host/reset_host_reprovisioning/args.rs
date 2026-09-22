@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::StableHostMachineId;
 use clap::Parser;
 
 /// Reset host reprovisioning state
@@ -29,5 +29,5 @@ Reset a host's reprovisioning back to CheckingFirmware:
 ")]
 pub(crate) struct Args {
     #[clap(long, required(true), help = "Machine ID to reset host reprovision on")]
-    pub(super) machine: MachineId,
+    pub(super) machine: StableHostMachineId,
 }

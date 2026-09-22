@@ -15,10 +15,11 @@
  * limitations under the License.
  */
 
-use std::time::SystemTime;
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime};
 
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId, StableHostMachineId};
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
 use model::instance::config::network::DeviceLocator;
@@ -30,7 +31,9 @@ use tonic::Code;
 use uuid::uuid;
 
 use super::common::api_fixtures::TestEnv;
-use crate::cfg::file::default_max_network_security_group_size;
+use crate::cfg::file::{
+    FnnConfig, FnnRoutingProfileConfig, default_max_network_security_group_size,
+};
 use crate::test_support::fixture_config::FixtureDefault as _;
 use crate::tests::common::api_fixtures::instance::{
     default_os_config, default_tenant_config, interface_network_config_with_devices,
@@ -38,16 +41,18 @@ use crate::tests::common::api_fixtures::instance::{
 };
 use crate::tests::common::api_fixtures::test_managed_host::TestManagedHost;
 use crate::tests::common::api_fixtures::{
-    create_test_env, populate_network_security_groups, site_explorer,
+    TestEnvOverrides, create_managed_host, create_test_env, create_test_env_with_overrides,
+    get_config, populate_network_security_groups, site_explorer,
 };
-use crate::tests::common::rpc_builder::VpcCreationRequest;
+use crate::tests::common::postgres::wait_for_blocked_query;
+use crate::tests::common::rpc_builder::{VpcCreationRequest, VpcUpdateRequest};
 
 async fn update_network_status_observation(
     env: &TestEnv,
     instance_id: &InstanceId,
     good_network_security_group_id: &str,
     security_version: &str,
-    dpu_machine_id: &MachineId,
+    dpu_machine_id: &DpuMachineId,
     source: rpc::forge::NetworkSecurityGroupSource,
     internal_uuid: &rpc::Uuid,
 ) {
@@ -92,6 +97,12 @@ async fn update_network_status_observation(
         }))
         .await
         .unwrap();
+}
+
+fn stable_host_id(host_id: HostMachineId) -> StableHostMachineId {
+    host_id
+        .try_into()
+        .expect("site-explorer fixture should produce a stable host ID")
 }
 
 #[crate::sqlx_test]
@@ -490,6 +501,196 @@ async fn test_network_security_group_create(
     Ok(())
 }
 
+/// Verifies disabled site support rejects new stateful intent without mutating persistence.
+///
+/// This prevents accepted NSG state from promising statefulness the site cannot provide.
+#[crate::sqlx_test]
+async fn test_network_security_group_stateful_egress_requires_site_support(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config.tenant_prefix_overlap_enabled = false;
+    config.network_security_group.stateful_acls_enabled = false;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+
+    let tenant_organization_id = "stateful_nsg_tenant";
+    let rejected_id = "08b4c3fa-bf88-4a61-b435-a2f398545652";
+    let stateless_id = "c34d8b63-2189-4bda-9340-266bf762442d";
+    let metadata = Some(rpc::forge::Metadata {
+        name: "stateful NSG gate".to_string(),
+        description: String::new(),
+        labels: vec![],
+    });
+
+    // Create the tenant required by the public NSG API.
+    env.api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: tenant_organization_id.to_string(),
+            routing_profile_type: None,
+            metadata: Some(rpc::forge::Metadata {
+                name: tenant_organization_id.to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+        }))
+        .await
+        .expect("tenant creation should succeed");
+
+    // Reject a stateful create before it can persist an unusable group.
+    let error = env
+        .api
+        .create_network_security_group(tonic::Request::new(
+            rpc::forge::CreateNetworkSecurityGroupRequest {
+                id: Some(rejected_id.to_string()),
+                tenant_organization_id: tenant_organization_id.to_string(),
+                metadata: metadata.clone(),
+                network_security_group_attributes: Some(
+                    rpc::forge::NetworkSecurityGroupAttributes {
+                        stateful_egress: true,
+                        rules: vec![],
+                    },
+                ),
+            },
+        ))
+        .await
+        .expect_err("stateful creation should require site support");
+    assert_eq!(error.code(), Code::InvalidArgument);
+
+    // Reload through the public API to prove the rejected create left no record.
+    let rejected_groups = env
+        .api
+        .find_network_security_groups_by_ids(tonic::Request::new(
+            rpc::forge::FindNetworkSecurityGroupsByIdsRequest {
+                network_security_group_ids: vec![rejected_id.to_string()],
+                tenant_organization_id: Some(tenant_organization_id.to_string()),
+            },
+        ))
+        .await?
+        .into_inner()
+        .network_security_groups;
+    assert!(rejected_groups.is_empty());
+
+    // Stateless NSGs remain valid while site-level stateful ACLs are disabled.
+    let stateless_network_security_group = env
+        .api
+        .create_network_security_group(tonic::Request::new(
+            rpc::forge::CreateNetworkSecurityGroupRequest {
+                id: Some(stateless_id.to_string()),
+                tenant_organization_id: tenant_organization_id.to_string(),
+                metadata: metadata.clone(),
+                network_security_group_attributes: Some(
+                    rpc::forge::NetworkSecurityGroupAttributes {
+                        stateful_egress: false,
+                        rules: vec![],
+                    },
+                ),
+            },
+        ))
+        .await?
+        .into_inner()
+        .network_security_group
+        .expect("create response should contain the NSG");
+    assert!(
+        !stateless_network_security_group
+            .attributes
+            .as_ref()
+            .expect("created NSG should contain attributes")
+            .stateful_egress
+    );
+
+    // Reject the unsupported false-to-true transition.
+    let error = env
+        .api
+        .update_network_security_group(tonic::Request::new(
+            rpc::forge::UpdateNetworkSecurityGroupRequest {
+                id: stateless_id.to_string(),
+                tenant_organization_id: tenant_organization_id.to_string(),
+                metadata,
+                network_security_group_attributes: Some(
+                    rpc::forge::NetworkSecurityGroupAttributes {
+                        stateful_egress: true,
+                        rules: vec![],
+                    },
+                ),
+                if_version_match: Some(stateless_network_security_group.version.clone()),
+            },
+        ))
+        .await
+        .expect_err("enabling stateful egress should require site support");
+    assert_eq!(error.code(), Code::InvalidArgument);
+
+    // Reload the NSG to prove the rejected update changed neither data nor version.
+    let persisted_groups = env
+        .api
+        .find_network_security_groups_by_ids(tonic::Request::new(
+            rpc::forge::FindNetworkSecurityGroupsByIdsRequest {
+                network_security_group_ids: vec![stateless_id.to_string()],
+                tenant_organization_id: Some(tenant_organization_id.to_string()),
+            },
+        ))
+        .await?
+        .into_inner()
+        .network_security_groups;
+    assert_eq!(persisted_groups, vec![stateless_network_security_group]);
+
+    // A stateful group can outlive the site setting. Once another writer
+    // disables it, an unconditional update must not re-enable it using the
+    // exception for an existing stateful group.
+    sqlx::query("UPDATE network_security_groups SET stateful_egress = true WHERE id = $1")
+        .bind(stateless_id)
+        .execute(&env.pool)
+        .await?;
+    let id = stateless_id.parse()?;
+    let mut writer = env.db_txn().await;
+    let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(writer.as_mut())
+        .await?;
+    let old =
+        db::network_security_group::find_by_ids(&mut writer, std::slice::from_ref(&id), None, true)
+            .await?
+            .pop()
+            .unwrap();
+    let restricted = db::network_security_group::update(
+        &mut writer,
+        &id,
+        &old.tenant_organization_id,
+        &old.metadata,
+        false,
+        &[],
+        old.version,
+        None,
+    )
+    .await?;
+    let update = env.api.update_network_security_group(tonic::Request::new(
+        rpc::forge::UpdateNetworkSecurityGroupRequest {
+            id: stateless_id.to_string(),
+            tenant_organization_id: tenant_organization_id.to_string(),
+            metadata: persisted_groups[0].metadata.clone(),
+            network_security_group_attributes: Some(rpc::forge::NetworkSecurityGroupAttributes {
+                stateful_egress: true,
+                rules: vec![],
+            }),
+            if_version_match: None,
+        },
+    ));
+    let release = async {
+        wait_for_blocked_query(&env.pool, writer_pid, "network_security_groups").await;
+        writer.commit().await
+    };
+    let (result, released) = tokio::join!(update, release);
+    released?;
+    let error = result.expect_err("stateful enablement must use the locked policy");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+    let mut txn = env.db_txn().await;
+    assert_eq!(
+        db::network_security_group::find_by_ids(&mut txn, &[id], None, false).await?,
+        vec![restricted]
+    );
+    txn.rollback().await?;
+
+    Ok(())
+}
+
 #[crate::sqlx_test]
 async fn test_network_security_group_update(
     pool: sqlx::PgPool,
@@ -872,175 +1073,318 @@ async fn test_network_security_group_update(
     Ok(())
 }
 
+/// Verifies VPC NSG attachment and policy updates bypass overlap admission while
+/// routing expansion remains rejected, keeping ACL policy independent of isolation.
 #[crate::sqlx_test]
-async fn test_network_security_group_delete(
+async fn tenant_prefix_overlap_allows_nsg_policy_but_rejects_routing_expansion(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(pool).await;
+    // Use an overlap-eligible FNN profile and enable the ordinary stateful-ACL gate.
+    let mut config = get_config();
+    config.tenant_prefix_overlap_enabled = true;
+    config.default_tenant_routing_profile_type = "INTERNAL".to_string();
+    config.network_security_group.stateful_acls_enabled = true;
+    let fnn = FnnConfig {
+        admin_vpc: None,
+        common_internal_route_target: None,
+        additional_route_target_imports: vec![],
+        routing_profiles: HashMap::from([(
+            "INTERNAL".to_string(),
+            FnnRoutingProfileConfig {
+                tenant_prefix_overlap_eligible: true,
+                internal: Some(true),
+                ..Default::default()
+            },
+        )]),
+        use_vpc_vrf_loopback: false,
+    };
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_fnn_config(Some(fnn)),
+    )
+    .await;
+    let tenant = "overlap-routing-policy";
+    crate::tests::common::api_fixtures::tenant::create_fixture_tenant(&env, tenant).await?;
 
-    populate_network_security_groups(env.api.clone()).await;
-
-    // Provided by fixtures
-    let default_tenant_org = "Tenant1";
-
-    // Our known fixture network security group
-    let good_network_security_group_id = "fd3ab096-d811-11ef-8fe9-7be4b2483448";
-    let bad_network_security_group_id = "ddfcabc4-92dc-41e2-874e-2c7eeb9fa156";
-
-    // Create a VPC
-    let vpc = env
-        .api
-        .create_vpc(
-            VpcCreationRequest::builder(default_tenant_org)
-                .network_security_group_id(good_network_security_group_id)
+    // An active tenant interface makes both the VPC attachment and its policy observable.
+    let nsg_id = uuid::Uuid::new_v4().to_string();
+    env.api
+        .create_network_security_group(tonic::Request::new(
+            rpc::forge::CreateNetworkSecurityGroupRequest {
+                id: Some(nsg_id.clone()),
+                tenant_organization_id: tenant.to_string(),
+                metadata: Some(rpc::forge::Metadata {
+                    name: "overlap NSG".to_string(),
+                    ..Default::default()
+                }),
+                network_security_group_attributes: Some(Default::default()),
+            },
+        ))
+        .await?;
+    let vpc_id = VpcId::new();
+    let segment_id = env
+        .create_vpc_and_tenant_segments_with_vpc_details(
+            VpcCreationRequest::builder(tenant)
+                .id(vpc_id)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .routing_profile_type("INTERNAL".to_string())
                 .metadata(Metadata::new_with_default_name())
-                .tonic_request(),
+                .rpc(),
+            1,
         )
-        .await
-        .unwrap()
-        .into_inner();
+        .await[0];
+    let host = create_managed_host(&env).await;
+    let _instance = host
+        .instance_builer(&env)
+        .tenant_org(tenant)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
 
-    // Create a new managed host in the DB and get the snapshot.
-    let mh = site_explorer::new_host(&env, ManagedHostConfig::default())
-        .await
-        .unwrap();
+    // Combine a stateful NSG with a broad permit, both independent of route isolation.
+    let vpc_update = || {
+        VpcUpdateRequest::builder()
+            .id(vpc_id)
+            .metadata(Metadata::new_with_default_name())
+            .network_security_group_id(nsg_id.clone())
+            .rpc()
+    };
+    let permit = rpc::forge::NetworkSecurityGroupRuleAttributes {
+        id: Some("permit-http".to_string()),
+        direction: rpc::forge::NetworkSecurityGroupRuleDirection::NsgRuleDirectionIngress.into(),
+        protocol: rpc::forge::NetworkSecurityGroupRuleProtocol::NsgRuleProtoTcp.into(),
+        action: rpc::forge::NetworkSecurityGroupRuleAction::NsgRuleActionPermit.into(),
+        priority: 100,
+        dst_port_start: Some(80),
+        dst_port_end: Some(80),
+        source_net: Some(
+            rpc::forge::network_security_group_rule_attributes::SourceNet::SrcPrefix(
+                "0.0.0.0/0".to_string(),
+            ),
+        ),
+        destination_net: Some(
+            rpc::forge::network_security_group_rule_attributes::DestinationNet::DstPrefix(
+                "0.0.0.0/0".to_string(),
+            ),
+        ),
+        ..Default::default()
+    };
+    let nsg_update = rpc::forge::UpdateNetworkSecurityGroupRequest {
+        id: nsg_id.clone(),
+        tenant_organization_id: tenant.to_string(),
+        metadata: Some(rpc::forge::Metadata {
+            name: "overlap NSG".to_string(),
+            ..Default::default()
+        }),
+        network_security_group_attributes: Some(rpc::forge::NetworkSecurityGroupAttributes {
+            stateful_egress: true,
+            rules: vec![permit],
+        }),
+        if_version_match: None,
+    };
 
-    let segment_id = env.create_vpc_and_tenant_segment().await;
+    // Neither attachment nor NSG policy may wait on the route-overlap lock.
+    let mut overlap_lock = env.db_txn().await;
+    db::tenant_prefix_overlap::lock_checks(&mut overlap_lock).await?;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        env.api.update_vpc(tonic::Request::new(vpc_update())),
+    )
+    .await
+    .expect("NSG assignment must not wait for the overlap lock")?;
+    let updated = tokio::time::timeout(
+        Duration::from_secs(10),
+        env.api
+            .update_network_security_group(tonic::Request::new(nsg_update)),
+    )
+    .await
+    .expect("NSG policy must not wait for the overlap lock")?
+    .into_inner()
+    .network_security_group
+    .unwrap();
+    overlap_lock.rollback().await?;
+    let attributes = updated.attributes.as_ref().unwrap();
+    assert!(attributes.stateful_egress);
+    assert_eq!(attributes.rules.len(), 1);
 
-    // Create an Instance
-    let instance = env
-        .api
-        .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.host_snapshot.id.into(),
-            config: Some(rpc::InstanceConfig {
-                tenant: Some(default_tenant_config()),
-                os: Some(default_os_config()),
-                network: Some(single_interface_network_config(segment_id)),
-                infiniband: None,
-                nvlink: None,
-                spxconfig: None,
-                network_security_group_id: Some(good_network_security_group_id.into()),
-                dpu_extension_services: None,
-                power_profile: None,
-            }),
-            instance_id: None,
-            instance_type_id: None,
-            metadata: Some(rpc::forge::Metadata {
-                name: "newinstance".to_string(),
-                description: "desc".to_string(),
-                labels: vec![],
-            }),
-            allow_unhealthy_machine: false,
-        }))
-        .await
-        .unwrap()
-        .into_inner();
-
-    // Try to delete the NSG.  This should fail
-    // because it's in use.
-    let _ = env
-        .api
-        .delete_network_security_group(tonic::Request::new(
-            rpc::forge::DeleteNetworkSecurityGroupRequest {
-                id: good_network_security_group_id.to_string(),
-                tenant_organization_id: default_tenant_org.to_string(),
-            },
-        ))
-        .await
-        .unwrap_err();
-
-    // Delete the VPC and Instance
-    let _ = env
-        .api
-        .release_instance(tonic::Request::new(rpc::forge::InstanceReleaseRequest {
-            id: instance.id,
-            issue: None,
-            is_repair_tenant: None,
-            delete_attribution: None,
-        }))
-        .await
-        .unwrap();
-
-    let _ = env
-        .api
-        .delete_vpc(tonic::Request::new(rpc::forge::VpcDeletionRequest {
-            id: vpc.id,
-        }))
-        .await
-        .unwrap();
-
-    // Try to delete the network security group again.
-    // This time it should pass because there are no
-    // associated objects.
-    let _ = env
-        .api
-        .delete_network_security_group(tonic::Request::new(
-            rpc::forge::DeleteNetworkSecurityGroupRequest {
-                id: good_network_security_group_id.to_string(),
-                tenant_organization_id: default_tenant_org.to_string(),
-            },
-        ))
-        .await
-        .unwrap();
-
-    // Next, we'll try to retrieve the deleted network security group
-    let forge_network_security_groups = env
+    // Public find calls must confirm both writes actually committed rather than
+    // trusting the successful mutation responses.
+    let persisted_groups = env
         .api
         .find_network_security_groups_by_ids(tonic::Request::new(
             rpc::forge::FindNetworkSecurityGroupsByIdsRequest {
-                network_security_group_ids: vec![good_network_security_group_id.to_string()],
-                tenant_organization_id: None,
+                network_security_group_ids: vec![nsg_id.clone()],
+                tenant_organization_id: Some(tenant.to_string()),
             },
         ))
-        .await
-        .unwrap()
+        .await?
         .into_inner()
         .network_security_groups;
-
-    // We shouldn't find it.
-    assert_eq!(forge_network_security_groups.len(), 0);
-
-    // Now try to delete it AGAIN
-    // This should fail with NOT FOUND.
+    assert_eq!(persisted_groups, vec![updated]);
+    let persisted_vpc = env
+        .api
+        .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![vpc_id],
+        }))
+        .await?
+        .into_inner()
+        .vpcs
+        .pop()
+        .expect("updated VPC must remain visible");
     assert_eq!(
-        env.api
-            .delete_network_security_group(tonic::Request::new(
-                rpc::forge::DeleteNetworkSecurityGroupRequest {
-                    id: good_network_security_group_id.to_string(),
-                    tenant_organization_id: default_tenant_org.to_string(),
-                },
-            ))
-            .await
-            .unwrap_err()
-            .code(),
-        Code::NotFound
+        persisted_vpc
+            .config
+            .unwrap()
+            .network_security_group_id
+            .as_deref(),
+        Some(nsg_id.as_str())
     );
 
-    // Now try to delete a network security group with a blank ID.
-    let _ = env
+    // The same VPC must still reject a route leak that weakens overlap isolation.
+    let mut routing_expansion = vpc_update();
+    routing_expansion.routing_profile_overrides = Some(rpc::forge::VpcRoutingProfileOverrides {
+        leak_default_route_from_underlay: Some(true),
+        ..Default::default()
+    });
+    let error = env
         .api
-        .delete_network_security_group(tonic::Request::new(
-            rpc::forge::DeleteNetworkSecurityGroupRequest {
-                id: "".to_string(),
-                tenant_organization_id: default_tenant_org.to_string(),
-            },
-        ))
+        .update_vpc(tonic::Request::new(routing_expansion))
         .await
-        .unwrap_err();
+        .expect_err("routing expansion must retain overlap admission");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error.message().contains("not safe for tenant prefix reuse"),
+        "{error}"
+    );
+    Ok(())
+}
 
-    // Now try to delete a network security group of a different tenant.
-    // This should fail because of the tenant mismatch.
-    let _ = env
-        .api
-        .delete_network_security_group(tonic::Request::new(
-            rpc::forge::DeleteNetworkSecurityGroupRequest {
-                id: bad_network_security_group_id.to_string(),
-                tenant_organization_id: default_tenant_org.to_string(),
-            },
-        ))
-        .await
-        .unwrap_err();
+#[crate::sqlx_test]
+async fn network_security_group_gate_off_concurrent_updates(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config.tenant_prefix_overlap_enabled = false;
+    config.network_security_group.stateful_acls_enabled = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let tenant = "concurrent-nsg-updates";
+    crate::tests::common::api_fixtures::tenant::create_fixture_tenant(&env, tenant).await?;
 
+    for (scenario, stateful_egress, match_version) in [
+        ("unconditional metadata", false, false),
+        ("unconditional expansion", true, false),
+        ("explicit version", false, true),
+    ] {
+        let nsg = env
+            .api
+            .create_network_security_group(tonic::Request::new(
+                rpc::forge::CreateNetworkSecurityGroupRequest {
+                    id: Some(uuid::Uuid::new_v4().to_string()),
+                    tenant_organization_id: tenant.to_string(),
+                    metadata: Some(rpc::forge::Metadata {
+                        name: scenario.to_string(),
+                        ..Default::default()
+                    }),
+                    network_security_group_attributes: Some(Default::default()),
+                },
+            ))
+            .await?
+            .into_inner()
+            .network_security_group
+            .unwrap();
+        let id = nsg.id.parse()?;
+        let mut writer = env.db_txn().await;
+        let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(writer.as_mut())
+            .await?;
+        let old = db::network_security_group::find_by_ids(
+            &mut writer,
+            std::slice::from_ref(&id),
+            None,
+            true,
+        )
+        .await?
+        .pop()
+        .unwrap();
+        let mut metadata = old.metadata.clone();
+        metadata.description = "competing update".to_string();
+        let competing = db::network_security_group::update(
+            &mut writer,
+            &id,
+            &old.tenant_organization_id,
+            &metadata,
+            false,
+            &[],
+            old.version,
+            None,
+        )
+        .await?;
+        let mut overlap_blocker = env.db_txn().await;
+        if !stateful_egress {
+            db::tenant_prefix_overlap::lock_checks(&mut overlap_blocker).await?;
+        }
+        let request = rpc::forge::UpdateNetworkSecurityGroupRequest {
+            id: nsg.id,
+            tenant_organization_id: tenant.to_string(),
+            metadata: Some(rpc::forge::Metadata {
+                name: scenario.to_string(),
+                description: "requested update".to_string(),
+                ..Default::default()
+            }),
+            network_security_group_attributes: Some(rpc::forge::NetworkSecurityGroupAttributes {
+                stateful_egress,
+                rules: vec![],
+            }),
+            if_version_match: match_version.then_some(nsg.version),
+        };
+        let update = env
+            .api
+            .update_network_security_group(tonic::Request::new(request));
+        let release = async {
+            wait_for_blocked_query(&env.pool, writer_pid, "network_security_groups").await;
+            writer.commit().await
+        };
+        let (result, released) = tokio::time::timeout(Duration::from_secs(40), async {
+            tokio::join!(update, release)
+        })
+        .await?;
+        released?;
+        overlap_blocker.rollback().await?;
+        let mut txn = env.db_txn().await;
+        let persisted = db::network_security_group::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(&id),
+            None,
+            false,
+        )
+        .await?
+        .pop()
+        .unwrap();
+        txn.rollback().await?;
+        if match_version {
+            let error = result.expect_err(scenario);
+            assert_eq!(
+                error.code(),
+                Code::FailedPrecondition,
+                "{scenario}: {error}"
+            );
+            assert_eq!(persisted, competing, "{scenario}");
+        } else {
+            let returned = result?.into_inner().network_security_group.unwrap();
+            assert_eq!(
+                persisted.metadata.description, "requested update",
+                "{scenario}"
+            );
+            assert_eq!(persisted.stateful_egress, stateful_egress, "{scenario}");
+            assert_eq!(
+                persisted.version.version_nr(),
+                competing.version.version_nr() + 1,
+                "{scenario}"
+            );
+            let expected: rpc::forge::NetworkSecurityGroup = persisted.try_into()?;
+            assert_eq!(returned, expected, "{scenario}");
+        }
+    }
     Ok(())
 }
 
@@ -1114,7 +1458,7 @@ async fn test_vpc_network_security_group_propagation_includes_addressless_interf
     let managed_host = site_explorer::new_host(&env, ManagedHostConfig::default()).await?;
     env.api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: Some(managed_host.host_snapshot.id),
+            machine_id: Some(stable_host_id(managed_host.host_snapshot.id)),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),
@@ -1305,7 +1649,7 @@ async fn test_network_security_group_propagation_impl(
     let _ = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.host_snapshot.id.into(),
+            machine_id: Some(stable_host_id(mh.host_snapshot.id)),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),
@@ -1542,7 +1886,7 @@ async fn test_network_security_group_propagation_impl(
     let _ = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh2.host_snapshot.id.into(),
+            machine_id: Some(stable_host_id(mh2.host_snapshot.id)),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),

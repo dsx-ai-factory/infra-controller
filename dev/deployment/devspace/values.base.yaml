@@ -164,6 +164,8 @@ nico-machine-a-tron:
   # No need to copy secrets or configure cross-namespace access
   machineATron:
     nicoApiUrl: "https://nico-api.nico-system.svc.cluster.local:1079"
+  machineDefaults:
+    accelerationFactor: 0.01
   # Preserve simulated machine identity and installed OS across pod restarts.
   # Without this, Core can remain in an Assigned state while a restarted
   # machine-a-tron has reset the corresponding host and DPUs to MachineDown.
@@ -180,8 +182,8 @@ nico-machine-a-tron:
           hwType: wiwynn_gb200_nvl
           hostCount: 2
           dpuPerHostCount: 2
-          oobDhcpRelayAddress: "192.168.192.1"
-          adminDhcpRelayAddress: "192.168.176.1"
+          bmcDhcpRelayAddress: "192.168.192.1"
+          underlayDhcpRelayAddress: "192.168.176.1"
 nico-dhcp:
   enabled: false
 nico-dns:

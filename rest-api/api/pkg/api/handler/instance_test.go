@@ -560,6 +560,15 @@ func testUpdateInterfaceWithIPs(t *testing.T, dbSession *cdb.Session, ifc *cdbm.
 	return ifc
 }
 
+type ethernetReconciliationExpectation struct {
+	rowCount        int
+	readyIDs        []uuid.UUID
+	deletingIDs     []uuid.UUID
+	pendingCount    int
+	uniqueIPAddress *string
+	usagePrefix     *cdbm.VpcPrefix
+}
+
 func testUpdateMachineToUnhealthy(t *testing.T, dbSession *cdb.Session, m *cdbm.Machine) *cdbm.Machine {
 	m.Status = cdbm.MachineStatusError
 	_, err := dbSession.DB.NewUpdate().Where("id = ?", m.ID).Model(m).Exec(context.Background())
@@ -837,6 +846,12 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, alcbyid)
 	mcbyid := testInstanceBuildMachine(t, dbSession, ip.ID, st1.ID, cutil.GetPtr(false), nil)
 	assert.NotNil(t, mcbyid)
+	mcbyid.Labels = map[string]string{"failure-domain": "fd-a"}
+	_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
+		MachineID: mcbyid.ID,
+		Labels:    mcbyid.Labels,
+	})
+	assert.NoError(t, err)
 
 	// Add capability to machine
 	common.TestBuildMachineCapability(t, dbSession, &mcbyid.ID, nil, cdbm.MachineCapabilityTypeGPU, "NVIDIA GB200", nil, nil, cutil.GetPtr("NVIDIA"), cutil.GetPtr(4), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeNVLink), nil)
@@ -1446,6 +1461,34 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		wantErr                  bool
 		verifyChildSpanner       bool
 	}{
+		{
+			name: "test Instance create API endpoint rejects power profile when DPS power management is disabled",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:           "Test Instance rejected power profile",
+					TenantID:       tn1.ID.String(),
+					InstanceTypeID: cutil.GetPtr(ist1.ID.String()),
+					VpcID:          vpc1.ID.String(),
+					PowerProfile:   cutil.GetPtr("balanced"),
+					UserData:       cutil.GetPtr(""),
+					IpxeScript:     cutil.GetPtr(common.DefaultIpxeScript),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{SubnetID: cutil.GetPtr(subnet1.ID.String())},
+					},
+					PhoneHomeEnabled: cutil.GetPtr(false),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu1,
+				respCode:    http.StatusPreconditionFailed,
+				respMessage: "Site does not have DPS power management enabled",
+			},
+			wantErr: false,
+		},
 		{
 			name: "test Instance create API endpoint success with subnet interface and ssh key group iPXE script and Labels",
 			fields: fields{
@@ -2146,6 +2189,62 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "test Instance create API endpoint rejects Machine label selector when tenant is not authorized",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:                 "Test Instance with unauthorized Machine label selector",
+					TenantID:             tn2.ID.String(),
+					InstanceTypeID:       cutil.GetPtr(ist2.ID.String()),
+					MachineLabelSelector: map[string]string{"failure-domain": "fd-a"},
+					VpcID:                vpc3.ID.String(),
+					UserData:             cutil.GetPtr(""),
+					IpxeScript:           cutil.GetPtr(common.DefaultIpxeScript),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{SubnetID: cutil.GetPtr(subnet3.ID.String())},
+					},
+					PhoneHomeEnabled: cutil.GetPtr(false),
+				},
+				reqOrg:      tnOrg2,
+				reqUser:     tnu2,
+				respCode:    http.StatusForbidden,
+				respMessage: "Tenant does not have capability to create Instances using Machine label selector",
+			},
+			wantErr: false,
+		},
+		{
+			name: "test Instance create API endpoint rejects specified Machine that does not match label selector",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:                 "Test Instance with mismatched Machine labels",
+					TenantID:             tn1.ID.String(),
+					MachineID:            cutil.GetPtr(mcbyid.ID),
+					MachineLabelSelector: map[string]string{"failure-domain": "fd-b"},
+					VpcID:                vpc2.ID.String(),
+					UserData:             cutil.GetPtr(""),
+					IpxeScript:           cutil.GetPtr(common.DefaultIpxeScript),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{SubnetID: cutil.GetPtr(subnet2.ID.String())},
+					},
+					PhoneHomeEnabled: cutil.GetPtr(false),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu1,
+				respCode:    http.StatusBadRequest,
+				respMessage: "Machine specified in request does not match machineLabelSelector",
+			},
+			wantErr: false,
+		},
+		{
 			name: "test Instance create API endpoint success, specify a machine ID belonging to an instance type",
 			fields: fields{
 				dbSession: dbSession,
@@ -2154,12 +2253,13 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIInstanceCreateRequest{
-					Name:       "Test Instance with machine ID",
-					TenantID:   tn1.ID.String(),
-					MachineID:  cutil.GetPtr(mcbyid.ID),
-					VpcID:      vpc2.ID.String(),
-					UserData:   cutil.GetPtr(""),
-					IpxeScript: cutil.GetPtr(common.DefaultIpxeScript),
+					Name:                 "Test Instance with machine ID",
+					TenantID:             tn1.ID.String(),
+					MachineID:            cutil.GetPtr(mcbyid.ID),
+					MachineLabelSelector: map[string]string{"failure-domain": "fd-a"},
+					VpcID:                vpc2.ID.String(),
+					UserData:             cutil.GetPtr(""),
+					IpxeScript:           cutil.GetPtr(common.DefaultIpxeScript),
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
 							SubnetID: cutil.GetPtr(subnet2.ID.String()),
@@ -4202,6 +4302,15 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	inst1 := testInstanceBuildInstance(t, dbSession, "test-instance-1", tn1.ID, ip.ID, st1.ID, &ist1.ID, vpc1.ID, cutil.GetPtr(mc1.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
 	assert.NotNil(t, inst1)
 
+	sxp1 := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-1", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusReady)
+	sxpPending := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-pending", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusPending)
+	assert.NotNil(t, sxp1)
+
+	existingPowerProfile := "balanced"
+	_, updatePowerProfileErr := dbSession.DB.Exec("UPDATE instance SET power_profile = ? WHERE id = ?", existingPowerProfile, inst1.ID)
+	require.NoError(t, updatePowerProfileErr)
+	inst1.PowerProfile = &existingPowerProfile
+
 	inst2 := testInstanceBuildInstance(t, dbSession, "test-instance-name-updated", tn1.ID, ip.ID, st1.ID, &ist1.ID, vpc1.ID, cutil.GetPtr(mc2.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
 	assert.NotNil(t, inst2)
 
@@ -4401,6 +4510,24 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 	// Add Network DPU capability to Instance Type
 	common.TestBuildMachineCapability(t, dbSession, nil, &ist4.ID, cdbm.MachineCapabilityTypeNetwork, "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller", nil, nil, cutil.GetPtr("Mellanox Technologies"), cutil.GetPtr(2), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeDPU), nil)
+
+	issue4908Device := cutil.GetPtr("MT42822 BlueField-2 integrated ConnectX-6 Dx network controller")
+	issue4908DeviceInstance := cutil.GetPtr(0)
+	issue4908VFID := cutil.GetPtr(1)
+
+	issue4908AddVFMachine := testInstanceBuildMachine(t, dbSession, ip.ID, st3.ID, cutil.GetPtr(false), nil)
+	assert.NotNil(t, testInstanceBuildMachineInstanceType(t, dbSession, issue4908AddVFMachine, ist4))
+	issue4908AddVFInstance := testInstanceBuildInstance(t, dbSession, "issue-4908-add-vf", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpc4.ID, cutil.GetPtr(issue4908AddVFMachine.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
+	issue4908AddVFPF := testInstanceBuildInterface(t, dbSession, issue4908AddVFInstance.ID, nil, &vpcPrefix1.ID, issue4908Device, issue4908DeviceInstance, nil, true, cdbm.InterfaceStatusReady, tnu1)
+	testUpdateInterfaceWithIPs(t, dbSession, issue4908AddVFPF, []string{"192.168.0.1"})
+
+	issue4908RemoveMachine := testInstanceBuildMachine(t, dbSession, ip.ID, st3.ID, cutil.GetPtr(false), nil)
+	assert.NotNil(t, testInstanceBuildMachineInstanceType(t, dbSession, issue4908RemoveMachine, ist4))
+	issue4908RemoveInstance := testInstanceBuildInstance(t, dbSession, "issue-4908-remove-vf", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpc4.ID, cutil.GetPtr(issue4908RemoveMachine.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
+	issue4908RemovePF := testInstanceBuildInterface(t, dbSession, issue4908RemoveInstance.ID, nil, &vpcPrefix1.ID, issue4908Device, issue4908DeviceInstance, nil, true, cdbm.InterfaceStatusReady, tnu1)
+	testUpdateInterfaceWithIPs(t, dbSession, issue4908RemovePF, []string{"192.168.0.3"})
+	issue4908RemoveVF := testInstanceBuildInterface(t, dbSession, issue4908RemoveInstance.ID, nil, &vpcPrefixSite3Secondary.ID, issue4908Device, issue4908DeviceInstance, issue4908VFID, false, cdbm.InterfaceStatusReady, tnu1)
+	testUpdateInterfaceWithIPs(t, dbSession, issue4908RemoveVF, []string{"192.174.0.1"})
 
 	inst13 := testInstanceBuildInstance(t, dbSession, "test-instance-nvlink-update", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpc4.ID, cutil.GetPtr(mc5.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
 
@@ -4754,6 +4881,10 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		expectedNetworkSecurityGroupInherited *bool
 		expectedPropagationDetailedStatus     *string
 		expectedPropagationStatus             *string
+		expectedSitePowerProfile              *string
+		expectedSiteSpectrumXAttachmentCount  *int
+		expectedRespSpectrumXAttachmentCount  *int
+		expectedSiteSpectrumXAttachmentType   *corev1.SpxAttachmentType
 		// When true, only assert len(siteReq.Config.Nvlink.GpuConfigs) matches the request (e.g. NVLink no-op where workflow uses DB order).
 		nvLinkGpuConfigsVerifyCountOnly bool
 		// When non-nil, expected len(siteReq.Config.Nvlink.GpuConfigs) for verifySiteControllerRequest (default: len(reqData.NVLinkInterfaces)).
@@ -4761,7 +4892,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		// When true with nvlinkInterfacesToDelete, still assert those rows are Deleting but skip Pending-row count/order checks.
 		nvLinkSkipPendingDBAssertions bool
 		// Optional hook after building the echo context and before Handle (e.g. adjust DB timestamps for time-sensitive branches).
-		beforeHandle func(t *testing.T)
+		beforeHandle           func(t *testing.T)
+		ethernetReconciliation *ethernetReconciliationExpectation
 	}
 
 	tests := []struct {
@@ -4775,6 +4907,209 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		verifySiteControllerRequest bool
 		verifyChildSpanner          bool
 	}{
+		{
+			name: "test Instance update preserves persisted power profile when omitted",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Name:       cutil.GetPtr("Test Instance preserved power profile"),
+					IpxeScript: os2.IpxeScript,
+				},
+				reqInstance:              inst1.ID.String(),
+				cleanInstanceToStatus:    inst1.Status,
+				reqOrg:                   tnOrg1,
+				reqUser:                  tnu1,
+				respCode:                 http.StatusOK,
+				expectedSitePowerProfile: &existingPowerProfile,
+			},
+			verifySiteControllerRequest: true,
+			verifyChildSpanner:          true,
+		},
+		{
+			name: "test Instance update marks the Instance configuring for a SpectrumX-only update",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					// The iPXE-based Operating System rejects an unset ipxeScript, so carry it
+					// through to keep this case independent of the surrounding table order.
+					IpxeScript: os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{
+						{
+							SpectrumXPartitionID: sxp1.ID.String(),
+							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+							DeviceInstance:       cutil.GetPtr(0),
+							AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+						},
+					},
+				},
+				reqInstance:           inst1.ID.String(),
+				cleanInstanceToStatus: inst1.Status,
+				reqOrg:                tnOrg1,
+				reqUser:               tnu1,
+				respCode:              http.StatusOK,
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			// Only the attachment type differs from the case above. The type is part of the
+			// reuse identity, so the Physical row has to retire and an OVS row take its
+			// place, rather than the Physical row being reused under the new type.
+			name: "test Instance update replaces a SpectrumX Attachment when only its type changes",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{
+						{
+							SpectrumXPartitionID: sxp1.ID.String(),
+							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+							DeviceInstance:       cutil.GetPtr(0),
+							AttachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+						},
+					},
+				},
+				reqInstance:                          inst1.ID.String(),
+				cleanInstanceToStatus:                inst1.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(1),
+				expectedSiteSpectrumXAttachmentType:  cutil.GetPtr(corev1.SpxAttachmentType_Ovn),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update carries existing SpectrumX Attachments when the request omits them",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				// Runs directly after the SpectrumX-only case, which left inst1 with one
+				// attachment. Omitting the list here must not clear it on the Site.
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+				},
+				reqInstance:                          inst1.ID.String(),
+				cleanInstanceToStatus:                inst1.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(1),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update omits SpectrumX Attachments marked Deleting from the Site config",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				// An empty list retires the attachment left by the cases above, so the next
+				// unrelated PATCH must not re-assert it to the Site.
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript:           os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{},
+				},
+				reqInstance:                          inst1.ID.String(),
+				cleanInstanceToStatus:                inst1.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(0),
+				expectedRespSpectrumXAttachmentCount: cutil.GetPtr(2),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update does not re-assert a Deleting SpectrumX Attachment",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				// Omitting the list carries the persisted set forward, but the row retired
+				// above is in Deleting and must stay out of the Site config.
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+				},
+				reqInstance:                          inst1.ID.String(),
+				cleanInstanceToStatus:                inst1.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(0),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update rejects a SpectrumX Attachment on a non-Ready Partition",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{
+						{
+							SpectrumXPartitionID: sxpPending.ID.String(),
+							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+							DeviceInstance:       cutil.GetPtr(0),
+							AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+						},
+					},
+				},
+				reqInstance:           inst1.ID.String(),
+				cleanInstanceToStatus: inst1.Status,
+				reqOrg:                tnOrg1,
+				reqUser:               tnu1,
+				respCode:              http.StatusBadRequest,
+			},
+		},
+		{
+			name: "test Instance update rejects power profile when DPS power management is disabled",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					PowerProfile: cutil.GetPtr("performance"),
+				},
+				reqInstance: inst1.ID.String(),
+				reqOrg:      tnOrg1,
+				reqUser:     tnu1,
+				respCode:    http.StatusPreconditionFailed,
+				respMessage: cutil.GetPtr("Site does not have DPS power management enabled"),
+			},
+		},
 		{
 			name: "test Instance update API endpoint success with InfiniBand Interfaces no-op when request matches READY rows on partition, device and device instance",
 			fields: fields{
@@ -6159,6 +6494,105 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			verifyChildSpanner:          true,
 		},
 		{
+			name: "test UpdateInstance adding VF reuses unchanged PF issue 4908",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{ //nolint:exhaustruct // This case leaves unrelated response assertions unset.
+				reqData: &model.APIInstanceUpdateRequest{ //nolint:exhaustruct // The request changes only Ethernet fields.
+					Name:       cutil.GetPtr("Issue 4908 Add VF"),
+					IpxeScript: os2.IpxeScript,
+					SecondaryVpcIDs: []string{
+						vpc4Site3Secondary.ID.String(),
+					},
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							SubnetID:             nil,
+							VpcPrefixID:          cutil.GetPtr(vpcPrefix1.ID.String()),
+							IPAddress:            nil,
+							InlineRoutingProfile: nil,
+							Device:               issue4908Device,
+							DeviceInstance:       issue4908DeviceInstance,
+							VirtualFunctionID:    nil,
+							IsPhysical:           true,
+						},
+						{
+							SubnetID:             nil,
+							VpcPrefixID:          cutil.GetPtr(vpcPrefixSite3Secondary.ID.String()),
+							IPAddress:            nil,
+							InlineRoutingProfile: nil,
+							Device:               issue4908Device,
+							DeviceInstance:       issue4908DeviceInstance,
+							VirtualFunctionID:    issue4908VFID,
+							IsPhysical:           false,
+						},
+					},
+				},
+				reqOrg:                tnOrg1,
+				reqUser:               tnu1,
+				reqInstance:           issue4908AddVFInstance.ID.String(),
+				cleanInstanceToStatus: issue4908AddVFInstance.Status,
+				respCode:              http.StatusOK,
+				ethernetReconciliation: &ethernetReconciliationExpectation{
+					rowCount:        2,
+					readyIDs:        []uuid.UUID{issue4908AddVFPF.ID},
+					deletingIDs:     []uuid.UUID{},
+					pendingCount:    1,
+					uniqueIPAddress: cutil.GetPtr("192.168.0.1"),
+					usagePrefix:     vpcPrefix1,
+				},
+			},
+			wantErr:                     false,
+			verifySiteControllerRequest: true,
+			verifyChildSpanner:          true,
+		},
+		{
+			name: "test UpdateInstance marks only omitted Ethernet interface deleting issue 4908",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{ //nolint:exhaustruct // This case leaves unrelated response assertions unset.
+				reqData: &model.APIInstanceUpdateRequest{ //nolint:exhaustruct // The request changes only Ethernet fields.
+					Name:       cutil.GetPtr("Issue 4908 Remove VF"),
+					IpxeScript: os2.IpxeScript,
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							SubnetID:             nil,
+							VpcPrefixID:          cutil.GetPtr(vpcPrefix1.ID.String()),
+							IPAddress:            nil,
+							InlineRoutingProfile: nil,
+							Device:               issue4908Device,
+							DeviceInstance:       issue4908DeviceInstance,
+							VirtualFunctionID:    nil,
+							IsPhysical:           true,
+						},
+					},
+				},
+				reqOrg:                tnOrg1,
+				reqUser:               tnu1,
+				reqInstance:           issue4908RemoveInstance.ID.String(),
+				cleanInstanceToStatus: issue4908RemoveInstance.Status,
+				respCode:              http.StatusOK,
+				ethernetReconciliation: &ethernetReconciliationExpectation{
+					rowCount:        2,
+					readyIDs:        []uuid.UUID{issue4908RemovePF.ID},
+					deletingIDs:     []uuid.UUID{issue4908RemoveVF.ID},
+					pendingCount:    0,
+					uniqueIPAddress: nil,
+					usagePrefix:     nil,
+				},
+			},
+			wantErr:                     false,
+			verifySiteControllerRequest: true,
+			verifyChildSpanner:          true,
+		},
+		{
 			name: "test Instance update API endpoint success with interface update",
 			fields: fields{
 				dbSession: dbSession,
@@ -7251,6 +7685,75 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				assert.ElementsMatch(t, tt.args.reqData.SecondaryVpcIDs, rst.SecondaryVpcIDs)
 			}
 
+			if expected := tt.args.ethernetReconciliation; expected != nil {
+				reconciledIfcs, _, reconciliationErr := ifcDAO.GetAll(
+					ctx,
+					nil,
+					cdbm.InterfaceFilterInput{
+						InstanceIDs:    []uuid.UUID{reqIns.ID},
+						SubnetID:       nil,
+						VpcPrefixID:    nil,
+						Device:         nil,
+						DeviceInstance: nil,
+						IsPhysical:     nil,
+						Statuses:       nil,
+						IPAddresses:    nil,
+					},
+					cdbp.PageInput{Offset: nil, Limit: cutil.GetPtr(cdbp.TotalLimit), OrderBy: nil},
+					nil,
+				)
+				require.NoError(t, reconciliationErr)
+				assert.Len(t, reconciledIfcs, expected.rowCount)
+				assert.Len(t, rst.Interfaces, expected.rowCount)
+
+				pendingCount := 0
+				deletingCount := 0
+				rowsWithExpectedIP := 0
+
+				for _, ifc := range reconciledIfcs {
+					switch ifc.Status {
+					case cdbm.InterfaceStatusPending:
+						pendingCount++
+					case cdbm.InterfaceStatusDeleting:
+						deletingCount++
+					}
+
+					for _, ipAddress := range ifc.IPAddresses {
+						if expected.uniqueIPAddress != nil && ipAddress == *expected.uniqueIPAddress {
+							rowsWithExpectedIP++
+						}
+					}
+				}
+
+				assert.Equal(t, expected.pendingCount, pendingCount)
+				assert.Equal(t, len(expected.deletingIDs), deletingCount)
+
+				if expected.uniqueIPAddress != nil {
+					assert.Equal(t, 1, rowsWithExpectedIP)
+				}
+
+				for _, interfaceID := range expected.readyIDs {
+					ifc, getErr := ifcDAO.GetByID(ctx, nil, interfaceID, nil)
+					require.NoError(t, getErr)
+					assert.Equal(t, cdbm.InterfaceStatusReady, ifc.Status)
+				}
+
+				for _, interfaceID := range expected.deletingIDs {
+					ifc, getErr := ifcDAO.GetByID(ctx, nil, interfaceID, nil)
+					require.NoError(t, getErr)
+					assert.Equal(t, cdbm.InterfaceStatusDeleting, ifc.Status)
+				}
+
+				if expected.usagePrefix != nil {
+					usageByID, usageErr := cdbm.NewVpcPrefixDAO(tt.fields.dbSession).GetPrefixUsage(ctx, nil, expected.usagePrefix)
+					require.NoError(t, usageErr)
+
+					usage := usageByID[expected.usagePrefix.ID]
+					require.NotNil(t, usage)
+					assert.LessOrEqual(t, usage.AcquiredIPs+uint64(2), usage.AvailableIPs)
+				}
+			}
+
 			if tt.args.expectedNetworkSecurityGroupInherited != nil {
 				assert.Equal(t, *tt.args.expectedNetworkSecurityGroupInherited, rst.NetworkSecurityGroupInherited)
 			}
@@ -7364,13 +7867,32 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				}
 				require.NotNil(t, siteReq, "expected UpdateInstance workflow request for Instance %s", tt.args.reqInstance)
 				if siteReq != nil {
+					if tt.args.expectedSitePowerProfile != nil {
+						require.NotNil(t, siteReq.Config.PowerProfile)
+						assert.Equal(t, *tt.args.expectedSitePowerProfile, *siteReq.Config.PowerProfile)
+					}
+
 					// Verify the number of interfaces in the request as pending status
 					// which is the number of interfaces in the request
 					var reqInsIfcs []cdbm.Interface
 					if tt.args.respNoOfInterfaces != nil {
 						reqInsIfcs, _, _ = ifcDAO.GetAll(ec.Request().Context(), nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{reqIns.ID}, Statuses: []string{cdbm.InterfaceStatusPending}}, cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InterfaceOrderByCreated, Order: cdbp.OrderAscending}}, nil)
 					} else {
-						reqInsIfcs, _, _ = ifcDAO.GetAll(ec.Request().Context(), nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{reqIns.ID}}, cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InterfaceOrderByCreated, Order: cdbp.OrderAscending}}, nil)
+						reqInsIfcs, _, _ = ifcDAO.GetAll(ec.Request().Context(), nil, cdbm.InterfaceFilterInput{
+							InstanceIDs:    []uuid.UUID{reqIns.ID},
+							SubnetID:       nil,
+							VpcPrefixID:    nil,
+							Device:         nil,
+							DeviceInstance: nil,
+							IsPhysical:     nil,
+							Statuses: []string{
+								cdbm.InterfaceStatusPending,
+								cdbm.InterfaceStatusProvisioning,
+								cdbm.InterfaceStatusReady,
+								cdbm.InterfaceStatusError,
+							},
+							IPAddresses: nil,
+						}, cdbp.PageInput{Offset: nil, Limit: nil, OrderBy: &cdbp.OrderBy{Field: cdbm.InterfaceOrderByCreated, Order: cdbp.OrderAscending}}, nil)
 					}
 
 					assert.Equal(t, len(reqInsIfcs), len(siteReq.Config.Network.Interfaces))
@@ -7421,7 +7943,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 						// Check if VirtualFunctionId is present
 						if reqInsIfcs[i].VirtualFunctionID != nil {
-							assert.Equal(t, siteIfc.VirtualFunctionId, reqInsIfcs[i].VirtualFunctionID)
+							assert.Equal(t, uint32(*reqInsIfcs[i].VirtualFunctionID), siteIfc.GetVirtualFunctionId())
 						}
 
 						if reqInsIfcs[i].RequestedIpAddress != nil {
@@ -7460,6 +7982,60 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						}
 					}
 
+					// The Site config is a replacement rather than a merge, so it is always sent.
+					require.NotNil(t, siteReq.Config.Spxconfig)
+
+					if tt.args.expectedRespSpectrumXAttachmentCount != nil {
+						require.Len(t, rst.SpectrumXAttachments, *tt.args.expectedRespSpectrumXAttachmentCount,
+							"a retiring attachment must still appear in the response, as a following GET reports it")
+						for _, apiSxA := range rst.SpectrumXAttachments {
+							assert.Equal(t, cdbm.SpectrumXAttachmentStatusDeleting, apiSxA.Status)
+						}
+					}
+
+					if tt.args.expectedSiteSpectrumXAttachmentCount != nil {
+						assert.Len(t, siteReq.Config.Spxconfig.SpxAttachments, *tt.args.expectedSiteSpectrumXAttachmentCount,
+							"an update that omits spectrumXAttachments must still carry the persisted set")
+					}
+
+					if tt.args.expectedSiteSpectrumXAttachmentType != nil {
+						require.Len(t, siteReq.Config.Spxconfig.SpxAttachments, 1)
+						assert.Equal(t, *tt.args.expectedSiteSpectrumXAttachmentType, siteReq.Config.Spxconfig.SpxAttachments[0].AttachmentType,
+							"the Site must be sent the requested attachment type, not the retired row's")
+					}
+
+					// Verify the SpectrumX Attachments are in the Site Controller request
+					if len(tt.args.reqData.SpectrumXAttachments) > 0 {
+						require.NotNil(t, siteReq.Config.Spxconfig)
+						assert.Equal(t, len(tt.args.reqData.SpectrumXAttachments), len(siteReq.Config.Spxconfig.SpxAttachments))
+
+						// Make sure order to should be same as the request received
+						for i := range siteReq.Config.Spxconfig.SpxAttachments {
+							assert.Equal(t, siteReq.Config.Spxconfig.SpxAttachments[i].SpxPartitionId.Value, tt.args.reqData.SpectrumXAttachments[i].SpectrumXPartitionID)
+							assert.Equal(t, siteReq.Config.Spxconfig.SpxAttachments[i].Device, tt.args.reqData.SpectrumXAttachments[i].Device)
+						}
+
+						// The Site request is built from persisted rows, so the response has to
+						// carry every requested attachment back as a new Pending row. A row a
+						// request retires also stays in the response, so this checks membership
+						// rather than an exact list; cases that pin the total use
+						// expectedRespSpectrumXAttachmentCount.
+						for _, reqSxA := range tt.args.reqData.SpectrumXAttachments {
+							matched := 0
+							for _, apiSxA := range rst.SpectrumXAttachments {
+								if apiSxA.SpectrumXPartitionID != reqSxA.SpectrumXPartitionID ||
+									apiSxA.Device != reqSxA.Device ||
+									apiSxA.AttachmentType != reqSxA.AttachmentType {
+									continue
+								}
+								matched++
+								assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, apiSxA.Status)
+								assert.Equal(t, rst.ID, apiSxA.InstanceID)
+							}
+							assert.Equal(t, 1, matched, "the response must carry the requested SpectrumX Attachment back exactly once")
+						}
+					}
+
 					// Verify the DPU Extension Service Deployments are in the Site Controller request
 					if len(tt.args.reqData.DpuExtensionServiceDeployments) > 0 {
 						assert.Equal(t, len(tt.args.reqData.DpuExtensionServiceDeployments), len(siteReq.Config.DpuExtensionServices.ServiceConfigs), siteReq.Config.DpuExtensionServices.ServiceConfigs)
@@ -7494,7 +8070,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			assert.NotEqual(t, rst.Updated.String(), inst1.Updated.String())
 
 			// Verify Instance status is configuring if any of the interfaces are being updated
-			if tt.args.reqData.NVLinkInterfaces != nil || tt.args.reqData.Interfaces != nil || tt.args.reqData.InfiniBandInterfaces != nil {
+			if tt.args.reqData.NVLinkInterfaces != nil || tt.args.reqData.Interfaces != nil || tt.args.reqData.InfiniBandInterfaces != nil ||
+				tt.args.reqData.SpectrumXAttachments != nil {
 				assert.Equal(t, rst.Status, cdbm.InstanceStatusConfiguring)
 			}
 
@@ -8403,7 +8980,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 
 	// Setup instances with specific IP addresses for IP filtering tests
 	// Use instances from the array so they're both on st1 and will be on the same page
-	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[0], []string{"192.168.1.100", "192.168.1.101"})
+	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[0], []string{"192.168.1.100", "192.168.1.101", "2001:db8::1"})
 	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[1], []string{"192.168.2.200"})
 
 	e := echo.New()
@@ -9340,6 +9917,43 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			expectedTotal: 2,
 		},
 		{
+			name: "test Instance getall API endpoint success with expanded IPv6 address filter",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqSiteIDs:                  []string{st1.ID.String()},
+				reqInfrastructureProviderID: ip.ID.String(),
+				reqOrg:                      tnOrg1,
+				reqUser:                     tnu1,
+				respCode:                    http.StatusOK,
+			},
+			ipAddresses:            []string{"2001:0DB8:0:0:0:0:0:1"},
+			expectedCount:          1,
+			expectedTotal:          1,
+			expectedFirstEntryName: "test-instance-11",
+		},
+		{
+			name: "test Instance getall API endpoint success with mixed IP address filters",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqSiteIDs:                  []string{st1.ID.String()},
+				reqInfrastructureProviderID: ip.ID.String(),
+				reqOrg:                      tnOrg1,
+				reqUser:                     tnu1,
+				respCode:                    http.StatusOK,
+			},
+			ipAddresses:   []string{"2001:0db8::1", "192.168.2.200", "invalid-address"},
+			expectedCount: 2,
+			expectedTotal: 2,
+		},
+		{
 			name: "test Instance getall API endpoint success with non-existent IP address filter",
 			fields: fields{
 				dbSession: dbSession,
@@ -10222,6 +10836,7 @@ func TestNewCreateInstanceHandler(t *testing.T) {
 				dbSession:  dbSession,
 				tc:         tc,
 				cfg:        cfg,
+				dps:        nil,
 				scp:        scp,
 				tracerSpan: sutil.NewTracerSpan(),
 			},
@@ -10229,9 +10844,8 @@ func TestNewCreateInstanceHandler(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewCreateInstanceHandler(tt.args.dbSession, tt.args.tc, tt.args.scp, tt.args.cfg); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NewCreateInstanceHandler() = %+v, want %+v", got, tt.want)
-			}
+			got := NewCreateInstanceHandler(tt.args.dbSession, tt.args.tc, tt.args.scp, tt.args.cfg, nil)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -10272,15 +10886,15 @@ func TestNewUpdateInstanceHandler(t *testing.T) {
 				tc:         tc,
 				scp:        scp,
 				cfg:        cfg,
+				dps:        nil,
 				tracerSpan: sutil.NewTracerSpan(),
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewUpdateInstanceHandler(tt.args.dbSession, tt.args.tc, tt.args.scp, tt.args.cfg); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NewUpdateInstanceHandler() = %v, want %v", got, tt.want)
-			}
+			got := NewUpdateInstanceHandler(tt.args.dbSession, tt.args.tc, tt.args.scp, tt.args.cfg, nil)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -10411,9 +11025,8 @@ func TestNewDeleteInstanceHandler(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewDeleteInstanceHandler(tt.args.dbSession, tt.args.tc, tt.args.scp, tt.args.cfg); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NewDeleteInstanceHandler() = %v, want %v", got, tt.want)
-			}
+			got := NewDeleteInstanceHandler(tt.args.dbSession, tt.args.tc, tt.args.scp, tt.args.cfg, nil)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

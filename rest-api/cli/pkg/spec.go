@@ -55,6 +55,7 @@ type Parameter struct {
 	Name        string  `yaml:"name"`
 	In          string  `yaml:"in"`
 	Required    bool    `yaml:"required"`
+	Deprecated  bool    `yaml:"deprecated"`
 	Description string  `yaml:"description"`
 	Schema      *Schema `yaml:"schema"`
 }
@@ -94,9 +95,11 @@ type Schema struct {
 	Type       SchemaType         `yaml:"type"`
 	Format     string             `yaml:"format"`
 	Enum       []string           `yaml:"enum"`
+	Deprecated bool               `yaml:"deprecated"`
 	Properties map[string]*Schema `yaml:"properties"`
 	Required   []string           `yaml:"required"`
 	Items      *Schema            `yaml:"items"`
+	MaxItems   *int               `yaml:"maxItems"`
 	MinLength  *int               `yaml:"minLength"`
 	MaxLength  *int               `yaml:"maxLength"`
 	Minimum    *int               `yaml:"minimum"`

@@ -45,7 +45,7 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(ms.dbSession)
-	_, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")
@@ -125,6 +125,15 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 			continue
 		}
 
+		// Updated is the row's own write time, so a SKU written since the Site collected this
+		// inventory carries changes the snapshot cannot know about, including any made through
+		// the API. Writing the reported values over them would lose those edits.
+		if site.IsTimeWithinStaleInventoryThreshold(cur.Updated) {
+			logger.Info().Str("SkuId", cur.ID).Msg("not updating SKU yet because it changed more recently than the inventory interval")
+
+			continue
+		}
+
 		// Update existing SKU data in DB
 		createdChanged := !reported.Created.IsZero() && !cur.Created.Equal(reported.Created)
 		if createdChanged || cur.Description != reported.Description || cur.SchemaVersion != reported.SchemaVersion ||
@@ -164,15 +173,25 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 	}
 
 	// Delete any SKU present in DB not present in NICo.
-	// We only act if this is the last page (or paging disabled) and outside race window.
+	// We only act if this is the last page (or paging disabled).
 	// The source of truth for NICo is reportedIDs.
 	if skuInventory.InventoryPage == nil || skuInventory.InventoryPage.TotalPages == 0 || (skuInventory.InventoryPage.CurrentPage == skuInventory.InventoryPage.TotalPages) {
 		for _, sk := range existingSkus {
 			if _, keep := reportedIDs[sk.ID]; keep {
 				continue
 			}
+			// Updated tracks when this row was last written, unlike Created which carries Core's
+			// timestamp and stays old for a SKU that Cloud only just learned about. A SKU
+			// written since the Site collected this inventory may be absent from it only because
+			// the snapshot predates the row, so deleting would drop a SKU that just arrived.
+			if site.IsTimeWithinStaleInventoryThreshold(sk.Updated) {
+				logger.Info().Str("SkuId", sk.ID).Msg("not deleting SKU yet because it is newer than the inventory interval")
+
+				continue
+			}
 			logger.Info().Str("SkuId", sk.ID).Msg("deleting SKU from DB since it was no longer reported in inventory from Site")
-			if derr := skuDAO.Delete(ctx, nil, sk.ID); derr != nil {
+			derr := skuDAO.Delete(ctx, nil, sk.ID)
+			if derr != nil {
 				logger.Error().Err(derr).Str("SkuID", sk.ID).Msg("failed to delete SKU from DB")
 			}
 		}

@@ -16,7 +16,9 @@
  */
 
 use axum::body::Body;
+use carbide_uuid::rack::RackProfileId;
 use hyper::http::StatusCode;
+use model::test_support::power_shelf_config;
 use tower::ServiceExt;
 
 use crate::tests::env::TestEnv;
@@ -27,9 +29,17 @@ async fn test_component_detail_pages_return_not_found_for_missing_resources(pool
     let env = TestEnv::new(pool).await;
     let app = make_test_app(&env.test_harness);
 
-    let rack_id = env.test_harness.create_rack().await.id;
+    let rack_id = env
+        .test_harness
+        .create_rack(RackProfileId::new("rack"))
+        .await
+        .id;
     let switch_id = env.test_harness.create_switch(1, 1).await.id;
-    let power_shelf_id = env.test_harness.create_power_shelf().await.id;
+    let power_shelf_id = env
+        .test_harness
+        .create_power_shelf(power_shelf_config("Component Detail Test Power Shelf"))
+        .await
+        .id;
 
     for route in [
         format!("/admin/rack/{rack_id}"),

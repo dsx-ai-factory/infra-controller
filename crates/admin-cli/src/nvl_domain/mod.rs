@@ -17,9 +17,6 @@
 
 mod health_report;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;

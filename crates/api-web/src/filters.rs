@@ -79,12 +79,25 @@ fn escaped_shortened_id_link(id: impl Display, path: impl Display) -> ::askama::
     let mut escaped_id = String::new();
     askama_escape::Html.write_escaped(&mut escaped_id, &id)?;
 
-    let short_id = &escaped_id[escaped_id.len().saturating_sub(6)..];
+    if id.chars().count() <= 6 {
+        return Ok(format!(
+            r#"<a href="/admin/{path}/{link_path}">{escaped_id}</a>"#
+        ));
+    }
+
+    let short_id = id
+        .char_indices()
+        .rev()
+        .nth(5)
+        .map(|(index, _)| &id[index..])
+        .unwrap_or(&id);
+    let mut escaped_short_id = String::new();
+    askama_escape::Html.write_escaped(&mut escaped_short_id, short_id)?;
     let formatted = format!(
         r#"
     <a href="/admin/{path}/{link_path}">
         <div class="machine_id">
-            <div>{escaped_id}</div><div>{short_id}</div>
+            <div>{escaped_id}</div><div>{escaped_short_id}</div>
         </div>
     </a>"#
     );
@@ -463,7 +476,82 @@ pub(super) fn controller_state_reason_fmt(
 mod tests {
     use carbide_test_support::{Check, check_values};
 
-    use super::format_json;
+    use super::{escaped_shortened_id_link, format_json};
+
+    #[test]
+    fn shortened_id_links_render_exact_output() {
+        check_values(
+            [
+                Check {
+                    scenario: "short ID",
+                    input: "a12",
+                    expect: r#"<a href="/admin/rack/a12">a12</a>"#.to_string(),
+                },
+                Check {
+                    scenario: "long ASCII ID",
+                    input: "rack-a12",
+                    expect: concat!(
+                        "\n    <a href=\"/admin/rack/rack-a12\">\n",
+                        "        <div class=\"machine_id\">\n",
+                        "            <div>rack-a12</div><div>ck-a12</div>\n",
+                        "        </div>\n",
+                        "    </a>"
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "six accented characters",
+                    input: "áéíóúñ",
+                    expect: concat!(
+                        "<a href=\"/admin/rack/",
+                        "%C3%A1%C3%A9%C3%AD%C3%B3%C3%BA%C3%B1",
+                        "\">áéíóúñ</a>"
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "seven accented characters",
+                    input: "áéíóúñü",
+                    expect: concat!(
+                        "\n    <a href=\"/admin/rack/",
+                        "%C3%A1%C3%A9%C3%AD%C3%B3%C3%BA%C3%B1%C3%BC",
+                        "\">\n",
+                        "        <div class=\"machine_id\">\n",
+                        "            <div>áéíóúñü</div><div>éíóúñü</div>\n",
+                        "        </div>\n",
+                        "    </a>"
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "Unicode suffix",
+                    input: "rack-abcdeå",
+                    expect: concat!(
+                        "\n    <a href=\"/admin/rack/rack-abcde%C3%A5\">\n",
+                        "        <div class=\"machine_id\">\n",
+                        "            <div>rack-abcdeå</div><div>abcdeå</div>\n",
+                        "        </div>\n",
+                        "    </a>"
+                    )
+                    .to_string(),
+                },
+                Check {
+                    scenario: "HTML metacharacters",
+                    input: "rack-<&abcd",
+                    expect: concat!(
+                        "\n    <a href=\"/admin/rack/rack-%3C%26abcd\">\n",
+                        "        <div class=\"machine_id\">\n",
+                        "            <div>rack-&#60;&#38;abcd</div>",
+                        "<div>&#60;&#38;abcd</div>\n",
+                        "        </div>\n",
+                        "    </a>"
+                    )
+                    .to_string(),
+                },
+            ],
+            |id| escaped_shortened_id_link(id, "rack").unwrap(),
+        );
+    }
 
     #[test]
     fn pretty_json_preserves_values_and_fallbacks() {

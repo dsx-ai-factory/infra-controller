@@ -4,7 +4,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -34,12 +33,14 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api"
+	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authn "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authentication"
 	otprop "go.opentelemetry.io/contrib/propagators/ot"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/interceptor"
 	"golang.org/x/time/rate"
@@ -81,7 +82,7 @@ func InitTemporalClients(tcfg *cconfig.TemporalConfig, tracingEnabled bool) (tsd
 	}
 
 	tOptions := tsdkClient.Options{
-		HostPort: fmt.Sprintf("%v:%v", tcfg.Host, tcfg.Port),
+		HostPort: tcfg.GetHostPort(),
 		// This client connects to `cloud` namespace
 		Namespace: tcfg.Namespace,
 		ConnectionOptions: tsdkClient.ConnectionOptions{
@@ -117,7 +118,7 @@ func InitTemporalClients(tcfg *cconfig.TemporalConfig, tracingEnabled bool) (tsd
 	return tc, tnc, err
 }
 
-func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Client, tnc tsdkClient.NamespaceClient, scp *sc.ClientPool) *echo.Echo {
+func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Client, tnc tsdkClient.NamespaceClient, scp *sc.ClientPool, dps dpsclient.PowerProvisioner) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HTTPErrorHandler = cerr.DefaultHTTPErrorHandler
@@ -190,7 +191,15 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	if cfg.GetTracingEnabled() {
 		svcName := cfg.GetTracingServiceName()
 		if svcName != "" {
-			e.Use(otelecho.Middleware(svcName, otelecho.WithSkipper(skipTracingRoutes), otelecho.WithPropagators(otprop.OT{})))
+			// Composite: WithPropagators replaces, so OT alone dropped W3C.
+			e.Use(otelecho.Middleware(svcName,
+				otelecho.WithSkipper(skipTracingRoutes),
+				otelecho.WithPropagators(propagation.NewCompositeTextMapPropagator(
+					propagation.TraceContext{},
+					propagation.Baggage{},
+					otprop.OT{},
+				)),
+			))
 		} else {
 			log.Warn().Msg("failed to get Tracing Service Name, skipping OTel middleware")
 		}
@@ -267,19 +276,19 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 		routeGroup.Use(middleware.AuditLog(dbSession))
 	}
 
-	jwtOriginConfig := cfg.GetOrInitJWTOriginConfig()
-	if jwtOriginConfig == nil {
-		log.Panic().Msg("JWT origin config not initialized, cannot initialize auth middleware")
+	tokenOriginConfig := cfg.GetOrInitTokenOriginConfig()
+	if tokenOriginConfig == nil {
+		log.Panic().Msg("token origin config not initialized, cannot initialize auth middleware")
 	}
 
 	keycloakConfig, _ := cfg.GetOrInitKeycloakConfig()
 	payloadEncryptionConfig := cconfig.NewPayloadEncryptionConfig(cfg.GetTemporalEncryptionKey())
 
 	// Wrap the auth middleware to check readiness (optional, can be removed if panic is sufficient)
-	authMiddleware := authn.Auth(dbSession, tc, jwtOriginConfig, payloadEncryptionConfig, keycloakConfig)
+	authMiddleware := authn.Auth(dbSession, tc, tokenOriginConfig, payloadEncryptionConfig, keycloakConfig)
 	routeGroup.Use(authMiddleware)
 
-	apiRoutes := api.NewAPIRoutes(dbSession, tc, tnc, scp, cfg)
+	apiRoutes := api.NewAPIRoutes(dbSession, tc, tnc, scp, cfg, dps)
 	for _, apiRoute := range apiRoutes {
 		routeGroup.Add(apiRoute.Method, apiRoute.Path, apiRoute.Handler.Handle)
 	}
@@ -299,12 +308,14 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	return e
 }
 
-func InitMetricsServer(e *echo.Echo, cfg *config.Config) *echo.Echo {
+func InitMetricsServer(e *echo.Echo, namespace string) *echo.Echo {
 	ep := echo.New()
 	ep.HideBanner = true
 
 	conf := echoPrometheus.MiddlewareConfig{
-		Subsystem: fmt.Sprintf("%s_api", cfg.GetAPIName()),
+		// The prefix has to go in Subsystem, since echoprometheus substitutes
+		// its own "echo" for an empty one.
+		Subsystem: namespace,
 		Skipper:   api.MetricsURLSkipper,
 	}
 

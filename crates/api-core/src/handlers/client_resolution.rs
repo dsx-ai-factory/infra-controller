@@ -19,12 +19,17 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 
 use ::rpc::forge as rpc;
+use carbide_uuid::machine::{DpuMachineId, MachineIdSubtypeTrait};
 use carbide_uuid::network::NetworkSegmentId;
+use db::ObjectColumnFilter;
 use db::db_read::DbReader;
+use model::instance::config::tenant_config::HOSTNAME_RE;
 use model::instance::snapshot::InstanceSnapshot;
-use model::machine::{InstanceState, MachineInterfaceSnapshot, ManagedHostState};
+use model::machine::machine_search_config::MachineSearchConfig;
+use model::machine::{InstanceState, Machine, MachineInterfaceSnapshot, ManagedHostState};
 use model::machine_interface::InterfaceType;
 use model::network_segment::NetworkSegmentType;
+use model::rack_type::{RackProductFamily, select_dpu_nvconfig_profile};
 use sqlx::PgConnection;
 
 use crate::CarbideError;
@@ -133,7 +138,7 @@ pub(super) fn is_same_host_inband_interface(
     machine_interface: &MachineInterfaceSnapshot,
     owner: &OverlayAddressOwner,
 ) -> bool {
-    machine_interface.machine_id == Some(owner.instance.machine_id)
+    machine_interface.machine_id == Some(owner.instance.machine_id.into())
         && machine_interface.interface_type == InterfaceType::Data
         && machine_interface.network_segment_type == Some(NetworkSegmentType::HostInband)
         && owner.segment_ids.contains(&machine_interface.segment_id)
@@ -232,6 +237,80 @@ pub(super) async fn resolve_machine_interface(
     }
 }
 
+/// Returns the product family reported by Site Explorer, or falls back to the
+/// configured rack profile when that report does not name a known family.
+async fn resolve_host_product_family(
+    api: &Api,
+    conn: &mut PgConnection,
+    host: &Machine<impl MachineIdSubtypeTrait>,
+) -> Result<Option<RackProductFamily>, CarbideError> {
+    if let Some(host_bmc_ip) = host.status.bmc_info.ip {
+        let endpoints = db::explored_endpoints::find_by_ips(&mut *conn, vec![host_bmc_ip]).await?;
+        if let Some(product_family) = endpoints
+            .first()
+            .and_then(|endpoint| endpoint.report.model())
+            .as_deref()
+            .and_then(RackProductFamily::from_hardware_model)
+        {
+            return Ok(Some(product_family));
+        }
+    }
+
+    let Some(rack_id) = host.rack_id.as_ref() else {
+        return Ok(None);
+    };
+    let Some(rack) = db::rack::find_by(
+        &mut *conn,
+        ObjectColumnFilter::One(db::rack::IdColumn, rack_id),
+    )
+    .await?
+    .pop() else {
+        return Ok(None);
+    };
+    let Some(rack_profile_id) = rack.rack_profile_id.as_ref() else {
+        return Ok(None);
+    };
+
+    Ok(api
+        .runtime_config
+        .rack_profiles
+        .get(rack_profile_id.as_str())
+        .and_then(|profile| profile.product_family.clone()))
+}
+
+/// Selects a DPU profile from the attached host's observed or configured
+/// product family and the DPU's hardware identity. Missing relationships mean
+/// no platform profile applies; database failures still propagate.
+async fn resolve_dpu_nvconfig_profile(
+    api: &Api,
+    conn: &mut PgConnection,
+    machine_interface: &MachineInterfaceSnapshot,
+) -> Result<Option<rpc::DpuNvConfigProfile>, CarbideError> {
+    let Some(dpu_machine_id) = machine_interface.machine_id.as_ref() else {
+        return Ok(None);
+    };
+    let Ok(dpu_machine_id) = DpuMachineId::try_from(*dpu_machine_id) else {
+        return Ok(None);
+    };
+
+    let Some(host) = db::machine::find_host_by_dpu_machine_id(&mut *conn, &dpu_machine_id).await?
+    else {
+        return Ok(None);
+    };
+    let product_family = resolve_host_product_family(api, conn, &host).await?;
+
+    let Some(dpu) =
+        db::machine::find_one(&mut *conn, &dpu_machine_id, MachineSearchConfig::default()).await?
+    else {
+        return Ok(None);
+    };
+
+    Ok(
+        select_dpu_nvconfig_profile(product_family.as_ref(), dpu.status.hardware_info.as_ref())
+            .map(rpc::DpuNvConfigProfile::from),
+    )
+}
+
 /// Resolve a client IP to its `CloudInitInstructions` response. The
 /// interface arm produces a discovery-instructions response (for
 /// unassigned hosts running scout, etc.); the instance arm produces an
@@ -250,7 +329,8 @@ pub(super) async fn resolve_cloud_init_instructions(
         // Is this an instance IP? If so, we use its cloud-init config *only* if it's Assigned/Ready.
         if let ResolvedClient::Instance(instance) = &resolved
             && let Some(managed_host_state) =
-                db::machine::lookup_managed_host_state(&mut *conn, instance.machine_id).await?
+                db::machine::lookup_managed_host_state(&mut *conn, instance.machine_id.into())
+                    .await?
         {
             let is_assigned_and_ready = matches!(
                 managed_host_state,
@@ -275,17 +355,31 @@ pub(super) async fn resolve_cloud_init_instructions(
     };
 
     match resolved_ip {
-        ResolvedClient::Instance(instance) => Ok(rpc::CloudInitInstructions {
-            custom_cloud_init: instance.config.os.user_data,
-            discovery_instructions: None,
-            metadata: Some(rpc::CloudInitMetaData {
-                instance_id: instance.id.to_string(),
-                cloud_name,
-                platform,
-            }),
-            api_url_override: None,
-            pxe_url_override: None,
-        }),
+        ResolvedClient::Instance(instance) => {
+            let local_hostname = if HOSTNAME_RE.is_match(&instance.metadata.name) {
+                Some(instance.metadata.name.clone())
+            } else {
+                tracing::warn!(
+                    instance_id=%instance.id,
+                    instance_name=%instance.metadata.name,
+                    "instance name is not a valid hostname; omitting local-hostname from cloud-init meta-data"
+                );
+                None
+            };
+
+            Ok(rpc::CloudInitInstructions {
+                custom_cloud_init: instance.config.os.user_data,
+                discovery_instructions: None,
+                metadata: Some(rpc::CloudInitMetaData {
+                    instance_id: instance.id.to_string(),
+                    cloud_name,
+                    platform,
+                    local_hostname,
+                }),
+                api_url_override: None,
+                pxe_url_override: None,
+            })
+        }
         ResolvedClient::MachineInterface(machine_interface) => {
             let domain_id = machine_interface.domain_id.ok_or_else(|| {
                 CarbideError::internal(format!(
@@ -322,6 +416,7 @@ pub(super) async fn resolve_cloud_init_instructions(
                     instance_id: machine_id.to_string(),
                     cloud_name,
                     platform,
+                    local_hostname: None,
                 });
 
             // For interfaces on the static-assignments segment, include
@@ -347,6 +442,10 @@ pub(super) async fn resolve_cloud_init_instructions(
             let vmaas_config = api.runtime_config.vmaas_config.as_ref();
             let host_representor_bridging =
                 vmaas_config.and_then(|config| config.bridging.as_ref());
+            let dpu_nvconfig_profile = resolve_dpu_nvconfig_profile(api, conn, &machine_interface)
+                .await?
+                .unwrap_or(rpc::DpuNvConfigProfile::Unspecified)
+                as i32;
 
             Ok(rpc::CloudInitInstructions {
                 custom_cloud_init,
@@ -363,6 +462,7 @@ pub(super) async fn resolve_cloud_init_instructions(
                     bootstrap_ca_source: rpc::BootstrapCaSource::from(
                         api.runtime_config.dpu_config.bootstrap_ca_source,
                     ) as i32,
+                    dpu_nvconfig_profile,
                 }),
                 metadata,
                 api_url_override,

@@ -379,7 +379,6 @@ pub fn find_prerequisites() -> eyre::Result<HashMap<String, PathBuf>> {
     let mut bins = HashMap::with_capacity(2);
     let paths: Vec<path::PathBuf> = env::split_paths(&env::var_os("PATH").unwrap()).collect();
     bins.insert("vault", find_first_in("vault", &paths));
-    bins.insert("grpcurl", find_first_in("grpcurl", &paths));
     bins.insert("curl", find_first_in("curl", &paths));
 
     let mut full_paths = HashMap::with_capacity(bins.len());

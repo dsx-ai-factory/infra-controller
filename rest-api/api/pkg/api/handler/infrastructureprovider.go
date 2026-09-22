@@ -267,7 +267,9 @@ func (gcipsh GetCurrentInfrastructureProviderStatsHandler) Handle(c echo.Context
 
 	// Get IPBlock stats for this org infrastructure provider
 	ipbDAO := cdbm.NewIPBlockDAO(gcipsh.dbSession)
-	ipbStatsMap, err := ipbDAO.GetCountByStatus(ctx, nil, cutil.GetPtr(ips[0].ID), nil, nil)
+	ipbFilter := cdbm.IPBlockFilterInput{}
+	ipbFilter.ProviderVisible(ips[0].ID)
+	ipbStatsMap, err := ipbDAO.GetCountByStatus(ctx, nil, ipbFilter)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving IPBlock stats for this org's infrastructure provider")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve IPBlock stats", nil)

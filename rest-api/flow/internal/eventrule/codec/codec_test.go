@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package codec_test
+package codec
 
 import (
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/codec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,7 +27,7 @@ func TestDecodeVersion(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			version, err := codec.DecodeVersion([]byte(test.data), "test document")
+			version, err := decodeVersion([]byte(test.data), "test document")
 			if test.wantErr {
 				require.Error(t, err)
 				return
@@ -63,7 +62,7 @@ func TestDecodeStrict(t *testing.T) {
 			var decoded struct {
 				Value string `json:"value"`
 			}
-			err := codec.DecodeStrict([]byte(test.data), &decoded)
+			err := decodeStrict([]byte(test.data), &decoded)
 			if test.wantErr {
 				require.Error(t, err)
 				return

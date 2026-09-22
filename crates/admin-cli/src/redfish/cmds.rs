@@ -288,8 +288,10 @@ pub(crate) async fn action(action: RedfishAction) -> color_eyre::Result<()> {
         BmcResetToDefaults => {
             redfish.bmc_reset_to_defaults().await?;
         }
-        BmcReset => {
-            redfish.bmc_reset().await?;
+        BmcReset { reset_type } => {
+            redfish
+                .bmc_reset(reset_type.map(libredfish::ManagerResetType::from))
+                .await?;
         }
         DisableSecureBoot => {
             redfish.disable_secure_boot().await?;

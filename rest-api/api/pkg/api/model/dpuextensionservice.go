@@ -4,6 +4,8 @@
 package model
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -11,6 +13,8 @@ import (
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
+	k8scorev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/yaml"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -21,18 +25,96 @@ import (
 const (
 	// DpuExtensionServiceTypeKubernetesPod is the service type for Kubernetes Pod
 	DpuExtensionServiceTypeKubernetesPod = "KubernetesPod"
+	// DpuExtensionServiceTypeDpfHelmChart is the service type for a DPF-managed Helm chart
+	DpuExtensionServiceTypeDpfHelmChart = "DpfHelmChart"
+	// DpuExtensionServiceDpuTargetPrimary targets the host's primary attached DPU
+	DpuExtensionServiceDpuTargetPrimary = "Primary"
+	// DpuExtensionServiceDpuTargetAllActive targets DPUs used by the instance network configuration
+	DpuExtensionServiceDpuTargetAllActive = "AllActive"
+	// DpuExtensionServiceDpuTargetAll targets the host's every attached DPU
+	DpuExtensionServiceDpuTargetAll = "All"
+	// DpuExtensionServiceMaxDataBytes is the max size of the deployment spec, matching the Core limit
+	DpuExtensionServiceMaxDataBytes = 131072
 	// DpuExtensionServiceMaxObservabilityConfigs is the max number of observability configs allowed per service version
 	DpuExtensionServiceMaxObservabilityConfigs = 20
 	// DpuExtensionServiceMaxObservabilityConfigNameLength is the max length for an observability config name
 	DpuExtensionServiceMaxObservabilityConfigNameLength = 64
 	// DpuExtensionServiceMaxObservabilityPropertyLength is the max length for endpoint and path properties
 	DpuExtensionServiceMaxObservabilityPropertyLength = 128
+	// DpfCredentialsUnsupportedError reports credentials on a DpfHelmChart request, which Core rejects
+	DpfCredentialsUnsupportedError = "`credentials` is unsupported for 'DpfHelmChart' services, they must be preprovisioned in the Site"
+	// DpfObservabilityUnsupportedError reports observability on a DpfHelmChart request, which Core rejects
+	DpfObservabilityUnsupportedError = "`observability` is unsupported for 'DpfHelmChart' services"
 )
 
 var (
 	dpuExtensionServiceObservabilityPromEndpointBadRE = regexp.MustCompile(`[^a-zA-Z0-9:\-]+`)
 	dpuExtensionServiceObservabilityLogPathBadRE      = regexp.MustCompile(`[^a-zA-Z0-9\-_\/\.\@]+`)
 )
+
+// ValidatePodYaml checks that the given bytes are a Kubernetes Pod specification
+func ValidatePodYaml(yamlData []byte) error {
+	var pod k8scorev1.Pod
+
+	if err := yaml.Unmarshal(yamlData, &pod); err != nil {
+		return fmt.Errorf("failed to parse yaml: %w", err)
+	}
+
+	if pod.Kind != "" && pod.Kind != "Pod" {
+		return fmt.Errorf("invalid kind: expected 'Pod', got %q", pod.Kind)
+	}
+
+	if len(pod.Spec.Containers) == 0 {
+		return errors.New("pod spec must contain at least one container")
+	}
+
+	return nil
+}
+
+// ValidateDpfHelmChartData checks that the given bytes are a DPF Helm chart definition.
+// The field rules mirror DpfHelmChartServiceData::validate in Core so an invalid
+// definition is rejected with a specific message before a workflow is dispatched.
+func ValidateDpfHelmChartData(jsonData []byte) error {
+	var chart struct {
+		RepoURL            string         `json:"repoURL"`
+		ChartName          string         `json:"chartName"`
+		ChartVersion       string         `json:"chartVersion"`
+		SecurityPrivileged *bool          `json:"security.privileged"`
+		Values             map[string]any `json:"values"`
+	}
+
+	if err := json.Unmarshal(jsonData, &chart); err != nil {
+		return fmt.Errorf("failed to parse json: %w", err)
+	}
+
+	if chart.RepoURL == "" {
+		return errors.New("repoURL must not be empty")
+	}
+
+	if !strings.HasPrefix(chart.RepoURL, "oci://") && !strings.HasPrefix(chart.RepoURL, "https://") {
+		return errors.New("repoURL must begin with oci:// or https://")
+	}
+
+	if chart.ChartName == "" {
+		return errors.New("chartName must not be empty")
+	}
+
+	if chart.ChartVersion == "" {
+		return errors.New("chartVersion must not be empty")
+	}
+
+	if chart.SecurityPrivileged == nil {
+		return errors.New("security.privileged must be specified")
+	}
+
+	if serviceDaemonSet, ok := chart.Values["serviceDaemonSet"].(map[string]any); ok {
+		if _, reserved := serviceDaemonSet["nodeSelector"]; reserved {
+			return errors.New("values may not set NICo-owned field serviceDaemonSet.nodeSelector")
+		}
+	}
+
+	return nil
+}
 
 // APIDpuExtensionServiceCreateRequest is the data structure to capture user request to create a new DpuExtensionService
 type APIDpuExtensionServiceCreateRequest struct {
@@ -42,6 +124,8 @@ type APIDpuExtensionServiceCreateRequest struct {
 	Description *string `json:"description"`
 	// ServiceType is the type of service
 	ServiceType string `json:"serviceType"`
+	// DpuTarget is the DPU placement policy for a DPF Helm chart
+	DpuTarget *string `json:"dpuTarget"`
 	// SiteID is the ID of the Site
 	SiteID string `json:"siteId"`
 	// Data is the deployment spec for the DPU Extension Service
@@ -61,19 +145,61 @@ func (descr *APIDpuExtensionServiceCreateRequest) Validate() error {
 			validation.Length(2, 256).Error(validationErrorStringLength)),
 		validation.Field(&descr.ServiceType,
 			validation.Required.Error(validationErrorValueRequired),
-			validation.In(DpuExtensionServiceTypeKubernetesPod).Error("must be 'KubernetesPod'")),
+			validation.In(
+				DpuExtensionServiceTypeKubernetesPod,
+				DpuExtensionServiceTypeDpfHelmChart,
+			).Error("must be 'KubernetesPod' or 'DpfHelmChart'")),
 		validation.Field(&descr.SiteID,
 			validation.Required.Error(validationErrorValueRequired),
 			validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&descr.Data,
-			validation.Required.Error(validationErrorValueRequired)),
+			validation.Required.Error(validationErrorValueRequired),
+			validation.Length(0, DpuExtensionServiceMaxDataBytes).Error(fmt.Sprintf("must not exceed %d bytes", DpuExtensionServiceMaxDataBytes))),
 	)
+	if err != nil {
+		return err
+	}
+
+	if descr.ServiceType == DpuExtensionServiceTypeDpfHelmChart {
+		if descr.DpuTarget == nil {
+			return validation.Errors{
+				"dpuTarget": errors.New("must be specified for `DpfHelmChart` services"),
+			}
+		}
+		if err = validation.Validate(
+			*descr.DpuTarget,
+			validation.Required.Error("must be specified for `DpfHelmChart` services"),
+			validation.In(
+				DpuExtensionServiceDpuTargetPrimary,
+				DpuExtensionServiceDpuTargetAllActive,
+				DpuExtensionServiceDpuTargetAll,
+			).Error("must be one of `Primary`, `AllActive`, or `All`"),
+		); err != nil {
+			return validation.Errors{
+				"dpuTarget": err,
+			}
+		}
+	} else if descr.DpuTarget != nil {
+		return validation.Errors{
+			"dpuTarget": errors.New("cannot be specified for `KubernetesPod` services"),
+		}
+	}
+
+	switch descr.ServiceType {
+	case DpuExtensionServiceTypeKubernetesPod:
+		err = ValidatePodYaml([]byte(descr.Data))
+	case DpuExtensionServiceTypeDpfHelmChart:
+		err = ValidateDpfHelmChartData([]byte(descr.Data))
+	}
 	if err != nil {
 		return err
 	}
 
 	// Validate credentials if provided
 	if descr.Credentials != nil {
+		if descr.ServiceType == DpuExtensionServiceTypeDpfHelmChart {
+			return errors.New(DpfCredentialsUnsupportedError)
+		}
 		err = descr.Credentials.Validate()
 		if err != nil {
 			return err
@@ -81,6 +207,9 @@ func (descr *APIDpuExtensionServiceCreateRequest) Validate() error {
 	}
 
 	if descr.Observability != nil {
+		if descr.ServiceType == DpuExtensionServiceTypeDpfHelmChart {
+			return errors.New(DpfObservabilityUnsupportedError)
+		}
 		err = descr.Observability.Validate()
 		if err != nil {
 			return err
@@ -111,6 +240,8 @@ func (desur *APIDpuExtensionServiceUpdateRequest) Validate() error {
 			validation.When(desur.Name != nil, validation.Required.Error(validationErrorStringLength)),
 			validation.When(desur.Name != nil, validation.By(util.ValidateNameCharacters)),
 			validation.When(desur.Name != nil, validation.Length(2, 256).Error(validationErrorStringLength))),
+		validation.Field(&desur.Data,
+			validation.When(desur.Data != nil, validation.Length(0, DpuExtensionServiceMaxDataBytes).Error(fmt.Sprintf("must not exceed %d bytes", DpuExtensionServiceMaxDataBytes)))),
 	)
 	if err != nil {
 		return err
@@ -201,6 +332,16 @@ func (descr *APIDpuExtensionServiceCreateRequest) ToProto(serviceID, tenantOrg s
 	}
 	if descr.ServiceType == DpuExtensionServiceTypeKubernetesPod {
 		req.ServiceType = corev1.DpuExtensionServiceType_KUBERNETES_POD
+	} else {
+		req.ServiceType = corev1.DpuExtensionServiceType_DPF_HELM_CHART
+		if descr.DpuTarget != nil {
+			target := map[string]corev1.DpuExtensionServiceDpuTarget{
+				DpuExtensionServiceDpuTargetPrimary:   corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY,
+				DpuExtensionServiceDpuTargetAllActive: corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE,
+				DpuExtensionServiceDpuTargetAll:       corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL,
+			}[*descr.DpuTarget]
+			req.DpuTarget = &target
+		}
 	}
 	return req
 }
@@ -236,6 +377,8 @@ type APIDpuExtensionService struct {
 	Description *string `json:"description"`
 	// ServiceType is the type of service
 	ServiceType string `json:"serviceType"`
+	// DpuTarget is the DPU placement policy for a DPF Helm chart
+	DpuTarget *string `json:"dpuTarget"`
 	// SiteID is the ID of the Site
 	SiteID string `json:"siteId"`
 	// Site is the summary of the site
@@ -267,6 +410,7 @@ func NewAPIDpuExtensionService(dbdes *cdbm.DpuExtensionService, dbdesds []cdbm.S
 		Name:           dbdes.Name,
 		Description:    dbdes.Description,
 		ServiceType:    dbdes.ServiceType,
+		DpuTarget:      dbdes.DpuTarget,
 		SiteID:         dbdes.SiteID.String(),
 		TenantID:       dbdes.TenantID.String(),
 		Version:        dbdes.Version,
@@ -305,6 +449,8 @@ type APIDpuExtensionServiceSummary struct {
 	Name string `json:"name"`
 	// ServiceType is the type of service
 	ServiceType string `json:"serviceType"`
+	// DpuTarget is the DPU placement policy for a DPF Helm chart
+	DpuTarget *string `json:"dpuTarget"`
 	// LatestVersion is the latest version of the DPU Extension Service
 	LatestVersion *string `json:"latestVersion"`
 	// Status is the status of the DpuExtensionService
@@ -317,6 +463,7 @@ func NewAPIDpuExtensionServiceSummary(dbdes *cdbm.DpuExtensionService) *APIDpuEx
 		ID:            dbdes.ID.String(),
 		Name:          dbdes.Name,
 		ServiceType:   dbdes.ServiceType,
+		DpuTarget:     dbdes.DpuTarget,
 		LatestVersion: dbdes.Version,
 		Status:        dbdes.Status,
 	}

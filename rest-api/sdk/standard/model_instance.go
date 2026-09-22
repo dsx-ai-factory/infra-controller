@@ -47,6 +47,8 @@ type Instance struct {
 	OperatingSystemId NullableString `json:"operatingSystemId,omitempty"`
 	// ID of the attached Network Security Group, if any
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
+	// External power provisioning profile associated with the Instance.
+	PowerProfile NullableString `json:"powerProfile,omitempty"`
 	// Propagation details for the attached Network Security Group
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails,omitempty"`
 	// Indicates if the Network Security Group is inherited from VPC
@@ -73,6 +75,8 @@ type Instance struct {
 	Interfaces []Interface `json:"interfaces,omitempty"`
 	// InfiniBandInterfaces are list of the InfiniBandInterface associated with the Instance
 	InfinibandInterfaces []InfiniBandInterface `json:"infinibandInterfaces,omitempty"`
+	// SpectrumXAttachments are list of the SpectrumXAttachment associated with the Instance
+	SpectrumXAttachments []SpectrumXAttachment `json:"spectrumXAttachments,omitempty"`
 	// NVLinkInterfaces are list of the NVLinkInterface associated with the Instance
 	NvLinkInterfaces []NVLinkInterface `json:"nvLinkInterfaces,omitempty"`
 	// DPU Extension Services deployed on DPUs of this Instance
@@ -551,6 +555,49 @@ func (o *Instance) UnsetNetworkSecurityGroupId() {
 	o.NetworkSecurityGroupId.Unset()
 }
 
+// GetPowerProfile returns the PowerProfile field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *Instance) GetPowerProfile() string {
+	if o == nil || IsNil(o.PowerProfile.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.PowerProfile.Get()
+}
+
+// GetPowerProfileOk returns a tuple with the PowerProfile field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *Instance) GetPowerProfileOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.PowerProfile.Get(), o.PowerProfile.IsSet()
+}
+
+// HasPowerProfile returns a boolean if a field has been set.
+func (o *Instance) HasPowerProfile() bool {
+	if o != nil && o.PowerProfile.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetPowerProfile gets a reference to the given NullableString and assigns it to the PowerProfile field.
+func (o *Instance) SetPowerProfile(v string) {
+	o.PowerProfile.Set(&v)
+}
+
+// SetPowerProfileNil sets the value for PowerProfile to be an explicit nil
+func (o *Instance) SetPowerProfileNil() {
+	o.PowerProfile.Set(nil)
+}
+
+// UnsetPowerProfile ensures that no value is present for PowerProfile, not even an explicit nil
+func (o *Instance) UnsetPowerProfile() {
+	o.PowerProfile.Unset()
+}
+
 // GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value if set, zero value otherwise.
 func (o *Instance) GetNetworkSecurityGroupPropagationDetails() NetworkSecurityGroupPropagationDetails {
 	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails) {
@@ -1011,6 +1058,38 @@ func (o *Instance) SetInfinibandInterfaces(v []InfiniBandInterface) {
 	o.InfinibandInterfaces = v
 }
 
+// GetSpectrumXAttachments returns the SpectrumXAttachments field value if set, zero value otherwise.
+func (o *Instance) GetSpectrumXAttachments() []SpectrumXAttachment {
+	if o == nil || IsNil(o.SpectrumXAttachments) {
+		var ret []SpectrumXAttachment
+		return ret
+	}
+	return o.SpectrumXAttachments
+}
+
+// GetSpectrumXAttachmentsOk returns a tuple with the SpectrumXAttachments field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *Instance) GetSpectrumXAttachmentsOk() ([]SpectrumXAttachment, bool) {
+	if o == nil || IsNil(o.SpectrumXAttachments) {
+		return nil, false
+	}
+	return o.SpectrumXAttachments, true
+}
+
+// HasSpectrumXAttachments returns a boolean if a field has been set.
+func (o *Instance) HasSpectrumXAttachments() bool {
+	if o != nil && !IsNil(o.SpectrumXAttachments) {
+		return true
+	}
+
+	return false
+}
+
+// SetSpectrumXAttachments gets a reference to the given []SpectrumXAttachment and assigns it to the SpectrumXAttachments field.
+func (o *Instance) SetSpectrumXAttachments(v []SpectrumXAttachment) {
+	o.SpectrumXAttachments = v
+}
+
 // GetNvLinkInterfaces returns the NvLinkInterfaces field value if set, zero value otherwise.
 func (o *Instance) GetNvLinkInterfaces() []NVLinkInterface {
 	if o == nil || IsNil(o.NvLinkInterfaces) {
@@ -1388,6 +1467,9 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 	if o.NetworkSecurityGroupId.IsSet() {
 		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
 	}
+	if o.PowerProfile.IsSet() {
+		toSerialize["powerProfile"] = o.PowerProfile.Get()
+	}
 	if !IsNil(o.NetworkSecurityGroupPropagationDetails) {
 		toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails
 	}
@@ -1426,6 +1508,9 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.InfinibandInterfaces) {
 		toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
+	}
+	if !IsNil(o.SpectrumXAttachments) {
+		toSerialize["spectrumXAttachments"] = o.SpectrumXAttachments
 	}
 	if !IsNil(o.NvLinkInterfaces) {
 		toSerialize["nvLinkInterfaces"] = o.NvLinkInterfaces

@@ -20,10 +20,12 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	oteltrace "go.opentelemetry.io/otel/trace"
+	tClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
@@ -198,9 +200,9 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 	}
 }
 
-// ExecuteGetTasksHandlerTestCases exercises GetRackTasksHandler and GetTrayTasksHandler
-// with a shared case matrix. pathFmt and the path parameter differ per handler;
-// both invoke the GetTasks workflow and use the same Temporal mock expectation.
+// ExecuteGetTasksHandlerTestCases exercises the root, Rack, and Tray task-list
+// handlers with a shared case matrix. pathFmt and the path parameter differ per
+// handler; all invoke Flow ListTasks through the generic proxy.
 type GetTasksHandlerTestCase struct {
 	name           string
 	reqOrg         string
@@ -209,7 +211,10 @@ type GetTasksHandlerTestCase struct {
 	queryParams    map[string]string
 	mockTasks      []*flowv1.Task
 	expectedStatus int
+	expectedPage   *pagination.PageResponse
+	expectedFlowID string
 	assertFlowReq  func(t *testing.T, req *flowv1.ListTasksRequest, pathParam string)
+	assertResponse func(t *testing.T, tasks []model.APITask)
 }
 
 func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(echo.Context) error, scp *sc.ClientPool, siteID string, testCases []GetTasksHandlerTestCase) {
@@ -230,6 +235,10 @@ func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(e
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Flow.WorkflowName, mock.Anything).
 				Run(func(args mock.Arguments) {
 					assert.Equal(t, flowv1.Flow_ListTasks_FullMethodName, args.Get(3).(grpcproxy.Request).FullMethod)
+					if tt.expectedFlowID != "" {
+						options := args.Get(1).(tClient.StartWorkflowOptions)
+						assert.Equal(t, tt.expectedFlowID, options.ID)
+					}
 					if tt.assertFlowReq != nil {
 						req := &flowv1.ListTasksRequest{}
 						testFlowProxyRequest(t, args, req)
@@ -243,14 +252,24 @@ func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(e
 			for k, v := range tt.queryParams {
 				q.Set(k, v)
 			}
-			path := fmt.Sprintf(pathFmt, tt.reqOrg, tt.pathParam) + "?" + q.Encode()
+			var path string
+			if tt.pathParam == "" {
+				path = fmt.Sprintf(pathFmt, tt.reqOrg)
+			} else {
+				path = fmt.Sprintf(pathFmt, tt.reqOrg, tt.pathParam)
+			}
+			path += "?" + q.Encode()
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
 			ec := e.NewContext(req, rec)
-			ec.SetParamNames("orgName", "id")
-			ec.SetParamValues(tt.reqOrg, tt.pathParam)
+			ec.SetParamNames("orgName")
+			ec.SetParamValues(tt.reqOrg)
+			if tt.pathParam != "" {
+				ec.SetParamNames("orgName", "id")
+				ec.SetParamValues(tt.reqOrg, tt.pathParam)
+			}
 			ec.Set("user", tt.user)
 
 			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
@@ -265,9 +284,165 @@ func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(e
 			var tasks []model.APITask
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tasks))
 			require.Len(t, tasks, len(tt.mockTasks))
-			require.NotEmpty(t, rec.Header().Get("X-Pagination"), "X-Pagination")
+			pageHeader := rec.Header().Get(pagination.ResponseHeaderName)
+			require.NotEmpty(t, pageHeader, pagination.ResponseHeaderName)
+			if tt.expectedPage != nil {
+				var pageResponse pagination.PageResponse
+				require.NoError(t, json.Unmarshal([]byte(pageHeader), &pageResponse))
+				assert.Equal(t, *tt.expectedPage, pageResponse)
+			}
+			if tt.assertResponse != nil {
+				tt.assertResponse(t, tasks)
+			}
 		})
 	}
+}
+
+func TestGetAllTaskHandler_Handle(t *testing.T) {
+	dbSession := testRackInitDB(t)
+	defer dbSession.Close()
+
+	cfg := common.GetTestConfig()
+	tcfg, _ := cfg.GetTemporalConfig()
+	scp := sc.NewClientPool(tcfg)
+
+	org := "test-org"
+	_, site, _ := testRackSetupTestData(t, dbSession, org)
+	siteWithoutFlow := &cdbm.Site{
+		ID:                       uuid.New(),
+		Name:                     "test-site-task-list-no-flow",
+		Org:                      org,
+		InfrastructureProviderID: site.InfrastructureProviderID,
+		Status:                   cdbm.SiteStatusRegistered,
+		Config:                   &cdbm.SiteConfig{},
+	}
+	_, err := dbSession.DB.NewInsert().Model(siteWithoutFlow).Exec(context.Background())
+	require.NoError(t, err)
+
+	providerUser := testRackBuildUser(t, dbSession, "provider-user-task-list-site", org, []string{authz.ProviderAdminRole})
+	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-task-list-site", org, []string{authz.TenantAdminRole})
+
+	handler := NewGetAllTaskHandler(dbSession, scp)
+	taskUUID := uuid.New().String()
+	listed := []*flowv1.Task{{
+		Id:          &flowv1.UUID{Id: taskUUID},
+		RackId:      &flowv1.UUID{Id: uuid.New().String()},
+		Description: "Power on rack",
+		Status:      flowv1.TaskStatus_TASK_STATUS_RUNNING,
+		Report:      `{"version":1,"stages":[]}`,
+	}}
+	defaultPageNumber, defaultPageSize := 1, 20
+	filteredPageNumber, filteredPageSize := 2, 10
+	defaultFlowID := fmt.Sprintf("task-get-all-%s", common.QueryParamHash(
+		(&model.APIGetTasksRequest{SiteID: site.ID.String()}).QueryValues(pagination.PageRequest{
+			PageNumber: &defaultPageNumber,
+			PageSize:   &defaultPageSize,
+		}),
+	))
+	filteredFlowID := fmt.Sprintf("task-get-all-%s", common.QueryParamHash(
+		(&model.APIGetTasksRequest{SiteID: site.ID.String(), ActiveOnly: true, IncludeReport: true}).QueryValues(pagination.PageRequest{
+			PageNumber: &filteredPageNumber,
+			PageSize:   &filteredPageSize,
+		}),
+	))
+
+	cases := []GetTasksHandlerTestCase{
+		{
+			name:           "success - list every task in site",
+			reqOrg:         org,
+			user:           providerUser,
+			queryParams:    map[string]string{"siteId": site.ID.String()},
+			mockTasks:      listed,
+			expectedStatus: http.StatusOK,
+			expectedPage:   &pagination.PageResponse{PageNumber: 1, PageSize: 20, Total: 1},
+			expectedFlowID: defaultFlowID,
+			assertFlowReq: func(t *testing.T, req *flowv1.ListTasksRequest, _ string) {
+				t.Helper()
+				assert.Nil(t, req.GetRackId())
+				assert.Nil(t, req.GetComponentId())
+				assert.False(t, req.GetActiveOnly())
+				assert.False(t, req.GetWithReport())
+			},
+			assertResponse: func(t *testing.T, tasks []model.APITask) {
+				t.Helper()
+				assert.Nil(t, tasks[0].Report)
+			},
+		},
+		{
+			name:           "success - filters and pagination pass through",
+			reqOrg:         org,
+			user:           providerUser,
+			queryParams:    map[string]string{"siteId": site.ID.String(), "activeOnly": "true", "includeReport": "true", "pageNumber": "2", "pageSize": "10"},
+			mockTasks:      listed,
+			expectedStatus: http.StatusOK,
+			expectedPage:   &pagination.PageResponse{PageNumber: 2, PageSize: 10, Total: 1},
+			expectedFlowID: filteredFlowID,
+			assertFlowReq: func(t *testing.T, req *flowv1.ListTasksRequest, _ string) {
+				t.Helper()
+				assert.True(t, req.GetActiveOnly())
+				assert.True(t, req.GetWithReport())
+				require.NotNil(t, req.GetPagination())
+				assert.Equal(t, int32(10), req.GetPagination().GetOffset())
+				assert.Equal(t, int32(10), req.GetPagination().GetLimit())
+			},
+			assertResponse: func(t *testing.T, tasks []model.APITask) {
+				t.Helper()
+				require.NotNil(t, tasks[0].Report)
+				assert.Equal(t, 1, tasks[0].Report.Version)
+			},
+		},
+		{
+			name:           "failure - invalid site UUID",
+			reqOrg:         org,
+			user:           providerUser,
+			queryParams:    map[string]string{"siteId": "not-a-uuid"},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "failure - site does not exist",
+			reqOrg:         org,
+			user:           providerUser,
+			queryParams:    map[string]string{"siteId": uuid.New().String()},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "failure - Flow not enabled on site",
+			reqOrg:         org,
+			user:           providerUser,
+			queryParams:    map[string]string{"siteId": siteWithoutFlow.ID.String()},
+			expectedStatus: http.StatusPreconditionFailed,
+		},
+		{
+			name:           "failure - tenant access denied",
+			reqOrg:         org,
+			user:           tenantUser,
+			queryParams:    map[string]string{"siteId": site.ID.String()},
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:           "failure - authorization precedes query validation",
+			reqOrg:         org,
+			user:           tenantUser,
+			queryParams:    map[string]string{"unknown": "value"},
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:           "failure - unknown query parameter",
+			reqOrg:         org,
+			user:           providerUser,
+			queryParams:    map[string]string{"siteId": site.ID.String(), "unknown": "value"},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "failure - missing siteId",
+			reqOrg:         org,
+			user:           providerUser,
+			queryParams:    map[string]string{},
+			expectedStatus: http.StatusBadRequest,
+		},
+	}
+
+	ExecuteGetTasksHandlerTestCases(t, "/v2/org/%s/nico/task", handler.Handle, scp, site.ID.String(), cases)
 }
 
 func TestGetRackTasksHandler_Handle(t *testing.T) {
@@ -285,7 +460,7 @@ func TestGetRackTasksHandler_Handle(t *testing.T) {
 	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-task-list-rack", org, []string{authz.TenantAdminRole})
 
 	handler := NewGetRackTasksHandler(dbSession, nil, scp, cfg)
-	rackID := uuid.New().String()
+	rackID := "core-rack-01"
 	taskUUID := uuid.New().String()
 	listed := []*flowv1.Task{{
 		Id:          &flowv1.UUID{Id: taskUUID},
@@ -303,9 +478,9 @@ func TestGetRackTasksHandler_Handle(t *testing.T) {
 			queryParams:    map[string]string{"siteId": site.ID.String()},
 			mockTasks:      listed,
 			expectedStatus: http.StatusOK,
+			expectedPage:   &pagination.PageResponse{PageNumber: 1, PageSize: 20, Total: 1},
 			assertFlowReq: func(t *testing.T, req *flowv1.ListTasksRequest, pathParam string) {
 				t.Helper()
-				require.NotNil(t, req.GetRackId())
 				assert.Equal(t, pathParam, req.GetRackId().GetId())
 				assert.Nil(t, req.GetComponentId())
 				assert.False(t, req.GetActiveOnly())
@@ -316,23 +491,18 @@ func TestGetRackTasksHandler_Handle(t *testing.T) {
 			reqOrg:         org,
 			user:           providerUser,
 			pathParam:      rackID,
-			queryParams:    map[string]string{"siteId": site.ID.String(), "activeOnly": "true"},
+			queryParams:    map[string]string{"siteId": site.ID.String(), "activeOnly": "true", "pageNumber": "2", "pageSize": "10"},
 			mockTasks:      listed,
 			expectedStatus: http.StatusOK,
+			expectedPage:   &pagination.PageResponse{PageNumber: 2, PageSize: 10, Total: 1},
 			assertFlowReq: func(t *testing.T, req *flowv1.ListTasksRequest, pathParam string) {
 				t.Helper()
-				require.NotNil(t, req.GetRackId())
 				assert.Equal(t, pathParam, req.GetRackId().GetId())
 				assert.True(t, req.GetActiveOnly())
+				require.NotNil(t, req.GetPagination())
+				assert.Equal(t, int32(10), req.GetPagination().GetOffset())
+				assert.Equal(t, int32(10), req.GetPagination().GetLimit())
 			},
-		},
-		{
-			name:           "failure - invalid rack UUID",
-			reqOrg:         org,
-			user:           providerUser,
-			pathParam:      "not-a-uuid",
-			queryParams:    map[string]string{"siteId": site.ID.String()},
-			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "failure - missing siteId",
@@ -370,7 +540,7 @@ func TestGetTrayTasksHandler_Handle(t *testing.T) {
 	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-task-list-tray", org, []string{authz.TenantAdminRole})
 
 	handler := NewGetTrayTasksHandler(dbSession, nil, scp, cfg)
-	trayID := uuid.New().String()
+	trayID := "core-machine-01"
 	taskUUID := uuid.New().String()
 	listed := []*flowv1.Task{{
 		Id:          &flowv1.UUID{Id: taskUUID},
@@ -385,23 +555,18 @@ func TestGetTrayTasksHandler_Handle(t *testing.T) {
 			reqOrg:         org,
 			user:           providerUser,
 			pathParam:      trayID,
-			queryParams:    map[string]string{"siteId": site.ID.String()},
+			queryParams:    map[string]string{"siteId": site.ID.String(), "pageSize": "5"},
 			mockTasks:      listed,
 			expectedStatus: http.StatusOK,
+			expectedPage:   &pagination.PageResponse{PageNumber: 1, PageSize: 5, Total: 1},
 			assertFlowReq: func(t *testing.T, req *flowv1.ListTasksRequest, pathParam string) {
 				t.Helper()
-				require.NotNil(t, req.GetComponentId())
 				assert.Equal(t, pathParam, req.GetComponentId().GetId())
 				assert.Nil(t, req.GetRackId())
+				require.NotNil(t, req.GetPagination())
+				assert.Equal(t, int32(0), req.GetPagination().GetOffset())
+				assert.Equal(t, int32(5), req.GetPagination().GetLimit())
 			},
-		},
-		{
-			name:           "failure - invalid tray UUID",
-			reqOrg:         org,
-			user:           providerUser,
-			pathParam:      "not-a-uuid",
-			queryParams:    map[string]string{"siteId": site.ID.String()},
-			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "failure - missing siteId",

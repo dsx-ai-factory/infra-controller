@@ -32,7 +32,7 @@ use tonic::Request;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-use super::dpf_config;
+use super::{dpf_config, expect_dpf_service_inventory};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host_with_dpf, create_managed_host_with_dpf_bf4,
     create_test_env_with_overrides, get_config,
@@ -40,7 +40,7 @@ use crate::tests::common::api_fixtures::{
 
 fn default_mock(deployment_type: DpuDeploymentType) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_| Ok(()));
+    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
@@ -54,7 +54,9 @@ fn default_mock(deployment_type: DpuDeploymentType) -> MockDpfOperations {
 
 #[crate::sqlx_test]
 async fn test_dpu_and_host_till_ready(pool: sqlx::PgPool) {
-    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(default_mock(DpuDeploymentType::Bf3));
+    let mut mock = default_mock(DpuDeploymentType::Bf3);
+    expect_dpf_service_inventory(&mut mock);
+    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(mock);
 
     let mut config = get_config();
     config.dpf = dpf_config();
@@ -86,7 +88,9 @@ async fn test_dpu_and_host_till_ready(pool: sqlx::PgPool) {
 /// Provision a BF4 through DPF and verify that NICo performs only the
 /// credential portion of post-ready platform handling.
 async fn assert_bf4_skips_platform_configuration(pool: sqlx::PgPool, enable_secure_boot: bool) {
-    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(default_mock(DpuDeploymentType::Bf4Generic));
+    let mut mock = default_mock(DpuDeploymentType::Bf4Generic);
+    expect_dpf_service_inventory(&mut mock);
+    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(mock);
 
     let mut config = get_config();
     config.dpf = dpf_config();
@@ -208,8 +212,8 @@ async fn test_dpf_inventory_uses_host_context_and_preserves_last_good_value(pool
 
     // Read both records through the public API and derive the expected CR name
     // independently from their reported BMC MAC addresses.
-    let host = env.find_machine(managed_host.id).await.remove(0);
-    let dpu = env.find_machine(managed_host.dpu_ids[0]).await.remove(0);
+    let host = env.find_machine(&managed_host.id).await.remove(0);
+    let dpu = env.find_machine(&managed_host.dpu_ids[0]).await.remove(0);
     assert!(
         host.config
             .as_ref()
@@ -266,7 +270,7 @@ async fn test_dpf_inventory_uses_host_context_and_preserves_last_good_value(pool
         vec![expected_dpu_name]
     );
     let stored_inventory = env
-        .find_machine(managed_host.dpu_ids[0])
+        .find_machine(&managed_host.dpu_ids[0])
         .await
         .remove(0)
         .inventory
@@ -287,7 +291,7 @@ async fn test_dpf_inventory_uses_host_context_and_preserves_last_good_value(pool
         .await
         .expect_err("incomplete DPF inventory must be rejected");
     let inventory_after_error = env
-        .find_machine(managed_host.dpu_ids[0])
+        .find_machine(&managed_host.dpu_ids[0])
         .await
         .remove(0)
         .inventory

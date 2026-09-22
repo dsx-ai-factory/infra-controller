@@ -71,9 +71,11 @@ func (operation resolvedOp) execute(client *Client, pathParams, queryParams map[
 
 // bodyField tracks a request body property for type-aware flag reading.
 type bodyField struct {
-	jsonName string
-	flagName string
-	schema   *Schema
+	jsonName   string
+	flagName   string
+	schema     *Schema
+	wrapInList bool
+	itemType   SchemaType
 }
 
 // GeneratedCommandFlag describes a flag accepted by an OpenAPI-generated
@@ -84,8 +86,8 @@ type GeneratedCommandFlag struct {
 	TakesValue bool
 }
 
-// GeneratedCommandBodyField describes a scalar request-body property exposed
-// as a generated CLI flag.
+// GeneratedCommandBodyField describes a request-body property exposed as a
+// generated CLI flag.
 type GeneratedCommandBodyField struct {
 	JSONName string
 	FlagName string
@@ -157,7 +159,7 @@ var commandPathAliases = map[string][]string{
 	"bringup-racks":                                     {"rack", "bringup-all"},
 	"cancel-task":                                       {"task", "cancel"},
 	"create-or-update-host-firmware-config":             {"host-firmware-config", "update"},
-	"create-or-update-machine-health-report":            {"health-report", "update"},
+	"create-or-update-machine-health-report":            {"machine", "health-report", "update"},
 	"create-or-update-tenant-identity-config":           {"tenant-identity", "update"},
 	"create-or-update-tenant-identity-token-delegation": {"tenant-identity", "token-delegation", "update"},
 	"create-site-explorer-endpoint-action":              {"site-explorer", "create"},
@@ -183,6 +185,7 @@ var commandPathAliases = map[string][]string{
 	"power-control-racks":                               {"rack", "power-all"},
 	"power-control-tray":                                {"tray", "power"},
 	"power-control-trays":                               {"tray", "power-all"},
+	"release-vpc-inactive-vni":                          {"vpc", "routing-profile", "release-inactive-vni"},
 	"replace-all-expected-rack":                         {"expected-rack", "replace-all"},
 	"reprovision-machine-dpu":                           {"machine", "dpu", "reprovision"},
 	"reset-machine-bmc":                                 {"machine", "bmc", "reset"},
@@ -653,8 +656,20 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 			}
 			for name, prop := range schema.Properties {
 				resolved := spec.ResolveSchema(prop)
-				if resolved == nil || resolved.Type == "object" || resolved.Type == "array" {
+				if resolved == nil || resolved.Type == "object" {
 					continue
+				}
+				wrapInList := false
+				var itemType SchemaType
+				if resolved.Type == "array" {
+					if resolved.MaxItems == nil || *resolved.MaxItems != 1 {
+						continue
+					}
+					itemType = generatedSchemaType(spec.ResolveSchema(resolved.Items))
+					if itemType == "" || itemType == "object" || itemType == "array" {
+						continue
+					}
+					wrapInList = true
 				}
 				flagName := toKebab(name)
 				// Prefix body properties whose kebab-cased name collides with
@@ -668,13 +683,18 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 					flagName = "body-" + flagName
 				}
 				usage := name
+				if prop.Deprecated || resolved.Deprecated {
+					usage += " (deprecated)"
+				}
 				if reqSet[name] {
 					usage += " (required)"
 				}
 				bodyFields = append(bodyFields, bodyField{
-					jsonName: name,
-					flagName: flagName,
-					schema:   resolved,
+					jsonName:   name,
+					flagName:   flagName,
+					schema:     resolved,
+					wrapInList: wrapInList,
+					itemType:   itemType,
 				})
 				flags = append(flags, schemaToFlag(flagName, usage, resolved))
 			}
@@ -1046,9 +1066,17 @@ func buildRequestBody(c *cli.Context, bodyFields []bodyField) ([]byte, error) {
 		if v == "" {
 			continue
 		}
-		val, err := coerceValue(v, bf.schema.Type)
+		valueType := bf.schema.Type
+		if bf.wrapInList {
+			valueType = bf.itemType
+		}
+		val, err := coerceValue(v, valueType)
 		if err != nil {
 			return nil, fmt.Errorf("flag --%s: %w", bf.flagName, err)
+		}
+		if bf.wrapInList {
+			obj[bf.jsonName] = []interface{}{val}
+			continue
 		}
 		obj[bf.jsonName] = val
 	}
@@ -1264,6 +1292,13 @@ func clientFromContext(c *cli.Context) (*Client, error) {
 func paramToFlag(p Parameter) cli.Flag {
 	flagName := toKebab(p.Name)
 	usage := p.Description
+	if p.Deprecated {
+		deprecatedUsage := p.Name + " (deprecated)"
+		if usage != "" {
+			deprecatedUsage += ": " + usage
+		}
+		usage = deprecatedUsage
+	}
 	if p.Schema != nil && len(p.Schema.Enum) > 0 {
 		usage += " [" + strings.Join(p.Schema.Enum, ", ") + "]"
 	}

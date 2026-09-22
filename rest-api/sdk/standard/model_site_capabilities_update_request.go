@@ -28,10 +28,10 @@ type SiteCapabilitiesUpdateRequest struct {
 	NetworkSecurityGroup NullableBool `json:"networkSecurityGroup,omitempty"`
 	// Enable or disable NVLink partition support for the Site
 	NvLinkPartition NullableBool `json:"nvLinkPartition,omitempty"`
-	// Enable or disable NICo Flow for the Site
-	Flow NullableBool `json:"flow,omitempty"`
 	// Enable or disable image-based operating system support for the Site
 	ImageBasedOperatingSystem NullableBool `json:"imageBasedOperatingSystem,omitempty"`
+	// Enable or disable DPS power management for the Site. Omission or `null` preserves the current value. Only Providers can update this field.
+	DpsPowerManagement NullableBool `json:"dpsPowerManagement,omitempty"`
 }
 
 // NewSiteCapabilitiesUpdateRequest instantiates a new SiteCapabilitiesUpdateRequest object
@@ -180,49 +180,6 @@ func (o *SiteCapabilitiesUpdateRequest) UnsetNvLinkPartition() {
 	o.NvLinkPartition.Unset()
 }
 
-// GetFlow returns the Flow field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *SiteCapabilitiesUpdateRequest) GetFlow() bool {
-	if o == nil || IsNil(o.Flow.Get()) {
-		var ret bool
-		return ret
-	}
-	return *o.Flow.Get()
-}
-
-// GetFlowOk returns a tuple with the Flow field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *SiteCapabilitiesUpdateRequest) GetFlowOk() (*bool, bool) {
-	if o == nil {
-		return nil, false
-	}
-	return o.Flow.Get(), o.Flow.IsSet()
-}
-
-// HasFlow returns a boolean if a field has been set.
-func (o *SiteCapabilitiesUpdateRequest) HasFlow() bool {
-	if o != nil && o.Flow.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetFlow gets a reference to the given NullableBool and assigns it to the Flow field.
-func (o *SiteCapabilitiesUpdateRequest) SetFlow(v bool) {
-	o.Flow.Set(&v)
-}
-
-// SetFlowNil sets the value for Flow to be an explicit nil
-func (o *SiteCapabilitiesUpdateRequest) SetFlowNil() {
-	o.Flow.Set(nil)
-}
-
-// UnsetFlow ensures that no value is present for Flow, not even an explicit nil
-func (o *SiteCapabilitiesUpdateRequest) UnsetFlow() {
-	o.Flow.Unset()
-}
-
 // GetImageBasedOperatingSystem returns the ImageBasedOperatingSystem field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SiteCapabilitiesUpdateRequest) GetImageBasedOperatingSystem() bool {
 	if o == nil || IsNil(o.ImageBasedOperatingSystem.Get()) {
@@ -266,6 +223,49 @@ func (o *SiteCapabilitiesUpdateRequest) UnsetImageBasedOperatingSystem() {
 	o.ImageBasedOperatingSystem.Unset()
 }
 
+// GetDpsPowerManagement returns the DpsPowerManagement field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *SiteCapabilitiesUpdateRequest) GetDpsPowerManagement() bool {
+	if o == nil || IsNil(o.DpsPowerManagement.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.DpsPowerManagement.Get()
+}
+
+// GetDpsPowerManagementOk returns a tuple with the DpsPowerManagement field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *SiteCapabilitiesUpdateRequest) GetDpsPowerManagementOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DpsPowerManagement.Get(), o.DpsPowerManagement.IsSet()
+}
+
+// HasDpsPowerManagement returns a boolean if a field has been set.
+func (o *SiteCapabilitiesUpdateRequest) HasDpsPowerManagement() bool {
+	if o != nil && o.DpsPowerManagement.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDpsPowerManagement gets a reference to the given NullableBool and assigns it to the DpsPowerManagement field.
+func (o *SiteCapabilitiesUpdateRequest) SetDpsPowerManagement(v bool) {
+	o.DpsPowerManagement.Set(&v)
+}
+
+// SetDpsPowerManagementNil sets the value for DpsPowerManagement to be an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) SetDpsPowerManagementNil() {
+	o.DpsPowerManagement.Set(nil)
+}
+
+// UnsetDpsPowerManagement ensures that no value is present for DpsPowerManagement, not even an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) UnsetDpsPowerManagement() {
+	o.DpsPowerManagement.Unset()
+}
+
 func (o SiteCapabilitiesUpdateRequest) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -285,11 +285,11 @@ func (o SiteCapabilitiesUpdateRequest) ToMap() (map[string]interface{}, error) {
 	if o.NvLinkPartition.IsSet() {
 		toSerialize["nvLinkPartition"] = o.NvLinkPartition.Get()
 	}
-	if o.Flow.IsSet() {
-		toSerialize["flow"] = o.Flow.Get()
-	}
 	if o.ImageBasedOperatingSystem.IsSet() {
 		toSerialize["imageBasedOperatingSystem"] = o.ImageBasedOperatingSystem.Get()
+	}
+	if o.DpsPowerManagement.IsSet() {
+		toSerialize["dpsPowerManagement"] = o.DpsPowerManagement.Get()
 	}
 	return toSerialize, nil
 }

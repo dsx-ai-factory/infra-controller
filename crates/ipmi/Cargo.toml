@@ -28,6 +28,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"

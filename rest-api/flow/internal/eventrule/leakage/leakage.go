@@ -61,8 +61,9 @@ func (r *targetResolver) Resolve(
 		return r.resolveAffectedComponentsInRack(ctx, resource)
 	case eventrule.ResourceKindRack:
 		resolved := target.Target{
-			Kind: eventrule.ResourceKindRack,
-			ID:   resource.RackID,
+			Kind:   eventrule.ResourceKindRack,
+			ID:     resource.RackID,
+			RackID: resource.RackID,
 		}
 		return []target.Target{resolved}, nil
 	default:
@@ -92,8 +93,9 @@ func (r *targetResolver) resolveAffectedComponentsInRack(
 	targets := make([]target.Target, 0, len(ids))
 	for _, id := range ids {
 		resolved := target.Target{
-			Kind: eventrule.ResourceKindComponent,
-			ID:   id,
+			Kind:   eventrule.ResourceKindComponent,
+			ID:     id,
+			RackID: resource.RackID,
 		}
 		targets = append(targets, resolved)
 	}
@@ -141,8 +143,8 @@ func affectedComponentIDs(resolvedRack *rack.Rack, sourceID uuid.UUID) ([]uuid.U
 }
 
 // DefaultRule returns the immutable safety fallback for leakage events.
-func DefaultRule() eventrule.Rule {
-	return eventrule.Rule{
+func DefaultRule() *eventrule.Rule {
+	return &eventrule.Rule{
 		ID:          defaultRuleID,
 		Origin:      eventrule.RuleOriginBuiltIn,
 		Name:        "Default leakage response",

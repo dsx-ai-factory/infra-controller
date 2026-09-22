@@ -6,6 +6,7 @@ package storetest
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
@@ -79,15 +80,36 @@ func testRuleLifecycle(t *testing.T, factory RuleBindingFactory) {
 	assert.Equal(t, "replacement", updated.Actions[0].Name)
 	assert.True(t, updated.Enabled)
 	assert.False(t, updated.UpdatedAt.Before(updated.CreatedAt))
+	require.NoError(t, rules.SetEnabled(ctx, rule.ID, true))
+	unchanged, err := rules.GetByID(ctx, rule.ID)
+	require.NoError(t, err)
+	assert.Equal(t, updated.UpdatedAt, unchanged.UpdatedAt)
 
 	enabled := true
-	listed, err := rules.List(ctx, eventrule.RuleFilter{
-		EventType: &rule.EventType,
-		Enabled:   &enabled,
+	listed, err := rules.List(ctx, eventrule.RuleListRequest{
+		Filter: eventrule.RuleFilter{
+			EventType: &rule.EventType,
+			Enabled:   &enabled,
+		},
+		Limit: 100,
 	})
 	require.NoError(t, err)
-	require.Len(t, listed, 1)
-	assert.Equal(t, rule.ID, listed[0].ID)
+	require.Equal(t, 1, listed.Total)
+	require.Len(t, listed.Rules, 1)
+	assert.Equal(t, rule.ID, listed.Rules[0].ID)
+
+	second := createRule(t, ctx, rules, rule.EventType)
+	third := createRule(t, ctx, rules, rule.EventType)
+	orderedIDs := []string{rule.ID.String(), second.ID.String(), third.ID.String()}
+	slices.Sort(orderedIDs)
+	page, err := rules.List(ctx, eventrule.RuleListRequest{Offset: 1, Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, 3, page.Total)
+	require.Len(t, page.Rules, 1)
+	assert.Equal(t, orderedIDs[1], page.Rules[0].ID.String())
+
+	_, err = rules.List(ctx, eventrule.RuleListRequest{})
+	require.ErrorContains(t, err, "limit must be positive")
 
 	require.NoError(t, rules.Delete(ctx, rule.ID))
 	_, err = rules.GetByID(ctx, rule.ID)
@@ -174,13 +196,18 @@ func testBindingInvariants(t *testing.T, factory RuleBindingFactory) {
 	mismatched.EventType = "other.event"
 	require.Error(t, bindings.Bind(ctx, mismatched))
 
-	require.NoError(t, bindings.Unbind(ctx, firstRack.ID))
+	require.NoError(t, bindings.Unbind(ctx, first.EventType, firstRack.Scope))
 	require.ErrorIs(
 		t,
-		bindings.Unbind(ctx, firstRack.ID),
-		eventrule.ErrRuleNotFound,
+		bindings.Unbind(ctx, first.EventType, firstRack.Scope),
+		eventrule.ErrBindingNotFound,
 	)
 	found, err = bindings.GetForScope(ctx, first.EventType, firstRack.Scope)
+	require.NoError(t, err)
+	assert.Nil(t, found)
+
+	require.NoError(t, bindings.Unbind(ctx, second.EventType, secondSite.Scope))
+	found, err = bindings.GetForScope(ctx, second.EventType, secondSite.Scope)
 	require.NoError(t, err)
 	assert.Nil(t, found)
 }

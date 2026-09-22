@@ -81,6 +81,7 @@ pub mod nvl_logical_partition;
 pub mod nvl_partition;
 pub mod operating_system_definition;
 pub mod os;
+pub mod pci;
 pub mod power_manager;
 pub mod power_shelf;
 pub mod predicted_machine_interface;

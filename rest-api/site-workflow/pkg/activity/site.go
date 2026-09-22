@@ -13,34 +13,39 @@ import (
 	tClient "go.temporal.io/sdk/client"
 )
 
-const updateSiteConfigInventoryWorkflowName = "UpdateSiteConfigInventory"
+const updateSiteConfigInventoryWorkflowName = "UpdateSiteConfigInventoryV2"
 
 // ManageSiteConfigInventory is an activity wrapper for Site Config inventory collection and publishing.
 type ManageSiteConfigInventory struct {
-	config ManageInventoryConfig
+	inventoryConfig ManageInventoryConfig
+	// siteAgentBuildInfo describes the Site Agent itself and is fixed for the life of the
+	// process, so the caller builds it once rather than the activity rebuilding it per run.
+	siteAgentBuildInfo *corev1.SiteAgentBuildInfo
 }
 
 // NewManageSiteConfigInventory returns a ManageSiteConfigInventory implementation.
-func NewManageSiteConfigInventory(config ManageInventoryConfig) ManageSiteConfigInventory {
+func NewManageSiteConfigInventory(inventoryConfig ManageInventoryConfig, siteAgentBuildInfo *corev1.SiteAgentBuildInfo) ManageSiteConfigInventory {
 	return ManageSiteConfigInventory{
-		config: config,
+		inventoryConfig:    inventoryConfig,
+		siteAgentBuildInfo: siteAgentBuildInfo,
 	}
 }
 
 // DiscoverSiteConfigInventory collects Core build metadata, advertised
-// capabilities, and runtime configuration. It publishes that snapshot to the
-// Cloud workflow, which stores the Core version and SLAAC capability and
-// creates IP Blocks for the Site fabric prefixes.
+// capabilities, and runtime configuration, alongside the Site Agent's own build info. It
+// publishes that snapshot to the Cloud workflow, which stores the Core version and SLAAC
+// capability, records the Site Agent build info, and creates IP Blocks for the Site fabric
+// prefixes.
 func (msi *ManageSiteConfigInventory) DiscoverSiteConfigInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "DiscoverSiteConfigInventory").Logger()
 	logger.Info().Msg("Starting activity")
 
-	grpcClient := msi.config.CoreGrpcAtomicClient.GetClient()
+	grpcClient := msi.inventoryConfig.CoreGrpcAtomicClient.GetClient()
 	if grpcClient == nil {
 		return cClient.ErrCoreGrpcClientNotConnected
 	}
 
-	buildInfo, err := grpcClient.GrpcServiceClient().Version(ctx, &corev1.VersionRequest{
+	coreBuildInfo, err := grpcClient.GrpcServiceClient().Version(ctx, &corev1.VersionRequest{
 		DisplayConfig: true,
 	})
 	if err != nil {
@@ -48,17 +53,22 @@ func (msi *ManageSiteConfigInventory) DiscoverSiteConfigInventory(ctx context.Co
 		return err
 	}
 
-	workflowOptions := tClient.StartWorkflowOptions{
-		ID:        fmt.Sprintf("update-site-config-inventory-%s", msi.config.SiteID.String()),
-		TaskQueue: msi.config.TemporalPublishQueue,
+	inventory := &corev1.SiteConfigInventory{
+		CoreBuildInfo:      coreBuildInfo,
+		SiteAgentBuildInfo: msi.siteAgentBuildInfo,
 	}
 
-	if _, err = msi.config.TemporalPublishClient.ExecuteWorkflow(
+	workflowOptions := tClient.StartWorkflowOptions{
+		ID:        fmt.Sprintf("update-site-config-inventory-%s", msi.inventoryConfig.SiteID.String()),
+		TaskQueue: msi.inventoryConfig.TemporalPublishQueue,
+	}
+
+	if _, err = msi.inventoryConfig.TemporalPublishClient.ExecuteWorkflow(
 		ctx,
 		workflowOptions,
 		updateSiteConfigInventoryWorkflowName,
-		msi.config.SiteID.String(),
-		buildInfo,
+		msi.inventoryConfig.SiteID.String(),
+		inventory,
 	); err != nil {
 		logger.Error().Err(err).Msg("Failed to publish Site Config inventory to Cloud")
 		return err

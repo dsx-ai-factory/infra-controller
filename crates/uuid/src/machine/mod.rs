@@ -16,8 +16,10 @@
  */
 
 use std::cmp::Ordering;
+use std::convert::Infallible;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter, Write};
+use std::hash::Hash;
 use std::str::FromStr;
 
 use data_encoding::BASE32_DNSSEC;
@@ -25,12 +27,131 @@ use prost::DecodeError;
 use prost::bytes::{Buf, BufMut};
 use prost::encoding::{DecodeContext, WireType};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::DbPrimaryUuid;
 
 static MACHINE_ID_PREFIX: &str = "fm100";
 
+use crate::typed_uuids::{TypedUuid, UuidSubtype};
+
+macro_rules! impl_prost_message_for_machine_id {
+    ($newtype:ty, $default_type:expr) => {
+        impl prost::Message for $newtype {
+            fn encode_raw(&self, buf: &mut impl prost::bytes::BufMut)
+            where
+                Self: Sized,
+            {
+                super::encode_machine_id(self.as_machine_id(), buf);
+            }
+
+            fn merge_field(
+                &mut self,
+                tag: u32,
+                wire_type: prost::encoding::WireType,
+                buf: &mut impl prost::bytes::Buf,
+                ctx: prost::encoding::DecodeContext,
+            ) -> Result<(), prost::DecodeError>
+            where
+                Self: Sized,
+            {
+                let mut id = *self.as_machine_id();
+                super::merge_machine_id(&mut id, tag, wire_type, buf, ctx)?;
+                *self = Self::try_from(id).map_err(|error| {
+                    #[allow(deprecated)]
+                    prost::DecodeError::new(error.to_string())
+                })?;
+                Ok(())
+            }
+
+            fn encoded_len(&self) -> usize {
+                super::encoded_machine_id_len(self.as_machine_id())
+            }
+
+            #[allow(deprecated)]
+            fn clear(&mut self) {
+                *self = Self::default();
+            }
+        }
+
+        impl Default for $newtype {
+            /// Returns a synthetic value required for prost message decoding.
+            ///
+            /// This is an interoperability value, not an application machine ID.
+            fn default() -> Self {
+                Self::try_from(super::prost_default_machine_id($default_type))
+                    .expect("the prost default machine type matches the subtype")
+            }
+        }
+    };
+}
+
+// Macro used by below modules (`mod dpu;`, etc): needs to be declared before we declare them.
+#[cfg(feature = "sqlx")]
+macro_rules! impl_sqlx_for_machine_id_newtype {
+    ($newtype:ty) => {
+        impl sqlx::Encode<'_, sqlx::Postgres> for $newtype {
+            fn encode_by_ref(
+                &self,
+                buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
+            ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+                buf.extend(self.to_string().as_bytes());
+                Ok(sqlx::encode::IsNull::No)
+            }
+        }
+
+        impl<'r, DB> sqlx::Decode<'r, DB> for $newtype
+        where
+            DB: sqlx::Database,
+            String: sqlx::Decode<'r, DB>,
+        {
+            fn decode(
+                value: <DB as sqlx::database::Database>::ValueRef<'r>,
+            ) -> Result<Self, sqlx::error::BoxDynError> {
+                let str_id: String = String::decode(value)?;
+                Ok(str_id.parse::<super::MachineId>()?.try_into()?)
+            }
+        }
+
+        impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for $newtype {
+            fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+                sqlx::Row::try_get(row, 0)
+            }
+        }
+
+        impl<DB> sqlx::Type<DB> for $newtype
+        where
+            DB: sqlx::Database,
+            String: sqlx::Type<DB>,
+        {
+            fn type_info() -> <DB as sqlx::Database>::TypeInfo {
+                String::type_info()
+            }
+
+            fn compatible(ty: &DB::TypeInfo) -> bool {
+                String::compatible(ty)
+            }
+        }
+
+        impl sqlx::postgres::PgHasArrayType for $newtype {
+            fn array_type_info() -> sqlx::postgres::PgTypeInfo {
+                <&str as sqlx::postgres::PgHasArrayType>::array_type_info()
+            }
+
+            fn array_compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+                <&str as sqlx::postgres::PgHasArrayType>::array_compatible(ty)
+            }
+        }
+    };
+}
+
+mod dpu;
+mod host;
+mod predicted_host;
+mod stable_host;
+
+pub use dpu::DpuMachineId;
+pub use host::{HostMachineId, HostMachineIdSubtype, HostMachineIdSubtypeTrait};
+pub use predicted_host::PredictedHostMachineId;
 #[cfg(feature = "sqlx")]
 use sqlx::{
     encode::IsNull,
@@ -38,8 +159,7 @@ use sqlx::{
     postgres::{PgHasArrayType, PgTypeInfo},
     {Database, Postgres, Row},
 };
-
-use crate::typed_uuids::{TypedUuid, UuidSubtype};
+pub use stable_host::StableHostMachineId;
 
 /// Marker type for MachineInterfaceId
 pub struct MachineInterfaceIdMarker;
@@ -84,7 +204,11 @@ pub struct MachineId {
 
 impl Ord for MachineId {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.to_string().cmp(&other.to_string())
+        self.ty
+            .id_char()
+            .cmp(&other.ty.id_char())
+            .then_with(|| self.source.id_char().cmp(&other.source.id_char()))
+            .then_with(|| self.hardware_id.cmp(&other.hardware_id))
     }
 }
 
@@ -95,14 +219,13 @@ impl PartialOrd for MachineId {
 }
 
 // Implement [`prost::Message`] manually so that we can be wire-compatible with the
-// `.common.MachineId` protobuf message, which is what we actually serialize. Do this by
-// constructing a `legacy_rpc::MachineId` and delegate all  [`prost::Message`] methods to it.
+// `.common.MachineId` protobuf message, which is what we actually serialize.
 impl prost::Message for MachineId {
     fn encode_raw(&self, buf: &mut impl BufMut)
     where
         Self: Sized,
     {
-        legacy_rpc::MachineId::from(*self).encode_raw(buf);
+        encode_machine_id(self, buf);
     }
 
     fn merge_field(
@@ -115,25 +238,41 @@ impl prost::Message for MachineId {
     where
         Self: Sized,
     {
-        let mut legacy_message = legacy_rpc::MachineId::from(*self);
-        legacy_message.merge_field(tag, wire_type, buf, ctx)?;
-        *self = MachineId::from_str(&legacy_message.id).map_err(|_| {
-            // Deprecation: if they remove DecodeError::new, they hopefully will provide some other way
-            // to impl prost::Message.
-            #[allow(deprecated)]
-            DecodeError::new(format!("Invalid machine id: {}", legacy_message.id))
-        })?;
-        Ok(())
+        merge_machine_id(self, tag, wire_type, buf, ctx)
     }
 
     fn encoded_len(&self) -> usize {
-        legacy_rpc::MachineId::from(*self).encoded_len()
+        encoded_machine_id_len(self)
     }
 
     #[allow(deprecated)]
     fn clear(&mut self) {
         *self = MachineId::default();
     }
+}
+
+fn encode_machine_id(id: &MachineId, buf: &mut impl BufMut) {
+    prost::Message::encode_raw(&legacy_rpc::MachineId::from(*id), buf);
+}
+
+fn merge_machine_id(
+    id: &mut MachineId,
+    tag: u32,
+    wire_type: WireType,
+    buf: &mut impl Buf,
+    ctx: DecodeContext,
+) -> Result<(), DecodeError> {
+    let mut legacy_message = legacy_rpc::MachineId::from(*id);
+    prost::Message::merge_field(&mut legacy_message, tag, wire_type, buf, ctx)?;
+    *id = MachineId::from_str(&legacy_message.id).map_err(|_| {
+        #[allow(deprecated)]
+        DecodeError::new(format!("Invalid machine id: {}", legacy_message.id))
+    })?;
+    Ok(())
+}
+
+fn encoded_machine_id_len(id: &MachineId) -> usize {
+    prost::Message::encoded_len(&legacy_rpc::MachineId::from(*id))
 }
 
 mod legacy_rpc {
@@ -239,6 +378,122 @@ impl PgHasArrayType for MachineId {
     }
 }
 
+/// Common behavior for all machine IDs.
+pub trait MachineIdSubtypeTrait:
+    Display
+    + Copy
+    + Clone
+    + Send
+    + Sync
+    + Eq
+    + PartialEq
+    + Hash
+    + Into<MachineId>
+    + TryFrom<MachineId, Error: Into<InvalidMachineType> + std::fmt::Debug>
+    + MachineIdSubtypeSqlx
+{
+    /// Returns this machine's type.
+    fn machine_type(&self) -> MachineType;
+    /// Borrows this ID as a base-level machine ID.
+    fn as_machine_id(&self) -> &MachineId;
+    /// Returns this machine's concrete subtype ([`StableHostMachineId`], [`DpuMachineId`], or
+    /// [`PredictedHostMachineId`]).
+    fn machine_id_subtype(&self) -> MachineIdSubtype;
+
+    /// Returns either a [`HostMachineId`] or [`DpuMachineId`] based on this machine ID's type.
+    fn host_or_dpu_id(&self) -> HostOrDpuId {
+        HostOrDpuId::from(self.machine_id_subtype())
+    }
+
+    /// Returns true if this identifies a DPU machine.
+    fn is_dpu(&self) -> bool {
+        matches!(self.machine_type(), MachineType::Dpu)
+    }
+}
+
+#[cfg(feature = "sqlx")]
+#[doc(hidden)]
+pub trait MachineIdSubtypeSqlx:
+    for<'q> sqlx::Encode<'q, sqlx::Postgres>
+    + sqlx::Type<sqlx::Postgres>
+    + sqlx::postgres::PgHasArrayType
+{
+}
+
+#[cfg(feature = "sqlx")]
+impl<T> MachineIdSubtypeSqlx for T where
+    T: for<'q> sqlx::Encode<'q, sqlx::Postgres>
+        + sqlx::Type<sqlx::Postgres>
+        + sqlx::postgres::PgHasArrayType
+{
+}
+
+#[cfg(not(feature = "sqlx"))]
+#[doc(hidden)]
+pub trait MachineIdSubtypeSqlx {}
+
+#[cfg(not(feature = "sqlx"))]
+impl<T> MachineIdSubtypeSqlx for T {}
+
+pub trait AsMachineId: Send + Sync {
+    fn as_machine_id(&self) -> &MachineId;
+    fn to_machine_id(&self) -> MachineId;
+}
+
+impl<T: MachineIdSubtypeTrait> AsMachineId for T {
+    fn as_machine_id(&self) -> &MachineId {
+        <Self as MachineIdSubtypeTrait>::as_machine_id(self)
+    }
+
+    fn to_machine_id(&self) -> MachineId {
+        *<Self as MachineIdSubtypeTrait>::as_machine_id(self)
+    }
+}
+
+impl MachineIdSubtypeTrait for MachineId {
+    fn machine_type(&self) -> MachineType {
+        Self::machine_type(self)
+    }
+
+    fn as_machine_id(&self) -> &MachineId {
+        self
+    }
+
+    fn machine_id_subtype(&self) -> MachineIdSubtype {
+        MachineId::machine_id_subtype(self)
+    }
+}
+
+impl From<&MachineId> for MachineId {
+    fn from(id: &MachineId) -> Self {
+        *id
+    }
+}
+
+/// Equivalent to [`MachineType`] but carries the strongly-typed subtype with each variant
+pub enum MachineIdSubtype {
+    Dpu(DpuMachineId),
+    StableHost(StableHostMachineId),
+    PredictedHost(PredictedHostMachineId),
+}
+
+/// Similar to [`MachineIdSubtype`] but for cases where stable and predicted host ID's should be
+/// combined into a single [`HostMachineId`] variant.
+pub enum HostOrDpuId {
+    Host(HostMachineId),
+    Dpu(DpuMachineId),
+}
+
+impl From<MachineIdSubtype> for HostOrDpuId {
+    fn from(value: MachineIdSubtype) -> Self {
+        match value {
+            MachineIdSubtype::Dpu(id) => HostOrDpuId::Dpu(id),
+            MachineIdSubtype::StableHost(id) => HostOrDpuId::Host(id.into()),
+            MachineIdSubtype::PredictedHost(id) => HostOrDpuId::Host(id.into()),
+        }
+    }
+}
+
 impl MachineId {
     pub fn new(source: MachineIdSource, hardware_hash: HardwareHash, ty: MachineType) -> MachineId {
         // BASE32_DNSSEC is chosen to just generate lowercase characters and
@@ -263,16 +518,6 @@ impl MachineId {
         self.ty
     }
 
-    /// Generate Remote ID based on machineID.
-    /// Remote Id is inserted by dhcrelay on DPU in each DHCP request sent by host.
-    /// This field is used only for DPU.
-    pub fn remote_id(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(self.to_string().as_bytes());
-        let hash: [u8; 32] = hasher.finalize().into();
-        BASE32_DNSSEC.encode(&hash)
-    }
-
     /// Note: Never use this! Tonic's codegen requires all types to implement Default, but there is
     /// no logical reason to construct a "default" MachineId in real code, so we simply construct a
     /// bogus one here.
@@ -281,16 +526,41 @@ impl MachineId {
         note = "Do not use `MachineId::default()` directly; only implemented for prost interop"
     )]
     pub fn default() -> Self {
-        Self::new(
-            MachineIdSource::ProductBoardChassisSerial,
-            [0; 32],
-            MachineType::Host,
-        )
+        prost_default_machine_id(MachineType::Host)
     }
 
     pub(crate) fn is_matching_prefix(s: &str) -> bool {
         s.starts_with(MACHINE_ID_PREFIX)
     }
+
+    /// Equivalent to [`Self::machine_type`] but returns a [`MachineIdSubtype`], which carries the
+    /// strongly-typed subtype with each variant
+    pub fn machine_id_subtype(&self) -> MachineIdSubtype {
+        match self.ty {
+            MachineType::Dpu => MachineIdSubtype::Dpu(DpuMachineId(*self)),
+            MachineType::Host => {
+                MachineIdSubtype::StableHost(StableHostMachineId(HostMachineId(*self)))
+            }
+            MachineType::PredictedHost => {
+                MachineIdSubtype::PredictedHost(PredictedHostMachineId(HostMachineId(*self)))
+            }
+        }
+    }
+
+    /// Similar to [`Self::machine_id_subtype`] but for cases where stable and predicted host ID's
+    /// should be combined into a single [`HostMachineId`] variant.
+    pub fn host_or_dpu_id(&self) -> HostOrDpuId {
+        match self.ty {
+            MachineType::Dpu => HostOrDpuId::Dpu(DpuMachineId(*self)),
+            MachineType::Host | MachineType::PredictedHost => {
+                HostOrDpuId::Host(HostMachineId(*self))
+            }
+        }
+    }
+}
+
+fn prost_default_machine_id(ty: MachineType) -> MachineId {
+    MachineId::new(MachineIdSource::ProductBoardChassisSerial, [0; 32], ty)
 }
 
 impl DbPrimaryUuid for MachineId {
@@ -466,6 +736,16 @@ pub enum MachineIdParseError {
     Encoding(String),
 }
 
+/// Represents a failure of a particular subtype of MachineId (HostMachineId, DpuMachineId, etc) to
+/// parse. Can either be due to the machine ID being invalid altogether, or of the wrong type.
+#[derive(thiserror::Error, Debug)]
+pub enum MachineIdSubtypeParseError {
+    #[error("not a valid machine ID: {0}")]
+    Invalid(#[from] MachineIdParseError),
+    #[error("machine ID is of wrong type: {0}")]
+    WrongType(#[from] InvalidMachineType),
+}
+
 impl FromStr for MachineId {
     type Err = MachineIdParseError;
 
@@ -516,6 +796,20 @@ impl<'de> Deserialize<'de> for MachineId {
         let str_value = String::deserialize(deserializer)?;
         let id = MachineId::from_str(&str_value).map_err(|err| Error::custom(err.to_string()))?;
         Ok(id)
+    }
+}
+
+/// Error returned when a machine ID does not have the required machine type.
+#[derive(thiserror::Error, Debug)]
+#[error("expected {expected}, got {actual}")]
+pub struct InvalidMachineType {
+    expected: &'static str,
+    actual: MachineId,
+}
+
+impl From<Infallible> for InvalidMachineType {
+    fn from(_: Infallible) -> Self {
+        unreachable!()
     }
 }
 
@@ -661,6 +955,198 @@ mod tests {
             "unknown" {
                 'x' => None,
             }
+        );
+    }
+
+    #[test]
+    fn test_machine_id_order_matches_string_order() {
+        let machine_ids = [
+            MachineType::Dpu,
+            MachineType::Host,
+            MachineType::PredictedHost,
+        ]
+        .into_iter()
+        .flat_map(|ty| {
+            [
+                MachineIdSource::Tpm,
+                MachineIdSource::ProductBoardChassisSerial,
+            ]
+            .into_iter()
+            .flat_map(move |source| {
+                [[0; 32], [0x55; 32], [0xff; 32]]
+                    .into_iter()
+                    .map(move |hardware_hash| MachineId::new(source, hardware_hash, ty))
+            })
+        })
+        .collect::<Vec<_>>();
+
+        for left in &machine_ids {
+            for right in &machine_ids {
+                assert_eq!(
+                    left.cmp(right),
+                    left.to_string().cmp(&right.to_string()),
+                    "direct ordering differs for {left} and {right}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_machine_id_subtype_accessors() {
+        let hardware_hash = [42; 32];
+        let dpu_id = MachineId::new(MachineIdSource::Tpm, hardware_hash, MachineType::Dpu);
+        let stable_host_id = MachineId::new(MachineIdSource::Tpm, hardware_hash, MachineType::Host);
+        let predicted_host_id = MachineId::new(
+            MachineIdSource::Tpm,
+            hardware_hash,
+            MachineType::PredictedHost,
+        );
+
+        assert!(matches!(
+            dpu_id.machine_id_subtype(),
+            MachineIdSubtype::Dpu(id) if id.as_machine_id() == &dpu_id
+        ));
+        assert!(matches!(
+            stable_host_id.machine_id_subtype(),
+            MachineIdSubtype::StableHost(id) if id.as_machine_id() == &stable_host_id
+        ));
+        assert!(matches!(
+            predicted_host_id.machine_id_subtype(),
+            MachineIdSubtype::PredictedHost(id) if id.as_machine_id() == &predicted_host_id
+        ));
+
+        assert!(matches!(
+            dpu_id.host_or_dpu_id(),
+            HostOrDpuId::Dpu(id) if id.as_machine_id() == &dpu_id
+        ));
+        for id in [stable_host_id, predicted_host_id] {
+            let HostOrDpuId::Host(host_id) = id.host_or_dpu_id() else {
+                panic!("expected {id} to be classified as a host");
+            };
+            assert_eq!(host_id.as_machine_id(), &id);
+            assert_eq!(host_id.is_stable_host(), id == stable_host_id);
+            assert!(match host_id.host_machine_id_subtype() {
+                HostMachineIdSubtype::Stable(subtype) => {
+                    subtype.as_machine_id() == &id && id == stable_host_id
+                }
+                HostMachineIdSubtype::Predicted(subtype) => {
+                    subtype.as_machine_id() == &id && id == predicted_host_id
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn test_machine_id_newtype_conversion_matrix() {
+        let hardware_hash = [42; 32];
+        let stable = MachineId::new(MachineIdSource::Tpm, hardware_hash, MachineType::Host);
+        let predicted = MachineId::new(
+            MachineIdSource::Tpm,
+            hardware_hash,
+            MachineType::PredictedHost,
+        );
+        let dpu = MachineId::new(MachineIdSource::Tpm, hardware_hash, MachineType::Dpu);
+
+        value_scenarios!(
+            run = |id| HostMachineId::try_from(id).is_ok();
+            "stable host is a host" { stable => true }
+            "predicted host is a host" { predicted => true }
+            "DPU is not a host" { dpu => false }
+        );
+        value_scenarios!(
+            run = |id| StableHostMachineId::try_from(id).is_ok();
+            "stable host is stable" { stable => true }
+            "predicted host is not stable" { predicted => false }
+            "DPU is not stable" { dpu => false }
+        );
+        value_scenarios!(
+            run = |id| PredictedHostMachineId::try_from(id).is_ok();
+            "predicted host is predicted" { predicted => true }
+            "stable host is not predicted" { stable => false }
+            "DPU is not predicted" { dpu => false }
+        );
+        value_scenarios!(
+            run = |id| DpuMachineId::try_from(id).is_ok();
+            "DPU is a DPU" { dpu => true }
+            "stable host is not a DPU" { stable => false }
+            "predicted host is not a DPU" { predicted => false }
+        );
+
+        value_scenarios!(
+            run = |id| {
+                let host_id = HostMachineId::try_from(id).unwrap();
+                (
+                    StableHostMachineId::try_from(host_id).is_ok(),
+                    PredictedHostMachineId::try_from(host_id).is_ok(),
+                )
+            };
+            "host narrows to stable host" { stable => (true, false) }
+            "host narrows to predicted host" { predicted => (false, true) }
+        );
+
+        assert_eq!(
+            PredictedHostMachineId::try_from(HostMachineId::try_from(stable).unwrap())
+                .unwrap_err()
+                .to_string(),
+            format!("expected predicted host machine ID, got {stable}"),
+        );
+        assert_eq!(
+            StableHostMachineId::try_from(HostMachineId::try_from(predicted).unwrap())
+                .unwrap_err()
+                .to_string(),
+            format!("expected stable host machine ID, got {predicted}"),
+        );
+    }
+
+    #[test]
+    fn test_machine_id_newtype_parsing_and_json() {
+        let hardware_hash = [42; 32];
+        let stable = MachineId::new(MachineIdSource::Tpm, hardware_hash, MachineType::Host);
+        let predicted = MachineId::new(
+            MachineIdSource::Tpm,
+            hardware_hash,
+            MachineType::PredictedHost,
+        );
+        let dpu = MachineId::new(MachineIdSource::Tpm, hardware_hash, MachineType::Dpu);
+
+        fn acceptance<T>(id: MachineId) -> (bool, bool)
+        where
+            T: FromStr + serde::de::DeserializeOwned,
+        {
+            (
+                id.to_string().parse::<T>().is_ok(),
+                serde_json::from_str::<T>(&serde_json::to_string(&id).unwrap()).is_ok(),
+            )
+        }
+
+        value_scenarios!(
+            run = |id| (
+                acceptance::<HostMachineId>(id),
+                acceptance::<StableHostMachineId>(id),
+                acceptance::<PredictedHostMachineId>(id),
+                acceptance::<DpuMachineId>(id),
+            );
+            "stable host parsing and JSON" {
+                stable => ((true, true), (true, true), (false, false), (false, false))
+            }
+            "predicted host parsing and JSON" {
+                predicted => ((true, true), (false, false), (true, true), (false, false))
+            }
+            "DPU parsing and JSON" {
+                dpu => ((false, false), (false, false), (false, false), (true, true))
+            }
+        );
+
+        let typed = StableHostMachineId::try_from(stable).unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&typed).unwrap(),
+            serde_json::to_string(&stable).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<StableHostMachineId>(&serde_json::to_string(&stable).unwrap())
+                .unwrap(),
+            typed
         );
     }
 }

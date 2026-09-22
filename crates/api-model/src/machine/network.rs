@@ -16,13 +16,12 @@
  */
 use std::net::{IpAddr, Ipv6Addr};
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Duration, Utc};
 use config_version::ConfigVersion;
 use health_report::HealthReport;
 use serde::{Deserialize, Serialize};
 
-use crate::instance::status::extension_service::InstanceExtensionServiceStatusObservation;
 use crate::instance::status::network::InstanceNetworkStatusObservation;
 
 /// The fabric interface status last reported by a DPU agent.
@@ -47,14 +46,13 @@ pub struct DpuLinkStatusObservation {
 /// Stored in a Postgres JSON field so new fields have to be Option until fully deployed
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineNetworkStatusObservation {
-    pub machine_id: MachineId,
+    pub machine_id: DpuMachineId,
     pub agent_version: Option<String>,
     pub observed_at: DateTime<Utc>,
     pub network_config_version: Option<ConfigVersion>,
     pub client_certificate_expiry: Option<i64>,
     pub agent_version_superseded_at: Option<DateTime<Utc>>,
     pub instance_network_observation: Option<InstanceNetworkStatusObservation>,
-    pub extension_service_observation: Option<InstanceExtensionServiceStatusObservation>,
     #[serde(default)]
     pub fabric_interfaces: Vec<DpuFabricInterfaceStatusObservation>,
 }
@@ -68,18 +66,6 @@ impl MachineNetworkStatusObservation {
         if match (
             &self.instance_network_observation,
             &other.instance_network_observation,
-        ) {
-            (None, Some(_)) => true,
-            (Some(_), None) => true,
-            (None, None) => false,
-            (Some(a), Some(b)) => a.any_observed_version_changed(b),
-        } {
-            return true;
-        }
-
-        if match (
-            &self.extension_service_observation,
-            &other.extension_service_observation,
         ) {
             (None, Some(_)) => true,
             (Some(_), None) => true,
@@ -207,21 +193,17 @@ mod tests {
 
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Check, scenarios, value_scenarios};
-    use carbide_uuid::extension_service::ExtensionServiceId;
     use chrono::TimeZone;
     use config_version::ConfigVersion;
 
     use super::*;
-    use crate::extension_service::ExtensionServiceType;
-    use crate::instance::status::extension_service::{
-        ExtensionServiceDeploymentStatus, ExtensionServiceStatusObservation,
-    };
     use crate::test_support::machine_snapshot::config_version;
 
     // A stable MachineId for status observations; `any_observed_version_changed`
     // never inspects it, so any valid id does.
-    fn machine_id() -> MachineId {
-        MachineId::from_str("fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg").unwrap()
+    fn machine_id() -> DpuMachineId {
+        DpuMachineId::from_str("fm100dt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg")
+            .unwrap()
     }
 
     // A fixed timestamp so observations built in tests compare deterministically.
@@ -234,7 +216,6 @@ mod tests {
     fn network_status(
         network_config_version: Option<ConfigVersion>,
         instance_network_observation: Option<InstanceNetworkStatusObservation>,
-        extension_service_observation: Option<InstanceExtensionServiceStatusObservation>,
     ) -> MachineNetworkStatusObservation {
         MachineNetworkStatusObservation {
             machine_id: machine_id(),
@@ -244,7 +225,6 @@ mod tests {
             client_certificate_expiry: None,
             agent_version_superseded_at: None,
             instance_network_observation,
-            extension_service_observation,
             fabric_interfaces: Vec::new(),
         }
     }
@@ -257,28 +237,6 @@ mod tests {
             config_version,
             instance_config_version,
             interfaces: Vec::new(),
-            observed_at: observed_at(),
-        }
-    }
-
-    fn extension_observation(
-        observation_config_version: ConfigVersion,
-        instance_config_version: Option<ConfigVersion>,
-    ) -> InstanceExtensionServiceStatusObservation {
-        InstanceExtensionServiceStatusObservation {
-            config_version: observation_config_version,
-            instance_config_version,
-            extension_service_statuses: vec![ExtensionServiceStatusObservation {
-                service_id: ExtensionServiceId::from_str("00000000-0000-0000-0000-000000000000")
-                    .unwrap(),
-                service_type: ExtensionServiceType::KubernetesPod,
-                service_name: "test-service".to_string(),
-                version: config_version(1),
-                removed: None,
-                overall_state: ExtensionServiceDeploymentStatus::Running,
-                components: vec![],
-                message: String::new(),
-            }],
             observed_at: observed_at(),
         }
     }
@@ -503,10 +461,10 @@ mod tests {
     }
 
     // any_observed_version_changed compares the network config version and then
-    // the two nested observations (instance-network and extension-service),
-    // each via a None/Some pairing that delegates to the sub-observation's own
-    // comparison. Enumerate every arm: matching versions, differing versions,
-    // each None/Some transition, and a deeper change inside each Some/Some pair.
+    // the nested instance-network observation, via a None/Some pairing that
+    // delegates to its own comparison. Enumerate every arm: matching versions,
+    // differing versions, each None/Some transition, and a deeper change inside
+    // the Some/Some pair.
     #[test]
     fn test_any_observed_version_changed() {
         let v1 = config_version(1);
@@ -516,123 +474,74 @@ mod tests {
             run = |(a, b)| a.any_observed_version_changed(&b);
             "identical observations -> unchanged" {
                 (
-                    network_status(Some(v1), None, None),
-                    network_status(Some(v1), None, None),
+                    network_status(Some(v1), None),
+                    network_status(Some(v1), None),
                 ) => false,
             }
 
             "both network config versions None -> unchanged" {
                 (
-                    network_status(None, None, None),
-                    network_status(None, None, None),
+                    network_status(None, None),
+                    network_status(None, None),
                 ) => false,
             }
 
             "network config version differs -> changed" {
                 (
-                    network_status(Some(v1), None, None),
-                    network_status(Some(v2), None, None),
+                    network_status(Some(v1), None),
+                    network_status(Some(v2), None),
                 ) => true,
             }
 
             "network config version None vs Some -> changed" {
                 (
-                    network_status(None, None, None),
-                    network_status(Some(v1), None, None),
+                    network_status(None, None),
+                    network_status(Some(v1), None),
                 ) => true,
             }
 
             "network config version Some vs None -> changed" {
                 (
-                    network_status(Some(v1), None, None),
-                    network_status(None, None, None),
+                    network_status(Some(v1), None),
+                    network_status(None, None),
                 ) => true,
             }
 
             "instance observation None vs Some -> changed" {
                 (
-                    network_status(Some(v1), None, None),
-                    network_status(Some(v1), Some(network_observation(v1, None)), None),
+                    network_status(Some(v1), None),
+                    network_status(Some(v1), Some(network_observation(v1, None))),
                 ) => true,
             }
 
             "instance observation Some vs None -> changed" {
                 (
-                    network_status(Some(v1), Some(network_observation(v1, None)), None),
-                    network_status(Some(v1), None, None),
+                    network_status(Some(v1), Some(network_observation(v1, None))),
+                    network_status(Some(v1), None),
                 ) => true,
             }
 
             "instance observation Some/Some identical -> unchanged" {
                 (
-                    network_status(Some(v1), Some(network_observation(v1, Some(v1))), None),
-                    network_status(Some(v1), Some(network_observation(v1, Some(v1))), None),
+                    network_status(Some(v1), Some(network_observation(v1, Some(v1)))),
+                    network_status(Some(v1), Some(network_observation(v1, Some(v1)))),
                 ) => false,
             }
 
             "instance observation inner config version differs -> changed" {
                 (
-                    network_status(Some(v1), Some(network_observation(v1, None)), None),
-                    network_status(Some(v1), Some(network_observation(v2, None)), None),
+                    network_status(Some(v1), Some(network_observation(v1, None))),
+                    network_status(Some(v1), Some(network_observation(v2, None))),
                 ) => true,
             }
 
             "instance observation inner instance-config version differs -> changed" {
                 (
-                    network_status(Some(v1), Some(network_observation(v1, Some(v1))), None),
-                    network_status(Some(v1), Some(network_observation(v1, Some(v2))), None),
+                    network_status(Some(v1), Some(network_observation(v1, Some(v1)))),
+                    network_status(Some(v1), Some(network_observation(v1, Some(v2)))),
                 ) => true,
             }
 
-            "extension observation None vs Some -> changed" {
-                (
-                    network_status(Some(v1), None, None),
-                    network_status(Some(v1), None, Some(extension_observation(v1, None))),
-                ) => true,
-            }
-
-            "extension observation Some vs None -> changed" {
-                (
-                    network_status(Some(v1), None, Some(extension_observation(v1, None))),
-                    network_status(Some(v1), None, None),
-                ) => true,
-            }
-
-            "extension observation Some/Some identical -> unchanged" {
-                (
-                    network_status(Some(v1), None, Some(extension_observation(v1, Some(v1)))),
-                    network_status(Some(v1), None, Some(extension_observation(v1, Some(v1)))),
-                ) => false,
-            }
-
-            "extension observation inner config version differs -> changed" {
-                (
-                    network_status(Some(v1), None, Some(extension_observation(v1, None))),
-                    network_status(Some(v1), None, Some(extension_observation(v2, None))),
-                ) => true,
-            }
-
-            "extension observation inner instance-config version differs -> changed" {
-                (
-                    network_status(Some(v1), None, Some(extension_observation(v1, Some(v1)))),
-                    network_status(Some(v1), None, Some(extension_observation(v1, Some(v2)))),
-                ) => true,
-            }
-
-            "extension observation service version differs -> changed" {
-                (
-                    network_status(Some(v1), None, Some(extension_observation(v1, None))),
-                    network_status(
-                        Some(v1),
-                        None,
-                        Some({
-                            let mut observation = extension_observation(v1, None);
-                            observation.extension_service_statuses[0].version = v2;
-                            observation
-                        }),
-                    ),
-                ) => true,
-            }
         );
     }
 
@@ -692,46 +601,6 @@ mod tests {
 
             "non-object json is rejected" {
                 "[]" => Fails,
-            }
-        );
-    }
-
-    // The default config round-trips through JSON unchanged, and the
-    // quarantine-state variant survives a round-trip too. Folds the prior
-    // single-default assertion into the round-trip table that already exists
-    // for the IP cases. serde_json::Error is not PartialEq, so failing rows
-    // would use `Fails`.
-    #[test]
-    fn test_managed_host_network_config_default_and_quarantine_roundtrip() {
-        scenarios!(
-            run = |config| {
-                let json = serde_json::to_string(&config).map_err(drop)?;
-                serde_json::from_str::<ManagedHostNetworkConfig>(&json).map_err(drop)
-            };
-            "default round-trips" {
-                ManagedHostNetworkConfig::default() => Yields(ManagedHostNetworkConfig::default()),
-            }
-
-            "quarantine state round-trips" {
-                ManagedHostNetworkConfig {
-                    loopback_ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-                    loopback_ip_v6: None,
-                    use_admin_network: Some(true),
-                    quarantine_state: Some(ManagedHostQuarantineState {
-                        reason: Some("flooded".to_string()),
-                        mode: ManagedHostQuarantineMode::BlockAllTraffic,
-                    }),
-                    use_admin_network_changed: None,
-                } => Yields(ManagedHostNetworkConfig {
-                    loopback_ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-                    loopback_ip_v6: None,
-                    use_admin_network: Some(true),
-                    quarantine_state: Some(ManagedHostQuarantineState {
-                        reason: Some("flooded".to_string()),
-                        mode: ManagedHostQuarantineMode::BlockAllTraffic,
-                    }),
-                    use_admin_network_changed: None,
-                }),
             }
         );
     }

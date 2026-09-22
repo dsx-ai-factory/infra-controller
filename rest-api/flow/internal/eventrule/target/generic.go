@@ -26,8 +26,9 @@ func (componentResolver) Resolve(
 		)
 	}
 	return []Target{{
-		Kind: eventrule.ResourceKindComponent,
-		ID:   resource.ID,
+		Kind:   eventrule.ResourceKindComponent,
+		ID:     resource.ID,
+		RackID: resource.RackID,
 	}}, nil
 }
 
@@ -38,8 +39,9 @@ func (rackResolver) Resolve(
 	request ResolveRequest,
 ) ([]Target, error) {
 	return []Target{{
-		Kind: eventrule.ResourceKindRack,
-		ID:   request.Resource.RackID,
+		Kind:   eventrule.ResourceKindRack,
+		ID:     request.Resource.RackID,
+		RackID: request.Resource.RackID,
 	}}, nil
 }
 

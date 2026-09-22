@@ -11,7 +11,18 @@ data:
     {{- .Values.configFiles.config | nindent 4 }}
     {{- else }}
     {{- /* Replace hardcoded nico-system namespace with actual global.namespace */ -}}
-    {{- .Files.Get "files/ssh-console-rs-config.toml" | replace "nico-system" (include "nico-ssh-console-rs.namespace" .) | replace "https://nico-api." (printf "https://%s." .Values.apiServiceName) | nindent 4 }}
+    {{- $config := .Files.Get "files/ssh-console-rs-config.toml" | replace "nico-system" (include "nico-ssh-console-rs.namespace" .) | replace "https://nico-api." (printf "https://%s." .Values.apiServiceName) -}}
+    {{- /* Operator certificate auth. Substitutes the empty placeholders in the packaged
+           config so a deployment can set just these two without restating the whole file.
+           Left unset, the placeholders stand and certificate auth stays disabled. */ -}}
+    {{- $sshConsole := .Values.sshConsole | default dict -}}
+    {{- with $sshConsole.opensshCertificateCaFingerprints | default list -}}
+    {{- $config = $config | replace "openssh_certificate_ca_fingerprints = []" (printf "openssh_certificate_ca_fingerprints = %s" (toJson .)) -}}
+    {{- end -}}
+    {{- with $sshConsole.adminCertificateRole | default "" -}}
+    {{- $config = $config | replace "admin_certificate_role = \"\"" (printf "admin_certificate_role = %s" (quote .)) -}}
+    {{- end -}}
+    {{- $config | nindent 4 }}
     {{- end }}
 ---
 apiVersion: v1

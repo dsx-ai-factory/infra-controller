@@ -1,6 +1,6 @@
 # `nico-admin-cli machine`
 
-_[Hardware commands](../../hardware.md) › **machine**_
+*[Hardware commands](../../hardware.md) › **machine***
 
 ## NAME
 
@@ -8,8 +8,10 @@ nico-admin-cli-machine - Machine related handling
 
 ## SYNOPSIS
 
-**nico-admin-cli machine** \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*subcommands*\>
+```text
+nico-admin-cli machine [--extended] [--sort-by]
+[-h|--help] <subcommands>
+```
 
 ## DESCRIPTION
 
@@ -17,24 +19,26 @@ Machine related handling
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ## Subcommands
@@ -50,8 +54,9 @@ Print help (see a summary with -h)
 | [`metadata`](./machine-metadata.md) | Edit Metadata associated with a Machine |
 | [`hardware-info`](./machine-hardware-info.md) | Update/show machine hardware info |
 | [`positions`](./machine-positions.md) | Show physical location info for machines in rack-based systems |
-| [`nvlink-info`](./machine-nvlink-info.md) | Update/show NVLink info for an MNNVL machine |
+| [`nvlink-info`](./machine-nvlink-info.md) | Show NVLink info for an MNNVL machine |
+| [`health-history`](./machine-health-history.md) | Show machine health history |
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

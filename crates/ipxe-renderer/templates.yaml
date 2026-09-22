@@ -115,7 +115,7 @@ templates:
     template: |
       #!ipxe
       # Ubuntu autoinstall template
-      kernel {{kernel}} BOOTIF=01-${netX/mac:hexhyp} ip=dhcp fb=false url={{install_iso}} autoinstall ds=nocloud-net;s=${cloudinit-url} console=tty0 console={{console}},115200 initrd=initrd.magic
+      kernel {{kernel}} BOOTIF=01-${netX/mac:hexhyp} ip=dhcp fb=false url={{install_iso}} autoinstall ds=nocloud-net;s=${tenant-cloudinit-url} console=tty0 console={{console}},115200 initrd=initrd.magic
       initrd {{initrd}}
       boot
 
@@ -135,10 +135,21 @@ templates:
       - console
     template: |
       #!ipxe
-      kernel {{kernel}} fsck.mode=skip autoinstall ip=dhcp BOOTIF=01-${netX/mac:hexhyp} url={{install_iso}} nvme-core.multipath=n nouveau.modeset=0 console=tty0 console={{console}},115200 nooemconfig force-platform={{force_platform}} force-ai={{ai_cfg}} ds=nocloud-net;s=${cloudinit-url}
+      kernel {{kernel}} fsck.mode=skip autoinstall ip=dhcp BOOTIF=01-${netX/mac:hexhyp} url={{install_iso}} nvme-core.multipath=n nouveau.modeset=0 console=tty0 console={{console}},115200 nooemconfig force-platform={{force_platform}} force-ai={{ai_cfg}} ds=nocloud-net;s=${tenant-cloudinit-url}
       initrd {{initrd}}
       boot
 
+  # The kickstart URL comes from the ${dpu-cloudinit-url} iPXE variable that the
+  # boot script sets, not from a stored `cloudinit_url` parameter as it once
+  # did. The cloud-init routes are split by consumer (dpu/, tenant/, scout/), so
+  # a URL captured into an OS definition when the endpoint had no prefix now
+  # points at a route that does not exist, and nothing would report the 404 --
+  # the DPU would simply never get a kickstart. Reading it from the boot script
+  # means the value cannot go stale, needs no migration if the prefixes move
+  # again, and matches character-for-character what
+  # PxeInstructions::get_pxe_instruction_for_arch emits for the same machine.
+  # A `cloudinit_url` left over on an existing definition is now unconsumed and
+  # is swept into {{extra}}; it is inert, and can be removed at leisure.
   - id: fd4f4413-18c4-5159-8cc0-7a64be5f98b9
     name: discovery-scout-aarch64-dpu
     description: Discovery Scout for ARM DPU with initrd
@@ -148,14 +159,13 @@ templates:
     required_params:
       - cli_cmd
       - bfnet
-      - cloudinit_url
       - machine_id
       - server_uri
     template: |
       #!ipxe
       set base_url {{base_url}}
 
-      kernel ${base_url}/internal/aarch64/carbide.efi initrd=initrd.img console=tty0 console=ttyS0,115200 console=ttyAMA0 console=hvc0 ip=dhcp cli_cmd={{cli_cmd}} bfnet={{bfnet}} bfks={{cloudinit_url}}/user-data machine_id={{machine_id}} server_uri={{server_uri}} {{extra}} ||
+      kernel ${base_url}/internal/aarch64/carbide.efi initrd=initrd.img console=tty0 console=ttyS0,115200 console=ttyAMA0 console=hvc0 ip=dhcp cli_cmd={{cli_cmd}} bfnet={{bfnet}} bfks=${dpu-cloudinit-url}/user-data machine_id={{machine_id}} server_uri={{server_uri}} {{extra}} ||
       imgfetch --name initrd.img ${base_url}/internal/aarch64/carbide.root ||
       boot ||
 
@@ -172,7 +182,7 @@ templates:
       - server_uri
     template: |
       #!ipxe
-      kernel {{base_url}}/internal/aarch64/scout.efi mac={{mac}} console=tty0 console=ttyS0,115200 pci=realloc=off iommu=off cli_cmd={{cli_cmd}} machine_id={{machine_id}} server_uri={{server_uri}} {{extra}} ||
+      kernel {{base_url}}/internal/aarch64/scout.efi mac={{mac}} console=tty0 console=ttyS0,115200 pci=realloc=off iommu=off cli_cmd={{cli_cmd}} machine_id={{machine_id}} server_uri={{server_uri}} ds=nocloud;s=${scout-cloudinit-url} {{extra}} ||
       boot ||
 
   - id: bbfbd1d9-9a19-5ce0-ba56-65d75eb225a1
@@ -188,7 +198,7 @@ templates:
       - server_uri
     template: |
       #!ipxe
-      kernel {{base_url}}/internal/x86_64/scout.efi mac={{mac}} console=tty0 console={{serial_console}} pci=realloc=off iommu=off cli_cmd={{cli_cmd}} machine_id={{machine_id}} server_uri={{server_uri}} {{extra}} ||
+      kernel {{base_url}}/internal/x86_64/scout.efi mac={{mac}} console=tty0 console={{serial_console}} pci=realloc=off iommu=off cli_cmd={{cli_cmd}} machine_id={{machine_id}} server_uri={{server_uri}} ds=nocloud;s=${scout-cloudinit-url} {{extra}} ||
       boot ||
 
   - id: cfff2862-bb55-55c6-bf66-237b5bcf09b3

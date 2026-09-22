@@ -20,7 +20,7 @@ pub use rpc::forge::forge_server::Forge;
 pub use sqlx::PgPool;
 pub use sqlx_testing;
 
-pub use crate::asset::{TestPowerShelf, TestRack, TestSwitch};
+pub use crate::asset::{TestExpectedSwitch, TestPowerShelf, TestRack, TestSwitch};
 pub use crate::resource_pool::ResourcePoolBuilder;
 pub use crate::{
     Api, DbMachineExt, TestDpuMachine, TestHarness, TestHostMachine, TestMachine, TestManagedHost,

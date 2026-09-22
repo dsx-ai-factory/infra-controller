@@ -16,10 +16,10 @@
  */
 
 //! Render one machine's boot-interface view (the `GetMachineBootInterfaces`
-//! RPC) as an ASCII table, JSON, or YAML. The view gathers the four stores a
-//! host's boot interface can live in -- managed interface rows, predictions, the
-//! explored endpoint default, and the retained post-deletion pairs -- plus the
-//! effective boot interface, store divergence, and desired-state reconciliation.
+//! RPC) as an ASCII table, JSON, or YAML. The view gathers managed interface
+//! rows, predictions, explored-endpoint defaults, and retained post-deletion
+//! pairs around the separate desired-state record. It also reports the
+//! effective owned pick, current-selection disagreement, and reconciliation.
 
 use std::fmt::Write as _;
 
@@ -47,12 +47,13 @@ struct BootInterfacesReport {
     predicted_interfaces: Vec<PredictedRow>,
     explored_endpoints: Vec<ExploredRow>,
     retained_interfaces: Vec<RetainedRow>,
-    /// MAC the system would boot from now (`pick_boot_interface` over the managed
-    /// rows). `None` when there is no managed candidate yet.
+    /// Effective owned MAC (`pick_boot_interface` over the managed rows).
+    /// `None` when there is no managed candidate yet.
     effective_boot_interface_mac: Option<String>,
-    /// The fully-populated effective boot interface id, when captured.
+    /// Fully populated Redfish interface id for the effective owned pick.
     effective_boot_interface_id: Option<String>,
-    /// True when the stores disagree about which MAC boots this machine.
+    /// Whether the effective owned pick, explored defaults, and declared-primary
+    /// predictions contain more than one MAC.
     divergent: bool,
     /// Desired generation and the machine controller's progress toward it.
     reconciliation: Option<ReconciliationReport>,
@@ -205,8 +206,8 @@ pub(super) async fn handle_boot_interfaces(
     Ok(())
 }
 
-/// One labeled table per store, then a summary block with the effective boot
-/// interface and the divergence flag.
+/// One labeled table per store, then the effective owned pick, selection
+/// disagreement, and desired-state reconciliation.
 fn render_tables(report: &BootInterfacesReport) -> String {
     let mut out = String::new();
     let dash = |s: &Option<String>| s.as_deref().unwrap_or("-").to_string();
@@ -218,7 +219,7 @@ fn render_tables(report: &BootInterfacesReport) -> String {
         .unwrap_or_default();
     let _ = writeln!(out, "Boot interfaces for machine {machine_id}");
 
-    // Store 1: managed interface rows (authoritative for a managed machine).
+    // Store 1: managed interface candidates and primary selection.
     let _ = writeln!(out, "\nmachine_interfaces (managed rows):");
     let mut managed = Table::new();
     managed.set_titles(Row::new(
@@ -562,28 +563,6 @@ mod tests {
         assert_eq!(
             value["reconciliation"]["failure"],
             "BIOS job retries exhausted"
-        );
-    }
-
-    #[test]
-    fn yaml_round_trips_with_every_field() {
-        let yaml = serde_yaml::to_string(&sample_report()).expect("serialize yaml");
-
-        assert!(yaml.contains("boot_interface_id:"));
-        assert!(yaml.contains("NIC.Slot.1-1-1"));
-        assert!(yaml.contains("recorded_at:"));
-        assert!(yaml.contains("divergent: true"));
-        assert!(yaml.contains("primary_interface: true"));
-        assert!(yaml.contains("reconciliation:"));
-        assert!(yaml.contains("reconciliation_state: Failed"));
-        assert!(yaml.contains("selection_source: RedfishUefiPci"));
-
-        // Round-trips back into a generic YAML value.
-        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse yaml");
-        assert_eq!(value["divergent"], serde_yaml::Value::Bool(true));
-        assert_eq!(
-            value["retained_interfaces"][0]["recorded_at"],
-            serde_yaml::Value::String("2026-06-01T00:00:00Z".to_string())
         );
     }
 

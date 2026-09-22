@@ -62,11 +62,11 @@ mod test {
     #[tokio::test]
     async fn test_url_normalize() {
         let request = Request::builder()
-            .uri("http://localhost:8080/api/v0/cloud-init//user-data")
+            .uri("http://localhost:8080/api/v0/cloud-init//dpu/user-data")
             .body(())
             .unwrap();
         let result = normalize_url(request).await;
-        assert_eq!(result.uri().path(), "/api/v0/cloud-init/user-data");
+        assert_eq!(result.uri().path(), "/api/v0/cloud-init/dpu/user-data");
     }
 
     #[tokio::test]

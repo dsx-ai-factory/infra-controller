@@ -5,6 +5,7 @@ max_database_connections = 1222
 database_pool_acquire_timeout = "15s"
 database_pool_idle_timeout = "20m"
 database_pool_max_lifetime = "45m"
+database_startup_retry_timeout = "2m"
 asn = 123
 dhcp_servers = ["1.2.3.4", "5.6.7.8"]
 ntp_servers = ["10.20.30.40", "50.60.70.80"]
@@ -76,6 +77,13 @@ pkeys = [{ start = "1", end = "10" }]
 
 [ib_config]
 fabric_monitor_run_interval = "101s"
+
+[credentials]
+ufm_source = "backend"
+
+[credentials.file]
+path = "/var/run/secrets/nico/ufm/credentials.yaml"
+poll_interval = "17s"
 
 [site_explorer]
 enabled = true
@@ -156,8 +164,11 @@ instance_autoreboot_period.start = "2025-01-07T00:00:00Z"
 instance_autoreboot_period.end = "2026-01-08T00:00:00Z"
 max_concurrent_machine_updates_absolute = 1
 
-[dpa_config]
+[ewethers_config]
 enabled = true
+svpc_enabled = true
+
+[ewethers_config.svpc]
 mqtt_endpoint = "mqtt.forge"
 
 [host_models.dell_r750]

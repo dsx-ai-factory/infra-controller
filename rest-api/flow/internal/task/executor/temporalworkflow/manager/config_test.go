@@ -15,34 +15,32 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 )
 
-func TestConfigValidateRequiresDataCipher(t *testing.T) {
-	conf := Config{
-		ClientConf: temporal.Config{
-			Endpoint: endpoint.Config{Host: "temporal", Port: 7233},
-		},
-		WorkerOptions: map[string]worker.Options{
-			WorkflowQueue: {},
-		},
-	}
-
-	err := conf.Validate()
-
-	require.EqualError(t, err, "data encryption cipher is required")
-}
-
-func TestConfigValidateAcceptsDataCipher(t *testing.T) {
+func TestConfigValidateDataCipher(t *testing.T) {
 	key := make([]byte, 32)
 	cipher, err := secret.NewCipher(base64.StdEncoding.EncodeToString(key))
 	require.NoError(t, err)
-	conf := Config{
-		ClientConf: temporal.Config{
-			Endpoint: endpoint.Config{Host: "temporal", Port: 7233},
-		},
-		WorkerOptions: map[string]worker.Options{
-			WorkflowQueue: {},
-		},
-		DataCipher: cipher,
+
+	tests := []struct {
+		name       string
+		dataCipher *secret.Cipher
+	}{
+		{name: "missing data cipher"},
+		{name: "configured data cipher", dataCipher: cipher},
 	}
 
-	require.NoError(t, conf.Validate())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conf := Config{
+				ClientConf: temporal.Config{
+					Endpoint: endpoint.Config{Host: "temporal", Port: 7233},
+				},
+				WorkerOptions: map[string]worker.Options{
+					WorkflowQueue: {},
+				},
+				DataCipher: tt.dataCipher,
+			}
+
+			require.NoError(t, conf.Validate())
+		})
+	}
 }

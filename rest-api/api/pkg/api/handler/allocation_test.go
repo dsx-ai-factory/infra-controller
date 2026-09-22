@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
@@ -182,6 +183,10 @@ func TestAllocationHandler_Create(t *testing.T) {
 	ipb4 := testIPBlockBuildIPBlock(t, dbSession, "test4pb", site4, ip2, &tenant3.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "196.162.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	ipb5 := testIPBlockBuildIPBlock(t, dbSession, "test4pb", site5, ip2, &tenant4.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "194.162.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 
+	// Matching the provider and site is not enough. A record with SitePrefixID
+	// set belongs to SitePrefix and cannot be the parent of an Allocation.
+	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tenant1, "192.169.0.0", 16, cdbm.IPBlockStatusReady, ipu)
+
 	ipbFG := testIPBlockBuildIPBlock(t, dbSession, "testipbFG", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.170.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 
 	acBadInstanceTypeDoesNotExist := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: uuid.New().String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 5}
@@ -194,6 +199,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 	acBadIPBlockProviderMismatch := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipb2.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 24}
 	acBadIPBlockSiteMismatch := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipb3.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 24}
 	acBadIPBBlockSizeLargerThanParent := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipb1.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 15}
+	acTenantSitePrefix := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: tenantSitePrefix.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 24}
 	acGoodIPB := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipb1.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 24}
 
 	acGoodIPBFG := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipbFG.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 16}
@@ -230,6 +236,8 @@ func TestAllocationHandler_Create(t *testing.T) {
 	errBodyBadSiteInIT, err := json.Marshal(model.APIAllocationCreateRequest{Name: "ok11", Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acBadInstanceTypeSiteMismatch}})
 	assert.Nil(t, err)
 	errBodyBadIPBInAC, err := json.Marshal(model.APIAllocationCreateRequest{Name: "ok12", Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acBadIPBlockDoesNotExist}})
+	assert.Nil(t, err)
+	errBodyTenantSitePrefixInAC, err := json.Marshal(model.APIAllocationCreateRequest{Name: "private-ipblock", Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acTenantSitePrefix}})
 	assert.Nil(t, err)
 	errBodyBadIPInIPB, err := json.Marshal(model.APIAllocationCreateRequest{Name: "ok13", Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acBadIPBlockProviderMismatch}})
 	assert.Nil(t, err)
@@ -457,6 +465,14 @@ func TestAllocationHandler_Create(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
+			name:           "Tenant SitePrefix cannot be used as an Allocation parent",
+			reqOrgName:     ipOrg1,
+			reqBody:        string(errBodyTenantSitePrefixInAC),
+			user:           ipu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
 			name:           "error when IP Block in Allocation Constraint belongs to a different Provider than current Org's",
 			reqOrgName:     ipOrg1,
 			reqBody:        string(errBodyBadIPInIPB),
@@ -637,6 +653,183 @@ func TestAllocationHandler_Create(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("reports an allocation parent deleted before its row lock", func(t *testing.T) {
+		raceName := "allocation-delete-first-" + uuid.NewString()
+		raceRoot := testIPBlockBuildIPBlock(
+			t,
+			dbSession,
+			raceName,
+			site,
+			ip,
+			nil,
+			cdbm.IPBlockRoutingTypeDatacenterOnly,
+			"198.18.0.0",
+			24,
+			cdbm.IPBlockProtocolVersionV4,
+			false,
+			cdbm.IPBlockStatusReady,
+			ipu,
+		)
+		raceRootPrefix, err := ipam.CreateIpamEntryForIPBlock(
+			ctx,
+			ipamStorage,
+			raceRoot.Prefix,
+			raceRoot.PrefixLength,
+			raceRoot.RoutingType,
+			raceRoot.InfrastructureProviderID.String(),
+			raceRoot.SiteID.String(),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, raceRootPrefix)
+
+		raceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		deleteTx, err := cdb.BeginTx(raceCtx, dbSession, nil)
+		require.NoError(t, err)
+		deleteFinished := false
+		handlerStarted := false
+		handlerDrained := false
+		handlerDone := make(chan error, 1)
+		defer func() {
+			if !deleteFinished {
+				_ = deleteTx.Rollback()
+			}
+			cancel()
+			if handlerStarted && !handlerDrained {
+				select {
+				case <-handlerDone:
+				case <-time.After(5 * time.Second):
+					t.Error("Allocation handler did not stop during cleanup")
+				}
+			}
+		}()
+
+		var deleteBackendPID int
+		err = deleteTx.GetBunTx().NewSelect().
+			ColumnExpr("pg_backend_pid()").
+			Scan(raceCtx, &deleteBackendPID)
+		require.NoError(t, err)
+
+		ipbDAO := cdbm.NewIPBlockDAO(dbSession)
+		lockedRoot, err := ipbDAO.GetByIDForUpdate(raceCtx, deleteTx, raceRoot.ID)
+		require.NoError(t, err)
+		require.NoError(t, ipbDAO.Delete(raceCtx, deleteTx, lockedRoot.ID))
+		deleteStorage := ipam.NewIpamStorage(dbSession.DB, deleteTx.GetBunTx())
+		require.NoError(t, ipam.DeleteIpamEntryForIPBlock(
+			raceCtx,
+			deleteStorage,
+			lockedRoot.Prefix,
+			lockedRoot.PrefixLength,
+			lockedRoot.RoutingType,
+			lockedRoot.InfrastructureProviderID.String(),
+			lockedRoot.SiteID.String(),
+		))
+
+		constraint := model.APIAllocationConstraintCreateRequest{
+			ResourceType:    cdbm.AllocationResourceTypeIPBlock,
+			ResourceTypeID:  raceRoot.ID.String(),
+			ConstraintType:  cdbm.AllocationConstraintTypeReserved,
+			ConstraintValue: 28,
+		}
+		body, err := json.Marshal(model.APIAllocationCreateRequest{
+			Name:                  raceName,
+			Description:           cutil.GetPtr(""),
+			TenantID:              tenant1.ID.String(),
+			SiteID:                site.ID.String(),
+			AllocationConstraints: []model.APIAllocationConstraintCreateRequest{constraint},
+		})
+		require.NoError(t, err)
+
+		e := echo.New()
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec := httptest.NewRecorder()
+		ec := e.NewContext(req, rec)
+		ec.SetParamNames("orgName")
+		ec.SetParamValues(ipOrg1)
+		ec.Set("user", ipu)
+		requestCtx := context.WithValue(raceCtx, otelecho.TracerKey, tracer) //nolint:staticcheck // Middleware owns the context key.
+		ec.SetRequest(ec.Request().WithContext(requestCtx))
+
+		handlerStarted = true
+		go func() {
+			handlerDone <- (CreateAllocationHandler{
+				dbSession: dbSession,
+				scp:       scp,
+				cfg:       cfg,
+			}).Handle(ec)
+		}()
+
+		require.Eventually(t, func() bool {
+			var blockedHandlers int
+			queryErr := dbSession.DB.NewSelect().
+				ColumnExpr("count(*)").
+				TableExpr("pg_catalog.pg_stat_activity").
+				Where("datname = current_database()").
+				Where("state = 'active'").
+				Where("wait_event_type = 'Lock'").
+				Where("query ILIKE ?", "%ip_block%").
+				Where("query ILIKE ?", "%FOR UPDATE%").
+				Where("? = ANY(pg_blocking_pids(pid))", deleteBackendPID).
+				Scan(raceCtx, &blockedHandlers)
+			return queryErr == nil && blockedHandlers > 0
+		}, 5*time.Second, 10*time.Millisecond, "Allocation creation did not wait for the deleting transaction's IP Block row lock")
+
+		err = deleteTx.Commit()
+		if err == nil {
+			deleteFinished = true
+		}
+		require.NoError(t, err)
+		select {
+		case err = <-handlerDone:
+			handlerDrained = true
+			require.NoError(t, err)
+		case <-raceCtx.Done():
+			t.Fatalf("Allocation creation did not resume after deletion committed: %v", raceCtx.Err())
+		}
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "The IP Block in the Allocation Constraint no longer exists")
+
+		allocationCount, err := cdbm.NewAllocationDAO(dbSession).GetCount(
+			ctx,
+			nil,
+			cdbm.AllocationFilterInput{
+				Name:      &raceName,
+				TenantIDs: []uuid.UUID{tenant1.ID},
+				SiteIDs:   []uuid.UUID{site.ID},
+			},
+		)
+		require.NoError(t, err)
+		assert.Zero(t, allocationCount)
+
+		constraintCount, err := dbSession.DB.NewSelect().
+			Model((*cdbm.AllocationConstraint)(nil)).
+			Where("ac.resource_type = ?", cdbm.AllocationResourceTypeIPBlock).
+			Where("ac.resource_type_id = ?", raceRoot.ID).
+			Count(ctx)
+		require.NoError(t, err)
+		assert.Zero(t, constraintCount)
+
+		childCount, err := dbSession.DB.NewSelect().
+			Model((*cdbm.IPBlock)(nil)).
+			Where("ipb.name = ?", raceName).
+			Where("ipb.tenant_id = ?", tenant1.ID).
+			Where("ipb.site_id = ?", site.ID).
+			Count(ctx)
+		require.NoError(t, err)
+		assert.Zero(t, childCount)
+
+		_, err = ipbDAO.GetByID(ctx, nil, raceRoot.ID, nil)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+		ipamer := cipam.NewWithStorage(ipamStorage)
+		ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+			ctx,
+			raceRoot.RoutingType,
+			raceRoot.InfrastructureProviderID.String(),
+			raceRoot.SiteID.String(),
+		))
+		assert.Nil(t, ipamer.PrefixFrom(ctx, raceRootPrefix.Cidr))
+	})
 }
 
 func testCreateAllocation(t *testing.T, dbSession *cdb.Session, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName, reqBody string) *model.APIAllocation {

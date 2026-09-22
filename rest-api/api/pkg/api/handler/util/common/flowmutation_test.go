@@ -91,6 +91,7 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		execute        func(context.Context, echo.Context, tclient.Client) (*flowv1.SubmitTaskResponse, error)
 		wantFullMethod string
 		wantRequest    proto.Message
+		wantWorkflowID string
 	}{
 		{
 			name: "power on",
@@ -169,14 +170,16 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "firmware update",
 			execute: func(ctx context.Context, c echo.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, error) {
-				return ExecuteFirmwareUpdateWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, workflowID, entityName)
+				return ExecuteFirmwareUpdateWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, true, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_UpgradeFirmware_FullMethodName,
+			wantWorkflowID: workflowID + "-override-version-check",
 			wantRequest: &flowv1.UpgradeFirmwareRequest{
-				TargetSpec:    mutationTargetSpec(rackID),
-				TargetVersion: &version,
-				SubTargets:    []string{"bmc", "nvos"},
-				Description:   "API firmware update rack r1",
+				TargetSpec:           mutationTargetSpec(rackID),
+				TargetVersion:        &version,
+				SubTargets:           []string{"bmc", "nvos"},
+				Description:          "API firmware update rack r1",
+				OverrideVersionCheck: true,
 			},
 		},
 	}
@@ -196,7 +199,11 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 			assert.Equal(t, tc.wantFullMethod, call.request.FullMethod)
 
 			t.Run("coalesces retries onto the mutation already in flight", func(t *testing.T) {
-				assert.Equal(t, FlowWorkflowID(workflowID), call.options.ID)
+				wantWorkflowID := tc.wantWorkflowID
+				if wantWorkflowID == "" {
+					wantWorkflowID = workflowID
+				}
+				assert.Equal(t, wantWorkflowID, call.options.ID)
 				assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, call.options.WorkflowIDConflictPolicy)
 			})
 
@@ -230,13 +237,13 @@ func TestExecuteFirmwareUpdateWorkflowEncryptsAuthenticationData(t *testing.T) {
 
 	got, err := ExecuteFirmwareUpdateWorkflow(
 		context.Background(), echoCtx, zerolog.Nop(), temporalClient,
-		mutationTargetSpec(rackID), nil, nil, authenticationData, siteID, nil, false,
+		mutationTargetSpec(rackID), nil, nil, authenticationData, siteID, nil, false, false,
 		workflowID, "rack r1",
 	)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.True(t, strings.HasPrefix(call.options.ID, FlowWorkflowID(workflowID+"-")))
+	assert.True(t, strings.HasPrefix(call.options.ID, workflowID+"-"))
 	assert.NotContains(t, call.options.ID, token)
 	assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, call.options.WorkflowIDConflictPolicy)
 	assert.NotContains(t, string(call.request.RequestJSON), token)

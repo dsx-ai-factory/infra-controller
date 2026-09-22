@@ -35,6 +35,9 @@ rules:
     resources: ["dpuflavors"]
     verbs: ["get", "create"]
   - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpuflavortemplates"]
+    verbs: ["get", "create"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
     resources: ["dpusets"]
     verbs: ["get"]
   - apiGroups: ["provisioning.dpu.nvidia.com"]
@@ -56,11 +59,11 @@ rules:
     resources: ["secrets"]
     verbs: ["get", "create", "patch"]
   # Extra-script ConfigMaps the BF4 DPUFlavors source via contentFrom.
-  # Create only: their content belongs to the operator, so NICo must not be able
-  # to update or overwrite them.
+  # NICo reads existing scripts and the Astra runtime config before initialization,
+  # but must not update or overwrite operator-owned content.
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["create"]
+    verbs: ["get", "create"]
 ---
 kind: RoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

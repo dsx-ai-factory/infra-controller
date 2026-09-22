@@ -21,13 +21,17 @@ use carbide_ib_fabric::config::IBFabricConfig;
 use carbide_ib_fabric::ib::{Filter, IBFabric, IBFabricManager};
 use carbide_instrument::testing::MetricsCapture;
 use carbide_uuid::infiniband::IBPartitionId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::instance::InstanceId;
+use carbide_uuid::machine::{MachineId, StableHostMachineId};
 use common::api_fixtures::ib_partition::{DEFAULT_TENANT, create_ib_partition};
 use common::api_fixtures::instance::{config_for_ib_config, create_instance_with_ib_config};
 use common::api_fixtures::{TestEnv, create_managed_host};
+use config_version::ConfigVersion;
 use db::ObjectColumnFilter;
-use model::ib::DEFAULT_IB_FABRIC_NAME;
+use model::ib::{DEFAULT_IB_FABRIC_NAME, IbMembership};
+use model::ib_partition::PartitionKey;
 use model::machine::ManagedHostState;
+use model::machine::machine_search_config::MachineSearchConfig;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{IbPartitionStatus, TenantState};
 use tonic::Request;
@@ -35,6 +39,73 @@ use tonic::Request;
 use crate::api::Api;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::TestEnvOverrides;
+use crate::tests::common::postgres::wait_for_blocked_query;
+
+// `pg_stat_activity.query` can truncate the expanded Machine snapshot query
+// before its locking clause.
+const MACHINE_LOCK_QUERY_MARKER: &str = "SELECT row_to_json";
+const INSTANCE_LOCK_QUERY_MARKER: &str = "FOR UPDATE OF i";
+
+/// Aborts a spawned database task if a failed lock probe unwinds the test.
+struct TestTaskHandle<T>(tokio::task::JoinHandle<T>);
+
+impl<T> TestTaskHandle<T> {
+    fn new(task: tokio::task::JoinHandle<T>) -> Self {
+        Self(task)
+    }
+
+    fn abort(&self) {
+        self.0.abort();
+    }
+
+    async fn join(mut self) -> Result<T, tokio::task::JoinError> {
+        (&mut self.0).await
+    }
+}
+
+impl<T> Drop for TestTaskHandle<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn backend_pid(txn: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> i32 {
+    sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(txn.as_mut())
+        .await
+        .unwrap()
+}
+
+async fn insert_retired_ib_membership(pool: &sqlx::PgPool, membership: &IbMembership) {
+    sqlx::query("INSERT INTO retired_ib_memberships (fabric, pkey, guid) VALUES ($1, $2, $3)")
+        .bind(&membership.fabric)
+        .bind(i32::from(u16::from(membership.pkey)))
+        .bind(&membership.guid)
+        .execute(pool)
+        .await
+        .expect("retired IB membership fixture should be insertable");
+}
+
+async fn retired_membership_count(pool: &sqlx::PgPool, membership: &IbMembership) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM retired_ib_memberships \
+         WHERE fabric = $1 AND pkey = $2 AND guid = $3",
+    )
+    .bind(&membership.fabric)
+    .bind(i32::from(u16::from(membership.pkey)))
+    .bind(&membership.guid)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn instance_is_deleted(pool: &sqlx::PgPool, instance_id: InstanceId) -> bool {
+    sqlx::query_scalar("SELECT deleted IS NOT NULL FROM instances WHERE id = $1")
+        .bind(instance_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
 
 async fn get_partition_status(api: &Api, ib_partition_id: IBPartitionId) -> IbPartitionStatus {
     let segment = api
@@ -67,6 +138,522 @@ fn assert_successful_ufm_changes(metrics: &MetricsCapture, operation: &str, mini
         observed >= minimum,
         "expected at least {minimum} successful {operation} changes, observed {observed}"
     );
+}
+
+/// Test-specific fixture for one live membership and a requested replacement.
+struct IbTransitionFixture {
+    env: TestEnv,
+    machine_id: MachineId,
+    instance_id: InstanceId,
+    initial_config_version: ConfigVersion,
+    requested_config: rpc::InstanceConfig,
+    metadata: rpc::Metadata,
+    original_partition_id: IBPartitionId,
+    requested_partition_id: IBPartitionId,
+    original_membership: IbMembership,
+    requested_membership: IbMembership,
+}
+
+/// Test-specific helper that enables IB for an isolated API fixture.
+async fn create_ib_test_env(pool: sqlx::PgPool) -> TestEnv {
+    let mut config = common::api_fixtures::get_config();
+    config.ib_config = Some(IBFabricConfig {
+        enabled: true,
+        max_partition_per_tenant: 16,
+        ..Default::default()
+    });
+    common::api_fixtures::create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config),
+    )
+    .await
+}
+
+/// Test-specific helper that requests one physical port on `partition_id`.
+fn one_port_ib_config(partition_id: IBPartitionId) -> rpc::InstanceInfinibandConfig {
+    rpc::InstanceInfinibandConfig {
+        ib_interfaces: vec![rpc::InstanceIbInterfaceConfig {
+            function_type: rpc::InterfaceFunctionType::Physical as i32,
+            virtual_function_id: None,
+            ib_partition_id: Some(partition_id),
+            device: "MT2910 Family [ConnectX-7]".to_string(),
+            vendor: None,
+            device_instance: 0,
+        }],
+    }
+}
+
+/// Test-specific helper that identifies one membership on the default fabric.
+fn ib_membership(pkey: PartitionKey, guid: impl Into<String>) -> IbMembership {
+    IbMembership {
+        fabric: DEFAULT_IB_FABRIC_NAME.to_string(),
+        pkey,
+        guid: guid.into(),
+    }
+}
+
+/// Test-specific helper that creates an original membership and a requested
+/// replacement on the same physical port.
+async fn create_ib_transition_fixture(pool: sqlx::PgPool) -> IbTransitionFixture {
+    let env = create_ib_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let (original_partition_id, original_partition) = create_ib_partition(
+        &env,
+        "transition-original".to_string(),
+        DEFAULT_TENANT.to_string(),
+    )
+    .await;
+    let (requested_partition_id, requested_partition) = create_ib_partition(
+        &env,
+        "transition-requested".to_string(),
+        DEFAULT_TENANT.to_string(),
+    )
+    .await;
+    let original_pkey = original_partition
+        .status
+        .as_ref()
+        .and_then(|status| status.pkey.as_deref())
+        .expect("ready fixture partition must have a PKey")
+        .parse()
+        .expect("fixture PKey must be valid");
+    let requested_pkey = requested_partition
+        .status
+        .as_ref()
+        .and_then(|status| status.pkey.as_deref())
+        .expect("ready fixture partition must have a PKey")
+        .parse()
+        .expect("fixture PKey must be valid");
+
+    let managed_host = create_managed_host(&env).await;
+    let (test_instance, instance) = create_instance_with_ib_config(
+        &env,
+        &managed_host,
+        one_port_ib_config(original_partition_id),
+        segment_id,
+    )
+    .await;
+    let instance_id = test_instance.id;
+    let initial_config_version = instance.config_version();
+    let metadata = instance.metadata().clone();
+    let mut requested_config = instance.config().inner().clone();
+    requested_config.infiniband = Some(one_port_ib_config(requested_partition_id));
+    let original_guid = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .config
+        .infiniband
+        .ib_interfaces
+        .into_iter()
+        .next()
+        .and_then(|interface| interface.guid)
+        .expect("allocated fixture IB interface must have a GUID");
+
+    IbTransitionFixture {
+        env,
+        machine_id: managed_host.id.into(),
+        instance_id,
+        initial_config_version,
+        requested_config,
+        metadata,
+        original_partition_id,
+        requested_partition_id,
+        original_membership: ib_membership(original_pkey, original_guid.clone()),
+        requested_membership: ib_membership(requested_pkey, original_guid),
+    }
+}
+
+/// Test-specific helper that builds the replacement complete config update.
+fn config_update_request(fixture: &IbTransitionFixture) -> rpc::forge::InstanceConfigUpdateRequest {
+    rpc::forge::InstanceConfigUpdateRequest {
+        instance_id: Some(fixture.instance_id),
+        if_version_match: None,
+        config: Some(fixture.requested_config.clone()),
+        metadata: Some(fixture.metadata.clone()),
+    }
+}
+
+/// Test-specific helper that builds a normal release request.
+fn release_request(instance_id: InstanceId) -> rpc::InstanceReleaseRequest {
+    rpc::InstanceReleaseRequest {
+        id: Some(instance_id),
+        issue: None,
+        is_repair_tenant: None,
+        delete_attribution: None,
+    }
+}
+
+/// Test-specific helper that bounds a spawned database race task.
+async fn join_test_task<T>(task: TestTaskHandle<T>, description: &str) -> T {
+    match tokio::time::timeout(std::time::Duration::from_secs(30), task.join()).await {
+        Ok(result) => result.unwrap_or_else(|error| panic!("{description} task failed: {error}")),
+        Err(_) => panic!("{description} did not finish within 30 seconds"),
+    }
+}
+
+/// Release records retirement atomically with deletion, then retries without
+/// rebuilding membership data for a transition that already committed.
+#[crate::sqlx_test]
+async fn release_records_atomically_and_retry_skips_resolution(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    // Hold an uncommitted copy of the exact retirement. Release can lock and
+    // reread the Instance, but its idempotent insert then waits here before it
+    // can mark the Instance deleted. Canceling at that boundary must roll back
+    // the whole release transaction.
+    let mut retirement_guard = fixture.env.pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO retired_ib_memberships (fabric, pkey, guid) VALUES ($1, $2, $3)")
+        .bind(&fixture.original_membership.fabric)
+        .bind(i32::from(u16::from(fixture.original_membership.pkey)))
+        .bind(&fixture.original_membership.guid)
+        .execute(retirement_guard.as_mut())
+        .await
+        .unwrap();
+    let blocker_pid = backend_pid(&mut retirement_guard).await;
+
+    let release_api = fixture.env.api.clone();
+    let instance_id = fixture.instance_id;
+    let release_task = TestTaskHandle::new(tokio::spawn(async move {
+        release_api
+            .release_instance(Request::new(release_request(instance_id)))
+            .await
+    }));
+    wait_for_blocked_query(
+        &fixture.env.pool,
+        blocker_pid,
+        "INSERT INTO retired_ib_memberships",
+    )
+    .await;
+
+    release_task.abort();
+    assert!(release_task.join().await.unwrap_err().is_cancelled());
+    retirement_guard.rollback().await.unwrap();
+
+    assert!(!instance_is_deleted(&fixture.env.pool, fixture.instance_id).await);
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.original_membership).await,
+        0
+    );
+
+    fixture
+        .env
+        .api
+        .release_instance(Request::new(release_request(fixture.instance_id)))
+        .await
+        .expect("release after the canceled transaction must succeed");
+    assert!(instance_is_deleted(&fixture.env.pool, fixture.instance_id).await);
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.original_membership).await,
+        1
+    );
+
+    sqlx::query("UPDATE ib_partitions SET status = status - 'pkey' WHERE id = $1")
+        .bind(fixture.original_partition_id)
+        .execute(&fixture.env.pool)
+        .await
+        .unwrap();
+    fixture
+        .env
+        .api
+        .release_instance(Request::new(release_request(fixture.instance_id)))
+        .await
+        .expect("already deleted retry must not resolve the old PKey");
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.original_membership).await,
+        1
+    );
+}
+
+/// Incomplete partition state must not strand its Instance. The exact
+/// membership is unknowable without a PKey, but release can still mark the
+/// Instance deleted and retain any other complete memberships.
+#[crate::sqlx_test]
+async fn release_continues_when_stored_membership_has_no_pkey(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    sqlx::query("UPDATE ib_partitions SET status = status - 'pkey' WHERE id = $1")
+        .bind(fixture.original_partition_id)
+        .execute(&fixture.env.pool)
+        .await
+        .unwrap();
+
+    fixture
+        .env
+        .api
+        .release_instance(Request::new(release_request(fixture.instance_id)))
+        .await
+        .expect("a missing stored PKey must not block release");
+
+    assert!(instance_is_deleted(&fixture.env.pool, fixture.instance_id).await);
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.original_membership).await,
+        0
+    );
+}
+
+/// An implicit version captured before an Instance-lock wait does not silently
+/// rebase. The rejected update rolls every membership change back too.
+#[crate::sqlx_test]
+async fn config_update_does_not_rebase_and_rolls_back_membership_transition(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    insert_retired_ib_membership(&fixture.env.pool, &fixture.requested_membership).await;
+
+    // Hold the Instance while the request performs its initial unlocked read.
+    // Once the request waits for this record, advance the version in the
+    // guarding transaction so its captured optimistic token becomes stale.
+    let mut instance_guard = fixture.env.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM instances WHERE id = $1 FOR UPDATE")
+        .bind(fixture.instance_id)
+        .fetch_one(instance_guard.as_mut())
+        .await
+        .unwrap();
+    let blocker_pid = backend_pid(&mut instance_guard).await;
+
+    let update_api = fixture.env.api.clone();
+    let update_request = config_update_request(&fixture);
+    let update_task = TestTaskHandle::new(tokio::spawn(async move {
+        update_api
+            .update_instance_config(Request::new(update_request))
+            .await
+    }));
+    wait_for_blocked_query(&fixture.env.pool, blocker_pid, INSTANCE_LOCK_QUERY_MARKER).await;
+
+    let concurrent_version = fixture.initial_config_version.increment();
+    sqlx::query("UPDATE instances SET config_version = $1 WHERE id = $2")
+        .bind(concurrent_version)
+        .bind(fixture.instance_id)
+        .execute(instance_guard.as_mut())
+        .await
+        .unwrap();
+    instance_guard.commit().await.unwrap();
+
+    let error = join_test_task(update_task, "Instance-blocked config update")
+        .await
+        .expect_err("a waiting update must retain its initially captured version");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+    let instance = db::instance::find_by_id(&fixture.env.pool, fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(instance.config_version, concurrent_version);
+    assert_eq!(
+        instance.config.infiniband.ib_interfaces[0].ib_partition_id,
+        fixture.original_partition_id
+    );
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.original_membership).await,
+        0
+    );
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.requested_membership).await,
+        1
+    );
+}
+
+/// A replacement can repair stored config from before GUID allocation. The old
+/// incomplete membership is skipped, while the fully resolved replacement
+/// still consumes its exact retired record.
+#[crate::sqlx_test]
+async fn config_update_replaces_stored_membership_without_guid(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    insert_retired_ib_membership(&fixture.env.pool, &fixture.requested_membership).await;
+    sqlx::query(
+        "UPDATE instances \
+         SET ib_config = ib_config #- ARRAY['ib_interfaces', '0', 'guid'] \
+         WHERE id = $1",
+    )
+    .bind(fixture.instance_id)
+    .execute(&fixture.env.pool)
+    .await
+    .unwrap();
+
+    fixture
+        .env
+        .api
+        .update_instance_config(Request::new(config_update_request(&fixture)))
+        .await
+        .expect("an incomplete stored membership must not block replacement");
+
+    let instance = db::instance::find_by_id(&fixture.env.pool, fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        instance.config.infiniband.ib_interfaces[0].ib_partition_id,
+        fixture.requested_partition_id
+    );
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.original_membership).await,
+        0
+    );
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.requested_membership).await,
+        0
+    );
+}
+
+/// Retirement bookkeeping must not make a previously accepted config update
+/// fail when the requested partition has no PKey. The known current membership
+/// is still retired, and the unresolved requested tuple is left untouched.
+#[crate::sqlx_test]
+async fn config_update_continues_when_requested_membership_has_no_pkey(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    insert_retired_ib_membership(&fixture.env.pool, &fixture.requested_membership).await;
+    sqlx::query("UPDATE ib_partitions SET status = status - 'pkey' WHERE id = $1")
+        .bind(fixture.requested_partition_id)
+        .execute(&fixture.env.pool)
+        .await
+        .unwrap();
+
+    fixture
+        .env
+        .api
+        .update_instance_config(Request::new(config_update_request(&fixture)))
+        .await
+        .expect("a missing requested PKey must not block the config update");
+
+    let instance = db::instance::find_by_id(&fixture.env.pool, fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        instance.config.infiniband.ib_interfaces[0].ib_partition_id,
+        fixture.requested_partition_id
+    );
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.original_membership).await,
+        1
+    );
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.requested_membership).await,
+        1
+    );
+}
+
+/// A config update owns the Instance before it waits for the Machine. If
+/// force-delete commits `ForceDeletion` at that boundary, the update must
+/// reject without applying the requested Instance or membership changes.
+#[crate::sqlx_test]
+async fn force_deletion_wins_waiting_ib_config_update(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    insert_retired_ib_membership(&fixture.env.pool, &fixture.requested_membership).await;
+
+    let mut force_deletion = fixture.env.pool.begin().await.unwrap();
+    let machine = db::machine::find_one(
+        force_deletion.as_mut(),
+        &fixture.machine_id,
+        MachineSearchConfig::default(),
+    )
+    .await
+    .unwrap()
+    .expect("fixture Machine must exist");
+    assert!(
+        db::machine::advance(
+            &machine,
+            force_deletion.as_mut(),
+            &ManagedHostState::ForceDeletion,
+            None,
+        )
+        .await
+        .unwrap()
+    );
+    let blocker_pid = backend_pid(&mut force_deletion).await;
+
+    let update_api = fixture.env.api.clone();
+    let update_request = config_update_request(&fixture);
+    let update_task = TestTaskHandle::new(tokio::spawn(async move {
+        update_api
+            .update_instance_config(Request::new(update_request))
+            .await
+    }));
+    wait_for_blocked_query(&fixture.env.pool, blocker_pid, MACHINE_LOCK_QUERY_MARKER).await;
+    force_deletion.commit().await.unwrap();
+
+    let error = join_test_task(update_task, "ForceDeletion-blocked config update")
+        .await
+        .expect_err("an IB update must reject ForceDeletion after its Machine wait");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+    let instance = db::instance::find_by_id(&fixture.env.pool, fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        instance.config.infiniband.ib_interfaces[0].ib_partition_id,
+        fixture.original_partition_id
+    );
+    assert_eq!(instance.config_version, fixture.initial_config_version);
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.original_membership).await,
+        0
+    );
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.requested_membership).await,
+        1
+    );
+}
+
+/// An IB update owns the Instance and then the Machine while it retires the
+/// original membership. Release waits for the Instance, rereads the committed
+/// replacement, and retires that membership with deletion.
+#[crate::sqlx_test]
+async fn ib_update_finishes_before_waiting_release(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    insert_retired_ib_membership(&fixture.env.pool, &fixture.requested_membership).await;
+    // Pause reuse after the config update owns both records, then start release
+    // and verify it waits for the Instance before rereading the replacement.
+    let mut membership_guard = fixture.env.pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT fabric FROM retired_ib_memberships \
+         WHERE fabric = $1 AND pkey = $2 AND guid = $3 FOR UPDATE",
+    )
+    .bind(&fixture.requested_membership.fabric)
+    .bind(i32::from(u16::from(fixture.requested_membership.pkey)))
+    .bind(&fixture.requested_membership.guid)
+    .fetch_one(membership_guard.as_mut())
+    .await
+    .unwrap();
+    let membership_blocker_pid = backend_pid(&mut membership_guard).await;
+
+    let update_api = fixture.env.api.clone();
+    let update_request = config_update_request(&fixture);
+    let update_task = TestTaskHandle::new(tokio::spawn(async move {
+        update_api
+            .update_instance_config(Request::new(update_request))
+            .await
+    }));
+    let update_pid = wait_for_blocked_query(
+        &fixture.env.pool,
+        membership_blocker_pid,
+        "DELETE FROM retired_ib_memberships",
+    )
+    .await;
+
+    let release_api = fixture.env.api.clone();
+    let instance_id = fixture.instance_id;
+    let release_task = TestTaskHandle::new(tokio::spawn(async move {
+        release_api
+            .release_instance(Request::new(release_request(instance_id)))
+            .await
+    }));
+    wait_for_blocked_query(&fixture.env.pool, update_pid, INSTANCE_LOCK_QUERY_MARKER).await;
+
+    membership_guard.commit().await.unwrap();
+    join_test_task(update_task, "IB config update")
+        .await
+        .expect("update holding the Instance must complete first");
+    join_test_task(release_task, "waiting release")
+        .await
+        .expect("release must reread and retire the replacement membership");
+
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.original_membership).await,
+        1
+    );
+    assert_eq!(
+        retired_membership_count(&fixture.env.pool, &fixture.requested_membership).await,
+        1
+    );
+    assert!(instance_is_deleted(&fixture.env.pool, fixture.instance_id).await);
 }
 
 #[crate::sqlx_test]
@@ -178,10 +765,19 @@ async fn test_create_instance_with_ib_config(pool: sqlx::PgPool) {
     let machine_guids = guids_by_device(&machine);
     let guid_cx7 = machine_guids.get("MT2910 Family [ConnectX-7]").unwrap()[1].clone();
     let guid_cx5 = machine_guids.get("MT27800 Family [ConnectX-5]").unwrap()[0].clone();
+    let reused_membership =
+        ib_membership(PartitionKey::try_from(pkey_u16).unwrap(), guid_cx7.clone());
+    // Allocation must consume the exact retirement for the membership it is
+    // about to make live again.
+    insert_retired_ib_membership(&env.pool, &reused_membership).await;
 
     let creation_metrics = MetricsCapture::start();
     let (tinstance, instance) =
         create_instance_with_ib_config(&env, &mh, ib_config.clone(), segment_id).await;
+    assert_eq!(
+        retired_membership_count(&env.pool, &reused_membership).await,
+        0
+    );
     assert_successful_ufm_changes(&creation_metrics, "bind_guid_to_pkey", 2.0);
     drop(creation_metrics);
 
@@ -631,374 +1227,11 @@ async fn test_ib_skip_update_infiniband_status(pool: sqlx::PgPool) {
     );
 }
 
-#[crate::sqlx_test]
-async fn test_update_instance_ib_config(pool: sqlx::PgPool) {
-    let mut config = common::api_fixtures::get_config();
-    config.ib_config = Some(IBFabricConfig {
-        enabled: true,
-        mtu: carbide_ib_fabric::ib::IBMtu(2),
-        rate_limit: carbide_ib_fabric::ib::IBRateLimit(10),
-        max_partition_per_tenant: 16,
-        ..Default::default()
-    });
-
-    let env = common::api_fixtures::create_test_env_with_overrides(
-        pool,
-        TestEnvOverrides::with_config(config),
-    )
-    .await;
-    let segment_id: carbide_uuid::network::NetworkSegmentId =
-        env.create_vpc_and_tenant_segment().await;
-
-    let (ib_partition1_id, ib_partition1) = create_ib_partition(
-        &env,
-        "test_ib_partition1".to_string(),
-        DEFAULT_TENANT.to_string(),
-    )
-    .await;
-    let hex_pkey1 = ib_partition1.status.as_ref().unwrap().pkey().to_string();
-    let pkey1_u16: u16 = u16::from_str_radix(
-        hex_pkey1
-            .strip_prefix("0x")
-            .expect("Pkey needs to be in hex format"),
-        16,
-    )
-    .expect("Failed to parse string to integer");
-    let (ib_partition2_id, ib_partition2) = create_ib_partition(
-        &env,
-        "test_ib_partition2".to_string(),
-        DEFAULT_TENANT.to_string(),
-    )
-    .await;
-    let hex_pkey2 = ib_partition2.status.as_ref().unwrap().pkey().to_string();
-    let pkey2_u16: u16 = u16::from_str_radix(
-        hex_pkey2
-            .strip_prefix("0x")
-            .expect("Pkey needs to be in hex format"),
-        16,
-    )
-    .expect("Failed to parse string to integer");
-
-    let mh = create_managed_host(&env).await;
-    let machine = mh.host().rpc_machine().await;
-
-    assert_eq!(&machine.state, "Ready");
-    let discovery_info = machine
-        .status
-        .as_ref()
-        .unwrap()
-        .discovery_info
-        .as_ref()
-        .unwrap();
-    let machine_guids = guids_by_device(&machine);
-    assert_eq!(discovery_info.infiniband_interfaces.len(), 6);
-    assert!(
-        machine
-            .status
-            .as_ref()
-            .unwrap()
-            .infiniband
-            .as_ref()
-            .is_some()
-    );
-    assert_eq!(
-        machine
-            .status
-            .as_ref()
-            .unwrap()
-            .infiniband
-            .as_ref()
-            .unwrap()
-            .ib_interfaces
-            .len(),
-        6
-    );
-
-    // select the second MT2910 Family [ConnectX-7] and the first MT27800 Family [ConnectX-5] which are sorted by slots
-    let ib_config = rpc::forge::InstanceInfinibandConfig {
-        ib_interfaces: vec![
-            rpc::forge::InstanceIbInterfaceConfig {
-                function_type: rpc::forge::InterfaceFunctionType::Physical as i32,
-                virtual_function_id: None,
-                ib_partition_id: Some(ib_partition1_id),
-                device: "MT2910 Family [ConnectX-7]".to_string(),
-                vendor: None,
-                device_instance: 0,
-            },
-            rpc::forge::InstanceIbInterfaceConfig {
-                function_type: rpc::forge::InterfaceFunctionType::Physical as i32,
-                virtual_function_id: None,
-                ib_partition_id: Some(ib_partition2_id),
-                device: "MT2910 Family [ConnectX-7]".to_string(),
-                vendor: None,
-                device_instance: 1,
-            },
-        ],
-    };
-
-    // Check which GUIDs these device/device_instance combinations should map to
-    let guid_cx7_1 = machine_guids.get("MT2910 Family [ConnectX-7]").unwrap()[0].clone();
-    let guid_cx7_2 = machine_guids.get("MT2910 Family [ConnectX-7]").unwrap()[1].clone();
-    let guid_cx5_1 = machine_guids.get("MT27800 Family [ConnectX-5]").unwrap()[0].clone();
-
-    let creation_metrics = MetricsCapture::start();
-    let (tinstance, instance) =
-        create_instance_with_ib_config(&env, &mh, ib_config.clone(), segment_id).await;
-    assert_successful_ufm_changes(&creation_metrics, "bind_guid_to_pkey", 2.0);
-    drop(creation_metrics);
-
-    let machine = mh.host().rpc_machine().await;
-    assert_eq!(&machine.state, "Assigned/Ready");
-    assert_eq!(
-        env.test_meter
-            .formatted_metric("carbide_ib_monitor_machines_with_missing_pkeys_count")
-            .unwrap(),
-        "0"
-    );
-    assert_eq!(
-        env.test_meter
-            .formatted_metric("carbide_ib_monitor_machines_with_unexpected_pkeys_count")
-            .unwrap(),
-        "0"
-    );
-    assert_eq!(
-        env.test_meter
-            .formatted_metric("carbide_ib_monitor_machines_with_unknown_pkeys_count")
-            .unwrap(),
-        "0"
-    );
-    let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id);
-    assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
-    assert_eq!(instance, check_instance);
-    let initial_config_version = instance.config_version();
-    let initial_ib_config_version = instance.ib_config_version();
-    let initial_network_config_version = instance.network_config_version();
-
-    let applied_ib_config = check_instance.config().infiniband();
-    assert_eq!(*applied_ib_config, ib_config);
-
-    let ib_status = check_instance.status().infiniband();
-    assert_eq!(ib_status.configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(ib_status.ib_interfaces.len(), 2);
-
-    if let Some(iface) = ib_status.ib_interfaces.first() {
-        assert_eq!(iface.pf_guid, Some(guid_cx7_1.clone()));
-        assert_eq!(iface.guid, Some(guid_cx7_1.clone()));
-    } else {
-        panic!("ib configuration is incorrect.");
-    }
-
-    if let Some(iface) = ib_status.ib_interfaces.get(1) {
-        assert_eq!(iface.pf_guid, Some(guid_cx7_2.clone()));
-        assert_eq!(iface.guid, Some(guid_cx7_2.clone()));
-    } else {
-        panic!("ib configuration is incorrect.");
-    }
-
-    // Check if ports have been registered at UFM
-    let ib_conn = env
-        .ib_fabric_manager
-        .new_client(DEFAULT_IB_FABRIC_NAME)
-        .await
-        .unwrap();
-    verify_pkey_guids(
-        ib_conn.clone(),
-        &[
-            (pkey1_u16, vec![guid_cx7_1.clone()]),
-            (pkey2_u16, vec![guid_cx7_2.clone()]),
-        ],
-    )
-    .await;
-
-    // Update the IB config. This deletes one interface, and adds another one
-    let ib_config2 = rpc::forge::InstanceInfinibandConfig {
-        ib_interfaces: vec![
-            rpc::forge::InstanceIbInterfaceConfig {
-                function_type: rpc::forge::InterfaceFunctionType::Physical as i32,
-                virtual_function_id: None,
-                ib_partition_id: Some(ib_partition2_id),
-                device: "MT2910 Family [ConnectX-7]".to_string(),
-                vendor: None,
-                device_instance: 1,
-            },
-            rpc::forge::InstanceIbInterfaceConfig {
-                function_type: rpc::forge::InterfaceFunctionType::Physical as i32,
-                virtual_function_id: None,
-                ib_partition_id: Some(ib_partition2_id),
-                device: "MT27800 Family [ConnectX-5]".to_string(),
-                vendor: None,
-                device_instance: 0,
-            },
-        ],
-    };
-
-    let mut new_config = instance.config().inner().clone();
-    new_config.infiniband = Some(ib_config2.clone());
-
-    let instance = env
-        .api
-        .update_instance_config(tonic::Request::new(
-            rpc::forge::InstanceConfigUpdateRequest {
-                instance_id: instance.id().into(),
-                if_version_match: None,
-                config: Some(new_config.clone()),
-                metadata: Some(instance.metadata().clone()),
-            },
-        ))
-        .await
-        .unwrap()
-        .into_inner();
-    let instance_status = instance.status.as_ref().unwrap();
-    assert_eq!(instance_status.configs_synced(), rpc::SyncState::Pending);
-    assert_eq!(
-        instance_status.tenant.as_ref().unwrap().state(),
-        rpc::TenantState::Configuring
-    );
-
-    let applied_ib_config = instance
-        .config
-        .as_ref()
-        .unwrap()
-        .infiniband
-        .as_ref()
-        .unwrap();
-    assert_eq!(*applied_ib_config, ib_config2);
-
-    let ib_status = instance_status.infiniband.as_ref().unwrap();
-    assert_eq!(ib_status.configs_synced(), rpc::SyncState::Pending);
-    assert_eq!(ib_status.ib_interfaces.len(), 2);
-
-    if let Some(iface) = ib_status.ib_interfaces.first() {
-        assert_eq!(iface.pf_guid, Some(guid_cx7_2.clone()));
-        assert_eq!(iface.guid, Some(guid_cx7_2.clone()));
-    } else {
-        panic!("ib configuration is incorrect.");
-    }
-
-    if let Some(iface) = ib_status.ib_interfaces.get(1) {
-        assert_eq!(iface.pf_guid, Some(guid_cx5_1.clone()));
-        assert_eq!(iface.guid, Some(guid_cx5_1.clone()));
-    } else {
-        panic!("ib configuration is incorrect.");
-    }
-
-    // DPU needs to acknowledge the newest config version
-    mh.network_configured(&env).await;
-
-    // First IB partition fabric monitor iteration detects the desync and fixes it
-    let update_metrics = MetricsCapture::start();
-    env.run_ib_fabric_monitor_iteration().await;
-    assert_successful_ufm_changes(&update_metrics, "bind_guid_to_pkey", 1.0);
-    assert_successful_ufm_changes(&update_metrics, "unbind_guid_from_pkey", 1.0);
-    drop(update_metrics);
-    assert_eq!(
-        env.test_meter
-            .formatted_metric("carbide_ib_monitor_machine_ib_status_updates_count")
-            .unwrap(),
-        "0"
-    );
-    assert_eq!(
-        env.test_meter
-            .formatted_metric("carbide_ib_monitor_machines_with_missing_pkeys_count")
-            .unwrap(),
-        "1"
-    );
-    assert_eq!(
-        env.test_meter
-            .formatted_metric("carbide_ib_monitor_machines_with_unexpected_pkeys_count")
-            .unwrap(),
-        "1"
-    );
-    verify_pkey_guids(
-        ib_conn.clone(),
-        &[
-            (pkey1_u16, vec![]),
-            (pkey2_u16, vec![guid_cx7_2.clone(), guid_cx5_1.clone()]),
-        ],
-    )
-    .await;
-
-    // Second IB partition fabric monitor reports no desync
-    env.run_ib_fabric_monitor_iteration().await;
-    assert_eq!(
-        env.test_meter
-            .formatted_metric("carbide_ib_monitor_machine_ib_status_updates_count")
-            .unwrap(),
-        "1"
-    );
-    assert_eq!(
-        env.test_meter
-            .formatted_metric("carbide_ib_monitor_machines_with_missing_pkeys_count")
-            .unwrap(),
-        "0"
-    );
-    assert_eq!(
-        env.test_meter
-            .formatted_metric("carbide_ib_monitor_machines_with_unexpected_pkeys_count")
-            .unwrap(),
-        "0"
-    );
-    // Instance shows ready state again
-    let instance = tinstance.rpc_instance().await;
-    let instance_status = instance.status();
-    assert_eq!(instance_status.configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(instance_status.tenant(), rpc::TenantState::Ready);
-    let new_config_version = instance.config_version();
-    let new_ib_config_version = instance.ib_config_version();
-    let new_network_config_version = instance.network_config_version();
-    assert_eq!(
-        new_config_version.version_nr(),
-        initial_config_version.version_nr() + 1
-    );
-    assert_eq!(
-        new_ib_config_version.version_nr(),
-        initial_ib_config_version.version_nr() + 1
-    );
-    assert_eq!(new_network_config_version, initial_network_config_version);
-
-    let applied_ib_config = instance.config().infiniband();
-    assert_eq!(*applied_ib_config, ib_config2);
-
-    let ib_status = instance_status.infiniband();
-    assert_eq!(ib_status.configs_synced(), rpc::SyncState::Synced);
-    assert_eq!(ib_status.ib_interfaces.len(), 2);
-
-    if let Some(iface) = ib_status.ib_interfaces.first() {
-        assert_eq!(iface.pf_guid, Some(guid_cx7_2.clone()));
-        assert_eq!(iface.guid, Some(guid_cx7_2.clone()));
-    } else {
-        panic!("ib configuration is incorrect.");
-    }
-
-    if let Some(iface) = ib_status.ib_interfaces.get(1) {
-        assert_eq!(iface.pf_guid, Some(guid_cx5_1.clone()));
-        assert_eq!(iface.guid, Some(guid_cx5_1.clone()));
-    } else {
-        panic!("ib configuration is incorrect.");
-    }
-
-    let deletion_metrics = MetricsCapture::start();
-    tinstance.delete().await;
-    assert_successful_ufm_changes(&deletion_metrics, "unbind_guid_from_pkey", 2.0);
-    drop(deletion_metrics);
-
-    // Check whether all partition bindings have been removed
-    verify_pkey_guids(
-        ib_conn.clone(),
-        &[
-            (pkey1_u16, Vec::<String>::new()),
-            (pkey2_u16, Vec::<String>::new()),
-        ],
-    )
-    .await;
-}
-
 /// Tries to create an Instance using the Forge API
 /// This does not drive the instance state machine until the ready state.
 pub(in crate::tests) async fn try_allocate_instance(
     env: &TestEnv,
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     ib_config: rpc::forge::InstanceInfinibandConfig,
 ) -> Result<(uuid::Uuid, rpc::forge::Instance), tonic::Status> {
     let segment_id = env.create_vpc_and_tenant_segment().await;
@@ -1360,212 +1593,6 @@ async fn test_postpone_partition_deletion_while_instances_reference_it(pool: sql
     assert!(
         partitions.is_empty(),
         "Partition should be deleted once no instances reference it"
-    );
-}
-
-/// Tests `count_instances_referencing_partition` with two partitions, two
-/// managed hosts, and two instances where the instances share one partition
-/// but only one references the second partition.
-///
-/// Setup:
-///   - Partition A, Partition B
-///   - Instance 1 (host 1): 1 IB interface → partition A
-///   - Instance 2 (host 2): 3 IB interfaces → 2 on partition A, 1 on partition B
-///
-/// Validates:
-///   - partition A count = 2, partition B count = 1
-///   - After soft-deleting instance 1: both counts unchanged (row still in DB)
-///   - After hard-deleting instance 1: partition A count = 1, partition B count = 0
-///   - After hard-deleting instance 2: both counts = 0
-#[crate::sqlx_test]
-async fn test_count_instances_multi_partition_multi_interface(pool: sqlx::PgPool) {
-    let mut config = common::api_fixtures::get_config();
-    config.ib_config = Some(IBFabricConfig {
-        enabled: true,
-        mtu: carbide_ib_fabric::ib::IBMtu(2),
-        rate_limit: carbide_ib_fabric::ib::IBRateLimit(10),
-        max_partition_per_tenant: 16,
-        ..Default::default()
-    });
-
-    let env = common::api_fixtures::create_test_env_with_overrides(
-        pool,
-        TestEnvOverrides::with_config(config),
-    )
-    .await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-
-    // Create two partitions: A and B
-    let (partition_a_id, _) =
-        create_ib_partition(&env, "partition_a".to_string(), DEFAULT_TENANT.to_string()).await;
-    let (partition_b_id, _) =
-        create_ib_partition(&env, "partition_b".to_string(), DEFAULT_TENANT.to_string()).await;
-
-    // No instances yet — both counts should be 0
-    let count_a =
-        db::ib_partition::count_instances_referencing_partition(&env.pool, partition_a_id)
-            .await
-            .unwrap();
-    let count_b =
-        db::ib_partition::count_instances_referencing_partition(&env.pool, partition_b_id)
-            .await
-            .unwrap();
-    assert_eq!(count_a, 0, "No instances should reference partition A yet");
-    assert_eq!(count_b, 0, "No instances should reference partition B yet");
-
-    // Create two managed hosts (each machine can hold one instance)
-    let mh1 = create_managed_host(&env).await;
-    let mh2 = create_managed_host(&env).await;
-
-    // Instance 1 (host 1): 1 IB interface bound to partition A
-    let ib_config_1 = rpc::forge::InstanceInfinibandConfig {
-        ib_interfaces: vec![rpc::forge::InstanceIbInterfaceConfig {
-            function_type: rpc::forge::InterfaceFunctionType::Physical as i32,
-            virtual_function_id: None,
-            ib_partition_id: Some(partition_a_id),
-            device: "MT2910 Family [ConnectX-7]".to_string(),
-            vendor: None,
-            device_instance: 0,
-        }],
-    };
-
-    // Instance 2 (host 2): 3 IB interfaces — 2 on partition A, 1 on partition B
-    let ib_config_2 = rpc::forge::InstanceInfinibandConfig {
-        ib_interfaces: vec![
-            rpc::forge::InstanceIbInterfaceConfig {
-                function_type: rpc::forge::InterfaceFunctionType::Physical as i32,
-                virtual_function_id: None,
-                ib_partition_id: Some(partition_a_id),
-                device: "MT2910 Family [ConnectX-7]".to_string(),
-                vendor: None,
-                device_instance: 0,
-            },
-            rpc::forge::InstanceIbInterfaceConfig {
-                function_type: rpc::forge::InterfaceFunctionType::Physical as i32,
-                virtual_function_id: None,
-                ib_partition_id: Some(partition_a_id),
-                device: "MT2910 Family [ConnectX-7]".to_string(),
-                vendor: None,
-                device_instance: 1,
-            },
-            rpc::forge::InstanceIbInterfaceConfig {
-                function_type: rpc::forge::InterfaceFunctionType::Physical as i32,
-                virtual_function_id: None,
-                ib_partition_id: Some(partition_b_id),
-                device: "MT27800 Family [ConnectX-5]".to_string(),
-                vendor: None,
-                device_instance: 0,
-            },
-        ],
-    };
-
-    let (tinstance1, _) = create_instance_with_ib_config(&env, &mh1, ib_config_1, segment_id).await;
-    let (tinstance2, _) = create_instance_with_ib_config(&env, &mh2, ib_config_2, segment_id).await;
-
-    // Partition A: referenced by instance 1 (1 iface) and instance 2 (2 ifaces) → count = 2
-    // Partition B: referenced by instance 2 only (1 iface) → count = 1
-    let count_a =
-        db::ib_partition::count_instances_referencing_partition(&env.pool, partition_a_id)
-            .await
-            .unwrap();
-    let count_b =
-        db::ib_partition::count_instances_referencing_partition(&env.pool, partition_b_id)
-            .await
-            .unwrap();
-    assert_eq!(
-        count_a, 2,
-        "Both instances reference partition A → count should be 2"
-    );
-    assert_eq!(
-        count_b, 1,
-        "Only instance 2 references partition B → count should be 1"
-    );
-
-    // Soft-delete instance 1 (mark as deleted). Row still in DB, counts unchanged.
-    let mut txn = env.pool.begin().await.unwrap();
-    sqlx::query("UPDATE instances SET deleted = NOW() WHERE id = $1::uuid")
-        .bind(tinstance1.id)
-        .execute(&mut *txn)
-        .await
-        .unwrap();
-    txn.commit().await.unwrap();
-
-    let count_a =
-        db::ib_partition::count_instances_referencing_partition(&env.pool, partition_a_id)
-            .await
-            .unwrap();
-    let count_b =
-        db::ib_partition::count_instances_referencing_partition(&env.pool, partition_b_id)
-            .await
-            .unwrap();
-    assert_eq!(
-        count_a, 2,
-        "Soft-deleted instance 1 still counted for partition A"
-    );
-    assert_eq!(
-        count_b, 1,
-        "Partition B unaffected by instance 1 soft-delete"
-    );
-
-    // Must delete instance_addresses first due to FK constraint.
-    let mut txn = env.pool.begin().await.unwrap();
-    sqlx::query("DELETE FROM instance_addresses WHERE instance_id = $1::uuid")
-        .bind(tinstance1.id)
-        .execute(&mut *txn)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM instances WHERE id = $1::uuid")
-        .bind(tinstance1.id)
-        .execute(&mut *txn)
-        .await
-        .unwrap();
-    txn.commit().await.unwrap();
-
-    // Partition A drops to 1 (only instance 2 remains).
-    // Partition B stays at 1 (instance 2 still references it).
-    let count_a =
-        db::ib_partition::count_instances_referencing_partition(&env.pool, partition_a_id)
-            .await
-            .unwrap();
-    let count_b =
-        db::ib_partition::count_instances_referencing_partition(&env.pool, partition_b_id)
-            .await
-            .unwrap();
-    assert_eq!(
-        count_a, 1,
-        "After hard-deleting instance 1, only instance 2 references partition A"
-    );
-    assert_eq!(count_b, 1, "Instance 2 still references partition B");
-
-    let mut txn = env.pool.begin().await.unwrap();
-    sqlx::query("DELETE FROM instance_addresses WHERE instance_id = $1::uuid")
-        .bind(tinstance2.id)
-        .execute(&mut *txn)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM instances WHERE id = $1::uuid")
-        .bind(tinstance2.id)
-        .execute(&mut *txn)
-        .await
-        .unwrap();
-    txn.commit().await.unwrap();
-
-    // Both counts should be 0
-    let count_a =
-        db::ib_partition::count_instances_referencing_partition(&env.pool, partition_a_id)
-            .await
-            .unwrap();
-    let count_b =
-        db::ib_partition::count_instances_referencing_partition(&env.pool, partition_b_id)
-            .await
-            .unwrap();
-    assert_eq!(
-        count_a, 0,
-        "No instances reference partition A after both hard-deleted"
-    );
-    assert_eq!(
-        count_b, 0,
-        "No instances reference partition B after both hard-deleted"
     );
 }
 

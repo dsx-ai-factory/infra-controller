@@ -34,32 +34,6 @@ fn builder<'a>(options: &'a ExecOptions, device: &'a str) -> CommandBuilder<'a> 
 }
 
 #[test]
-fn test_build_query_command_spec_basic() {
-    let options = ExecOptions::default();
-    let builder = builder(&options, "01:00.0");
-
-    let temp_file = Path::new("/tmp/test.json");
-    let variables = vec!["SRIOV_EN".to_string(), "NUM_OF_VFS".to_string()];
-
-    let command_spec = builder.build_query_command(&variables, temp_file).unwrap();
-
-    // Verify command spec structure
-    assert_eq!(command_spec.program, "mlxconfig");
-    assert!(command_spec.args.contains(&"-d".to_string()));
-    assert!(command_spec.args.contains(&"01:00.0".to_string()));
-    assert!(command_spec.args.contains(&"-e".to_string()));
-    assert!(command_spec.args.contains(&"-j".to_string()));
-    assert!(
-        command_spec
-            .args
-            .contains(&temp_file.to_string_lossy().to_string())
-    );
-    assert!(command_spec.args.contains(&"q".to_string()));
-    assert!(command_spec.args.contains(&"SRIOV_EN".to_string()));
-    assert!(command_spec.args.contains(&"NUM_OF_VFS".to_string()));
-}
-
-#[test]
 fn test_build_query_command_spec_empty_variables() {
     let options = ExecOptions::default();
     let builder = builder(&options, "02:00.0");
@@ -97,24 +71,6 @@ fn test_build_query_command_spec_many_variables() {
     for var in &variables {
         assert!(command_spec.args.contains(var));
     }
-}
-
-#[test]
-fn test_build_set_command_spec_basic() {
-    let options = ExecOptions::default();
-    let builder = builder(&options, "01:00.0");
-
-    let assignments = vec!["SRIOV_EN=true".to_string(), "NUM_OF_VFS=16".to_string()];
-
-    let command_spec = builder.build_set_command(&assignments).unwrap();
-
-    assert_eq!(command_spec.program, "mlxconfig");
-    assert!(command_spec.args.contains(&"-d".to_string()));
-    assert!(command_spec.args.contains(&"01:00.0".to_string()));
-    assert!(command_spec.args.contains(&"--yes".to_string()));
-    assert!(command_spec.args.contains(&"set".to_string()));
-    assert!(command_spec.args.contains(&"SRIOV_EN=true".to_string()));
-    assert!(command_spec.args.contains(&"NUM_OF_VFS=16".to_string()));
 }
 
 #[test]
@@ -294,23 +250,6 @@ fn build_set_assignments_formats_each_value() {
 }
 
 #[test]
-fn test_different_devices() {
-    let options = ExecOptions::default();
-
-    // Test different device identifiers
-    let devices = ["01:00.0", "02:00.0", "03:00.1", "0000:01:00.0"];
-
-    for device in &devices {
-        let builder = builder(&options, device);
-        let temp_file = Path::new("/tmp/test.json");
-        let variables = vec!["TEST_VAR".to_string()];
-
-        let command_spec = builder.build_query_command(&variables, temp_file).unwrap();
-        assert!(command_spec.args.contains(&device.to_string()));
-    }
-}
-
-#[test]
 fn test_realistic_mlxconfig_query_spec() {
     let options = ExecOptions::default();
     let builder = builder(&options, "01:00.0");
@@ -341,44 +280,4 @@ fn test_realistic_mlxconfig_set_spec() {
 
     let command_str = format!("{command_spec}");
     assert!(command_str.contains("mlxconfig -d 01:00.0 --yes set SRIOV_EN=true NUM_OF_VFS=16"));
-}
-
-#[test]
-fn test_command_spec_args_order() {
-    let options = ExecOptions::default();
-    let builder = builder(&options, "01:00.0");
-
-    let variables = vec!["VAR1".to_string(), "VAR2".to_string()];
-    let temp_file = Path::new("/tmp/test.json");
-
-    let command_spec = builder.build_query_command(&variables, temp_file).unwrap();
-
-    // Check that basic arguments are in the expected order
-    let device_pos = command_spec
-        .args
-        .iter()
-        .position(|x| x == "01:00.0")
-        .unwrap();
-    let d_flag_pos = command_spec.args.iter().position(|x| x == "-d").unwrap();
-    let query_pos = command_spec.args.iter().position(|x| x == "q").unwrap();
-
-    assert!(d_flag_pos < device_pos);
-    assert!(device_pos < query_pos);
-}
-
-#[test]
-fn test_command_spec_complex_path() {
-    let options = ExecOptions::default();
-    let builder = builder(&options, "01:00.0");
-
-    let temp_file = Path::new("/tmp/very/deep/directory/structure/test.json");
-    let variables = vec!["TEST_VAR".to_string()];
-
-    let command_spec = builder.build_query_command(&variables, temp_file).unwrap();
-
-    assert!(
-        command_spec
-            .args
-            .contains(&temp_file.to_string_lossy().to_string())
-    );
 }

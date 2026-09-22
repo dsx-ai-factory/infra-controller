@@ -611,12 +611,11 @@ fn notification_name(notification: &Notification) -> &'static str {
     }
 }
 
-/// Emits `DomainStateInfo` as a log-only event until metric and report semantics are defined.
+/// Emits `DomainStateInfo` as a structured log event.
 fn domain_state_info_to_events(info: &DomainStateInfo) -> Vec<Result<CollectorEvent, HealthError>> {
-    // DomainStateInfo is the periodic NMX-C health signal, but this PR only
-    // routes NMX-C payloads through log-oriented sinks. Keep the complete
-    // notification as structured log attributes until metric/report semantics
-    // are designed separately.
+    // The complete payload remains available to log sinks. When domain health
+    // reporting is enabled, the event processor derives a domain report from
+    // the structured health and server-header attributes.
     vec![Ok(notification_to_log(&Notification::DomainStateInfo(
         info.clone(),
     )))]

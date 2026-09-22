@@ -104,6 +104,7 @@ func TestOperatingSystem_ToImageAttributesProto(t *testing.T) {
 	authToken := "token"
 	rootFsID := "fs-1"
 	rootFsLabel := "label"
+	imageDisk := "/dev/disk/by-id/nvme-Dell_DC_NVMe_CD7_U.2_960GB_Z3W0A01DTXBH-extra-long"
 	os := &OperatingSystem{
 		ID:                 id,
 		Name:               "ubuntu",
@@ -114,6 +115,7 @@ func TestOperatingSystem_ToImageAttributesProto(t *testing.T) {
 		ImageAuthToken:     &authToken,
 		RootFsID:           &rootFsID,
 		RootFsLabel:        &rootFsLabel,
+		ImageDisk:          &imageDisk,
 		EnableBlockStorage: true,
 	}
 	got := os.ToImageAttributesProto("org-1")
@@ -131,6 +133,7 @@ func TestOperatingSystem_ToImageAttributesProto(t *testing.T) {
 	assert.Equal(t, &authToken, got.AuthToken)
 	assert.Equal(t, &rootFsID, got.RootfsId)
 	assert.Equal(t, &rootFsLabel, got.RootfsLabel)
+	assert.Equal(t, &imageDisk, got.BootDisk)
 }
 
 func TestOperatingSystem_ToImageDeletionRequestProto(t *testing.T) {

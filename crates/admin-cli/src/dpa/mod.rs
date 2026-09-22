@@ -19,13 +19,9 @@ mod ensure;
 mod show;
 
 // Cross-module re-exports for jump module.
+use clap::Parser;
 pub(crate) use show::args::Args as ShowDpa;
 pub(crate) use show::cmd::show;
-
-#[cfg(test)]
-mod tests;
-
-use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;
 

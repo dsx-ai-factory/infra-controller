@@ -4,13 +4,47 @@
 package model
 
 import (
+	"cmp"
 	"time"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 	"github.com/google/uuid"
 
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
+
+// APIGetAllDpuMachineRequest binds query parameters for GET /dpu.
+type APIGetAllDpuMachineRequest struct {
+	SiteID string `query:"siteId"`
+}
+
+// Validate checks the DPU list query shape.
+func (r *APIGetAllDpuMachineRequest) Validate() error {
+	return validation.ValidateStruct(r,
+		validation.Field(&r.SiteID,
+			validation.Required.Error(validationErrorValueRequired),
+			validationis.UUID.Error(validationErrorInvalidUUID),
+		),
+	)
+}
+
+// APIGetDpuMachineRequest binds query parameters for GET /dpu/:id.
+type APIGetDpuMachineRequest struct {
+	SiteID               string `query:"siteId"`
+	IncludeNetworkConfig bool   `query:"includeNetworkConfig"`
+}
+
+// Validate checks the DPU retrieval query shape.
+func (r *APIGetDpuMachineRequest) Validate() error {
+	return validation.ValidateStruct(r,
+		validation.Field(&r.SiteID,
+			validation.Required.Error(validationErrorValueRequired),
+			validationis.UUID.Error(validationErrorInvalidUUID),
+		),
+	)
+}
 
 // APIDpuNetworkConfig represents the network configuration fields exposed by the REST API for a DPU.
 // Internal-only and sensitive Core fields are omitted; this is not the complete Core configuration.
@@ -82,7 +116,7 @@ func (apnnc *APIDpuNetworkConfig) FromProto(protoConfig *corev1.ManagedHostNetwo
 	}
 
 	apnnc.Asn = protoConfig.Asn
-	apnnc.DhcpServers = protoConfig.DhcpServers
+	apnnc.DhcpServers = append(make([]string, 0, len(protoConfig.DhcpServers)), protoConfig.DhcpServers...)
 	apnnc.VniDevice = protoConfig.VniDevice
 	apnnc.ManagedHostConfigVersion = protoConfig.ManagedHostConfigVersion
 	apnnc.UseAdminNetwork = protoConfig.UseAdminNetwork
@@ -97,17 +131,17 @@ func (apnnc *APIDpuNetworkConfig) FromProto(protoConfig *corev1.ManagedHostNetwo
 		nvt := protoConfig.GetNetworkVirtualizationType().String()
 		apnnc.NetworkVirtualizationType = &nvt
 	}
-	apnnc.RouteServers = protoConfig.RouteServers
+	apnnc.RouteServers = append(make([]string, 0, len(protoConfig.RouteServers)), protoConfig.RouteServers...)
 	apnnc.RemoteID = protoConfig.RemoteId
-	apnnc.DeprecatedDenyPrefixes = protoConfig.DeprecatedDenyPrefixes
-	apnnc.DenyPrefixes = protoConfig.DenyPrefixes
-	apnnc.SiteFabricPrefixes = protoConfig.SiteFabricPrefixes
+	apnnc.DeprecatedDenyPrefixes = append(make([]string, 0, len(protoConfig.DeprecatedDenyPrefixes)), protoConfig.DeprecatedDenyPrefixes...)
+	apnnc.DenyPrefixes = append(make([]string, 0, len(protoConfig.DenyPrefixes)), protoConfig.DenyPrefixes...)
+	apnnc.SiteFabricPrefixes = append(make([]string, 0, len(protoConfig.SiteFabricPrefixes)), protoConfig.SiteFabricPrefixes...)
 	apnnc.VpcIsolationBehavior = protoConfig.VpcIsolationBehavior.String()
 	apnnc.StatefulAclsEnabled = protoConfig.StatefulAclsEnabled
 	apnnc.EnableDhcp = protoConfig.EnableDhcp
 	apnnc.IsPrimaryDpu = protoConfig.IsPrimaryDpu
 	apnnc.DatacenterAsn = protoConfig.DatacenterAsn
-	apnnc.AnycastSitePrefixes = protoConfig.AnycastSitePrefixes
+	apnnc.AnycastSitePrefixes = append(make([]string, 0, len(protoConfig.AnycastSitePrefixes)), protoConfig.AnycastSitePrefixes...)
 	apnnc.TenantHostAsn = protoConfig.TenantHostAsn
 	apnnc.SiteGlobalVpcVni = protoConfig.SiteGlobalVpcVni
 
@@ -121,13 +155,11 @@ func (apnnc *APIDpuNetworkConfig) FromProto(protoConfig *corev1.ManagedHostNetwo
 		apnnc.AdminInterface.FromProto(protoConfig.AdminInterface)
 	}
 
-	if protoConfig.TenantInterfaces != nil {
-		apnnc.TenantInterfaces = make([]APIFlatInterfaceConfig, len(protoConfig.TenantInterfaces))
-		for i, protoInterface := range protoConfig.TenantInterfaces {
-			if protoInterface != nil {
-				apnnc.TenantInterfaces[i] = APIFlatInterfaceConfig{}
-				apnnc.TenantInterfaces[i].FromProto(protoInterface)
-			}
+	apnnc.TenantInterfaces = make([]APIFlatInterfaceConfig, len(protoConfig.TenantInterfaces))
+	for i, protoInterface := range protoConfig.TenantInterfaces {
+		if protoInterface != nil {
+			apnnc.TenantInterfaces[i] = APIFlatInterfaceConfig{}
+			apnnc.TenantInterfaces[i].FromProto(protoInterface)
 		}
 	}
 
@@ -235,20 +267,20 @@ func (afic *APIFlatInterfaceConfig) FromProto(protoConfig *corev1.FlatInterfaceC
 	afic.FunctionType = protoConfig.FunctionType.String()
 	afic.VlanID = protoConfig.VlanId
 	afic.Vni = protoConfig.Vni
-	afic.Gateway = protoConfig.Gateway                 //nolint:staticcheck // Preserve the scalar REST compatibility field.
-	afic.IP = protoConfig.Ip                           //nolint:staticcheck // Preserve the scalar REST compatibility field.
-	afic.InterfacePrefix = protoConfig.InterfacePrefix //nolint:staticcheck // Preserve the scalar REST compatibility field.
+	afic.Gateway = protoConfig.GetGateway()                 //nolint:staticcheck // Preserve the scalar REST compatibility field.
+	afic.IP = protoConfig.GetIp()                           //nolint:staticcheck // Preserve the scalar REST compatibility field.
+	afic.InterfacePrefix = protoConfig.GetInterfacePrefix() //nolint:staticcheck // Preserve the scalar REST compatibility field.
 
 	afic.VirtualFunctionID = protoConfig.VirtualFunctionId
 
 	afic.VpcPrefixes = protoConfig.VpcPrefixes
-	afic.Prefix = protoConfig.Prefix //nolint:staticcheck // Preserve the scalar REST compatibility field.
+	afic.Prefix = protoConfig.GetPrefix() //nolint:staticcheck // Preserve the scalar REST compatibility field.
 	afic.Fqdn = protoConfig.Fqdn
 
 	afic.BootURL = protoConfig.Booturl
 	afic.VpcVni = protoConfig.VpcVni
-	afic.SviIP = protoConfig.SviIp //nolint:staticcheck // Preserve the scalar REST compatibility field.
-	afic.TenantVrfLoopbackIP = protoConfig.TenantVrfLoopbackIp
+	afic.SviIP = protoConfig.SviIp                             //nolint:staticcheck // Preserve the scalar REST compatibility field.
+	afic.TenantVrfLoopbackIP = protoConfig.TenantVrfLoopbackIp //nolint:staticcheck // Preserve optional REST compatibility presence.
 	afic.IsL2Segment = protoConfig.IsL2Segment
 	afic.VpcPeerPrefixes = protoConfig.VpcPeerPrefixes
 
@@ -383,8 +415,10 @@ func (admif *APIDpuMachineInterface) FromProto(protoInterface *corev1.MachineInt
 		admif.LastDhcp = &lastDhcp
 	}
 
-	if protoInterface.IsBmc != nil {
-		admif.IsBmc = *protoInterface.IsBmc
+	if protoInterface.InterfaceType != nil {
+		admif.IsBmc = protoInterface.GetInterfaceType() == corev1.InterfaceType_INTERFACE_TYPE_BMC
+	} else {
+		admif.IsBmc = protoInterface.GetIsBmc() //nolint:staticcheck // Preserve compatibility with Core responses that predate interface_type.
 	}
 }
 
@@ -411,12 +445,12 @@ type APIDpuMachine struct {
 	// Health is the health information for the DPU
 	Health *APIMachineHealth `json:"health"`
 	// Labels are the labels associated with the DPU
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// State is the lifecycle state of the DPU as reported by NICo Core
 	State string `json:"state"`
 	// DpuNetworkConfig contains the network configuration fields exposed by the REST API for the DPU.
 	// Internal-only and sensitive Core fields are omitted; the REST response retains its public JSON shape.
-	DpuNetworkConfig APIDpuNetworkConfig `json:"dpuNetworkConfig"`
+	DpuNetworkConfig *APIDpuNetworkConfig `json:"dpuNetworkConfig"`
 	// LastRebooted is the last reboot timestamp reported by NICo Core
 	LastRebooted *time.Time `json:"lastRebooted"`
 	// PlacementInRack is the physical placement of the DPU Machine within its Rack
@@ -444,6 +478,7 @@ func NewAPIDpuMachines(protoDpuMachines []*corev1.DpuMachine, ctx APIDpuMachineP
 		}
 		apiDpuMachine := APIDpuMachine{}
 		apiDpuMachine.FromProto(protoDpuMachine, ctx)
+		apiDpuMachine.DpuNetworkConfig = cmp.Or(apiDpuMachine.DpuNetworkConfig, &APIDpuNetworkConfig{})
 		apiDpuMachines = append(apiDpuMachines, apiDpuMachine)
 	}
 	return apiDpuMachines
@@ -511,12 +546,12 @@ func (apd *APIDpuMachine) FromProto(protoDpuMachine *corev1.DpuMachine, ctx APID
 
 	var labels cdbm.Labels
 	labels.FromProto(protoMachine.GetMetadata().GetLabels())
-	apd.Labels = labels
+	apd.Labels = APILabels(labels)
 
 	apd.State = protoMachine.State
 
 	if protoDpuMachine.DpuNetworkConfig != nil {
-		apd.DpuNetworkConfig = APIDpuNetworkConfig{}
+		apd.DpuNetworkConfig = &APIDpuNetworkConfig{}
 		apd.DpuNetworkConfig.FromProto(protoDpuMachine.DpuNetworkConfig)
 	}
 

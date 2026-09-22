@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"reflect"
 	"testing"
 	"time"
 
@@ -25,10 +24,12 @@ import (
 	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
+	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/uptrace/bun/extra/bundebug"
@@ -44,6 +45,8 @@ import (
 	tosv1mock "go.temporal.io/api/operatorservicemock/v1"
 	twsv1mock "go.temporal.io/api/workflowservicemock/v1"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 // testTemporalSiteClientPool Building site client pool
@@ -156,6 +159,29 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 
 	// Site 2 where the Machine components will be purged
 	site2 := util.TestBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusPending, nil, ipu)
+	ipBlockDAO := cdbm.NewIPBlockDAO(dbSession)
+	sitePrefixInput := cdbm.IPBlockCreateInput{
+		Name:                     "target-tenant-site-prefix",
+		SiteID:                   site.ID,
+		InfrastructureProviderID: ip.ID,
+		TenantID:                 &tenant.ID,
+		SitePrefixID:             cutil.GetPtr(uuid.New()),
+		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
+		Prefix:                   "10.60.0.0",
+		PrefixLength:             24,
+		ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
+		Status:                   cdbm.IPBlockStatusReady,
+		CreatedBy:                &ipu.ID,
+	}
+	targetIPBlock, err := ipBlockDAO.Create(ctx, nil, sitePrefixInput)
+	require.NoError(t, err)
+	sitePrefixInput.Name = "retained-tenant-site-prefix"
+	sitePrefixInput.SiteID = site2.ID
+	sitePrefixInput.SitePrefixID = cutil.GetPtr(uuid.New())
+	sitePrefixInput.Prefix = "10.61.0.0"
+	retainedIPBlock, err := ipBlockDAO.Create(ctx, nil, sitePrefixInput)
+	require.NoError(t, err)
+
 	vpc2 := util.TestBuildVpc(t, dbSession, ip, site2, tenant, "test-vpc-2")
 	machine3 := util.TestBuildMachine(t, dbSession, ip.ID, site2.ID, cutil.GetPtr("mcTypeTest2"), cutil.GetPtr(true), cdbm.MachineStatusReady)
 	machine4 := util.TestBuildMachine(t, dbSession, ip.ID, site2.ID, cutil.GetPtr("mcTypeTest3"), cutil.GetPtr(true), cdbm.MachineStatusReady)
@@ -240,6 +266,7 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 		want           error
 		wantErr        bool
 		expectDeletion bool
+		checkIPBlocks  func(*testing.T)
 	}{
 		{
 			name: "test Site delete component activity successfully completed",
@@ -260,6 +287,15 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 			},
 			want:           nil,
 			expectDeletion: true,
+			checkIPBlocks: func(t *testing.T) {
+				var deleted cdbm.IPBlock
+				err := dbSession.DB.NewSelect().Model(&deleted).Where("ipb.id = ?", targetIPBlock.ID).WhereAllWithDeleted().Scan(ctx)
+				require.NoError(t, err)
+				require.NotNil(t, deleted.Deleted)
+				active, err := ipBlockDAO.GetByID(ctx, nil, retainedIPBlock.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, retainedIPBlock.ID, active.ID)
+			},
 		},
 		{
 			name: "test Site delete component activity successfully completed when site doesn't exits",
@@ -309,6 +345,10 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
+			}
+			require.NoError(t, err)
+			if tt.checkIPBlocks != nil {
+				tt.checkIPBlocks(t)
 			}
 
 			// Check if the VPC was deleted in the DB
@@ -368,10 +408,11 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 
 func TestNewManageSite(t *testing.T) {
 	type args struct {
-		dbSession      *cdb.Session
-		siteClientPool *sc.ClientPool
-		tc             client.Client
-		cfg            *config.Config
+		dbSession         *cdb.Session
+		siteClientPool    *sc.ClientPool
+		tc                client.Client
+		cfg               *config.Config
+		siteHealthMetrics *cwm.SiteHealthMetrics
 	}
 
 	dbSession := &cdb.Session{}
@@ -389,6 +430,7 @@ func TestNewManageSite(t *testing.T) {
 
 	tc := &tmocks.Client{}
 	scp := sc.NewClientPool(tcfg)
+	shm := cwm.NewSiteHealthMetrics(prometheus.NewRegistry(), "nico_rest_workflow")
 
 	tests := []struct {
 		name string
@@ -398,24 +440,27 @@ func TestNewManageSite(t *testing.T) {
 		{
 			name: "test new ManageSite instantiation",
 			args: args{
-				dbSession:      dbSession,
-				siteClientPool: scp,
-				tc:             tc,
-				cfg:            cfg,
+				dbSession:         dbSession,
+				siteClientPool:    scp,
+				tc:                tc,
+				cfg:               cfg,
+				siteHealthMetrics: shm,
 			},
 			want: ManageSite{
-				dbSession:      dbSession,
-				siteClientPool: scp,
-				tc:             tc,
-				cfg:            cfg,
+				dbSession:         dbSession,
+				siteClientPool:    scp,
+				tc:                tc,
+				cfg:               cfg,
+				siteHealthMetrics: shm,
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewManageSite(tt.args.dbSession, tt.args.siteClientPool, tc, cfg); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NewManageSite() = %v, want %v", got, tt.want)
-			}
+			assert.Equal(t, tt.want, NewManageSite(
+				tt.args.dbSession, tt.args.siteClientPool, tt.args.tc,
+				tt.args.cfg, tt.args.siteHealthMetrics,
+			))
 		})
 	}
 }
@@ -438,6 +483,16 @@ func TestManageSite_MonitorInventoryReceiptForAllSites(t *testing.T) {
 	site2 := util.TestBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusRegistered, cutil.GetPtr(time.Now().Add(-1*time.Hour)), ipu)
 	site3 := util.TestBuildSite(t, dbSession, ip, "test-site-3", cdbm.SiteStatusRegistered, cutil.GetPtr(time.Now()), ipu)
 	site4 := util.TestBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, cutil.GetPtr(time.Now().Add(-1*time.Hour)), ipu)
+	site5 := util.TestBuildSite(t, dbSession, ip, "test-site-5", cdbm.SiteStatusRegistered, nil, ipu)
+
+	// Only site3 has ever reported a cert expiry, so the rest exercise the
+	// never-reported case the gauge publishes as 0.
+	site3CertExpiry := time.Now().Add(30 * 24 * time.Hour)
+	_, err := cdbm.NewSiteDAO(dbSession).Update(ctx, nil, cdbm.SiteUpdateInput{
+		SiteID:          site3.ID,
+		AgentCertExpiry: &site3CertExpiry,
+	})
+	assert.NoError(t, err)
 
 	tSiteClientPool := testTemporalSiteClientPool(t)
 	assert.NotNil(t, tSiteClientPool)
@@ -456,6 +511,11 @@ func TestManageSite_MonitorInventoryReceiptForAllSites(t *testing.T) {
 	cfg2 := config.NewConfig()
 	cfg2.SetNotificationsSlackWebhookURL("")
 
+	// One registry across every case, so a later run sees what the earlier ones
+	// published and can prove a Site keeps or loses its series.
+	reg := prometheus.NewRegistry()
+	siteHealthMetrics := cwm.NewSiteHealthMetrics(reg, "nico_rest_workflow")
+
 	type fields struct {
 		dbSession      *cdb.Session
 		siteClientPool *sc.ClientPool
@@ -465,10 +525,13 @@ func TestManageSite_MonitorInventoryReceiptForAllSites(t *testing.T) {
 		ctx context.Context
 	}
 	tests := []struct {
-		name       string
-		fields     fields
-		args       args
-		wantStatus map[uuid.UUID]string
+		name          string
+		fields        fields
+		args          args
+		setup         func(t *testing.T)
+		wantStatus    map[uuid.UUID]string
+		wantGauge     map[string]float64
+		wantCertGauge map[string]float64
 	}{
 		{
 			name: "test monitor inventory receipt for all sites with Slack notification",
@@ -485,6 +548,20 @@ func TestManageSite_MonitorInventoryReceiptForAllSites(t *testing.T) {
 				site2.ID: cdbm.SiteStatusError,
 				site3.ID: cdbm.SiteStatusRegistered,
 			},
+			// site1 is Pending so it is not published at all, and site5 has never
+			// reported, so it publishes 0 rather than going missing.
+			wantGauge: map[string]float64{
+				site2.Name: float64(site2.InventoryReceived.Unix()),
+				site3.Name: float64(site3.InventoryReceived.Unix()),
+				site4.Name: float64(site4.InventoryReceived.Unix()),
+				site5.Name: 0,
+			},
+			wantCertGauge: map[string]float64{
+				site2.Name: 0,
+				site3.Name: float64(site3CertExpiry.Unix()),
+				site4.Name: 0,
+				site5.Name: 0,
+			},
 		},
 		{
 			name: "test monitor inventory receipt for all sites without Slack notification",
@@ -499,14 +576,61 @@ func TestManageSite_MonitorInventoryReceiptForAllSites(t *testing.T) {
 			wantStatus: map[uuid.UUID]string{
 				site4.ID: cdbm.SiteStatusError,
 			},
+			// site2 and site4 went to Error in the case above and are still
+			// disconnected, so they have to keep reporting. Dropping them here
+			// would resolve the alert while the outage continues.
+			wantGauge: map[string]float64{
+				site2.Name: float64(site2.InventoryReceived.Unix()),
+				site3.Name: float64(site3.InventoryReceived.Unix()),
+				site4.Name: float64(site4.InventoryReceived.Unix()),
+				site5.Name: 0,
+			},
+			wantCertGauge: map[string]float64{
+				site2.Name: 0,
+				site3.Name: float64(site3CertExpiry.Unix()),
+				site4.Name: 0,
+				site5.Name: 0,
+			},
+		},
+		{
+			name: "test monitor inventory receipt drops a deleted Site",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				cfg:            cfg2,
+			},
+			args: args{
+				ctx: ctx,
+			},
+			setup: func(t *testing.T) {
+				derr := cdbm.NewSiteDAO(dbSession).Delete(ctx, nil, site4.ID)
+				assert.NoError(t, derr)
+			},
+			// A Site that no longer exists is the one case the rebuild has to
+			// clear, otherwise it ages into an alert nothing can resolve.
+			wantGauge: map[string]float64{
+				site2.Name: float64(site2.InventoryReceived.Unix()),
+				site3.Name: float64(site3.InventoryReceived.Unix()),
+				site5.Name: 0,
+			},
+			wantCertGauge: map[string]float64{
+				site2.Name: 0,
+				site3.Name: float64(site3CertExpiry.Unix()),
+				site5.Name: 0,
+			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.setup != nil {
+				tt.setup(t)
+			}
+
 			mst := ManageSite{
-				dbSession:      tt.fields.dbSession,
-				siteClientPool: tt.fields.siteClientPool,
-				cfg:            tt.fields.cfg,
+				dbSession:         tt.fields.dbSession,
+				siteClientPool:    tt.fields.siteClientPool,
+				cfg:               tt.fields.cfg,
+				siteHealthMetrics: siteHealthMetrics,
 			}
 			err := mst.MonitorInventoryReceiptForAllSites(tt.args.ctx)
 			assert.NoError(t, err)
@@ -517,138 +641,33 @@ func TestManageSite_MonitorInventoryReceiptForAllSites(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, wantStatus, site.Status)
 			}
+
+			assert.Equal(t, tt.wantGauge, testSiteGauge(t, reg, "nico_rest_workflow_site_last_inventory_receipt_timestamp_seconds"))
+			assert.Equal(t, tt.wantCertGauge, testSiteGauge(t, reg, "nico_rest_workflow_site_agent_cert_expiry_timestamp_seconds"))
 		})
 	}
 }
 
-func TestManageSite_MonitorInventoryReceiptForAllSites_PagerDutyEnabled(t *testing.T) {
-	ctx := context.Background()
+// testSiteGauge reads a per-Site gauge back as Site name to published value.
+func testSiteGauge(t *testing.T, reg *prometheus.Registry, name string) map[string]float64 {
+	families, err := reg.Gather()
+	require.NoError(t, err)
 
-	dbSession := testSiteInitDB(t)
-	defer dbSession.Close()
-
-	util.TestSetupSchema(t, dbSession)
-
-	ipOrg := "test-provider-org-1"
-	ipRoles := []string{"FORGE_PROVIDER_ADMIN"}
-
-	ipu := util.TestBuildUser(t, dbSession, uuid.New().String(), []string{ipOrg}, ipRoles)
-	ip := util.TestBuildInfrastructureProvider(t, dbSession, "testIP", ipOrg, ipu)
-
-	// Create sites with expired inventory receipt times
-	site1 := util.TestBuildSite(t, dbSession, ip, "pagerduty-test-site-1", cdbm.SiteStatusRegistered, cutil.GetPtr(time.Now().Add(-2*time.Hour)), ipu)
-	site2 := util.TestBuildSite(t, dbSession, ip, "pagerduty-test-site-2", cdbm.SiteStatusRegistered, cutil.GetPtr(time.Now().Add(-30*time.Minute)), ipu)
-
-	tSiteClientPool := testTemporalSiteClientPool(t)
-	assert.NotNil(t, tSiteClientPool)
-
-	temporalsuit := testsuite.WorkflowTestSuite{}
-	temporalsuit.NewTestWorkflowEnvironment()
-
-	// Create a mock PagerDuty server
-	pdEventCount := 0
-	testPagerDutyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Validate it's a POST request to the right path
-		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "/v2/enqueue", r.URL.Path)
-
-		pdEventCount++
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		w.Write([]byte(`{"status":"success","message":"Event processed","dedup_key":"test-dedup-key"}`))
-	}))
-	defer testPagerDutyServer.Close()
-
-	// Override the default http.Client to redirect PagerDuty requests to our test server
-	originalTransport := http.DefaultTransport
-	http.DefaultTransport = &mockPagerDutyTransport{
-		testServerURL: testPagerDutyServer.URL,
-		original:      originalTransport,
-	}
-	defer func() {
-		http.DefaultTransport = originalTransport
-	}()
-
-	// Configure PagerDuty
-	cfg := config.NewConfig()
-	cfg.SetNotificationsPagerDutyIntegrationKey("test-integration-key")
-
-	mst := ManageSite{
-		dbSession:      dbSession,
-		siteClientPool: tSiteClientPool,
-		cfg:            cfg,
+	values := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "site" {
+					values[label.GetValue()] = metric.GetGauge().GetValue()
+				}
+			}
+		}
 	}
 
-	err := mst.MonitorInventoryReceiptForAllSites(ctx)
-	assert.NoError(t, err)
-
-	// Verify site statuses were updated correctly
-	siteDAO := cdbm.NewSiteDAO(dbSession)
-	site1Result, err := siteDAO.GetByID(ctx, nil, site1.ID, nil, false)
-	assert.NoError(t, err)
-	assert.Equal(t, cdbm.SiteStatusError, site1Result.Status)
-
-	site2Result, err := siteDAO.GetByID(ctx, nil, site2.ID, nil, false)
-	assert.NoError(t, err)
-	assert.Equal(t, cdbm.SiteStatusError, site2Result.Status)
-
-	// Assert on PagerDuty events received (both sites should trigger alerts)
-	assert.Equal(t, 2, pdEventCount, "Expected 2 PagerDuty events but got %d", pdEventCount)
-}
-
-func TestManageSite_MonitorInventoryReceiptForAllSites_PagerDutyDisabled(t *testing.T) {
-	ctx := context.Background()
-
-	dbSession := testSiteInitDB(t)
-	defer dbSession.Close()
-
-	util.TestSetupSchema(t, dbSession)
-
-	ipOrg := "test-provider-org-1"
-	ipRoles := []string{"FORGE_PROVIDER_ADMIN"}
-
-	ipu := util.TestBuildUser(t, dbSession, uuid.New().String(), []string{ipOrg}, ipRoles)
-	ip := util.TestBuildInfrastructureProvider(t, dbSession, "testIP", ipOrg, ipu)
-
-	// Create sites with expired inventory receipt times
-	_ = util.TestBuildSite(t, dbSession, ip, "pagerduty-test-site-3", cdbm.SiteStatusRegistered, cutil.GetPtr(time.Now().Add(-2*time.Hour)), ipu)
-	_ = util.TestBuildSite(t, dbSession, ip, "pagerduty-test-site-4", cdbm.SiteStatusRegistered, cutil.GetPtr(time.Now().Add(-30*time.Minute)), ipu)
-
-	tSiteClientPool := testTemporalSiteClientPool(t)
-	assert.NotNil(t, tSiteClientPool)
-
-	temporalsuit := testsuite.WorkflowTestSuite{}
-	temporalsuit.NewTestWorkflowEnvironment()
-
-	cfg := config.NewConfig()
-
-	mst := ManageSite{
-		dbSession:      dbSession,
-		siteClientPool: tSiteClientPool,
-		cfg:            cfg,
-	}
-
-	err := mst.MonitorInventoryReceiptForAllSites(ctx)
-	assert.NoError(t, err)
-}
-
-// mockPagerDutyTransport intercepts requests to PagerDuty and redirects them to a test server
-type mockPagerDutyTransport struct {
-	testServerURL string
-	original      http.RoundTripper
-}
-
-func (m *mockPagerDutyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Intercept requests to PagerDuty's API
-	if req.URL.Host == "events.pagerduty.com" {
-		// Redirect to our test server
-		req.URL.Scheme = "http"
-		req.URL.Host = m.testServerURL[7:] // Remove "http://" prefix
-		return m.original.RoundTrip(req)
-	}
-	// Pass through all other requests
-	return m.original.RoundTrip(req)
+	return values
 }
 
 // MockTemporalClient is a mock for Temporal Client
@@ -1241,10 +1260,14 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 func TestManageSite_UpdateSiteInDB(t *testing.T) {
 	ctx := context.Background()
 	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil)
+	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
 	siteDAO := cdbm.NewSiteDAO(resources.dbSession)
 
-	createSite := func(t *testing.T, version *string, config *cdbm.SiteConfig) *cdbm.Site {
+	// The stored Site Agent version every case starts from, so a case that expects it untouched
+	// does not have to restate it.
+	const existingAgentVersion = "1.0.0"
+
+	createSite := func(t *testing.T, version *string, config *cdbm.SiteConfig, intervalSeconds *int) *cdbm.Site {
 		t.Helper()
 		site := &cdbm.Site{
 			ID:                       uuid.New(),
@@ -1253,7 +1276,8 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			Org:                      "test",
 			InfrastructureProviderID: resources.provider.ID,
 			SiteControllerVersion:    version,
-			SiteAgentVersion:         cutil.GetPtr("1.0.0"),
+			SiteAgentVersion:         cutil.GetPtr(existingAgentVersion),
+			InventoryIntervalSeconds: intervalSeconds,
 			IsInfinityEnabled:        true,
 			Status:                   cdbm.SiteStatusRegistered,
 			CreatedBy:                resources.user.ID,
@@ -1268,9 +1292,14 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 		name                  string
 		existingVersion       *string
 		existingConfig        *cdbm.SiteConfig
+		existingInterval      *int
 		buildInfo             *corev1.BuildInfo
+		siteAgentBuildInfo    *corev1.SiteAgentBuildInfo
 		wantVersion           *string
 		wantVpcSlaac          bool
+		wantFlow              bool
+		wantAgentVersion      *string
+		wantInterval          *int
 		wantDBUpdate          bool
 		wantVpcSlaacKeyAbsent bool
 		wantErr               bool
@@ -1278,6 +1307,58 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 		useUnknownSiteID      bool
 		omitVpcSlaacKey       bool
 	}{
+		{
+			name:           "stores the reported Site Agent version and interval",
+			existingConfig: &cdbm.SiteConfig{},
+			buildInfo:      &corev1.BuildInfo{},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{
+				Version:           "2.0.0",
+				InventoryInterval: durationpb.New(time.Minute),
+			},
+			wantAgentVersion: cutil.GetPtr("2.0.0"),
+			wantInterval:     cutil.GetPtr(60),
+			wantDBUpdate:     true,
+		},
+		{
+			name:             "updates a changed interval",
+			existingConfig:   &cdbm.SiteConfig{},
+			existingInterval: cutil.GetPtr(180),
+			buildInfo:        &corev1.BuildInfo{},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{
+				Version:           existingAgentVersion,
+				InventoryInterval: durationpb.New(time.Minute),
+			},
+			wantInterval: cutil.GetPtr(60),
+			wantDBUpdate: true,
+		},
+		{
+			// An older Site Agent reports nothing about itself, which must not erase what an
+			// earlier report established.
+			name:             "leaves Site Agent values alone when nothing is reported",
+			existingConfig:   &cdbm.SiteConfig{Flow: true},
+			existingInterval: cutil.GetPtr(180),
+			buildInfo:        &corev1.BuildInfo{},
+			wantInterval:     cutil.GetPtr(180),
+			wantFlow:         true,
+		},
+		{
+			name:               "keeps the stored interval when the report omits it",
+			existingConfig:     &cdbm.SiteConfig{},
+			existingInterval:   cutil.GetPtr(180),
+			buildInfo:          &corev1.BuildInfo{},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion},
+			wantInterval:       cutil.GetPtr(180),
+		},
+		{
+			// A sub-second interval cannot come from a cron schedule, so it is not stored.
+			name:           "ignores a sub-second interval",
+			existingConfig: &cdbm.SiteConfig{},
+			buildInfo:      &corev1.BuildInfo{},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{
+				Version:           existingAgentVersion,
+				InventoryInterval: durationpb.New(500 * time.Millisecond),
+			},
+		},
 		{
 			name:            "updates version while VPC SLAAC remains false",
 			existingVersion: nil,
@@ -1379,6 +1460,43 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			wantDBUpdate:    true,
 		},
 		{
+			name:               "enables Flow when Site Agent reports it enabled",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion, FlowEnabled: proto.Bool(true)},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantFlow:           true,
+			wantDBUpdate:       true,
+		},
+		{
+			name:               "disables Flow when Site Agent reports it disabled",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{Flow: true},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion, FlowEnabled: proto.Bool(false)},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantDBUpdate:       true,
+		},
+		{
+			name:               "preserves Flow when queued Site inventory omits configuration",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{Flow: true},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantFlow:           true,
+		},
+		{
+			name:               "skips update when reported Flow configuration matches",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{Flow: true},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion, FlowEnabled: proto.Bool(true)},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantFlow:           true,
+		},
+		{
 			name:            "initializes nil config with advertised VPC SLAAC",
 			existingVersion: cutil.GetPtr("1.0.0"),
 			existingConfig:  nil,
@@ -1413,7 +1531,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			site := createSite(t, tt.existingVersion, tt.existingConfig)
+			site := createSite(t, tt.existingVersion, tt.existingConfig, tt.existingInterval)
 			if tt.omitVpcSlaacKey {
 				_, err := resources.dbSession.DB.NewUpdate().
 					Model((*cdbm.Site)(nil)).
@@ -1436,7 +1554,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 				siteID = uuid.New()
 			}
 
-			err = mst.UpdateSiteInDB(ctx, siteID, tt.buildInfo)
+			err = mst.UpdateSiteInDB(ctx, siteID, tt.buildInfo, tt.siteAgentBuildInfo)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.wantNonRetryable {
@@ -1461,6 +1579,23 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			}
 			require.NotNil(t, got.Config)
 			assert.Equal(t, tt.wantVpcSlaac, got.Config.VpcSlaac)
+			assert.Equal(t, tt.wantFlow, got.Config.Flow)
+
+			// A nil expectation means the report left the stored value as createSite wrote it.
+			wantAgentVersion := existingAgentVersion
+			if tt.wantAgentVersion != nil {
+				wantAgentVersion = *tt.wantAgentVersion
+			}
+			require.NotNil(t, got.SiteAgentVersion)
+			assert.Equal(t, wantAgentVersion, *got.SiteAgentVersion)
+
+			if tt.wantInterval == nil {
+				assert.Nil(t, got.InventoryIntervalSeconds)
+			} else {
+				require.NotNil(t, got.InventoryIntervalSeconds)
+				assert.Equal(t, *tt.wantInterval, *got.InventoryIntervalSeconds)
+			}
+
 			if tt.wantDBUpdate {
 				assert.True(t, got.Updated.After(originalUpdated))
 			} else {
@@ -1519,7 +1654,7 @@ func setupSiteFabricIPBlockTest(t *testing.T) siteFabricIPBlockTestResources {
 func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_CreatesMissingBlocks(t *testing.T) {
 	ctx := context.Background()
 	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil)
+	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
 
 	err := mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{
 		"10.0.1.12/16",
@@ -1561,7 +1696,7 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_CreatesMissingBlocks(t 
 func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_IsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil)
+	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
 
 	prefixes := []string{"10.42.0.0/16", "2001:db8:42::/64"}
 	require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, prefixes))
@@ -1581,7 +1716,7 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_IsIdempotent(t *testing
 func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_LeavesExistingManualBlock(t *testing.T) {
 	ctx := context.Background()
 	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil)
+	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
 
 	existing := util.TestBuildBuildIPBlock(
 		t,
@@ -1610,7 +1745,7 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_LeavesExistingManualBlo
 func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_CreatesDatacenterOnlyBlockWhenOtherRoutingTypeExists(t *testing.T) {
 	ctx := context.Background()
 	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil)
+	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
 
 	existing := util.TestBuildBuildIPBlock(
 		t,
@@ -1652,10 +1787,17 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_CreatesDatacenterOnlyBl
 func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_ReturnsErrorWhenFabricBlockLockHeld(t *testing.T) {
 	ctx := context.Background()
 	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil)
+	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
 
 	err := cdb.WithTx(ctx, resources.dbSession, func(tx *cdb.Tx) error {
-		require.NoError(t, tx.AcquireAdvisoryLock(ctx, getSiteFabricIPBlockLockID(resources.site), false))
+		require.NoError(t, tx.AcquireAdvisoryLock(
+			ctx,
+			cdbm.SiteFabricIPBlockLockID(
+				resources.site.InfrastructureProviderID,
+				resources.site.ID,
+			),
+			false,
+		))
 
 		derr := mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.0.0.0/16"})
 		assert.ErrorIs(t, derr, cdb.ErrXactAdvisoryLockFailed)
@@ -1671,7 +1813,7 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_ReturnsErrorWhenFabricB
 func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_InvalidPrefixDoesNotCreateBlocks(t *testing.T) {
 	ctx := context.Background()
 	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil)
+	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
 
 	err := mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"not-a-cidr"})
 	require.Error(t, err)
@@ -1683,7 +1825,7 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_InvalidPrefixDoesNotCre
 func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_NoPrefixesIsNoOp(t *testing.T) {
 	ctx := context.Background()
 	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil)
+	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
 
 	require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, nil))
 
@@ -1694,7 +1836,7 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_NoPrefixesIsNoOp(t *tes
 func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_UnknownSiteReturnsError(t *testing.T) {
 	ctx := context.Background()
 	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil)
+	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
 
 	err := mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, uuid.New(), []string{"10.0.0.0/16"})
 	require.ErrorIs(t, err, cdb.ErrDoesNotExist)

@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"go.temporal.io/sdk/testsuite"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -28,7 +27,6 @@ import (
 	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -95,6 +93,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 	st := cwu.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, ipu)
 	st2 := cwu.TestBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusRegistered, nil, ipu)
 	st3 := cwu.TestBuildSite(t, dbSession, ip, "test-site-3", cdbm.SiteStatusRegistered, nil, ipu)
+	st4 := cwu.TestBuildSite(t, dbSession, ip, "test-site-linked-machine", cdbm.SiteStatusRegistered, nil, ipu)
 
 	// Build ExpectedMachine inventory that is paginated
 	// Generate data for 34 ExpectedMachines reported from Site Agent while Cloud has 38 ExpectedMachines
@@ -126,8 +125,8 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 
 		// Update creation and update timestamp to be earlier than inventory processing interval
 		_, uerr := dbSession.DB.Exec("UPDATE expected_machine SET created = ?, updated = ? WHERE id = ?",
-			time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval*2)),
-			time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
 			em.ID.String())
 		assert.NoError(t, uerr)
 
@@ -166,7 +165,8 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 		}
 
 		// Test label updates: add/modify labels for some machines
-		if i == 1 {
+		switch i {
+		case 1:
 			// Add labels to a machine that didn't have them before
 			ctrlExpectedMachine.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -174,7 +174,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 				},
 			}
 			expectedMachinesToUpdate = append(expectedMachinesToUpdate, pagedExpectedMachines[i])
-		} else if i == 5 {
+		case 5:
 			// Modify existing labels
 			ctrlExpectedMachine.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -184,13 +184,13 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 				},
 			}
 			expectedMachinesToUpdate = append(expectedMachinesToUpdate, pagedExpectedMachines[i])
-		} else if i == 10 {
+		case 10:
 			// Remove labels (set to empty labels array)
 			ctrlExpectedMachine.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{},
 			}
 			expectedMachinesToUpdate = append(expectedMachinesToUpdate, pagedExpectedMachines[i])
-		} else if i == 15 {
+		case 15:
 			// Remove labels (set metadata to nil)
 			ctrlExpectedMachine.Metadata = nil
 			expectedMachinesToUpdate = append(expectedMachinesToUpdate, pagedExpectedMachines[i])
@@ -392,6 +392,8 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 				siteClientPool: tt.fields.siteClientPool,
 			}
 
+			cwu.TestInventoryAgeUpdatedTimestamp(tt.args.ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+
 			err := mei.UpdateExpectedMachinesInDB(tt.args.ctx, tt.args.siteID, tt.args.expectedMachineInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
 
@@ -461,6 +463,126 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 							fmt.Sprintf("ExpectedMachine %v labels should match on creation", emID))
 					}
 				}
+			}
+		})
+	}
+
+	t.Run("defer association until the linked machine exists in REST", func(t *testing.T) {
+		emID := uuid.New()
+		bmcMAC := "00:11:22:33:77:01"
+		predictedMachineID := "fm100p-predicted-host"
+		inventory := &corev1.ExpectedMachineInventory{
+			ExpectedMachines: []*corev1.ExpectedMachine{
+				{
+					Id:                  &corev1.UUID{Value: emID.String()},
+					BmcMacAddress:       bmcMAC,
+					ChassisSerialNumber: "SN-LINKED-MACHINE",
+				},
+			},
+			LinkedMachines: []*corev1.LinkedExpectedMachine{
+				{
+					BmcMacAddress: bmcMAC,
+					MachineId:     &corev1.MachineId{Id: predictedMachineID},
+				},
+			},
+			Timestamp:       timestamppb.Now(),
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		}
+
+		mei := ManageExpectedMachine{dbSession: dbSession}
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+		err := mei.UpdateExpectedMachinesInDB(ctx, st4.ID, inventory)
+		require.NoError(t, err)
+
+		reconciled, err := emDAO.Get(ctx, nil, emID, nil, false)
+		require.NoError(t, err)
+		assert.Nil(t, reconciled.MachineID)
+
+		permanentMachine := cwu.TestBuildMachine(t, dbSession, ip.ID, st4.ID, nil, cutil.GetPtr(false), cdbm.MachineStatusReady)
+		inventory.LinkedMachines[0].MachineId.Id = permanentMachine.ID
+
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+		err = mei.UpdateExpectedMachinesInDB(ctx, st4.ID, inventory)
+		require.NoError(t, err)
+
+		reconciled, err = emDAO.Get(ctx, nil, emID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, &permanentMachine.ID, reconciled.MachineID)
+	})
+}
+
+// TestManageExpectedMachine_UpdateRespectsStaleInventoryThreshold covers the gate shared by every
+// inventory activity that overwrites provider-set fields: an inventory collected before an edge
+// edit must not undo it. ExpectedMachine stands in for the rest, which apply the same check.
+func TestManageExpectedMachine_UpdateRespectsStaleInventoryThreshold(t *testing.T) {
+	testCases := []struct {
+		name         string
+		writtenAgo   time.Duration
+		wantSerial   string
+		wantLabelSet bool
+	}{
+		{
+			name:         "a recently written ExpectedMachine keeps its stored values",
+			writtenAgo:   time.Second,
+			wantSerial:   "SET-THROUGH-API",
+			wantLabelSet: true,
+		},
+		{
+			name:       "an ExpectedMachine untouched for longer than the interval takes the reported values",
+			writtenAgo: 2 * cutil.DefaultInventoryReceiptInterval,
+			wantSerial: "REPORTED-BY-SITE",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			dbSession := testExpectedMachineInitDB(t)
+			defer dbSession.Close()
+			testExpectedMachineSetupSchema(t, dbSession)
+
+			ipOrg := "test-provider-org"
+			ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, []string{"FORGE_PROVIDER_ADMIN"})
+			ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
+			st := cwu.TestBuildSite(t, dbSession, ip, "test-site-stale", cdbm.SiteStatusRegistered, nil, ipu)
+
+			emDAO := cdbm.NewExpectedMachineDAO(dbSession)
+			emID := uuid.New()
+			_, err := emDAO.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+				ExpectedMachineID:   emID,
+				SiteID:              st.ID,
+				BmcMacAddress:       "00:11:22:33:99:01",
+				ChassisSerialNumber: "SET-THROUGH-API",
+				Labels:              map[string]string{"owner": "provider"},
+				CreatedBy:           ipu.ID,
+			})
+			require.NoError(t, err)
+
+			_, err = dbSession.DB.NewUpdate().
+				Model((*cdbm.ExpectedMachine)(nil)).
+				Set("updated = ?", time.Now().Add(-tc.writtenAgo)).
+				Where("id = ?", emID).
+				Exec(ctx)
+			require.NoError(t, err)
+
+			mei := ManageExpectedMachine{dbSession: dbSession}
+			err = mei.UpdateExpectedMachinesInDB(ctx, st.ID, &corev1.ExpectedMachineInventory{
+				ExpectedMachines: []*corev1.ExpectedMachine{{
+					Id:                  &corev1.UUID{Value: emID.String()},
+					BmcMacAddress:       "00:11:22:33:99:01",
+					ChassisSerialNumber: "REPORTED-BY-SITE",
+				}},
+				Timestamp:       timestamppb.Now(),
+				InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			})
+			require.NoError(t, err)
+
+			got, err := emDAO.Get(ctx, nil, emID, nil, false)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantSerial, got.ChassisSerialNumber)
+			if tc.wantLabelSet {
+				assert.Equal(t, cdbm.Labels{"owner": "provider"}, got.Labels, "a deferred update must leave labels alone")
 			}
 		})
 	}
@@ -542,6 +664,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB_BmcIpAddress(t *testin
 	})
 
 	mei := ManageExpectedMachine{dbSession: dbSession}
+	cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
 	err := mei.UpdateExpectedMachinesInDB(ctx, st.ID, &corev1.ExpectedMachineInventory{
 		ExpectedMachines: reportedMachines,
 		Timestamp:        timestamppb.Now(),
@@ -577,6 +700,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB_BmcIpAddress(t *testin
 		require.NoError(t, err)
 
 		nonexistentSkuID := "nonexistent-sku"
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
 		err = mei.UpdateExpectedMachinesInDB(ctx, st.ID, &corev1.ExpectedMachineInventory{
 			ExpectedMachines: []*corev1.ExpectedMachine{
 				{
@@ -699,37 +823,6 @@ func TestNewManageExpectedMachine(t *testing.T) {
 			got := NewManageExpectedMachine(tt.args.dbSession, tt.args.siteClientPool)
 			assert.Equal(t, tt.want.dbSession, got.dbSession, "dbSession should match")
 			assert.Equal(t, tt.want.siteClientPool, got.siteClientPool, "siteClientPool should match")
-		})
-	}
-}
-
-func TestStaleInventoryThresholdCondition(t *testing.T) {
-	tests := []struct {
-		name       string
-		actionTime time.Time
-		want       bool
-	}{
-		{
-			name:       "recent action within stale inventory threshold",
-			actionTime: time.Now(),
-			want:       true,
-		},
-		{
-			name:       "action just outside stale inventory threshold",
-			actionTime: time.Now().Add(-time.Duration(cwutil.InventoryReceiptInterval + time.Second*15)),
-			want:       false,
-		},
-		{
-			name:       "old action well outside stale inventory threshold",
-			actionTime: time.Now().Add(-time.Hour),
-			want:       false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := util.IsTimeWithinStaleInventoryThreshold(tt.actionTime); got != tt.want {
-				t.Errorf("IsTimeWithinStaleInventoryThreshold() = %v, want %v", got, tt.want)
-			}
 		})
 	}
 }

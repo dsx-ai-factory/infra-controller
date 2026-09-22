@@ -15,36 +15,43 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::str::FromStr;
+use std::time::Duration;
 
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::model::{RpcInto, RpcTryFrom};
 use ::rpc::{common as rpc_common, forge as rpc};
-use carbide_dpf::dpu_cr_name;
+use carbide_dpf::{DpuDeploymentType, dpu_cr_name, dpu_node_cr_name};
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
 use carbide_utils::arch::CpuArchitecture;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtype};
+use db::machine::{AdminNetworkChangeNotPending, ExtensionServiceObservationNotCurrent};
 use db::vpc_prefix::VpcId;
 use db::{
-    DatabaseError, ObjectColumnFilter, dpu_agent_upgrade_policy, network_security_group,
-    network_segment,
+    ConditionalWrite, DatabaseError, ObjectColumnFilter, dpu_agent_upgrade_policy,
+    network_security_group, network_segment,
 };
 use futures_util::future::join_all;
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
-use model::extension_service::{ExtensionService, ExtensionServiceVersionInfo};
+use model::extension_service::{
+    ExtensionService, ExtensionServiceType, ExtensionServiceVersionInfo,
+};
 use model::hardware_info::{MachineInventory, MachineInventorySoftwareComponent};
 use model::instance::config::extension_services::InstanceExtensionServiceConfig;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::network::MachineNetworkStatusObservation;
 use model::machine::upgrade_policy::{AgentUpgradePolicy, BuildVersion};
-use model::machine::{InstanceState, LoadSnapshotOptions, ManagedHostState};
+use model::machine::{
+    InstanceState, LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot,
+};
 use model::machine_update_module::HOST_UPDATE_HEALTH_PROBE_ID;
 use model::network_segment::NetworkSegmentSearchConfig;
+use model::rack_type::select_dpu_nvconfig_profile;
 use tonic::{Request, Response, Status};
 
 use crate::api::{Api, log_machine_id, log_request_data};
@@ -57,6 +64,9 @@ use crate::{CarbideError, cfg, ethernet_virtualization};
 /// vxlan48 is special HBN single vxlan device. It handles networking between machines on the
 /// same subnet. It handles the encapsulation into VXLAN and VNI for cross-host comms.
 const HBN_SINGLE_VLAN_DEVICE: &str = "vxlan48";
+
+/// Bounds Kubernetes label reads while Site Explorer attachment locks are held.
+const DPF_DEPLOYMENT_LABEL_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Consolidates host-level and DPU-level `ManagedHostNetworkConfig` into
 /// the single proto sent to `carbide-dpu-agent`. The host layer
@@ -96,19 +106,19 @@ fn deny_prefixes_for_agent(
 
 /// Builds the deprecated deny field with the same address-family contract as `deny_prefixes`.
 ///
-/// Mutual isolation folds site-fabric prefixes into this field, so those prefixes must pass
-/// through the per-DPU filter as well.
+/// Mutual isolation folds the virtualizer's effective site-isolation prefixes into this field,
+/// so those prefixes must pass through the per-DPU address-family filter as well.
 fn deprecated_deny_prefixes_for_agent(
     deny_prefixes: &[String],
-    site_fabric_prefixes: &[IpNetwork],
+    site_isolation_prefixes: &[IpNetwork],
     isolation_behavior: VpcIsolationBehaviorType,
     network_virtualization_type: VpcVirtualizationType,
 ) -> Vec<String> {
     match isolation_behavior {
         VpcIsolationBehaviorType::MutualIsolation => {
-            let site_fabric_prefixes =
-                deny_prefixes_for_agent(site_fabric_prefixes, network_virtualization_type);
-            [site_fabric_prefixes.as_slice(), deny_prefixes].concat()
+            let site_isolation_prefixes =
+                deny_prefixes_for_agent(site_isolation_prefixes, network_virtualization_type);
+            [site_isolation_prefixes.as_slice(), deny_prefixes].concat()
         }
         VpcIsolationBehaviorType::Open => deny_prefixes.to_vec(),
     }
@@ -148,9 +158,10 @@ fn tenant_interface_fqdn(
 
 async fn get_managed_host_network_config_inner(
     api: &Api,
-    dpu_machine_id: MachineId,
+    dpu_machine_id: DpuMachineId,
 ) -> Result<rpc::ManagedHostNetworkConfigResponse, tonic::Status> {
     let mut txn = api.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_config(txn.as_mut()).await?;
 
     let snapshot = db::managed_host::load_snapshot(
         &mut txn,
@@ -177,7 +188,7 @@ async fn get_managed_host_network_config_inner(
         }
     };
 
-    let maybe_instance =
+    let mut maybe_instance =
         Option::<rpc::Instance>::rpc_try_from(snapshot.clone()).map_err(CarbideError::from)?;
 
     let primary_dpu_snapshot = snapshot
@@ -227,10 +238,22 @@ async fn get_managed_host_network_config_inner(
                     })
             });
 
-    // If there is an instance, the state machine sets the host to tenant
-    // network. But if no interfaces are configured for this DPU, override
-    // and keep it on admin. This prevents the host from using the DPU at all.
-    let use_admin_network = snapshot.use_admin_network() || !dpu_has_tenant_interface_config;
+    // Keep the initial network wait on Admin, including hosts whose stored mode
+    // was already changed by an older Core. DPUs without tenant interfaces
+    // also remain on Admin.
+    let use_admin_network = snapshot.use_admin_network()
+        || !dpu_has_tenant_interface_config
+        || matches!(
+            snapshot.managed_state,
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
+            }
+        );
+    if !use_admin_network {
+        // Validate before rendering either network: rendering can allocate
+        // loopbacks, which must follow the VPC/VNI locks taken by this check.
+        super::tenant_prefix_overlap::validate_retained_host(api, &mut txn, &snapshot).await?;
+    }
 
     let use_admin_network_changed = dpu_snapshot.network_config.use_admin_network_changed;
 
@@ -275,7 +298,7 @@ async fn get_managed_host_network_config_inner(
     let (admin_interface_rpc, host_interface_id) = ethernet_virtualization::admin_network(
         &mut txn,
         &snapshot,
-        &dpu_snapshot.id,
+        &dpu_machine_id,
         ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: use_fnn_over_admin_nw,
             common_pools: &api.common_pools,
@@ -295,24 +318,7 @@ async fn get_managed_host_network_config_inner(
 
     let tenant_interfaces = match &snapshot.instance {
         None => vec![],
-        // We don't support secondary DPU yet.
-        // If admin network is to be used for this managedhost, why to send old tenant data, which
-        // is just to be deleted.
-        Some(_instance) if use_admin_network => vec![],
-        Some(_instance)
-            // If instance is waiting for network segment to come up in READY state, stay on admin
-            // network.
-            if matches!(
-                snapshot.managed_state,
-                ManagedHostState::Assigned {
-                    instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
-                }
-            ) =>
-        {
-            // Should/Can we still query and return the NSG of the VPC so that
-            // policies can be configured on the DPU while interfaces are still coming up?
-            vec![]
-        }
+        Some(_) if use_admin_network => vec![],
         Some(instance) => {
             let interfaces = &instance.config.network.interfaces;
             let Some(network_segment_id) = interfaces[0].network_segment_id else {
@@ -320,11 +326,11 @@ async fn get_managed_host_network_config_inner(
                 // network segment is empty, return error.
                 return Err(CarbideError::NetworkSegmentNotAllocated.into());
             };
-            let Some(vpc) = db::vpc::find_by_segment(&mut txn, network_segment_id)
-                .await? else {
+            let Some(vpc) = db::vpc::find_by_segment(&mut txn, network_segment_id).await? else {
                 return Err(CarbideError::FailedPrecondition(
                     "network segment is not a member of a VPC".to_string(),
-                ).into())
+                )
+                .into());
             };
 
             network_virtualization_type = vpc.config.network_virtualization_type;
@@ -340,33 +346,35 @@ async fn get_managed_host_network_config_inner(
                     // which point it's safe to move to the admin network). The
                     // tenant's NSGs can interfere with these connections, so we
                     // must avoid installing them.
-                    matches!(instance_state, InstanceState::BootingWithDiscoveryImage { ..})
-                },
+                    matches!(
+                        instance_state,
+                        InstanceState::BootingWithDiscoveryImage { .. }
+                    )
+                }
                 _ => false,
             };
 
             // Check if there's an NSG on the instance.
             let network_security_group_details = if !suppress_tenant_security_groups
                 && let Some((tenant_id, Some(nsg_id))) = snapshot.instance.as_ref().map(|i| {
-                (
-                    &i.config.tenant.tenant_organization_id,
-                    i.config.network_security_group_id.as_ref(),
-                )
-            }) {
-                // Make our DB query for the IDs to get our NetworkSecurityGroup
-                let network_security_group =
-                    network_security_group::find_by_ids(
-                        &mut txn,
-                        std::slice::from_ref(nsg_id),
-                        Some(tenant_id),
-                        false,
+                    (
+                        &i.config.tenant.tenant_organization_id,
+                        i.config.network_security_group_id.as_ref(),
                     )
-                        .await?
-                        .pop()
-                        .ok_or(CarbideError::NotFoundError {
-                            kind: "NetworkSecurityGroup",
-                            id: tenant_id.to_string(),
-                        })?;
+                }) {
+                // Make our DB query for the IDs to get our NetworkSecurityGroup
+                let network_security_group = network_security_group::find_by_ids(
+                    &mut txn,
+                    std::slice::from_ref(nsg_id),
+                    Some(tenant_id),
+                    false,
+                )
+                .await?
+                .pop()
+                .ok_or(CarbideError::NotFoundError {
+                    kind: "NetworkSecurityGroup",
+                    id: tenant_id.to_string(),
+                })?;
 
                 Some((
                     i32::from(rpc::NetworkSecurityGroupSource::NsgSourceInstance),
@@ -384,33 +392,38 @@ async fn get_managed_host_network_config_inner(
             });
 
             let Some(physical_iface) = physical_iface else {
-                return Err(CarbideError::internal(String::from(
-                    "Physical interface not found",
-                ))
-                .into());
+                return Err(
+                    CarbideError::internal(String::from("Physical interface not found")).into(),
+                );
             };
 
             let physical_ip = preferred_physical_ip(physical_iface.ip_addrs.values().copied());
             let prefix_only =
                 physical_iface.ip_addrs.is_empty() && !physical_iface.interface_prefixes.is_empty();
             if physical_ip.is_none() && !prefix_only {
-                return Err(CarbideError::internal(String::from(
-                    "physical IP address not found",
-                ))
-                .into());
+                return Err(
+                    CarbideError::internal(String::from("physical IP address not found")).into(),
+                );
             }
 
             // All interfaces have the segment id allocated. It is already validated during
             // instance creation.
-            let segment_ids = interfaces.iter().filter_map(|x|x.network_segment_id).collect_vec();
+            let segment_ids = interfaces
+                .iter()
+                .filter_map(|x| x.network_segment_id)
+                .collect_vec();
             let segment_details = db::network_segment::find_by(
                 &mut txn,
                 ObjectColumnFilter::List(network_segment::IdColumn, &segment_ids),
                 NetworkSegmentSearchConfig::default(),
-            ).await?;
+            )
+            .await?;
 
-            let segment_details = segment_details.iter().map(|x|(x.id, x)).collect::<HashMap<_,_>>();
-            let mut tenant_loopback_ips: HashMap<VpcId, String> = HashMap::new();
+            let segment_details = segment_details
+                .iter()
+                .map(|x| (x.id, x))
+                .collect::<HashMap<_, _>>();
+            let mut tenant_loopback_ips: HashMap<VpcId, IpAddr> = HashMap::new();
 
             // Resolve every segment domain in a single query up front, then look each one up by id
             // inside the interface loop. The domains map keeps its rows keyed by id so a missing
@@ -420,21 +433,25 @@ async fn get_managed_host_network_config_inner(
                 .filter_map(|segment| segment.config.subdomain_id)
                 .unique()
                 .collect_vec();
-            let domains_by_id =
-                db::dns::domain::find_by_uuids(txn.as_pgconn(), &subdomain_ids)
-                    .await
-                    .map_err(CarbideError::from)?;
+            let domains_by_id = db::dns::domain::find_by_uuids(txn.as_pgconn(), &subdomain_ids)
+                .await
+                .map_err(CarbideError::from)?;
 
             // if there is no device then this is a legacy config and only the primary dpu is allowed.
             // all other DPUs don't get interfaces
-            for iface in interfaces.iter().filter(|i|
-                (i.device_locator.is_none() && is_primary_dpu) || (i.device_locator.as_ref().is_some_and(|dl| device_locator.as_ref().is_some_and(|dl2| dl2 == dl)))
-            ) {
+            for iface in interfaces.iter().filter(|i| {
+                (i.device_locator.is_none() && is_primary_dpu)
+                    || (i
+                        .device_locator
+                        .as_ref()
+                        .is_some_and(|dl| device_locator.as_ref().is_some_and(|dl2| dl2 == dl)))
+            }) {
                 // This can not happen as validated during instance creation.
                 let Some(iface_segment) = iface.network_segment_id else {
-                    return Err(CarbideError::Internal { message: format!(
-                        "Tenant segment is not assigned for iface: {iface:?}."
-                    ) }.into());
+                    return Err(CarbideError::Internal {
+                        message: format!("Tenant segment is not assigned for iface: {iface:?}."),
+                    }
+                    .into());
                 };
 
                 let Some(segment) = segment_details.get(&iface_segment) else {
@@ -443,13 +460,14 @@ async fn get_managed_host_network_config_inner(
                     ) }.into());
                 };
 
-                let tenant_loopback_ip = if VpcVirtualizationType::Fnn == network_virtualization_type
+                let tenant_loopback_ip = if VpcVirtualizationType::Fnn
+                    == network_virtualization_type
                     && use_vpc_vrf_loopback
                 {
                     match segment.config.vpc_id {
                         Some(vpc_id) => {
                             if let Some(loopback_ip) = tenant_loopback_ips.get(&vpc_id) {
-                                Some(loopback_ip.clone())
+                                Some(*loopback_ip)
                             } else {
                                 // Resolve loopbacks after the interface segment is known so each VPC
                                 // receives its own DPU loopback allocation.
@@ -460,10 +478,9 @@ async fn get_managed_host_network_config_inner(
                                         &dpu_machine_id,
                                         &vpc_id,
                                     )
-                                    .await?
-                                    .to_string();
+                                    .await?;
 
-                                tenant_loopback_ips.insert(vpc_id, loopback_ip.clone());
+                                tenant_loopback_ips.insert(vpc_id, loopback_ip);
                                 Some(loopback_ip)
                             }
                         }
@@ -555,16 +572,32 @@ async fn get_managed_host_network_config_inner(
     let deny_prefixes =
         deny_prefixes_for_agent(&api.eth_data.deny_prefixes, network_virtualization_type);
 
-    let site_fabric_networks = api
-        .eth_data
-        .site_fabric_prefixes
-        .as_ref()
-        .map(|s| s.as_ip_slice())
-        .unwrap_or_default();
-    let site_fabric_prefixes: Vec<String> = site_fabric_networks
+    // Keep the legacy fields on their original site-prefix contract so older
+    // agents retain their existing behavior throughout a rolling upgrade.
+    let site_fabric_networks = &api.runtime_config.site_fabric_prefixes;
+    let site_fabric_prefixes = site_fabric_networks
         .iter()
-        .map(|net| net.to_string())
+        .map(ToString::to_string)
         .collect();
+
+    let retained_operator_roots = if network_virtualization_type == VpcVirtualizationType::Fnn
+        && api.runtime_config.site_fabric_null_routes.is_none()
+    {
+        db::site_prefix::find_operator_managed_prefixes_with_retained_vpc_prefixes(txn.as_pgconn())
+            .await?
+    } else {
+        vec![]
+    };
+    let site_fabric_null_routes =
+        (network_virtualization_type == VpcVirtualizationType::Fnn).then(|| {
+            let items = api
+                .runtime_config
+                .resolved_site_fabric_null_routes(&retained_operator_roots)
+                .into_iter()
+                .map(|prefix| prefix.to_string())
+                .collect();
+            rpc_common::StringList { items }
+        });
 
     let deprecated_deny_prefixes = deprecated_deny_prefixes_for_agent(
         &deny_prefixes,
@@ -607,11 +640,35 @@ async fn get_managed_host_network_config_inner(
             .map(|config| config.service_id)
             .unique()
             .collect_vec();
-        let services_by_id = db::extension_service::find_by_ids(&mut txn, &service_ids, false)
-            .await?
-            .into_iter()
-            .map(|service| (service.id, service))
-            .collect::<HashMap<_, _>>();
+        let services_by_id =
+            db::extension_service::find_by_ids(&mut txn, &service_ids, false, false)
+                .await?
+                .into_iter()
+                .map(|service| (service.id, service))
+                .collect::<HashMap<_, _>>();
+
+        // The nested Instance is also consumed by the agent. Keep its
+        // extension-service view aligned with the dedicated agent payload so
+        // a DPF service cannot leak through that compatibility field either.
+        let agent_service_ids: HashSet<_> = services_by_id
+            .values()
+            .filter(|service| {
+                service.service_type == ExtensionServiceType::KubernetesPod
+                    && service.deleted.is_none()
+            })
+            .map(|service| service.id.to_string())
+            .collect();
+        if let Some(instance) = maybe_instance.as_mut()
+            && let Some(config) = instance.config.as_mut()
+            && let Some(extension_services) = config.dpu_extension_services.as_mut()
+        {
+            extension_services
+                .service_configs
+                .retain(|config| agent_service_ids.contains(&config.service_id));
+            if extension_services.service_configs.is_empty() {
+                config.dpu_extension_services = None;
+            }
+        }
 
         let mut extension_service_info: Vec<ExtensionServiceInfo> =
             Vec::with_capacity(service_configs.len());
@@ -623,6 +680,14 @@ async fn get_managed_host_network_config_inner(
                     kind: "ExtensionService",
                     id: config.service_id.to_string(),
                 })?;
+
+            // A DPF Helm service may be active or retained as a removed
+            // attachment while DPF finishes its own cleanup. In either case
+            // it must not produce agent configuration, trigger a version
+            // lookup, or read a credential from Vault.
+            if service.service_type == ExtensionServiceType::DpfHelmChart {
+                continue;
+            }
 
             // The pinned version is looked up individually so the exact
             // `version == config.version` selection (and its full data/credential/observability
@@ -706,6 +771,8 @@ async fn get_managed_host_network_config_inner(
         deprecated_deny_prefixes,
         deny_prefixes,
         site_fabric_prefixes,
+        site_fabric_null_routes,
+        vpc_peer_vnis_authoritative: true,
         anycast_site_prefixes: api
             .runtime_config
             .anycast_site_prefixes
@@ -823,7 +890,7 @@ pub(crate) async fn get_managed_host_network_config(
     log_request_data(&request);
 
     let request = request.into_inner();
-    let dpu_machine_id = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
+    let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
 
     let resp = get_managed_host_network_config_inner(api, dpu_machine_id).await?;
 
@@ -837,7 +904,7 @@ pub(crate) async fn update_agent_reported_inventory(
     log_request_data(&request);
 
     let request = request.into_inner();
-    let dpu_machine_id = convert_and_log_machine_id(request.machine_id.as_ref())?;
+    let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
     // For DPF-ingested DPUs the agent runs containerized and cannot enumerate
     // the DPF services directly. Read service versions from the DPF operator
@@ -939,7 +1006,7 @@ pub(crate) async fn record_dpu_network_status(
     log_request_data(&request);
 
     let request = request.into_inner();
-    let dpu_machine_id = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
+    let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
 
@@ -984,22 +1051,33 @@ pub(crate) async fn record_dpu_network_status(
     };
 
     // Instance network observation is the part of network observation now.
-    db::machine::update_network_status_observation(&mut txn, &dpu_machine_id, &machine_obs).await?;
+    if let ConditionalWrite::NotApplied(reason) =
+        db::machine::update_network_status_observation(&mut txn, &dpu_machine_id, &machine_obs)
+            .await?
+    {
+        return Err(db::DatabaseError::from(reason).into());
+    }
     if dpu_machine.network_config.value.use_admin_network_changed == Some(true)
         && machine_obs.network_config_version.as_ref() == Some(&dpu_machine.network_config.version)
     {
-        tracing::info!(
-            dpu_machine_id = %dpu_machine_id,
-            network_config_version = %dpu_machine.network_config.version,
-            agent_version = ?machine_obs.agent_version,
-            "Clearing use_admin_network_changed after matching-version ACK; OVS restart may have been skipped by agents that do not support the flag"
-        );
-        db::machine::clear_use_admin_network_changed_if_version_matches(
+        match db::machine::clear_use_admin_network_changed_if_version_matches(
             &mut txn,
             &dpu_machine_id,
             &dpu_machine.network_config.version,
         )
-        .await?;
+        .await?
+        {
+            ConditionalWrite::Applied(()) => tracing::info!(
+                dpu_machine_id = %dpu_machine_id,
+                network_config_version = %dpu_machine.network_config.version,
+                agent_version = ?machine_obs.agent_version,
+                "Cleared use_admin_network_changed after matching-version ACK; OVS restart may have been skipped by agents that do not support the flag"
+            ),
+            ConditionalWrite::NotApplied(AdminNetworkChangeNotPending) => {
+                // Another writer cleared the flag or changed the configuration
+                // after our read. Keep processing the network status report.
+            }
+        }
     }
     tracing::trace!(
         machine_id = %dpu_machine_id,
@@ -1009,6 +1087,36 @@ pub(crate) async fn record_dpu_network_status(
         agent_version = machine_obs.agent_version,
         "Applied network configs",
     );
+
+    // Instance extension service observation is now separate from network observation.
+    let extension_service_observation = request
+        .dpu_extension_service_version
+        .is_some()
+        .then(|| {
+            model::instance::status::extension_service::InstanceExtensionServiceStatusObservation::try_from(
+                &request,
+            )
+        })
+        .transpose()
+        .map_err(CarbideError::from)?
+        .map(|mut observation| {
+            observation.retain_agent_managed_statuses();
+            observation
+        });
+    if let Some(extension_service_observation) = &extension_service_observation {
+        match db::machine::update_extension_service_status_observation(
+            &mut txn,
+            &dpu_machine_id,
+            model::extension_service::ExtensionServiceType::KubernetesPod,
+            extension_service_observation,
+        )
+        .await?
+        {
+            // A late observation must not fail the rest of this network status report.
+            ConditionalWrite::Applied(())
+            | ConditionalWrite::NotApplied(ExtensionServiceObservationNotCurrent) => {}
+        }
+    }
 
     // Store the DPU submitted health-report
     let mut health_report = health_report::HealthReport::try_from(
@@ -1127,7 +1235,7 @@ pub(crate) async fn record_dpu_network_status(
         // hand is the reporting DPU rather than the host that stays asleep.
         carbide_instrument::emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::DpuNetworkStatus,
-            machine_id: dpu_machine_id,
+            machine_id: dpu_machine_id.into(),
             err: err.to_string(),
         });
     }
@@ -1137,7 +1245,7 @@ pub(crate) async fn record_dpu_network_status(
 
 async fn wakeup_host_state_handler_by_dpu_id(
     api: &Api,
-    dpu_machine_id: &MachineId,
+    dpu_machine_id: &DpuMachineId,
 ) -> Result<(), DatabaseError> {
     let host_machines_by_dpu_ids =
         db::machine::lookup_host_machine_ids_by_dpu_ids(&mut api.db_reader(), &[*dpu_machine_id])
@@ -1151,7 +1259,7 @@ async fn wakeup_host_state_handler_by_dpu_id(
     {
         carbide_instrument::emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::DpuNetworkStatus,
-            machine_id: *host_machine_id,
+            machine_id: host_machine_id.into(),
             err: err.to_string(),
         });
     }
@@ -1197,12 +1305,8 @@ pub(crate) async fn dpu_agent_upgrade_check(
         ))
     })?;
     log_machine_id(&machine_id);
-    if !machine_id.machine_type().is_dpu() {
-        return Err(CarbideError::InvalidArgument(
-            "upgrade check can only be performed on DPUs".into(),
-        )
-        .into());
-    }
+    let dpu_machine_id = DpuMachineId::try_from(machine_id)
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
 
     // We usually want these two to match
     let agent_version = req.current_agent_version;
@@ -1214,7 +1318,7 @@ pub(crate) async fn dpu_agent_upgrade_check(
     let mut txn = api.txn_begin().await?;
 
     let machine =
-        db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default()).await?;
+        db::machine::find_one(&mut txn, &dpu_machine_id, MachineSearchConfig::default()).await?;
     let machine = machine.ok_or(CarbideError::NotFoundError {
         kind: "dpu",
         id: machine_id.to_string(),
@@ -1277,9 +1381,287 @@ pub(crate) async fn dpu_agent_upgrade_policy_action(
     Ok(tonic::Response::new(response))
 }
 
-/// Trigger DPU reprovisioning
-/// In case user passes a DPU ID, trigger_dpu_reprovisioning only for that particular DPU.
-/// In case user passes a host id, trigger_dpu_reprovisioning
+/// Returns whether adding a request for `machine_id` covers every attached DPU.
+fn reprovision_request_covers_all_attached_dpus(
+    snapshot: &ManagedHostStateSnapshot,
+    machine_id: &MachineId,
+) -> bool {
+    if machine_id.machine_type().is_dpu() {
+        snapshot
+            .dpu_snapshots
+            .iter()
+            .all(|dpu| dpu.id.as_machine_id() == machine_id || dpu.reprovision_requested.is_some())
+    } else {
+        snapshot.has_managed_dpus()
+    }
+}
+
+/// Returns the DPUNode when this request may need the exact BF3 to GB200
+/// deployment migration.
+async fn dpf_deployment_migration_node(
+    api: &Api,
+    conn: &mut sqlx::PgConnection,
+    snapshot: &ManagedHostStateSnapshot,
+) -> Result<Option<String>, CarbideError> {
+    if !api.runtime_config.dpf.enabled
+        || !snapshot.host_snapshot.config.dpf.used_for_ingestion
+        || snapshot.dpu_snapshots.is_empty()
+    {
+        return Ok(None);
+    }
+
+    let Some(rack_id) = snapshot.host_snapshot.rack_id.as_ref() else {
+        return Ok(None);
+    };
+    let Some(rack) = db::rack::find_by(conn, ObjectColumnFilter::One(db::rack::IdColumn, rack_id))
+        .await?
+        .pop()
+    else {
+        return Ok(None);
+    };
+    let Some(rack_profile_id) = rack.rack_profile_id.as_ref() else {
+        return Ok(None);
+    };
+    let Some(rack_profile) = api
+        .runtime_config
+        .rack_profiles
+        .get(rack_profile_id.as_str())
+    else {
+        return Ok(None);
+    };
+    let every_dpu_uses_gb200_profile = snapshot.dpu_snapshots.iter().all(|dpu| {
+        select_dpu_nvconfig_profile(
+            rack_profile.product_family.as_ref(),
+            dpu.status.hardware_info.as_ref(),
+        )
+        .is_some()
+    });
+    if !every_dpu_uses_gb200_profile {
+        return Ok(None);
+    }
+
+    Ok(snapshot
+        .host_snapshot
+        .dpf_id()
+        .map(|dpf_id| dpu_node_cr_name(&dpf_id)))
+}
+
+/// Returns whether the live DPUNode still belongs to the generic BF3
+/// deployment and therefore needs a migration of the complete DPU set.
+async fn dpf_deployment_migration_source_is_active(
+    api: &Api,
+    node_name: &str,
+) -> Result<bool, CarbideError> {
+    let dpf_sdk = api.dpf_sdk.as_deref().ok_or_else(|| {
+        CarbideError::internal(
+            "DPF SDK is unavailable while checking a DPF deployment migration".to_string(),
+        )
+    })?;
+    if dpf_sdk
+        .verify_node_labels(node_name, DpuDeploymentType::Bf3Gb200)
+        .await
+        .map_err(CarbideError::DpfError)?
+    {
+        return Ok(false);
+    }
+
+    dpf_sdk
+        .verify_node_labels(node_name, DpuDeploymentType::Bf3)
+        .await
+        .map_err(CarbideError::DpfError)
+}
+
+/// Refuses a request change that would leave only part of the attached DPU set
+/// selected while the shared DPUNode still needs deployment migration.
+fn reject_partial_dpf_deployment_migration_request_set(
+    snapshot: &ManagedHostStateSnapshot,
+    machine_id: &MachineId,
+    mode: rpc::dpu_reprovisioning_request::Mode,
+    migration_source_is_active: bool,
+) -> Result<(), CarbideError> {
+    if !migration_source_is_active {
+        return Ok(());
+    }
+
+    let requested_count = snapshot
+        .dpu_snapshots
+        .iter()
+        .filter(|dpu| {
+            let request_targets_dpu =
+                machine_id.machine_type().is_host() || dpu.id.as_machine_id() == machine_id;
+            if request_targets_dpu {
+                mode == rpc::dpu_reprovisioning_request::Mode::Set
+            } else {
+                dpu.reprovision_requested.is_some()
+            }
+        })
+        .count();
+    if requested_count == 0 || requested_count == snapshot.dpu_snapshots.len() {
+        return Ok(());
+    }
+
+    let operation = match mode {
+        rpc::dpu_reprovisioning_request::Mode::Set => "Set",
+        rpc::dpu_reprovisioning_request::Mode::Clear => "Clear",
+        rpc::dpu_reprovisioning_request::Mode::Restart => "Restart",
+    };
+    Err(CarbideError::FailedPrecondition(format!(
+        "{operation} for DPU {machine_id} would leave only part of the attached DPU set selected \
+         while the shared DPUNode still needs the GB200 deployment; submit {operation} with host \
+         machine ID {} so every attached DPU changes together",
+        snapshot.host_snapshot.id,
+    )))
+}
+
+/// Refuses a reprovision request that would migrate a host to DPF while its
+/// instance still has extension services attached.
+///
+/// Migrating flips the extension-service delivery path from the DPU agent to
+/// DPUDevice placement labels, and an existing attachment cannot follow: it was
+/// admitted against the agent path, and only a detach moves it. Reprovisioning a
+/// strict subset of DPUs keeps the host on the legacy path and stays allowed.
+///
+/// `dpf_based_dpu_provisioning_possible` enforces the same invariant for
+/// reprovisioning the state machine starts on its own; this exists so an
+/// operator gets an actionable error instead of a silent legacy fallback.
+fn reject_dpf_migration_that_would_strand_extension_services(
+    api: &Api,
+    snapshot: &ManagedHostStateSnapshot,
+    machine_id: &MachineId,
+) -> Result<(), CarbideError> {
+    let host = &snapshot.host_snapshot;
+    if host.config.dpf.used_for_ingestion
+        || !host.config.dpf.enabled
+        || !api.runtime_config.dpf.enabled
+    {
+        return Ok(());
+    }
+
+    let migrates_host_to_dpf = reprovision_request_covers_all_attached_dpus(snapshot, machine_id);
+
+    let has_attached_extension_services = snapshot.instance.as_ref().is_some_and(|instance| {
+        !instance
+            .config
+            .extension_services
+            .service_configs
+            .is_empty()
+    });
+
+    if migrates_host_to_dpf && has_attached_extension_services {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "reprovisioning would migrate host {} to DPF, which cannot deliver the extension services attached to its instance; detach them first",
+            host.id,
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validates request conditions that do not require a Kubernetes read.
+fn validate_dpu_reprovisioning_request(
+    api: &Api,
+    snapshot: &ManagedHostStateSnapshot,
+    machine_id: &MachineId,
+    mode: rpc::dpu_reprovisioning_request::Mode,
+) -> Result<(), CarbideError> {
+    let update_alert = snapshot
+        .aggregate_health
+        .alerts
+        .iter()
+        .find(|alert| alert.id == *HOST_UPDATE_HEALTH_PROBE_ID);
+    if !update_alert.is_some_and(|alert| {
+        alert
+            .classifications
+            .contains(&health_report::HealthAlertClassification::prevent_allocations())
+    }) {
+        return Err(CarbideError::InvalidArgument(format!(
+            "machine {machine_id} must have a 'HostUpdateInProgress' health alert with the \
+             'PreventAllocations' classification before reprovisioning. set this precondition \
+             with: `machine health-override add --template host-update <id>`",
+        )));
+    }
+
+    let reprovisioning_started = snapshot.dpu_snapshots.iter().any(|dpu| {
+        dpu.reprovision_requested
+            .as_ref()
+            .is_some_and(|request| request.started_at.is_some())
+    });
+    if reprovisioning_started && mode != rpc::dpu_reprovisioning_request::Mode::Restart {
+        return Err(CarbideError::internal(
+            "reprovisioning is already started".to_string(),
+        ));
+    }
+
+    if mode == rpc::dpu_reprovisioning_request::Mode::Set {
+        reject_dpf_migration_that_would_strand_extension_services(api, snapshot, machine_id)?;
+    }
+
+    Ok(())
+}
+
+/// Locks every attached DPU row in stable order before revalidating and
+/// updating a reprovisioning request set.
+async fn lock_attached_dpus(
+    conn: &mut sqlx::PgConnection,
+    snapshot: &ManagedHostStateSnapshot,
+) -> Result<(), CarbideError> {
+    let dpu_ids = snapshot
+        .dpu_snapshots
+        .iter()
+        .map(|dpu| dpu.id)
+        .collect::<Vec<_>>();
+    let locked_dpus = db::machine::find(
+        conn,
+        db::ObjectFilter::List(&dpu_ids),
+        MachineSearchConfig {
+            for_update: true,
+            ..MachineSearchConfig::default()
+        },
+    )
+    .await?;
+    if locked_dpus.len() != dpu_ids.len() {
+        return Err(CarbideError::internal(format!(
+            "expected to lock {} attached DPUs but found {}",
+            dpu_ids.len(),
+            locked_dpus.len(),
+        )));
+    }
+
+    Ok(())
+}
+
+/// Loads the host snapshot used to validate and update DPU reprovisioning
+/// requests.
+async fn load_dpu_reprovisioning_snapshot(
+    api: &Api,
+    conn: &mut sqlx::PgConnection,
+    machine_id: &MachineId,
+) -> Result<ManagedHostStateSnapshot, CarbideError> {
+    db::managed_host::load_snapshot(
+        conn,
+        machine_id,
+        LoadSnapshotOptions {
+            include_history: false,
+            // The attached extension services checked by validation live on
+            // the instance.
+            include_instance_data: true,
+            host_health_config: api.runtime_config.host_health,
+        },
+    )
+    .await?
+    .ok_or(CarbideError::NotFoundError {
+        kind: "machine",
+        id: machine_id.to_string(),
+    })
+}
+
+/// Triggers DPU reprovisioning for one DPU or every DPU attached to a host.
+///
+/// `Set` and `Clear` intentionally keep the transaction that owns the admin
+/// segment locks open across the DPF Kubernetes read. This prevents Site
+/// Explorer from changing attachments between the authorizing snapshot and
+/// the request writes.
+#[allow(txn_held_across_await)]
 pub(crate) async fn trigger_dpu_reprovisioning(
     api: &Api,
     request: tonic::Request<rpc::DpuReprovisioningRequest>,
@@ -1288,64 +1670,76 @@ pub(crate) async fn trigger_dpu_reprovisioning(
 
     log_request_data(&request);
     let req = request.into_inner();
-    let machine_id = req.machine_id.as_ref().or(req.dpu_id.as_ref());
-    let machine_id = convert_and_log_machine_id(machine_id)?;
+    let deprecated_dpu_id = req.dpu_id;
+    let machine_id = req.machine_id.as_ref().or(deprecated_dpu_id.as_ref());
+    let machine_id: MachineId = convert_and_log_machine_id(machine_id)?;
 
+    let mode = req.mode();
+    // Set and Clear must choose their complete DPU set from the same attachment
+    // state that authorizes the request writes. Take the Site Explorer lock
+    // order before loading that snapshot so attachment changes cannot make a
+    // previously ineligible host require migration after this check.
+    let admin_lock_admission = if matches!(mode, Mode::Set | Mode::Clear) {
+        Some(db::machine_interface::admin_lock_admission().await)
+    } else {
+        None
+    };
     let mut txn = api.txn_begin().await?;
-
-    let snapshot = db::managed_host::load_snapshot(
-        &mut txn,
-        &machine_id,
-        LoadSnapshotOptions {
-            include_history: false,
-            include_instance_data: false,
-            host_health_config: api.runtime_config.host_health,
-        },
-    )
-    .await?
-    .ok_or(CarbideError::NotFoundError {
-        kind: "machine",
-        id: machine_id.to_string(),
-    })?;
-
-    // Start reprovisioning only if the host has an HostUpdateInProgress health alert
-    let update_alert = snapshot
-        .aggregate_health
-        .alerts
-        .iter()
-        .find(|a| a.id == *HOST_UPDATE_HEALTH_PROBE_ID);
-    if !update_alert.is_some_and(|alert| {
-        alert
-            .classifications
-            .contains(&health_report::HealthAlertClassification::prevent_allocations())
-    }) {
-        return Err(CarbideError::InvalidArgument(format!(
-            "machine {machine_id} must have a 'HostUpdateInProgress' health alert with the 'PreventAllocations' classification before reprovisioning. set this precondition with: `machine health-override add --template host-update <id>`",
-        )).into());
+    if admin_lock_admission.is_some() {
+        db::machine_interface::lock_all_admin_segments(txn.as_mut()).await?;
     }
 
-    if snapshot.dpu_snapshots.iter().any(|ms| {
-        ms.reprovision_requested
-            .as_ref()
-            .is_some_and(|x| x.started_at.is_some())
-    }) {
-        match req.mode() {
-            Mode::Restart => {}
-            _ => {
-                return Err(CarbideError::internal(
-                    "reprovisioning is already started".to_string(),
-                )
-                .into());
-            }
-        }
+    let mut snapshot = load_dpu_reprovisioning_snapshot(api, txn.as_mut(), &machine_id).await?;
+    validate_dpu_reprovisioning_request(api, &snapshot, &machine_id, mode)?;
+
+    let migration_node = if matches!(mode, Mode::Set | Mode::Clear) {
+        dpf_deployment_migration_node(api, txn.as_mut(), &snapshot).await?
+    } else {
+        None
+    };
+    let migration_source_is_active = if let Some(node_name) = migration_node.as_deref() {
+        // Keep the attachment locks through this Kubernetes read and the
+        // request writes. Releasing them here would allow migration eligibility
+        // to change between the two operations.
+        tokio::time::timeout(
+            DPF_DEPLOYMENT_LABEL_CHECK_TIMEOUT,
+            dpf_deployment_migration_source_is_active(api, node_name),
+        )
+        .await
+        .map_err(|_| {
+            CarbideError::DpfError(carbide_dpf::DpfError::timeout(
+                "DPUNode deployment label validation",
+                format!(
+                    "label checks for DPUNode '{node_name}' did not complete within {} seconds",
+                    DPF_DEPLOYMENT_LABEL_CHECK_TIMEOUT.as_secs()
+                ),
+            ))
+        })??
+    } else {
+        false
+    };
+
+    if mode == Mode::Set || migration_node.is_some() {
+        // Set replaces the request JSON, and migration validation depends on
+        // the complete request set. Lock and reload before either can write.
+        lock_attached_dpus(txn.as_mut(), &snapshot).await?;
+        snapshot = load_dpu_reprovisioning_snapshot(api, txn.as_mut(), &machine_id).await?;
+        validate_dpu_reprovisioning_request(api, &snapshot, &machine_id, mode)?;
     }
 
-    match req.mode() {
+    match mode {
         Mode::Set => {
+            reject_partial_dpf_deployment_migration_request_set(
+                &snapshot,
+                &machine_id,
+                mode,
+                migration_source_is_active,
+            )?;
+
             let initiator = req.initiator().as_str_name();
-            if machine_id.machine_type().is_dpu() {
+            if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id.machine_id_subtype() {
                 db::machine::trigger_dpu_reprovisioning_request(
-                    &machine_id,
+                    &dpu_machine_id,
                     &mut txn,
                     initiator,
                     req.update_firmware,
@@ -1364,8 +1758,15 @@ pub(crate) async fn trigger_dpu_reprovisioning(
             }
         }
         Mode::Clear => {
-            if machine_id.machine_type().is_dpu() {
-                db::machine::clear_dpu_reprovisioning_request(&mut txn, &machine_id, true).await?;
+            reject_partial_dpf_deployment_migration_request_set(
+                &snapshot,
+                &machine_id,
+                mode,
+                migration_source_is_active,
+            )?;
+            if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id.machine_id_subtype() {
+                db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu_machine_id, true)
+                    .await?;
             } else {
                 for dpu_snapshot in &snapshot.dpu_snapshots {
                     db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu_snapshot.id, true)
@@ -1411,6 +1812,7 @@ pub(crate) async fn trigger_dpu_reprovisioning(
     }
 
     txn.commit().await?;
+    drop(admin_lock_admission);
 
     Ok(Response::new(()))
 }
@@ -1483,7 +1885,7 @@ async fn get_bgp_password(
 }
 
 #[cfg(test)]
-mod deny_prefix_tests {
+mod prefix_policy_tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;

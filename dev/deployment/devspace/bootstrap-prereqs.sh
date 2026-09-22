@@ -45,8 +45,10 @@ REST_POSTGRES_USER="${LOCAL_DEV_REST_POSTGRES_USER:-nico_rest}"
 REST_POSTGRES_PASSWORD="${LOCAL_DEV_REST_POSTGRES_PASSWORD:-nico_rest}"
 TEMPORAL_NAMESPACE="temporal"
 
-VAULT_NAMESPACE="${VAULT_NAMESPACE:-vault}"
-VAULT_ADDR="${LOCAL_DEV_VAULT_ADDR:-http://vault.${VAULT_NAMESPACE}.svc.cluster.local:8200}"
+# Kubernetes namespace hosting the local development Vault. Keep this distinct
+# from VAULT_NAMESPACE, which selects a Vault Enterprise/HCP namespace.
+VAULT_KUBERNETES_NAMESPACE="${LOCAL_DEV_VAULT_KUBERNETES_NAMESPACE:-vault}"
+VAULT_ADDR="${LOCAL_DEV_VAULT_ADDR:-http://vault.${VAULT_KUBERNETES_NAMESPACE}.svc.cluster.local:8200}"
 VAULT_TOKEN="${LOCAL_DEV_VAULT_TOKEN:-root}"
 VAULT_KV_MOUNT="${LOCAL_DEV_VAULT_KV_MOUNT:-secrets}"
 VAULT_PKI_MOUNT="${LOCAL_DEV_VAULT_PKI_MOUNT:-certs}"
@@ -316,13 +318,13 @@ apply_local_vault() {
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: ${VAULT_NAMESPACE}
+  name: ${VAULT_KUBERNETES_NAMESPACE}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: vault
-  namespace: ${VAULT_NAMESPACE}
+  namespace: ${VAULT_KUBERNETES_NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -359,7 +361,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: vault
-  namespace: ${VAULT_NAMESPACE}
+  namespace: ${VAULT_KUBERNETES_NAMESPACE}
 spec:
   selector:
     app: vault
@@ -369,10 +371,10 @@ spec:
       targetPort: 8200
 EOF
 
-  kubectl rollout status statefulset/vault -n "${VAULT_NAMESPACE}" --timeout=180s >/dev/null
+  kubectl rollout status statefulset/vault -n "${VAULT_KUBERNETES_NAMESPACE}" --timeout=180s >/dev/null
 
   log "Configuring Vault mounts and local role"
-  kubectl exec -n "${VAULT_NAMESPACE}" statefulset/vault -- sh -lc "
+  kubectl exec -n "${VAULT_KUBERNETES_NAMESPACE}" statefulset/vault -- sh -lc "
     set -euo pipefail
     export VAULT_ADDR=http://127.0.0.1:8200
     export VAULT_TOKEN='${VAULT_TOKEN}'
@@ -424,7 +426,7 @@ load_admin_root_cert_pem() {
   elif [[ "${INSTALL_VAULT}" == "1" ]]; then
     log "Reading the local Vault PKI CA for Core admin-client trust"
     ADMIN_ROOT_CERT_PEM="$(
-      kubectl exec -n "${VAULT_NAMESPACE}" statefulset/vault -- \
+      kubectl exec -n "${VAULT_KUBERNETES_NAMESPACE}" statefulset/vault -- \
         env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN="${VAULT_TOKEN}" \
         vault read -field=certificate "${VAULT_PKI_MOUNT}/cert/ca"
     )"

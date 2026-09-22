@@ -5,6 +5,7 @@ package firmwareauth
 
 import (
 	"encoding/base64"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -83,31 +84,50 @@ func TestEncryptRejectsInvalidTypedData(t *testing.T) {
 
 	tests := []struct {
 		name               string
+		cipher             *secret.Cipher
 		authenticationData *pb.FirmwareAuthenticationData
 		subTargets         []string
+		wantInvalid        bool
+		wantUnavailable    bool
 	}{
 		{
 			name:               "missing value",
+			cipher:             cipher,
 			authenticationData: &pb.FirmwareAuthenticationData{},
+			wantInvalid:        true,
 		},
 		{
-			name: "missing per-component data",
+			name:   "missing per-component data",
+			cipher: cipher,
 			authenticationData: &pb.FirmwareAuthenticationData{
 				Value: &pb.FirmwareAuthenticationData_PerComponent{},
 			},
+			wantInvalid: true,
 		},
 		{
 			name:               "authentication with dpu-only subtargets",
+			cipher:             cipher,
 			authenticationData: sharedAuthenticationData("token"),
 			subTargets:         []string{"DPU"},
+			wantInvalid:        true,
+		},
+		{
+			name:               "authentication without data cipher",
+			authenticationData: sharedAuthenticationData("token"),
+			wantUnavailable:    true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Encrypt(cipher, tt.authenticationData, tt.subTargets)
+			_, err := Encrypt(tt.cipher, tt.authenticationData, tt.subTargets)
 			require.Error(t, err)
-			require.True(t, IsInvalidData(err))
+			require.Equal(t, tt.wantInvalid, IsInvalidData(err))
+			require.Equal(
+				t,
+				tt.wantUnavailable,
+				errors.Is(err, ErrDataCipherNotConfigured),
+			)
 		})
 	}
 }
@@ -118,11 +138,17 @@ func TestDecryptRejectsEnvelopeFailures(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name    string
-		cipher  *secret.Cipher
-		mutate  func(*secret.EncryptedData)
-		wantErr string
+		name            string
+		cipher          *secret.Cipher
+		mutate          func(*secret.EncryptedData)
+		wantErr         string
+		wantUnavailable bool
 	}{
+		{
+			name:            "missing data cipher",
+			wantErr:         ErrDataCipherNotConfigured.Error(),
+			wantUnavailable: true,
+		},
 		{
 			name:    "wrong key",
 			cipher:  newTestCipher(t, 2),
@@ -168,6 +194,11 @@ func TestDecryptRejectsEnvelopeFailures(t *testing.T) {
 				devicetypes.ComponentTypeCompute,
 			)
 			require.ErrorContains(t, err, tt.wantErr)
+			require.Equal(
+				t,
+				tt.wantUnavailable,
+				errors.Is(err, ErrDataCipherNotConfigured),
+			)
 		})
 	}
 }

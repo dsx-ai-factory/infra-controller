@@ -33,6 +33,7 @@ rustls = { workspace = true }
 k8s-openapi = { features = ["latest", "schemars"], workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 strum_macros = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
@@ -40,14 +41,17 @@ eyre = { workspace = true }
 tracing = { workspace = true }
 uuid = { features = ["v4"], workspace = true }
 async-trait = { workspace = true }
+derive_builder = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 tokio-stream = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
 
-carbide-uuid = { path = "../uuid", features = ["sqlx"] }
+carbide-api-model = { path = "../api-model", default-features = false }
+carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-utils = { path = "../utils" }
+carbide-uuid = { path = "../uuid", features = ["sqlx"] }
 
 # Optional dependencies for carbide-dpf-api-harness binary
 clap = { workspace = true, features = ["derive"], optional = true }
@@ -63,7 +67,6 @@ tower-test = { workspace = true }
 hyper = { features = ["client", "http1"], workspace = true }
 http = { workspace = true }
 once_cell = { workspace = true }
-serde_yaml = { workspace = true }
 
 [build-dependencies]
 # requires this patch version for kopium. without this we have to specify a specific anyhow patch version in the main workspace.

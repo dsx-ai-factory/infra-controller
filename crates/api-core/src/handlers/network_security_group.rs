@@ -77,6 +77,14 @@ pub(crate) async fn create(
         )
     };
 
+    validate_stateful_egress_enablement(
+        None,
+        stateful_egress,
+        api.runtime_config
+            .network_security_group
+            .stateful_acls_enabled,
+    )?;
+
     let max_nsg_size = api
         .runtime_config
         .network_security_group
@@ -309,12 +317,9 @@ pub(crate) async fn update(
     // Start a new transaction for a db write.
     let mut txn = api.txn_begin().await?;
 
-    // Look up the NetworkSecurityGroup.  We'll need to check the current
-    // version. We could probably do everything with a single query
-    // with a few subqueries, but we'd only be able to send back a
-    // NotFound, leaving the caller with no way to know if it was
-    // because their NetworkSecurityGroup wasn't found or because the version
-    // didn't match.
+    // Lock the row through validation and update so the version and policy we
+    // validate are the values we replace. NSG permits cannot override FNN null
+    // routes, so this write does not need the routing-overlap lock.
     let current_network_security_group = network_security_group::find_by_ids(
         &mut txn,
         std::slice::from_ref(&id),
@@ -353,7 +358,7 @@ pub(crate) async fn update(
     };
 
     // Prepare the version match if present.
-    if let Some(if_version_match) = req.if_version_match {
+    if let Some(if_version_match) = req.if_version_match.as_ref() {
         let target_version = if_version_match
             .parse::<ConfigVersion>()
             .map_err(CarbideError::from)?;
@@ -366,6 +371,14 @@ pub(crate) async fn update(
             .into());
         }
     };
+
+    validate_stateful_egress_enablement(
+        Some(current_network_security_group.stateful_egress),
+        stateful_egress,
+        api.runtime_config
+            .network_security_group
+            .stateful_acls_enabled,
+    )?;
 
     // Update record in the DB and get back
     // our new NetworkSecurityGroup state.
@@ -621,6 +634,24 @@ pub(crate) async fn get_attachments(
     Ok(Response::new(rpc_out))
 }
 
+/// Rejects newly enabled stateful egress when the site does not support stateful ACLs.
+fn validate_stateful_egress_enablement(
+    current_stateful_egress: Option<bool>,
+    requested_stateful_egress: bool,
+    stateful_acls_enabled: bool,
+) -> Result<(), CarbideError> {
+    // Existing stateful groups remain editable if the site flag is disabled after creation.
+    if !stateful_acls_enabled && requested_stateful_egress && current_stateful_egress != Some(true)
+    {
+        return Err(CarbideError::InvalidArgument(
+            "stateful_egress requires network_security_group.stateful_acls_enabled to be true"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_expanded_rule_set(
     rules: &[NetworkSecurityGroupRule],
     limit: usize,
@@ -674,4 +705,39 @@ fn validate_expanded_rule_set(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+
+    use super::*;
+
+    /// Verifies the validator rejects only new stateful intent while site support is disabled.
+    ///
+    /// Existing stateful groups must remain editable after an operator disables the site flag.
+    #[test]
+    fn stateful_egress_enablement_requires_site_support() {
+        scenarios!(
+            run = |(current, requested, site_enabled)| {
+                validate_stateful_egress_enablement(current, requested, site_enabled).map_err(drop)
+            };
+            "site support disabled" {
+                // Stateless NSGs remain supported when stateful ACLs are unavailable.
+                (None, false, false) => Yields(()),
+                // Creation must not persist stateful intent the site cannot provide.
+                (None, true, false) => Fails,
+                // A stateless NSG cannot become stateful while support is unavailable.
+                (Some(false), true, false) => Fails,
+                // Disabling the site flag must not prevent unrelated edits to existing stateful NSGs.
+                (Some(true), true, false) => Yields(()),
+            }
+
+            "site support enabled" {
+                // Stateful NSGs are valid when the site advertises the required capability.
+                (None, true, true) => Yields(()),
+            }
+        );
+    }
 }

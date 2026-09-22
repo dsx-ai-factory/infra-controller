@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,9 +24,11 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 	validUUID := uuid.New().String()
 
 	tests := []struct {
-		desc      string
-		obj       APIDpuExtensionServiceCreateRequest
-		expectErr bool
+		desc                    string
+		obj                     APIDpuExtensionServiceCreateRequest
+		expectErr               bool
+		expectedValidationField string
+		expectedValidationError string
 	}{
 		{
 			desc: "ok when only required fields are provided",
@@ -33,9 +36,19 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 			},
 			expectErr: false,
+		},
+		{
+			desc: "error when data exceeds the Core size limit",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeKubernetesPod,
+				SiteID:      validUUID,
+				Data:        strings.Repeat("a", DpuExtensionServiceMaxDataBytes+1),
+			},
+			expectErr: true,
 		},
 		{
 			desc: "ok when all fields are provided",
@@ -44,9 +57,153 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Description: cutil.GetPtr("test description"),
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 			},
 			expectErr: false,
+		},
+		{
+			desc: "error when Kubernetes Pod data is not a Pod specification",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeKubernetesPod,
+				SiteID:      validUUID,
+				Data:        "kind: Deployment",
+			},
+			expectErr: true,
+		},
+		{
+			desc: "ok when DPF Helm chart data is a chart definition",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+			},
+			expectErr: false,
+		},
+		// A Helm registration must identify its immutable placement policy before reaching Core.
+		{
+			desc: "error when DPF Helm chart omits DPU target",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+			},
+			expectErr:               true,
+			expectedValidationField: "dpuTarget",
+			expectedValidationError: "must be specified for `DpfHelmChart` services",
+		},
+		// A present but empty target must not bypass the enum validator's empty-value behavior.
+		{
+			desc: "error when DPF Helm chart DPU target is empty",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr(""),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+			},
+			expectErr:               true,
+			expectedValidationField: "dpuTarget",
+			expectedValidationError: "must be specified for `DpfHelmChart` services",
+		},
+		// An unknown target must report the supported public API values rather than Core enum names.
+		{
+			desc: "error when DPF Helm chart DPU target is invalid",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				DpuTarget:   cutil.GetPtr("invalid"),
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+			},
+			expectErr:               true,
+			expectedValidationField: "dpuTarget",
+			expectedValidationError: "must be one of `Primary`, `AllActive`, or `All`",
+		},
+		// Kubernetes Pod services must reject the Helm-only placement policy before dispatch.
+		{
+			desc: "error when Kubernetes Pod specifies DPU target",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeKubernetesPod,
+				DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetPrimary),
+				SiteID:      validUUID,
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
+			},
+			expectErr:               true,
+			expectedValidationField: "dpuTarget",
+			expectedValidationError: "cannot be specified for `KubernetesPod` services",
+		},
+		{
+			desc: "error when DPF Helm chart data is not a chart definition",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				SiteID:      validUUID,
+				Data:        "apiVersion: v1\nkind: Pod",
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when DPF Helm chart repoURL scheme is not supported",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"http://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when DPF Helm chart omits security.privileged",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0"}`,
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when DPF Helm chart values set the reserved node selector",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":true,"values":{"serviceDaemonSet":{"nodeSelector":{}}}}`,
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when DPF Helm chart request carries credentials",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+				Credentials: &APIDpuExtensionServiceCredentials{
+					RegistryURL: "https://registry.hub.docker.com",
+					Username:    cutil.GetPtr("testuser"),
+					Password:    cutil.GetPtr("testpass"),
+				},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when DPF Helm chart request carries observability",
+			obj: APIDpuExtensionServiceCreateRequest{
+				Name:        "test-service",
+				ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+				SiteID:      validUUID,
+				Data:        `{"repoURL":"https://example.com/charts","chartName":"chart","chartVersion":"1.0.0","security.privileged":false}`,
+				Observability: &APIDpuExtensionServiceObservability{
+					Configs: []APIDpuExtensionServiceObservabilityConfig{},
+				},
+			},
+			expectErr: true,
 		},
 		{
 			desc: "ok when credentials are provided",
@@ -54,7 +211,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Credentials: &APIDpuExtensionServiceCredentials{
 					RegistryURL: "https://registry.hub.docker.com",
 					Username:    cutil.GetPtr("testuser"),
@@ -69,7 +226,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: []APIDpuExtensionServiceObservabilityConfig{
 						{
@@ -89,7 +246,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: []APIDpuExtensionServiceObservabilityConfig{},
 				},
@@ -101,7 +258,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 			obj: APIDpuExtensionServiceCreateRequest{
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 			},
 			expectErr: true,
 		},
@@ -111,7 +268,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "t",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 			},
 			expectErr: true,
 		},
@@ -121,7 +278,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        strings.Repeat("a", 257),
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 			},
 			expectErr: true,
 		},
@@ -131,7 +288,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        " test_service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 			},
 			expectErr: true,
 		},
@@ -140,7 +297,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 			obj: APIDpuExtensionServiceCreateRequest{
 				Name:   "test-service",
 				SiteID: validUUID,
-				Data:   "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:   "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 			},
 			expectErr: true,
 		},
@@ -150,7 +307,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: "InvalidType",
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 			},
 			expectErr: true,
 		},
@@ -159,7 +316,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 			obj: APIDpuExtensionServiceCreateRequest{
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 			},
 			expectErr: true,
 		},
@@ -169,7 +326,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      "invalid-uuid",
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 			},
 			expectErr: true,
 		},
@@ -188,7 +345,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Credentials: &APIDpuExtensionServiceCredentials{
 					RegistryURL: "https://registry.hub.docker.com",
 					Password:    cutil.GetPtr("testpass"),
@@ -202,7 +359,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Credentials: &APIDpuExtensionServiceCredentials{
 					RegistryURL: "https://registry.hub.docker.com",
 					Username:    cutil.GetPtr("testuser"),
@@ -216,7 +373,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Credentials: &APIDpuExtensionServiceCredentials{
 					RegistryURL: "not-a-valid-url",
 					Username:    cutil.GetPtr("testuser"),
@@ -231,7 +388,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: []APIDpuExtensionServiceObservabilityConfig{
 						{
@@ -256,7 +413,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: []APIDpuExtensionServiceObservabilityConfig{
 						{
@@ -279,7 +436,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: func() []APIDpuExtensionServiceObservabilityConfig {
 						configs := make([]APIDpuExtensionServiceObservabilityConfig, DpuExtensionServiceMaxObservabilityConfigs+1)
@@ -303,7 +460,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: []APIDpuExtensionServiceObservabilityConfig{
 						{
@@ -324,7 +481,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: []APIDpuExtensionServiceObservabilityConfig{
 						{
@@ -345,7 +502,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: []APIDpuExtensionServiceObservabilityConfig{
 						{
@@ -366,7 +523,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: []APIDpuExtensionServiceObservabilityConfig{
 						{
@@ -386,7 +543,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: []APIDpuExtensionServiceObservabilityConfig{
 						{
@@ -406,7 +563,7 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 				Name:        "test-service",
 				ServiceType: DpuExtensionServiceTypeKubernetesPod,
 				SiteID:      validUUID,
-				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test",
+				Data:        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n  - name: test\n    image: test:latest",
 				Observability: &APIDpuExtensionServiceObservability{
 					Configs: []APIDpuExtensionServiceObservabilityConfig{
 						{
@@ -424,6 +581,12 @@ func TestAPIDpuExtensionServiceCreateRequest_Validate(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			err := tc.obj.Validate()
 			assert.Equal(t, tc.expectErr, err != nil)
+			if tc.expectedValidationField != "" {
+				var fieldErrors validation.Errors
+				require.ErrorAs(t, err, &fieldErrors)
+				require.Contains(t, fieldErrors, tc.expectedValidationField)
+				assert.EqualError(t, fieldErrors[tc.expectedValidationField], tc.expectedValidationError)
+			}
 			if err != nil {
 				fmt.Println(err.Error())
 			}
@@ -443,6 +606,13 @@ func TestAPIDpuExtensionServiceUpdateRequest_Validate(t *testing.T) {
 				Name: cutil.GetPtr("updated-name"),
 			},
 			expectErr: false,
+		},
+		{
+			desc: "error when data exceeds the Core size limit",
+			obj: APIDpuExtensionServiceUpdateRequest{
+				Data: cutil.GetPtr(strings.Repeat("a", DpuExtensionServiceMaxDataBytes+1)),
+			},
+			expectErr: true,
 		},
 		{
 			desc: "ok when description is updated",
@@ -802,6 +972,20 @@ func TestAPIDpuExtensionServiceCreateRequest_ToProto(t *testing.T) {
 		assert.NotNil(t, req)
 		assert.Nil(t, req.Credential)
 		assert.Nil(t, req.Observability)
+	})
+	t.Run("DpfHelmChart maps to the DPF service type", func(t *testing.T) {
+		descr := APIDpuExtensionServiceCreateRequest{
+			Name:        "svc-d",
+			ServiceType: DpuExtensionServiceTypeDpfHelmChart,
+			DpuTarget:   cutil.GetPtr(DpuExtensionServiceDpuTargetAllActive),
+			SiteID:      uuid.NewString(),
+			Data:        `{"repoURL":"oci://registry.example.com/charts","chartName":"firewall","chartVersion":"1.2.3","security.privileged":false}`,
+		}
+		require.NoError(t, descr.Validate())
+		req := descr.ToProto("svc-id-5", "org-1")
+		assert.Equal(t, corev1.DpuExtensionServiceType_DPF_HELM_CHART, req.ServiceType)
+		require.NotNil(t, req.DpuTarget)
+		assert.Equal(t, corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE, *req.DpuTarget)
 	})
 }
 

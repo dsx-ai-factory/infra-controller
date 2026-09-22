@@ -4,176 +4,222 @@
 package processor
 
 import (
+	"cmp"
 	"context"
-	"errors"
 	"fmt"
-	"time"
+	"slices"
+
+	"github.com/google/uuid"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/executor"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/target"
-	"github.com/google/uuid"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
-// initialRetryDelay prevents a transient creator-attempt failure from becoming
-// immediately due. The scheduler owns delay policy after the first attempt.
-// It is global because per-rule retry customization is not required and would
-// unnecessarily expand the persisted rule contract.
-const initialRetryDelay = 5 * time.Second
-
-// executionPersistTimeout bounds result persistence after detaching it from
-// the attempt context so cancellation cannot leave the execution pending.
-const executionPersistTimeout = 5 * time.Second
-
-func (p *Processor) processAction(
+func (p *Processor) plan(
 	ctx context.Context,
-	prepared preparedEvent,
-	action eventrule.Action,
-) error {
-	// Check action eligibility before creating durable state.
-	if !action.Condition.AppliesTo(prepared.Envelope, prepared.Resource) {
-		return nil
+	prepared *preparedEvent,
+) (*eventrule.Event, error) {
+	event := &prepared.Event
+	planned := make([]eventrule.PlannedExecution, len(event.EffectivePolicy.Actions))
+	for i, action := range event.EffectivePolicy.Actions {
+		executionPlan, err := p.planAction(ctx, *event, prepared.Resource, action)
+		if err != nil {
+			return nil, fmt.Errorf("plan action %q: %w", action.Name, err)
+		}
+
+		planned[i] = eventrule.PlannedExecution{
+			ActionName:    action.Name,
+			ExecutionPlan: executionPlan,
+		}
 	}
 
-	// Atomically create or deduplicate the execution. A nil execution is a
-	// deduplication result and must not be dispatched.
-	execution, err := p.executions.CreateExecution(
-		ctx,
-		eventrule.ExecutionIdentity{
-			EventKey:   prepared.Envelope.Key,
-			RuleID:     prepared.Rule.ID,
-			ActionName: action.Name,
-		},
-	)
-	if err != nil || execution == nil {
-		return err
+	committed, err := p.store.CommitEventPlan(ctx, *event, planned)
+	if err != nil {
+		return nil, fmt.Errorf("persist event plan: %w", err)
 	}
 
-	// Resolve targets or persist the resulting target-resolution result.
-	targets, result := p.resolveTargets(ctx, prepared, action)
-	if result != nil {
-		return p.persistExecution(ctx, execution.ID, *result)
-	}
-
-	// Execute the action and persist the resulting state.
-	return p.executeAction(ctx, execution, action, targets)
+	return committed, nil
 }
 
-func (p *Processor) resolveTargets(
+func (p *Processor) planAction(
 	ctx context.Context,
-	prepared preparedEvent,
+	event eventrule.Event,
+	resource eventrule.ResolvedResource,
 	action eventrule.Action,
-) ([]target.Target, *eventrule.ExecutionResult) {
-	strategy := action.Spec.TargetResolutionStrategy()
-	if !strategy.RequiresResolution() {
-		return nil, nil
+) (eventrule.ExecutionPlan, error) {
+	switch spec := action.Spec.(type) {
+	case *eventrule.SubmitTask:
+		return p.planSubmitTask(ctx, event, resource, spec)
+	case *eventrule.SendAlert:
+		return &eventrule.SendAlertPlan{Severity: spec.Severity, Message: spec.Message}, nil
+	case *eventrule.Noop:
+		return &eventrule.NoopPlan{Reason: spec.Reason}, nil
+	default:
+		return nil, fmt.Errorf("unsupported action spec %T", action.Spec)
 	}
+}
 
-	targets, err := p.resolveTargetRequest(ctx, target.ResolveRequest{
-		Envelope: prepared.Envelope,
-		Resource: prepared.Resource,
-		Strategy: strategy,
+func (p *Processor) planSubmitTask(
+	ctx context.Context,
+	event eventrule.Event,
+	resource eventrule.ResolvedResource,
+	spec *eventrule.SubmitTask,
+) (eventrule.ExecutionPlan, error) {
+	resolved, err := p.resolveTargetRequest(ctx, target.ResolveRequest{
+		EventType: event.Type,
+		Resource:  resource,
+		Strategy:  spec.TargetStrategy,
 	})
 	if err != nil {
 		if isTerminalTargetError(err) {
-			result := eventrule.FailedExecutionResult(err.Error())
-			return nil, &result
+			return nil, terminalError(err)
 		}
-
-		result := eventrule.DeferredExecutionResult(
-			eventrule.ExecutionReasonAttemptFailed,
-			err.Error(),
-			initialRetryDelay,
-		)
-		return nil, &result
+		return nil, err
 	}
 
-	if len(targets) == 0 {
-		result := eventrule.SkippedExecutionResult(
-			eventrule.ExecutionReasonNoTargets,
-		)
-		return nil, &result
+	targets, err := p.materializeTaskTargets(ctx, resolved)
+	if err != nil {
+		return nil, err
 	}
 
-	return targets, nil
+	info, err := spec.Operation.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("marshal task operation: %w", err)
+	}
+
+	description := spec.Description
+	if description == "" {
+		description = spec.Operation.Description()
+	}
+
+	conflictStrategy := operation.ConflictStrategyReject
+	if spec.ConflictStrategy == eventrule.ConflictStrategyQueue {
+		conflictStrategy = operation.ConflictStrategyQueue
+	}
+
+	return &eventrule.SubmitTaskPlan{
+		Operation: operation.Wrapper{
+			Type: spec.Operation.Type(),
+			Code: spec.Operation.CodeString(),
+			Info: info,
+		},
+		Description:      description,
+		ConflictStrategy: conflictStrategy,
+		Targets:          targets,
+	}, nil
 }
 
 func (p *Processor) resolveTargetRequest(
 	ctx context.Context,
 	request target.ResolveRequest,
 ) ([]target.Target, error) {
-	resolver, err := p.targets.Lookup(request.Envelope.Type, request.Strategy)
+	resolver, err := p.targets.Lookup(request.EventType, request.Strategy)
 	if err != nil {
 		return nil, err
 	}
 
-	targets, err := resolver.Resolve(ctx, request)
+	resolved, err := resolver.Resolve(ctx, request)
 	if err != nil {
 		return nil, err
 	}
-	for i, resolved := range targets {
-		if err := resolved.Validate(); err != nil {
-			return nil, fmt.Errorf(
-				"%w: resolver target %d: %v",
-				target.ErrUnresolvable,
-				i,
-				err,
-			)
+
+	for i, candidate := range resolved {
+		if err := candidate.Validate(); err != nil {
+			return nil, fmt.Errorf("%w: resolver target %d: %v", target.ErrUnresolvable, i, err)
 		}
 	}
+
+	return resolved, nil
+}
+
+func (p *Processor) materializeTaskTargets(
+	ctx context.Context,
+	resolved []target.Target,
+) ([]operation.RackExecutionTarget, error) {
+	byRack := make(map[uuid.UUID]operation.ComponentsByType)
+	for _, candidate := range resolved {
+		components, err := p.componentsForTarget(ctx, candidate)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(components) == 0 {
+			continue
+		}
+
+		if existing := byRack[candidate.RackID]; len(existing) > 0 {
+			components, err = existing.Merge(components)
+			if err != nil {
+				return nil, fmt.Errorf("merge rack %s components: %w", candidate.RackID, err)
+			}
+		}
+
+		byRack[candidate.RackID] = components
+	}
+
+	targets := make([]operation.RackExecutionTarget, 0, len(byRack))
+	for rackID, components := range byRack {
+		targets = append(targets, operation.RackExecutionTarget{
+			RackID:           rackID,
+			ComponentsByType: components.Clone(),
+		})
+	}
+
+	slices.SortFunc(targets, func(a, b operation.RackExecutionTarget) int {
+		return cmp.Compare(a.RackID.String(), b.RackID.String())
+	})
 
 	return targets, nil
 }
 
-func (p *Processor) executeAction(
+func (p *Processor) componentsForTarget(
 	ctx context.Context,
-	execution *eventrule.Execution,
-	action eventrule.Action,
-	targets []target.Target,
-) error {
-	result, err := p.executor.Execute(ctx, executor.ExecutionRequest{
-		Execution: *execution,
-		Action:    action,
-		Targets:   targets,
-	})
-	if err != nil {
-		if ctx.Err() != nil ||
-			errors.Is(err, context.Canceled) ||
-			errors.Is(err, context.DeadlineExceeded) {
-			result = eventrule.DeferredExecutionResult(
-				eventrule.ExecutionReasonAttemptInterrupted,
-				fmt.Sprintf("executor execution interrupted: %v", err),
-				initialRetryDelay,
-			)
-		} else {
-			result = eventrule.FailedExecutionResult(
-				fmt.Sprintf("executor execution failed: %v", err),
-			)
+	candidate target.Target,
+) (operation.ComponentsByType, error) {
+	switch candidate.Kind {
+	case eventrule.ResourceKindComponent:
+		component, err := p.inventory.ComponentByID(ctx, candidate.ID)
+		if err != nil {
+			return nil, classifyInventoryError(err)
 		}
-	} else if err := result.Validate(); err != nil {
-		result = eventrule.FailedExecutionResult(
-			fmt.Sprintf("invalid executor result: %v", err),
-		)
+
+		if component.RackID != candidate.RackID {
+			return nil, terminalError(fmt.Errorf(
+				"component %s belongs to rack %s, resolver selected rack %s",
+				candidate.ID,
+				component.RackID,
+				candidate.RackID,
+			))
+		}
+
+		return operation.ComponentsByType{component.Type: []uuid.UUID{component.Info.ID}}, nil
+	case eventrule.ResourceKindRack:
+		rack, err := p.inventory.RackByID(ctx, candidate.RackID, true)
+		if err != nil {
+			return nil, classifyInventoryError(err)
+		}
+
+		components := make(operation.ComponentsByType)
+		for _, component := range rack.Components {
+			if component.Type == devicetypes.ComponentTypeUnknown {
+				return nil, terminalError(fmt.Errorf(
+					"rack %s component %s has unknown type",
+					rack.Info.ID,
+					component.Info.ID,
+				))
+			}
+
+			components[component.Type] = append(components[component.Type], component.Info.ID)
+		}
+
+		if len(components) == 0 {
+			return nil, nil
+		}
+
+		return components.Normalize()
+	default:
+		return nil, terminalError(fmt.Errorf("unsupported target kind %q", candidate.Kind))
 	}
-
-	return p.persistExecution(ctx, execution.ID, result)
-}
-
-func (p *Processor) persistExecution(
-	ctx context.Context,
-	executionID uuid.UUID,
-	result eventrule.ExecutionResult,
-) error {
-	persistCtx, cancel := context.WithTimeout(
-		context.WithoutCancel(ctx),
-		executionPersistTimeout,
-	)
-	defer cancel()
-
-	_, err := p.executions.TransitionExecution(
-		persistCtx,
-		executionID,
-		result,
-	)
-	return err
 }

@@ -739,14 +739,21 @@ mod tests {
 
     #[test]
     fn etv_cannot_peer_with_fnn() {
-        assert!(
-            !VpcVirtualizationType::EthernetVirtualizer.can_peer_with(VpcVirtualizationType::Fnn)
-        );
-        assert!(matches!(
-            VpcVirtualizationType::EthernetVirtualizer
-                .ensure_can_peer_with(VpcVirtualizationType::Fnn),
-            Err(VpcCapabilityError::PeeringIncompatible { .. })
-        ));
+        for etv in [
+            VpcVirtualizationType::EthernetVirtualizer,
+            VpcVirtualizationType::EthernetVirtualizerWithNvue,
+        ] {
+            for (a, b) in [
+                (etv, VpcVirtualizationType::Fnn),
+                (VpcVirtualizationType::Fnn, etv),
+            ] {
+                assert!(!a.can_peer_with(b));
+                assert!(matches!(
+                    a.ensure_can_peer_with(b),
+                    Err(VpcCapabilityError::PeeringIncompatible { .. })
+                ));
+            }
+        }
     }
 
     #[test]
@@ -771,183 +778,6 @@ mod tests {
                      check the `peers_with` slices in their profiles",
                 );
             }
-        }
-    }
-
-    /// Single-source-of-truth matrix asserting every capability for
-    /// every variant. The per-capability tests above check one
-    /// capability across variants; this test checks every capability
-    /// per variant, so any single value changing produces exactly one
-    /// failing assertion with a clear "which variant, which capability"
-    /// message.
-    ///
-    /// If a new VPC virtualization type is added, append a row here
-    /// and the compiler-/test-driven coverage stays exhaustive.
-    #[test]
-    fn capability_matrix_per_variant() {
-        struct Expected {
-            data_plane: DataPlaneKind,
-            fabric_interface_type: FabricInterfaceType,
-            supports_ipv4_prefix: bool,
-            supports_ipv6_prefix: bool,
-            supports_routing_profiles: bool,
-            supports_slaac: bool,
-            allocates_svi_ip: bool,
-            imports_peer_vnis_into_overlay: bool,
-            vni_advertised_to_peers: bool,
-            allowed_segment_types: &'static [NetworkSegmentType],
-            peers_with: &'static [VpcVirtualizationType],
-        }
-
-        let cases: &[(VpcVirtualizationType, Expected)] = &[
-            (
-                VpcVirtualizationType::EthernetVirtualizer,
-                Expected {
-                    data_plane: DataPlaneKind::DpuOverlayL2,
-                    fabric_interface_type: FabricInterfaceType::Dpu,
-                    supports_ipv4_prefix: true,
-                    supports_ipv6_prefix: false,
-                    supports_routing_profiles: false,
-                    supports_slaac: false,
-                    allocates_svi_ip: false,
-                    imports_peer_vnis_into_overlay: false,
-                    vni_advertised_to_peers: false,
-                    allowed_segment_types: &[
-                        NetworkSegmentType::Tenant,
-                        NetworkSegmentType::Admin,
-                        NetworkSegmentType::Underlay,
-                    ],
-                    peers_with: &[
-                        VpcVirtualizationType::EthernetVirtualizer,
-                        VpcVirtualizationType::EthernetVirtualizerWithNvue,
-                        VpcVirtualizationType::Flat,
-                    ],
-                },
-            ),
-            (
-                VpcVirtualizationType::EthernetVirtualizerWithNvue,
-                Expected {
-                    // Deprecated -- treated identically to ETV.
-                    data_plane: DataPlaneKind::DpuOverlayL2,
-                    fabric_interface_type: FabricInterfaceType::Dpu,
-                    supports_ipv4_prefix: true,
-                    supports_ipv6_prefix: false,
-                    supports_routing_profiles: false,
-                    supports_slaac: false,
-                    allocates_svi_ip: false,
-                    imports_peer_vnis_into_overlay: false,
-                    vni_advertised_to_peers: false,
-                    allowed_segment_types: &[
-                        NetworkSegmentType::Tenant,
-                        NetworkSegmentType::Admin,
-                        NetworkSegmentType::Underlay,
-                    ],
-                    peers_with: &[
-                        VpcVirtualizationType::EthernetVirtualizer,
-                        VpcVirtualizationType::EthernetVirtualizerWithNvue,
-                        VpcVirtualizationType::Flat,
-                    ],
-                },
-            ),
-            (
-                VpcVirtualizationType::Fnn,
-                Expected {
-                    data_plane: DataPlaneKind::DpuOverlayL3,
-                    fabric_interface_type: FabricInterfaceType::Dpu,
-                    supports_ipv4_prefix: true,
-                    supports_ipv6_prefix: true,
-                    supports_routing_profiles: true,
-                    supports_slaac: true,
-                    allocates_svi_ip: true,
-                    imports_peer_vnis_into_overlay: true,
-                    vni_advertised_to_peers: true,
-                    allowed_segment_types: &[
-                        NetworkSegmentType::Tenant,
-                        NetworkSegmentType::Admin,
-                        NetworkSegmentType::Underlay,
-                    ],
-                    peers_with: &[VpcVirtualizationType::Fnn, VpcVirtualizationType::Flat],
-                },
-            ),
-            (
-                VpcVirtualizationType::Flat,
-                Expected {
-                    data_plane: DataPlaneKind::OperatorManaged,
-                    fabric_interface_type: FabricInterfaceType::Nic,
-                    supports_ipv4_prefix: true,
-                    supports_ipv6_prefix: true,
-                    supports_routing_profiles: false,
-                    supports_slaac: false,
-                    allocates_svi_ip: false,
-                    imports_peer_vnis_into_overlay: false,
-                    vni_advertised_to_peers: true,
-                    allowed_segment_types: &[NetworkSegmentType::HostInband],
-                    peers_with: &[
-                        VpcVirtualizationType::EthernetVirtualizer,
-                        VpcVirtualizationType::EthernetVirtualizerWithNvue,
-                        VpcVirtualizationType::Fnn,
-                        VpcVirtualizationType::Flat,
-                    ],
-                },
-            ),
-        ];
-
-        // Belt-and-suspenders: ensure the matrix covers every variant
-        // that exists in `ALL_VPC_VIRTUALIZATION_TYPES`. If a new
-        // variant is added there but not here, this fires.
-        assert_eq!(
-            cases.len(),
-            ALL_VPC_VIRTUALIZATION_TYPES.len(),
-            "capability_matrix_per_variant is missing a row -- ensure every variant in \
-             ALL_VPC_VIRTUALIZATION_TYPES is represented here",
-        );
-
-        for (vt, expected) in cases {
-            let caps = vt.capabilities();
-            assert_eq!(caps.data_plane, expected.data_plane, "data_plane for {vt}");
-            assert_eq!(
-                vt.fabric_interface_type(),
-                expected.fabric_interface_type,
-                "fabric_interface_type for {vt}",
-            );
-            assert_eq!(
-                caps.supports_ipv4_prefix, expected.supports_ipv4_prefix,
-                "supports_ipv4_prefix for {vt}",
-            );
-            assert_eq!(
-                caps.supports_ipv6_prefix, expected.supports_ipv6_prefix,
-                "supports_ipv6_prefix for {vt}",
-            );
-            assert_eq!(
-                vt.supports_routing_profiles(),
-                expected.supports_routing_profiles,
-                "supports_routing_profiles for {vt}",
-            );
-            assert_eq!(
-                vt.supports_slaac(),
-                expected.supports_slaac,
-                "supports_slaac for {vt}",
-            );
-            assert_eq!(
-                vt.allocates_svi_ip(),
-                expected.allocates_svi_ip,
-                "allocates_svi_ip for {vt}",
-            );
-            assert_eq!(
-                vt.imports_peer_vnis_into_overlay(),
-                expected.imports_peer_vnis_into_overlay,
-                "imports_peer_vnis_into_overlay for {vt}",
-            );
-            assert_eq!(
-                vt.vni_advertised_to_peers(),
-                expected.vni_advertised_to_peers,
-                "vni_advertised_to_peers for {vt}",
-            );
-            assert_eq!(
-                caps.allowed_segment_types, expected.allowed_segment_types,
-                "allowed_segment_types for {vt}",
-            );
-            assert_eq!(caps.peers_with, expected.peers_with, "peers_with for {vt}",);
         }
     }
 

@@ -308,11 +308,21 @@ type httpMiddleware struct {
 // HTTPMiddlewareOption defines a middleware option
 type HTTPMiddlewareOption func(*httpMiddleware)
 
+// MetricsNamespaceEnv overrides the prefix a caller passes to WithRequestMetrics.
+// These services read no config file, so an environment variable is the only
+// override available to an operator.
+const MetricsNamespaceEnv = "METRICS_NAMESPACE"
+
 // WithRequestMetrics enables service specific metrics regarding
 // request duration and count. By default these metrics are disabled.
+// serverName is the prefix applied to the metric names, and METRICS_NAMESPACE
+// takes precedence over it when set.
 func WithRequestMetrics(serverName string) HTTPMiddlewareOption {
 	return func(h *httpMiddleware) {
 		h.latencyMetricsName = serverName
+		if namespace := os.Getenv(MetricsNamespaceEnv); namespace != "" {
+			h.latencyMetricsName = namespace
+		}
 	}
 }
 

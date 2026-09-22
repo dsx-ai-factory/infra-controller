@@ -5,7 +5,6 @@ package tenant
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -151,7 +150,7 @@ func (mt ManageTenant) UpdateTenantsInDB(ctx context.Context, siteID uuid.UUID, 
 		slogger := logger.With().Str("Tenant Org", tenant.Org).Logger()
 
 		// Was this created within inventory receipt interval? If so, we may be processing an older inventory
-		if time.Since(tenant.Created) < cwutil.InventoryReceiptInterval {
+		if site.IsTimeWithinStaleInventoryThreshold(tenant.Created) {
 			continue
 		}
 

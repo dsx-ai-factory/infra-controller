@@ -451,11 +451,14 @@ impl Ufm {
     ) -> Result<HashMap<PartitionKey, Partition>, UFMError> {
         let path = match (options.include_guids_data, options.include_qos_conf) {
             (true, true) => {
-                // This API is not supported in current UFM version: https://nvbugspro.nvidia.com/bug/5409095
+                // This API is not supported in current UFM version: https://github.com/NVIDIA/infra-controller/issues/5558
                 // Instead of returning unexpected results, don't even try to talk to UFM
                 // and make developers aware of the issue.
                 // That at least allows the application developer to implement a workaround
-                return Err(UFMError::InvalidArgument("Returning qos_conf and guids_data is not supported: https://nvbugspro.nvidia.com/bug/5409095".to_string()));
+                return Err(UFMError::InvalidArgument(
+                    "returning qos_conf and guids_data together is not supported by UFM"
+                        .to_string(),
+                ));
             }
             (true, false) => "/resources/pkeys?guids_data=true",
             (false, true) => "/resources/pkeys?qos_conf=true",

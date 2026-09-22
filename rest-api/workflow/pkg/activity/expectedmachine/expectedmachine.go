@@ -55,7 +55,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(mei.dbSession)
-	_, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")
@@ -101,13 +101,44 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		}
 	}
 
-	// Build a map of BmcMacAddress to linked Machine ID
-	linkedMachineByBmcMac := map[string]string{}
+	// Collect the linked Machine IDs reported by Core so they can be checked
+	// against REST inventory before Expected Machine reconciliation.
+	linkedMachineCandidatesByBmcMac := map[string]string{}
+	linkedMachineIDs := []string{}
 	for _, lm := range expectedMachineInventory.GetLinkedMachines() {
 		if lm == nil || lm.MachineId == nil || lm.BmcMacAddress == "" {
 			continue
 		}
-		linkedMachineByBmcMac[lm.BmcMacAddress] = lm.MachineId.Id
+		machineID := lm.MachineId.Id
+		if machineID == "" {
+			logger.Error().Str("BMC MAC", lm.BmcMacAddress).Msg("received linked Machine with empty ID, skipping")
+			continue
+		}
+		linkedMachineCandidatesByBmcMac[lm.BmcMacAddress] = machineID
+		linkedMachineIDs = append(linkedMachineIDs, machineID)
+	}
+
+	linkedMachineByBmcMac := map[string]string{}
+	if len(linkedMachineIDs) > 0 {
+		mDAO := cdbm.NewMachineDAO(mei.dbSession)
+		machines, _, merr := mDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{
+			MachineIDs:      linkedMachineIDs,
+			ExcludeMetadata: true,
+		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if merr != nil {
+			logger.Error().Err(merr).Msg("failed to validate linked Machines against REST inventory")
+			return merr
+		}
+
+		existingMachineIDs := make(map[string]bool, len(machines))
+		for _, machine := range machines {
+			existingMachineIDs[machine.ID] = true
+		}
+		for bmcMacAddress, machineID := range linkedMachineCandidatesByBmcMac {
+			if existingMachineIDs[machineID] {
+				linkedMachineByBmcMac[bmcMacAddress] = machineID
+			}
+		}
 	}
 
 	// iterate over current page or all (single load) if paging disabled
@@ -160,6 +191,15 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			if cerr != nil {
 				logger.Error().Err(cerr).Str("ID", emID.String()).Msg("failed to create ExpectedMachine in DB")
 			}
+			continue
+		}
+
+		// A row written since the Site collected this inventory holds changes the snapshot
+		// cannot know about, including any made through the API, so writing the reported values
+		// over them would lose those edits.
+		if site.IsTimeWithinStaleInventoryThreshold(cur.Updated) {
+			logger.Info().Str("ExpectedMachineID", cur.ID.String()).Msg("not updating ExpectedMachine yet because it changed more recently than the inventory interval")
+
 			continue
 		}
 
@@ -222,7 +262,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 				continue
 			}
 			// Avoid destructive actions inside race-condition window
-			if util.IsTimeWithinStaleInventoryThreshold(em.Updated) {
+			if site.IsTimeWithinStaleInventoryThreshold(em.Updated) {
 				continue
 			}
 			logger.Info().Str("ExpectedMachineID", em.ID.String()).Msg("deleting ExpectedMachine from DB since it was no longer reported in inventory from Site")

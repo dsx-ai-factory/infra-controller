@@ -86,20 +86,18 @@ pods:
         # setup-machine-a-tron.sh estimates the pool size and warns if you overflow.
         hostCount: 3
         dpuPerHostCount: 2
-        vpcCount: 0
-        subnetsPerVpc: 0
         dpuRebootDelay: 1
         hostRebootDelay: 1
         scoutRunInterval: "60s"
         runIntervalWorking: "1s"
         runIntervalIdle: "10s"
         networkStatusRunInterval: "20s"
-        # Set to the gateway of the OOB/underlay network in nico-core site config.
-        # (setup-machine-a-tron.sh fills this from the running nico-core config.)
-        oobDhcpRelayAddress: "FILL_IN"
-        # Set to the gateway of the admin network in nico-core site config.
-        adminDhcpRelayAddress: "FILL_IN"
-        networkVirtualizationType: ""
+        # Gateway of the BMC (OOB) network in nico-core site config; relay for BMC DHCP.
+        # (setup-machine-a-tron.sh fills both relays from the running nico-core config.)
+        bmcDhcpRelayAddress: "FILL_IN"
+        # Gateway of the underlay segment that serves DPU OOB and switch NVOS DHCP
+        # (simulated-underlay in scale mode).
+        underlayDhcpRelayAddress: "FILL_IN"
         dpusInNicMode: false
 
 extraEnv:

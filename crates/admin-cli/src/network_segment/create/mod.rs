@@ -26,6 +26,10 @@ use crate::errors::CarbideCliResult;
 
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        if let Err(err) = self.validate() {
+            err.exit();
+        }
+
         ctx.assert_cloud_unsafe_op_message()?;
         cmd::create(self, ctx.config.format, &ctx.api_client).await
     }

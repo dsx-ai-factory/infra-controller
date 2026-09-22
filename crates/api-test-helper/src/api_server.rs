@@ -102,6 +102,7 @@ pub async fn start(
         internet_l3_vni = 1337
         bypass_rbac = true
         allow_insecure_discovery = {insecure_discovery}
+        scout_boot_interface_correction_enabled = true
 
         [ib_config]
         max_partition_per_tenant = 31

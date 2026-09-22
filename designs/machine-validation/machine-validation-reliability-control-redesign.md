@@ -80,7 +80,10 @@ Constraints:
 1. The existing machine-controller currently relies on `last_machine_validation_time` and failure details as a compatibility signal.
 2. Existing REST workflows may time out while validation continues; new run resources must keep the run queryable by ID.
 3. In `M3`, log ingestion must be bounded by chunk size, retention, and per-run limits.
-4. Secret-bearing external config values and common credential strings must be redacted before log persistence and display.
+4. Plugins and their site administrators are responsible for ensuring emitted
+   logs do not contain secrets or external configuration values. Retained logs
+   remain access-controlled and bounded by the configured size and retention
+   policy.
 
 Dependencies:
 
@@ -119,7 +122,7 @@ Dependencies:
 | NFR-3 | In `M3`, log ingestion must be bounded by retention, chunk size, and per-run limits. |
 | NFR-4 | API writes from Scout must be idempotent, using event sequence numbers or attempt IDs to handle retries. |
 | NFR-5 | RBAC must separate viewing runs/logs from controlling runs. |
-| NFR-6 | Secrets in external config files and logs must be redacted before persistence and display; any remaining privileged operational output must be access-controlled. |
+| NFR-6 | Plugin owners and site administrators must prevent secrets in emitted logs; retained output must be access-controlled and bounded. |
 | NFR-7 | The data model should not prevent future parallel execution, but the first implementation must remain sequential. |
 | NFR-8 | The system must expose metrics for implemented milestone behavior, including run duration, test duration, failures, stale heartbeats, reconciliation, and later retry, cancellation, and log ingestion failures. |
 
@@ -420,7 +423,7 @@ Finite domains must use canonical shared API/domain enums and must be enforced a
 
 The current system does not have a live log destination. Scout captures command stdout/stderr only after `TokioCmd::output_with_timeout()` returns, sends the completed `MachineValidationResult` through `PersistValidationResult`, and the API stores the final output in `machine_validation_results.stdout` and `machine_validation_results.stderr`.
 
-The redesigned system stores live/recent streamed output in `machine_validation_log_chunks`. Scout sends stdout/stderr chunks while the process is active through `AppendMachineValidationLog`; the API persists redacted chunks by run, run item, attempt, stream, and sequence number. `machine_validation_results.stdout` and `machine_validation_results.stderr` remain available as a compatibility final-result projection for existing result readers.
+The redesigned system stores live/recent streamed output in `machine_validation_log_chunks`. Scout sends stdout/stderr chunks while the process is active through `AppendMachineValidationLog`; the API persists the emitted chunks by run, run item, attempt, stream, and sequence number. `machine_validation_results.stdout` and `machine_validation_results.stderr` remain available as a compatibility final-result projection for existing result readers.
 
 Initial live-log defaults should be configurable, but the first implementation should start with conservative limits:
 
@@ -430,17 +433,17 @@ Initial live-log defaults should be configurable, but the first implementation s
 | Maximum retained live/recent log data | 10 MiB per attempt and 100 MiB per run |
 | Terminal run log retention in database | 14 days |
 | Full long-term logs | Debug bundle or object storage in a later milestone |
-| Redaction | Required before persistence for external config values, access tokens, and credential-bearing keys |
+| Sensitive output | Plugin owners and site administrators must not emit secrets, access tokens, or external configuration values |
 
 The database log chunks are intended for bounded live/recent visibility. Full long-term log archival is outside the first implementation and should be decided separately as database retention, object storage, debug bundle content, or a combination.
 
 Security requirements for log persistence:
 
-1. Redaction must happen before `AppendMachineValidationLog` persists stdout or stderr chunks.
-2. Raw external configuration values must not be written to log chunks. Scout and wrappers should avoid printing external config, and the API redactor must treat known external config values and credential-bearing keys as sensitive.
-3. Redacted chunks are still privileged operational data and should be readable only by users with machine-validation log access.
+1. Plugin owners and site administrators must ensure stdout and stderr do not contain secrets or raw external configuration values before `AppendMachineValidationLog` persists them.
+2. Scout and wrappers should avoid printing external configuration. NICo stores emitted chunks without inspecting or redacting them.
+3. Retained chunks are privileged operational data and should be readable only by users with machine-validation log access.
 4. Retention cleanup must delete log chunks after the configured retention period and should be independent from the final run summary retention.
-5. Tests must cover access tokens, password-like keys, bearer tokens, and external config value leakage in stdout and stderr.
+5. Tests must cover log access control, size bounds, retention cleanup, and sequence handling.
 
 ## **3.4 Component Details**
 
@@ -681,7 +684,7 @@ The milestones intentionally separate reliability from observability and control
 2. Add bounded log chunk ingestion with sequence numbers.
 3. Add admin UI and CLI live log tail.
 4. Add progress, current test, attempt count, heartbeat freshness, and failure reason to run views.
-5. Add log redaction and retention limits.
+5. Add log access control and retention limits.
 6. Keep full long-term archival out of scope; use bounded recent logs first.
 
 ### **3.10.5 M4: Control Operations**
@@ -728,7 +731,7 @@ The following work is intentionally excluded from this reliability/control redes
 1. Internal Scout-to-API and service-to-service communication must continue using existing mTLS and authorization.
 2. Viewing logs and controlling runs must be governed by RBAC. Viewing a run is not the same permission as canceling or retrying it.
 3. Control operations must be audited with actor, reason, timestamp, requested action, acknowledgement, completion, and outcome.
-4. Logs and external config data may contain secrets. Scout and the API must redact known credential key names, access tokens, and secret-bearing external config values before log persistence. Raw external configuration values must not be intentionally written to stdout, stderr, or `machine_validation_log_chunks`.
+4. Logs and external configuration data may contain secrets. Plugin owners and site administrators must ensure secrets are not emitted to stdout, stderr, or `machine_validation_log_chunks`; NICo stores emitted chunks without inspecting or redacting them.
 5. In `M4b`, active cancellation must terminate only the process group or container associated with the active validation attempt.
 6. REST and gRPC APIs must validate state transitions so clients cannot skip required terminalization or retry rules.
 
@@ -765,7 +768,7 @@ Logs and visibility (`M3`):
 
 1. Live stdout/stderr appears in the admin UI while a long-running test is active.
 2. The UI shows current test, attempt count, heartbeat freshness, and failure reason.
-3. Log chunks are bounded, sequenced, and redacted according to policy.
+3. Log chunks are bounded, sequenced, and access-controlled according to policy. Plugin owners and site administrators ensure they do not contain secrets.
 4. Missing log chunks are visible as sequence gaps rather than silently hidden.
 
 Control operations (`M4`):

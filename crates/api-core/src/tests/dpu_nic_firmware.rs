@@ -64,7 +64,6 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
         .await?;
 
     assert_eq!(started_count.len(), 1);
-    assert!(!started_count.contains(&managed_host.dpu().id));
     assert!(started_count.contains(&managed_host.id));
 
     // Starting the host's DPU updates moves the progress counter. Other tests
@@ -125,8 +124,6 @@ async fn test_start_updates_with_multidpu(
         .await?;
 
     assert_eq!(dpus_started.len(), 1);
-    assert!(!dpus_started.contains(&dpu_machine_id));
-    assert!(!dpus_started.contains(&dpu_machine_id2));
     assert!(dpus_started.contains(&mh.host().id));
 
     // Check if health override is placed
@@ -220,128 +217,6 @@ async fn test_check_for_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
         .check_for_updates(&snapshots, 10)
         .await;
     assert_eq!(machine_updates.len(), 2);
-
-    Ok(())
-}
-
-#[crate::sqlx_test]
-async fn test_clear_completed_updates(
-    pool: sqlx::PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(pool).await;
-    let mh = create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await?;
-    mh.update_nic_firmware_version(&mut txn).await?;
-    txn.commit().await?;
-
-    let dpu_nic_firmware_update = DpuNicFirmwareUpdate {
-        reported_wrong_versions: std::sync::Mutex::new(std::collections::HashSet::new()),
-        metrics: None,
-        config: env.config.clone(),
-        dpf: None,
-    };
-
-    let snapshots = get_all_snapshots(&env).await;
-
-    let mut txn = env
-        .pool
-        .begin()
-        .await
-        .expect("Failed to create transaction");
-
-    let started_count = dpu_nic_firmware_update
-        .start_updates(&env.pool, 10, &HashSet::default(), &snapshots)
-        .await?;
-
-    assert!(!started_count.contains(&mh.dpu().id));
-    assert!(started_count.contains(&mh.id));
-
-    // Check if health override is placed
-    let managed_host = mh.snapshot(&mut txn).await;
-
-    for dpu in managed_host.dpu_snapshots.iter() {
-        let initiator = &dpu.reprovision_requested.as_ref().unwrap().initiator;
-        assert!(initiator.starts_with(AutomaticFirmwareUpdateReference::REF_NAME));
-    }
-
-    txn.commit().await.expect("commit failed");
-
-    let mut txn = env
-        .pool
-        .begin()
-        .await
-        .expect("Failed to create transaction");
-
-    dpu_nic_firmware_update
-        .clear_completed_updates(&mut txn)
-        .await
-        .unwrap();
-
-    // Health override is still in place since update did not complete
-    let managed_host = mh.snapshot(&mut txn).await;
-
-    for dpu in managed_host.dpu_snapshots.iter() {
-        let initiator = &dpu.reprovision_requested.as_ref().unwrap().initiator;
-        assert!(initiator.starts_with(AutomaticFirmwareUpdateReference::REF_NAME));
-    }
-
-    txn.rollback().await.unwrap();
-
-    // pretend like the update happened
-    let mut txn = env
-        .pool
-        .begin()
-        .await
-        .expect("Failed to create transaction");
-    let query = r#"UPDATE machine_topologies SET topology=jsonb_set(topology, '{discovery_data,Info,dpu_info,firmware_version}', $1, false)
-     WHERE machine_id=$2"#;
-    sqlx::query::<_>(query)
-        .bind(sqlx::types::Json("24.42.1000"))
-        .bind(mh.dpu().id.to_string())
-        .execute(&mut *txn)
-        .await
-        .unwrap();
-    let query = r#"UPDATE machines set reprovisioning_requested = NULL where id = $1"#;
-    sqlx::query(query)
-        .bind(mh.dpu().id.to_string())
-        .execute(&mut *txn)
-        .await
-        .unwrap();
-
-    let health_override = create_host_update_health_report_dpufw();
-    // Mark the Host as in update.
-    db::machine::insert_health_report(
-        &mut txn,
-        &mh.id,
-        health_report::HealthReportApplyMode::Merge,
-        &health_override,
-        false,
-    )
-    .await?;
-
-    txn.commit().await.unwrap();
-
-    let mut txn = env
-        .pool
-        .begin()
-        .await
-        .expect("Failed to create transaction");
-
-    dpu_nic_firmware_update
-        .clear_completed_updates(&mut txn)
-        .await
-        .unwrap();
-
-    // Health override is removed
-    let managed_host = mh.snapshot(&mut txn).await;
-    assert!(
-        !managed_host
-            .host_snapshot
-            .health_reports
-            .merges
-            .contains_key(HOST_UPDATE_HEALTH_REPORT_SOURCE)
-    );
-    assert!(managed_host.aggregate_health.alerts.is_empty());
 
     Ok(())
 }

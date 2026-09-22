@@ -23,7 +23,7 @@ const CORRECT_MTU: usize = 9216;
 /// Ensures that p0 and p1 have expected MTU.
 ///
 /// HBN sets this but there is a race condition with interfaces being renamed on startup.
-/// https://nvbugswb.nvidia.com/NvBugs5/SWBug.aspx?bugid=4331317
+/// https://github.com/NVIDIA/infra-controller/issues/5555
 pub(super) async fn ensure() -> eyre::Result<()> {
     for iface in ["p0", "p1"] {
         let current = get_mtu(iface).await?;

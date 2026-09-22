@@ -125,6 +125,7 @@ impl WatcherMock {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) async fn wait_for_receivers(&self, n: usize) {
         let res = timeout(Duration::from_secs(5), async {
             loop {
@@ -158,6 +159,9 @@ impl DpuRepository for WatcherMock {
     }
     async fn delete(&self, _: &str, _: &str) -> Result<(), DpfError> {
         Ok(())
+    }
+    async fn delete_if_uid(&self, name: &str, _ns: &str, _uid: &str) -> Result<(), DpfError> {
+        Err(DpfError::not_found("DPU", name))
     }
     fn watch<F, Fut>(
         &self,
@@ -266,6 +270,7 @@ pub(super) fn make_dpu_reboot(ns: &str, name: &str, device: &str, node: &str) ->
     make_dpu(ns, name, device, node, DpuStatusPhase::Rebooting)
 }
 
+#[allow(dead_code)]
 pub(super) fn make_dpu_labeled(
     ns: &str,
     name: &str,
@@ -328,6 +333,15 @@ impl K8sConfigRepository for ConfigMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for ConfigMock {
+    async fn get(
+        &self,
+        _name: &str,
+        _ns: &str,
+    ) -> Result<Option<crate::crds::dpfoperatorconfigs_generated::DPFOperatorConfig>, DpfError>
+    {
+        Ok(None)
+    }
+
     async fn patch(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), DpfError> {
         Ok(())
     }

@@ -17,7 +17,6 @@ Restart=on-failure
 RestartPreventExitStatus=255
 StandardOutput=journal+console
 StandardError=journal+console
-LogLevel=info
 
 [Install]
 WantedBy=multi-user.target

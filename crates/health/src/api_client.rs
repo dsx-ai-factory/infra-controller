@@ -138,6 +138,33 @@ impl ApiClientWrapper {
         Ok(())
     }
 
+    /// Replaces one source's NVLink domain report using merge semantics.
+    ///
+    /// A success for a probe clears an alert from the same report source and
+    /// probe identifier.
+    pub async fn submit_nvlink_domain_health_report(
+        &self,
+        domain_id: &NvLinkDomainId,
+        report: health_report::HealthReport,
+    ) -> Result<(), HealthError> {
+        let ovrd = rpc::forge::HealthReportEntry {
+            report: Some(report.into()),
+            mode: rpc::forge::HealthReportApplyMode::Merge.into(),
+        };
+
+        let request = rpc::forge::InsertNvLinkDomainHealthReportRequest {
+            domain_id: Some(*domain_id),
+            health_report_entry: Some(ovrd),
+        };
+
+        self.client
+            .insert_nv_link_domain_health_report(request)
+            .await
+            .map_err(HealthError::ApiInvocationError)?;
+
+        Ok(())
+    }
+
     pub async fn submit_power_shelf_health_report(
         &self,
         power_shelf_id: &carbide_uuid::power_shelf::PowerShelfId,
@@ -218,18 +245,19 @@ impl ApiCredentialKind {
 struct ApiCredentialProvider {
     client: ForgeApiClient,
     kind: ApiCredentialKind,
+    mac: MacAddress,
 }
 
 impl CredentialProvider for ApiCredentialProvider {
     fn fetch_credentials<'a>(
         &'a self,
-        endpoint: &'a BmcAddr,
+        _endpoint: &'a BmcAddr,
     ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
         Box::pin(async move {
             let response = match &self.kind {
                 ApiCredentialKind::Bmc => {
                     let request = rpc::forge::GetBmcCredentialsRequest {
-                        mac_addr: endpoint.mac.to_string(),
+                        mac_addr: self.mac.to_string(),
                     };
                     self.client
                         .get_bmc_credentials(request)
@@ -286,7 +314,7 @@ fn switch_endpoint_metadata(
             .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
         endpoint_role,
         is_primary: switch.is_primary,
-        nmxc_enabled: config.enable_nmxc,
+        nmxc_enabled: config.enable_nmxc || switch.is_primary,
         nmxt_enabled,
     }))
 }
@@ -347,8 +375,8 @@ impl ApiEndpointSource {
 
     pub async fn fetch_bmc_hosts(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
         let mut endpoints = self.fetch_machine_endpoints().await?;
-        endpoints.extend(self.fetch_power_shelf_endpoints().await);
         endpoints.extend(self.fetch_switch_endpoints().await);
+        endpoints.extend(self.fetch_power_shelf_endpoints().await);
 
         self.prune_bmc_client_cache(&endpoints);
 
@@ -358,7 +386,10 @@ impl ApiEndpointSource {
     }
 
     fn prune_bmc_client_cache(&self, live_endpoints: &[Arc<BmcEndpoint>]) {
-        let live_macs: HashSet<MacAddress> = live_endpoints.iter().map(|ep| ep.addr.mac).collect();
+        let live_macs = live_endpoints
+            .iter()
+            .filter_map(|endpoint| endpoint.addr.mac)
+            .collect::<HashSet<_>>();
         let mut cache = self.bmc_client_cache.lock().expect("cache mutex poisoned");
         let before = cache.len();
         cache.retain(|mac, _| live_macs.contains(mac));
@@ -390,7 +421,11 @@ impl ApiEndpointSource {
 
         let mut endpoints = Vec::new();
 
-        for ids_chunk in machine_ids.machine_ids.chunks(100) {
+        // Page by id count, but keep each reply well under tonic's 4 MiB receive
+        // limit: a page of 100 machines has exceeded it in the field at about
+        // 46 KB per machine.
+        const MACHINES_PAGE_SIZE: usize = 25;
+        for ids_chunk in machine_ids.machine_ids.chunks(MACHINES_PAGE_SIZE) {
             let request = ::rpc::forge::MachinesByIdsRequest {
                 machine_ids: Vec::from(ids_chunk),
                 ..Default::default()
@@ -413,6 +448,7 @@ impl ApiEndpointSource {
                     Err(error) => tracing::warn!(
                         ?machine,
                         ?error,
+                        rack_id = machine.rack_id.as_ref().map(tracing::field::display),
                         "Could not add machine endpoint due to error"
                     ),
                 }
@@ -438,6 +474,7 @@ impl ApiEndpointSource {
                         Err(error) => tracing::warn!(
                             ?switch,
                             ?error,
+                            rack_id = switch.rack_id.as_ref().map(tracing::field::display),
                             "Could not add switch endpoint due to error"
                         ),
                     }
@@ -448,6 +485,7 @@ impl ApiEndpointSource {
                         Err(error) => tracing::warn!(
                             ?switch,
                             ?error,
+                            rack_id = switch.rack_id.as_ref().map(tracing::field::display),
                             "Could not add switch host endpoint due to error"
                         ),
                     }
@@ -482,6 +520,7 @@ impl ApiEndpointSource {
                         Err(error) => tracing::warn!(
                             ?power_shelf,
                             ?error,
+                            rack_id = power_shelf.rack_id.as_ref().map(tracing::field::display),
                             "Could not add power shelf endpoint due to error"
                         ),
                     }
@@ -597,21 +636,17 @@ impl ApiEndpointSource {
             ));
         };
         let addr = BmcAddr::try_from(bmc_info)?;
-        let serial = power_shelf
-            .config
-            .as_ref()
-            .map(|config| config.name.clone())
-            .ok_or(HealthError::GenericError(
-                "Power shelf endpoint does not have serial".to_string(),
-            ))?;
 
         self.endpoint_for(
             addr,
             Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: power_shelf.id,
-                serial,
+                serial: None,
+                nvlink_domain_uuid: power_shelf
+                    .nvlink_domain_uuid
+                    .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
             })),
-            None,
+            power_shelf.rack_id.clone(),
             ApiCredentialKind::Bmc,
         )
     }
@@ -623,6 +658,9 @@ impl ApiEndpointSource {
         rack_id: Option<RackId>,
         credential_kind: ApiCredentialKind,
     ) -> Result<Arc<BmcEndpoint>, HealthError> {
+        let mac = addr.mac.ok_or_else(|| {
+            HealthError::GenericError(format!("API endpoint {} has no BMC MAC address", addr.ip))
+        })?;
         let bmc_latency_instrumentation = self.bmc_latency_metrics.clone().map(|metrics| {
             BmcLatencyInstrumentation::new(
                 metrics,
@@ -631,10 +669,11 @@ impl ApiEndpointSource {
         });
         let cached = {
             let mut cache = self.bmc_client_cache.lock().expect("cache mutex poisoned");
-            cache_or_create_bmc_client(&mut cache, addr.mac, credential_kind, |kind| {
+            cache_or_create_bmc_client(&mut cache, mac, credential_kind, |kind| {
                 let provider: Arc<dyn CredentialProvider> = Arc::new(ApiCredentialProvider {
                     client: self.api.client.clone(),
                     kind,
+                    mac,
                 });
                 Ok(Arc::new(BmcClient::new(
                     self.reqwest.clone(),
@@ -739,7 +778,11 @@ impl TryFrom<&rpc::forge::BmcInfo> for BmcAddr {
             })?;
         let port = bmc_info.port.map(|port| port.try_into().unwrap_or(443));
 
-        Ok(Self { ip, port, mac })
+        Ok(Self {
+            ip,
+            port,
+            mac: Some(mac),
+        })
     }
 }
 
@@ -763,7 +806,11 @@ impl TryFrom<&rpc::forge::SwitchNvosInfo> for BmcAddr {
             })?;
         let port = nvos_info.port.map(|port| port.try_into().unwrap_or(443));
 
-        Ok(Self { ip, port, mac })
+        Ok(Self {
+            ip,
+            port,
+            mac: Some(mac),
+        })
     }
 }
 
@@ -811,7 +858,7 @@ mod tests {
         BmcAddr {
             ip: "10.0.0.1".parse().expect("valid ip"),
             port: Some(443),
-            mac: test_mac(),
+            mac: Some(test_mac()),
         }
     }
 
@@ -937,6 +984,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn switch_endpoint_metadata_enables_nmxc_for_primary_switch() {
+        let metadata = switch_endpoint_metadata(
+            &rpc::forge::Switch {
+                config: Some(rpc::forge::SwitchConfig {
+                    name: "switch-a".to_string(),
+                    ..Default::default()
+                }),
+                is_primary: true,
+                ..Default::default()
+            },
+            SwitchEndpointRole::Host,
+            false,
+        )
+        .expect("switch metadata");
+
+        let EndpointMetadata::Switch(switch) = metadata else {
+            panic!("expected switch metadata");
+        };
+
+        assert!(switch.nmxc_enabled);
+    }
+
+    #[test]
+    fn power_shelf_endpoint_uses_api_rack_id_and_non_nil_domain() {
+        let api_url = Url::parse("https://127.0.0.1:1079").expect("valid URL");
+
+        let source = ApiEndpointSource::new(
+            Arc::new(ApiClientWrapper::new(
+                "test-ca.pem".to_string(),
+                "test-client.pem".to_string(),
+                "test-client-key.pem".to_string(),
+                &api_url,
+            )),
+            reqwest(),
+            None,
+            10,
+            None,
+        );
+
+        let rack_id = RackId::new("RACK_1");
+        let domain = NvLinkDomainId::new();
+
+        check_values(
+            [
+                Check {
+                    scenario: "domain is missing",
+                    input: None,
+                    expect: None,
+                },
+                Check {
+                    scenario: "nil domain is absent",
+                    input: Some(NvLinkDomainId::nil()),
+                    expect: None,
+                },
+                Check {
+                    scenario: "non-nil API power shelf field",
+                    input: Some(domain),
+                    expect: Some(domain),
+                },
+            ],
+            |nvlink_domain_uuid| {
+                let endpoint = source
+                    .extract_power_shelf_endpoint(&rpc::forge::PowerShelf {
+                        config: Some(rpc::forge::PowerShelfConfig {
+                            name: "power-shelf-a".to_string(),
+                            ..Default::default()
+                        }),
+                        bmc_info: Some(rpc::forge::BmcInfo {
+                            ip: Some("10.0.0.1".to_string()),
+                            mac: Some(test_mac().to_string()),
+                            port: Some(443),
+                            ..Default::default()
+                        }),
+                        rack_id: Some(rack_id.clone()),
+                        nvlink_domain_uuid,
+                        ..Default::default()
+                    })
+                    .expect("power shelf endpoint");
+
+                assert_eq!(endpoint.rack_id.as_ref(), Some(&rack_id));
+                let Some(EndpointMetadata::PowerShelf(power_shelf)) = endpoint.metadata.as_ref()
+                else {
+                    panic!("expected power shelf metadata");
+                };
+                assert_eq!(power_shelf.serial, None);
+                power_shelf.nvlink_domain_uuid
+            },
+        );
+    }
+
     #[tokio::test]
     async fn cache_returns_existing_client_on_matching_kind() {
         let mut cache: HashMap<MacAddress, CachedBmcClient> = HashMap::new();
@@ -976,6 +1114,47 @@ mod tests {
             factory_calls.load(Ordering::SeqCst),
             1,
             "factory must only be called on cache miss"
+        );
+    }
+
+    #[test]
+    fn api_endpoint_requires_mac_before_caching_client() {
+        let source = ApiEndpointSource::new(
+            Arc::new(ApiClientWrapper::new(
+                "test-ca.pem".to_string(),
+                "test-client.pem".to_string(),
+                "test-client-key.pem".to_string(),
+                &Url::parse("https://127.0.0.1:1079").expect("valid API URL"),
+            )),
+            reqwest(),
+            None,
+            10,
+            None,
+        );
+        let error = source
+            .endpoint_for(
+                BmcAddr {
+                    ip: "2001:db8::1".parse().expect("valid IPv6 address"),
+                    port: None,
+                    mac: None,
+                },
+                None,
+                None,
+                ApiCredentialKind::Bmc,
+            )
+            .err()
+            .expect("missing API MAC is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "generic error: API endpoint 2001:db8::1 has no BMC MAC address"
+        );
+        assert!(
+            source
+                .bmc_client_cache
+                .lock()
+                .expect("cache lock")
+                .is_empty()
         );
     }
 

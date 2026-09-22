@@ -18,9 +18,11 @@ import (
 func TestStoreContract(t *testing.T) {
 	storetest.RunRuleBindingContract(t, func() (eventrule.RuleStore, eventrule.BindingStore) {
 		store := New()
+
 		return store, store
 	})
-	storetest.RunExecutionContract(t, func(now *time.Time) eventrule.ExecutionStore {
+
+	storetest.RunExecutionContract(t, func(now *time.Time) storetest.EventExecutionStore {
 		return NewWithClock(func() time.Time { return *now })
 	})
 }
@@ -62,17 +64,27 @@ func TestBindingScansIgnoreUnrelatedInvalidRecords(t *testing.T) {
 	require.NoError(t, store.Delete(ctx, rule.ID))
 }
 
-func TestStore_CreateExecutionRejectsDanglingIndexes(t *testing.T) {
+func TestStore_CommitEventPlanRejectsDanglingIndexes(t *testing.T) {
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	store := NewWithClock(func() time.Time { return now })
-	identity := eventrule.ExecutionIdentity{
-		EventKey:   eventrule.EventKey{SourceName: "test", SourceKey: "event-1"},
-		RuleID:     uuid.New(),
-		ActionName: "action",
+	definition := eventrule.Event{
+		Key:           eventrule.EventKey{SourceName: "test", SourceKey: "event-1"},
+		Type:          "test.event",
+		Resource:      eventrule.ResourceIdentity{Kind: eventrule.ResourceKindRack, ID: uuid.New()},
+		AppliedRuleID: uuid.New(),
+		EffectivePolicy: eventrule.Policy{Actions: []eventrule.Action{
+			{Name: "action", Spec: &eventrule.Noop{}},
+		}},
+		Summary: "Test event",
 	}
-	store.executionsByKey[identity.Key()] = uuid.New()
 
-	execution, err := store.CreateExecution(context.Background(), identity)
-	require.ErrorIs(t, err, eventrule.ErrExecutionNotFound)
-	require.Nil(t, execution)
+	store.eventsByKey[definition.Key] = uuid.New()
+
+	event, err := store.CommitEventPlan(context.Background(), definition, []eventrule.PlannedExecution{{
+		ActionName:    "action",
+		ExecutionPlan: &eventrule.NoopPlan{},
+	}})
+
+	require.ErrorIs(t, err, eventrule.ErrEventNotFound)
+	require.Nil(t, event)
 }

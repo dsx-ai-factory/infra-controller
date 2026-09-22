@@ -19,7 +19,6 @@
 //! Measured boot unit testing module.
 
 pub(super) mod common;
-mod integration;
 mod journal;
 mod metrics;
 mod profile;

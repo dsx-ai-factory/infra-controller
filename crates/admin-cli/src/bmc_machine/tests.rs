@@ -29,9 +29,13 @@ use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
 use clap::{CommandFactory, Parser};
 
-use super::common::AdminPowerControlAction;
+use super::common::{AdminPowerControlAction, ResetTypeArg};
 use super::*;
-use crate::test_support::{parse_leaf, raw_value};
+use crate::test_support::{parse_leaf, parse_with_leaf_matches, raw_value};
+
+// A valid SwitchId and PowerShelfId for exercising the bmc-reset targets.
+const TEST_SWITCH_ID: &str = "sw100nsmnq69j4ntqlj162fnnbvg747gfqbicaa6tqgq6spocirfle7rom0";
+const TEST_POWER_SHELF_ID: &str = "ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0";
 
 // Define a basic/working MachineId for testing.
 const TEST_MACHINE_ID: &str = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg";
@@ -53,8 +57,8 @@ fn verify_cmd_structure() {
 // including testing required arguments, as well as optional
 // flag-specific checking.
 
-// parse_bmc_reset routes to the BmcReset variant; the --machine value is
-// captured verbatim and --use-ipmitool toggles the flag (default off).
+// parse_bmc_reset routes to the BmcReset variant; --use-ipmitool toggles the
+// flag (default off) and the --machine target parses as a typed MachineId.
 #[test]
 fn parse_bmc_reset() {
     scenarios!(
@@ -69,7 +73,7 @@ fn parse_bmc_reset() {
                 .map_err(drop)
         };
         "bmc-reset with required args, ipmitool off" {
-            &["bmc-machine", "bmc-reset", "--machine", "machine-123"][..] => Yields(("machine-123".to_string(), false)),
+            &["bmc-machine", "bmc-reset", "--machine", TEST_MACHINE_ID][..] => Yields((TEST_MACHINE_ID.to_string(), false)),
         }
 
         "bmc-reset with --use-ipmitool" {
@@ -77,9 +81,87 @@ fn parse_bmc_reset() {
                 "bmc-machine",
                 "bmc-reset",
                 "--machine",
-                "machine-123",
+                TEST_MACHINE_ID,
                 "--use-ipmitool",
-            ][..] => Yields(("machine-123".to_string(), true)),
+            ][..] => Yields((TEST_MACHINE_ID.to_string(), true)),
+        }
+    );
+}
+
+// Each of the three mutually exclusive targets converts to the matching
+// DeviceId variant, and --reset-type maps onto the request's ResetType.
+#[test]
+fn bmc_reset_targets_convert_to_device_id() {
+    use carbide_uuid::device::DeviceId;
+    use rpc::forge::AdminBmcResetRequest;
+    use rpc::forge::admin_bmc_reset_request::ResetType;
+
+    let request = |argv: &[&str]| -> AdminBmcResetRequest {
+        let (cmd, _) =
+            parse_with_leaf_matches::<Cmd>(argv, &["bmc-reset"]).expect("bmc-reset should parse");
+        match cmd {
+            Cmd::BmcReset(args) => AdminBmcResetRequest::from(args),
+            other => panic!("expected BmcReset, got {other:?}"),
+        }
+    };
+
+    let machine = request(&["bmc-machine", "bmc-reset", "--machine", TEST_MACHINE_ID]);
+    assert!(matches!(machine.device_id, Some(DeviceId::Machine(_))));
+    assert_eq!(machine.reset_type, ResetType::Unspecified as i32);
+
+    let switch = request(&[
+        "bmc-machine",
+        "bmc-reset",
+        "--switch",
+        TEST_SWITCH_ID,
+        "--reset-type",
+        "force",
+    ]);
+    assert!(matches!(switch.device_id, Some(DeviceId::Switch(_))));
+    assert_eq!(switch.reset_type, ResetType::ForceRestart as i32);
+
+    let power_shelf = request(&[
+        "bmc-machine",
+        "bmc-reset",
+        "--power-shelf",
+        TEST_POWER_SHELF_ID,
+        "--reset-type",
+        "graceful",
+    ]);
+    assert!(matches!(
+        power_shelf.device_id,
+        Some(DeviceId::PowerShelf(_))
+    ));
+    assert_eq!(power_shelf.reset_type, ResetType::GracefulRestart as i32);
+}
+
+// The target flags form a required, mutually exclusive group: exactly one of
+// --machine/--switch/--power-shelf must be given.
+#[test]
+fn bmc_reset_requires_exactly_one_target() {
+    scenarios!(
+        run = |argv| {
+            Cmd::try_parse_from(argv.iter().copied())
+                .map(|_| ())
+                .map_err(drop)
+        };
+        "no target is rejected" {
+            &["bmc-machine", "bmc-reset"][..] => Fails,
+        }
+
+        "two targets are rejected" {
+            &[
+                "bmc-machine",
+                "bmc-reset",
+                "--machine",
+                TEST_MACHINE_ID,
+                "--switch",
+                TEST_SWITCH_ID,
+            ][..] => Fails,
+        }
+
+        "one target parses" {
+            &["bmc-machine", "bmc-reset", "--switch", TEST_SWITCH_ID][..] => Yields(()),
         }
     );
 }
@@ -289,4 +371,37 @@ fn admin_power_control_action_value_enum() {
         Ok(AdminPowerControlAction::ACPowercycle)
     ));
     assert!(AdminPowerControlAction::from_str("invalid", false).is_err());
+}
+
+// reset_type_arg_to_proto ensures ResetTypeArg converts to the request's
+// ResetType (graceful -> GracefulRestart, force -> ForceRestart).
+#[test]
+fn reset_type_arg_to_proto() {
+    use rpc::forge::admin_bmc_reset_request::ResetType;
+
+    assert!(matches!(
+        ResetType::from(ResetTypeArg::Graceful),
+        ResetType::GracefulRestart
+    ));
+    assert!(matches!(
+        ResetType::from(ResetTypeArg::Force),
+        ResetType::ForceRestart
+    ));
+}
+
+// reset_type_arg_value_enum ensures ResetTypeArg parses from its kebab-case
+// string forms and rejects anything else.
+#[test]
+fn reset_type_arg_value_enum() {
+    use clap::ValueEnum;
+
+    assert!(matches!(
+        ResetTypeArg::from_str("graceful", false),
+        Ok(ResetTypeArg::Graceful)
+    ));
+    assert!(matches!(
+        ResetTypeArg::from_str("force", false),
+        Ok(ResetTypeArg::Force)
+    ));
+    assert!(ResetTypeArg::from_str("invalid", false).is_err());
 }

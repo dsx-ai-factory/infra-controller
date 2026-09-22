@@ -136,7 +136,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 	ibp7 := util.TestBuildInfiniBandPartition(t, dbSession, "test-ibp-7", st1, tn, cutil.GetPtr(uuid.New()), cdbm.InfiniBandPartitionStatusReady, false)
 	assert.NotNil(t, ibp7)
 	// Set created earlier than the inventory receipt interval
-	_, err := dbSession.DB.Exec("UPDATE infiniband_partition SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval)), ibp7.ID.String())
+	_, err := dbSession.DB.Exec("UPDATE infiniband_partition SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), ibp7.ID.String())
 	assert.NoError(t, err)
 
 	ibp8 := util.TestBuildInfiniBandPartition(t, dbSession, "test-ibp-8", st1, tn, cutil.GetPtr(uuid.New()), cdbm.InfiniBandPartitionStatusError, true)
@@ -151,7 +151,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 	ibp11 := util.TestBuildInfiniBandPartition(t, dbSession, "test-ibp-11", st1, tn, cutil.GetPtr(uuid.New()), cdbm.InfiniBandPartitionStatusReady, false)
 	assert.NotNil(t, ibp11)
 	// Set created earlier than the inventory receipt interval
-	_, err = dbSession.DB.Exec("UPDATE infiniband_partition SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval)), ibp11.ID.String())
+	_, err = dbSession.DB.Exec("UPDATE infiniband_partition SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), ibp11.ID.String())
 	assert.NoError(t, err)
 
 	// Build InfiniBand Partition inventory that is paginated
@@ -161,7 +161,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 	for i := 0; i < 38; i++ {
 		ibp := util.TestBuildInfiniBandPartition(t, dbSession, fmt.Sprintf("test-vpc-paged-%d", i), st2, tn, cutil.GetPtr(uuid.New()), cdbm.InfiniBandPartitionStatusReady, false)
 		// Update creation timestamp to be earlier than inventory processing interval
-		_, err = dbSession.DB.Exec("UPDATE infiniband_partition SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.InventoryReceiptInterval)*2), ibp.ID.String())
+		_, err = dbSession.DB.Exec("UPDATE infiniband_partition SET created = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), ibp.ID.String())
 		assert.NoError(t, err)
 		pagedIbps = append(pagedIbps, ibp)
 		pagedInvIds = append(pagedInvIds, ibp.ControllerIBPartitionID.String())

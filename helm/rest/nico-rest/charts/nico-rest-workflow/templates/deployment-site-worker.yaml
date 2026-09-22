@@ -27,6 +27,10 @@ spec:
         app: nico-rest-site-worker
         app.kubernetes.io/name: nico-rest-workflow
         app.kubernetes.io/component: site-worker
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -44,6 +48,13 @@ spec:
               value: /app/config.yaml
             - name: TEMPORAL_NAMESPACE
               value: site
+            {{- range $k, $v := .Values.extraEnv }}
+            {{- if has $k (list "CONFIG_FILE_PATH" "TEMPORAL_NAMESPACE" "TEMPORAL_QUEUE") }}
+            {{- fail (printf "extraEnv must not override chart-managed variable %s" $k) }}
+            {{- end }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
             - name: TEMPORAL_QUEUE
               value: site
           volumeMounts:

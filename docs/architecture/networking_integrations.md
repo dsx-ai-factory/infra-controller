@@ -31,8 +31,8 @@ Networking integrations in NICo achieve this through the following patterns:
 - Tenants need to know how they can actually configure their instances. Valid configurations depend on the hardware. E.g. in an instance with 4 connected InfiniBand ports, tenants can associate each of these ports with a separate partition. However tenants are not able to configure instances without InfiniBand ports for IB.
 - Tenants learn about the support configurations via "Instance Types", which hold a list of capabilities. Each type of networking capability informs a tenant on how the respective interface can be configured. This means for each configurable interface, the instance type should list a respective capability.
 - The set of capabilities encoded in instance types must match or be a subset of the capabilities associated with a `Machine`. Machine capabilities are detected during the hardware discovery and ingestion phases. They are viewable by site administrators via debug tools.
-    - During Machine ingestion, data about all network interfaces is collected both in-band (using scout) and out-of-band (using site-explorer). The data is stored within `machine` and `machine_topologies` tables
-    - Based on the raw discovery data, "machine capabilities" (type `MachineCapabilitiesSet`) are computed by the core service and presented to site administrators. These capabilities inform users about the amount of interfaces which are configurable. For each network integration, a new type of machine capability is required. E.g. InfiniBand uses the `MachineCapabilityAttributesInfiniband` capability, while nvlink uses the `MachineCapabilityAttributesGpu` capability.
+  - During Machine ingestion, data about all network interfaces is collected both in-band (using scout) and out-of-band (using site-explorer). The data is stored within `machine` and `machine_topologies` tables
+  - Based on the raw discovery data, "machine capabilities" (type `MachineCapabilitiesSet`) are computed by the core service and presented to site administrators. These capabilities inform users about the amount of interfaces which are configurable. For each network integration, a new type of machine capability is required. For example, InfiniBand uses the `MachineCapabilityAttributesInfiniband` capability, while nvlink uses the `MachineCapabilityAttributesGpu` capability.
 - The SKU validation feature can include checks whether any newly ingested host includes the expected amount of network interfaces - where each network interface is typically described as a machine capability.
 
 ## Implementation requirements and considerations
@@ -45,14 +45,14 @@ To implement these workflows, the following patterns had been developed and prov
 - The desired state is a combination of the "tenant requested state" as well as a set of configurations internally managed by NICo.
   - The tenant requested state is stored fully in the `InstanceConfig` object
   - The internal requested state is stored in the `ManagedHostNetworkConfig` that is part of the `machine` table in the database. The most important field here is the `use_admin_network` field which controls whether tenant configurations are overridden and that the machine should indeed be placed onto an isolated/admin network.
-- The actual state is stored as part of the `Machine` database object. The integration between NICo and the respective networking subsystem is responsible for updating it there. All other workflows within NICo will use this observed state for decision making instead of reaching out to any external services. This internal caching of observed state keeps workflows deterministic and reliable, since they act on the same source of truth. It also helps with reactivity and scaling, since all other code path won't need to reach out to an external service anymore to learn about network state.  
-  
-  2 integration patterns had been developed here over time:
+- The actual state is stored as part of the `Machine` database object. The integration between NICo and the respective networking subsystem is responsible for updating it there. All other workflows within NICo will use this observed state for decision making instead of reaching out to any external services. This internal caching of observed state keeps workflows deterministic and reliable, since they act on the same source of truth. It also helps with reactivity and scaling, since all other code paths do not need to reach out to an external service to learn about network state.
+
+  Two integration patterns have been developed over time:
     1. The actual observed state is updated by a "monitoring and reconciliation task" specific to the networking technology. Examples of this integration are the `IbFabricMonitor` services (for InfiniBand) and `NvlPartitionMonitor` (for NVLink). This kind of monitoring and integration is favorable if the external networking is controlled via an external service, since the integration is able to fetch the actual networking state for more than one device and host at the same time and can update all affected machine objects at once.
-    2. The actual observed state is updated for each interface or host by a service associated with this interface by making an API call into NICo. An examples of this integration is `dpu-agent` sending the observed DPU configuration via a gRPC call (`RecordDpuNetworkStatus`).
+    2. The actual observed state is updated for each interface or host by a service associated with this interface by making an API call into NICo. An example of this integration is `dpu-agent` sending the observed DPU configuration via a gRPC call (`RecordDpuNetworkStatus`).
 - Site admins need to be able to view both the desired configuration for any interface as well as the actual configuration.
 
-### State reconciliation
+### State Reconciliation
 
 There needs to be a mechanism that periodically compares the expected networking configuration with the desired networking configuration. If they are not in-sync, the respective components needs to take all the required actions to bring the configurations in sync.
 
@@ -69,7 +69,19 @@ There needs to be a mechanism that periodically compares the expected networking
     - If the instance ever had been `Ready`, and the actual network configuration deviates from the intended configuration, the status should show `Configuring`.
     - If instance termination has been requested, the instances status should show `Terminating` independent of network configurations.
 3. The instance state machine should have guards in certain states that wait until the desired network configurations are applied:
-    - During initial instance provisioning (before `Ready` state), one state in the state machine should wait until the desired network configuration is applied. For DPU configurations, this happens in the `WaitingForNetworkConfig` state. The guards in this state should use the same logic that derive the `configs_synced` value for tenants.
+    - During initial provisioning, `WaitingForNetworkConfig` waits for current
+      DPU observations and matching configuration versions. It also waits for
+      health alerts that prevent host state changes and the primary p0 PXE gate.
+      Refer to
+      [DPU ToR Uplink Health](../dpu-management/dpu_configuration.md#dpu-tor-uplink-health)
+      for the BGP policy.
+    - Immediately before a normal PXE restart, `WaitingForRebootToReady`
+      repeats the aggregate health and primary p0 checks. Instance deletion and
+      explicit custom iPXE requests bypass these checks.
+    - A live `UpdateInstanceConfig` request uses
+      `NetworkConfigUpdate/WaitingForConfigSynced`. This state waits for current
+      DPU observations and health alerts that prevent host state changes. It does
+      not apply the primary p0 PXE gate or restart the host.
     - During instance termination, one state in the state machine should wait until the machine is isolated from any other machine in the network. If this step is omitted (to let the machine proceed termination in the case of an unhealthy network fabric), the respective machine must at least be tagged with a health alert that would prevent a different tenant from using the host. Both options guarantee that no other tenant will get access to the tenants network partition.
 
 ### Machine Capabilities and Instance types
@@ -95,4 +107,3 @@ There needs to be a mechanism that periodically compares the expected networking
 
 - If an external fabric manager is used to observe interface state and set configuration, a client library in Rust is required.
 - Interactions with external fabric managers will require credentials. These should be read from the file system, and get injected via an external service (e.g. K8S secrets).
-

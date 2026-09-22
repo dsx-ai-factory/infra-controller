@@ -311,9 +311,14 @@ func (o {{classname}}) ToMap() (map[string]interface{}, error) {
 	{{#isNullable}}
 	{{#vendorExtensions.x-golang-is-container}}
 	{{! support for container fields is not ideal at this point because of lack of Nullable* types}}
+	{{#vendorExtensions.x-go-required-nullable}}
+	toSerialize["{{{baseName}}}"] = o.{{name}}
+	{{/vendorExtensions.x-go-required-nullable}}
+	{{^vendorExtensions.x-go-required-nullable}}
 	if o.{{name}} != nil {
 		toSerialize["{{{baseName}}}"] = o.{{name}}
 	}
+	{{/vendorExtensions.x-go-required-nullable}}
 	{{/vendorExtensions.x-golang-is-container}}
 	{{^vendorExtensions.x-golang-is-container}}
 	{{#required}}
@@ -398,6 +403,13 @@ func (o *{{{classname}}}) UnmarshalJSON(data []byte) (err error) {
 		return err;
 	}
 
+	{{#vendorExtensions.x-go-has-nullable-required-properties}}
+	nullableRequiredProperties := map[string]struct{}{
+	{{#vendorExtensions.x-go-nullable-required-properties}}
+		"{{.}}": {},
+	{{/vendorExtensions.x-go-nullable-required-properties}}
+	}
+	{{/vendorExtensions.x-go-has-nullable-required-properties}}
 	for _, requiredProperty := range(requiredProperties) {
 		{{#useDefaultValuesForRequiredVars}}
 		if value, exists := allProperties[requiredProperty]; !exists || value == "" {
@@ -409,7 +421,13 @@ func (o *{{{classname}}}) UnmarshalJSON(data []byte) (err error) {
 		if value, exists := allProperties[requiredProperty]; !exists || value == ""{
 		{{/useDefaultValuesForRequiredVars}}
 		{{^useDefaultValuesForRequiredVars}}
+		{{#vendorExtensions.x-go-has-nullable-required-properties}}
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		{{/vendorExtensions.x-go-has-nullable-required-properties}}
+		{{^vendorExtensions.x-go-has-nullable-required-properties}}
 		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+		{{/vendorExtensions.x-go-has-nullable-required-properties}}
 		{{/useDefaultValuesForRequiredVars}}
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}

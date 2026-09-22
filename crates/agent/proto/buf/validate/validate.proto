@@ -13,6 +13,7 @@ message FieldConstraints {
   UInt32Rules uint32 = 2;
   EnumRules enum = 3;
   MapRules map = 4;
+  bool required = 5;
 }
 
 message StringRules {

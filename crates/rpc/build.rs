@@ -17,12 +17,11 @@
 use std::fs;
 use std::path::PathBuf;
 
-use carbide_proto_compiler::{
-    CompilerConfig, ExternPaths, TonicBuilderCodegenExt, TonicBuilderExternPathsExt, compile, syn,
-};
+use carbide_proto_compiler::{CompilerConfig, TonicBuilderCodegenExt, compile};
 use tonic_client_wrapper::codegen;
 
 const PROTO_FILES: &[&str] = &[
+    "proto/codegen/v1/machine_id_types.proto",
     "proto/common.proto",
     "proto/scout_firmware_upgrade.proto",
     "proto/forge.proto",
@@ -73,152 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&reflection, &schema.raw_descriptor_set)?;
 
     let codegen = schema.collect_codegen()?;
-
-    let extern_paths = ExternPaths::new(
-        [
-            (
-                ".common.MachineId",
-                syn::parse_quote!(::carbide_uuid::machine::MachineId),
-            ),
-            (
-                ".common.DomainId",
-                syn::parse_quote!(::carbide_uuid::domain::DomainId),
-            ),
-            (
-                ".common.RemediationId",
-                syn::parse_quote!(::carbide_uuid::dpu_remediations::RemediationId),
-            ),
-            (
-                ".common.MachineInterfaceId",
-                syn::parse_quote!(::carbide_uuid::machine::MachineInterfaceId),
-            ),
-            (
-                ".common.VpcId",
-                syn::parse_quote!(::carbide_uuid::vpc::VpcId),
-            ),
-            (
-                ".common.VpcPrefixId",
-                syn::parse_quote!(::carbide_uuid::vpc::VpcPrefixId),
-            ),
-            (
-                ".common.SitePrefixId",
-                syn::parse_quote!(::carbide_uuid::site_prefix::SitePrefixId),
-            ),
-            (
-                ".common.VpcPeeringId",
-                syn::parse_quote!(::carbide_uuid::vpc_peering::VpcPeeringId),
-            ),
-            (
-                ".common.IBPartitionId",
-                syn::parse_quote!(::carbide_uuid::infiniband::IBPartitionId),
-            ),
-            (
-                ".common.SpxPartitionId",
-                syn::parse_quote!(::carbide_uuid::spx::SpxPartitionId),
-            ),
-            (
-                ".common.InstanceId",
-                syn::parse_quote!(::carbide_uuid::instance::InstanceId),
-            ),
-            (
-                ".common.NetworkSegmentId",
-                syn::parse_quote!(::carbide_uuid::network::NetworkSegmentId),
-            ),
-            (
-                ".common.DpaInterfaceId",
-                syn::parse_quote!(::carbide_uuid::dpa_interface::DpaInterfaceId),
-            ),
-            (
-                ".common.NetworkPrefixId",
-                syn::parse_quote!(::carbide_uuid::network::NetworkPrefixId),
-            ),
-            (
-                ".common.SwitchId",
-                syn::parse_quote!(::carbide_uuid::switch::SwitchId),
-            ),
-            (
-                ".common.PowerShelfId",
-                syn::parse_quote!(::carbide_uuid::power_shelf::PowerShelfId),
-            ),
-            (
-                ".common.ComputeAllocationId",
-                syn::parse_quote!(::carbide_uuid::compute_allocation::ComputeAllocationId),
-            ),
-            (
-                ".common.OperatingSystemId",
-                syn::parse_quote!(::carbide_uuid::operating_system::OperatingSystemId),
-            ),
-            (
-                ".common.IpxeTemplateId",
-                syn::parse_quote!(::carbide_uuid::ipxe_template::IpxeTemplateId),
-            ),
-            (
-                ".common.MachineValidationId",
-                syn::parse_quote!(::carbide_uuid::machine_validation::MachineValidationId),
-            ),
-            (
-                ".common.RackId",
-                syn::parse_quote!(::carbide_uuid::rack::RackId),
-            ),
-            (
-                ".common.RackProfileId",
-                syn::parse_quote!(::carbide_uuid::rack::RackProfileId),
-            ),
-            (
-                ".common.NVLinkPartitionId",
-                syn::parse_quote!(::carbide_uuid::nvlink::NvLinkPartitionId),
-            ),
-            (
-                ".common.NVLinkLogicalPartitionId",
-                syn::parse_quote!(::carbide_uuid::nvlink::NvLinkLogicalPartitionId),
-            ),
-            (
-                ".common.NVLinkDomainId",
-                syn::parse_quote!(::carbide_uuid::nvlink::NvLinkDomainId),
-            ),
-            (
-                ".measured_boot.MeasurementSystemProfileId",
-                syn::parse_quote!(::carbide_uuid::measured_boot::MeasurementSystemProfileId),
-            ),
-            (
-                ".measured_boot.MeasurementSystemProfileAttrId",
-                syn::parse_quote!(::carbide_uuid::measured_boot::MeasurementSystemProfileAttrId),
-            ),
-            (
-                ".measured_boot.MeasurementBundleId",
-                syn::parse_quote!(::carbide_uuid::measured_boot::MeasurementBundleId),
-            ),
-            (
-                ".measured_boot.MeasurementBundleValueId",
-                syn::parse_quote!(::carbide_uuid::measured_boot::MeasurementBundleValueId),
-            ),
-            (
-                ".measured_boot.MeasurementReportId",
-                syn::parse_quote!(::carbide_uuid::measured_boot::MeasurementReportId),
-            ),
-            (
-                ".measured_boot.MeasurementReportValueId",
-                syn::parse_quote!(::carbide_uuid::measured_boot::MeasurementReportValueId),
-            ),
-            (
-                ".measured_boot.MeasurementJournalId",
-                syn::parse_quote!(::carbide_uuid::measured_boot::MeasurementJournalId),
-            ),
-            (
-                ".measured_boot.MeasurementApprovedMachineId",
-                syn::parse_quote!(::carbide_uuid::measured_boot::MeasurementApprovedMachineId),
-            ),
-            (
-                ".measured_boot.MeasurementApprovedProfileId",
-                syn::parse_quote!(::carbide_uuid::measured_boot::MeasurementApprovedProfileId),
-            ),
-            (
-                ".common.DeviceId",
-                syn::parse_quote!(::carbide_uuid::device::DeviceId),
-            ),
-        ]
-        .into_iter(),
-    );
+    let rust_descriptor_set = codegen.rust_file_descriptor_set(&schema.file_descriptor_set)?;
 
     let derive_prost_builder =
         "#[cfg_attr(feature = \"test-support\", derive(carbide_prost_builder::Builder))]";
@@ -245,9 +99,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".forge.BmcIpAllocationType",
             "#[cfg_attr(feature = \"cli\", derive(clap::ValueEnum))]",
         )
-        .extern_path(".google.protobuf.Duration", "crate::Duration")
-        .extern_path(".google.protobuf.Timestamp", "crate::Timestamp")
-        .extern_paths(&extern_paths)
         .include_file("prost_common.rs")
         .type_attribute(".health", "#[derive(serde::Deserialize, serde::Serialize)]")
         .type_attribute(
@@ -319,6 +170,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "forge.InstanceTypeMachineCapabilityFilterAttributes.device_type",
             "#[serde(deserialize_with = \"MachineCapabilityDeviceType::from_string\", serialize_with = \"MachineCapabilityDeviceType::serialize_from_enum_i32\")]",
         )
+        .field_attribute(
+            "machine_discovery.DiscoveryInfo.memory_device_groups",
+            "#[serde(default, skip_serializing_if = \"Vec::is_empty\")]",
+        )
 
         .type_attribute(
             ".rack_manager",
@@ -370,10 +225,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         inner_rpc_client_type: "crate::forge_tls_client::ForgeClientT".to_string(),
         root_files: vec!["forge.proto".to_string()],
         generated_types_path_within_crate: "protos".to_string(),
-        extern_paths: extern_paths.build_index(),
+        extern_paths: codegen.extern_paths(),
     };
     let client_wrapper_generator =
-        codegen::CodeGenerator::new(client_wrapper_config, &schema.file_descriptor_set)?;
+        codegen::CodeGenerator::new(client_wrapper_config, &rust_descriptor_set)?;
 
     client_wrapper_generator.write_rpc_client_wrapper(out_dir.join("forge_api_client.rs"))?;
     client_wrapper_generator
@@ -388,14 +243,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generated_types_path_within_crate: "protos".to_string(),
     };
     let nmx_c_client_wrapper =
-        codegen::CodeGenerator::new(nmx_c_client_wrapper_config, &schema.file_descriptor_set)?;
+        codegen::CodeGenerator::new(nmx_c_client_wrapper_config, &rust_descriptor_set)?;
     nmx_c_client_wrapper.write_rpc_client_wrapper(out_dir.join("nmx_c_client.rs"))?;
     nmx_c_client_wrapper.write_rpc_convenience_converters(out_dir.join("nmx_c_converters.rs"))?;
 
     // Both wrapper generators are done borrowing the descriptor set. Transfer
     // ownership to tonic/prost last; compile_fds renders Rust without invoking
     // protoc again.
-    prost_builder.compile_fds(schema.file_descriptor_set)?;
+    prost_builder.compile_fds(rust_descriptor_set)?;
 
     Ok(())
 }

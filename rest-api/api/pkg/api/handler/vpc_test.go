@@ -19,6 +19,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -52,6 +53,39 @@ func testVPCInitDB(t *testing.T) *cdb.Session {
 		bundebug.FromEnv(""),
 	))
 	return dbSession
+}
+
+func TestPowerResourceGroupAPIError(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		fallback    string
+		wantCode    int
+		wantMessage string
+	}{
+		{
+			name:        "maps DPS name collision to conflict",
+			err:         fmt.Errorf("create replacement group: %w", dpsclient.ErrResourceGroupAlreadyExists),
+			fallback:    "Failed to change DPS resource group",
+			wantCode:    http.StatusConflict,
+			wantMessage: "Power resource group already exists",
+		},
+		{
+			name:        "preserves generic DPS failure mapping",
+			err:         errors.New("DPS unavailable"),
+			fallback:    "Failed to create DPS resource group",
+			wantCode:    http.StatusServiceUnavailable,
+			wantMessage: "Failed to create DPS resource group",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			apiErr := powerResourceGroupAPIError(test.err, test.fallback)
+			assert.Equal(t, test.wantCode, apiErr.Code)
+			assert.Equal(t, test.wantMessage, apiErr.Message)
+		})
+	}
 }
 
 // testVPCSetupSchema resets the tables required by VPC handler and
@@ -308,6 +342,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 		expectedStatus             string
 		expectedVni                *int
 		expectedVirtualizationType string
+		expectedRoutingProfile     *string
 		expectedStatusDetails      []expectedStatusDetail
 	}
 
@@ -442,6 +477,15 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 	vpcWithAllocatedVniName := "Test VPC with allocated VNI"
 	vpcWithRoutingProfileName := "Test VPC routing profile"
 	vpcWithRoutingProfileOverridesName := "Test VPC routing profile overrides"
+	vpcWithResolvedRoutingProfileName := "Test VPC resolved routing profile"
+	vpcWithUnpersistedResolvedRoutingProfileName := "Test VPC unpersisted resolved routing profile"
+	vpcWithUnpersistedResolvedRoutingProfileID := uuid.New()
+	_, err = dbSession.DB.Exec(`
+		ALTER TABLE vpc
+		ADD CONSTRAINT vpc_test_reject_resolved_routing_profile_persistence
+		CHECK (name <> 'Test VPC unpersisted resolved routing profile' OR routing_profile IS NULL)
+	`)
+	require.NoError(t, err)
 	allocatedVni := uint32(7301)
 	expectedAllocatedVni := int(allocatedVni)
 
@@ -477,6 +521,17 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 		}
 	}).Return(nil)
 
+	wrunWithResolvedRoutingProfile := &tmocks.WorkflowRun{}
+	wrunWithResolvedRoutingProfile.On("GetID").Return(wid)
+	wrunWithResolvedRoutingProfile.Mock.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		controllerVpc, ok := args.Get(1).(*corev1.Vpc)
+		if ok {
+			controllerVpc.Config = &corev1.VpcConfig{
+				RoutingProfileType: cutil.GetPtr("EXTERNAL"),
+			}
+		}
+	}).Return(nil)
+
 	tc.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
 		mock.AnythingOfType("func(internal.Context, uuid.UUID, uuid.UUID) error"), mock.AnythingOfType("uuid.UUID"),
 		mock.AnythingOfType("uuid.UUID")).Return(wrun, nil)
@@ -506,7 +561,12 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 
 	tsc.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
 		"CreateVPCV2", mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
-			return req == nil || (req.Name != unavailableVpcName && req.Name != vpcWithAllocatedVniName && req.Name != vpcWithRoutingProfileName && req.Name != vpcWithRoutingProfileOverridesName)
+			return req != nil && (req.Name == vpcWithResolvedRoutingProfileName || req.Name == vpcWithUnpersistedResolvedRoutingProfileName)
+		})).Return(wrunWithResolvedRoutingProfile, nil)
+
+	tsc.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+		"CreateVPCV2", mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
+			return req == nil || (req.Name != unavailableVpcName && req.Name != vpcWithAllocatedVniName && req.Name != vpcWithRoutingProfileName && req.Name != vpcWithRoutingProfileOverridesName && req.Name != vpcWithResolvedRoutingProfileName && req.Name != vpcWithUnpersistedResolvedRoutingProfileName)
 		})).Return(wrun, nil)
 
 	// Mock timeout error
@@ -537,6 +597,27 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 		expectNoMutation   bool
 		expectRolledBack   bool
 	}{
+		{
+			name: "test VPC create API endpoint rejects power resource group when DPS power management is disabled",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:               "Test VPC rejected power resource group",
+					SiteID:             st1.ID.String(),
+					PowerResourceGroup: cutil.GetPtr("resource-group"),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusPreconditionFailed,
+				respMessage: "Site does not have DPS power management enabled",
+			},
+			wantErr:          false,
+			expectNoMutation: true,
+		},
 		{
 			name: "test VPC create API endpoint success",
 			fields: fields{
@@ -600,6 +681,58 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
+		},
+		{
+			name: "test VPC create API endpoint returns Core-resolved routing profile",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					Name:                      vpcWithResolvedRoutingProfileName,
+					SiteID:                    st1.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+				},
+				reqOrg:                 tnOrg,
+				reqUser:                tnu,
+				respCode:               http.StatusCreated,
+				expectedStatus:         cdbm.VpcStatusProvisioning,
+				expectedRoutingProfile: cutil.GetPtr(model.APIVpcRoutingProfileExternal),
+				expectedStatusDetails: []expectedStatusDetail{
+					{
+						status:  cdbm.VpcStatusProvisioning,
+						message: "VPC provisioning has been initiated on Site",
+					},
+				},
+			},
+			wantErr:            false,
+			verifyChildSpanner: true,
+		},
+		{
+			name: "test VPC create API endpoint rolls back when Core-resolved routing profile cannot be persisted",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcCreateRequest{
+					ID:                        &vpcWithUnpersistedResolvedRoutingProfileID,
+					Name:                      vpcWithUnpersistedResolvedRoutingProfileName,
+					SiteID:                    st1.ID.String(),
+					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+					SlaacEnabled:              cutil.GetPtr(true),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusInternalServerError,
+				respMessage: "Failed to persist Core-resolved VPC routing profile",
+			},
+			wantErr:            false,
+			verifyChildSpanner: true,
+			expectRolledBack:   true,
 		},
 		{
 			name: "test VPC create API endpoint rejects SLAAC when Site config inventory stores false",
@@ -842,7 +975,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
-			name: "test VPC create API endpoint rejects unsupported routing profile",
+			name: "test VPC create API endpoint accepts site-configured routing profile",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -850,16 +983,22 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIVpcCreateRequest{
-					Name:                      "Test VPC unsupported routing profile",
+					Name:                      "Test VPC site-configured routing profile",
 					Description:               cutil.GetPtr("Test VPC Description"),
 					SiteID:                    st1.ID.String(),
 					NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
 					RoutingProfile:            cutil.GetPtr("tenant-edge"),
 				},
-				reqOrg:      tnOrg,
-				reqUser:     tnu,
-				respCode:    http.StatusBadRequest,
-				respMessage: "`routingProfile` must be one of privileged-internal, internal, or external",
+				reqOrg:         tnOrg,
+				reqUser:        tnu,
+				respCode:       http.StatusCreated,
+				expectedStatus: cdbm.VpcStatusProvisioning,
+				expectedStatusDetails: []expectedStatusDetail{
+					{
+						status:  cdbm.VpcStatusProvisioning,
+						message: "VPC provisioning has been initiated on Site",
+					},
+				},
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
@@ -1427,7 +1566,11 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			} else {
 				assert.Nil(t, rst.Description)
 			}
-			assert.Equal(t, tt.args.reqData.RoutingProfile, rst.RoutingProfile)
+			expectedRoutingProfile := tt.args.reqData.RoutingProfile
+			if tt.args.expectedRoutingProfile != nil {
+				expectedRoutingProfile = tt.args.expectedRoutingProfile
+			}
+			assert.Equal(t, expectedRoutingProfile, rst.RoutingProfile)
 			assert.Equal(t, tt.args.reqData.RoutingProfileOverrides, rst.RoutingProfileOverrides)
 			expectedSlaacEnabled := tt.args.reqData.SlaacEnabled != nil && *tt.args.reqData.SlaacEnabled
 			assert.Equal(t, expectedSlaacEnabled, rst.SlaacEnabled)
@@ -1472,6 +1615,12 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			assert.Equal(t, expectedSlaacEnabled, persistedVpc.SlaacEnabled)
 			require.NotNil(t, persistedVpc.NetworkVirtualizationType)
 			assert.Equal(t, expectedVirtualizationType, *persistedVpc.NetworkVirtualizationType)
+			if expectedRoutingProfile != nil {
+				require.NotNil(t, persistedVpc.RoutingProfile)
+				assert.Equal(t, model.NormalizeAPIVpcRoutingProfileForSite(*expectedRoutingProfile), *persistedVpc.RoutingProfile)
+			} else {
+				assert.Nil(t, persistedVpc.RoutingProfile)
+			}
 			assert.Equal(t, tt.args.reqData.RoutingProfileOverrides.ToDB(), persistedVpc.RoutingProfileOverrides)
 			if tt.args.reqData.RoutingProfileOverrides != nil {
 				// Effective state returned without a VNI is cached and exposed to this privileged tenant.
@@ -1709,6 +1858,25 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 		expectedRoutingProfileOverrides   *model.APIVpcRoutingProfileOverrides
 		expectNoRoutingProfileMutation    bool
 	}{
+		{
+			name: "test VPC update rejects power resource group when DPS power management is disabled",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcUpdateRequest{
+					PowerResourceGroup: cutil.GetPtr("resource-group"),
+				},
+				reqVPCID:    vpc.ID.String(),
+				reqVPC:      vpc,
+				reqOrg:      tnOrg,
+				reqUser:     tnu,
+				respCode:    http.StatusPreconditionFailed,
+				respMessage: "Site does not have DPS power management enabled",
+			},
+		},
 		// A present object replaces the FNN VPC's full inline definition.
 		{
 			name: "test VPC update replaces routing profile overrides",
@@ -4098,9 +4266,8 @@ func TestNewCreateVPCHandler(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewCreateVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NewCreateVPCHandler() = %v, want %v", got, tt.want)
-			}
+			got := NewCreateVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg, nil)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -4145,9 +4312,8 @@ func TestNewUpdateVPCHandler(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewUpdateVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NewUpdateVPCHandler() = %v, want %v", got, tt.want)
-			}
+			got := NewUpdateVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg, nil)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -4274,9 +4440,8 @@ func TestNewDeleteVPCHandler(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewDeleteVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NewDeleteVPCHandler() = %v, want %v", got, tt.want)
-			}
+			got := NewDeleteVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg, nil)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

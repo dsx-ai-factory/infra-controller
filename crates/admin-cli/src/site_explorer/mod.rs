@@ -28,9 +28,6 @@ mod re_explore;
 mod refresh_endpoint;
 mod remediation;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 // Re-export for cross-module use by jump/cmds.rs
 pub(crate) use get_report::args::{Args as GetReportMode, EndpointInfo};

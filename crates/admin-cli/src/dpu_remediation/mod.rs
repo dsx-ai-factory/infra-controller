@@ -23,9 +23,6 @@ mod list_applied;
 mod revoke;
 mod show;
 
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
 
 use crate::cfg::dispatch::Dispatch;

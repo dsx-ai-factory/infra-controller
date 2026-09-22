@@ -21,16 +21,21 @@ use std::sync::Arc;
 use carbide_api_core::bootstrap::acquire_vault_import_work_lock;
 use carbide_api_core::cfg::file::{
     CarbideConfig, CredentialBackend, ImportSource, ProviderConfig, SecretsConfig,
+    UfmCredentialSource,
 };
 use carbide_api_core::secrets::{PostgresCredentialManager, SecretRouting, SecretsContext};
 use carbide_kms_provider::{
     DEFAULT_TRANSIT_MOUNT, IntegratedKmsProvider, KmsBackend, MultiKmsProvider, TransitKmsProvider,
 };
 use carbide_secrets::certificates::CertificateProvider;
-use carbide_secrets::credentials::{CredentialManager, CredentialReader, CredentialWriter};
+use carbide_secrets::chained_reader::{NonUfmCredentialReader, UfmBackendCredentialBlocker};
+use carbide_secrets::credentials::{
+    CredentialManager, CredentialPrefix, CredentialReader, CredentialWriter,
+    UfmCredentialMutationBlocker,
+};
 use carbide_secrets::{
-    CredentialConfig, ForgeVaultClient, MemoryCredentialStore, SpiffeIdentity, VaultConfig,
-    create_certificate_provider, create_credential_manager_from, create_vault_client,
+    CredentialConfig, ForgeVaultClient, MemoryCredentialStore, SecretsError, SpiffeIdentity,
+    VaultConfig, create_certificate_provider, create_credential_manager_from, create_vault_client,
 };
 use db::work_lock_manager::{self, WorkLockManagerHandle};
 use eyre::WrapErr;
@@ -52,6 +57,12 @@ pub(crate) struct RuntimeResources {
     pub work_lock_manager_handle: WorkLockManagerHandle,
     pub secrets_context: Option<SecretsContext>,
 }
+
+type CredentialRuntimeParts = (
+    Arc<dyn CredentialWriter>,
+    Vec<Box<dyn CredentialReader>>,
+    Option<SecretsContext>,
+);
 
 pub(crate) async fn setup_resources(
     carbide_config: &CarbideConfig,
@@ -88,18 +99,20 @@ pub(crate) async fn setup_resources(
     )
     .await?;
 
-    // Build the local-override readers (env, file); each is consulted only when
-    // its [credentials.*] section is enabled. The backends (postgres,
-    // vault) and the writer are chosen below.
-    let local_overrides = local_credential_readers(credential_config).await?;
+    // Build the local-override readers. The config-file credential source, if
+    // set, overrides the legacy environment-selected file source; env remains
+    // opt-in through its legacy environment configuration. The backends
+    // (postgres, vault) and the writer are chosen below.
+    let local_overrides = local_credential_readers(carbide_config, credential_config).await?;
 
     // With a [secrets] section, the credential chain and write target come from
-    // `backends`/`writer` -- defaulting to env -> file -> vault writing to vault,
-    // so the section alone changes nothing. The one-time vault import is
+    // `backends`/`writer` -- generally defaulting to env -> file -> vault
+    // writing to vault. `credentials.ufm_source` can retain that read order or
+    // select one authoritative UFM source. The one-time vault import is
     // independent: it runs iff `import_from` is set. Without the section, the
     // store comes from CARBIDE_CREDENTIAL_STORE: vault (the default), or an
     // in-memory store for development and testing.
-    let (credential_manager, secrets_context) = if let Some(secrets_config) =
+    let (writer, chain, secrets_context): CredentialRuntimeParts = if let Some(secrets_config) =
         &carbide_config.secrets
     {
         // Reject a nonsensical backends list before anything with side effects
@@ -156,7 +169,12 @@ pub(crate) async fn setup_resources(
             import_vault_secrets_once(
                 &db_pool,
                 &work_lock_manager_handle,
-                secrets_config,
+                VaultImportOptions {
+                    secrets: secrets_config,
+                    exclude_ufm: carbide_config
+                        .credentials
+                        .uses_authoritative_local_ufm_credentials(),
+                },
                 &routing,
                 kms.as_ref(),
                 &vault_client,
@@ -184,10 +202,7 @@ pub(crate) async fn setup_resources(
             CredentialBackend::Vault => vault_client.clone(),
             CredentialBackend::Postgres => pg_manager,
         };
-        (
-            create_credential_manager_from(writer, chain),
-            Some(SecretsContext { routing, kms }),
-        )
+        (writer, chain, Some(SecretsContext { routing, kms }))
     } else {
         let store: Arc<dyn CredentialManager> = match std::env::var("CARBIDE_CREDENTIAL_STORE")
             .as_deref()
@@ -202,14 +217,19 @@ pub(crate) async fn setup_resources(
             }
         };
         // env -> file -> the configured store; nothing from [secrets] applies.
+        // The local UFM blocker, when configured, stops before the store.
         let chain = local_overrides
             .into_iter()
             .chain(std::iter::once(
                 Box::new(store.clone()) as Box<dyn CredentialReader>
             ))
             .collect();
-        (create_credential_manager_from(store, chain), None)
+        (store, chain, None)
     };
+    // Apply the UFM mutation policy once, after selecting either persistent
+    // writer path, so the two setup branches cannot drift apart.
+    let writer = credential_writer_with_ufm_policy(carbide_config, writer);
+    let credential_manager = create_credential_manager_from(writer, chain);
 
     Ok(RuntimeResources {
         credential_manager,
@@ -256,9 +276,7 @@ async fn connect_postgres(config: &CarbideConfig) -> eyre::Result<PgPool> {
     // We need logs to be enabled at least at `INFO` level. Otherwise
     // our global logging filter would reject the logs before they get injected
     // into the `SqlxQueryTracing` layer.
-    let mut options = config
-        .database_url
-        .parse::<sqlx::postgres::PgConnectOptions>()?
+    let mut options = crate::postgres_connect_options(&config.database_url)?
         .log_statements(SQLX_STATEMENTS_LOG_LEVEL.as_log().to_level_filter());
     // The integration test opts out of TLS enforcement.
     if let Some(tls_config) = &config.tls
@@ -280,16 +298,113 @@ async fn connect_postgres(config: &CarbideConfig) -> eyre::Result<PgPool> {
         );
     }
 
-    Ok(sqlx::pool::PoolOptions::new()
+    let pool_options = sqlx::pool::PoolOptions::new()
         .max_connections(max_connections)
         // Lifecycle settings are operator-configurable; each `database_pool_*`
         // config field documents what it bounds. The defaults are sqlx's own,
         // so exposing them changes no behavior -- tuning belongs to the site.
         .acquire_timeout(config.database_pool_acquire_timeout)
         .idle_timeout(Some(config.database_pool_idle_timeout))
-        .max_lifetime(Some(config.database_pool_max_lifetime))
-        .connect_with(options)
-        .await?)
+        .max_lifetime(Some(config.database_pool_max_lifetime));
+
+    connect_with_retry(pool_options, options, config.database_startup_retry_timeout).await
+}
+
+/// Establish the initial database connection, retrying with bounded
+/// exponential backoff for up to `retry_timeout` instead of failing on the
+/// first error. A transient outage (failover, rolling upgrade, DNS blip)
+/// that clears within the window no longer takes the whole process down;
+/// a genuinely unreachable database still fails once the window elapses.
+///
+/// Each attempt itself is capped by whatever time remains in the window
+/// (independent of `database_pool_acquire_timeout`), so a single slow or
+/// hanging attempt -- e.g. a DNS lookup that never returns -- can't run
+/// the total past `retry_timeout`. Once the window is exhausted, no further
+/// attempt is even started -- the last error is returned as-is, so a
+/// connection that happens to become ready in that same instant doesn't
+/// count as succeeding within a window that's already closed. `retry_timeout`
+/// of zero attempts the connection exactly once, unbounded by this function
+/// (matching the old behavior, subject only to the pool's own
+/// `acquire_timeout`).
+async fn connect_with_retry(
+    pool_options: sqlx::pool::PoolOptions<sqlx::Postgres>,
+    connect_options: sqlx::postgres::PgConnectOptions,
+    retry_timeout: std::time::Duration,
+) -> eyre::Result<PgPool> {
+    const INITIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+    const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
+    // Runs one attempt, bounded to `remaining` (`None` for a zero
+    // `retry_timeout`, meaning unbounded here).
+    async fn try_connect(
+        pool_options: &sqlx::pool::PoolOptions<sqlx::Postgres>,
+        connect_options: &sqlx::postgres::PgConnectOptions,
+        remaining: Option<std::time::Duration>,
+    ) -> Result<PgPool, sqlx::Error> {
+        let attempt = pool_options.clone().connect_with(connect_options.clone());
+        match remaining {
+            Some(remaining) => tokio::time::timeout(remaining, attempt)
+                .await
+                .unwrap_or(Err(sqlx::Error::PoolTimedOut)),
+            None => attempt.await,
+        }
+    }
+
+    let start = std::time::Instant::now();
+    let mut retry_delay = INITIAL_RETRY_DELAY;
+    let time_remaining = |elapsed: std::time::Duration| {
+        (!retry_timeout.is_zero()).then(|| retry_timeout.saturating_sub(elapsed))
+    };
+
+    let mut error = match try_connect(
+        &pool_options,
+        &connect_options,
+        time_remaining(start.elapsed()),
+    )
+    .await
+    {
+        Ok(pool) => return Ok(pool),
+        Err(error) => error,
+    };
+
+    while !retry_timeout.is_zero() && start.elapsed() < retry_timeout {
+        let elapsed = start.elapsed();
+        tracing::warn!(
+            %error,
+            elapsed_secs = elapsed.as_secs_f64(),
+            retry_in_secs = retry_delay.as_secs_f64(),
+            "failed to connect to postgres at startup, retrying"
+        );
+        tokio::time::sleep(retry_delay.min(retry_timeout.saturating_sub(elapsed))).await;
+        retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
+
+        // The sleep above may have used up the rest of the window. Only
+        // attempt again if time actually remains -- otherwise stop without
+        // touching `error`, so a window that closes mid-sleep still reports
+        // the real error from the last actual attempt instead of a
+        // synthetic "out of time" one that would obscure it.
+        let Some(remaining) = time_remaining(start.elapsed()).filter(|r| !r.is_zero()) else {
+            break;
+        };
+        error = match try_connect(&pool_options, &connect_options, Some(remaining)).await {
+            Ok(pool) => return Ok(pool),
+            Err(error) => error,
+        };
+    }
+
+    let elapsed = start.elapsed();
+    tracing::warn!(
+        %error,
+        elapsed_secs = elapsed.as_secs_f64(),
+        "failed to connect to postgres at startup, giving up"
+    );
+    Err(error).wrap_err_with(|| {
+        if retry_timeout.is_zero() {
+            "failed to connect to postgres".to_string()
+        } else {
+            format!("failed to connect to postgres after retrying for {elapsed:.0?}")
+        }
+    })
 }
 
 fn validate_database_pool_durations(
@@ -304,26 +419,104 @@ fn validate_database_pool_durations(
 }
 
 async fn local_credential_readers(
-    config: &CredentialConfig,
+    carbide_config: &CarbideConfig,
+    credential_config: &CredentialConfig,
 ) -> eyre::Result<Vec<Box<dyn CredentialReader>>> {
-    let env_reader: Option<Box<dyn CredentialReader>> = if config.env.enabled() {
+    let env_reader: Option<Box<dyn CredentialReader>> = if credential_config.env.enabled() {
         Some(Box::new(
-            carbide_secrets::local_credentials::EnvCredentials::new(config.env.clone())?,
+            carbide_secrets::local_credentials::EnvCredentials::new(credential_config.env.clone())?,
         ))
     } else {
         None
     };
-    let file_reader: Option<Box<dyn CredentialReader>> = if config.file.enabled() {
+    let file_config = file_credentials_config(carbide_config, credential_config);
+    let file_reader: Option<Box<dyn CredentialReader>> = if file_config.enabled() {
         Some(Box::new(
-            carbide_secrets::local_credentials::FileCredentialsWatcher::new(config.file.clone())
-                .await?,
+            carbide_secrets::local_credentials::FileCredentialsWatcher::new(file_config).await?,
         ))
     } else {
         None
     };
-    // The local overrides that ended up enabled, in order -- always tried
-    // ahead of the backends.
-    Ok([env_reader, file_reader].into_iter().flatten().collect())
+    let mut local_readers: Vec<Box<dyn CredentialReader>> =
+        [env_reader, file_reader].into_iter().flatten().collect();
+    match carbide_config.credentials.ufm_source {
+        UfmCredentialSource::LocalFirst => Ok(local_readers),
+        UfmCredentialSource::Backend => {
+            let local_chain = carbide_secrets::ChainedCredentialReader::from(local_readers);
+            Ok(vec![Box::new(NonUfmCredentialReader::new(local_chain))])
+        }
+        UfmCredentialSource::Local => {
+            validate_local_ufm_credentials(carbide_config, &local_readers).await?;
+            tracing::info!(
+                "local environment/file sources own UFM credentials; persistent backend access is \
+                 disabled"
+            );
+            local_readers.push(Box::new(UfmBackendCredentialBlocker));
+            Ok(local_readers)
+        }
+    }
+}
+
+async fn validate_local_ufm_credentials(
+    carbide_config: &CarbideConfig,
+    local_readers: &[Box<dyn CredentialReader>],
+) -> eyre::Result<()> {
+    if !carbide_config
+        .ib_config
+        .as_ref()
+        .is_some_and(|config| config.enabled)
+    {
+        return Ok(());
+    }
+    for fabric in carbide_config.ib_fabrics.keys() {
+        let key = carbide_secrets::credentials::CredentialKey::UfmAuth {
+            fabric: fabric.clone(),
+        };
+        let mut found = false;
+        for reader in local_readers {
+            if reader.get_credentials(&key).await?.is_some() {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(SecretsError::UfmCredentialReadBlocked {
+                fabric: fabric.clone(),
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn file_credentials_config(
+    carbide_config: &CarbideConfig,
+    credential_config: &CredentialConfig,
+) -> carbide_secrets::FileCredentialsConfig {
+    carbide_config
+        .credentials
+        .file
+        .as_ref()
+        .map(|file| carbide_secrets::FileCredentialsConfig {
+            enabled: Some(true),
+            path: Some(file.path.clone()),
+            poll_interval: Some(file.poll_interval),
+        })
+        .unwrap_or_else(|| credential_config.file.clone())
+}
+
+fn credential_writer_with_ufm_policy(
+    carbide_config: &CarbideConfig,
+    writer: Arc<dyn CredentialWriter>,
+) -> Arc<dyn CredentialWriter> {
+    if carbide_config
+        .credentials
+        .uses_authoritative_local_ufm_credentials()
+    {
+        Arc::new(UfmCredentialMutationBlocker::new(writer))
+    } else {
+        writer
+    }
 }
 
 /// Build the KMS stack from the `[secrets.kms]` config: construct every
@@ -452,8 +645,10 @@ fn build_kms_backend(
 /// all-or-nothing bulk copy with no half-imported state to reason about.
 ///
 /// This is orthogonal to the reader chain and writer: an import seeds
-/// Postgres with vault's secrets, but the read order and write target stay
-/// exactly as `backends` / `writer` set them -- importing changes neither.
+/// Postgres with eligible Vault secrets, but the read order and write target
+/// stay exactly as `backends` / `writer` set them -- importing changes neither.
+/// UFM paths are ineligible while local sources own UFM credentials so the
+/// import cannot bypass that site-wide ownership boundary.
 ///
 /// Rolling upgrades still need care once writes move to Postgres: a replica
 /// running an older config can write rotated credentials to its own writer,
@@ -472,10 +667,15 @@ fn build_kms_backend(
 /// hard crash falls back to its lease expiry. Vault and KMS work is prepared
 /// before the transaction atomically commits every secret plus the marker, so
 /// an expired owner cannot write after a replacement takes over.
+struct VaultImportOptions<'a> {
+    secrets: &'a SecretsConfig,
+    exclude_ufm: bool,
+}
+
 async fn import_vault_secrets_once(
     db_pool: &PgPool,
     work_lock_manager: &WorkLockManagerHandle,
-    config: &SecretsConfig,
+    options: VaultImportOptions<'_>,
     routing: &SecretRouting,
     kms: &dyn KmsBackend,
     vault_client: &ForgeVaultClient,
@@ -501,20 +701,29 @@ async fn import_vault_secrets_once(
         // Strict enumeration: any list or read failure aborts the boot rather
         // than importing a subset and recording it as complete. The marker is
         // permanent, so a partial import here would be silent credential loss.
-        let secrets = vault_client
-            .get_secrets_strict()
+        let excluded_prefixes = if options.exclude_ufm {
+            &[CredentialPrefix::UfmAuth][..]
+        } else {
+            &[]
+        };
+        // The vault-token-refresh probe path is always excluded regardless
+        // of `excluded_prefixes` (see `vault_path_exclusion`), but that
+        // exclusion never sets `excluded_prefix_found`: the probe exists on
+        // every site that has ever authenticated to Vault, so counting it
+        // here would let a genuinely empty or misconfigured import source
+        // pass the empty-vault guard in `validate_vault_import_selection`
+        // below and permanently record nothing.
+        let (secrets, excluded_prefix_found) = vault_client
+            .get_secrets_strict_excluding_prefixes(excluded_prefixes)
             .await
             .map_err(eyre::Report::from)
             .wrap_err("enumerate vault secrets for import")?;
-        if secrets.is_empty() {
-            return Err(eyre::eyre!(
-                "vault enumeration returned no secrets; refusing to record an import from an empty vault. if this site really has no vault secrets, remove import_from from the [secrets] config; otherwise fix vault and restart"
-            ));
-        }
+        validate_vault_import_selection(secrets.len(), excluded_prefix_found)?;
 
         tracing::info!(
-            vault_secret_count = secrets.len(),
-            approach = ?config.import_approach,
+            import_secret_count = secrets.len(),
+            excluded_prefix_found,
+            approach = ?options.secrets.import_approach,
             "Importing secrets from vault"
         );
         let stats = carbide_api_core::secrets::import_vault_secrets(
@@ -523,7 +732,7 @@ async fn import_vault_secrets_once(
             routing,
             kms,
             &secrets,
-            config.import_approach,
+            options.secrets.import_approach,
         )
         .await
         .map_err(eyre::Report::new)
@@ -565,6 +774,19 @@ async fn import_vault_secrets_once(
     }
 }
 
+fn validate_vault_import_selection(
+    eligible_secret_count: usize,
+    excluded_prefix_found: bool,
+) -> eyre::Result<()> {
+    if eligible_secret_count == 0 && !excluded_prefix_found {
+        return Err(eyre::eyre!(
+            "vault enumeration returned no secrets; refusing to record an import from an empty vault. if this site really has no vault secrets, remove import_from from the [secrets] config; otherwise fix vault and restart"
+        ));
+    }
+
+    Ok(())
+}
+
 async fn is_import_complete(db_pool: &PgPool) -> eyre::Result<bool> {
     carbide_api_core::secrets::is_vault_import_complete(db_pool)
         .await
@@ -574,7 +796,295 @@ async fn is_import_complete(db_pool: &PgPool) -> eyre::Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use carbide_secrets::credentials::{CredentialKey, Credentials};
+
     use super::*;
+
+    #[test]
+    fn vault_import_allows_an_excluded_only_source() {
+        for (name, eligible_secret_count, excluded_prefix_found, expected_ok) in [
+            ("empty vault", 0, false, false),
+            ("only excluded UFM credentials", 0, true, true),
+            ("eligible credentials", 1, false, true),
+        ] {
+            assert_eq!(
+                validate_vault_import_selection(eligible_secret_count, excluded_prefix_found)
+                    .is_ok(),
+                expected_ok,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_credentials_file_overrides_environment_selected_file_source() {
+        let mut carbide_config = carbide_api_core::test_support::default_config::get();
+        carbide_config.credentials.ufm_source = UfmCredentialSource::Local;
+        carbide_config.credentials.file =
+            Some(carbide_api_core::cfg::file::CredentialFileSourceConfig {
+                path: "/var/run/secrets/nico/ufm/credentials.yaml".into(),
+                poll_interval: std::time::Duration::from_secs(17),
+            });
+        let credential_config = CredentialConfig {
+            file: carbide_secrets::FileCredentialsConfig {
+                enabled: Some(true),
+                path: Some("legacy-credentials.yaml".into()),
+                poll_interval: Some(std::time::Duration::from_secs(23)),
+            },
+            ..Default::default()
+        };
+
+        let file_config = file_credentials_config(&carbide_config, &credential_config);
+
+        assert!(file_config.enabled());
+        assert_eq!(
+            file_config.path(),
+            std::path::PathBuf::from("/var/run/secrets/nico/ufm/credentials.yaml")
+        );
+        assert_eq!(
+            file_config.poll_interval(),
+            std::time::Duration::from_secs(17)
+        );
+    }
+
+    #[tokio::test]
+    async fn ufm_source_controls_legacy_file_read_precedence() {
+        let dir = tempfile::tempdir().expect("create credential directory");
+        let path = dir.path().join("credentials.json");
+        let key = CredentialKey::UfmAuth {
+            fabric: "default".to_string(),
+        };
+        let local_credentials = Credentials::UsernamePassword {
+            username: "local-user".to_string(),
+            password: "local-token".to_string(),
+        };
+        let backend_credentials = Credentials::UsernamePassword {
+            username: "legacy-user".to_string(),
+            password: "legacy-token".to_string(),
+        };
+
+        enum Expected {
+            Local,
+            Backend,
+            Blocked,
+        }
+        let default_ufm_source =
+            carbide_api_core::cfg::file::CredentialsConfig::default().ufm_source;
+        let cases = [
+            (
+                "default preserves a legacy file override",
+                r#"{
+  "ufm_auth_by_fabric": {
+    "default": {
+      "username": "local-user",
+      "password": "local-token"
+    }
+  }
+}"#,
+                default_ufm_source,
+                Expected::Local,
+            ),
+            (
+                "default falls back when the legacy file has no entry",
+                "{}",
+                default_ufm_source,
+                Expected::Backend,
+            ),
+            (
+                "authoritative file entry",
+                r#"{
+  "ufm_auth_by_fabric": {
+    "default": {
+      "username": "local-user",
+      "password": "local-token"
+    }
+  }
+}"#,
+                UfmCredentialSource::Local,
+                Expected::Local,
+            ),
+            (
+                "authoritative local source miss",
+                "{}",
+                UfmCredentialSource::Local,
+                Expected::Blocked,
+            ),
+            (
+                "backend mode ignores local entry",
+                r#"{
+  "ufm_auth_by_fabric": {
+    "default": {
+      "username": "local-user",
+      "password": "local-token"
+    }
+  }
+}"#,
+                UfmCredentialSource::Backend,
+                Expected::Backend,
+            ),
+        ];
+
+        for (name, file_contents, ufm_source, expected) in cases {
+            tokio::fs::write(&path, file_contents)
+                .await
+                .unwrap_or_else(|error| panic!("{name}: write local credential snapshot: {error}"));
+            let mut carbide_config = carbide_api_core::test_support::default_config::get();
+            let ib_config = carbide_config.ib_config.get_or_insert_default();
+            ib_config.enabled = true;
+            carbide_config.credentials.ufm_source = ufm_source;
+            let credential_config = CredentialConfig {
+                env: carbide_secrets::EnvCredentialsConfig {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+                file: carbide_secrets::FileCredentialsConfig {
+                    enabled: Some(true),
+                    path: Some(path.clone()),
+                    poll_interval: Some(std::time::Duration::from_secs(60)),
+                },
+                ..Default::default()
+            };
+            let mut readers =
+                match local_credential_readers(&carbide_config, &credential_config).await {
+                    Ok(readers) => {
+                        assert!(
+                            !matches!(expected, Expected::Blocked),
+                            "{name}: local-source startup unexpectedly succeeded"
+                        );
+                        readers
+                    }
+                    Err(error) => {
+                        assert!(
+                            matches!(expected, Expected::Blocked),
+                            "{name}: build local readers: {error}"
+                        );
+                        assert!(
+                            error.to_string().contains("default")
+                                && error.to_string().contains("credentials.ufm_source"),
+                            "{name}: {error}"
+                        );
+                        continue;
+                    }
+                };
+            let backend = MemoryCredentialStore::default();
+            backend
+                .set_credentials(&key, &backend_credentials)
+                .await
+                .expect("seed persistent backend");
+            readers.push(Box::new(backend));
+            let chain = carbide_secrets::ChainedCredentialReader::from(readers);
+
+            let result = chain.get_credentials(&key).await;
+
+            match expected {
+                Expected::Local => assert_eq!(
+                    result.unwrap_or_else(|error| panic!("{name}: file lookup failed: {error}")),
+                    Some(local_credentials.clone()),
+                    "{name}"
+                ),
+                Expected::Backend => assert_eq!(
+                    result.unwrap_or_else(|error| panic!("{name}: backend lookup failed: {error}")),
+                    Some(backend_credentials.clone()),
+                    "{name}"
+                ),
+                Expected::Blocked => unreachable!("handled during startup validation"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn local_ufm_validation_skips_disabled_ib_management() {
+        let dir = tempfile::tempdir().expect("create credential directory");
+        let path = dir.path().join("credentials.json");
+        tokio::fs::write(&path, "{}")
+            .await
+            .expect("write empty credential snapshot");
+        let mut carbide_config = carbide_api_core::test_support::default_config::get();
+        carbide_config.ib_config = None;
+        carbide_config.credentials.ufm_source = UfmCredentialSource::Local;
+        carbide_config.credentials.file =
+            Some(carbide_api_core::cfg::file::CredentialFileSourceConfig {
+                path,
+                poll_interval: std::time::Duration::from_secs(60),
+            });
+        let credential_config = CredentialConfig {
+            env: carbide_secrets::EnvCredentialsConfig {
+                enabled: Some(false),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        local_credential_readers(&carbide_config, &credential_config)
+            .await
+            .expect("disabled IB management must not require dormant UFM credentials");
+    }
+
+    #[tokio::test]
+    async fn configured_ufm_source_controls_backend_mutations() {
+        let key = CredentialKey::UfmAuth {
+            fabric: "fabric-a".to_string(),
+        };
+        let credentials = Credentials::UsernamePassword {
+            username: "ufm-user".to_string(),
+            password: "ufm-token".to_string(),
+        };
+        let cases = [
+            (
+                "local ownership",
+                UfmCredentialSource::Local,
+                Some("local sources own all UFM credentials"),
+            ),
+            (
+                "local-first compatibility ownership",
+                UfmCredentialSource::LocalFirst,
+                None,
+            ),
+            ("backend ownership", UfmCredentialSource::Backend, None),
+        ];
+
+        for (name, ufm_source, blocked_message) in cases {
+            let mut carbide_config = carbide_api_core::test_support::default_config::get();
+            carbide_config.credentials.ufm_source = ufm_source;
+            let backend = Arc::new(MemoryCredentialStore::default());
+            let writer = credential_writer_with_ufm_policy(&carbide_config, backend.clone());
+
+            let result = writer.set_credentials(&key, &credentials).await;
+
+            if let Some(blocked_message) = blocked_message {
+                let error = result.expect_err("UFM backend mutation must be blocked");
+                assert!(
+                    matches!(
+                        &error,
+                        carbide_secrets::SecretsError::UfmCredentialMutationBlocked { .. }
+                    ),
+                    "{name}: {error}"
+                );
+                assert!(
+                    error.to_string().contains(blocked_message),
+                    "{name}: {error}"
+                );
+                assert_eq!(
+                    backend
+                        .get_credentials_from_writer(&key)
+                        .await
+                        .unwrap_or_else(|error| panic!("{name}: read backend: {error}")),
+                    None,
+                    "{name}"
+                );
+            } else {
+                result.unwrap_or_else(|error| panic!("{name}: write backend: {error}"));
+                assert_eq!(
+                    backend
+                        .get_credentials_from_writer(&key)
+                        .await
+                        .unwrap_or_else(|error| panic!("{name}: read backend: {error}")),
+                    Some(credentials.clone()),
+                    "{name}"
+                );
+            }
+        }
+    }
 
     /// The pool builder rejects zero-valued lifecycle settings before it
     /// touches the database, naming the offending field.
@@ -603,5 +1113,116 @@ mod tests {
                 "error must name `{field}`, got: {error}"
             );
         }
+    }
+
+    fn unreachable_connect_options() -> sqlx::postgres::PgConnectOptions {
+        // Nothing listens on this port on localhost, so the connection is
+        // refused immediately instead of hanging on a real timeout.
+        "postgres://user:pass@127.0.0.1:1/db"
+            .parse()
+            .expect("valid connection string")
+    }
+
+    fn bounded_pool_options() -> sqlx::pool::PoolOptions<sqlx::Postgres> {
+        // Some environments don't refuse a closed low port immediately (e.g.
+        // a firewall drops the SYN instead of sending RST), so each attempt
+        // is bounded explicitly rather than relying on the OS to fail fast.
+        sqlx::pool::PoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(200))
+    }
+
+    /// A `retry_timeout` of zero preserves the old behavior: fail on the
+    /// very first connection attempt, no retry, and the error doesn't
+    /// falsely claim it retried.
+    #[tokio::test]
+    async fn connect_with_retry_fails_immediately_when_timeout_is_zero() {
+        let start = std::time::Instant::now();
+        let error = connect_with_retry(
+            bounded_pool_options(),
+            unreachable_connect_options(),
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect_err("an unreachable database must fail");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "a zero retry timeout must not wait between attempts"
+        );
+        assert!(
+            !error.to_string().contains("retrying"),
+            "a single, unretried attempt must not claim it retried, got: {error}"
+        );
+    }
+
+    /// With a non-zero `retry_timeout`, a still-unreachable database keeps
+    /// getting retried until the window elapses, then fails -- it does not
+    /// give up on the first error, and it does not retry forever.
+    #[tokio::test]
+    async fn connect_with_retry_retries_until_timeout_then_fails() {
+        let retry_timeout = std::time::Duration::from_millis(1500);
+        let start = std::time::Instant::now();
+        let error = connect_with_retry(
+            bounded_pool_options(),
+            unreachable_connect_options(),
+            retry_timeout,
+        )
+        .await
+        .expect_err("a database that never becomes reachable must eventually fail");
+        assert!(
+            start.elapsed() >= retry_timeout,
+            "must keep retrying for the full window before giving up"
+        );
+        assert!(
+            error.to_string().contains("retrying for"),
+            "error should explain it gave up after retrying, got: {error}"
+        );
+    }
+
+    /// A hostname that can never resolve (DNS failure, not just a refused
+    /// TCP connection) is retried like any other connection error, and a
+    /// lookup that hangs can't run a single attempt past the remaining
+    /// window: total time stays close to `retry_timeout` either way.
+    #[tokio::test]
+    async fn connect_with_retry_bounds_a_dns_resolution_failure() {
+        // ".invalid" is reserved by RFC 2606 to never resolve.
+        let connect_options = "postgres://user:pass@nowhere.invalid/db"
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .expect("valid connection string");
+        let retry_timeout = std::time::Duration::from_millis(1500);
+        let start = std::time::Instant::now();
+        let error = connect_with_retry(bounded_pool_options(), connect_options, retry_timeout)
+            .await
+            .expect_err("a hostname that never resolves must eventually fail");
+        assert!(
+            start.elapsed() >= retry_timeout
+                && start.elapsed() < retry_timeout + std::time::Duration::from_secs(2),
+            "must give up close to the retry window even if DNS resolution hangs, took {:?}",
+            start.elapsed()
+        );
+        assert!(error.to_string().contains("retrying for"));
+    }
+
+    /// Once the retry window has fully elapsed, the loop gives up right
+    /// away instead of sleeping for a full backoff delay and trying again --
+    /// a `retry_timeout` shorter than the first backoff delay means the
+    /// window is already gone by the time the loop would otherwise retry.
+    #[tokio::test]
+    async fn connect_with_retry_does_not_retry_once_the_window_is_already_gone() {
+        let retry_timeout = std::time::Duration::from_millis(50);
+        let start = std::time::Instant::now();
+        let _ = connect_with_retry(
+            bounded_pool_options(),
+            unreachable_connect_options(),
+            retry_timeout,
+        )
+        .await
+        .expect_err("an unreachable database must fail");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "must give up as soon as the window closes rather than sleeping for a full \
+             backoff delay first, took {:?}",
+            start.elapsed()
+        );
     }
 }

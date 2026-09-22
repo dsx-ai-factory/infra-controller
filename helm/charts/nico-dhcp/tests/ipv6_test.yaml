@@ -1,0 +1,194 @@
+# Verify opt-in DHCPv6 wiring without letting its workload serve IPv4 clients.
+suite: DHCPv6 deployment
+templates:
+  - deployment.yaml
+  - deployment-v6.yaml
+  - configmap-v6.yaml
+  - service-v6.yaml
+  - configmap.yaml
+  - service.yaml
+  - metrics-service.yaml
+  - service-monitor.yaml
+release:
+  namespace: nico-system
+tests:
+  # Existing installations must not acquire any v6 resources by default.
+  - it: omits all DHCPv6 resources by default
+    templates: &v6Templates [deployment-v6.yaml, configmap-v6.yaml, service-v6.yaml]
+    asserts: &disabled
+      - hasDocuments:
+          count: 0
+
+  # Stored pre-IPv6 values can lack both new maps during an upgrade.
+  - it: accepts absent DHCPv6 values
+    templates: *v6Templates
+    set:
+      dhcp: null
+      v6ExternalService: null
+    asserts: *disabled
+
+  # A private-registry v6 pod needs its own selector and the existing credentials.
+  # Scaling IPv4 must not change the independent DHCPv6 writer count.
+  - it: runs one isolated Kea6 writer with socket and hook readiness checks
+    template: deployment-v6.yaml
+    set:
+      dhcp.v6Enabled: true
+      dhcp.v6ServerIdentifier: "020000000001"
+      global.imagePullSecrets: [{name: site-registry}]
+      replicas: 2
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+      - equal:
+          path: spec.replicas
+          value: 2
+        template: deployment.yaml
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+      - equal:
+          path: spec.selector.matchLabels
+          value: &v6Selector
+            app.kubernetes.io/name: nico-dhcp6
+            app.kubernetes.io/component: dhcp
+      - equal:
+          path: spec.template.metadata.labels
+          value: *v6Selector
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: nico-dhcp
+      - equal:
+          path: spec.template.spec.imagePullSecrets
+          value: [{name: site-registry}]
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'exec /sbin/kea-dhcp6 -c /var/run/kea/kea_config6.json'
+      - matchRegex:
+          path: spec.template.spec.containers[0].startupProbe.exec.command[2]
+          pattern: 'ss -H -6 -lun "sport = :547"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command[2]
+          pattern: 'http://\[::1\]:1089/ready'
+
+  # The hook alone gates Rapid Commit, while Kea must always be capable of it.
+  - it: uses a stable DUID and leaves the hook Rapid Commit gate off
+    template: configmap-v6.yaml
+    set:
+      dhcp.v6Enabled: true
+      dhcp.v6ServerIdentifier: "020000000001"
+    asserts:
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"server-id":\s*\{\s*"type": "LL",\s*"htype": 1,\s*"identifier": "020000000001",\s*"persist": false\s*\}'
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"rapid-commit": true'
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"hook-rapid-commit-v6": false'
+
+  # Site overrides must reach the hook without turning zero into a default.
+  - it: forwards DHCPv6 options while preserving the DHCPv4 endpoint
+    template: configmap-v6.yaml
+    set:
+      dhcp.v6Enabled: true
+      dhcp.v6ServerIdentifier: "020000000001"
+      dhcp.v6RapidCommit: true
+      dhcp.v6DnsServers: "2001:db8::53"
+      dhcp.v6NtpServers: "2001:db8::123"
+      config.kea.declineProbationPeriod: 0
+      config.kea.hookParameters.nicoMetricsEndpoint: "0.0.0.0:18089"
+      metrics.port: "65535"
+    asserts:
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"decline-probation-period": 0[,\s]'
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"carbide-metrics-endpoint": "\[::\]:65535"'
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"hook-rapid-commit-v6": true'
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"hook-dns-servers-ipv6": "2001:db8::53"'
+      - matchRegex:
+          path: data["kea_config6.json"]
+          pattern: '"hook-ntp-servers-ipv6": "2001:db8::123"'
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"carbide-metrics-endpoint": "0\.0\.0\.0:18089"'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["kea_config.json"]
+          pattern: '"nico-metrics-endpoint": "0\.0\.0\.0:18089"'
+        template: configmap.yaml
+
+  # Relay traffic must select the correct family and preserve UDP source ports.
+  - it: keeps relay Services separate and preserves external relay source addresses
+    template: service-v6.yaml
+    set:
+      dhcp.v6Enabled: true
+      dhcp.v6ServerIdentifier: "020000000001"
+      v6ExternalService.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 3
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6]
+        documentIndex: 0
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6]
+        documentIndex: 2
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+        documentIndex: 2
+      - equal:
+          path: spec.selector
+          value: *v6Selector
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv4]
+        template: service.yaml
+      - equal:
+          path: spec.selector
+          value:
+            app.kubernetes.io/name: nico-dhcp
+            app.kubernetes.io/component: dhcp
+        template: service.yaml
+
+  # Both exporters must remain discoverable after changing their shared port.
+  - it: exposes both metrics endpoints through the common ServiceMonitor
+    set:
+      dhcp.v6Enabled: true
+      dhcp.v6ServerIdentifier: "020000000001"
+      metrics.port: "18089"
+      config.kea.hookParameters.nicoMetricsEndpoint: "[::]:18089"
+      serviceMonitor.enabled: true
+    templates: [metrics-service.yaml, service-v6.yaml]
+    documentSelector:
+      path: metadata.labels["app.kubernetes.io/metrics"]
+      value: nico-dhcp
+      matchMany: true
+    asserts:
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: PreferDualStack
+      - equal:
+          path: spec.ports[0].port
+          value: 18089
+      - equal:
+          path: spec.ports[0].name
+          value: http
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/metrics"]
+          value: nico-dhcp
+        template: service-monitor.yaml
+      - equal:
+          path: spec.endpoints[0].port
+          value: http
+        template: service-monitor.yaml

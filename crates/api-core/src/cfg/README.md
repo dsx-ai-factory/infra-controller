@@ -13,9 +13,14 @@ the invalid key's full section path and source. Names inside intentionally
 dynamic maps, such as pool names and rack-profile IDs, remain user-defined;
 fields within each map value must still match the documented schema.
 
-The removed `force_dpu_nic_mode` key is explicitly recognized at the top level
-and under `[site_explorer]`, ignored, and reported as a deprecation warning.
-Use `site_explorer.dpu_policy` instead.
+The removed `force_dpu_nic_mode` and `rack_management_enabled` keys are
+explicitly recognized, ignored, and reported as deprecation warnings. Use
+`site_explorer.dpu_policy` instead of `force_dpu_nic_mode`.
+`rack_management_enabled` lost its last runtime consumer when
+[PR #1583](https://github.com/NVIDIA/infra-controller/pull/1583) made Expected
+Machine lookup during DHCP discovery unconditional. Remove both deprecated keys
+from site configuration; compatibility parsing does not restore their former
+behavior.
 
 ---
 
@@ -33,6 +38,7 @@ Use `site_explorer.dpu_policy` instead.
 | `database_pool_acquire_timeout` | `Duration` | `30s` | `server` | How long a caller may wait for a connection from the pool before the attempt fails (sqlx's own default); trips on a stalled database or a saturated pool alike. Must be greater than zero (startup rejects `0`). |
 | `database_pool_idle_timeout` | `Duration` | `10m` | `server` | Idle time after which the pool closes a connection, keeping the pool's own reaping well inside the Postgres server's 60-minute idle-session reaper. Must be greater than zero (startup rejects `0`). |
 | `database_pool_max_lifetime` | `Duration` | `30m` | `server` | Maximum age of a pooled connection before it is recycled, so the pool re-balances onto the current primary after a database failover. Must be greater than zero (startup rejects `0`). |
+| `database_startup_retry_timeout` | `Duration` | `5m` | `server` | How long to keep retrying the initial database connection at startup before giving up, so a transient outage (failover, rolling upgrade, DNS blip) doesn't take the process down. Retries use exponential backoff between attempts, starting at 1s and capped at 30s; each attempt itself is bounded by whatever time remains in this window (independent of `database_pool_acquire_timeout`), so total startup time never exceeds it. The last connection error is reported once the window elapses. `0` disables retrying: fail on the first attempt, bounded only by `database_pool_acquire_timeout` (the old behavior). |
 | `api_admission_control` | `ApiAdmissionControlConfig` | *(see below)* | `server` | Fair per-client admission with global execution and pending-request limits for gRPC and admin HTTP business requests. |
 | `ib_config` | `Option<IBFabricConfig>` | — | `hardware` | InfiniBand fabric configuration (see [IBFabricConfig](#ibfabricconfig)). |
 | `asn` | `u32` | **required** | `networking` | Autonomous System Number, fixed per environment. Used by nico-dpu-agent for `frr.conf` BGP routing. |
@@ -41,8 +47,9 @@ Use `site_explorer.dpu_policy` instead.
 | `route_servers` | `Vec<String>` | `[]` | `networking` | Route server IPs for L2VPN Ethernet Virtual network support. |
 | `enable_route_servers` | `bool` | `false` | `networking` | Enables route server injection into DPU FRR configs for L2VPN. |
 | `deny_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 CIDR prefixes that tenant instances are blocked from reaching. FNN generates family-specific NVUE ACL policies; all non-FNN virtualizers apply the IPv4 prefixes only. |
-| `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IP prefixes (v4/v6) assigned for tenant use within this site. |
-| `tenant_prefix_overlap_enabled` | `bool` | `false` | `networking` | Site opt-in for tenant prefix overlap admission. This setting has no effect until [#3890](https://github.com/NVIDIA/infra-controller/issues/3890) lands and does not change the existing database prefix constraints. Admission will also require site-wide `vpc_isolation_behavior = "mutual_isolation"` and participating FNN base profiles with `tenant_prefix_overlap_eligible = true`. |
+| `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 prefixes assigned for tenant use within this site. With `mutual_isolation`, ETV enforces the IPv4 prefixes with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL. With `open`, that ACL is not installed. On upgrade, authoritative Core scans persisted Ready and Deleting operator-managed SitePrefixes even when this list is empty. It assigns an unparented legacy VpcPrefix when exactly one operator root contains it; ambiguous parentage blocks startup. With a nonempty list, missing parentage also blocks startup. Listen-only replicas require an authoritative Core to assign unresolved lineage first. |
+| `site_fabric_null_routes` | `Option<Vec<IpNetwork>>` | `site_fabric_prefixes` | `networking` | IPv4 and IPv6 prefixes installed by FNN as blackhole routes under `mutual_isolation`. Omission inherits `site_fabric_prefixes`, retains removed operator-managed roots while they contain a VpcPrefix or VPC-attached direct NetworkPrefix, and reduces those inherited roots to their minimal exact union. Soft-deleted children retain coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative: each CIDR is canonicalized to its network boundary and exact duplicates are removed, but parent, child, and adjacent entries are not aggregated. An empty list (`[]`) installs no null routes. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. An effective `/0` null route and `leak_default_route_from_underlay = true` for the same address family are unsupported because the imported default wins the equal-prefix distance comparison. With `open`, the routes are not installed. Tenant prefix reuse follows the [overlap checks](#tenant-prefix-overlap-checks). |
+| `tenant_prefix_overlap_enabled` | `bool` | `false` | `networking` | Site opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). The existing `VpcPrefix` exclusion continues to prevent overlapping `VpcPrefix` persistence until the cutover tracked by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892). |
 | `max_site_prefixes_per_tenant` | `u32` | `8` | `networking` | Maximum tenant-managed SitePrefixes retained for one tenant at this site. Prefixes awaiting removal still count against this limit and keep their CIDR reserved. |
 | `anycast_site_prefixes` | `Vec<Ipv4Network>` | `[]` | `networking` | Aggregate IPv4 prefixes containing tenant-announced prefixes (e.g., BYOIP). **Deprecated.** Use [`routing_profiles.allowed_anycast_prefixes`](#fnnroutingprofileconfig) instead. |
 | `common_tenant_host_asn` | `Option<u32>` | — | `networking` | ASN that tenants use to peer with the DPU. If unset, any ASN is accepted. |
@@ -53,10 +60,12 @@ Use `site_explorer.dpu_policy` instead.
 | `listen_mode` | `ListenMode` | `Tls` | `server` | Transport mode: `plaintext_http1`, `plaintext_http2`, or `tls`. |
 | `auth` | `Option<AuthConfig>` | — | `server` | Authentication/authorization settings (see [AuthConfig](#authconfig)). |
 | `pools` | `Option<HashMap<String, ResourcePoolDef>>` | — | `networking` | Resource pools that allocate IPs, VNIs, etc. Required but `Option` for partial-config merging. |
-| `networks` | `Option<HashMap<String, NetworkDefinition>>` | — | `networking` | Networks created at startup. Alternative: `CreateNetworkSegment` gRPC. `NetworkDefinition` supports dual-stack seed-time segments with optional `prefix_v6` and `dhcpv6_link_address`; config edits do not retrofit prefixes onto an already-seeded segment because seed definitions are snapshotted on first create. |
+| `networks` | `Option<HashMap<String, NetworkDefinition>>` | — | `networking` | Networks to create at startup. Alternative: `CreateNetworkSegment` gRPC. `NetworkDefinition` supports IPv4-only, IPv6-only, and dual-stack segments with optional `prefix_v6` and `dhcpv6_link_address`. NICo saves the complete initial definition when it creates a segment. Later configuration edits do not update the existing segment or its saved definition. Refer to [Initial Network Configuration](../../../../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration) for all prefix combinations, gateway requirements, examples, and compatibility. |
 | `dpu_ipmi_tool_impl` | `Option<String>` | — | `machines` | IPMI tool implementation for DPU power control (`"prod"` or `"fake"`). |
 | `dpu_ipmi_reboot_attempts` | `Option<u32>` | — | `machines` | Retry count when IPMI errors during DPU reboot. |
 | `bmc_session_lockout_threshold` | `u32` | `3` | `security` | Consecutive BMC HTTP 401/403 responses before session-token login attempts stop for that BMC. |
+| `bmc_max_sessions_per_caller` | `usize` | `4` | `security` | Cap on outstanding Redfish sessions per calling service identity per BMC; a `GetBmcCredentials` mint past the cap revokes that caller's oldest sessions. Values below 1 are treated as 1. |
+| `bmc_proxy` | `Option<BmcProxyConfig>` | — | `security` | Routes this instance's ordinary BMC Redfish traffic — including established-endpoint credentialed exploration — through nico-bmc-proxy. Credential setup and rotation, session minting, exploration's anonymous vendor probes, and component-manager compute-tray power control (explicit per-endpoint credentials) always stay direct. |
 | `ib_fabrics` | `HashMap<String, IbFabricDefinition>` | `{}` | `hardware` | InfiniBand fabrics managed by the site. Currently only one fabric is supported. |
 | `initial_domain_name` | `Option<String>` | — | `machines` | Domain to create if none exist. Most sites use a single domain. |
 | `initial_dpu_agent_upgrade_policy` | `Option<AgentUpgradePolicyChoice>` | — | `machines` | Policy for nico-dpu-agent upgrades. Also settable via `nico-admin-cli`. |
@@ -64,19 +73,21 @@ Use `site_explorer.dpu_policy` instead.
 | `machine_update_run_interval` | `Option<u64>` | — | `machines` | Interval (seconds) at which the machine update manager checks for updates. |
 | `retained_boot_interface_window` | `Option<Duration>` | — | `machines` | How long a retained boot interface pair (`retained_boot_interfaces` table) stays applicable after its `machine_interfaces` row was deleted. Unset retains forever; set a window (e.g. `30d`) so a MAC reappearing on different hardware doesn't inherit an obsolete Redfish interface id. |
 | `site_explorer` | `SiteExplorerConfig` | *(see below)* | `hardware` | SiteExplorer hardware discovery settings (see [SiteExplorerConfig](#siteexplorerconfig)). |
-| `vpc_peering_policy` | `Option<VpcPeeringPolicy>` | — | `networking` | Policy for VPC peering based on network virtualization type at creation time. |
-| `vpc_peering_policy_on_existing` | `Option<VpcPeeringPolicy>` | — | `networking` | Policy for whether existing VPC peerings should be active. |
+| `vpc_peering_policy` | `Option<VpcPeeringPolicy>` | — | `networking` | VPC peering creation policy. `exclusive` admits capability-compatible pairs, while `none` or omission disables creation. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. ETV/FNN requests always return `InvalidArgument`. |
+| `vpc_peering_policy_on_existing` | `Option<VpcPeeringPolicy>` | — | `networking` | Activation policy for stored VPC peerings. Omission falls back to `vpc_peering_policy`. `exclusive` enables the virtualization-specific mechanism only for compatible pairs: ETV emits peer-prefix ACL permits, while FNN imports peer-VNI route targets. `none` disables both mechanisms. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. |
 | `attestation_enabled` | `bool` | `false` | `security` | Enables TPM-based machine attestation (adds `Measuring` state before `Ready`). |
 | `bmc_rotation_enabled` | `bool` | `false` | `security` | Site-wide kill-switch for passive BMC credential rotation. When `false` (default), a Ready host never auto-enters `RotatingBmc`; the force-converge escape hatch bypasses it. |
 | `uefi_rotation_enabled` | `bool` | `false` | `security` | Site-wide kill-switch for passive UEFI credential rotation (host and DPU). When `false` (default), a Ready host never auto-enters `RotatingHostUefi` nor drives its DPUs into `RotatingDpuUefi`; the per-machine force-converge escape hatch bypasses it. |
+| `nic_lockdown_ikm_rotation_enabled` | `bool` | `false` | `security` | Site-wide kill-switch for NIC lockdown IKM rotation. When `false` (default), the SuperNIC lock/unlock flow keeps deriving keys from each card's current tracked IKM version, so a staged `RotateCredential(lockdown_ikm)` bumps the site-wide target without migrating any card. When `true`, the assignment-cycle lock derives from the staged site-wide target, so cards migrate to the new IKM as tenants cycle. Unlock always derives from the version a card is actually locked under regardless of this flag, so flipping it off never bricks an already-migrated card. |
 | `bmc_factory_reset_on_instance_termination_enabled` | `bool` | `false` | `security` | Site-wide opt-in for factory-resetting the host BMC during tenant release. When `false` (default), tenant release proceeds directly to `PowerCycle`; when `true`, the release flow factory-resets the BMC, waits for it to return, restores the device's previous per-device credential, then continues with the existing power-cycle / boot-order repair. |
 | `tpm_required` | `bool` | `true` | `security` | Require TPM module for machine registration. **Testing only** when `false`. |
 | `machine_state_controller` | `MachineStateControllerConfig` | *(see below)* | `machines` | Machine state controller timing (see [MachineStateControllerConfig](#machinestatecontrollerconfig)). |
 | `network_segment_state_controller` | `NetworkSegmentStateControllerConfig` | *(see below)* | `networking` | Network segment state controller timing. |
 | `vpc_prefix_state_controller` | `VpcPrefixStateControllerConfig` | *(see below)* | `networking` | VPC prefix state controller timing. |
+| `extension_service_state_controller` | `ExtensionServiceStateControllerConfig` | *(see below)* | `machines` | DPU extension service state controller timing. |
 | `ib_partition_state_controller` | `IbPartitionStateControllerConfig` | *(see below)* | `hardware` | IB partition state controller timing. |
 | `dpa_interface_state_controller` | `DpaInterfaceStateControllerConfig` | *(see below)* | `networking` | DPA interface state controller timing. |
-| `rack_state_controller` | `RackStateControllerConfig` | *(see below)* | `hardware` | Rack state controller timing, optional ingestion firmware update, and primary-switch mTLS service selection. |
+| `rack_state_controller` | `RackStateControllerConfig` | *(see below)* | `hardware` | Rack state controller timing, optional automatic rack firmware and switch NVOS updates, and primary-switch mTLS service selection. |
 | `power_shelf_state_controller` | `PowerShelfStateControllerConfig` | *(see below)* | `hardware` | Power shelf state controller timing and optional rack firmware reprovisioning. |
 | `switch_state_controller` | `SwitchStateControllerConfig` | *(see below)* | `hardware` | Switch state controller timing and per-switch mTLS service selection. |
 | `spdm_state_controller` | `SpdmStateControllerConfig` | *(see below)* | `security` | SPDM state controller timing. |
@@ -85,7 +96,7 @@ Use `site_explorer.dpu_policy` instead.
 | `machine_updater` | `MachineUpdater` | *(see below)* | `machines` | Machine update policies (see [MachineUpdater](#machineupdater)). |
 | `max_find_by_ids` | `u32` | `100` | `server` | Max IDs accepted by `find_*_by_ids` APIs. |
 | `network_security_group` | `NetworkSecurityGroupConfig` | *(see below)* | `networking` | NSG settings (see [NetworkSecurityGroupConfig](#networksecuritygroupconfig)). |
-| `min_dpu_functioning_links` | `Option<u32>` | — | `machines` | Minimum functioning DPU links for healthy status. If unset, all must work. |
+| `min_dpu_functioning_links` | `Option<u32>` | unset (effective value `2`) | `machines` | Controls DPU ToR BGP health checks. Refer to [DPU ToR Uplink Health](../../../../docs/dpu-management/dpu_configuration.md#dpu-tor-uplink-health) for values and lifecycle effects. |
 | `host_health` | `HostHealthConfig` | *(default)* | `machines` | Host health monitoring thresholds for hardware health and DPU agent compliance. |
 | `observability` | `ObservabilityConfig` | *(default)* | `integrations` | Observability settings shared across all state controllers (see [ObservabilityConfig](#observabilityconfig)). |
 | `internet_l3_vni` | `u32` | `100001` | `networking` | Network infrastructure-provided L3 VNI for FNN VPC Internet connectivity. Combined with `datacenter_asn` for route-target. |
@@ -98,7 +109,7 @@ Use `site_explorer.dpu_policy` instead.
 | `bom_validation` | `BomValidationConfig` | *(see below)* | `machines` | BOM/SKU validation (see [BomValidationConfig](#bomvalidationconfig)). |
 | `bios_profiles` | `BiosProfileVendor` | *(default)* | `machines` | BIOS profiles by vendor/model for Redfish BIOS management. |
 | `selected_profile` | `BiosProfileType` | *(default)* | `machines` | Default BIOS profile type applied to machines. |
-| `dpa_config` | `Option<DpaConfig>` | — | `networking` | Cluster Interconnect (east-west Ethernet) config (see [DpaConfig](#dpaconfig)). |
+| `ewethers_config` | `Option<EwEthersConfig>` | — | `networking` | Cluster Interconnect (east-west Ethernet) config (see [EwEthersConfig](#ewethersconfig)). Accepts the legacy `dpa_config` section name; legacy inline `mqtt_endpoint`, `mqtt_broker_port`, `hb_interval`, and `auth` keys are migrated into `svpc` at load time with a deprecation warning. |
 | `dsx_exchange_event_bus` | `Option<DsxExchangeEventBusConfig>` | — | `integrations` | MQTT event bus for managed-host state publishing plus BMS metadata subscription and rack/isolation/heartbeat publishing (see [DsxExchangeEventBusConfig](#dsxexchangeeventbusconfig)). |
 | `datacenter_asn` | `u32` | `11414` | `networking` | Datacenter ASN used by FNN for DC-specific route targets. |
 | `nvlink_config` | `Option<NvLinkConfig>` | — | `hardware` | NvLink partitioning via NMX-C (see [NvLinkConfig](#nvlinkconfig)). |
@@ -107,7 +118,6 @@ Use `site_explorer.dpu_policy` instead.
 | `auto_machine_repair_plugin` | `AutoMachineRepairPluginConfig` | *(default)* | `machines` | Auto-repair configuration for failed machines. |
 | `vmaas_config` | `Option<VmaasConfig>` | — | `integrations` | VMaaS configuration for VM system integration (see [VmaasConfig](#vmaasconfig)). |
 | `mlxconfig_profiles` | `Option<HashMap<String, MlxConfigProfile>>` | — | `machines` | Named Mellanox NIC register configuration profiles for superNIC firmware flashing. TOML key: `mlx-config-profiles`. |
-| `rack_management_enabled` | `bool` | `false` | `hardware` | Standalone infrastructure manager mode for GB200/GB300/VR144. See doc comment for full behavioral changes. |
 | `rms` | `RmsConfig` | *(see below)* | `hardware` | Rack Manager Service configuration for API connectivity and mTLS (see [RmsConfig](#rmsconfig)). |
 | `rack_profiles` | `RackProfileConfig` | *(default)* | `hardware` | Rack profile definitions referenced by expected racks. |
 | `spdm` | `SpdmConfig` | *(see below)* | `security` | SPDM hardware attestation (see [SpdmConfig](#spdmconfig)). |
@@ -136,9 +146,11 @@ Use `site_explorer.dpu_policy` instead.
 | `log_history` | `LogHistoryConfig` | *(default)* | `integrations` | In-memory log history for the admin web live log viewer at `/admin/logs` (see [LogHistoryConfig](#loghistoryconfig)). |
 | `tracing` | `TracingConfig` | *(default)* | `integrations` | OTLP trace export settings (see [TracingConfig](#tracingconfig)). |
 | `secrets` | `Option<SecretsConfig>` | — | `security` | Secrets backend configuration. When present, the credential reader chain and write target are operator-configured (see [SecretsConfig](#secretsconfig)). |
+| `credentials` | `CredentialsConfig` | *(default)* | `security` | Operator-managed static credential sources and the UFM read/mutation policy (see [CredentialsConfig](#credentialsconfig)). The config stores source locations, not credential values. |
 | `dhcp_lease_expiry_handling` | `bool` | `false` | `networking` | Enables IP cleanup when a DHCP lease expires. |
 | `certificates` | `CertificatesConfig` | *(default)* | `security` | Certificate vending backend, selected independently of the credential store; the default shares the credential Vault (see [CertificatesConfig](#certificatesconfig)). |
 | `allow_insecure_discovery` | `bool` | `false` | `machines` | Allows machines to submit discovery without enforcing the request comes from the expected IP address. Needed for *Integration tests only*, should otherwise not be used. |
+| `scout_boot_interface_correction_enabled` | `bool` | `false` | `machines` | Controls whether NICo may reconcile a boot interface selection recorded as `RedfishChassisId` or `RedfishSerialNumber` after ordering DPU-attached Admin interfaces by the `domain:bus:device.function` PCI addresses in scout's `HardwareInfo`. The setting is read at startup. NICo records available comparisons in structured logs and `carbide_scout_pci_evaluations_total` regardless of this setting. When `false`, it does not change the selection. When `true`, reconciliation requires at least two eligible interfaces, a complete and unique candidate, `ManagedHostState::Ready` or `ManagedHostState::HostInit` with `MachineState::Discovered`, no `Instance` or primary interface prediction, and no conflicting or integrated-NIC primary. If the selected MAC is already desired and primary, NICo changes only the source to `ScoutReportPci`. Otherwise it updates the desired target and primary together and enqueues the state handler. A `Ready` host enters `BootConfiguring`; `HostInit` completes its reboot handshake first. |
 | `node_auth` | `NodeAuthConfig` | *(default)* | `security` | How Scout and the DPU-agent authenticate: bearer JWTs, machine mTLS client certificates, or both during a migration (see [NodeAuthConfig](#nodeauthconfig)). |
 
 ---
@@ -185,8 +197,20 @@ For product families other than `gb200` and `gb300`, the `GetRackProfile`
 `product_family` enum is `UNSPECIFIED`. The configured string remains available
 to descriptor-based RMS operations.
 
+Each `rack_capabilities.<role>` section also requires a `count` field. This
+field is independent of RMS: it tells the rack state machine how many devices
+with that role the rack must have before it can progress. A rack stays in
+`Created` until all three roles have at least `count` devices registered; it
+stays in `Discovering` until all three roles have at least `count` devices in
+`Ready` state. All three roles — `compute`, `switch`, and `power_shelf` —
+require a `count` regardless of which backends are set to `rms`. The third
+example below shows `count` on `compute` and `switch` even though those roles
+use non-RMS backends.
+
 The examples below only show the component-manager and rack-profile fields.
 Configure `[rms]` separately when NICo needs to call RMS.
+The `nsm` and `psm` backend values require externally managed services; the
+NICo deployment charts do not install NSM or PSM.
 
 Example: GB200 rack where all component-manager roles use RMS:
 
@@ -203,16 +227,38 @@ rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
 [rack_profiles.NVL72.firmware_object]
 url = "https://firmware.example.com/objects/nvl72.json"
 fetch_timeout = "30s"
+access_token_credential = "nvl72-artifacts"
 
 [rack_profiles.NVL72.rack_capabilities.compute]
 vendor = "NVIDIA"
+count = 18
 
 [rack_profiles.NVL72.rack_capabilities.switch]
 vendor = "NVIDIA"
+count = 9
 
 [rack_profiles.NVL72.rack_capabilities.power_shelf]
 vendor = "LiteOn"
+count = 8
 ```
+
+`firmware_object` supplies the SOT JSON for automatic rack firmware and switch
+NVOS image updates and for automatic compute-tray firmware updates during
+pre-ingestion. When `firmware_object` is configured for a profile with switches,
+the document must include an NVOS image whose firmware type matches
+`rack_hardware_class`. NICo requests `prod` when `rack_hardware_class` is
+omitted. RMS records an asynchronous update failure when the document does not
+contain the required image. If `firmware_object` is omitted, NICo skips both
+automatic rack maintenance phases and the compute-tray pre-ingestion update. An
+explicit maintenance request can supply a firmware object instead. If no
+firmware object is available while a switch in the maintenance scope is already
+waiting for an NVOS update, the rack transitions to `Error` instead of skipping
+the NVOS phase. `fetch_timeout` defaults to `30s`.
+
+`access_token_credential` optionally names a credential that contains a
+firmware artifact access token. NICo reads the secret when compute-tray
+pre-ingestion starts. When the field is omitted, NICo sends the RMS no-auth
+sentinel.
 
 Example: GB300 rack with Lenovo compute trays and Delta power shelves:
 
@@ -228,12 +274,15 @@ rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
 
 [rack_profiles.NVL72_GB300.rack_capabilities.compute]
 vendor = "Lenovo"
+count = 18
 
 [rack_profiles.NVL72_GB300.rack_capabilities.switch]
 vendor = "nvidia"
+count = 9
 
 [rack_profiles.NVL72_GB300.rack_capabilities.power_shelf]
 vendor = "delta"
+count = 6
 ```
 
 Example: only the component-manager power shelf backend uses RMS. The compute
@@ -253,8 +302,15 @@ url = "http://nsm.example.internal:50052"
 product_family = "gb200"
 rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
 
+[rack_profiles.NVL72_POWER.rack_capabilities.compute]
+count = 18
+
+[rack_profiles.NVL72_POWER.rack_capabilities.switch]
+count = 9
+
 [rack_profiles.NVL72_POWER.rack_capabilities.power_shelf]
 vendor = "Lite-On"
+count = 8
 ```
 
 Each rack that uses an RMS-backed operation must have a `rack_profile_id`
@@ -274,6 +330,78 @@ available for topology-specific flows.
 ---
 
 ## Sub-Structs
+
+### `BmcProxyConfig` — `bmc_proxy`
+
+Routes `nico-api` BMC Redfish traffic through `nico-bmc-proxy`. The proxy
+authenticates upstream itself, so clients from the proxied pools carry no BMC
+credentials.
+
+The proxied pools handle:
+
+- Machine-lifecycle Redfish traffic.
+- Credentialed exploration for endpoints with established stored root
+  credentials. The proxy resolves the same per-BMC credential key.
+
+Some traffic remains on the direct pools:
+
+- Every exploration cycle starts with a direct anonymous service-root probe
+  because vendor detection has no proxy path.
+- The power-shelf vendor fallback authenticates directly.
+- Component-manager compute-tray power control—the `core` compute-tray
+  backend and standalone servers—uses explicit per-endpoint credentials.
+- Credential-subject operations remain direct: first-contact exploration,
+  credential setup with factory or expected credentials, BMC session minting,
+  password rotation, and UEFI password management.
+
+The proxied pool rejects explicit credentials, so a misrouted request returns
+an error. The proxy presents a verifiable certificate, and connections to it
+keep certificate verification enabled.
+
+Keep these constraints in mind:
+
+- **Precedence.** This static section is independent of the dynamic
+  `site_explorer.bmc_proxy` development redirect configured by the
+  `set bmc-proxy` CLI command. The proxied pool ignores the dynamic redirect,
+  and the admin Redfish passthrough uses this section when both are configured.
+  The dynamic redirect continues to apply to clients from the direct pools.
+- **Basic authentication.** For BMCs without a `SessionService`, the proxy
+  uses HTTP Basic authentication. `GetBmcCredentials` provides these
+  credentials only when `allow_bmc_basic_auth_fallback` is enabled.
+  Otherwise, the BMC is unreachable through the proxied pool.
+- **Port.** `nico-bmc-proxy` always connects to the BMC through the standard
+  HTTPS port, 443. A BMC recorded with another Redfish port returns a
+  client-creation error that identifies the unsupported port.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | `bool` | `false` | Master switch for routing through `nico-bmc-proxy`. When `false`, traffic uses the direct pools; the independent dynamic `site_explorer.bmc_proxy` redirect remains in effect. |
+| `address` | `String` | `""` | Proxy address as `host:port` or `host` (the port defaults to the BMC proxy's 1079). Required when `enabled` is true; startup fails on an enabled section with an empty `address`. |
+| `client_cert` | `String` | `/var/run/secrets/spiffe.io/tls.crt` | PEM client certificate presented to the proxy's mTLS listener. |
+| `client_key` | `String` | `/var/run/secrets/spiffe.io/tls.key` | PEM private key for `client_cert`. |
+| `root_ca` | `String` | `/var/run/secrets/spiffe.io/ca.crt` | PEM bundle that verifies the proxy's server certificate. |
+
+#### Certificate lifecycle
+
+`client_cert`, `client_key`, and `root_ca` are read from disk, so certificate
+rotation is picked up without a restart:
+
+- The proxied Redfish pool and the admin passthrough client read the files at
+  startup, and an unreadable file fails startup. Each rebuilds its TLS client
+  from disk on the first request after a five-minute interval. A failed rebuild
+  keeps the previous client in service, increments
+  `carbide_api_bmc_proxy_client_reload_failures_total`, and defers the next
+  attempt until another five-minute interval has passed.
+- The nv-redfish proxied pool that site-explorer uses builds its client on
+  first use and rebuilds it at most once per five-minute interval, off the
+  request path. A failed rebuild keeps the previous client and logs a warning.
+  Until a first client exists, every request retries the build and returns the
+  read error.
+
+Rotate so that the outgoing certificate stays valid for at least five minutes
+after the new files are written, and alert on the reload-failure counter: a
+persistent failure means proxied BMC traffic stops when the stale certificate
+expires.
 
 ### `ApiAdmissionControlConfig`
 
@@ -408,10 +536,10 @@ shipped configuration selects a plaintext mode.
 | ------- | ------ | --------- | ------------- |
 | `enabled` | `bool` | `true` | Enables hardware discovery. |
 | `run_interval` | `Duration` | `120s` | Interval between exploration runs. |
-| `concurrent_explorations` | `u64` | `30` | Max nodes explored in parallel. |
-| `explorations_per_run` | `u64` | `90` | Max nodes explored per run. |
+| `concurrent_explorations` | `u64` | `100` | Max nodes explored in parallel. |
+| `explorations_per_run` | `u64` | `360` | Max nodes explored per run. |
 | `create_machines` | `bool` | `true` | When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true. Dynamically toggleable. |
-| `machines_created_per_run` | `u64` | `4` | Max ManagedHosts created per run. |
+| `machines_created_per_run` | `u64` | `100` | Max ManagedHosts created per run. |
 | `rotate_switch_nvos_credentials` | `bool` | `false` | Auto-rotate switch NVOS admin credentials. |
 | `override_target_ip` | `Option<String>` | — | **Deprecated.** Use `bmc_proxy`. Debug BMC IP override. |
 | `override_target_port` | `Option<u16>` | — | **Deprecated.** Use `bmc_proxy`. Debug BMC port override. |
@@ -428,8 +556,8 @@ shipped configuration selects a plaintext mode.
 
 ### `StateControllerConfig`
 
-Shared by all `*StateControllerConfig` structs (machine, network segment, VPC prefix, IB
-partition, DPA interface, rack, power shelf, switch, SPDM).
+Shared by all `*StateControllerConfig` structs (machine, network segment, VPC prefix, extension
+service, IB partition, DPA interface, rack, power shelf, switch, SPDM).
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
@@ -448,7 +576,7 @@ TOML section: `[rack_state_controller]`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
-| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | `scale_up_fabric_manager`, `scale_up_fabric_telemetry_interface` | mTLS certificate bindings applied to the primary switch before NMX cluster setup. A non-empty list replaces the default. Omission and `[]` both use the default. |
+| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack `ConfigureNmxCluster` uses a fixed `nvue_api` binding before RMS V2 selects and configures the primary switch. |
 
 ### `SwitchStateControllerConfig`
 
@@ -457,20 +585,20 @@ TOML section: `[switch_state_controller]`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
-| `switch_mtls_services` | `Vec<SwitchMtlsService>` | all four values below | mTLS certificate bindings applied by the per-switch certificate workflow. A non-empty list replaces the default. Omission and `[]` both use the default. |
+| `switch_mtls_services` | `Vec<SwitchMtlsService>` | all four values below | mTLS certificate bindings applied by switch state-controller operations and direct `ComponentConfigureSwitchCertificate` RPC calls. A non-empty list replaces the default. Omission and `[]` both use the default. |
 
-Both settings accept the same service names:
+`switch_mtls_services` accepts these RMS service values:
 
-| Value | Switch endpoint |
-|-------|-----------------|
-| `nvue_api` | NVUE REST API |
-| `scale_up_fabric_telemetry` | NMX-T cluster application (`nmx-telemetry`) |
-| `scale_up_fabric_manager` | NMX-C cluster application (`nmx-controller`) |
-| `scale_up_fabric_telemetry_interface` | NVOS gNMI server mTLS configuration |
+| Value | RMS service description |
+|-------|-------------------------|
+| `nvue_api` | NVUE REST API service |
+| `scale_up_fabric_telemetry` | Scale-up fabric telemetry service |
+| `scale_up_fabric_manager` | Scale-up fabric manager service |
+| `scale_up_fabric_telemetry_interface` | Scale-up fabric telemetry interface service |
 
-These lists select server-side certificate bindings. They do not enable the
-underlying service. For workflow scope, see
-[Switch Certificate Configuration](../../../../docs/architecture/state_machines/switch_configure_certificate.md).
+`switch_mtls_services` selects server-side certificate bindings. It does not
+enable the underlying service. For workflow scope, see
+[Switch Certificate Configuration](https://docs.nvidia.com/infra-controller/documentation/architecture/state-machines/switch-certificate-configuration).
 
 ### `ObservabilityConfig`
 
@@ -537,6 +665,14 @@ Extends `StateControllerConfig` with:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `vpc_prefix_drain_time` | `Duration` | `5m` | Time a VPC prefix must have 0 referencing network prefixes before release. |
+| `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
+
+### `ExtensionServiceStateControllerConfig`
+
+TOML section: `[extension_service_state_controller]`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
 
 ### `FirmwareGlobal`
@@ -630,7 +766,16 @@ Without configured DPF intercept topology, NICo deliberately preserves the estab
 | `dpu_nic_firmware_update_versions` | `Vec<String>` | *(BF2+BF3 NIC versions)* | DPU NIC firmware version strings. |
 | `dpu_enable_secure_boot` | `bool` | `false` | Enable secure boot flow for DPU provisioning via Redfish. |
 | `num_of_vfs` | `u32` | `16` | Number of hardware VFs configured per DPU PF during BlueField provisioning. Max `126`. Under DPF, changing this value changes the immutable BF3/generic-BF4 flavor and requires a carbide-api restart and DPU reprovisioning. Reducing it below the static inventory's previous effective VF count also removes desired VF ServiceInterfaces; because NICo does not prune them, operators must stop NICo, remove the omitted NICo ServiceInterfaces, re-ingest the DPUs, and restart. Configured intercept inventories remain valid only while every selected `vf_id` is both lower than this value and no greater than 15. |
+| `service_vpc_slot_count` | `u32` | `0` | Number of HBN interfaces reserved for externally coordinated service-VPC attachments on BF3 and generic BF4. Must be zero when `tenant_prefix_overlap_enabled = true`; otherwise startup fails. NICo generates stable names from `iface_svc_0` through `iface_svc_{N-1}`. The generated interfaces count toward HBN's 32-interface limit and increase its `nvidia.com/bf_sf` request. BF4 Astra ignores this field when generating interfaces, but the startup restriction still applies. |
+| `additional_managed_sf` | `u32` | `0` | Additional BF3/generic-BF4 SF capacity without a generated HBN interface. This value and `service_vpc_slot_count` are added to the managed SF count used to size or validate `PF_TOTAL_SF`. BF4 Astra ignores this field. |
 | `restart_ovs_on_use_admin_network_change` | `bool` | `false` | Restart OVS on DPU-OS agents when host `use_admin_network` changes. Containerized agents skip the local service restart and still ACK the network config. |
+
+With intercept bridging, both SF settings increase `PF_TOTAL_SF`, change the
+`DPUFlavor`, and require controlled DPU reprovisioning. Without intercept
+bridging, they consume the unchanged legacy `pf_total_sf_reserved` pool, and
+startup rejects an overcommit. NICo does not create bridges, ServiceInterfaces,
+service chains, IPAM, or application-service CRs for service-VPC slots; an
+external controller must coordinate them. Changes are read at API startup.
 
 To use `embedded`, build a site-specific BFB with an explicit
 `BOOTSTRAP_CA_PATH`. The build provides no repository or default CA fallback
@@ -650,7 +795,7 @@ client-certificate authentication is not used.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `max_network_security_group_size` | `u32` | `200` | Max expanded rules per NSG. |
-| `stateful_acls_enabled` | `bool` | `true` | Enable stateful ACLs (toggled on DPU via nvue). |
+| `stateful_acls_enabled` | `bool` | `true` | Allow stateful NSG creation and stateless-to-stateful updates, and enable supporting NVUE configuration on DPUs. When disabled, existing stateful NSGs remain editable but behave statelessly. |
 | `policy_overrides` | `Vec<NetworkSecurityGroupRule>` | `[]` | NSG rules injected before user-defined rules. |
 
 ### `FnnConfig`
@@ -670,8 +815,8 @@ client-certificate authentication is not used.
 | `route_target_imports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets imported into DPU VRFs for VPC routes. |
 | `route_targets_on_exports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets added to routes exported by the DPU. |
 | `internal` | `Option<bool>` | — (effective `false`) | Whether the profile uses internal VNI allocation. This property cannot be overridden on a VPC. |
-| `tenant_prefix_overlap_eligible` | `bool` | `false` | Base-profile opt-in for tenant prefix overlap admission. This setting has no effect until [#3890](https://github.com/NVIDIA/infra-controller/issues/3890) lands and cannot be overridden on a VPC. |
-| `leak_default_route_from_underlay` | `Option<bool>` | — (effective `false`) | Leak the default route from the underlay/default VRF into tenant VRFs. |
+| `tenant_prefix_overlap_eligible` | `bool` | `false` | Base routing profile opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). This setting cannot be overridden on a VPC. |
+| `leak_default_route_from_underlay` | `Option<bool>` | — (effective `false`) | Leak the default route from the underlay/default VRF into tenant VRFs. Do not enable this for an address family whose effective `site_fabric_null_routes` contains `/0`; the imported default has a better administrative distance than the equal-prefix blackhole. |
 | `leak_tenant_host_routes_to_underlay` | `Option<bool>` | — (effective `false`) | Leak tenant host routes into the underlay/default VRF. |
 | `tenant_leak_communities_accepted` | `Option<bool>` | — (effective `false`) | Honor route-leak communities sent by the tenant host OS. |
 | `accepted_leaks_from_underlay` | `Option<Vec<PrefixFilterPolicyEntry>>` | — (effective `[]`) | Specific underlay/default VRF prefixes allowed to leak into tenant VRFs. Routing only; does not affect ACLs. |
@@ -681,6 +826,107 @@ client-certificate authentication is not used.
 Unset properties retain presence information so a VPC's inline
 `routing_profile_overrides` can inherit them. After the named profile and VPC
 override are combined, properties still unset use the effective defaults above.
+
+### Tenant prefix overlap checks
+
+`tenant_prefix_overlap_enabled` defaults to `false`. When set to `true`, NICo
+checks whether two `VpcPrefix` records may reuse the same CIDR. It does not
+permit direct `NetworkPrefix` reuse or change the database constraints.
+
+An overlapping `VpcPrefix` pair is eligible only when all of these conditions
+are true:
+
+- The requested and existing CIDRs are identical, the existing `VpcPrefix` is
+  not deleted, and the `VpcPrefix` records belong to different VPCs. The VPCs
+  may belong to the same tenant and share one tenant-managed `SitePrefix`.
+- Both VPCs use FNN and have distinct `status.vni` values. Each VPC owns exactly
+  one VNI allocation across the internal and external pools, matching
+  `status.vni`. A retained previous allocation makes the VPC ineligible.
+- Each `VpcPrefix` is linked to a tenant-managed, `DatacenterOnly` `SitePrefix`
+  owned by its VPC tenant and containing the `VpcPrefix` CIDR. The requested
+  `SitePrefix` must be `Ready`; the existing `SitePrefix` may be `Ready` or
+  `Deleting`.
+- Site-wide `vpc_isolation_behavior` is `"mutual_isolation"`.
+- `site_global_vpc_vni` and `common_internal_route_target` are unset, and
+  `additional_route_target_imports` is empty, so they cannot bridge the VPCs.
+- The deprecated site-wide `anycast_site_prefixes` list is empty.
+- `dpu_config.service_vpc_slot_count` is zero. Service-VPC attachments have not
+  been qualified for overlapping prefixes; enabling overlap with reserved
+  service-VPC slots fails startup.
+- Each resolved FNN profile, after applying its VPC overrides, has
+  `tenant_prefix_overlap_eligible = true` and `internal = true`; has no import
+  or export route targets; disables default-route leakage, tenant-host-route
+  leakage, and tenant leak communities; and has no accepted underlay leaks or
+  allowed anycast prefixes.
+
+The FNN renderer falls back to `anycast_site_prefixes` for IPv4 when the profile
+has no IPv4 `allowed_anycast_prefixes`. The IPv6 list has no such fallback.
+The [chart's default configuration](../../../../helm/charts/nico-api/files/carbide-api-config.toml)
+sets `anycast_site_prefixes = ["0.0.0.0/0"]`; a site using that default must
+override it with `[]` to meet the overlap requirements.
+
+For an overlapping prefix, `CreateVpcPrefix` locks the participating VPCs
+until its transaction ends. Concurrent VNI changes or VPC deletion must wait,
+including for a VPC owned by another tenant.
+
+The gRPC `CreateNetworkSegment` and `AttachNetworkSegmentToVpc` handlers reject
+any direct prefix that overlaps a `VpcPrefix`, regardless of the site gate. The
+gRPC `CreateVpcPrefix` handler considers prefixes on attached segments. It may
+adopt only direct Tenant segment prefixes in the same VPC that are not already
+linked to a `VpcPrefix`; every other direct `NetworkPrefix` overlap on an
+attached segment is rejected. An unattached `CreateNetworkSegment` request does
+not run these checks, but a later attachment does.
+
+With `tenant_prefix_overlap_enabled = true`, peering creation, `VpcPrefix`
+creation, and VPC virtualization changes that add imports also check each
+affected receiver's local and imported prefixes. Core returns `InvalidArgument`
+if a change would make one VPC receive overlapping address space from different
+VPCs. Direct peer imports follow the renderer, including its independent VNI
+imports; there are no transitive peer imports. Prefixes awaiting removal still
+count. These writers also check the combined networks of each affected Instance,
+including Instances waiting for their network segments and pending replacements.
+
+VPC routing-profile changes check the affected tenant-serving FNN interfaces. Allocated Instances remain relevant even before their controllers leave Admin networking, including while waiting for network segments. Pending networks and deleting Instances not yet in the controller's return-to-Admin state also count. Core rejects unsafe routing-profile changes on these paths with `FailedPrecondition`, even before duplicate CIDRs exist. Unused definitions remain editable. Metadata updates, unchanged stored routing policy, and proven restrictions do not take the overlap transaction lock unless a concurrent update changes the policy they replace. With overlap enabled, `UpdateVpc` can return `FailedPrecondition` if the VPC changes while the request waits for its row lock. With overlap disabled, requests without `if_version_match` instead use the latest locked record and repeat any needed routing-policy checks. Explicit version conditions still apply in either mode.
+
+Instance allocation and network expansion check all VPCs used by the requested, current, and pending networks together, including their direct peer imports. An Instance must not connect to overlapping address space from different VPCs, even when those VPCs are otherwise isolated. Core returns `InvalidArgument` for that conflict. With overlap enabled, allocation and network expansion also check the effective FNN routing policy before duplicate CIDRs exist. Network expansion requires an eligible resolved routing profile and safe site-wide policy. NSG permits and stateful egress do not participate in overlap admission: FNN isolation is enforced by routing blackholes, which ACL policy cannot bypass.
+
+New prefix reuse requires coverage from the current `site_fabric_null_routes` configuration, or current `site_fabric_prefixes` when the override is omitted. Retained-state validation also uses retiring operator roots when the override is omitted, matching the routes sent to FNN. Retiring roots do not authorize new reuse. An explicit empty list disables tenant prefix reuse.
+
+When `tenant_prefix_overlap_enabled = false` but another VPC still uses the same addresses, Instance allocation and network expansion return `InvalidArgument`. Prefixes being deleted still count. Metadata edits and removal of unchanged interfaces remain available. A request cannot replace a pending network update. Requests that need admission take the overlap transaction lock before resource locks, including when the gate is off. A waiting Instance update reloads its dependencies but keeps its original configuration version. If that version changed, the request returns `FailedPrecondition`.
+
+With the gate off, peering and VPC virtualization changes also reject new imports of overlapping address space involving a tenant-managed `VpcPrefix`. Existing imports and nonexpanding changes remain available. Unsafe routing-profile changes are rejected where an affected Instance can reach that duplicate address space.
+
+Core checks retained prefixes, peer imports, Instance networks, and effective
+FNN policy before starting controllers or the API listener, including with
+`listen_only = true`. Startup network seeding and Admin VPC attachment check
+their changes before committing. An unsafe retained configuration fails startup.
+Tenant DPU configuration requests also check their retained networks before
+returning tenant interfaces; Admin-only responses remain available for cleanup.
+With overlap enabled, the policy checks apply to every retained FNN network on
+a DPU Instance, even before duplicate prefixes exist.
+These checks coordinate with admission writers through the same transaction
+lock. DPU configuration requests share the read lock with each other.
+A routing writer holding the exclusive lock blocks configuration requests
+across the site until its transaction ends.
+
+With overlap disabled, these startup and tenant DPU checks apply only to
+overlaps involving a tenant-managed `VpcPrefix`. Overlaps between existing
+operator-managed or rootless prefixes do not activate them. This preserves
+existing configurations, including Admin networks, without weakening the
+checks on tenant-managed prefixes retained after disabling overlap.
+
+Turning off the site or profile admission opt-in does not invalidate safely
+isolated existing networks. Prefixes and their tenant-managed SitePrefixes may
+be deleting while routes drain, but routing isolation, VNI ownership, and
+effective policy must remain safe. See
+[#5116](https://github.com/dsx-ai-factory/infra-controller/issues/5116) for the
+startup and writer checks, following the
+[peering and policy checks](https://github.com/dsx-ai-factory/infra-controller/issues/5114)
+and [Instance admission](https://github.com/dsx-ai-factory/infra-controller/issues/5115).
+
+Even when the application accepts an eligible pair, the existing `VpcPrefix`
+exclusion rejects overlapping `VpcPrefix` persistence until the cutover tracked
+by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892).
 
 ### `VpcDefinition`
 
@@ -698,18 +944,31 @@ override are combined, properties still unset use the effective defaults above.
 |-------|------|---------|-------------|
 | `prefix` | `IpNetwork` | **required** | IPv4 or IPv6 CIDR prefix accepted by a prefix-list policy. |
 
-### `DpaConfig`
+### `EwEthersConfig`
+
+Legacy site files may still name this section `[dpa_config]` (accepted as an
+alias) and may inline `mqtt_endpoint`, `mqtt_broker_port`, `hb_interval`, and
+`auth`; those keys are migrated into `svpc` at load time with a deprecation
+warning. Nest them under `[ewethers_config.svpc]` in new configurations.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `enabled` | `bool` | `false` | Enable Cluster Interconnect Network. |
-| `mqtt_endpoint` | `String` | `"mqtt.nico"` | MQTT broker host for DPA. |
-| `mqtt_broker_port` | `u16` | `1884` | MQTT broker port. |
+| `svpc_enabled` | `bool` | `false` | Enable the SVPC path. Not mutually exclusive with `astra_enabled`. |
+| `astra_enabled` | `bool` | `false` | Enable the Astra path. Not mutually exclusive with `svpc_enabled`. |
 | `subnet_ip` | `Ipv4Addr` | `0.0.0.0` | Base IPv4 address of the DPA subnet. |
 | `subnet_mask` | `i32` | `0` | CIDR prefix length for the DPA subnet. |
+| `monitor_run_interval` | `Duration` | `60s` | The interval at which the DPA monitor runs. |
+| `svpc` | `SvpcConfig` | *(defaults)* | SVPC MQTT connection settings (see [SvpcConfig](#svpcconfig)). |
+
+### `SvpcConfig`
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `mqtt_endpoint` | `String` | `"mqtt.forge"` | MQTT broker host for the SVPC path. |
+| `mqtt_broker_port` | `u16` | `1884` | MQTT broker port. |
 | `hb_interval` | `Duration` | `2m` | Heartbeat interval for DPA health checks. |
 | `auth` | `MqttAuthConfig` | *(none)* | MQTT authentication settings. |
-| `monitor_run_interval` | `Duration` | `60s` | The interval at which the DPA monitor runs. |
 
 ### `DsxExchangeEventBusConfig`
 
@@ -751,14 +1010,28 @@ events, so consumers handle them identically.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `enabled` | `bool` | `false` | Enable DPF Kubernetes deployment. |
-| `deployment_scoped_service_interfaces` | `bool` | `false` | Opt the complete DPF namespace into deployment-scoped `-bf3`, `-bf4`, and `-astra` DPUServiceInterfaces. Each resource selects Nodes in the remote DPU cluster through DPF's propagated `svc.dpu.nvidia.com/owned-by-dpudeployment=<namespace>_<deployment_name>` ownership label; management-cluster DPUNode deployment labels are not used for this selector. Enabling or disabling is a planned migration: stop NICo, remove old-mode NICo ServiceInterfaces in both transition directions, perform DPU re-ingestion, and restart. NICo neither detects nor deletes old-mode resources; skipping cleanup can leave competing interface generations active. Astra requires this setting. |
+| `deployment_scoped_service_interfaces` | `bool` | `false` | Migration knob for deployment-scoped DPUServiceInterfaces. BF3 sites (including BF3 GB200) and BF4-generic-only sites use unscoped interfaces by default for backward compatibility. BF4 Astra requires this setting so the whole DPF namespace uses scoped ServiceInterfaces and legacy unscoped ServiceInterfaces cannot also bind Astra nodes. When enabled, NICo removes legacy unscoped ServiceInterfaces before creating scoped replacements. If cleanup remains incomplete for ten minutes, NICo logs an error and continues waiting. If an operator manually completes unscoped cleanup, NICo creates scoped replacements. The setting is read only at startup. To return to unscoped interfaces, stop NICo, delete the scoped ServiceInterfaces and wait for their deletion, then restart NICo with this set to `false`. If scoped ServiceInterfaces exist, DPF initialization rejects a `false` value. |
 | `pf_total_sf_reserved` | `u32` | `30` | SF capacity reserved beyond the NICo-managed HBN, DHCP, and FMDS endpoints when an intercept-bridging inventory is configured. NICo sets `PF_TOTAL_SF` to the effective inventory's endpoint count plus this value for BF3 and generic BF4. Without configured intercept bridging, this value is the complete `PF_TOTAL_SF`, preserving the legacy default of `30`; BF4 Astra retains its fixed flavor and ignores this setting. Changing this value changes the BF3/generic-BF4 flavor. Every intercept-inventory change requires controlled ServiceInterface cleanup and DPU re-ingestion, even when the serialized flavor and its hash remain unchanged. Operators must select a value compatible with their platform's SF and BAR capacity. With configured intercept bridging, startup rejects configurations whose managed endpoint count plus reserve exceeds `u32::MAX`. |
 | `dpu_service_sync_enabled` | `bool` | `true` | Whether NICo rolls a changed DPUService out on its own, by releasing the DPF maintenance hold on hosts whose DPUs already match their DPUDeployment. Selects *who* opens the gate, never whether one exists: DPF is always configured to park a changed DPUService behind a hold, so no service update reaches a DPU unchecked. Setting `false` does not resume unchecked rollout — the held DPUs wait for an operator to release them deliberately. Hosts still awaiting reprovisioning, and hosts carrying a live tenant instance, keep their hold either way. |
 | `dpu_agent_bootstrap_ca` | `DpfDpuAgentBootstrapCa` | `legacy_download` | Bootstrap trust for the containerized DPU agent. Supports `legacy_download` and `mounted`, as described in the following examples. |
 | `services` | `Box<DpfMandatoryServicesConfig>` | built-in mandatory-service defaults | Helm chart, image, pull-secret, and `extra_helm_values` settings for the six mandatory DPF services. |
-| `docker_image_pull_secret` | `Option<String>` | — | Override for the Kubernetes `imagePullSecrets` entry used to pull mandatory-service images (applied to every mandatory service except `dts` and `doca_hbn`, which take a pull secret only from their per-service config). |
+| `extra_services` | `Box<DpfExtraServicesConfig>` | built-in extra-service defaults | Site-wide Helm chart, image, pull-secret, and `extra_helm_values` settings for deployment-specific services. BF4 Astra uses Weave DHCP agent, Weave flow controller, and Xplane; BF3 and generic BF4 do not render them. |
+| `docker_image_pull_secret` | `Option<String>` | — | Override for the Kubernetes `imagePullSecrets` entry used to pull mandatory-service images (applied to every mandatory service except `dts` and `doca_hbn`, which take a pull secret only from their per-service config). It is the fallback for an Astra extra service that has no per-service pull secret. |
 | `proxy` | `Option<DpfProxyDetails>` | — | Proxy configuration for the DPU. When set, containerd on the DPU routes outbound HTTPS traffic through it. |
-| `deployments` | `DpfDeploymentsConfig` | *(default)* | Per-generation DPUDeployment configurations. BF3 is always present with defaults; BF4 variants are opt-in. BF4 Astra gets default Weave DHCP agent, Weave flow controller, and Xplane services; `extra_services` can replace any of those definitions. |
+| `extra_bfcfg_parameters` | `Vec<String>` | `[]` | `bf.cfg` lines appended to each deployment's [DPUFlavor `bfcfgParameters`](https://networking-docs.nvidia.com/dpf/26.4.1/dpuflavor) — for example, a DPU login password (`ubuntu_PASSWORD='$6$...'`). These site-wide lines are appended first, followed by that deployment's own `extra_bfcfg_parameters`. Entries are passed through verbatim; NICo applies no quoting or interpretation. Entries containing `{{` are rejected at startup. Changing this list creates a new DPUFlavor resource and reprovisions the affected deployment's DPUs; the new parameters take effect during DPU re-install. |
+| `deployments` | `DpfDeploymentsConfig` | *(default)* | Per-generation DPUDeployment configurations. BF3 is always present with defaults; BF4 variants are opt-in. A deployment can override individual fields of its supported extra services. |
+
+### `DpfDeploymentConfig`
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `bfb_url` | `Option<String>` | BF3 bf-bundle URL | BlueField firmware bundle used for BF3 provisioning. Mutually exclusive with `bluefield_software`; BF4 requires `bluefield_software` instead. |
+| `bluefield_software` | `Option<BlueFieldSoftwareConfig>` | — | BF4 OS ISO and PSID-to-PLDM firmware source. BF4 requires this field with at least one `pldm_fw_bundle` entry. |
+| `flavor_name` | `String` | `carbide-dpu-flavor` | Base name for the generated BF3/generic-BF4 `DPUFlavor` or Astra `DPUFlavorTemplate`. |
+| `deployment_name` | `String` | `nico-deployment-v2` | Name of the generated `DPUDeployment`. |
+| `node_label_key` | `String` | `carbide.nvidia.com/controlled.node.v2` | Label key used to select DPU nodes for this deployment. |
+| `services` | `Option<Box<DpfMandatoryServicesConfig>>` | inherit `[dpf.services]` | Optional complete per-deployment mandatory-service override. Omitted service entries use built-in defaults rather than top-level values. |
+| `extra_services` | `BTreeMap<DpfExtraService, DpfServiceConfigOverride>` | `{}` | Deployment-local overlays for supported extra services. |
 
 Every active DPF deployment must use distinct `deployment_name`, `flavor_name`, and `node_label_key` values. A deployment `node_label_key` must not be `feature.node.kubernetes.io/dpu-enabled`, which marks every DPF-managed node, or `carbide.nvidia.com/host-bmc-ip`, whose per-node contextual value is the host BMC address. These checks use the local configuration and do not query or modify cluster resources.
 
@@ -822,7 +1095,7 @@ be propagated there by DPF.
 | `client_cert` | `Option<String>` | — | Path to the client certificate PEM for mTLS. |
 | `client_key` | `Option<String>` | — | Path to the client private key PEM for mTLS. |
 | `enforce_tls` | `bool` | `true` | Enforce TLS when connecting to RMS. |
-| `scale_up_fabric_manager_api_version` | `ScaleUpFabricManagerApiVersion` | `v1` | ScaleUpFabric Manager configuration API: `v1` uses the synchronous call after disabling ScaleUpFabric state; `v2` submits an asynchronous job and polls it to completion. |
+| `scale_up_fabric_manager_api_version` | `ScaleUpFabricManagerApiVersion` | `v2` | **Deprecated.** Accepted and ignored. Accepts `v1` or `v2`; any other value fails config load. ScaleUpFabricManager configuration submits an asynchronous job and polls it to completion. |
 
 ### `SpdmConfig`
 
@@ -861,6 +1134,22 @@ be propagated there by DPF.
 | `run_interval` | `Duration` | `60s` | Validation check interval. |
 | `stale_run_timeout` | `Duration` | `24h` | Grace period before an active validation run is considered stale. Values below `90s` are raised to `90s` to avoid marking healthy heartbeat-based runs stale. |
 | `tests` | `Vec<MachineValidationTestConfig>` | `[]` | Per-test enable/disable overrides. |
+| `approved_plugin_registries` | `Vec<String>` | `[]` | Registries allowed for Machine Validation plugin images. Empty denies plugin registration; legacy tests are unaffected. |
+| `allowed_plugin_types` | `Vec<String>` | `["container"]` | Plugin execution types allowed for the site. Empty denies plugin registration; the only accepted value is `container`. |
+| `allow_privileged_plugins` | `bool` | `false` | Allows registration of plugins that request the privileged container profile. |
+| `allow_full_host_plugins` | `bool` | `false` | Allows registration of privileged plugins that request a writable host-root mount. Each revision still needs separate approval before it can be enabled. |
+| `attempt_logs` | `MachineValidationAttemptLogConfig` | enabled, 16 KiB/chunk, 1 MiB/attempt, 30d | Site-wide storage policy for Machine Validation attempt logs. |
+
+### `MachineValidationAttemptLogConfig`
+
+TOML section: `[machine_validation_config.attempt_logs]`.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | `bool` | `true` | Persists plugin stdout/stderr chunks. When false, appended chunks are discarded. |
+| `max_chunk_bytes` | `usize` | `16384` | Maximum stored UTF-8 bytes per chunk; must be greater than zero and no more than `16384` when enabled. |
+| `max_attempt_bytes` | `usize` | `1048576` | Maximum total stored UTF-8 bytes per attempt; must be at least `max_chunk_bytes` and no more than `1048576` when enabled. |
+| `retention` | `Duration` | `30d` | Non-negative retention duration for terminal-attempt logs. Cleanup runs in bounded batches even when Machine Validation is disabled. |
 
 ### `BomValidationConfig`
 
@@ -868,7 +1157,7 @@ be propagated there by DPF.
 | ------- | ------ | --------- | ------------- |
 | `enabled` | `bool` | `false` | Enable BOM/SKU validation. |
 | `ignore_unassigned_machines` | `bool` | `false` | Let machines without a SKU bypass validation. |
-| `allow_allocation_on_validation_failure` | `bool` | `false` | Keep machines allocatable even when validation fails. |
+| `allow_allocation_on_validation_failure` | `bool` | `false` | Keep machines with assigned SKUs allocatable on validation failure; does not bypass unassigned machines. |
 | `find_match_interval` | `Duration` | `5m` | Interval between SKU match attempts. |
 | `auto_generate_missing_sku` | `bool` | `false` | Auto-create missing SKUs from expected machines. |
 | `auto_generate_missing_sku_interval` | `Duration` | `5m` | Interval between auto-generate attempts. |
@@ -904,15 +1193,78 @@ be propagated there by DPF.
 | `max_megabytes` | `usize` | `128` | Maximum amount of recent log history retained in memory, in MiB. Oldest lines are evicted once the budget is exceeded. |
 | `page_size` | `usize` | `500` | Number of lines sent in the initial view and in each scrollback page of the live log viewer. |
 
+### `CredentialsConfig`
+
+The optional `[credentials]` section configures non-secret locations from which
+NICo reads operator-managed credentials. Non-UFM credentials continue to read
+the local environment and file sources before the configured persistent
+backends. `ufm_source` controls the read precedence and mutation policy for UFM
+credentials.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `ufm_source` | `UfmCredentialSource` | `local_first` | UFM credential policy. `local_first` reads environment/file entries before falling back to the persistent backend and writes to the backend. `backend` ignores local UFM entries. `local` makes environment/file entries authoritative and rejects persistent-backend UFM mutations. |
+| `file` | `Option<CredentialFileSourceConfig>` | — | Watched JSON or YAML static-credential file (see [CredentialFileSourceConfig](#credentialfilesourceconfig)). When present, it replaces the legacy file source selected by `CARBIDE_CREDENTIALS_FILE_*`; the environment source remains first when enabled. |
+
+When `ufm_source = "local"` and InfiniBand management is enabled, startup
+requires a local `ufm_auth_by_fabric` entry for every configured fabric. The
+mode is all-or-nothing: NICo does not fall back to Vault or Postgres for a
+missing fabric. When `ufm_source` is omitted, `local_first` preserves the
+pre-existing local-override behavior.
+
+#### Environment credential source
+
+The environment source is disabled by default. Set
+`CARBIDE_CREDENTIALS_ENV_ENABLED=true` on the `nico-api` process to enable it;
+the only accepted boolean values are `true` and `false`. The optional
+`CARBIDE_CREDENTIALS_ENV_PREFIX` overrides the default
+`CARBIDE_STATIC_CREDENTIAL_` prefix. Trailing underscores are removed from the
+configured prefix, then `__` separates each nested field.
+
+For example, these variables provide both fields required for the `default`
+UFM fabric using the default prefix:
+
+```bash
+export CARBIDE_CREDENTIALS_ENV_ENABLED=true
+export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__USERNAME=ignored-for-token-or-certificate-auth
+export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=bearer-token-or-empty
+```
+
+Environment credentials are snapshotted at process startup. Changing them
+requires restarting `nico-api`; use the watched file source for runtime
+credential rotation. With `ufm_source = "local_first"`, an environment entry
+overrides the corresponding file and persistent-backend entries. With
+`ufm_source = "local"`, every configured fabric must be present in the enabled
+environment/file sources.
+
+### `CredentialFileSourceConfig`
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `path` | `PathBuf` | **required** | Absolute or working-directory-relative path to a JSON or YAML credential file. The file must exist and parse at startup. |
+| `poll_interval` | `Duration` | `60s` | Nonzero interval used in addition to filesystem events to detect projected-Secret replacements. Startup rejects zero. |
+
+The watcher keeps the last valid snapshot when a reload fails. A UFM-only YAML
+file has the following shape; both `username` and `password` are required. The
+password is the bearer token, while an empty password selects the default
+SPIFFE client certificate:
+
+```yaml
+ufm_auth_by_fabric:
+  default:
+    username: ignored-for-token-or-certificate-auth
+    password: bearer-token-or-empty
+```
+
 ### `SecretsConfig`
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `kms` | `KmsConfig` | **required** | KMS backend configuration (see [KmsConfig](#kmsconfig)). |
 | `routing` | `HashMap<String, String>` | **required** | Maps path prefixes to the `kek_id` that encrypts new writes under them, longest prefix winning. A `/` catch-all entry is required. Reads never consult routing — every stored row records the KEK that wrote it. |
-| `backends` | `Vec<CredentialBackend>` | `[vault]` | The credential backend read order, highest priority first (first match wins). The local-override readers (env, file) are always tried ahead of these when enabled. |
-| `writer` | `CredentialBackend` | `vault` | Where new credential writes go. Set to `postgres` to send new writes to the journal; independent of `backends`. |
-| `import_from` | `Option<ImportSource>` | — | A source backend to import secrets from at startup. Unset means a fresh site with nothing to import; unsupported values fail config parsing. |
+| `backends` | `Vec<CredentialBackend>` | `[vault]` | The persistent-backend read order, highest priority first (first match wins). Enabled local overrides are tried first for non-UFM credentials. UFM reads use these backends directly in `backend` mode and as fallback in `local_first` mode. |
+| `writer` | `CredentialBackend` | `vault` | Where new credential writes go. Set to `postgres` to send new writes to the journal; independent of `backends`. UFM mutations are rejected when `credentials.ufm_source = "local"`. |
+| `import_from` | `Option<ImportSource>` | — | A source backend to import secrets from at startup. Only `vault` is supported. When `credentials.ufm_source = "local"`, the import does not traverse or read `ufm/`; an import containing only excluded UFM entries still records completion. Unset means a fresh site with nothing to import. |
 | `import_approach` | `ImportApproach` | `missing_only` | How to treat secrets that already exist in Postgres during import. |
 
 ### `KmsConfig`
@@ -920,7 +1272,18 @@ be propagated there by DPF.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `active` | `String` | **required** | The provider that wraps DEKs for new writes. |
-| `providers` | `HashMap<String, KmsProviderConfig>` | **required** | Named provider configurations. |
+| `providers` | `HashMap<String, ProviderConfig>` | **required** | Named provider configurations (see [ProviderConfig](#providerconfig)). |
+
+### `ProviderConfig`
+
+Each entry in `providers` is tagged by `type`. Unknown fields are rejected.
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `type` | `"integrated"` or `"transit"` | **required** | `integrated` holds key material in the NICo process; `transit` wraps and unwraps DEKs in Vault/OpenBao Transit so KEK material never leaves the KMS. |
+| `keys` (`integrated`) | `HashMap<String, KeySource>` | **required, non-empty** | Maps each `kek_id` to where its base64-encoded 256-bit key loads from: `{ env = "NAME" }`, `{ file = "/path" }`, or `{ value = "<base64>" }`. Each key must decode to exactly 32 bytes; a missing variable or unreadable file fails the boot, and a key file readable by group or others logs a warning. Inline `value` is development/test-only because the config is logged at startup and shown on the admin web page. |
+| `keys` (`transit`) | `Vec<String>` | **required** | Transit key names this provider answers for. |
+| `transit_mount` (`transit`) | `Option<String>` | `"transit"` | Secrets-engine mount path. Transit requires a static token in `VAULT_TOKEN`; the Kubernetes service-account login flow is not supported for Transit. |
 
 ### `CertificatesConfig`
 

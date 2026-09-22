@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"testing"
+	"time"
 
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
@@ -357,6 +358,7 @@ func TestGetInfrastructureProviderForOrg(t *testing.T) {
 			}
 		})
 	}
+
 }
 
 func TestGRPCStatusMessage(t *testing.T) {
@@ -515,6 +517,7 @@ func TestGetTenantForOrg(t *testing.T) {
 			}
 		})
 	}
+
 }
 
 func TestGetTenantFromTenantIDOrOrg(t *testing.T) {
@@ -772,7 +775,9 @@ func TestGetIPBlockFromIDString(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := GetIPBlockFromIDString(ctx, nil, tc.ipBlockID, dbSession)
+			filter := cdbm.IPBlockFilterInput{}
+			filter.TenantAllocated(tenant.ID)
+			s, err := GetIPBlockFromIDString(ctx, nil, tc.ipBlockID, filter, dbSession)
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err == nil {
 				assert.NotNil(t, s)
@@ -1045,6 +1050,13 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 
 		mc := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(inst1.ID), uuid.New(), nil, nil, nil, mcStatus)
 		assert.NotNil(t, mc)
+		if i == 21 || i == 22 {
+			_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
+				MachineID: mc.ID,
+				Labels:    map[string]string{"failure-domain": "fd-a"},
+			})
+			assert.NoError(t, err)
+		}
 
 		mit := testCommonBuildMachineInstanceType(t, dbSession, mc.ID, inst1.ID)
 		assert.NotNil(t, mit)
@@ -1053,8 +1065,25 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 	tests := []struct {
 		name         string
 		instancetype *cdbm.InstanceType
+		request      *cam.APIInstanceCreateRequest
 		expectErr    bool
 	}{
+		{
+			name:         "error when no Machine matches label selector",
+			instancetype: inst1,
+			request: &cam.APIInstanceCreateRequest{
+				MachineLabelSelector: map[string]string{"failure-domain": "missing"},
+			},
+			expectErr: true,
+		},
+		{
+			name:         "success when Machine matches all label selector",
+			instancetype: inst1,
+			request: &cam.APIInstanceCreateRequest{
+				MachineLabelSelector: map[string]string{"failure-domain": "fd-a"},
+			},
+			expectErr: false,
+		},
 		{
 			name:         "success when machine and machine instance type exists",
 			instancetype: inst1,
@@ -1068,13 +1097,85 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := GetUnallocatedMachineForInstanceType(ctx, zerolog.Nop(), tx, dbSession, tc.instancetype, nil)
+			s, err := GetUnallocatedMachineForInstanceType(ctx, zerolog.Nop(), tx, dbSession, tc.instancetype, tc.request)
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err == nil {
 				assert.NotNil(t, s)
+				if tc.request != nil {
+					assert.True(t, s.MatchesLabelSelector(tc.request.MachineLabelSelector))
+				}
 			}
 		})
 	}
+
+	t.Run("rechecks labels after a concurrent update", func(t *testing.T) {
+		concurrentInstanceType := testCommonBuildInstanceType(t, dbSession, "concurrent-label-update", site1, ip, tnuser)
+		machine := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(concurrentInstanceType.ID), uuid.New(), nil, nil, nil, cdbm.MachineStatusReady)
+		_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
+			MachineID: machine.ID,
+			Labels:    map[string]string{"failure-domain": "fd-a"},
+		})
+		require.NoError(t, err)
+		testCommonBuildMachineInstanceType(t, dbSession, machine.ID, concurrentInstanceType.ID)
+
+		labelTx, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		_, err = cdbm.NewMachineDAO(dbSession).Update(ctx, labelTx, cdbm.MachineUpdateInput{
+			MachineID: machine.ID,
+			Labels:    map[string]string{"failure-domain": "fd-b"},
+		})
+		require.NoError(t, err)
+
+		allocationTx, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		labelTxFinished := false
+		defer func() {
+			if !labelTxFinished {
+				assert.NoError(t, labelTx.Rollback())
+			}
+			require.NoError(t, allocationTx.Rollback())
+		}()
+		var allocationBackendPID int
+		err = allocationTx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &allocationBackendPID)
+		require.NoError(t, err)
+
+		type allocationResult struct {
+			machine *cdbm.Machine
+			err     error
+		}
+		resultCh := make(chan allocationResult, 1)
+		go func() {
+			selected, selectionErr := GetUnallocatedMachineForInstanceType(
+				ctx,
+				zerolog.Nop(),
+				allocationTx,
+				dbSession,
+				concurrentInstanceType,
+				&cam.APIInstanceCreateRequest{MachineLabelSelector: map[string]string{"failure-domain": "fd-a"}},
+			)
+			resultCh <- allocationResult{machine: selected, err: selectionErr}
+		}()
+
+		require.Eventually(t, func() bool {
+			var waitEventType string
+			queryErr := dbSession.DB.QueryRowContext(ctx, `
+				SELECT COALESCE(wait_event_type, '')
+				FROM pg_catalog.pg_stat_activity
+				WHERE pid = ?
+			`, allocationBackendPID).Scan(&waitEventType)
+			return queryErr == nil && waitEventType == "Lock"
+		}, 5*time.Second, 10*time.Millisecond, "Machine selection did not wait for the concurrent label update")
+
+		require.NoError(t, labelTx.Commit())
+		labelTxFinished = true
+		select {
+		case result := <-resultCh:
+			require.Nil(t, result.machine)
+			require.Error(t, result.err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Machine selection did not resume after the concurrent label update committed")
+		}
+	})
 }
 
 func TestGetSiteMachineCountStats(t *testing.T) {
@@ -2268,6 +2369,11 @@ func TestMatchInstanceTypeCapabilitiesForMachines(t *testing.T) {
 	icap3 := TestCommonBuildMachineCapability(t, dbSession, nil, &inst1.ID, cdbm.MachineCapabilityTypeNetwork, "MT28908 Family [ConnectX-7]", nil, nil, cutil.GetPtr("Mellanox Technologies"), cutil.GetPtr(2), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeDPU), nil)
 	assert.NotNil(t, icap3)
 
+	// An omitted DeviceType is a wildcard. This filter has only a SpectrumX
+	// candidate on the matching Machine below.
+	icap4 := TestCommonBuildMachineCapability(t, dbSession, nil, &inst1.ID, cdbm.MachineCapabilityTypeNetwork, "ConnectX-8", nil, nil, nil, cutil.GetPtr(4), nil, nil)
+	assert.NotNil(t, icap4)
+
 	mc1 := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(inst1.ID), uuid.New(), nil, nil, nil, cdbm.MachineStatusReady)
 	assert.NotNil(t, mc1)
 
@@ -2280,11 +2386,26 @@ func TestMatchInstanceTypeCapabilitiesForMachines(t *testing.T) {
 	mcap3 := TestCommonBuildMachineCapability(t, dbSession, &mc1.ID, nil, cdbm.MachineCapabilityTypeNetwork, "MT28908 Family [ConnectX-7]", nil, nil, cutil.GetPtr("Mellanox Technologies"), cutil.GetPtr(2), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeDPU), nil)
 	assert.NotNil(t, mcap3)
 
+	// The same network description can identify generic, DPU, and SpectrumX
+	// capabilities. The DPU filter above must match its exact device type rather
+	// than whichever same-name row happens to be loaded last.
+	mcap4 := TestCommonBuildMachineCapability(t, dbSession, &mc1.ID, nil, cdbm.MachineCapabilityTypeNetwork, "MT28908 Family [ConnectX-7]", nil, nil, cutil.GetPtr("Mellanox Technologies"), cutil.GetPtr(1), nil, nil)
+	assert.NotNil(t, mcap4)
+	mcap5 := TestCommonBuildMachineCapability(t, dbSession, &mc1.ID, nil, cdbm.MachineCapabilityTypeNetwork, "MT28908 Family [ConnectX-7]", nil, nil, nil, cutil.GetPtr(4), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX), nil)
+	assert.NotNil(t, mcap5)
+	mcap6 := TestCommonBuildMachineCapability(t, dbSession, &mc1.ID, nil, cdbm.MachineCapabilityTypeNetwork, "ConnectX-8", nil, nil, nil, cutil.GetPtr(4), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX), nil)
+	assert.NotNil(t, mcap6)
+
 	mc2 := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(inst1.ID), uuid.New(), nil, nil, nil, cdbm.MachineStatusReady)
 	assert.NotNil(t, mc2)
 
 	mcap21 := TestCommonBuildMachineCapability(t, dbSession, &mc2.ID, nil, cdbm.MachineCapabilityTypeCPU, "AMD Opteron Series x10", cutil.GetPtr("3.0Hz"), cutil.GetPtr("32GB"), nil, cutil.GetPtr(4), nil, nil)
 	assert.NotNil(t, mcap21)
+
+	// A requested Machine without capability rows must not disappear from the
+	// candidate index when another requested Machine does have matching rows.
+	mc3 := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(inst1.ID), uuid.New(), nil, nil, nil, cdbm.MachineStatusReady)
+	assert.NotNil(t, mc3)
 
 	tests := []struct {
 		name                  string
@@ -2319,6 +2440,17 @@ func TestMatchInstanceTypeCapabilitiesForMachines(t *testing.T) {
 			expectMachineIDReturn: true,
 			expectMachineID:       mc2.ID,
 		},
+		{
+			name:                  "fails when one requested machine has no capabilities",
+			dbSession:             dbSession,
+			logger:                logger,
+			instanceTypeID:        inst1.ID,
+			machineIDs:            []string{mc1.ID, mc3.ID},
+			expectErr:             false,
+			expectMatch:           false,
+			expectMachineIDReturn: true,
+			expectMachineID:       mc3.ID,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2330,6 +2462,143 @@ func TestMatchInstanceTypeCapabilitiesForMachines(t *testing.T) {
 					assert.Equal(t, tc.expectMachineID, *mid)
 				}
 			}
+		})
+	}
+}
+
+func TestMachineCapabilityMatchesFilter(t *testing.T) {
+	dpu := cdbm.MachineCapabilityDeviceTypeDPU
+	spectrumX := cdbm.MachineCapabilityDeviceTypeSpectrumX
+
+	newPair := func() (*cdbm.MachineCapability, *cdbm.MachineCapability) {
+		candidate := &cdbm.MachineCapability{
+			Type:             cdbm.MachineCapabilityTypeNetwork,
+			Name:             "ConnectX-8",
+			Frequency:        cutil.GetPtr("3.0GHz"),
+			Capacity:         cutil.GetPtr("400Gbps"),
+			HardwareRevision: cutil.GetPtr("A1"),
+			Cores:            cutil.GetPtr(8),
+			Threads:          cutil.GetPtr(16),
+			Vendor:           cutil.GetPtr("NVIDIA"),
+			DeviceType:       &dpu,
+			Count:            cutil.GetPtr(2),
+		}
+		filter := *candidate
+		return candidate, &filter
+	}
+
+	tests := []struct {
+		name      string
+		configure func(candidate, filter *cdbm.MachineCapability)
+		want      bool
+	}{
+		{
+			name: "all populated fields match",
+			want: true,
+		},
+		{
+			name: "omitted optional filters are wildcards",
+			configure: func(candidate, filter *cdbm.MachineCapability) {
+				candidate.DeviceType = &spectrumX
+				filter.Frequency = nil
+				filter.Capacity = nil
+				filter.HardwareRevision = nil
+				filter.Cores = nil
+				filter.Threads = nil
+				filter.Vendor = nil
+				filter.DeviceType = nil
+				filter.InactiveDevices = nil
+				filter.Count = nil
+			},
+			want: true,
+		},
+		{
+			name: "type differs",
+			configure: func(candidate, _ *cdbm.MachineCapability) {
+				candidate.Type = cdbm.MachineCapabilityTypeGPU
+				candidate.DeviceType = nil
+			},
+		},
+		{
+			name: "name differs",
+			configure: func(candidate, _ *cdbm.MachineCapability) {
+				candidate.Name = "ConnectX-7"
+			},
+		},
+		{
+			name: "populated filter rejects a missing candidate field",
+			configure: func(candidate, _ *cdbm.MachineCapability) {
+				candidate.Frequency = nil
+			},
+		},
+		{
+			name: "frequency differs",
+			configure: func(candidate, _ *cdbm.MachineCapability) {
+				candidate.Frequency = cutil.GetPtr("2.0GHz")
+			},
+		},
+		{
+			name: "capacity differs",
+			configure: func(candidate, _ *cdbm.MachineCapability) {
+				candidate.Capacity = cutil.GetPtr("200Gbps")
+			},
+		},
+		{
+			name: "hardware revision differs",
+			configure: func(candidate, _ *cdbm.MachineCapability) {
+				candidate.HardwareRevision = cutil.GetPtr("B1")
+			},
+		},
+		{
+			name: "cores differ",
+			configure: func(candidate, _ *cdbm.MachineCapability) {
+				candidate.Cores = cutil.GetPtr(4)
+			},
+		},
+		{
+			name: "threads differ",
+			configure: func(candidate, _ *cdbm.MachineCapability) {
+				candidate.Threads = cutil.GetPtr(8)
+			},
+		},
+		{
+			name: "vendor differs",
+			configure: func(candidate, _ *cdbm.MachineCapability) {
+				candidate.Vendor = cutil.GetPtr("Other")
+			},
+		},
+		{
+			name: "explicit device type differs",
+			configure: func(candidate, _ *cdbm.MachineCapability) {
+				candidate.DeviceType = &spectrumX
+			},
+		},
+		{
+			name: "inactive devices differ",
+			configure: func(candidate, filter *cdbm.MachineCapability) {
+				candidate.Type = cdbm.MachineCapabilityTypeInfiniBand
+				filter.Type = cdbm.MachineCapabilityTypeInfiniBand
+				candidate.DeviceType = nil
+				filter.DeviceType = nil
+				candidate.InactiveDevices = []int{1, 3}
+				filter.InactiveDevices = []int{1, 2}
+			},
+		},
+		{
+			name: "count differs",
+			configure: func(candidate, _ *cdbm.MachineCapability) {
+				candidate.Count = cutil.GetPtr(4)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate, filter := newPair()
+			if tt.configure != nil {
+				tt.configure(candidate, filter)
+			}
+			assert.Equal(t, tt.want, machineCapabilityMatchesFilter(candidate, filter))
 		})
 	}
 }

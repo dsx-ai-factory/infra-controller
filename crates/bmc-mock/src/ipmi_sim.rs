@@ -20,18 +20,21 @@ use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr, TcpListener, UdpSocket};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
 use nix::sys::stat::Mode;
 use nix::unistd::mkfifo;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::pipe;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::redfish::account_service::PasswordUpdater;
 use crate::redfish::manager::ManagerState;
@@ -44,30 +47,24 @@ const PASSWORD_UPDATE_TIMEOUT: Duration = Duration::from_secs(10);
 const IPMI_SIM_EXECUTABLE: &str = "ipmi_sim";
 const CHASSIS_CONTROL_FIFO: &str = "chassis-control.fifo";
 
+/// A byte stream supplied to the mock SOL transport for one console connection.
+pub type ConsoleOutputStream = Pin<Box<dyn Stream<Item = Bytes> + Send + 'static>>;
+
+/// Creates an independent byte stream for every accepted mock SOL connection.
+pub type ConsoleOutputStreamFactory = Box<dyn Fn() -> ConsoleOutputStream + Send + 'static>;
+
+/// Configures one `ipmi_sim` process and its mock serial-console transport.
 #[derive(Debug, Clone)]
 pub struct IpmiSimConfig {
-    /// Client-facing port advertised through Redfish. When absent, clients connect directly to
-    /// the dynamically allocated simulator port.
-    pub reachable_port: Option<u16>,
+    /// Stable identity used to derive the simulator GUID.
     pub stable_id: String,
+    /// Prompt written after interactive input ends with a newline.
     pub console_prompt: String,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct IpmiEndpoint {
-    pub reachable_port: u16,
-    pub listen_port: u16,
-}
-
-impl IpmiEndpoint {
-    fn new(listen_port: u16, reachable_port: Option<u16>) -> Self {
-        Self {
-            reachable_port: reachable_port.unwrap_or(listen_port),
-            listen_port,
-        }
-    }
-}
-
+/// Owns an IPMI simulator and its SOL console.
+///
+/// Dropping the handle stops the simulator and cancels accepted SOL connections and their output.
 pub struct IpmiSimHandle {
     child: tokio::process::Child,
     _chassis_control: ChassisControl,
@@ -75,14 +72,15 @@ pub struct IpmiSimHandle {
     _console: MockConsole,
     manager: Arc<ManagerState>,
     _password_updater: Arc<dyn PasswordUpdater>,
-    pub endpoint: IpmiEndpoint,
+    /// UDP port on which the simulator listens and which clients must use.
+    pub port: u16,
 }
 
 impl std::fmt::Debug for IpmiSimHandle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("IpmiSimHandle")
-            .field("endpoint", &self.endpoint)
+            .field("port", &self.port)
             .finish_non_exhaustive()
     }
 }
@@ -168,7 +166,15 @@ impl Reservations {
     }
 }
 
-pub async fn start(state: &BmcState, config: IpmiSimConfig) -> Result<IpmiSimHandle, Error> {
+/// Starts an IPMI simulator with an optional output stream factory for SOL connections.
+///
+/// The factory is called once per accepted console connection; its bytes are forwarded unchanged.
+/// Without a factory, the console only echoes interactive input and writes the configured prompt.
+pub async fn start<C: Callbacks>(
+    state: &BmcState<C>,
+    config: IpmiSimConfig,
+    console_output: Option<ConsoleOutputStreamFactory>,
+) -> Result<IpmiSimHandle, Error> {
     let (username, password) = state
         .account_service_state
         .administrator_credentials()
@@ -180,7 +186,7 @@ pub async fn start(state: &BmcState, config: IpmiSimConfig) -> Result<IpmiSimHan
         .tempdir()?;
     std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(0o700))?;
 
-    let console = MockConsole::start(config.console_prompt.clone()).await?;
+    let console = MockConsole::start(config.console_prompt.clone(), console_output).await?;
     let callbacks = state
         .callbacks
         .clone()
@@ -223,7 +229,6 @@ pub async fn start(state: &BmcState, config: IpmiSimConfig) -> Result<IpmiSimHan
 
         match wait_until_ready(&mut child, ipmi_sim_lan_port, ipmi_sim_serial_port).await {
             Ok(()) => {
-                let endpoint = IpmiEndpoint::new(ipmi_sim_lan_port, config.reachable_port);
                 let connect_ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
                 let password_updater: Arc<dyn PasswordUpdater> = Arc::new(IpmiPasswordUpdater {
                     connect_ip,
@@ -232,9 +237,7 @@ pub async fn start(state: &BmcState, config: IpmiSimConfig) -> Result<IpmiSimHan
                 state
                     .account_service_state
                     .set_password_updater(&password_updater);
-                state
-                    .manager
-                    .set_ipmi_endpoint(Some(endpoint.reachable_port));
+                state.manager.set_ipmi_endpoint(Some(ipmi_sim_lan_port));
                 return Ok(IpmiSimHandle {
                     child,
                     _chassis_control: chassis_control,
@@ -242,7 +245,7 @@ pub async fn start(state: &BmcState, config: IpmiSimConfig) -> Result<IpmiSimHan
                     _console: console,
                     manager: state.manager.clone(),
                     _password_updater: password_updater,
-                    endpoint,
+                    port: ipmi_sim_lan_port,
                 });
             }
             Err(error) => {
@@ -291,7 +294,7 @@ impl Drop for ChassisControl {
 }
 
 impl ChassisControl {
-    fn start(base: &Path, callbacks: Arc<dyn Callbacks>) -> Result<Self, std::io::Error> {
+    fn start<C: Callbacks>(base: &Path, callbacks: Arc<C>) -> Result<Self, std::io::Error> {
         let fifo_path = base.join(CHASSIS_CONTROL_FIFO);
         mkfifo(&fifo_path, Mode::S_IRUSR | Mode::S_IWUSR).map_err(std::io::Error::from)?;
         let receiver = pipe::OpenOptions::new().open_receiver(&fifo_path)?;
@@ -524,17 +527,38 @@ impl Drop for MockConsole {
 }
 
 impl MockConsole {
-    async fn start(prompt: String) -> Result<Self, std::io::Error> {
+    async fn start(
+        prompt: String,
+        output_factory: Option<ConsoleOutputStreamFactory>,
+    ) -> Result<Self, std::io::Error> {
         let listener = TokioTcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
         let bmc_mock_console_port = listener.local_addr()?.port();
         let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let prompt = prompt.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = serve_console(stream, &prompt).await {
-                        tracing::debug!(%error, "mock SOL console connection closed with error");
+            let mut connections = JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (stream, _) = match accepted {
+                            Ok(connection) => connection,
+                            Err(error) => {
+                                tracing::warn!(%error, "mock SOL console accept failed");
+                                break;
+                            }
+                        };
+                        let prompt = prompt.clone();
+                        let output = output_factory.as_ref().map(|factory| factory());
+                        connections.spawn(async move {
+                            if let Err(error) = serve_console(stream, &prompt, output).await {
+                                tracing::debug!(%error, "mock SOL console connection closed with error");
+                            }
+                        });
                     }
-                });
+                    result = connections.join_next(), if !connections.is_empty() => {
+                        if let Some(Err(error)) = result {
+                            tracing::warn!(%error, "mock SOL console connection task failed");
+                        }
+                    }
+                }
             }
         });
         Ok(Self {
@@ -544,19 +568,36 @@ impl MockConsole {
     }
 }
 
-async fn serve_console(mut stream: TcpStream, prompt: &str) -> Result<(), std::io::Error> {
+async fn serve_console(
+    mut stream: TcpStream,
+    prompt: &str,
+    mut output: Option<ConsoleOutputStream>,
+) -> Result<(), std::io::Error> {
     let mut input = Vec::new();
     let mut buffer = [0_u8; 32];
     loop {
-        let length = stream.read(&mut buffer).await?;
-        if length == 0 {
-            return Ok(());
-        }
-        input.extend_from_slice(&buffer[..length]);
-        stream.write_all(&buffer[..length]).await?;
-        if input.ends_with(b"\n") || input.ends_with(b"\r") {
-            input.clear();
-            stream.write_all(format!("\r\n{prompt}").as_bytes()).await?;
+        tokio::select! {
+            biased;
+            length = stream.read(&mut buffer) => {
+                let length = length?;
+                if length == 0 {
+                    return Ok(());
+                }
+                input.extend_from_slice(&buffer[..length]);
+                stream.write_all(&buffer[..length]).await?;
+                if input.ends_with(b"\n") || input.ends_with(b"\r") {
+                    input.clear();
+                    stream.write_all(format!("\r\n{prompt}").as_bytes()).await?;
+                }
+            }
+            next = async { output.as_mut().expect("branch guard requires output").next().await },
+                if output.is_some() =>
+            {
+                match next {
+                    Some(bytes) => stream.write_all(&bytes).await?,
+                    None => output = None,
+                }
+            }
         }
     }
 }
@@ -565,85 +606,20 @@ async fn serve_console(mut stream: TcpStream, prompt: &str) -> Result<(), std::i
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::sync::Notify;
+    use bytes::Bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
 
     use super::{
-        ChassisControlEvent, Error, IPMI_SIM_EXECUTABLE, IpmiEndpoint, IpmiSimConfig, MockConsole,
-        stable_guid, start, validate_credential, validate_executable_in_path,
+        ChassisControlEvent, ConsoleOutputStream, ConsoleOutputStreamFactory, Error,
+        IPMI_SIM_EXECUTABLE, IpmiSimConfig, MockConsole, stable_guid, start, validate_credential,
+        validate_executable_in_path,
     };
-    use crate::{Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl};
-
-    #[derive(Debug, Default)]
-    struct RecordingCallbacks {
-        commands: Mutex<Vec<SystemPowerControl>>,
-        command_received: Notify,
-    }
-
-    impl RecordingCallbacks {
-        async fn wait_for_command_count(&self, expected_count: usize) {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let command_received = self.command_received.notified();
-                    if self.commands.lock().unwrap().len() >= expected_count {
-                        return;
-                    }
-                    command_received.await;
-                }
-            })
-            .await
-            .expect("timed out waiting for chassis reset callback");
-        }
-    }
-
-    impl Callbacks for RecordingCallbacks {
-        fn get_power_state(&self) -> MockPowerState {
-            MockPowerState::On
-        }
-
-        fn send_power_command(
-            &self,
-            request: SystemPowerControl,
-        ) -> Result<(), SetSystemPowerError> {
-            self.commands.lock().unwrap().push(request);
-            self.command_received.notify_one();
-            Ok(())
-        }
-
-        fn state_refresh_indication(&self) {}
-    }
-
-    #[test]
-    fn endpoint_uses_configured_reachable_port_or_listen_port() {
-        for (name, listen_port, reachable_port, expected) in [
-            (
-                "direct",
-                16_020,
-                None,
-                IpmiEndpoint {
-                    reachable_port: 16_020,
-                    listen_port: 16_020,
-                },
-            ),
-            (
-                "forwarded",
-                16_020,
-                Some(623),
-                IpmiEndpoint {
-                    reachable_port: 623,
-                    listen_port: 16_020,
-                },
-            ),
-        ] {
-            assert_eq!(
-                IpmiEndpoint::new(listen_port, reachable_port),
-                expected,
-                "{name}",
-            );
-        }
-    }
+    use crate::SystemPowerControl;
+    use crate::test_support::TestCallbacks;
 
     #[test]
     fn ipmi_sim_executable_is_required() {
@@ -706,10 +682,10 @@ mod tests {
         let error = start(
             &state,
             IpmiSimConfig {
-                reachable_port: None,
                 stable_id: "missing-callback".to_string(),
                 console_prompt: "root@bmc-mock # ".to_string(),
             },
+            None,
         )
         .await
         .unwrap_err();
@@ -719,24 +695,24 @@ mod tests {
 
     #[tokio::test]
     async fn real_ipmitool_resets_chassis() {
-        let bmc = crate::test_support::generic_supermicro_bmc().await;
-        let mut state = bmc.state;
+        let callbacks = Arc::new(TestCallbacks::default());
+        let bmc =
+            crate::test_support::generic_supermicro_bmc_with_callbacks(callbacks.clone()).await;
+        let state = bmc.state;
         state
             .account_service_state
             .change_factory_default_password("password");
-        let callbacks = Arc::new(RecordingCallbacks::default());
-        state.callbacks = Some(callbacks.clone());
         let simulator = start(
             &state,
             IpmiSimConfig {
-                reachable_port: None,
                 stable_id: "chassis-reset".to_string(),
                 console_prompt: "root@bmc-mock # ".to_string(),
             },
+            None,
         )
         .await
         .unwrap();
-        let port = simulator.endpoint.listen_port.to_string();
+        let port = simulator.port.to_string();
         let output = tokio::time::timeout(
             Duration::from_secs(10),
             tokio::process::Command::new("ipmitool")
@@ -800,7 +776,9 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_mock_console_releases_listener() {
-        let console = MockConsole::start("prompt".to_string()).await.unwrap();
+        let console = MockConsole::start("prompt".to_string(), None)
+            .await
+            .unwrap();
         let port = console.bmc_mock_console_port;
 
         drop(console);
@@ -818,5 +796,49 @@ mod tests {
         })
         .await
         .expect("mock console listener was not released");
+    }
+
+    #[tokio::test]
+    async fn mock_console_forwards_supplied_bytes_and_preserves_interaction() {
+        let output_factory: ConsoleOutputStreamFactory = Box::new(|| {
+            Box::pin(futures::stream::iter([Bytes::from_static(
+                b"machine-owned output\r\n",
+            )])) as ConsoleOutputStream
+        });
+        let console = MockConsole::start("prompt>".to_string(), Some(output_factory))
+            .await
+            .unwrap();
+        let mut connection =
+            TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, console.bmc_mock_console_port))
+                .await
+                .unwrap();
+        connection.write_all(b"probe\r").await.unwrap();
+
+        let output = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut output = Vec::new();
+            let mut buffer = [0; 128];
+            loop {
+                let length = connection.read(&mut buffer).await.unwrap();
+                assert_ne!(length, 0, "mock console disconnected early");
+                output.extend_from_slice(&buffer[..length]);
+                if output
+                    .windows(b"machine-owned output\r\n".len())
+                    .any(|window| window == b"machine-owned output\r\n")
+                    && output
+                        .windows(b"probe\r\r\nprompt>".len())
+                        .any(|window| window == b"probe\r\r\nprompt>")
+                {
+                    return output;
+                }
+            }
+        })
+        .await
+        .expect("mock console did not forward output and prompt");
+
+        assert!(
+            output
+                .windows(b"machine-owned output\r\n".len())
+                .any(|window| window == b"machine-owned output\r\n")
+        );
     }
 }

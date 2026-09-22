@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "actions": [
+    {
+      "version": 1,
+      "name": "submit",
+      "type": "submit_task",
+      "condition": {
+        "severities": ["critical"],
+        "componentTypes": ["COMPUTE"]
+      },
+      "spec": {
+        "operation": {
+          "type": "power_control",
+          "code": "force_power_off",
+          "payload": {
+            "operation": 4,
+            "forced": false
+          }
+        },
+        "targetStrategy": "component",
+        "conflictStrategy": "queue",
+        "description": "power off"
+      }
+    },
+    {
+      "version": 1,
+      "name": "alert",
+      "type": "send_alert",
+      "condition": {},
+      "spec": {
+        "severity": "warning",
+        "message": "leak detected"
+      }
+    },
+    {
+      "version": 1,
+      "name": "noop",
+      "type": "noop",
+      "condition": {},
+      "spec": {
+        "reason": "audit only"
+      }
+    }
+  ]
+}

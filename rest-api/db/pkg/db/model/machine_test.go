@@ -12,6 +12,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -69,6 +70,52 @@ func testMachineBuildMachineInstanceType(t *testing.T, dbSession *db.Session, ma
 	_, err := dbSession.DB.NewInsert().Model(m).Exec(context.Background())
 	assert.Nil(t, err)
 	return m
+}
+
+func TestMachine_MatchesLabelSelector(t *testing.T) {
+	tests := []struct {
+		name    string
+		machine *Machine
+		filters map[string]string
+		want    bool
+	}{
+		{
+			name: "nil Machine",
+		},
+		{
+			name:    "empty filters",
+			machine: &Machine{},
+			want:    true,
+		},
+		{
+			name:    "exact match",
+			machine: &Machine{Labels: map[string]string{"failure-domain": "fd-a"}},
+			filters: map[string]string{"failure-domain": "fd-a"},
+			want:    true,
+		},
+		{
+			name:    "subset match",
+			machine: &Machine{Labels: map[string]string{"failure-domain": "fd-a", "power-domain": "pd-2"}},
+			filters: map[string]string{"failure-domain": "fd-a"},
+			want:    true,
+		},
+		{
+			name:    "missing key",
+			machine: &Machine{Labels: map[string]string{"power-domain": "pd-2"}},
+			filters: map[string]string{"failure-domain": "fd-a"},
+		},
+		{
+			name:    "different value",
+			machine: &Machine{Labels: map[string]string{"failure-domain": "fd-b"}},
+			filters: map[string]string{"failure-domain": "fd-a"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, test.machine.MatchesLabelSelector(test.filters))
+		})
+	}
 }
 
 func TestMachineSQLDAO_Create(t *testing.T) {
@@ -809,6 +856,14 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 	})
 	assert.Nil(t, err)
 
+	// Give one Machine a distinct placement label for exact label-filter tests.
+	ms1[1].Labels["failure-domain"] = "fd-a"
+	_, err = msd.Update(ctx, nil, MachineUpdateInput{
+		MachineID: ms1[1].ID,
+		Labels:    ms1[1].Labels,
+	})
+	assert.NoError(t, err)
+
 	// set one of machines in set 2 to be missing on site
 	ms2[0].IsMissingOnSite = true
 	_, err = msd.Update(ctx, nil, MachineUpdateInput{
@@ -874,6 +929,26 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 				IsAssigned: cutil.GetPtr(true),
 			},
 			expectedCount: 1,
+			expectedError: false,
+		},
+		{
+			desc: "GetAll with exact Machine label selector returns matching objects",
+			filter: MachineFilterInput{
+				Labels: map[string]string{
+					"failure-domain": "fd-a",
+					"key1":           "value1",
+				},
+			},
+			expectedCount: 1,
+			firstEntry:    &ms1[1],
+			expectedError: false,
+		},
+		{
+			desc: "GetAll with a non-matching Machine label value returns no objects",
+			filter: MachineFilterInput{
+				Labels: map[string]string{"failure-domain": "missing"},
+			},
+			expectedCount: 0,
 			expectedError: false,
 		},
 		{
@@ -1191,6 +1266,144 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
 				assert.True(t, ok)
 			}
+		})
+	}
+
+	t.Run("includes soft-deleted Machines when requested", func(t *testing.T) {
+		machineID := ms1[0].ID
+		err := msd.Delete(ctx, nil, machineID, false)
+		require.NoError(t, err)
+
+		active, activeTotal, err := msd.GetAll(
+			ctx,
+			nil,
+			MachineFilterInput{MachineIDs: []string{machineID}},
+			paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, active)
+		assert.Zero(t, activeTotal)
+
+		withDeleted, totalWithDeleted, err := msd.GetAll(
+			ctx,
+			nil,
+			MachineFilterInput{MachineIDs: []string{machineID}, IncludeDeleted: true},
+			paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, withDeleted, 1)
+		assert.Equal(t, 1, totalWithDeleted)
+		assert.NotNil(t, withDeleted[0].Deleted)
+	})
+}
+
+func TestMachineSQLDAO_GetDistinctLabelKeys(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineInstanceTypeSetupSchema(t, dbSession)
+	dao := NewMachineDAO(dbSession)
+	ip, site, instanceType := testMachineInstanceTypeBuildInstanceType(t, dbSession, "label-keys")
+
+	for i, labels := range []map[string]string{
+		{"failure-domain": "fd-b", "nvidia.com/failure-domain": "fd-b"},
+		{"failure-domain": "fd-a"},
+		{"power-domain": "pd-1"},
+		nil,
+	} {
+		machineID := fmt.Sprintf("label-keys-%d", i)
+		_, err := dao.Create(ctx, nil, MachineCreateInput{
+			MachineID: machineID, InfrastructureProviderID: ip.ID, SiteID: site.ID,
+			InstanceTypeID: &instanceType.ID, ControllerMachineID: machineID,
+			ControllerMachineType: instanceType.ControllerMachineType,
+			Labels:                labels, Status: MachineStatusInitializing,
+		})
+		require.NoError(t, err)
+	}
+
+	tests := []struct {
+		name      string
+		filter    MachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted keys", want: []string{"failure-domain", "nvidia.com/failure-domain", "power-domain"}, wantTotal: 3},
+		{
+			name: "descending second result",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelKeyOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"nvidia.com/failure-domain"}, wantTotal: 3,
+		},
+		{name: "empty site scope", filter: MachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelKeys(ctx, nil, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
+		})
+	}
+}
+
+func TestMachineSQLDAO_GetDistinctLabelValues(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineInstanceTypeSetupSchema(t, dbSession)
+	dao := NewMachineDAO(dbSession)
+	ip, site, instanceType := testMachineInstanceTypeBuildInstanceType(t, dbSession, "label-values")
+
+	for i, labels := range []map[string]string{
+		{"failure-domain": "fd-b", "nvidia.com/failure-domain": "fd-b"},
+		{"failure-domain": "fd-a"},
+		{"failure-domain": "fd-b", "power-domain": "pd-1"},
+		nil,
+	} {
+		machineID := fmt.Sprintf("label-values-%d", i)
+		_, err := dao.Create(ctx, nil, MachineCreateInput{
+			MachineID: machineID, InfrastructureProviderID: ip.ID, SiteID: site.ID,
+			InstanceTypeID: &instanceType.ID, ControllerMachineID: machineID,
+			ControllerMachineType: instanceType.ControllerMachineType,
+			Labels:                labels, Status: MachineStatusInitializing,
+		})
+		assert.NoError(t, err)
+	}
+
+	tests := []struct {
+		name      string
+		labelKey  string
+		filter    MachineFilterInput
+		page      paginator.PageInput
+		want      []string
+		wantTotal int
+	}{
+		{name: "distinct sorted values", labelKey: "failure-domain", want: []string{"fd-a", "fd-b"}, wantTotal: 2},
+		{name: "different key", labelKey: "power-domain", want: []string{"pd-1"}, wantTotal: 1},
+		{name: "missing key", labelKey: "missing", want: []string{}, wantTotal: 0},
+		{name: "slash in key", labelKey: "nvidia.com/failure-domain", want: []string{"fd-b"}, wantTotal: 1},
+		{name: "provider scope", labelKey: "failure-domain", filter: MachineFilterInput{InfrastructureProviderIDs: []uuid.UUID{ip.ID}}, want: []string{"fd-a", "fd-b"}, wantTotal: 2},
+		{
+			name: "descending second result", labelKey: "failure-domain",
+			page: paginator.PageInput{
+				Offset: cutil.GetPtr(1), Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: LabelValueOrderByDefault, Order: paginator.OrderDescending},
+			},
+			want: []string{"fd-a"}, wantTotal: 2,
+		},
+		{name: "empty site scope", labelKey: "failure-domain", filter: MachineFilterInput{SiteIDs: []uuid.UUID{}}, want: []string{}, wantTotal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, total, err := dao.GetDistinctLabelValues(ctx, nil, tt.labelKey, tt.filter, tt.page)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantTotal, total)
 		})
 	}
 }
@@ -1559,6 +1772,33 @@ func TestMachineSQLDAO_Clear(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("can clear soft-delete timestamp", func(t *testing.T) {
+		machineID := mcsExp[3].ID
+		err := msd.Delete(ctx, nil, machineID, false)
+		require.NoError(t, err)
+
+		var deleted Machine
+		err = dbSession.DB.NewSelect().
+			Model(&deleted).
+			Where("m.id = ?", machineID).
+			WhereAllWithDeleted().
+			Scan(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, deleted.Deleted)
+
+		restored, err := msd.Clear(ctx, nil, MachineClearInput{
+			MachineID: machineID,
+			Deleted:   true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, restored)
+		assert.Nil(t, restored.Deleted)
+
+		active, err := msd.GetByID(ctx, nil, machineID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, machineID, active.ID)
+	})
 }
 
 func TestMachineSQLDAO_Delete(t *testing.T) {

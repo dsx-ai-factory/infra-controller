@@ -408,14 +408,6 @@ pub extern "C" fn machine_get_client_fqdn_ipv6(ctx: *mut Machine) -> DhcpByteBuf
     }
 }
 
-/// Return whether DHCPv6 rapid commit option rendering is enabled.
-#[unsafe(no_mangle)]
-pub extern "C" fn machine_get_rapid_commit_v6(ctx: *mut Machine) -> bool {
-    assert!(!ctx.is_null());
-
-    CONFIG.read().unwrap().rapid_commit_v6
-}
-
 /// Write the configured DHCPv6 provisioning-server address into a caller-provided 16-byte buffer.
 ///
 /// Returns false when the hook parameter is unset.
@@ -651,7 +643,7 @@ pub extern "C" fn machine_get_interface_subnet_mask(ctx: *mut Machine) -> u32 {
 }
 
 /// Extract MTU from Machine object. We got it in the grpc response in discovery_fetch_machine.
-/// https://jirasw.nvidia.com/browse/FORGE-2443
+/// https://github.com/NVIDIA/infra-controller/issues/5559
 #[unsafe(no_mangle)]
 pub extern "C" fn machine_get_interface_mtu(ctx: *mut Machine) -> u16 {
     // SAFETY: Initial lint enablement: this C ABI contract needs owner review.

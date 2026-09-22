@@ -37,6 +37,9 @@ Stage a site-wide NVOS target password after seeding current per-switch credenti
 Rotate the SuperNIC lockdown IKM with an audit note:
     $ nico-admin-cli credential rotate --type=lockdown-ikm --reason=\"quarterly rotation\"
 
+Rotate the BF4 DPU BMC service account password (converges every enrolled BF4 DPU):
+    $ nico-admin-cli credential rotate --type=dpu-bmc-service
+
 ")]
 pub(crate) struct Args {
     #[clap(

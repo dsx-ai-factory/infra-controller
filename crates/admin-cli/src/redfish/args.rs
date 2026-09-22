@@ -170,7 +170,11 @@ Gracefully shut a machine down (also accepted as the alias `shutdown`):
     /// Reset BMC to factory defaults
     BmcResetToDefaults,
     /// Reboot the BMC itself
-    BmcReset,
+    BmcReset {
+        /// Redfish Manager.Reset type. Omit for the vendor default.
+        #[clap(long = "reset-type", value_enum)]
+        reset_type: Option<crate::bmc_machine::common::ResetTypeArg>,
+    },
     /// Get Secure boot status
     GetSecureBoot,
     /// Disable Secure Boot

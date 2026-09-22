@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -17,9 +18,11 @@ type SelectItem struct {
 
 const selectWindowSize = 12
 
+var errSelectionCancelled = errors.New("selection cancelled")
+
 // Select displays an interactive arrow-key menu and returns the selected item.
 // For large lists it shows a scrolling window of selectWindowSize items.
-func Select(label string, items []SelectItem) (*SelectItem, error) {
+func Select(label string, items []SelectItem) (selectedItem *SelectItem, err error) {
 	if len(items) == 0 {
 		return nil, fmt.Errorf("no items to select from")
 	}
@@ -28,7 +31,16 @@ func Select(label string, items []SelectItem) (*SelectItem, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer restore()
+	defer func() {
+		restoreErr := restore()
+		if restoreErr != nil {
+			if err == nil {
+				err = restoreErr
+			} else {
+				err = errors.Join(err, restoreErr)
+			}
+		}
+	}()
 
 	cursor := 0
 	windowStart := 0
@@ -61,7 +73,7 @@ func Select(label string, items []SelectItem) (*SelectItem, error) {
 			MoveToColumn(1)
 			ClearDown()
 			ShowCursor()
-			return nil, fmt.Errorf("selection cancelled")
+			return nil, errSelectionCancelled
 
 		case key.Special == KeyUp:
 			if cursor > 0 {

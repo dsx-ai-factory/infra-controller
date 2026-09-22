@@ -45,3 +45,28 @@ pub(super) const MAINTENANCE: u64 = 300; // 5 minutes
 /// rotation engine's short per-device backoff without tripping the SLA on the
 /// first retry.
 pub(super) const ROTATING_BMC: u64 = 15 * 60; // 15 minutes
+
+/// SLA for Site Explorer suppression acknowledgement during decommissioning
+pub(super) const DECOMMISSIONING_SUPPRESSING_SITE_EXPLORER: u64 = 300; // 5 minutes
+
+/// SLA for recording NVOS DHCP suppression during decommissioning
+pub(super) const DECOMMISSIONING_SUPPRESSING_NVOS_DHCP: u64 = 300; // 5 minutes
+
+/// SLA for submitting the NVOS factory-reset RMS job during decommissioning
+pub(super) const DECOMMISSIONING_FACTORY_RESET_NVOS: u64 = 300; // 5 minutes
+
+/// SLA for waiting for NVOS DHCP suppression acknowledgement after reset
+pub(super) const DECOMMISSIONING_WAITING_FOR_NVOS_DHCP_ACKNOWLEDGEMENT: u64 = 15 * 60; // 15 minutes
+
+/// SLA for recording BMC DHCP suppression during decommissioning
+pub(super) const DECOMMISSIONING_SUPPRESSING_BMC_DHCP: u64 = 300; // 5 minutes
+
+/// SLA for BMC factory reset during decommissioning
+pub(super) const DECOMMISSIONING_FACTORY_RESET_BMC: u64 = 300; // 5 minutes
+
+/// SLA for waiting for BMC DHCP suppression acknowledgement after reset
+pub(super) const DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACKNOWLEDGEMENT: u64 = 15 * 60; // 15 minutes
+
+/// SLA for deleting managed per-device BMC and NVOS credentials during
+/// decommissioning
+pub(super) const DECOMMISSIONING_DELETING_MANAGED_CREDENTIALS: u64 = 300; // 5 minutes

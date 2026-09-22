@@ -112,6 +112,51 @@ func TestInterfaceInlineRoutingProfile_ToProtoFromProto(t *testing.T) {
 	assert.Equal(t, []string{"198.51.100.0/24", "2001:db8:1::/64"}, fromProto.AllowedAnycastPrefixes)
 }
 
+func TestInterface_EthernetKey(t *testing.T) {
+	vpcID := uuid.New()
+	familyMode := InterfaceVpcIPFamilyModeIPv4Only
+	deviceInstance := 0
+
+	var base Interface
+	base.VpcID = &vpcID
+	base.VpcIPFamilyMode = &familyMode
+	base.Device = cutil.GetPtr("device")
+	base.DeviceInstance = &deviceInstance
+	base.IsPhysical = true
+
+	sameVpcID := vpcID
+	sameFamilyMode := familyMode
+	sameDeviceInstance := deviceInstance
+	same := base
+	same.VpcID = &sameVpcID
+	same.VpcIPFamilyMode = &sameFamilyMode
+	same.Device = cutil.GetPtr("device")
+	same.DeviceInstance = &sameDeviceInstance
+	same.VpcPrefixID = cutil.GetPtr(uuid.New())
+	assert.Equal(t, base.EthernetInterfaceKey(), same.EthernetInterfaceKey(), "resolved prefixes must not change VPC-selector identity")
+
+	missingDeviceInstance := base
+	missingDeviceInstance.DeviceInstance = nil
+	assert.NotEqual(t, base.EthernetInterfaceKey(), missingDeviceInstance.EthernetInterfaceKey())
+
+	emptyProfile := base
+	emptyProfile.InlineRoutingProfile = &InterfaceInlineRoutingProfile{}
+	assert.NotEqual(t, base.EthernetInterfaceKey(), emptyProfile.EthernetInterfaceKey())
+
+	differentVpc := base
+	differentVpc.VpcID = cutil.GetPtr(uuid.New())
+	assert.NotEqual(t, base.EthernetInterfaceKey(), differentVpc.EthernetInterfaceKey())
+
+	virtualFunction := base
+	virtualFunction.IsPhysical = false
+	virtualFunction.VirtualFunctionID = cutil.GetPtr(1)
+	assert.NotEqual(t, base.EthernetInterfaceKey(), virtualFunction.EthernetInterfaceKey(), "a virtual function must not match a physical function")
+
+	otherVirtualFunction := virtualFunction
+	otherVirtualFunction.VirtualFunctionID = cutil.GetPtr(2)
+	assert.NotEqual(t, virtualFunction.EthernetInterfaceKey(), otherVirtualFunction.EthernetInterfaceKey())
+}
+
 func TestInterfaceSQLDAO_Create(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInstanceInitDB(t)
@@ -1344,7 +1389,7 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 
 	vfID := 10
 	macAddress := "21-41-A7-A6-40-76"
-	ipAddresses := []string{"192.0.2.3", "2001:db8:abcd:0018"}
+	ipAddresses := []string{"192.0.2.3", "2001:db8:abcd::18"}
 	routingProfile := &InterfaceInlineRoutingProfile{
 		AllowedAnycastPrefixes: []string{"192.0.2.0/24", "2001:db8::/64"},
 	}
@@ -1485,6 +1530,18 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 			id:          uuid.New(),
 			paramStatus: cutil.GetPtr(InterfaceStatusProvisioning),
 			expectError: true,
+		},
+		{
+			desc:             "failed with malformed IP address",
+			id:               ifc1.ID,
+			paramIPAddresses: []string{"not-an-ip"},
+			expectError:      true,
+		},
+		{
+			desc:             "failed with CIDR-form IP address",
+			id:               ifc1.ID,
+			paramIPAddresses: []string{"192.0.2.1/31"},
+			expectError:      true,
 		},
 	}
 	for _, tc := range tests {

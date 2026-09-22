@@ -36,6 +36,7 @@ carbide-dhcp-common = { path = "../dhcp-common" }
 carbide-instrument = { path = "../instrument" }
 carbide-rpc = { path = "../rpc" }
 carbide-tls = { path = "../tls" }
+carbide-dhcpv6 = { path = "../dhcpv6" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 
 [features]
@@ -50,7 +51,6 @@ test-support = [
 [dev-dependencies]
 eyre = { workspace = true }
 serde_json = { workspace = true }
-test-cdylib = { workspace = true }
 tempfile = { workspace = true }
 # Self-dependency so the crate's own integration tests see the `test-support` helpers.
 carbide-dhcp = { path = ".", features = ["test-support"] }

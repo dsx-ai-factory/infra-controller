@@ -36,6 +36,7 @@ fn get_bmc_nvos_admin_credential_key(bmc_mac_address: MacAddress) -> CredentialK
     CredentialKey::SwitchNvosAdmin { bmc_mac_address }
 }
 
+#[derive(Clone)]
 pub(super) struct CredentialClient {
     credential_manager: Arc<dyn CredentialManager>,
 }
@@ -144,17 +145,30 @@ impl CredentialClient {
         self.get_credentials(&key).await
     }
 
+    /// Read the site-wide DPU BMC `service` password at `version`. The caller
+    /// resolves the current version from
+    /// `sitewide_credential_rotation.target_version` for the `dpu_bmc_service`
+    /// family (see [`super::bmc_endpoint_explorer::BmcEndpointExplorer`]); version
+    /// 0 is the legacy unversioned path.
+    ///
+    /// Only version 0 is lazily generated on first ingestion (`create_if_missing`).
+    /// A versioned secret (>= 1) is staged by `RotateCredential` before the
+    /// site-wide target advances, so a missing one is a real error rather than a
+    /// cue to mint a divergent password that no other DPU would share.
     pub(super) async fn get_sitewide_dpu_bmc_service_password(
         &self,
+        version: u32,
         create_if_missing: bool,
     ) -> Result<String, EndpointExplorationError> {
         let key = CredentialKey::BmcCredentials {
-            credential_type: BmcCredentialType::SiteWideDpuBmcService,
+            credential_type: BmcCredentialType::site_wide_dpu_bmc_service(version),
         };
 
         match self.get_credentials(&key).await {
             Ok(Credentials::UsernamePassword { password, .. }) => Ok(password),
-            Err(EndpointExplorationError::MissingCredentials { .. }) if create_if_missing => {
+            Err(EndpointExplorationError::MissingCredentials { .. })
+                if create_if_missing && version == 0 =>
+            {
                 let password = Credentials::generate_password();
                 self.set_credentials(
                     &key,
@@ -296,7 +310,7 @@ mod tests {
 
         let client = CredentialClient::new(manager);
         let password = client
-            .get_sitewide_dpu_bmc_service_password(false)
+            .get_sitewide_dpu_bmc_service_password(0, false)
             .await
             .expect("existing dpu bmc service password");
 
@@ -307,7 +321,7 @@ mod tests {
     async fn get_sitewide_dpu_bmc_service_password_creates_when_missing() {
         let client = CredentialClient::new(Arc::new(TestCredentialManager::default()));
         let password = client
-            .get_sitewide_dpu_bmc_service_password(true)
+            .get_sitewide_dpu_bmc_service_password(0, true)
             .await
             .expect("generated dpu bmc service password");
 
@@ -318,7 +332,7 @@ mod tests {
     async fn get_sitewide_dpu_bmc_service_password_errors_when_missing_and_not_create() {
         let client = CredentialClient::new(Arc::new(TestCredentialManager::default()));
         let error = client
-            .get_sitewide_dpu_bmc_service_password(false)
+            .get_sitewide_dpu_bmc_service_password(0, false)
             .await
             .expect_err("missing dpu bmc service password should fail");
 
@@ -332,14 +346,55 @@ mod tests {
     async fn get_sitewide_dpu_bmc_service_password_is_stable_once_created() {
         let client = CredentialClient::new(Arc::new(TestCredentialManager::default()));
         let first = client
-            .get_sitewide_dpu_bmc_service_password(true)
+            .get_sitewide_dpu_bmc_service_password(0, true)
             .await
             .expect("first read creates site-wide DPU BMC service password");
         let second = client
-            .get_sitewide_dpu_bmc_service_password(true)
+            .get_sitewide_dpu_bmc_service_password(0, true)
             .await
             .expect("second read returns same site-wide DPU BMC service password");
 
         assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn get_sitewide_dpu_bmc_service_password_reads_versioned_path() {
+        let manager = Arc::new(TestCredentialManager::default());
+        manager
+            .set_credentials(
+                &CredentialKey::BmcCredentials {
+                    credential_type: BmcCredentialType::site_wide_dpu_bmc_service(2),
+                },
+                &Credentials::UsernamePassword {
+                    username: "service".to_string(),
+                    password: "v2-service-pass".to_string(),
+                },
+            )
+            .await
+            .expect("preset versioned dpu bmc service password");
+
+        let client = CredentialClient::new(manager);
+        let password = client
+            .get_sitewide_dpu_bmc_service_password(2, false)
+            .await
+            .expect("existing versioned dpu bmc service password");
+
+        assert_eq!(password, "v2-service-pass");
+    }
+
+    #[tokio::test]
+    async fn get_sitewide_dpu_bmc_service_password_never_creates_versioned() {
+        // A missing versioned (>= 1) secret is a staging error, never lazily
+        // minted -- creating one here would diverge from the fleet's copy.
+        let client = CredentialClient::new(Arc::new(TestCredentialManager::default()));
+        let error = client
+            .get_sitewide_dpu_bmc_service_password(2, true)
+            .await
+            .expect_err("a missing versioned service secret must not be created");
+
+        assert!(matches!(
+            error,
+            EndpointExplorationError::MissingCredentials { .. }
+        ));
     }
 }

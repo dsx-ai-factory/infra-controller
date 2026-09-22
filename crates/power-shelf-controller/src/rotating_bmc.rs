@@ -110,7 +110,7 @@ pub async fn handle_rotating_bmc(
         site_explorer_pause::gate_before_credential_change(
             &ctx.services.db_pool,
             &bmc_macs,
-            site_explorer_pause::ROTATION_SUPPRESSION_REASON,
+            model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation,
         )
         .await?,
         GateDecision::Wait
@@ -173,7 +173,7 @@ pub async fn handle_rotating_bmc(
             site_explorer_pause::resume_after_credential_change(
                 &mut resume_txn,
                 &bmc_macs,
-                site_explorer_pause::ROTATION_SUPPRESSION_REASON,
+                model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation,
             )
             .await?;
             Ok(
@@ -205,7 +205,7 @@ async fn rotate_power_shelf_bmc(
     match rotate_bmc(
         &services.db_pool,
         services.credential_manager.as_ref(),
-        services.redfish_client_pool.as_ref(),
+        services.bmc_credential_ops.as_ref(),
         &target,
         force,
     )

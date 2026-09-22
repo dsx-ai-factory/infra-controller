@@ -64,6 +64,7 @@ fn partition_health_to_state(status: Option<&str>) -> &'static str {
 }
 
 const APP_STATUS_STATES: &[&str] = &["ok", "not_ok", "unknown"];
+const INTERFACE_OPER_STATUS_STATES: &[&str] = &["up", "down"];
 
 fn app_status_to_state(status: Option<&str>) -> &'static str {
     match status {
@@ -246,7 +247,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
     ) -> Result<Self, HealthError> {
         let switch_id = match &endpoint.metadata {
             Some(EndpointMetadata::Switch(s)) => s.serial.clone(),
-            _ => endpoint.addr.mac.to_string(),
+            _ => endpoint.key(),
         };
 
         let event_context = EventContext::from_endpoint(endpoint.as_ref(), COLLECTOR_NAME);
@@ -283,6 +284,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
             tracing::warn!(
                 ?error,
                 switch_id = %self.switch_id,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "nvue_rest: skipping iteration — credential fetch failed"
             );
             return Ok(IterationResult {
@@ -310,6 +312,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
                 tracing::warn!(
                 error = ?e,
                 switch_id = %self.switch_id,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "nvue_rest: failed to collect system health"
                 );
             }
@@ -328,6 +331,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
                 tracing::warn!(
                 error = ?e,
                 switch_id = %self.switch_id,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "nvue_rest: failed to collect system reboot reason"
                 );
             }
@@ -354,6 +358,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
                 tracing::warn!(
                 error = ?e,
                 switch_id = %self.switch_id,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "nvue_rest: failed to collect cluster apps"
                 );
             }
@@ -394,36 +399,58 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
                 tracing::warn!(
                 error = ?e,
                 switch_id = %self.switch_id,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "nvue_rest: failed to collect SDN partitions"
                 );
             }
         }
 
-        match self.client.get_link_diagnostics().await {
-            Ok(diagnostics) => {
-                for diag in &diagnostics {
-                    let value = diagnostic_opcode_to_f64(&diag.code);
-                    self.emit_metric(
-                        "link_diagnostic",
-                        Some(&format!("{}:{}", diag.interface, diag.code)),
-                        value,
-                        "state",
-                        vec![
-                            (Cow::Borrowed("interface_name"), diag.interface.clone()),
-                            (Cow::Borrowed("opcode"), diag.code.clone()),
-                            (Cow::Borrowed("diagnostic_status"), diag.status.clone()),
-                        ],
-                    );
-                    entity_count += 1;
+        match self.client.get_interfaces().await {
+            Ok(Some(interfaces)) => {
+                for (interface_name, interface) in &interfaces {
+                    if let Some(state @ ("up" | "down")) = interface.link.state.as_deref() {
+                        self.emit_state_set(
+                            "interface_oper_status",
+                            Some(interface_name),
+                            state,
+                            INTERFACE_OPER_STATUS_STATES,
+                            vec![(Cow::Borrowed("interface_name"), interface_name.clone())],
+                        );
+
+                        entity_count += 1;
+                    }
+
+                    for (code, diagnostic) in &interface.link.diagnostics {
+                        let value = diagnostic_opcode_to_f64(code);
+
+                        self.emit_metric(
+                            "link_diagnostic",
+                            Some(&format!("{interface_name}:{code}")),
+                            value,
+                            "state",
+                            vec![
+                                (Cow::Borrowed("interface_name"), interface_name.clone()),
+                                (Cow::Borrowed("opcode"), code.clone()),
+                                (
+                                    Cow::Borrowed("diagnostic_status"),
+                                    diagnostic.status.clone(),
+                                ),
+                            ],
+                        );
+
+                        entity_count += 1;
+                    }
                 }
             }
+            Ok(None) => {}
             Err(e) => {
                 fetch_failures += 1;
                 saw_auth_failure |= is_auth_error(&e);
                 tracing::warn!(
                 error = ?e,
                 switch_id = %self.switch_id,
-                "nvue_rest: failed to collect link diagnostics"
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
+                "nvue_rest: failed to collect interfaces"
                 );
             }
         }
@@ -456,6 +483,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
                 tracing::warn!(
                 error = ?e,
                 switch_id = %self.switch_id,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "nvue_rest: failed to collect platform environment fan"
                 );
             }
@@ -517,6 +545,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
                 tracing::warn!(
                 error = ?e,
                 switch_id = %self.switch_id,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "nvue_rest: failed to collect platform environment temperature"
                 );
             }
@@ -536,6 +565,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
                 tracing::warn!(
                 error = ?e,
                 switch_id = %self.switch_id,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "nvue_rest: failed to collect platform environment leakage"
                 );
             }
@@ -559,6 +589,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
                 tracing::warn!(
                 error = ?e,
                 switch_id = %self.switch_id,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "nvue_rest: failed to collect platform environment status"
                 );
             }
@@ -567,6 +598,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
         if saw_auth_failure {
             tracing::warn!(
                 switch_id = %self.switch_id,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "nvue_rest: auth failure observed, clearing cached credentials"
             );
             self.client.clear_credentials();
@@ -576,6 +608,7 @@ impl PeriodicCollector<crate::bmc::BmcClient> for NvueRestCollector {
 
         tracing::debug!(
             switch_id = %self.switch_id,
+            rack_id = self.event_context.rack_id().map(tracing::field::display),
             entity_count,
             "nvue_rest: collection iteration complete"
         );
@@ -697,6 +730,7 @@ impl NvueRestCollector {
             observed_at: Some(chrono::Utc::now()),
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::NvueLeakage,
                 target: None,
                 message: "NVUE leakage data is unavailable".to_string(),
@@ -721,6 +755,7 @@ impl NvueRestCollector {
 
         if sensors.is_empty() {
             successes.push(HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::NvueLeakage,
                 target: None,
             });
@@ -730,16 +765,19 @@ impl NvueRestCollector {
             match leakage_state_to_state(sensor.as_ref().and_then(|sensor| sensor.state.as_deref()))
             {
                 "ok" => successes.push(HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::NvueLeakage,
                     target: Some((*sensor_name).clone()),
                 }),
                 "leak" => alerts.push(HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::NvueLeakage,
                     target: Some((*sensor_name).clone()),
                     message: format!("NVUE leakage sensor {sensor_name} reports leak"),
                     classifications: vec![Classification::Leak],
                 }),
                 _ => alerts.push(HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::NvueLeakage,
                     target: Some((*sensor_name).clone()),
                     message: format!("NVUE leakage sensor {sensor_name} state is unknown"),
@@ -1335,7 +1373,7 @@ mod tests {
         BmcAddr {
             ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             port: Some(443),
-            mac: MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap(),
+            mac: Some(MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap()),
         }
     }
 
@@ -1452,6 +1490,33 @@ mod tests {
                 "expected request for {}, got {request_line}",
                 endpoint.request_path(),
             );
+
+            if matches!(endpoint, IterationEndpoint::Interfaces) {
+                let request_target = request_line
+                    .split_whitespace()
+                    .nth(1)
+                    .expect("request line contains a target");
+
+                let request_url = url::Url::parse(&format!("http://localhost{request_target}"))
+                    .expect("request target parses as a URL");
+
+                let query = request_url.query_pairs().collect::<Vec<_>>();
+
+                for expected in [
+                    ("rev", "operational"),
+                    ("filter_", "type=nvl"),
+                    ("include", "/*/type"),
+                    ("include", "/*/link/state"),
+                    ("include", "/*/link/diagnostics"),
+                ] {
+                    assert!(
+                        query
+                            .iter()
+                            .any(|(key, value)| key == expected.0 && value == expected.1),
+                        "expected interface query parameter {expected:?}, got {query:?}",
+                    );
+                }
+            }
 
             let reason = match status {
                 200 => "OK",
@@ -1792,9 +1857,24 @@ mod tests {
                 ));
                 (2, samples, vec![])
             }
-            IterationEndpoint::Interfaces => (
-                2,
-                vec![
+            IterationEndpoint::Interfaces => {
+                let mut samples = state_set_summaries(
+                    "interface_oper_status",
+                    Some("swp1"),
+                    "down",
+                    &["up", "down"],
+                    &[("interface_name", "swp1")],
+                );
+
+                samples.extend(state_set_summaries(
+                    "interface_oper_status",
+                    Some("swp2"),
+                    "up",
+                    &["up", "down"],
+                    &[("interface_name", "swp2")],
+                ));
+
+                samples.extend([
                     sample_summary(
                         "link_diagnostic",
                         Some("swp1:0"),
@@ -1817,9 +1897,10 @@ mod tests {
                             ("diagnostic_status", "fault"),
                         ],
                     ),
-                ],
-                vec![],
-            ),
+                ]);
+
+                (4, samples, vec![])
+            }
             IterationEndpoint::Fans => {
                 let mut samples = vec![sample_summary(
                     "fan_max_speed",
@@ -2026,7 +2107,7 @@ mod tests {
                     )),
                 },
                 Case {
-                    scenario: "interface response emits each link diagnostic",
+                    scenario: "interface response emits link states and diagnostics",
                     input: IterationResponse {
                         endpoint: IterationEndpoint::Interfaces,
                         status: 200,
@@ -2034,13 +2115,16 @@ mod tests {
                             "swp1":{
                                 "type":"nvl",
                                 "link":{
+                                    "state":{"down":{}},
                                     "diagnostics":{
                                         "0":{"status":"ok"},
                                         "2":{"status":"fault"}
                                     }
                                 }
                             },
-                            "swp2":{"type":"nvl","link":{}}
+                            "swp2":{"type":"nvl","link":{"state":{"up":{}}}},
+                            "swp3":{"type":"nvl","link":{}},
+                            "swp4":{"type":"nvl","link":{"state":{"testing":{}}}}
                         }"#,
                     },
                     expect: Yields(populated_iteration_summary(IterationEndpoint::Interfaces)),

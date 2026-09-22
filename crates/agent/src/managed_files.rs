@@ -84,8 +84,6 @@ pub(super) fn main_sync(
         // This itself can go in some number of weeks, once the build
         // this is a part of gets deployed everywhere, and this file is
         // cleaned up.
-        //
-        // https://jirasw.nvidia.com/browse/FORGE-7062
         (
             "/etc/rc.local".into(),
             duppet::FileSpec::new().with_ensure(FileEnsure::Absent),

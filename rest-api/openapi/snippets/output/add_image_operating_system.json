@@ -1,0 +1,34 @@
+{
+  "id": "44d246f3-3075-4daa-9887-0d376bf9dec5",
+  "name": "ubuntu-22.04-image",
+  "description": "Ubuntu 22.04 image-based installation",
+  "infrastructureProviderId": null,
+  "tenantId": "7306ff7d-f2b4-472f-ba1c-3ec9c24967be",
+  "type": "Image",
+  "imageUrl": "https://cloud-images.ubuntu.com/releases/jammy/release-20260826/ubuntu-22.04-server-cloudimg-amd64.img",
+  "imageSha": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+  "imageAuthType": null,
+  "imageAuthToken": null,
+  "imageDisk": "/dev/disk/by-id/nvme-Dell_BOSS-N1_VNOWW12345V0123451UT",
+  "rootFsId": null,
+  "rootFsLabel": "cloudimg-rootfs",
+  "ipxeScript": null,
+  "userData": null,
+  "isCloudInit": false,
+  "phoneHomeEnabled": false,
+  "allowOverride": false,
+  "siteAssociations": [],
+  "isActive": true,
+  "deactivationNote": null,
+  "status": "Pending",
+  "statusHistory": [
+    {
+      "status": "Pending",
+      "message": "Request received, pending processing",
+      "created": "2026-08-31T17:30:00Z",
+      "updated": "2026-08-31T17:30:00Z"
+    }
+  ],
+  "created": "2026-08-31T17:30:00Z",
+  "updated": "2026-08-31T17:30:00Z"
+}

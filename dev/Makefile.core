@@ -31,7 +31,7 @@ POSTGRES_PASSWORD ?= postgres
 POSTGRES_DB ?= postgres
 TEST_BINARIES := as ar pkg-config protoc cmake date c++ ld git make tr perl \
 	touch mv rm ranlib basename cp chmod tpm2 locale parallel bash hostname \
-	sleep echo curl python3 grep sed sh ping ipmi_sim ipmitool vault grpcurl
+	sleep echo curl python3 grep sed sh ping ipmi_sim ipmitool vault
 
 CORE_MAKEFILE := $(lastword $(MAKEFILE_LIST))
 CORE_MAKE := $(MAKE) --no-print-directory -f $(CORE_MAKEFILE)

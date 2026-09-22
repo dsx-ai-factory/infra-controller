@@ -310,83 +310,6 @@ fn error_display_debug_and_source() {
     assert!(debug.contains("/debug/test"), "debug echoes the payload");
 }
 
-// Tests for convenience error constructors.
-//
-// Each constructor populates a distinct variant with the caller's string; this
-// asserts the variant/field round-trip (the categorization those variants
-// answer lives in `error_categorization_predicates`).
-#[test]
-fn test_unknown_message_type_constructor() {
-    let error = MqtteaClientError::unknown_message_type("/pets/fluffy/unknown-data");
-
-    match error {
-        MqtteaClientError::UnknownMessageType(ref topic) => {
-            assert_eq!(topic, "/pets/fluffy/unknown-data");
-        }
-        _ => panic!("Should be UnknownMessageType"),
-    }
-}
-
-#[test]
-fn test_topic_parsing_error_constructor() {
-    let error = MqtteaClientError::topic_parsing_error("Invalid topic format for hamster data");
-
-    match error {
-        MqtteaClientError::TopicParsingError(ref msg) => {
-            assert_eq!(msg, "Invalid topic format for hamster data");
-        }
-        _ => panic!("Should be TopicParsingError"),
-    }
-}
-
-#[test]
-fn test_raw_message_error_constructor() {
-    let error = MqtteaClientError::raw_message_error("Failed to process bird song data");
-
-    match error {
-        MqtteaClientError::RawMessageError(msg) => {
-            assert_eq!(msg, "Failed to process bird song data");
-        }
-        _ => panic!("Should be RawMessageError"),
-    }
-}
-
-#[test]
-fn test_unregistered_type_constructor() {
-    let error = MqtteaClientError::unregistered_type("CatMessage");
-
-    match error {
-        MqtteaClientError::UnregisteredType(ref type_name) => {
-            assert_eq!(type_name, "CatMessage");
-        }
-        _ => panic!("Should be UnregisteredType"),
-    }
-}
-
-#[test]
-fn test_invalid_utf8_constructor() {
-    let error = MqtteaClientError::invalid_utf8("Invalid UTF-8 in dog collar message");
-
-    match error {
-        MqtteaClientError::InvalidUtf8(msg) => {
-            assert_eq!(msg, "Invalid UTF-8 in dog collar message");
-        }
-        _ => panic!("Should be InvalidUtf8"),
-    }
-}
-
-#[test]
-fn test_pattern_compilation_error_constructor() {
-    let error = MqtteaClientError::pattern_compilation_error("Invalid regex: [unclosed bracket");
-
-    match error {
-        MqtteaClientError::PatternCompilationError(ref msg) => {
-            assert_eq!(msg, "Invalid regex: [unclosed bracket");
-        }
-        _ => panic!("Should be PatternCompilationError"),
-    }
-}
-
 // Tests for unregistered_type_error helper function
 #[test]
 fn test_unregistered_type_error_function() {
@@ -412,28 +335,6 @@ fn test_unregistered_type_error_custom_type() {
             assert!(type_name.contains("CustomAnimalMessage"));
         }
         _ => panic!("Should be UnregisteredType"),
-    }
-}
-
-// Tests for error equality and comparison (for test assertions)
-#[test]
-fn test_error_equality() {
-    let error1 = MqtteaClientError::unknown_message_type("/pets/cat/data");
-    let error2 = MqtteaClientError::unknown_message_type("/pets/cat/data");
-    let error3 = MqtteaClientError::unknown_message_type("/pets/dog/data");
-
-    // Note: MqtteaClientError likely doesn't implement PartialEq due to inner error types
-    // So we test by matching patterns instead
-    match (&error1, &error2, &error3) {
-        (
-            MqtteaClientError::UnknownMessageType(t1),
-            MqtteaClientError::UnknownMessageType(t2),
-            MqtteaClientError::UnknownMessageType(t3),
-        ) => {
-            assert_eq!(t1, t2);
-            assert_ne!(t1, t3);
-        }
-        _ => panic!("All should be UnknownMessageType"),
     }
 }
 

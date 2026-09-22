@@ -28,6 +28,7 @@ use tracing::instrument;
 
 use crate::configuring::handle_configuring;
 use crate::context::PowerShelfStateHandlerContextObjects;
+use crate::decommissioning::handle_decommissioning;
 use crate::deleting::handle_deleting;
 use crate::error_state::handle_error;
 use crate::fetching_data::handle_fetching_data;
@@ -106,6 +107,9 @@ impl PowerShelfStateHandler {
             PowerShelfControllerState::ReProvisioning { .. } => {
                 handle_reprovisioning(power_shelf_id, state, ctx).await
             }
+            PowerShelfControllerState::Decommissioning {
+                decommissioning_state,
+            } => handle_decommissioning(power_shelf_id, state, decommissioning_state, ctx).await,
             PowerShelfControllerState::Deleting => {
                 handle_deleting(power_shelf_id, state, ctx).await
             }

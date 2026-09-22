@@ -25,7 +25,8 @@ use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::{
-    ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
+    ColumnInfo, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult,
+    FilterableQueryBuilder, ObjectColumnFilter,
 };
 
 #[cfg(test)]
@@ -133,13 +134,14 @@ pub async fn create(
         name => name.to_string(),
     };
     let version = ConfigVersion::initial();
-    let query = "INSERT INTO racks(id, rack_profile_id, config, controller_state, controller_state_outcome, name, description, labels, version)
-            VALUES($1, $2, $3::json, $4::json, $5::json, $6, $7, $8::jsonb, $9) RETURNING *";
+    let query = "INSERT INTO racks(id, rack_profile_id, config, controller_state, controller_state_version, controller_state_outcome, name, description, labels, version)
+            VALUES($1, $2, $3::json, $4::json, $5, $6::json, $7, $8, $9::jsonb, $10) RETURNING *";
     let rack: Rack = sqlx::query_as(query)
         .bind(rack_id)
         .bind(rack_profile_id)
         .bind(sqlx::types::Json(config))
         .bind(controller_state)
+        .bind(version)
         .bind(controller_state_outcome)
         .bind(name)
         .bind(&src_metadata.description)
@@ -216,13 +218,21 @@ pub async fn consume_maintenance_termination_request(
     Ok(rack)
 }
 
+/// `try_update_controller_state` writes the rack state and `new_version`
+/// when the version matches `expected_version` and maintenance is not terminating.
+///
+/// A missing rack, changed version, or `maintenance_termination_requested`
+/// latch while the persisted state is `Maintenance` returns
+/// `NotApplied(ControllerStateNotCurrent)`. A latch outside `Maintenance` does
+/// not block the write. Successful writes return `Applied(())` and remain in the
+/// caller's transaction; database failures remain errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     rack_id: &RackId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &RackState,
-) -> DatabaseResult<bool> {
+) -> DatabaseResult<ConditionalWrite<(), ControllerStateNotCurrent>> {
     // A termination request is accepted only while the persisted rack state is
     // Maintenance. Scope the latch guard to that state so an invalid or stale
     // latch cannot freeze transitions in every other rack state.
@@ -237,7 +247,10 @@ pub async fn try_update_controller_state(
             .await
             .map_err(|e| DatabaseError::new("try_update_controller_state", e))?;
 
-    Ok(query_result.is_some())
+    Ok(match query_result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 pub async fn update_controller_state_outcome(

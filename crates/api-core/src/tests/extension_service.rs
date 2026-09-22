@@ -14,7 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ::rpc::forge::dpu_extension_service_observability_config::Config;
 use ::rpc::forge::forge_server::Forge;
@@ -22,18 +23,48 @@ use ::rpc::forge::{
     self as rpc, DpuExtensionServiceObservabilityConfig,
     DpuExtensionServiceObservabilityConfigLogging,
 };
+use carbide_dpf::{
+    DetachedDpuServiceDefinition, DpfError, DpuServiceHelmChartObservation, DpuServiceObservation,
+};
+use carbide_extension_service_controller::dpu_service::{
+    dpu_service_mutable_patch, project_dpu_service,
+};
+use carbide_extension_service_controller::io::ExtensionServiceStateControllerIO;
 use carbide_instrument::testing::MetricsCapture;
+use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_secrets::credentials::{CredentialKey, Credentials};
+use carbide_uuid::extension_service::ExtensionServiceId;
 use config_version::ConfigVersion;
+use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::extension_service::{ExtensionServiceLifecycleState, ExtensionServiceType};
+use model::tenant::TenantOrganizationId;
+use state_controller::controller::Enqueuer;
+use state_controller::io::StateControllerIO;
 use tonic::Request;
 use uuid::Uuid;
 
 use crate::api::Api;
-use crate::tests::common::api_fixtures::{TestEnv, create_managed_host, create_test_env};
+use crate::tests::common::api_fixtures::{
+    TestEnv, TestEnvOverrides, create_managed_host, create_test_env,
+    create_test_env_with_overrides, get_config,
+};
 
 const TEST_SERVICE_DATA: &str = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n    - name: app\n      image: nginx:1.27";
 const TEST_SERVICE_DATA_VERSION_2: &str = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: version-2\nspec:\n  containers:\n    - name: app\n      image: nginx:1.27";
 const TEST_SERVICE_DATA_VERSION_3: &str = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: version-3\nspec:\n  containers:\n    - name: app\n      image: nginx:1.27";
+const TEST_DPF_HELM_CHART_SERVICE_DATA: &str = r#"{
+  "repoURL": "oci://registry.example.com/charts",
+  "chartName": "tenant-service",
+  "chartVersion": "1.2.3",
+  "security.privileged": false
+}"#;
+const TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2: &str = r#"{
+  "repoURL": "oci://registry.example.com/charts",
+  "chartName": "tenant-service",
+  "chartVersion": "2.0.0",
+  "security.privileged": true,
+  "values": {"replicas": 2}
+}"#;
 const CREDENTIAL_CLEANUP_FAILURE_METRIC: &str =
     "carbide_extension_service_credential_cleanup_failures_total";
 
@@ -63,6 +94,19 @@ fn create_observability() -> rpc::DpuExtensionServiceObservability {
             ),
         }],
     }
+}
+
+fn lifecycle_state(service: &rpc::DpuExtensionService) -> String {
+    let lifecycle = service
+        .lifecycle_status
+        .as_ref()
+        .expect("extension service response includes lifecycle status");
+    serde_json::from_str::<serde_json::Value>(&lifecycle.state)
+        .expect("lifecycle state is JSON")
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .expect("lifecycle JSON contains state")
+        .to_string()
 }
 
 async fn create_test_tenants(env: &TestEnv) -> Result<(), eyre::Report> {
@@ -97,6 +141,58 @@ async fn create_test_tenants(env: &TestEnv) -> Result<(), eyre::Report> {
     Ok(())
 }
 
+async fn create_dpf_enabled_test_env(db_pool: sqlx::PgPool) -> TestEnv {
+    let mut config = get_config();
+    config.dpf.enabled = true;
+    create_test_env_with_overrides(db_pool, TestEnvOverrides::with_config(config)).await
+}
+
+async fn create_dpf_controller_test_env(
+    db_pool: sqlx::PgPool,
+    dpf_sdk: MockDpfOperations,
+) -> TestEnv {
+    let mut config = get_config();
+    config.dpf.enabled = true;
+    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(dpf_sdk);
+    create_test_env_with_overrides(
+        db_pool,
+        TestEnvOverrides::with_config(config).with_dpf_sdk(dpf_sdk),
+    )
+    .await
+}
+
+fn dpu_service_observation(service: &DetachedDpuServiceDefinition) -> DpuServiceObservation {
+    DpuServiceObservation {
+        name: Some(service.name.clone()),
+        namespace: Some(service.namespace.clone()),
+        labels: service.labels.clone(),
+        helm_chart: DpuServiceHelmChartObservation {
+            repo_url: service.helm_chart.repo_url.clone(),
+            chart: Some(service.helm_chart.chart.clone()),
+            version: service.helm_chart.version.clone(),
+            release_name: Some(service.helm_chart.release_name.clone()),
+            values: service.helm_chart.values.clone(),
+        },
+        deploy_in_cluster: Some(service.deploy_in_cluster),
+        dpu_cluster_selector_present: false,
+        interfaces_present: false,
+        paused: None,
+        security_privileged: Some(service.security_privileged),
+        service_daemon_set_node_selector: Some(serde_json::json!({
+            "nodeSelectorTerms": [{
+                "matchExpressions": service.node_selector_labels.iter().map(|(key, value)| serde_json::json!({
+                    "key": key,
+                    "operator": "In",
+                    "values": [value],
+                })).collect::<Vec<_>>(),
+            }],
+        })),
+        service_id: None,
+        config_ports_present: false,
+        is_deleting: false,
+    }
+}
+
 async fn create_test_extension_service_and_tenants(
     env: &TestEnv,
 ) -> Result<rpc::DpuExtensionService, eyre::Report> {
@@ -110,6 +206,7 @@ async fn create_test_extension_service(
     credential: Option<rpc::DpuExtensionServiceCredential>,
 ) -> Result<rpc::DpuExtensionService, eyre::Report> {
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: name.to_string(),
         description: Some("Test service".to_string()),
@@ -132,6 +229,7 @@ async fn create_test_extension_service_with_three_versions(
 ) -> Result<rpc::DpuExtensionService, eyre::Report> {
     create_test_tenants(env).await?;
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -188,6 +286,7 @@ async fn create_test_extension_service_with_ten_versions(
 ) -> Result<String, eyre::Report> {
     create_test_tenants(env).await?;
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -276,6 +375,7 @@ async fn test_extension_service_creation(db_pool: sqlx::PgPool) -> Result<(), ey
     create_test_tenants(&env).await?;
 
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -293,10 +393,1193 @@ async fn test_extension_service_creation(db_pool: sqlx::PgPool) -> Result<(), ey
 
     assert!(create_resp.is_ok());
 
-    println!(
-        "Extension service created: {:?}",
-        create_resp.unwrap().into_inner()
+    let service = create_resp.unwrap().into_inner();
+    assert_eq!(lifecycle_state(&service), "ready");
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_extension_service_is_rejected_when_dpf_is_disabled(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+
+    create_test_tenants(&env).await?;
+
+    let response = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: None,
+            service_name: "dpf-service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await
+        .expect_err("DPF helm chart extension services require DPF to be enabled for this site");
+
+    assert_eq!(response.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        response.message(),
+        "DPF helm chart extension services require DPF to be enabled for this site"
     );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_create_persists_normalized_creating_state_without_dpf_call(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_dpf_enabled_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    // Deliberately use non-contract field order and whitespace. The API must
+    // persist the parsed model's normalized representation, rather than this
+    // caller-provided encoding.
+    let data = r#"{
+        "security.privileged": false,
+        "chartVersion": "1.2.3",
+        "repoURL": "oci://registry.example.com/charts",
+        "chartName": "tenant-service"
+    }"#;
+    let response = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: None,
+            service_name: "accepted-dpf-service".to_string(),
+            description: Some("durable acceptance only".to_string()),
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: data.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+
+    let service_id: ExtensionServiceId = response.service_id.parse()?;
+    assert_eq!(lifecycle_state(&response), "creating");
+    let latest_version = response
+        .latest_version_info
+        .as_ref()
+        .expect("initial version is returned");
+    assert_eq!(
+        response.active_versions,
+        vec![latest_version.version.clone()]
+    );
+    assert_eq!(
+        latest_version
+            .version
+            .parse::<ConfigVersion>()?
+            .version_nr(),
+        1
+    );
+    assert_eq!(
+        latest_version.data,
+        model::extension_service::DpfHelmChartServiceData::parse(data)?.normalized_json()?
+    );
+
+    // The handler committed the sole V1 and controller state, but did not run
+    // or call the controller. That proves create is durable acceptance only;
+    // the periodic controller scan performs the later DPF work.
+    let mut txn = env.pool.begin().await?;
+    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("committed DPF Helm service is controller-visible");
+    assert_eq!(
+        record.status.controller_state.value,
+        ExtensionServiceLifecycleState::Creating
+    );
+    assert!(record.status.controller_state_outcome.is_none());
+    let version = db::extension_service::find_version_info(&mut txn, service_id, None).await?;
+    assert!(!version.has_credential);
+    let history = db::state_history::for_object(
+        &mut txn,
+        db::state_history::StateHistoryTableId::ExtensionService,
+        &service_id,
+    )
+    .await?;
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<ExtensionServiceLifecycleState>(&history[0].state)?,
+        ExtensionServiceLifecycleState::Creating
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let service_id = ExtensionServiceId::new();
+    let initial_data =
+        model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
+    let initial_projection = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &initial_data);
+    let updated_data = model::extension_service::DpfHelmChartServiceData::parse(
+        TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2,
+    )?;
+    let updated_projection = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &updated_data);
+    let existing = dpu_service_observation(&initial_projection);
+    let expected_name = updated_projection.name.clone();
+    let expected_patch = dpu_service_mutable_patch(
+        &updated_projection,
+        initial_projection.helm_chart.values.as_ref(),
+    );
+
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service()
+        .times(1)
+        .returning(|service| Ok(dpu_service_observation(service)));
+    mock.expect_get_dpu_service()
+        .times(1)
+        .withf({
+            let expected_name = expected_name.clone();
+            move |name| name == expected_name.as_str()
+        })
+        .returning(move |_| Ok(Some(existing.clone())));
+    mock.expect_patch_dpu_service()
+        .times(1)
+        .withf(move |name, patch| name == expected_name.as_str() && patch == &expected_patch)
+        .returning(|_, _| Ok(()));
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+
+    let created = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: Some(service_id.to_string()),
+            service_name: "update-dpf-service".to_string(),
+            description: Some("before update".to_string()),
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(created.service_id, service_id.to_string());
+
+    // The existing create reconciler reaches Ready before this API-only
+    // component accepts a replacement definition.
+    env.run_extension_service_controller_iteration().await;
+
+    let stale_update = env
+        .api
+        .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_id: service_id.to_string(),
+            service_name: None,
+            description: None,
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2.to_string(),
+            credential: None,
+            observability: None,
+            if_version_ctr_match: Some(0),
+        }))
+        .await
+        .expect_err("a stale API revision must be rejected before replacing V1");
+    assert_eq!(stale_update.code(), tonic::Code::FailedPrecondition);
+
+    let updated = env
+        .api
+        .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_id: service_id.to_string(),
+            service_name: Some("updated-dpf-service".to_string()),
+            description: Some("after update".to_string()),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2.to_string(),
+            credential: None,
+            observability: None,
+            if_version_ctr_match: Some(1),
+        }))
+        .await?
+        .into_inner();
+
+    assert_eq!(updated.version_ctr, 2);
+    assert_eq!(lifecycle_state(&updated), "updating");
+    let latest_version = updated
+        .latest_version_info
+        .as_ref()
+        .expect("stable V1 is returned");
+    assert_eq!(
+        updated.active_versions,
+        vec![latest_version.version.clone()]
+    );
+    assert_eq!(
+        latest_version
+            .version
+            .parse::<ConfigVersion>()?
+            .version_nr(),
+        1
+    );
+    assert_eq!(
+        latest_version.data,
+        model::extension_service::DpfHelmChartServiceData::parse(
+            TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2
+        )?
+        .normalized_json()?
+    );
+
+    let mut txn = env.pool.begin().await?;
+    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("updated DPF Helm service remains controller-visible");
+    assert_eq!(record.name, "updated-dpf-service");
+    assert_eq!(record.version_ctr, 2);
+    assert_eq!(
+        record.status.controller_state.value,
+        ExtensionServiceLifecycleState::Updating
+    );
+    assert_eq!(
+        db::extension_service::find_all_versions(&env.pool, service_id).await?,
+        vec![latest_version.version.parse()?]
+    );
+    let history = db::state_history::for_object(
+        &mut txn,
+        db::state_history::StateHistoryTableId::ExtensionService,
+        &service_id,
+    )
+    .await?;
+    assert_eq!(history.len(), 3);
+    assert_eq!(
+        serde_json::from_str::<ExtensionServiceLifecycleState>(&history[2].state)?,
+        ExtensionServiceLifecycleState::Updating
+    );
+    txn.commit().await?;
+
+    // A second data update is rejected before it can change V1 because DPF
+    // reconciliation of the first replacement has not completed yet.
+    let error = env
+        .api
+        .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_id: service_id.to_string(),
+            service_name: None,
+            description: None,
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+            if_version_ctr_match: Some(2),
+        }))
+        .await
+        .expect_err("data updates must wait for Ready");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("only be updated while ready"));
+
+    // The controller reads the old owned object, patches only the mutable
+    // DPUService material, and records the in-place revision as Ready.
+    env.run_extension_service_controller_iteration().await;
+    let mut txn = env.pool.begin().await?;
+    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("updated DPF Helm service remains controller-visible");
+    assert_eq!(
+        record.status.controller_state.value,
+        ExtensionServiceLifecycleState::Ready
+    );
+    assert_eq!(
+        db::extension_service::find_all_versions(&env.pool, service_id).await?,
+        vec![latest_version.version.parse()?]
+    );
+    let history = db::state_history::for_object(
+        &mut txn,
+        db::state_history::StateHistoryTableId::ExtensionService,
+        &service_id,
+    )
+    .await?;
+    assert_eq!(history.len(), 4);
+    assert_eq!(
+        serde_json::from_str::<ExtensionServiceLifecycleState>(&history[3].state)?,
+        ExtensionServiceLifecycleState::Ready
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let service_id = ExtensionServiceId::new();
+    let data =
+        model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
+    let projected = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &data);
+    let expected_name = projected.name.clone();
+    let existing = dpu_service_observation(&projected);
+    let mut finalizing = existing.clone();
+    finalizing.is_deleting = true;
+    let get_calls = Arc::new(AtomicUsize::new(0));
+
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service()
+        .times(1)
+        .returning(|service| Ok(dpu_service_observation(service)));
+    mock.expect_get_dpu_service().times(3).returning({
+        let get_calls = Arc::clone(&get_calls);
+        move |_| match get_calls.fetch_add(1, Ordering::Relaxed) {
+            0 => Ok(Some(existing.clone())),
+            1 => Ok(Some(finalizing.clone())),
+            _ => Ok(None),
+        }
+    });
+    mock.expect_delete_dpu_service()
+        .times(1)
+        .withf(move |name| name == expected_name.as_str())
+        .returning(|_| Ok(()));
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+
+    env.api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: Some(service_id.to_string()),
+            service_name: "delete-dpf-service".to_string(),
+            description: Some("delete controller test".to_string()),
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?;
+    env.run_extension_service_controller_iteration().await;
+
+    // Deletion is accepted only as durable intent. The record and V1 stay
+    // available to the state controller while DPF finalizers run.
+    env.api
+        .delete_dpu_extension_service(Request::new(rpc::DeleteDpuExtensionServiceRequest {
+            service_id: service_id.to_string(),
+            versions: vec![],
+        }))
+        .await?;
+    env.api
+        .delete_dpu_extension_service(Request::new(rpc::DeleteDpuExtensionServiceRequest {
+            service_id: service_id.to_string(),
+            versions: vec![ConfigVersion::initial().to_string()],
+        }))
+        .await?;
+    let mut txn = env.pool.begin().await?;
+    let deleting = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+        .await?
+        .pop()
+        .expect("soft-deleted DPF Helm service remains controller-visible");
+    assert!(deleting.deleted.is_some());
+    assert_eq!(
+        deleting.status.controller_state.value,
+        ExtensionServiceLifecycleState::Deleting
+    );
+    assert!(
+        db::extension_service::find_all_versions(&env.pool, service_id)
+            .await?
+            .is_empty()
+    );
+    txn.commit().await?;
+
+    let deleting = env
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![service_id.to_string()],
+        }))
+        .await?
+        .into_inner()
+        .services;
+    assert_eq!(deleting.len(), 1);
+    assert_eq!(lifecycle_state(&deleting[0]), "deleting");
+    assert!(deleting[0].active_versions.is_empty());
+    assert!(deleting[0].latest_version_info.is_none());
+
+    let recreate_while_deleting = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: None,
+            service_name: "delete-dpf-service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await;
+    let error = recreate_while_deleting
+        .expect_err("a pending DPF Helm chart deletion must reserve its service name");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+    // DPF accepts the delete and then keeps the CR while finalizers run. NICo
+    // must poll that deletionTimestamp-bearing object without issuing a
+    // second delete; only the following NotFound completes the lifecycle.
+    env.run_extension_service_controller_iteration().await;
+    env.run_extension_service_controller_iteration().await;
+    env.run_extension_service_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await?;
+    let deleted = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+        .await?
+        .pop()
+        .expect("terminal service record remains available");
+    assert_eq!(
+        deleted.status.controller_state.value,
+        ExtensionServiceLifecycleState::Deleted
+    );
+    let history = db::state_history::for_object(
+        &mut txn,
+        db::state_history::StateHistoryTableId::ExtensionService,
+        &service_id,
+    )
+    .await?;
+    assert_eq!(history.len(), 4);
+    assert_eq!(
+        serde_json::from_str::<ExtensionServiceLifecycleState>(&history[3].state)?,
+        ExtensionServiceLifecycleState::Deleted
+    );
+    txn.commit().await?;
+
+    let terminal = env
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![service_id.to_string()],
+        }))
+        .await?
+        .into_inner()
+        .services;
+    assert!(terminal.is_empty());
+
+    let recreated = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: None,
+            service_name: "delete-dpf-service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+    assert_ne!(recreated.service_id, service_id.to_string());
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_delete_refuses_unowned_dpu_service(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let service_id = ExtensionServiceId::new();
+    let data =
+        model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
+    let projected = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &data);
+    let mut unowned = dpu_service_observation(&projected);
+    unowned.labels.clear();
+
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service()
+        .times(1)
+        .returning(|service| Ok(dpu_service_observation(service)));
+    // There is deliberately no delete expectation: a same-name CR without
+    // NICo's owner label must never be deleted.
+    mock.expect_get_dpu_service()
+        .times(1)
+        .returning(move |_| Ok(Some(unowned.clone())));
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+
+    env.api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: Some(service_id.to_string()),
+            service_name: "unowned-delete-dpf-service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?;
+    env.run_extension_service_controller_iteration().await;
+
+    env.api
+        .delete_dpu_extension_service(Request::new(rpc::DeleteDpuExtensionServiceRequest {
+            service_id: service_id.to_string(),
+            versions: vec![],
+        }))
+        .await?;
+    env.run_extension_service_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await?;
+    let service = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+        .await?
+        .pop()
+        .expect("soft-deleted service remains available after an ownership conflict");
+    assert_eq!(
+        service.status.controller_state.value,
+        ExtensionServiceLifecycleState::Failed
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_delete_recovers_after_controller_restart(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let service_id = ExtensionServiceId::new();
+    let mut initial_mock = MockDpfOperations::new();
+    initial_mock
+        .expect_create_dpu_service()
+        .times(1)
+        .returning(|service| Ok(dpu_service_observation(service)));
+    let env = create_dpf_controller_test_env(db_pool, initial_mock).await;
+    create_test_tenants(&env).await?;
+
+    env.api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: Some(service_id.to_string()),
+            service_name: "restart-delete-dpf-service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?;
+    env.run_extension_service_controller_iteration().await;
+    env.api
+        .delete_dpu_extension_service(Request::new(rpc::DeleteDpuExtensionServiceRequest {
+            service_id: service_id.to_string(),
+            versions: vec![],
+        }))
+        .await?;
+
+    // Drop the first API/controller fixture before starting a fresh one over
+    // the same durable database state. The restarted controller discovers the
+    // soft-deleted Deleting row through its periodic scan.
+    let restart_pool = env.pool.clone();
+    drop(env);
+
+    let mut restarted_mock = MockDpfOperations::new();
+    restarted_mock
+        .expect_get_dpu_service()
+        .times(1)
+        .returning(|_| Err(DpfError::not_found("DPUService", "already-gone")));
+    let mut config = get_config();
+    config.dpf.enabled = true;
+    let mut restart_overrides =
+        TestEnvOverrides::with_config(config).with_dpf_sdk(Arc::new(restarted_mock));
+    // The initial fixture already created the site-wide Admin and Underlay
+    // segments in this database. A restarted API must reuse them rather than
+    // attempting to create overlapping fixed-prefix test infrastructure.
+    restart_overrides.create_network_segments = Some(false);
+    let restarted = create_test_env_with_overrides(restart_pool, restart_overrides).await;
+    restarted.run_extension_service_controller_iteration().await;
+
+    let mut txn = restarted.pool.begin().await?;
+    let service = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+        .await?
+        .pop()
+        .expect("terminal service remains available");
+    assert_eq!(
+        service.status.controller_state.value,
+        ExtensionServiceLifecycleState::Deleted
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_metadata_update_keeps_active_lifecycle_and_v1(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service()
+        .times(1)
+        .returning(|service| Ok(dpu_service_observation(service)));
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+
+    let created = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: None,
+            service_name: "metadata-dpf-service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+    let service_id: ExtensionServiceId = created.service_id.parse()?;
+    env.run_extension_service_controller_iteration().await;
+
+    let updated = env
+        .api
+        .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_id: service_id.to_string(),
+            service_name: Some("metadata-dpf-service-renamed".to_string()),
+            description: Some("metadata only".to_string()),
+            data: String::new(),
+            credential: None,
+            observability: None,
+            if_version_ctr_match: Some(1),
+        }))
+        .await?
+        .into_inner();
+
+    assert_eq!(updated.version_ctr, 1);
+    assert_eq!(updated.active_versions.len(), 1);
+    assert_eq!(
+        updated.active_versions[0]
+            .parse::<ConfigVersion>()?
+            .version_nr(),
+        1
+    );
+
+    let mut txn = env.pool.begin().await?;
+    let history = db::state_history::for_object(
+        &mut txn,
+        db::state_history::StateHistoryTableId::ExtensionService,
+        &service_id,
+    )
+    .await?;
+    // `Creating -> Ready` only. Metadata did not request controller work.
+    assert_eq!(history.len(), 2);
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_create_rejects_unsupported_credentials_and_observability(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_dpf_enabled_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    for (name, credential, observability, expected_message) in [
+        (
+            "dpf-credential",
+            Some(rpc::DpuExtensionServiceCredential {
+                registry_url: String::new(),
+                r#type: None,
+            }),
+            None,
+            "credentials for DPF helm chart extension services should be preprovisioned and are not supported through API",
+        ),
+        (
+            "dpf-observability",
+            None,
+            Some(create_observability()),
+            "observability configuration for DPF helm chart extension services is not supported yet",
+        ),
+    ] {
+        let service_id = ExtensionServiceId::new();
+        let response = env
+            .api
+            .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+                dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+                service_id: Some(service_id.to_string()),
+                service_name: name.to_string(),
+                description: None,
+                tenant_organization_id: "best_org".to_string(),
+                service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+                data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+                credential,
+                observability,
+            }))
+            .await
+            .expect_err("unsupported DPF option must be rejected before persistence");
+        assert_eq!(response.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(response.message(), expected_message);
+
+        let mut txn = env.pool.begin().await?;
+        assert!(
+            db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+                .await?
+                .is_empty(),
+            "rejected DPF option must not leave a controller row"
+        );
+        txn.commit().await?;
+    }
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_create_rejects_invalid_data(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_dpf_enabled_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    for (name, data, expected_message) in [
+        (
+            "dpf-missing-chart-version",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "security.privileged":false
+            }"#,
+            "missing field `chartVersion`",
+        ),
+        (
+            "dpf-unknown-field",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "security.privileged":false,
+                "unsupported":true
+            }"#,
+            "unknown field `unsupported`",
+        ),
+        (
+            "dpf-reserved-node-selector",
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "security.privileged":false,
+                "values":{"serviceDaemonSet":{"nodeSelector":{"tenant":"value"}}}
+            }"#,
+            "tenant values may not set NICo-owned field serviceDaemonSet.nodeSelector",
+        ),
+    ] {
+        let service_id = ExtensionServiceId::new();
+        let error = env
+            .api
+            .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+                dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+                service_id: Some(service_id.to_string()),
+                service_name: name.to_string(),
+                description: None,
+                tenant_organization_id: "best_org".to_string(),
+                service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+                data: data.to_string(),
+                credential: None,
+                observability: None,
+            }))
+            .await
+            .expect_err("invalid DPF Helm data must be rejected before persistence");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains(expected_message));
+
+        let mut txn = env.pool.begin().await?;
+        assert!(
+            db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+                .await?
+                .is_empty(),
+            "invalid DPF Helm data must not leave a controller row"
+        );
+        txn.commit().await?;
+    }
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_create_rejects_duplicate_name_for_tenant(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_dpf_enabled_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    env.api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: None,
+            service_name: "duplicate-dpf-service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?;
+
+    let error = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::All as i32),
+            service_id: None,
+            service_name: "Duplicate-Dpf-Service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await
+        .expect_err("DPF Helm service names must be unique within a tenant");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+    Ok(())
+}
+
+/// Seeds a DPF Helm service directly so controller-plumbing tests can isolate
+/// their setup from create-API assertions.
+async fn seed_dpf_helm_chart_service(
+    env: &TestEnv,
+    name: &str,
+) -> Result<ExtensionServiceId, eyre::Report> {
+    let service_id = ExtensionServiceId::new();
+    seed_dpf_helm_chart_service_with_id(env, service_id, name).await?;
+    Ok(service_id)
+}
+
+async fn seed_dpf_helm_chart_service_with_id(
+    env: &TestEnv,
+    service_id: ExtensionServiceId,
+    name: &str,
+) -> Result<(), eyre::Report> {
+    let tenant: TenantOrganizationId = "best_org".parse()?;
+    let mut txn = env.pool.begin().await?;
+    db::extension_service::create(
+        &mut txn,
+        ConfigVersion::initial(),
+        &service_id,
+        &ExtensionServiceType::DpfHelmChart,
+        Some(model::extension_service::DpuTarget::All),
+        name,
+        &tenant,
+        Some("controller fixture"),
+        TEST_DPF_HELM_CHART_SERVICE_DATA,
+        None,
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_create_reconciliation_transitions_to_active(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service()
+        .times(1)
+        .returning(|service| Ok(dpu_service_observation(service)));
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+    let service_id = seed_dpf_helm_chart_service(&env, "controller-create").await?;
+
+    env.run_extension_service_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await?;
+    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("controller record remains available");
+    assert_eq!(
+        record.status.controller_state.value,
+        ExtensionServiceLifecycleState::Ready
+    );
+    assert!(matches!(
+        record.status.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Transition { .. })
+    ));
+    let history = db::state_history::for_object(
+        &mut txn,
+        db::state_history::StateHistoryTableId::ExtensionService,
+        &service_id,
+    )
+    .await?;
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        serde_json::from_str::<ExtensionServiceLifecycleState>(&history[1].state)?,
+        ExtensionServiceLifecycleState::Ready
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_create_reconciliation_accepts_owned_already_exists(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let service_id = ExtensionServiceId::new();
+    let data =
+        model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
+    let expected = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &data);
+    let expected_name = expected.name.clone();
+    let expected_observation = dpu_service_observation(&expected);
+
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service()
+        .times(1)
+        .returning(move |_| {
+            Err(DpfError::already_exists(
+                "DPUService",
+                expected_name.clone(),
+            ))
+        });
+    mock.expect_get_dpu_service()
+        .times(1)
+        .returning(move |_| Ok(Some(expected_observation.clone())));
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+    seed_dpf_helm_chart_service_with_id(&env, service_id, "controller-already-exists").await?;
+
+    env.run_extension_service_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await?;
+    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("controller record remains available");
+    assert_eq!(
+        record.status.controller_state.value,
+        ExtensionServiceLifecycleState::Ready
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_create_reconciliation_refuses_unowned_existing_service(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let service_id = ExtensionServiceId::new();
+    let data =
+        model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
+    let expected = project_dpu_service(service_id, carbide_dpf::NAMESPACE, &data);
+    let expected_name = expected.name.clone();
+    let mut unowned = dpu_service_observation(&expected);
+    unowned.labels.clear();
+
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service()
+        .times(1)
+        .returning(move |_| {
+            Err(DpfError::already_exists(
+                "DPUService",
+                expected_name.clone(),
+            ))
+        });
+    mock.expect_get_dpu_service()
+        .times(1)
+        .returning(move |_| Ok(Some(unowned.clone())));
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+    seed_dpf_helm_chart_service_with_id(&env, service_id, "controller-ownership-conflict").await?;
+
+    env.run_extension_service_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await?;
+    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("controller record remains available");
+    assert_eq!(
+        record.status.controller_state.value,
+        ExtensionServiceLifecycleState::Failed
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_create_reconciliation_retries_transient_failure(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service().times(1).returning(|_| {
+        Err(DpfError::timeout(
+            "create DPUService",
+            "simulated transport failure",
+        ))
+    });
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+    let service_id = seed_dpf_helm_chart_service(&env, "controller-retry").await?;
+
+    env.run_extension_service_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await?;
+    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("controller record remains available");
+    assert_eq!(
+        record.status.controller_state.value,
+        ExtensionServiceLifecycleState::Creating
+    );
+    assert!(matches!(
+        record.status.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+            if reason == "DPF DPUService creation failed; retrying"
+    ));
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dpf_helm_chart_controller_queue_scan_and_persistence(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+
+    let service_id = seed_dpf_helm_chart_service(&env, "controller-scan").await?;
+    let io = ExtensionServiceStateControllerIO::default();
+    let enqueuer = Enqueuer::<ExtensionServiceStateControllerIO>::new(env.pool.clone());
+
+    // No enqueue occurs on creation. A manual iteration uses the standard
+    // periodic list and reaches the durable Creating row. This fixture has no
+    // DPF mock, so it also proves the controller retries safely when DPF is
+    // unavailable rather than issuing a direct API-handler mutation.
+    env.run_extension_service_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await?;
+    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("DPF Helm chart service remains visible to the controller");
+    assert_eq!(
+        record.status.controller_state.value,
+        ExtensionServiceLifecycleState::Creating
+    );
+    assert!(matches!(
+        record.status.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+            if reason == "DPF SDK is unavailable; retrying DPUService creation"
+    ));
+    let initial_history = db::state_history::for_object(
+        &mut txn,
+        db::state_history::StateHistoryTableId::ExtensionService,
+        &service_id,
+    )
+    .await?;
+    assert_eq!(initial_history.len(), 1);
+    txn.commit().await?;
+
+    // An explicit framework wake-up uses the same durable queue and preserves
+    // the pending lifecycle state. Production relies on periodic scans for now.
+    enqueuer.enqueue_object(&service_id).await?;
+    env.run_extension_service_controller_iteration().await;
+
+    // A mistakenly enqueued Kubernetes-pod service is not controller-visible:
+    // the DPF-only load query returns None and no lifecycle state is changed.
+    let non_dpf_id = ExtensionServiceId::new();
+    let tenant: TenantOrganizationId = "best_org".parse()?;
+    let mut txn = env.pool.begin().await?;
+    db::extension_service::create(
+        &mut txn,
+        ConfigVersion::initial(),
+        &non_dpf_id,
+        &ExtensionServiceType::KubernetesPod,
+        None,
+        "controller-non-dpf",
+        &tenant,
+        None,
+        TEST_SERVICE_DATA,
+        None,
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+    enqueuer.enqueue_object(&non_dpf_id).await?;
+    env.run_extension_service_controller_iteration().await;
+    let mut txn = env.pool.begin().await?;
+    assert!(io.load_object_state(&mut txn, &non_dpf_id).await?.is_none());
+    txn.commit().await?;
+
+    // Exercise the IO transition/history path directly. Production code does
+    // not take this transition until a later component has completed DPF work.
+    let mut txn = env.pool.begin().await?;
+    let creating = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("controller record exists");
+    let deleted_version = creating.status.controller_state.version.increment();
+    assert_eq!(
+        io.persist_controller_state(
+            &mut txn,
+            &service_id,
+            creating.status.controller_state.version,
+            deleted_version,
+            &ExtensionServiceLifecycleState::Deleted,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    io.persist_state_history(
+        &mut txn,
+        &service_id,
+        deleted_version,
+        &ExtensionServiceLifecycleState::Deleted,
+    )
+    .await?;
+    // Models a create request that completed in DPF after a delete won the
+    // database race. Its stale Creating version cannot overwrite Deleted with
+    // Ready; the framework re-enqueues the object after this lost CAS.
+    assert_eq!(
+        io.persist_controller_state(
+            &mut txn,
+            &service_id,
+            creating.status.controller_state.version,
+            creating.status.controller_state.version.increment(),
+            &ExtensionServiceLifecycleState::Ready,
+        )
+        .await?,
+        db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent)
+    );
+    txn.commit().await?;
+
+    // Deleted is terminal in the shell: it is still listed by periodic scans,
+    // but never receives a DPF mutation or an unintended state transition.
+    env.run_extension_service_controller_iteration().await;
+    let mut txn = env.pool.begin().await?;
+    let deleted = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+        .await?
+        .pop()
+        .expect("terminal record remains visible");
+    assert_eq!(
+        deleted.status.controller_state.value,
+        ExtensionServiceLifecycleState::Deleted
+    );
+    assert!(matches!(
+        deleted.status.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::DoNothing { .. })
+    ));
+    let history = db::state_history::for_object(
+        &mut txn,
+        db::state_history::StateHistoryTableId::ExtensionService,
+        &service_id,
+    )
+    .await?;
+    assert_eq!(history.len(), 2);
+    txn.commit().await?;
 
     Ok(())
 }
@@ -310,6 +1593,7 @@ async fn test_extension_service_create_with_credential(
     create_test_tenants(&env).await?;
 
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -356,6 +1640,7 @@ async fn test_extension_service_create_failure(db_pool: sqlx::PgPool) -> Result<
     create_test_tenants(&env).await?;
 
     let requested_extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -728,6 +2013,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Test empty service name
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "".to_string(),
         description: Some("Test service".to_string()),
@@ -746,6 +2032,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Test empty data
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -764,6 +2051,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Test invalid data format (not YAML or JSON)
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -780,8 +2068,9 @@ async fn test_extension_service_creation_invalid_arg(
         .await;
     assert!(create_resp.is_err());
 
-    // Test invalid credential type
+    // Test invalid credential registry URL
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -810,6 +2099,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Test invalid observability config
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -833,6 +2123,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Test invalid observability config name
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -862,6 +2153,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Fail to create an an extension with too many observability configs
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -895,6 +2187,7 @@ async fn test_extension_service_creation_invalid_arg(
     // Fail to create an an extension with just a basic bad observability config
     // that's missing the actual config.
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -929,6 +2222,7 @@ async fn test_extension_service_creation_with_same_name(
     create_test_tenants(&env).await?;
 
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -954,6 +2248,7 @@ async fn test_extension_service_creation_with_same_name(
 
     // Creating a new extension service with the same name and tenant organization ID should fail
     let duplicate_extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "Test-Service".to_string(),
         description: Some("Test service".to_string()),
@@ -976,6 +2271,7 @@ async fn test_extension_service_creation_with_same_name(
 
     // However, creating a new extension service with the same name but different tenant organization ID should be allowed
     let new_extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -1020,11 +2316,22 @@ async fn test_extension_service_recreate_same_name_after_delete(
     let find_resp = env
         .api
         .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
-            service_ids: vec![service_id],
+            service_ids: vec![service_id.clone()],
         }))
         .await;
     assert!(find_resp.is_ok());
     assert!(find_resp.unwrap().into_inner().services.is_empty());
+
+    let mut txn = env.pool.begin().await?;
+    let deleted = db::extension_service::find_by_ids(&mut txn, &[service_id.parse()?], true, false)
+        .await?
+        .pop()
+        .expect("soft-deleted Kubernetes Pod service remains in the database");
+    assert_eq!(
+        deleted.status.controller_state.value,
+        ExtensionServiceLifecycleState::Deleted
+    );
+    txn.commit().await?;
 
     let recreate_resp = create_test_extension_service(&env.api, service_name, None).await;
     assert!(recreate_resp.is_ok());
@@ -1158,6 +2465,7 @@ async fn test_extension_service_update_invalid_arg(
 
     // Create another extension service with a different name
     let other_extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "other-test-service".to_string(),
         description: Some("Other test service".to_string()),
@@ -1358,6 +2666,7 @@ async fn test_extension_service_update_metadata(db_pool: sqlx::PgPool) -> Result
 
     // Create another extension service with a different name
     let other_extension_service = rpc::CreateDpuExtensionServiceRequest {
+        dpu_target: None,
         service_id: None,
         service_name: "other-test-service".to_string(),
         description: Some("Other test service".to_string()),
@@ -1533,6 +2842,7 @@ async fn test_extension_service_find_by_ids(db_pool: sqlx::PgPool) -> Result<(),
     assert!(find_resp.is_ok());
     let services = find_resp.unwrap().into_inner().services;
     assert!(services.len() == 1);
+    assert_eq!(lifecycle_state(&services[0]), "ready");
 
     println!("Services found: {:?}", services);
 
@@ -2393,6 +3703,7 @@ async fn test_find_instances_by_extension_service_multiple_services_per_instance
     let service2 = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            dpu_target: None,
             service_id: None,
             service_name: "test-service-2".to_string(),
             description: Some("Second test service".to_string()),
@@ -2465,5 +3776,325 @@ async fn test_find_instances_by_extension_service_multiple_services_per_instance
     assert_eq!(instances[0].service_id, service2_id);
     assert_eq!(instances[0].version, service2_version);
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_helm_target_placement_status_and_detach(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::Mutex;
+
+    use model::extension_service::{DPF_HELM_CHART_PLACEMENT_LABEL_VALUE, DpfHelmChartIdentity};
+
+    use crate::tests::common::api_fixtures::create_managed_host_with_dpf_multi;
+
+    let labels = Arc::new(Mutex::new(
+        HashMap::<String, BTreeMap<String, String>>::new(),
+    ));
+    let failed_device = Arc::new(Mutex::new(None::<String>));
+    let mut mock = MockDpfOperations::new();
+    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_node().returning(|_| Ok(()));
+    mock.expect_release_maintenance_hold().returning(|_| Ok(()));
+    mock.expect_is_reboot_required().returning(|_| Ok(false));
+    mock.expect_get_dpu_phase()
+        .returning(|_, _| Ok(carbide_dpf::DpuPhase::Ready));
+    mock.expect_deployment_type_for_dpu()
+        .returning(|_, _| Ok(carbide_dpf::DpuDeploymentType::Bf3));
+    mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    mock.expect_get_service_versions_for_dpu()
+        .returning(|_| Ok(vec![]));
+    mock.expect_create_dpu_service()
+        .returning(|service| Ok(dpu_service_observation(service)));
+    let writes = labels.clone();
+    let failure = failed_device.clone();
+    mock.expect_merge_dpu_device_node_labels()
+        .returning(move |device, delta| {
+            if failure.lock().unwrap().as_deref() == Some(device) {
+                return Err(DpfError::timeout("placement", "injected placement failure"));
+            }
+            let mut labels = writes.lock().unwrap();
+            let labels = labels.entry(device.to_owned()).or_default();
+            for (key, value) in delta {
+                if let Some(value) = value {
+                    labels.insert(key, value);
+                } else {
+                    labels.remove(&key);
+                }
+            }
+            Ok(())
+        });
+    let reads = labels.clone();
+    mock.expect_get_dpu_device_node_labels()
+        .returning(move |device| {
+            Ok(reads
+                .lock()
+                .unwrap()
+                .get(device)
+                .cloned()
+                .unwrap_or_default())
+        });
+    let mut site_config = get_config();
+    site_config.dpf.enabled = true;
+    site_config.dpf.deployments.bf3.bfb_url = Some("http://example.com/test.bfb".into());
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(site_config).with_dpf_sdk(Arc::new(mock)),
+    )
+    .await;
+    let mh = create_managed_host_with_dpf_multi(&env, 3).await;
+    let segments = env.create_vpc_and_tenant_segments(2).await;
+    let mut txn = env.db_txn().await;
+    let host = mh.snapshot(&mut txn).await.host_snapshot;
+    txn.commit().await?;
+    let primary = host.primary_attached_dpu_machine_id().unwrap();
+    let (_, mapping) = host.get_dpu_device_and_id_mappings()?;
+    let secondary = *mapping
+        .values()
+        .flatten()
+        .find(|id| **id != primary)
+        .unwrap();
+    let used_dpus = [primary, secondary];
+    let mut network = rpc::InstanceNetworkConfig::default();
+    for (dpu, segment) in used_dpus.iter().zip(segments) {
+        let locator = host.get_device_locator_for_dpu_id(dpu)?;
+        let mut interface =
+            crate::tests::common::api_fixtures::instance::single_interface_network_config(segment)
+                .interfaces
+                .remove(0);
+        interface.device = Some(locator.device);
+        interface.device_instance = locator.device_instance as u32;
+        network.interfaces.push(interface);
+    }
+    let instance = mh.instance_builer(&env).network(network).build().await;
+    let tenant = instance
+        .rpc_instance()
+        .await
+        .into_inner()
+        .config
+        .unwrap()
+        .tenant
+        .unwrap()
+        .tenant_organization_id;
+    env.api
+        .create_tenant(Request::new(rpc::CreateTenantRequest {
+            organization_id: tenant.clone(),
+            metadata: Some(rpc::Metadata {
+                name: tenant.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await?;
+    let mut registrations = Vec::new();
+    for (name, target) in [
+        ("primary-policy", 0),
+        ("all-policy", 2),
+        ("all-active-policy", 1),
+    ] {
+        let service = env
+            .api
+            .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+                service_name: name.into(),
+                service_type: rpc::DpuExtensionServiceType::DpfHelmChart as i32,
+                dpu_target: Some(target),
+                tenant_organization_id: tenant.clone(),
+                data: TEST_DPF_HELM_CHART_SERVICE_DATA.into(),
+                ..Default::default()
+            }))
+            .await?
+            .into_inner();
+        registrations.push(service);
+    }
+    env.run_extension_service_controller_iteration().await;
+    let current = instance.rpc_instance().await.into_inner();
+    let mut config = current.config.unwrap();
+    config.dpu_extension_services = Some(rpc::InstanceDpuExtensionServicesConfig {
+        service_configs: registrations
+            .iter()
+            .map(|service| rpc::InstanceDpuExtensionServiceConfig {
+                service_id: service.service_id.clone(),
+                version: service
+                    .latest_version_info
+                    .as_ref()
+                    .unwrap()
+                    .version
+                    .clone(),
+            })
+            .collect(),
+    });
+    env.api
+        .update_instance_config(Request::new(rpc::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            metadata: current.metadata.clone(),
+            config: Some(config.clone()),
+            ..Default::default()
+        }))
+        .await?;
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    txn.commit().await?;
+    let attached = &snapshot
+        .instance
+        .as_ref()
+        .unwrap()
+        .config
+        .extension_services
+        .service_configs;
+    assert_eq!(
+        attached
+            .iter()
+            .map(|config| config.dpu_target)
+            .collect::<Vec<_>>(),
+        vec![
+            Some(model::extension_service::DpuTarget::Primary),
+            Some(model::extension_service::DpuTarget::All),
+            Some(model::extension_service::DpuTarget::AllActive)
+        ]
+    );
+    let primary = snapshot
+        .host_snapshot
+        .primary_attached_dpu_machine_id()
+        .unwrap();
+    let devices: Vec<_> = snapshot
+        .dpu_snapshots
+        .iter()
+        .map(|dpu| (dpu.id, dpu.dpf_id().unwrap()))
+        .collect();
+    let primary_key = DpfHelmChartIdentity::from_service_id(registrations[0].service_id.parse()?)
+        .placement_label_key;
+    let all_key = DpfHelmChartIdentity::from_service_id(registrations[1].service_id.parse()?)
+        .placement_label_key;
+    let all_active_key =
+        DpfHelmChartIdentity::from_service_id(registrations[2].service_id.parse()?)
+            .placement_label_key;
+    for (_, name) in &devices {
+        labels.lock().unwrap().insert(
+            name.clone(),
+            BTreeMap::from([
+                ("unrelated-owner".into(), "preserved".into()),
+                (
+                    all_active_key.clone(),
+                    DPF_HELM_CHART_PLACEMENT_LABEL_VALUE.into(),
+                ),
+            ]),
+        );
+    }
+    for _ in 0..3 {
+        env.run_machine_state_controller_iteration().await;
+    }
+    {
+        let labels = labels.lock().unwrap();
+        for (id, name) in &devices {
+            let labels = &labels[name];
+            assert_eq!(
+                labels.get(&primary_key).map(String::as_str),
+                (*id == primary).then_some(DPF_HELM_CHART_PLACEMENT_LABEL_VALUE)
+            );
+            assert_eq!(
+                labels.get(&all_key).map(String::as_str),
+                Some(DPF_HELM_CHART_PLACEMENT_LABEL_VALUE)
+            );
+            assert_eq!(
+                labels.get(&all_active_key).map(String::as_str),
+                used_dpus
+                    .contains(id)
+                    .then_some(DPF_HELM_CHART_PLACEMENT_LABEL_VALUE)
+            );
+            assert_eq!(labels["unrelated-owner"], "preserved");
+        }
+    }
+    let public = instance
+        .rpc_instance()
+        .await
+        .into_inner()
+        .status
+        .unwrap()
+        .dpu_extension_services
+        .unwrap();
+    for (service, count) in registrations.iter().zip([1, 3, 2]) {
+        let status = public
+            .dpu_extension_services
+            .iter()
+            .find(|status| status.service_id == service.service_id)
+            .unwrap();
+        assert_eq!(status.dpu_statuses.len(), count);
+        assert_eq!(
+            status.deployment_status,
+            rpc::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceRunning as i32
+        );
+    }
+    // Simulate a former primary label that must be removed even though it is no longer a target.
+    let former_primary = devices
+        .iter()
+        .find(|(id, _)| !used_dpus.contains(id))
+        .unwrap()
+        .1
+        .clone();
+    labels
+        .lock()
+        .unwrap()
+        .get_mut(&former_primary)
+        .unwrap()
+        .insert(
+            primary_key.clone(),
+            DPF_HELM_CHART_PLACEMENT_LABEL_VALUE.into(),
+        );
+    labels
+        .lock()
+        .unwrap()
+        .get_mut(&former_primary)
+        .unwrap()
+        .insert(
+            all_active_key.clone(),
+            DPF_HELM_CHART_PLACEMENT_LABEL_VALUE.into(),
+        );
+    *failed_device.lock().unwrap() = Some(former_primary.clone());
+    config.dpu_extension_services = Some(rpc::InstanceDpuExtensionServicesConfig::default());
+    env.api
+        .update_instance_config(Request::new(rpc::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            metadata: current.metadata.clone(),
+            config: Some(config),
+            ..Default::default()
+        }))
+        .await?;
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    assert!(
+        !instance
+            .db_instance(&mut txn)
+            .await
+            .config
+            .extension_services
+            .service_configs
+            .is_empty()
+    );
+    txn.commit().await?;
+    assert!(labels.lock().unwrap()[&former_primary].contains_key(&primary_key));
+    assert!(labels.lock().unwrap()[&former_primary].contains_key(&all_active_key));
+    *failed_device.lock().unwrap() = None;
+    for _ in 0..3 {
+        env.run_machine_state_controller_iteration().await;
+    }
+    let mut txn = env.db_txn().await;
+    assert!(
+        instance
+            .db_instance(&mut txn)
+            .await
+            .config
+            .extension_services
+            .service_configs
+            .is_empty()
+    );
+    txn.commit().await?;
+    for labels in labels.lock().unwrap().values() {
+        assert!(!labels.contains_key(&primary_key));
+        assert!(!labels.contains_key(&all_key));
+        assert!(!labels.contains_key(&all_active_key));
+        assert_eq!(labels["unrelated-owner"], "preserved");
+    }
     Ok(())
 }

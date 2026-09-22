@@ -144,11 +144,11 @@ impl HealthObject {
 
     fn history_url(&self) -> Option<String> {
         match self {
-            HealthObject::Machine(id) => Some(format!("/admin/machine/{id}/health-history")),
+            HealthObject::Machine(_)
+            | HealthObject::PowerShelf(_)
+            | HealthObject::Rack(_)
+            | HealthObject::Switch(_) => Some(format!("{}/health-history", self.detail_url())),
             HealthObject::NvLinkDomain(_) => None,
-            HealthObject::PowerShelf(_) => None,
-            HealthObject::Rack(_) => None,
-            HealthObject::Switch(_) => None,
         }
     }
 
@@ -331,7 +331,7 @@ async fn fetch_machine_health_page_data(
     };
     let health_contributors =
         fetch_dpu_health_contributors(api, machine_id, snapshot.associated_dpu_machine_ids).await?;
-    let history = match fetch_health_history(api, machine_id).await {
+    let history = match fetch_machine_health_history(api, machine_id).await {
         Ok(records) => HealthHistoryTable { records },
         Err(err) => {
             tracing::error!(error = %err, %machine_id, "find_machine_health_histories");
@@ -360,14 +360,19 @@ async fn fetch_rack_health_page_data(
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
+    let history = match fetch_rack_health_history(api, rack_id).await {
+        Ok(records) => HealthHistoryTable { records },
+        Err(err) => {
+            tracing::error!(error = %err, %rack_id, "find_rack_health_histories");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
+        }
+    };
 
     Ok(HealthPageData {
         entries,
         aggregate_health,
         health_contributors: Vec::new(),
-        history: HealthHistoryTable {
-            records: Vec::new(),
-        },
+        history,
     })
 }
 
@@ -384,14 +389,19 @@ async fn fetch_power_shelf_health_page_data(
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
+    let history = match fetch_power_shelf_health_history(api, power_shelf_id).await {
+        Ok(records) => HealthHistoryTable { records },
+        Err(err) => {
+            tracing::error!(error = %err, %power_shelf_id, "find_power_shelf_health_histories");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
+        }
+    };
 
     Ok(HealthPageData {
         entries,
         aggregate_health,
         health_contributors: Vec::new(),
-        history: HealthHistoryTable {
-            records: Vec::new(),
-        },
+        history,
     })
 }
 
@@ -408,14 +418,19 @@ async fn fetch_switch_health_page_data(
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
         }
     };
+    let history = match fetch_switch_health_history(api, switch_id).await {
+        Ok(records) => HealthHistoryTable { records },
+        Err(err) => {
+            tracing::error!(error = %err, %switch_id, "find_switch_health_histories");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Html(err.to_string())).into_response());
+        }
+    };
 
     Ok(HealthPageData {
         entries,
         aggregate_health,
         health_contributors: Vec::new(),
-        history: HealthHistoryTable {
-            records: Vec::new(),
-        },
+        history,
     })
 }
 
@@ -595,7 +610,11 @@ async fn fetch_machine_health_snapshot(
             .health
             .as_ref()
             .map(|health| health_report_from_rpc_convert_invalid(health.clone())),
-        associated_dpu_machine_ids: machine.associated_dpu_machine_ids,
+        associated_dpu_machine_ids: machine
+            .associated_dpu_machine_ids
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     })
 }
 
@@ -1113,11 +1132,26 @@ fn aggregate_health_report_entries(
     replace.or_else(|| has_merge.then_some(aggregate))
 }
 
-pub(super) async fn fetch_health_history(
+/// Extracts and converts the records for `object_id` from a `HealthHistories`
+/// response map, dropping entries for any other object id.
+fn health_history_records_for(
+    mut histories: std::collections::HashMap<String, ::rpc::forge::HealthHistoryRecords>,
+    object_id: &str,
+) -> Vec<HealthHistoryRecord> {
+    histories
+        .remove(object_id)
+        .unwrap_or_default()
+        .records
+        .into_iter()
+        .map(HealthHistoryRecord::from_rpc_convert_invalid)
+        .collect()
+}
+
+pub(super) async fn fetch_machine_health_history(
     api: &Api,
     machine_id: &MachineId,
 ) -> Result<Vec<HealthHistoryRecord>, tonic::Status> {
-    let records = api
+    let histories = api
         .find_machine_health_histories(tonic::Request::new(
             ::rpc::forge::MachineHealthHistoriesRequest {
                 machine_ids: vec![*machine_id],
@@ -1127,17 +1161,75 @@ pub(super) async fn fetch_health_history(
         ))
         .await
         .map(|response| response.into_inner())?
-        .histories
-        .remove(&machine_id.to_string())
-        .unwrap_or_default()
-        .records;
+        .histories;
 
-    let records = records
-        .into_iter()
-        .map(HealthHistoryRecord::from_rpc_convert_invalid)
-        .collect();
+    Ok(health_history_records_for(
+        histories,
+        &machine_id.to_string(),
+    ))
+}
 
-    Ok(records)
+pub(super) async fn fetch_switch_health_history(
+    api: &Api,
+    switch_id: &SwitchId,
+) -> Result<Vec<HealthHistoryRecord>, tonic::Status> {
+    let histories = api
+        .find_switch_health_histories(tonic::Request::new(
+            ::rpc::forge::SwitchHealthHistoriesRequest {
+                switch_ids: vec![*switch_id],
+                start_time: None,
+                end_time: None,
+            },
+        ))
+        .await
+        .map(|response| response.into_inner())?
+        .histories;
+
+    Ok(health_history_records_for(
+        histories,
+        &switch_id.to_string(),
+    ))
+}
+
+pub(super) async fn fetch_rack_health_history(
+    api: &Api,
+    rack_id: &RackId,
+) -> Result<Vec<HealthHistoryRecord>, tonic::Status> {
+    let histories = api
+        .find_rack_health_histories(tonic::Request::new(
+            ::rpc::forge::RackHealthHistoriesRequest {
+                rack_ids: vec![rack_id.clone()],
+                start_time: None,
+                end_time: None,
+            },
+        ))
+        .await
+        .map(|response| response.into_inner())?
+        .histories;
+
+    Ok(health_history_records_for(histories, rack_id.as_ref()))
+}
+
+pub(super) async fn fetch_power_shelf_health_history(
+    api: &Api,
+    power_shelf_id: &PowerShelfId,
+) -> Result<Vec<HealthHistoryRecord>, tonic::Status> {
+    let histories = api
+        .find_power_shelf_health_histories(tonic::Request::new(
+            ::rpc::forge::PowerShelfHealthHistoriesRequest {
+                power_shelf_ids: vec![*power_shelf_id],
+                start_time: None,
+                end_time: None,
+            },
+        ))
+        .await
+        .map(|response| response.into_inner())?
+        .histories;
+
+    Ok(health_history_records_for(
+        histories,
+        &power_shelf_id.to_string(),
+    ))
 }
 
 impl super::Base for HealthPage {}

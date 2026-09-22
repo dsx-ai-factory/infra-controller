@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::panic::Location;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use carbide_ib_fabric::errors::IbError;
 use carbide_redfish::libredfish::RedfishClientCreationError;
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
 use carbide_site_explorer::EndpointExplorationServiceError;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{InvalidMachineType, MachineId};
 use config_version::ConfigVersionParseError;
 use db::credential_rotation::CredentialRotationType;
 use db::ip_allocator::DhcpError;
@@ -262,6 +263,26 @@ pub enum CarbideError {
     AttestationError(String),
 }
 
+// Implement From<Infallible> so that we can write generic code that converts between MachineId
+// representations using TryFrom, while supporting "non-converting" cases where the caller is
+// already passing the right type. (The `impl TryFrom<T> for T` blanket impl uses `Infallible` as
+// its error type.)
+impl From<Infallible> for CarbideError {
+    fn from(_: Infallible) -> Self {
+        // We just crash if this is ever called, because the whole point of `Infallible` is that
+        // it's an error variant that is never actually constructed. Future rust versions will use
+        // `!` as the error type for TryFrom<T> for T, and this whole conversion will become
+        // unnecessary (as the compiler will already determine it to be unreachable.)
+        unreachable!()
+    }
+}
+
+impl From<InvalidMachineType> for CarbideError {
+    fn from(err: InvalidMachineType) -> Self {
+        Self::InvalidArgument(err.to_string())
+    }
+}
+
 impl From<libnmxc::NmxcError> for CarbideError {
     fn from(e: libnmxc::NmxcError) -> Self {
         match e {
@@ -280,6 +301,7 @@ impl From<ModelError> for CarbideError {
             ModelError::MissingArgument(e) => Self::MissingArgument(e),
             ModelError::HardwareInfo(e) => Self::HardwareInfoError(e),
             ModelError::InvalidArgument(e) => Self::InvalidArgument(e),
+            ModelError::InvalidMachindId(e) => Self::InvalidArgument(e),
         }
     }
 }
@@ -382,6 +404,7 @@ impl From<IbError> for CarbideError {
             IbError::IBFabricError(msg) => Self::IBFabricError(msg),
             IbError::NotFoundError { kind, id } => Self::NotFoundError { kind, id },
             IbError::InvalidArgument(e) => Self::InvalidArgument(e),
+            IbError::CredentialConfigurationError(e) => Self::FailedPrecondition(e),
             IbError::NotImplemented => Self::NotImplemented,
             IbError::Internal { message } => Self::Internal { message },
         }
@@ -434,9 +457,9 @@ impl OperatorError for CarbideError {
             CarbideError::ClientCertificateMissingInformation(_) => ErrorCode::nico(Api, 401),
             CarbideError::PermissionDeniedError(_) => ErrorCode::nico(Api, 403),
             CarbideError::NotFoundError { .. } => ErrorCode::nico(Api, 404),
-            CarbideError::AlreadyFoundError { .. } | CarbideError::AlreadyInProgress(_) => {
-                ErrorCode::nico(Api, 409)
-            }
+            CarbideError::AlreadyFoundError { .. }
+            | CarbideError::AlreadyInProgress(_)
+            | CarbideError::ExpectedHostDuplicateMacAddress(_) => ErrorCode::nico(Api, 409),
             CarbideError::MaintenanceMode
             | CarbideError::UnhealthyHost
             | CarbideError::ConcurrentModificationError(_, _)
@@ -533,6 +556,9 @@ impl From<CarbideError> for tonic::Status {
             }
             error @ CarbideError::FailedPrecondition(_) => {
                 Status::failed_precondition(error.to_string())
+            }
+            error @ CarbideError::ExpectedHostDuplicateMacAddress(_) => {
+                Status::already_exists(error.to_string())
             }
             error @ CarbideError::ExpectedSwitchDuplicateNvosMacAddress(_) => {
                 Status::failed_precondition(error.to_string())
@@ -735,7 +761,7 @@ fn test_permission_denied_error_maps_to_permission_denied_status() {
 #[test]
 fn test_address_already_in_use_maps_to_failed_precondition_status() {
     use std::str::FromStr;
-    let err = CarbideError::AddressAlreadyInUse(AddressAlreadyInUseError(
+    let err = CarbideError::AddressAlreadyInUse(AddressAlreadyInUseError::active(
         "10.0.0.1".parse().unwrap(),
         MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap(),
         uuid::Uuid::new_v4().into(),

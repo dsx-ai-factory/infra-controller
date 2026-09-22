@@ -23,32 +23,32 @@ func TestConfigValidate(t *testing.T) {
 			mutate:  func(config *Config) { config.Rules = nil },
 			wantErr: "rule resolver is required",
 		},
-		"missing action execution store": {
-			mutate:  func(config *Config) { config.Executions = nil },
-			wantErr: "execution store is required",
+		"missing event plan store": {
+			mutate:  func(config *Config) { config.Store = nil },
+			wantErr: "event plan store is required",
 		},
 		"missing target resolver": {
 			mutate:  func(config *Config) { config.Targets = nil },
 			wantErr: "target resolver registry is required",
 		},
-		"missing action executor": {
-			mutate:  func(config *Config) { config.Executor = nil },
-			wantErr: "action executor is required",
-		},
 	}
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			config := validProcessorConfig()
+			config := validProcessorConfig(t)
+
 			if test.mutate != nil {
 				test.mutate(&config)
 			}
 
 			err := config.Validate()
+
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
+
 				return
 			}
+
 			require.NoError(t, err)
 		})
 	}
@@ -57,12 +57,14 @@ func TestConfigValidate(t *testing.T) {
 func TestNew(t *testing.T) {
 	t.Run("rejects invalid configuration", func(t *testing.T) {
 		processor, err := New(Config{})
+
 		require.Error(t, err)
 		require.Nil(t, processor)
 	})
 
 	t.Run("constructs processor", func(t *testing.T) {
-		processor, err := New(validProcessorConfig())
+		processor, err := New(validProcessorConfig(t))
+
 		require.NoError(t, err)
 		require.NotNil(t, processor)
 	})

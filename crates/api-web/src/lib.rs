@@ -669,11 +669,11 @@ fn routes_with_auth_mode(
             .route("/machine/{machine_id}/health", get(health::machine_health))
             .route(
                 "/machine/{machine_id}/health-history",
-                get(health_history::show_health_history),
+                get(health_history::show_machine_health_history),
             )
             .route(
                 "/machine/{machine_id}/health-history.json",
-                get(health_history::show_health_history_json),
+                get(health_history::show_machine_health_history_json),
             )
             .route(
                 "/machine/{machine_id}/state-history",
@@ -699,6 +699,14 @@ fn routes_with_auth_mode(
                 post(health::remove_power_shelf_health_report),
             )
             .route(
+                "/power-shelf/{power_shelf_id}/health-history",
+                get(health_history::show_power_shelf_health_history),
+            )
+            .route(
+                "/power-shelf/{power_shelf_id}/health-history.json",
+                get(health_history::show_power_shelf_health_history_json),
+            )
+            .route(
                 "/power-shelf/{power_shelf_id}/state-history",
                 get(state_history::show_power_shelf_state_history),
             )
@@ -719,6 +727,14 @@ fn routes_with_auth_mode(
                 post(health::remove_rack_health_report),
             )
             .route(
+                "/rack/{rack_id}/health-history",
+                get(health_history::show_rack_health_history),
+            )
+            .route(
+                "/rack/{rack_id}/health-history.json",
+                get(health_history::show_rack_health_history_json),
+            )
+            .route(
                 "/rack/{rack_id}/state-history",
                 get(state_history::show_rack_state_history),
             )
@@ -737,6 +753,14 @@ fn routes_with_auth_mode(
             .route(
                 "/switch/{switch_id}/health/remove-report",
                 post(health::remove_switch_health_report),
+            )
+            .route(
+                "/switch/{switch_id}/health-history",
+                get(health_history::show_switch_health_history),
+            )
+            .route(
+                "/switch/{switch_id}/health-history.json",
+                get(health_history::show_switch_health_history_json),
             )
             .route(
                 "/switch/{switch_id}/state-history",

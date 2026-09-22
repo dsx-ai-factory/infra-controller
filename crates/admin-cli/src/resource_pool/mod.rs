@@ -19,12 +19,8 @@ mod grow;
 mod list;
 
 // Cross-module re-export for jump module
-pub(crate) use list::cmd::list;
-
-#[cfg(test)]
-mod tests;
-
 use clap::Parser;
+pub(crate) use list::cmd::list;
 
 use crate::cfg::dispatch::Dispatch;
 

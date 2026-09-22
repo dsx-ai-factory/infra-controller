@@ -142,7 +142,7 @@ func (a Action) Clone() Action {
 
 // Validate checks the action name, condition, and typed specification.
 func (a Action) Validate() error {
-	if err := validateIdentifier("action name", a.Name); err != nil {
+	if err := ValidateIdentifier("action name", a.Name); err != nil {
 		return err
 	}
 
@@ -243,15 +243,11 @@ func (s *SubmitTask) clone() ActionSpec {
 	if s == nil {
 		return nil
 	}
-	cloned := &SubmitTask{
-		TargetStrategy:   s.TargetStrategy,
-		ConflictStrategy: s.ConflictStrategy,
-		Description:      s.Description,
-	}
+	cloned := *s
 	if s.Operation != nil {
 		cloned.Operation = s.Operation.Clone()
 	}
-	return cloned
+	return &cloned
 }
 
 func (s *SubmitTask) validate() error {

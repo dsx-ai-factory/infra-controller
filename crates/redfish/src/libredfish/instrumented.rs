@@ -25,8 +25,9 @@
 //! ([`super::implementation`]), so the one decorator covers every consumer
 //! -- machine-controller, spdm-controller, site-explorer, preingestion, and
 //! the rest -- without touching their call sites. The `operation` label is
-//! the trait method's own name: a closed set fixed at compile time, never a
-//! URL or other wire data.
+//! the trait method's own name, or a fixed compile-time label for a direct
+//! operation that needs response metadata unavailable through the trait. It
+//! is never a URL or other wire data.
 //!
 //! This backend's `outcome` has a third value beyond the shared helper's
 //! ok/error: `unsupported`, for calls a vendor answers with a local
@@ -61,11 +62,13 @@ use libredfish::model::task::Task;
 use libredfish::model::thermal::Thermal;
 use libredfish::model::update_service::{ComponentType, TransferProtocolType, UpdateService};
 use libredfish::model::{BootOption, ComputerSystem, Manager, ODataId};
+use libredfish::standard::RedfishStandard;
 use libredfish::{
     Assembly, BiosProfileType, BiosProfileVendor, Boot, BootInterfaceRef, BootOptions,
     BootOverride, Chassis, Collection, EnabledDisabled, EthernetInterface, JobState,
-    MachineSetupStatus, NetworkAdapter, NetworkDeviceFunction, NetworkPort, PCIeDevice, PowerState,
-    Redfish, RedfishError, RedfishFuture, Resource, RoleId, Status, SystemPowerControl,
+    MachineSetupStatus, ManagerResetType, NetworkAdapter, NetworkDeviceFunction, NetworkPort,
+    PCIeDevice, PowerState, Redfish, RedfishError, RedfishFuture, Resource, RoleId,
+    SpxNicModelAndName, Status, SystemPowerControl,
 };
 
 use super::redact_password;
@@ -166,6 +169,10 @@ macro_rules! delegate_with_red {
 }
 
 impl Redfish for InstrumentedRedfish {
+    fn std_redfish(&self) -> &RedfishStandard {
+        self.inner.std_redfish()
+    }
+
     delegate_with_red! {
         fn change_username<'a>(&'a self, old_name: &'a str, new_name: &'a str) -> ();
         fn get_accounts<'a>(&'a self) -> Vec<ManagerAccount>;
@@ -196,7 +203,7 @@ impl Redfish for InstrumentedRedfish {
         ) -> Task;
         fn get_power_metrics<'a>(&'a self) -> Power;
         fn power<'a>(&'a self, action: SystemPowerControl) -> ();
-        fn bmc_reset<'a>(&'a self) -> ();
+        fn bmc_reset<'a>(&'a self, reset_type: Option<ManagerResetType>) -> ();
         fn chassis_reset<'a>(
             &'a self,
             chassis_id: &'a str,
@@ -335,6 +342,10 @@ impl Redfish for InstrumentedRedfish {
         fn set_host_privilege_level<'a>(&'a self, level: HostPrivilegeLevel) -> ();
         fn set_utc_timezone<'a>(&'a self) -> ();
         fn set_ntp_servers<'a>(&'a self, servers: &'a [String]) -> ();
+        fn get_spx_nic_east_west_control_enabled<'a>(&'a self, nic_index: u8) -> Option<bool>;
+        fn set_spx_nic_east_west_control_enabled<'a>(&'a self, nic_index: u8, enabled: bool) -> ();
+        fn get_spx_nic_mac_address<'a>(&'a self, nic_index: u8) -> Option<String>;
+        fn get_spx_nic_model_and_name<'a>(&'a self, nic_index: u8) -> Option<SpxNicModelAndName>;
     }
 
     // MARK: - Password-bearing operations

@@ -16,14 +16,15 @@ The following guiding principles are for DPU configuration:
 
 ## Core Configuration Flow
 
-DPUs are configured by the NICo site controller via a **declarative** and **stateless** mechanism:
+The NICo site controller configures DPUs using a **declarative** and
+**stateless** mechanism:
 
-- The agent running on DPUs (`dpu-agent`) requests the current desired configuration via the `GetManagedHostNetworkConfig` gRPC API call. Example data of the returned configuration is provided in the [Appendix](#dpu-configuration-example) below.
-- Every configuration that is received from the site controller is converted into a [NVUE](https://docs.nvidia.com/networking-ethernet-software/cumulus-linux/System-Configuration/NVIDIA-User-Experience-NVUE/) configuration file, which is then used to reconfigure HBN via the nvue CLI tool (`nv config apply`).
+- The agent running on DPUs (`dpu-agent`) requests the current desired configuration using the `GetManagedHostNetworkConfig` gRPC API call. Example response data is provided in the [Appendix](#dpu-configuration-example).
+- The agent converts each configuration from the site controller into an [NVUE](https://docs.nvidia.com/networking-ethernet-software/cumulus-linux/System-Configuration/NVIDIA-User-Experience-NVUE/) configuration file. It then reconfigures HBN with the NVUE CLI tool (`nv config apply`).
 - The `dpu-agent` also reconfigures a DHCP server running on the DPU, which responds to DHCP requests from the attached host.
-- After HBN and the DHCP server are reconfigured, `dpu-agent` implements health-checks that supervise whether the desired configurations are in-place and check whether the DPU is healthy (e.g. the agent continuously checks whether the DPU has established BGP peering with TORs and route servers according to the desired configuration).
+- After HBN and the DHCP server are reconfigured, `dpu-agent` checks whether the desired configuration is in place and the DPU is healthy. The checks include BGP peering with top-of-rack (ToR) switches and route servers.
 - The `dpu-agent` uses the `RecordDpuNetworkStatus` gRPC API call to report back to the site control plane whether the desired configurations are applied, and whether all health checks are succeeding.
-- For the first 30s after any configuration change, the DPU reports itself as unhealthy with a `PostConfigCheckWait` alert. This gives the DPU some time to monitor the stability and health of the new configuration before the site controller assumes that the new configuration is fully applied and operational.
+- After an agent iteration changes HBN or reloads local DHCP in ContainerExec mode, the agent adds a `PostConfigCheckWait` alert to one health report. The controller waits for a fresh health sample before it advances the host lifecycle.
 
 ```mermaid
 sequenceDiagram
@@ -37,7 +38,7 @@ sequenceDiagram
         participant Dhcp as DHCP Server
     end
 
-    loop Every 30s
+    loop At each polling interval
         Agent->>NICo: GetManagedHostNetworkConfig()<br>Returns desired configs and versions
         Agent->>Nvue: Apply requested configuration
         Agent->>Dhcp: Reconfigure DHCP Server
@@ -45,6 +46,130 @@ sequenceDiagram
         Agent->>NICo: RecordDpuNetworkStatus()<br>Report applied config versions<br>Report DPU health
     end
 ```
+
+## DPU LLDP Collection
+
+NICo uses LLDP-MED data from each DPU to associate its physical uplinks with
+top-of-rack switch ports. The collection path depends on how `dpu-agent` is
+deployed:
+
+**A systemd-managed agent invokes `lldpcli` directly.** Provisioning renames   `/etc/lldpd.d/lldp-interfaces.conf` to `/etc/lldpd.d/lldp-interfaces.conf.disabled`, configures `DAEMON_ARGS="-M 1"`, and restarts `lldpd` so LLDP-MED inventory is available on all interfaces.
+
+**A DPF deployment runs `nico-lldp-sidecar`** from the same image as `dpu-agent`. The sidecar invokes the host's `lldpcli`, writes an atomic snapshot to the shared `/data/lldp` path, and the containerized agent reads that snapshot.
+
+The DPF sidecar refreshes a successful snapshot every 120 seconds and retries a
+failed collection after 30 seconds. It retains snapshots for ten minutes and
+keeps the last successful snapshot when a later collection fails, but
+`dpu-agent` rejects snapshots older than five minutes. This allows short
+collection failures without reporting stale topology indefinitely.
+
+The sidecar mounts the host `/run`, `/usr/sbin`, and `/lib` paths read-only and
+mounts the host `/sys` at `/host-sys`, also read-only. It is granted only
+`DAC_OVERRIDE`; all other Linux capabilities are dropped. Its default resource
+requests are 10 millicores and 64 MiB, with limits of 250 millicores and 128
+MiB. Keep the sidecar and agent image versions aligned because the shared
+snapshot format is an internal contract.
+
+For deployment settings and log collection, refer to
+[DPF Setup for NICo Integration](../manuals/dpf.md#dpu-lldp-sidecar). For
+operational checks, refer to [DPU Health Checks](../operations/monitoring-health.md#dpu-health-checks).
+
+## DPU ToR Uplink Health
+
+The DPU agent expects two ordered HBN uplinks. The first uplink is the primary
+p0 interface, and the second is the redundant p1 interface. Health alert
+targets use the configured HBN interface names. Normal PXE boot depends on p0.
+
+Agents deployed with DOCA Platform Framework (DPF) query NVUE. Agents without
+DPF query FRR. Both paths apply the same policy to BGP transport sessions. The
+optional `min_dpu_functioning_links` field sets the minimum number of
+established transport sessions. Add it as a top-level key in the `nico-api`
+site configuration.
+
+`nico-api` reads this field when the process starts. Restart the `nico-api`
+Deployment after you change its site configuration ConfigMap. The chart adds a
+ConfigMap reloader annotation by default, so installations with that reloader
+restart the Deployment automatically.
+
+The field accepts an unsigned 32-bit integer. The following table describes
+each supported setting and the invalid configuration range:
+
+| Value | ToR Uplink Behavior |
+|---|---|
+| Unset | Uses the default value of `2`. |
+| `0` | Disables the p0 and p1 transport checks and their FRR IPv6 unicast negotiation checks. NVUE does not request BGP neighbor data. The agent emits no p0 PXE readiness signal. Other BGP and DPU health checks continue. |
+| `1` | Either established transport session satisfies the minimum. A p0 failure remains visible because PXE requires p0. A p1 transport failure is suppressed when p0 is established. |
+| `2` | Requires both sessions for a clean report. A lone p1 failure remains visible but does not block lifecycle progress. This value is the default. |
+| Greater than `2` | Produces a critical configuration health alert because the agent expects exactly two uplinks. The NVUE path uses `BgpPeeringTor`; the FRR path uses `BgpStats`. |
+
+No configuration change is required for this policy. A site using `1` can keep
+it to suppress a lone p1 transport alert. Remove the setting to restore the
+default p1 visibility. A lone p1 failure does not prevent allocation or block
+host state transitions with either setting.
+
+### Transport Session Policy
+
+Both paths treat a missing neighbor or a state other than `Established` as an
+unavailable uplink. NVUE also treats a missing state as an uplink finding. The
+FRR summary requires a state string, so missing or malformed summary data
+produces a critical `BgpStats` alert instead. The following table shows the
+resulting `BgpPeeringTor` alerts for valid transport data:
+
+| p0 Transport | p1 Transport | Minimum `1` | Minimum `2` |
+|---|---|---|---|
+| Established | Established | No alert | No alert |
+| Unavailable | Established | p0 alert with `PreventAllocations` | p0 alert with `PreventAllocations` |
+| Established | Unavailable | No alert | Unclassified p1 alert |
+| Unavailable | Unavailable | Both alerts with `PreventAllocations` and `PreventHostStateChanges` | Both alerts with `PreventAllocations` and `PreventHostStateChanges` |
+
+`PreventAllocations` keeps the host out of the allocation pool. On a p0
+transport alert, it also supplies the PXE readiness signal used during normal
+instance provisioning. The controller checks this signal before it leaves
+`WaitingForNetworkConfig` and immediately before the normal PXE restart in
+`WaitingForRebootToReady`.
+
+The final restart check also evaluates general
+`PreventHostStateChanges` alerts. Hosts without managed DPUs receive this
+general check but have no p0 check. Instance deletion and custom iPXE reboot
+paths bypass the final readiness check.
+
+The p0 check applies to the initial normal PXE flow. Live network updates do not
+use this PXE readiness gate.
+
+### FRR IPv6 Unicast Warnings
+
+For an FNN configuration with an IPv6 loopback, the non-DPF FRR path also checks
+whether required uplinks negotiated the IPv6 unicast address family. Other FRR
+configurations do not run this address family check. The DPF NVUE path checks
+transport state only.
+
+FRR reports an address family failure as a `BgpPeeringTor` alert whose message
+states that the session did not negotiate IPv6 unicast. This warning does not
+mean that the BGP transport session is unavailable. One address family warning
+is unclassified and does not supply the p0 PXE readiness signal.
+
+With a minimum of `1`, only p0 must negotiate IPv6 unicast. With a minimum of
+`2`, both uplinks must negotiate it. At `2`, if both uplinks have findings,
+including a mix of a transport failure and an address family warning, both
+alerts include `PreventAllocations` and `PreventHostStateChanges`.
+
+### Health Sampling After Configuration Changes
+
+When an agent iteration applies an actual HBN configuration change, it adds a
+critical `PostConfigCheckWait` alert to that iteration's health report. The
+alert includes `PreventAllocations` and `PreventHostStateChanges`. The
+controller therefore cannot accept the newly acknowledged network version from
+that same report. It waits for a later health report.
+
+This behavior is a report boundary, not a fixed timer. If the next iteration
+does not apply another configuration change, the agent removes the alert. When
+the uplink check is enabled and completes, the later report contains its current
+BGP result. With default agent settings, the active polling interval is 10
+seconds.
+
+On the NVUE path, only an actual HBN update triggers this alert. An accepted
+DHCP gRPC request does not trigger it by itself. On the ContainerExec path, an
+actual local HBN update or DHCP reload triggers the alert.
 
 ## Bootstrap CA Trust
 
@@ -114,8 +239,13 @@ NICo uses versioned immutable configuration data in order to detect whether any 
 
 The DPU configuration that is applied can be understood as coming from two different sources:
 
-* **Tenant configurations**: While the host is under control of a tenant, the tenant can change the desired overlay network configuration. The tenant can e.g. control from which VPC prefix an IP address should be allocated for a given network interface. They can also decide how many Virtual Function interfaces (VFs) are utilized, and what their configuration is.
-* **Site controller and host lifecycle**: During the lifecycle of a host, certain parts of the network configuration need to be updated. For example, when the host is provisioned for a tenant, the host networking gets reconfigured from using the admin overlay network towards the tenant overlay network. When the host is released by the tenant, it is moved back onto the admin network.
+- **Tenant configurations**: While a tenant controls the host, the tenant can
+  change the desired overlay network configuration. For example, the tenant can
+  select the VPC prefix and configure the virtual function (VF) interfaces.
+- **Site controller and host lifecycle**: The site controller updates parts of
+  the network configuration during the host lifecycle. Provisioning moves host
+  networking from the admin overlay to the tenant overlay. Release moves it
+  back to the admin overlay.
 
 In order to separate these concerns, NICo internally uses two different configuration data structs and associated version numbers (`instance_network_config` versus `managedhost_network_config`). It can thereby distinguish whether a setting that is required by the tenant has not been applied, compared to whether a setting that is required by the control plane has not been applied.
 

@@ -334,7 +334,7 @@ async fn test_allocate_instance_rejects_inactive_os(_: PgPoolOptions, options: P
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(rpc::forge::InstanceOperatingSystemConfig {
@@ -422,7 +422,7 @@ async fn test_allocate_instance_rejects_not_ready_os(_: PgPoolOptions, options: 
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(rpc::forge::InstanceOperatingSystemConfig {
@@ -633,7 +633,7 @@ async fn test_create_instance_with_os_image_and_verify_pxe_rendering(
         pxe.pxe_script
     );
     assert!(
-        pxe.pxe_script.contains("ds=nocloud-net"),
+        pxe.pxe_script.contains("ds=nocloud-net;"),
         "Expected cloud-init data source when userdata is set, got: {}",
         pxe.pxe_script
     );

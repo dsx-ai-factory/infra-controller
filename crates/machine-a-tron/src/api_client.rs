@@ -14,28 +14,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use base64::prelude::*;
 use bmc_mock::{DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, MachineInfo};
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineInterfaceId};
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use mac_address::MacAddress;
 use model::expected_machine::HostDpuPolicy;
-use rpc::forge::instance_operating_system_config::Variant;
 use rpc::forge::machine_cleanup_info::CleanupStepResult;
 use rpc::forge::{
     ConfigSetting, ExpectedInterface, ExpectedMachine, ExpectedPowerShelf, ExpectedRack,
-    ExpectedRackRequest, ExpectedSwitch, InlineIpxe, InstanceOperatingSystemConfig,
-    MachinesByIdsRequest, SetDynamicConfigRequest, VpcVirtualizationType,
+    ExpectedRackRequest, ExpectedSwitch, MachinesByIdsRequest, SetDynamicConfigRequest,
 };
 use rpc::protos::forge_api_client::ForgeApiClient;
 
 use crate::MachineConfig;
+use crate::status::DeviceKind;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientApiError {
@@ -57,8 +55,6 @@ pub struct MockDiscoveryData {
     pub tpm_ek_certificate: Option<Vec<u8>>,
 }
 
-static SUBNET_COUNTER: AtomicU32 = AtomicU32::new(0);
-static VPC_COUNTER: AtomicU32 = AtomicU32::new(0);
 const DUMMY_NVOS_USERNAME: &str = "admin";
 const DUMMY_NVOS_PASSWORD: &str = "factory_password";
 
@@ -71,8 +67,61 @@ impl From<ForgeApiClient> for ApiClient {
     }
 }
 
+/// One expected inventory record that machine-a-tron registers at startup.
+#[derive(Clone, Debug)]
+pub(crate) enum ExpectedRecord {
+    Rack {
+        rack_id: RackId,
+        rack_profile_id: RackProfileId,
+    },
+    Machine {
+        bmc_mac_address: String,
+        chassis_serial_number: String,
+        rack_id: Option<RackId>,
+        dpu_policy: Option<HostDpuPolicy>,
+        dpf_enabled: bool,
+        interfaces: Vec<ExpectedInterface>,
+    },
+    Switch {
+        bmc_mac_address: String,
+        switch_serial_number: String,
+        nvos_mac_addresses: Vec<String>,
+        rack_id: Option<RackId>,
+    },
+    PowerShelf {
+        bmc_mac_address: String,
+        shelf_serial_number: String,
+        rack_id: Option<RackId>,
+    },
+}
+
+impl ExpectedRecord {
+    /// Human-readable identity used in logs and the registration summary.
+    pub(crate) fn identifier(&self) -> String {
+        let (kind, serial, bmc_mac_address) = match self {
+            Self::Rack { rack_id, .. } => return format!("rack {rack_id}"),
+            Self::Machine {
+                chassis_serial_number,
+                bmc_mac_address,
+                ..
+            } => (DeviceKind::Machine, chassis_serial_number, bmc_mac_address),
+            Self::Switch {
+                switch_serial_number,
+                bmc_mac_address,
+                ..
+            } => (DeviceKind::Switch, switch_serial_number, bmc_mac_address),
+            Self::PowerShelf {
+                shelf_serial_number,
+                bmc_mac_address,
+                ..
+            } => (DeviceKind::PowerShelf, shelf_serial_number, bmc_mac_address),
+        };
+        format!("{kind} {serial} ({bmc_mac_address})")
+    }
+}
+
 pub struct DpuNetworkStatusArgs<'a> {
-    pub dpu_machine_id: MachineId,
+    pub dpu_machine_id: DpuMachineId,
     pub network_config_version: String,
     pub instance_network_config_version: Option<String>,
     pub instance_config_version: Option<String>,
@@ -143,10 +192,15 @@ impl ApiClient {
                     ClientApiError::ConfigError("No TPM EK certificate waa supplied".to_string()),
                 )?))
         }
+        let discovery_reporter = match machine_info {
+            MachineInfo::Host(_) => rpc::MachineDiscoveryReporter::Scout,
+            MachineInfo::Dpu(_) => rpc::MachineDiscoveryReporter::DpuAgent,
+        };
         let mdi = rpc::forge::MachineDiscoveryInfo {
             machine_interface_id: Some(machine_interface_id),
             discovery_data: Some(rpc::DiscoveryData::Info(machine_discovery_info)),
             create_machine: true,
+            discovery_reporter: discovery_reporter as i32,
             ..Default::default()
         };
 
@@ -224,101 +278,6 @@ impl ApiClient {
             .map_err(ClientApiError::InvocationError)
     }
 
-    pub async fn allocate_instance(
-        &self,
-        host_machine_id: MachineId,
-        network_segment_name: &str,
-    ) -> ClientApiResult<rpc::forge::Instance> {
-        let segment_request = rpc::forge::NetworkSegmentSearchFilter {
-            name: Some(network_segment_name.to_owned()),
-            tenant_org_id: None,
-        };
-
-        let network_segment_ids = self
-            .0
-            .find_network_segment_ids(segment_request)
-            .await
-            .map_err(|e| {
-                ClientApiError::ConfigError(format!(
-                    "network segment: {network_segment_name} retrieval error {e}"
-                ))
-            })?;
-
-        if network_segment_ids.network_segments_ids.len() >= 2 {
-            tracing::warn!(
-                "Network segments from previous runs of machine-a-tron have not been cleaned up. Suggested to start again after cleaning db."
-            );
-        }
-        let Some(network_segment_id) = network_segment_ids.network_segments_ids.into_iter().next()
-        else {
-            return Err(ClientApiError::ConfigError(format!(
-                "network segment: {network_segment_name} not found."
-            )));
-        };
-
-        let interface_config = rpc::forge::InstanceInterfaceConfig {
-            function_type: rpc::forge::InterfaceFunctionType::Physical as i32,
-            network_segment_id: Some(network_segment_id),
-            network_details: Some(
-                rpc::forge::instance_interface_config::NetworkDetails::SegmentId(
-                    network_segment_id,
-                ),
-            ),
-            device: None,
-            device_instance: 0,
-            virtual_function_id: None,
-            ip_address: None,
-            ipv6_interface_config: None,
-            routing_profile: None,
-        };
-
-        let tenant_config = rpc::TenantConfig {
-            tenant_organization_id: "Forge-simulation-tenant".to_string(),
-            tenant_keyset_ids: vec![],
-            hostname: None,
-        };
-
-        let instance_config = rpc::InstanceConfig {
-            tenant: Some(tenant_config),
-            os: Some(InstanceOperatingSystemConfig {
-                variant: Some(Variant::Ipxe(InlineIpxe {
-                    ipxe_script: "Non-existing-ipxe".to_string(),
-                })),
-                user_data: None,
-                phone_home_enabled: false,
-                run_provisioning_instructions_on_every_boot: false,
-            }),
-            network: Some(rpc::InstanceNetworkConfig {
-                interfaces: vec![interface_config],
-                #[allow(deprecated)]
-                auto: false,
-                auto_config: None,
-            }),
-            network_security_group_id: None,
-            infiniband: None,
-            dpu_extension_services: None,
-            nvlink: None,
-            spxconfig: None,
-            power_profile: None,
-        };
-
-        let instance_request = rpc::InstanceAllocationRequest {
-            instance_id: None,
-            machine_id: Some(host_machine_id),
-            //  None here means the allocation will simply inherit the
-            // instance_type_id of the machine in the request, whatever it is.
-            instance_type_id: None,
-            config: Some(instance_config),
-            metadata: None,
-            allow_unhealthy_machine: false,
-        };
-
-        self.0
-            .allocate_instance(instance_request)
-            .await
-            .map_err(ClientApiError::InvocationError)
-    }
-
     pub async fn force_delete_machine(
         &self,
         machine_id: String,
@@ -362,6 +321,7 @@ impl ApiClient {
             .admin_force_delete_switch(rpc::forge::AdminForceDeleteSwitchRequest {
                 switch_id: Some(switch_id),
                 delete_interfaces: true,
+                delete_bmc_suppressions: false,
             })
             .await
             .map_err(ClientApiError::InvocationError)?;
@@ -393,119 +353,11 @@ impl ApiClient {
             .admin_force_delete_power_shelf(rpc::forge::AdminForceDeletePowerShelfRequest {
                 power_shelf_id: Some(power_shelf_id),
                 delete_interfaces: true,
+                delete_bmc_suppressions: false,
             })
             .await
             .map_err(ClientApiError::InvocationError)?;
         Ok(Some(power_shelf_id))
-    }
-
-    pub async fn create_network_segment(
-        &self,
-        vpc_name: &String,
-        network_virtualization_type: Option<VpcVirtualizationType>,
-    ) -> ClientApiResult<rpc::NetworkSegment> {
-        let subnet_count = SUBNET_COUNTER.fetch_add(1, Ordering::Acquire);
-
-        let vpc_ids_all = self
-            .0
-            .find_vpc_ids(rpc::forge::VpcSearchFilter {
-                tenant_org_id: None,
-                name: Some(vpc_name.clone()),
-                label: None,
-            })
-            .await;
-
-        match vpc_ids_all {
-            Ok(vpc_id_list) => {
-                match vpc_id_list.vpc_ids.len() {
-                    0 => tracing::error!(
-                        vpc_name = %*vpc_name,
-                        "No VPC IDs are associated with VPC name; this should not happen",
-                    ),
-                    1 => {}
-                    _ => tracing::warn!(
-                        vpc_id_count = vpc_id_list.vpc_ids.len(),
-                        vpc_name = %vpc_name,
-                        "Multiple VPC IDs are associated with VPC name; clean up the database and restart",
-                    ),
-                }
-
-                let is_fnn = network_virtualization_type == Some(VpcVirtualizationType::Fnn);
-
-                let mut prefixes = vec![rpc::forge::NetworkPrefix {
-                    id: None,
-                    prefix: format!("192.5.{subnet_count}.12/24"),
-                    gateway: Some(format!("192.5.{subnet_count}.13")),
-                    reserve_first: 1,
-                    free_ip_count: 0,
-                    svi_ip: None,
-                    free_ip_count_v2: None,
-                    free_ip_count_saturated: false,
-                }];
-
-                if is_fnn {
-                    prefixes.push(rpc::forge::NetworkPrefix {
-                        id: None,
-                        prefix: format!("2001:db8:{subnet_count}::/112"),
-                        gateway: None,
-                        reserve_first: 1,
-                        free_ip_count: 0,
-                        svi_ip: None,
-                        free_ip_count_v2: None,
-                        free_ip_count_saturated: false,
-                    });
-                }
-
-                self.0
-                    .create_network_segment(rpc::forge::NetworkSegmentCreationRequest {
-                        id: None,
-                        vpc_id: vpc_id_list.vpc_ids.first().copied(),
-                        name: format!("subnet_{subnet_count}"),
-                        segment_type: rpc::forge::NetworkSegmentType::Tenant.into(),
-                        prefixes,
-                        mtu: Some(1500),
-                        subdomain_id: None,
-                        infer_slaac_eui64_addresses: false,
-                    })
-                    .await
-                    .map_err(ClientApiError::InvocationError)
-            }
-            Err(e) => Err(ClientApiError::ConnectFailed(format!(
-                "Error {} when finding VPC {}",
-                e, *vpc_name
-            ))),
-        }
-    }
-
-    pub async fn create_vpc(
-        &self,
-        network_virtualization_type: Option<VpcVirtualizationType>,
-    ) -> ClientApiResult<rpc::forge::Vpc> {
-        let vpc_count = VPC_COUNTER.fetch_add(1, Ordering::Acquire);
-        self.0
-            .create_vpc(rpc::forge::VpcCreationRequest {
-                id: None,
-                tenant_organization_id: "Forge-simulation-tenant".to_string(),
-                tenant_keyset_id: None,
-                network_security_group_id: None,
-                network_virtualization_type: network_virtualization_type.map(|t| t as i32),
-                vni: None,
-                routing_profile_type: None,
-                routing_profile_overrides: None,
-                power_resource_group: None,
-                slaac_enabled: None,
-                metadata: Some(rpc::forge::Metadata {
-                    name: format!("vpc_{vpc_count}"),
-                    description: "".to_string(),
-                    labels: vec![rpc::forge::Label {
-                        key: "Forge-simulation-vpc".to_string(),
-                        value: Some("Machine-a-tron".to_string()),
-                    }],
-                }),
-                default_nvlink_logical_partition_id: None,
-            })
-            .await
-            .map_err(ClientApiError::InvocationError)
     }
 
     pub async fn machine_validation_complete(
@@ -564,17 +416,68 @@ impl ApiClient {
             .map_err(ClientApiError::InvocationError)
     }
 
+    /// Registers one expected inventory record of any supported kind.
+    pub(crate) async fn add_expected_record(&self, record: ExpectedRecord) -> ClientApiResult<()> {
+        match record {
+            ExpectedRecord::Rack {
+                rack_id,
+                rack_profile_id,
+            } => self.ensure_expected_rack(rack_id, rack_profile_id).await,
+            ExpectedRecord::Machine {
+                bmc_mac_address,
+                chassis_serial_number,
+                rack_id,
+                dpu_policy,
+                dpf_enabled,
+                interfaces,
+            } => {
+                self.add_expected_machine(
+                    bmc_mac_address,
+                    chassis_serial_number,
+                    rack_id,
+                    dpu_policy,
+                    dpf_enabled,
+                    interfaces,
+                )
+                .await
+            }
+            ExpectedRecord::Switch {
+                bmc_mac_address,
+                switch_serial_number,
+                nvos_mac_addresses,
+                rack_id,
+            } => {
+                self.add_expected_switch(
+                    bmc_mac_address,
+                    switch_serial_number,
+                    nvos_mac_addresses,
+                    rack_id,
+                )
+                .await
+            }
+            ExpectedRecord::PowerShelf {
+                bmc_mac_address,
+                shelf_serial_number,
+                rack_id,
+            } => {
+                self.add_expected_power_shelf(bmc_mac_address, shelf_serial_number, rack_id)
+                    .await
+            }
+        }
+    }
+
     /// Registers a mock expected machine. Static BMC (`bmc_ip_address`) is left unset here;
     /// real environments set it through the admin CLI / API when DHCP discovery is not used.
     /// `dpu_policy` is the per-host policy -- pass `Some(Ignore)` for zero-DPU
     /// mock hosts or `Some(Nic)` for DPU-in-NIC-mode mock hosts; `None` for
-    /// normal DPU hosts.
+    /// normal DPU hosts. `dpf_enabled` marks the host as DPF-managed in NICo.
     pub async fn add_expected_machine(
         &self,
         bmc_mac_address: String,
         chassis_serial_number: String,
         rack_id: Option<RackId>,
         dpu_policy: Option<HostDpuPolicy>,
+        dpf_enabled: bool,
         interfaces: Vec<ExpectedInterface>,
     ) -> ClientApiResult<()> {
         self.0
@@ -592,8 +495,8 @@ impl ApiClient {
                 rack_id,
                 default_pause_ingestion_and_poweron: None,
                 #[allow(deprecated)]
-                dpf_enabled: true,
-                is_dpf_enabled: Some(true),
+                dpf_enabled,
+                is_dpf_enabled: Some(dpf_enabled),
                 bmc_ip_address: None,
                 bmc_retain_credentials: None,
                 dpu_mode: dpu_policy.map(|policy| rpc::forge::DpuMode::from(policy) as i32),

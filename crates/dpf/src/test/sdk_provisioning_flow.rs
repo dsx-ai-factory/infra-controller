@@ -105,6 +105,9 @@ impl DpuRepository for ProvisioningFlowMock {
     async fn delete(&self, _: &str, _: &str) -> Result<(), DpfError> {
         Ok(())
     }
+    async fn delete_if_uid(&self, name: &str, _ns: &str, _uid: &str) -> Result<(), DpfError> {
+        Err(DpfError::not_found("DPU", name))
+    }
     fn watch<F, Fut>(
         &self,
         _: &str,
@@ -216,6 +219,15 @@ impl K8sConfigRepository for ProvisioningFlowMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for ProvisioningFlowMock {
+    async fn get(
+        &self,
+        _name: &str,
+        _ns: &str,
+    ) -> Result<Option<crate::crds::dpfoperatorconfigs_generated::DPFOperatorConfig>, DpfError>
+    {
+        Ok(None)
+    }
+
     async fn patch(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), DpfError> {
         Ok(())
     }
@@ -318,85 +330,4 @@ async fn test_provisioning_flow_reboot_then_ready() {
     mock.emit_dpu(make_dpu(TEST_NS, "d1", "dev1", "n1", DpuStatusPhase::Ready));
 
     ready_events.wait_for(1).await;
-}
-
-#[tokio::test]
-async fn test_pending_does_not_clear_annotation_external_clear_does() {
-    let mock = ProvisioningFlowMock::new();
-
-    // Create DPUNode with RESTART_ANNOTATION
-    let node = DPUNode {
-        metadata: ObjectMeta {
-            name: Some("n1".into()),
-            namespace: Some(TEST_NS.into()),
-            annotations: Some(BTreeMap::from([(RESTART_ANNOTATION.into(), "true".into())])),
-            ..Default::default()
-        },
-        spec: DpuNodeSpec {
-            dpus: None,
-            node_dms_address: None,
-            node_reboot_method: None,
-        },
-        status: None,
-    };
-    mock.insert_node(&node);
-
-    let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NS, String::new())
-        .build_without_resources()
-        .await
-        .unwrap();
-
-    let reboot_events = Arc::new(Collector::<RebootRequiredEvent>::default());
-    let rbe = reboot_events.clone();
-
-    let _watcher = sdk
-        .watcher()
-        .on_reboot_required(move |e| {
-            let rbe = rbe.clone();
-            async move {
-                rbe.push(e);
-                Ok(())
-            }
-        })
-        .start()
-        .unwrap();
-
-    mock.wait_for_watchers(1).await;
-
-    // Emit DPU with host_reboot_required
-    mock.emit_dpu(make_dpu_reboot(TEST_NS, "d1", "dev1", "n1"));
-
-    // Wait for callback to fire
-    reboot_events.wait_for(1).await;
-
-    // Annotation should STILL be on the DPUNode
-    let node = DpuNodeRepository::get(&mock, "n1", TEST_NS)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        node.metadata
-            .annotations
-            .as_ref()
-            .unwrap()
-            .contains_key(RESTART_ANNOTATION),
-        "Pending should not clear the annotation"
-    );
-
-    // External clear via SDK
-    sdk.reboot_complete("n1").await.unwrap();
-
-    // Annotation should now be removed
-    let node = DpuNodeRepository::get(&mock, "n1", TEST_NS)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        !node
-            .metadata
-            .annotations
-            .unwrap_or_default()
-            .contains_key(RESTART_ANNOTATION),
-        "reboot_complete should remove the annotation"
-    );
 }

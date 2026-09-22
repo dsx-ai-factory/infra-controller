@@ -9,46 +9,41 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/target"
 )
 
-// ExecutionRequest contains the execution, action, and resolved targets
-// needed for one dispatch attempt.
+// ExecutionRequest contains the immutable identity and plan needed for one
+// dispatch attempt.
 type ExecutionRequest struct {
-	Execution eventrule.Execution
-	Action    eventrule.Action
-	Targets   []target.Target
+	ExecutionID uuid.UUID
+	Plan        eventrule.ExecutionPlan
 }
 
-// Validate checks the execution and action inputs.
+// Validate checks the execution input.
 func (r ExecutionRequest) Validate() error {
-	if err := r.Execution.Validate(); err != nil {
-		return fmt.Errorf("execution: %w", err)
+	if r.ExecutionID == uuid.Nil {
+		return fmt.Errorf("execution id is required")
 	}
-	if err := r.Action.Validate(); err != nil {
-		return fmt.Errorf("action: %w", err)
+
+	if err := eventrule.ValidateExecutionPlan(r.Plan); err != nil {
+		return fmt.Errorf("execution plan: %w", err)
 	}
-	for i, target := range r.Targets {
-		if err := target.Validate(); err != nil {
-			return fmt.Errorf("target %d: %w", i, err)
-		}
-	}
+
 	return nil
 }
 
-// Executor performs action side effects and produces execution results.
+// Executor performs the side effects for one action type.
 type Executor interface {
-	// Execute may be called multiple times for the same Execution.ID after a
+	// Execute may be called multiple times for the same ExecutionID after a
 	// deferred result. Implementations that produce external side effects must
-	// use Execution.ID, or stable keys derived from it for partitioned work, to
+	// use ExecutionID, or stable keys derived from it for partitioned work, to
 	// make repeated calls idempotent and reconcile an ambiguous prior result
-	// before submitting again. Attempts and rotating lease tokens must not
-	// be used as downstream idempotency identities. Execute returns a valid
-	// result and a nil error. Operational failures are represented by deferred
-	// or failed results. A context cancellation or deadline error means the
-	// attempt was interrupted and is deferred by the dispatcher. Any other
-	// non-nil error means that no valid result was produced and indicates an
-	// executor contract failure.
-	Execute(context.Context, ExecutionRequest) (eventrule.ExecutionResult, error)
+	// before submitting again. Attempt numbers must not be used as downstream
+	// idempotency identities. A nil error means the action completed successfully
+	// from the event-rule dispatcher's point of view.
+	// Implementations preserve context errors, classify retryable operational
+	// errors with ErrRetryable, and classify terminal errors with ErrTerminal.
+	Execute(context.Context, ExecutionRequest) error
 }

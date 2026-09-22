@@ -52,8 +52,6 @@ struct State {
 
 #[tokio::test]
 async fn test_network_monitor() -> eyre::Result<()> {
-    carbide_host_support::init_logging("nico-dpu-agent")?;
-
     let state: Arc<Mutex<State>> = Arc::new(Mutex::new(Default::default()));
 
     // Start carbide API

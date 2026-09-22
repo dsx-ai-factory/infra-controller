@@ -31,6 +31,7 @@ path = "src/main.rs"
 # [begin-local-dependencies]
 carbide-host-support = { path = "../host-support", default-features = false }
 carbide-instrument = { path = "../instrument" }
+carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-tls = { path = "../tls" }
 carbide-utils = { path = "../utils", default-features = false }
 carbide-version = { path = "../version" }
@@ -50,6 +51,7 @@ http-body = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 mime = { workspace = true }
+opentelemetry = { workspace = true }
 pin-project-lite = { workspace = true }
 prometheus = { workspace = true }
 rand = { workspace = true }

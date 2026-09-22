@@ -63,7 +63,9 @@ impl IBFabric for MockIBFabric {
         options: GetPartitionOptions,
     ) -> Result<HashMap<u16, IBNetwork>, IbError> {
         if options.include_guids_data && options.include_qos_conf {
-            return Err(IbError::internal("Returning qos_conf and guids_data is not supported: https://nvbugspro.nvidia.com/bug/5409095".to_string()));
+            return Err(IbError::internal(
+                "returning qos_conf and guids_data together is not supported by UFM".to_string(),
+            ));
         };
         assert!(
             options.include_qos_conf || options.include_guids_data,

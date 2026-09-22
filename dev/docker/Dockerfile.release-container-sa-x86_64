@@ -41,15 +41,9 @@ RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
   /etc/init.d/postgresql start && \
   sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;" && \
   createdb root && \
-  # --no-workspace: runs the task once at workspace root instead of once per workspace member.
-  # Without this flag, cargo-make iterates all 64 crates and invokes `cargo clippy` / `cargo build`
-  # per member, which causes shared deps (tonic, sqlx, carbide-rpc, etc.) to be recompiled
-  # repeatedly. With --no-workspace, a single invocation at the root builds everything once.
-  #
-  # Trade-off: per-crate feature isolation is lost — features are unified across the whole
-  # workspace at compile time. This is acceptable here because all crates ship together as a
-  # single release image; feature conflicts between separately-deployed services are not a concern.
-  # clippy-release shares release artifacts with build-release below, avoiding a full double-compile.
+  # Run clippy once at the workspace root. build-release itself selects only the packages whose
+  # artifacts are copied into the runtime image, so test-only workspace members cannot enable
+  # features in production dependencies.
   cargo make --no-workspace clippy-release && \
   echo "$(date): Finished cargo make clippy-release\n" && \
   cargo make carbide-lints && \

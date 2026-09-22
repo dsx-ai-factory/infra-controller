@@ -22,7 +22,7 @@ use carbide_utils::arch::CpuArchitecture;
 use mac_address::MacAddress;
 use rpc::machine_discovery::{
     BlockDevice, CpuInfo, DiscoveryInfo, DmiData, DpuData, Gpu, GpuPlatformInfo,
-    InfinibandInterface, MemoryDevice, NetworkInterface, NvmeDevice, PciDeviceProperties,
+    InfinibandInterface, MemoryDeviceGroup, NetworkInterface, NvmeDevice, PciDeviceProperties,
     TpmDescription,
 };
 
@@ -63,7 +63,7 @@ fn for_host(host: &HostMachineInfo) -> DiscoveryInfo {
         HardwareType::NvidiaDgxGb300 => DiscoveryInfo {
             network_interfaces: vec![generic_nic(
                 required_dpu(host).host_mac_address,
-                0x0603,
+                0x0006_0003,
                 "Mellanox Technologies",
                 "BlueField-3 SmartNIC Main Card",
                 Some("MT43244 BlueField-3 integrated ConnectX-7 network controller"),
@@ -230,7 +230,9 @@ fn dell_poweredge(host: &HostMachineInfo, product_name: &str, bios_version: &str
             product_name: product_name.into(),
             sys_vendor: "Dell Inc.".into(),
         }),
-        memory_devices: memory_devices(8, 16384, "DDR4"),
+        memory_device_groups: memory_device_groups(8, 16384, "DDR4"),
+        #[allow(deprecated)]
+        memory_devices: vec![],
         ..Default::default()
     }
 }
@@ -285,7 +287,9 @@ fn hpe_proliant(host: &HostMachineInfo) -> DiscoveryInfo {
             sys_vendor: "HPE".into(),
             ..Default::default()
         }),
-        memory_devices: memory_devices(16, 16384, "DDR5"),
+        memory_device_groups: memory_device_groups(16, 16384, "DDR5"),
+        #[allow(deprecated)]
+        memory_devices: vec![],
         ..Default::default()
     }
 }
@@ -298,14 +302,14 @@ fn wiwynn_gb200(host: &HostMachineInfo) -> DiscoveryInfo {
         network_interfaces: vec![
             generic_nic(
                 dpus[0].host_mac_address,
-                0x0603,
+                0x0016_0003,
                 "Mellanox Technologies",
                 "BlueField-3 SmartNIC Main Card",
                 Some("MT43244 BlueField-3 integrated ConnectX-7 network controller"),
             ),
             generic_nic(
                 dpus[1].host_mac_address,
-                0x1603,
+                0x0006_0003,
                 "Mellanox Technologies",
                 "BlueField-3 SmartNIC Main Card",
                 Some("MT43244 BlueField-3 integrated ConnectX-7 network controller"),
@@ -350,7 +354,9 @@ fn wiwynn_gb200(host: &HostMachineInfo) -> DiscoveryInfo {
             sys_vendor: "NVIDIA".into(),
         }),
         gpus: gb200_gpus(),
-        memory_devices: memory_devices(2, 491520, "LPDDR5"),
+        memory_device_groups: memory_device_groups(2, 491520, "LPDDR5"),
+        #[allow(deprecated)]
+        memory_devices: vec![],
         ..Default::default()
     }
 }
@@ -439,7 +445,9 @@ fn lenovo_gb300(host: &HostMachineInfo) -> DiscoveryInfo {
                 }),
             })
             .collect(),
-        memory_devices: memory_devices(2, 491520, "LPDDR5"),
+        memory_device_groups: memory_device_groups(2, 491520, "LPDDR5"),
+        #[allow(deprecated)]
+        memory_devices: vec![],
         tpm_description: Some(TpmDescription {
             vendor: "Could not convert spec_version672".into(),
             firmware_version: "0xf0018.0x4a0a00".into(),
@@ -570,7 +578,9 @@ fn nvidia_dgx_h100(host: &HostMachineInfo) -> DiscoveryInfo {
                 platform_info: None,
             })
             .collect(),
-        memory_devices: memory_devices(32, 65536, "DDR5"),
+        memory_device_groups: memory_device_groups(32, 65536, "DDR5"),
+        #[allow(deprecated)]
+        memory_devices: vec![],
         ..Default::default()
     }
 }
@@ -626,14 +636,18 @@ fn generic_nic(
     device: &str,
     description: Option<&str>,
 ) -> NetworkInterface {
-    let device_name = format!("enp{}s{}np0", slot >> 16, slot & 0xff);
-    let slot = format!("{:04x}:{:02x}:00.0", slot >> 16, slot & 0xff);
+    let domain = slot >> 16;
+    let bus = slot & 0xff;
+    let device_name = format!("enp{domain}s{bus}np0");
+    let slot = format!("{domain:04x}:{bus:02x}:00.0");
     NetworkInterface {
         mac_address: mac_address.to_string(),
         pci_properties: Some(PciDeviceProperties {
             vendor: vendor.into(),
             device: device.into(),
-            path: format!("/devices/pci0000:00/0000:00:00.0/{slot}/net/{device_name}"),
+            path: format!(
+                "/devices/pci{domain:04x}:00/{domain:04x}:00:00.0/{slot}/net/{device_name}"
+            ),
             numa_node: 0,
             description: description.map(Into::into),
             slot: Some(slot),
@@ -662,13 +676,13 @@ fn network_interface(
     }
 }
 
-fn memory_devices(count: usize, size_mb: u32, memory_type: &str) -> Vec<MemoryDevice> {
-    (0..count)
-        .map(|_| MemoryDevice {
-            size_mb: Some(size_mb),
-            mem_type: Some(memory_type.into()),
-        })
-        .collect()
+/// Builds a single-group mock memory device list for use in simulated machine profiles.
+fn memory_device_groups(count: u32, size_mb: u32, memory_type: &str) -> Vec<MemoryDeviceGroup> {
+    vec![MemoryDeviceGroup {
+        size_mb: Some(size_mb),
+        mem_type: Some(memory_type.into()),
+        count,
+    }]
 }
 
 /// Mock NVMe capacity in MiB (matching what the real host enumeration reports),
@@ -684,12 +698,12 @@ fn nvme_size_mb(model: &str) -> u32 {
 }
 
 /// Distinct fake sysfs DEVPATH for the Nth mock NVMe controller, mirroring the
-/// shape the real host enumeration reports (`…/nvme/nvmeN/nvmeNn1`). Each drive
-/// needs a unique PCI path so v5 SKU generation records one storage entry per
-/// drive.
+/// shape the real host enumeration reports (`…/<pci function>/nvme/nvmeN`).
+/// Each drive sits behind its own PCI function so v5+ SKU generation records
+/// one storage entry per drive.
 fn nvme_pci_path(index: usize) -> String {
     format!(
-        "/devices/pci0000:00/0000:64:00.0/0000:{:02x}:00.0/nvme/nvme{index}/nvme{index}n1",
+        "/devices/pci0000:00/0000:64:00.0/0000:{:02x}:00.0/nvme/nvme{index}",
         0x65 + index
     )
 }
@@ -875,7 +889,8 @@ mod tests {
 
     use super::*;
 
-    fn lenovo_host() -> MachineInfo {
+    /// Builds a mock host with the platform's fixed number of DPUs.
+    fn host_for_platform(platform: HardwareType) -> MachineInfo {
         let pool_config =
             PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 16).expect("valid MAC pool");
         let hardware_pool_config =
@@ -884,17 +899,20 @@ mod tests {
             ranges: None,
             pool: Some(pool_config),
         });
-        let dpu = DpuMachineInfo::new(
-            HardwareType::LenovoGB300Nvl,
-            &mut pool,
-            DpuSettings::default(),
-        );
+        let dpu_count = platform.fixed_number_of_dpu().unwrap_or(1);
+        let dpus = (0..dpu_count)
+            .map(|_| DpuMachineInfo::new(platform, &mut pool, DpuSettings::default()))
+            .collect();
         MachineInfo::Host(HostMachineInfo::new(
-            HardwareType::LenovoGB300Nvl,
-            vec![dpu],
+            platform,
+            dpus,
             &mut pool,
             hardware_pool_config,
         ))
+    }
+
+    fn lenovo_host() -> MachineInfo {
+        host_for_platform(HardwareType::LenovoGB300Nvl)
     }
 
     #[test]
@@ -975,7 +993,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             [2, 1, 4, 3]
         );
-        assert_eq!(discovery.memory_devices.len(), 2);
+        assert_eq!(
+            discovery.memory_device_groups,
+            vec![MemoryDeviceGroup {
+                size_mb: Some(491520),
+                mem_type: Some("LPDDR5".into()),
+                count: 2,
+            }]
+        );
         assert!(discovery.tpm_description.is_some());
     }
 
@@ -996,22 +1021,38 @@ mod tests {
         ];
 
         for platform in platforms {
-            let pool_config =
-                PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 16).expect("valid pool");
-            let hardware_pool_config =
-                PoolConfig::new(MacAddress::new([6, 0, 0, 0, 0, 0]), 16).expect("valid pool");
-            let mut pool = MacAddressPool::new(Config {
-                ranges: None,
-                pool: Some(pool_config),
-            });
-            let dpu_count = platform.fixed_number_of_dpu().unwrap_or(1);
-            let dpus = (0..dpu_count)
-                .map(|_| DpuMachineInfo::new(platform, &mut pool, DpuSettings::default()))
-                .collect();
-            let host = HostMachineInfo::new(platform, dpus, &mut pool, hardware_pool_config);
-
-            let _ = for_machine(&MachineInfo::Host(host));
+            for_machine(&host_for_platform(platform));
         }
+    }
+
+    #[test]
+    fn wiwynn_gb200_reports_distinct_pci_locations() {
+        let discovery = for_machine(&host_for_platform(HardwareType::WiwynnGB200Nvl));
+
+        assert_eq!(
+            discovery
+                .network_interfaces
+                .iter()
+                .filter_map(|interface| interface.pci_properties.as_ref())
+                .map(|properties| {
+                    (
+                        properties.slot.as_deref().expect("PCI slot"),
+                        properties.path.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "0016:03:00.0",
+                    "/devices/pci0016:00/0016:00:00.0/0016:03:00.0/net/enp22s3np0",
+                ),
+                (
+                    "0006:03:00.0",
+                    "/devices/pci0006:00/0006:00:00.0/0006:03:00.0/net/enp6s3np0",
+                ),
+            ],
+            "Wiwynn DPUs must report their distinct expected PCI locations",
+        );
     }
 
     #[test]

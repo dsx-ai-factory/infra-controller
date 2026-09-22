@@ -17,7 +17,8 @@ makes them available for selection by a tenant during instance creation.
 Each port of all supported Infiniband NICs is reported as a separate PCI device.
 This makes those ports individually controllable and thereby mostly indistinguishable from a different physical NIC. E.g. an
 infiniband capable ConnectX-6 NIC shows up on a Linux host as the following 2 devices:
-```
+
+```text
 ubuntu@alpha:~$ lspci -v | grep Mellanox
 ca:00.0 Infiniband controller: Mellanox Technologies MT28908 Family [ConnectX-6]
         Subsystem: Mellanox Technologies MT28908 Family [ConnectX-6]
@@ -26,13 +27,15 @@ ca:00.1 Infiniband controller: Mellanox Technologies MT28908 Family [ConnectX-6]
 ```
 
 Both show up as 2 independent infiniband devices:
-```
+
+```text
 ls /sys/class/infiniband
 ibp202s0f0  ibp202s0f1
 ```
 
 This setup is mostly equivalent to a setup with 2 single-port Infiniband NICs.
 Therefore we seem to have 2 options for presenting multi-port NICs to NICo users:
+
 1. **Preferred:** Present each physical port of a NIC as a separate Infiniband NIC. The combination of a NIC & port is referred to as `device`.
 2. Present a multi-port NIC as single NIC with multiple ports.
 
@@ -46,24 +49,28 @@ While the devices for the 2 ports seem mostly independent, there are still a few
 
 1. Both devices report the same serial number.
 2. The Mellanox firmware tools (`mlxconfig`, `mst`) show only a single device. E.g.
-    ```
+
+    ```text
     MST devices:
     ------------
     /dev/mst/mt4123_pciconf0         - PCI configuration cycles access.
                                        domain:bus:dev.fn=0000:ca:00.0 addr.reg=88 data.reg=92 cr_bar.gw_offset=-1
                                        Chip revision is: 00
     ```
-    This breaks the illusion of 2 independent devices. Since the tenant can install and use those tools without the availability of a NIC firmware lockdown, they are able to inspect these properties. There however doesn't seem to be an obvious problem with it.
+
+   This breaks the illusion of 2 independent devices. Since the tenant can install and use those tools without the availability of a NIC firmware lockdown, they are able to inspect these properties. There however doesn't seem to be an obvious problem with it.
 3. Due to 2), the port configurations for both ports are performed by manipulating a single device object in the Mellanox Firmware tools. E.g. both of the following commands
-    ```
+
+    ```text
     mlxconfig -d /dev/mst/mt4123_pciconf0 set LINK_TYPE_P1=1 LINK_TYPE_P2=1
     mlxconfig -d /dev/mst/mt4123_pciconf0.1 set LINK_TYPE_P1=1 LINK_TYPE_P2=1
     ```
-    reconfigure both ports of a physical card from ethernet to infiniband (`LINK_TYPE=2` configures
-    ethernet, `LINK_TYPE=1` configures infiniband), independent of whether the target
-    device is the first port (`/dev/mst/mt4123_pciconf0` or 2nd port `/dev/mst/mt4123_pciconf0.1`).
 
-    The same applies also for settings like `NUM_OF_VFS` and `SRIOV_EN`.
+   reconfigure both ports of a physical card from ethernet to infiniband (`LINK_TYPE=2` configures
+   ethernet, `LINK_TYPE=1` configures infiniband), independent of whether the target
+   device is the first port (`/dev/mst/mt4123_pciconf0` or 2nd port `/dev/mst/mt4123_pciconf0.1`).
+
+   The same applies also for settings like `NUM_OF_VFS` and `SRIOV_EN`.
 
 None of those reasons seem blockers for representing the ports as separate devices for NICo users:
 Since NICo configures the device for tenants, they do not need to worry about the physical properties and can just
@@ -74,7 +81,7 @@ use the independent devices.
 ### NICo machine hardware enumeration
 
 When NICo discovers a machine that is intended to be managed by the NICo site controller,
-it enumerates its hardware details using the [nico-scout](https://github.com/NVIDIA/infra-controller/tree/main/crates/scout) tool.
+it enumerates its hardware details using the [nico-scout](https://github.com/dsx-ai-factory/infra-controller/tree/main/crates/scout) tool.
 
 The tool reports all discovered hardware information (e.g. the number and type
 of CPUs, GPUs, and network interfaces), and this information gets persisted
@@ -131,6 +138,7 @@ network device. E.g. a dual port ConnectX-6 NIC gets reported as:
 ```
 
 There however seem to be aspects that we can improve on:
+
 1. The device and vendor names are passed as identifiers. If Tenants would want to
   use the same information to configure infiniband on an instance, the API calls
   to do that would contain the same non-descriptive data: Configure the first
@@ -139,14 +147,14 @@ There however seem to be aspects that we can improve on:
   report and the interface selection become more obvious to the user. We could
   also transmit both the IDs and the names. But as long as the IDs are not referenced
   in any other NICo APIs they do not seem too useful.
-1. The device path is very OS and driver specific. A different path is reported
+2. The device path is very OS and driver specific. A different path is reported
   depending on which of the various Mellanox drivers the NICo discovery image uses.
   We are be able to have more stable information by just persisting the PCI slot - either
   in the existing `path` field or a new `slot` field.
-1. For multi-fabric support, we would include the identifier of the fabric that the
+3. For multi-fabric support, we would include the identifier of the fabric that the
   device is connected to. This field can be empty in the MVP which supports only a single fabric.
   An empty field would always reference the default Infiniband fabric.
-1. The `device` is referred to as `interface` in the discovery data API, which is
+4. The `device` is referred to as `interface` in the discovery data API, which is
   inconsistent with the remaining terminology. We can rename `InfinibandInterface`
   to `InfinibandDevice`, and `infiniband_interfaces` to `infiniband_devices`.
 
@@ -192,6 +200,7 @@ Each machine that adheres to an instance type shares the same capabilities.
 
 To support Infiniband, we can extend the existing capabilities model of the
 NICo REST API backend to cover infiniband:
+
 - Each Infiniband `device` will be represented by a capability that describes
   the device.
 - The `type` field that is used for Infiniband devices would be `Infiniband`.
@@ -361,7 +370,7 @@ target device in case of conflicts:
 The Web UI can combine all the necessary information into a single combo-box.
 E.g. it could show a combo box with the following content:
 
-```
+```text
  +-----------------------------------------------------------------------+
  | Select Device                                                         |
  +-----------------------------------------------------------------------+
@@ -379,6 +388,7 @@ If a tenant selects a network interface, we need to be able to
 **uniquely** map the interface to a specific hardware interface.
 
 E.g. this instance configuration request:
+
 ```json
 {
     "device": "MT28908 Family [ConnectX-6]",
@@ -388,6 +398,7 @@ E.g. this instance configuration request:
 ```
 
 needs to map to the following hardware interface information:
+
 ```json
 {
     "guid": "1234",
@@ -412,6 +423,7 @@ and pick the N-th slot that satisfies the criteria.
 **Example 2:**
 
 Assuming the following hardware information is available:
+
 ```json
 [{
     "guid": "1234",
@@ -449,6 +461,7 @@ Assuming the following hardware information is available:
 ```
 
 In this example a selection of
+
 - `{device: "Mellanox ... MT28908 ...", fabric: "IbFabric1", device_instance: 0}`
   would select the interface with GUID `1234`.
 - `{device: "Mellanox ... MT28908 ...", fabric: "IbFabric1", device_instance: 1}`
@@ -474,6 +487,7 @@ runtime. It also provides the ability to execute a configuration script
 which configures the local Infiniband interfaces for the operating mode that the
 Tenant desired for this instance. This script needs to configure all network interfaces
 on the host. This includes
+
 - setting the correct number of VFs per physical device
 - writing GUIDs that NICo allocated for VF interfaces to the locations the OS
   expects them
@@ -558,6 +572,7 @@ guid of the associated physical function in every interface. Along:
 The APIs described above make it slightly ambiguous which `device` (in terms of
 PCI slot) a tenant would use for an interface. The tenant specifies the following
 in an instance creation request
+
 ```json
 {
     "device": "MT28908 Family [ConnectX-6]",
@@ -566,6 +581,7 @@ in an instance creation request
     "ib_partition_id": "partition_a"
 }
 ```
+
 and the system would look up what PCI address `device_instance: 2` refers to.
 This mapping might not be obvious in a system which features multiple NICs with
 one or multiple ports, and each of them connected to a mix of fabrics.
@@ -677,6 +693,7 @@ instance creation and configuration would still work as expected.
 ### Terminology
 
 A variety of different terms had been used to reference "things to send/receive infiniband traffic":
+
 - Network Interface Cards (NICs)
 - Network Adapters
 - Host Channel Adapters (HCAs)

@@ -15,12 +15,32 @@
  * limitations under the License.
  */
 
+use std::io;
+
 use super::args::SetArgs;
-use crate::errors::CarbideCliResult;
+use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
 pub(super) async fn registry_set(args: SetArgs, api_client: &ApiClient) -> CarbideCliResult<()> {
+    let mut password = String::new();
+    io::stdin().read_line(&mut password).map_err(|error| {
+        CarbideCliError::GenericError(format!(
+            "failed to read registry credential from standard input: {error}"
+        ))
+    })?;
+    if password.contains('\r') || password.contains('\n') {
+        return Err(CarbideCliError::GenericError(
+            "registry credential from standard input must not contain carriage return or newline characters"
+                .to_owned(),
+        ));
+    }
+    if password.is_empty() {
+        return Err(CarbideCliError::GenericError(
+            "registry password from standard input must not be empty".to_owned(),
+        ));
+    }
+
     api_client
-        .set_container_registry_credential(args.registry, args.username, args.password)
+        .set_container_registry_credential(args.registry, args.username, password.to_owned())
         .await
 }

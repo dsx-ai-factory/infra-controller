@@ -1304,8 +1304,10 @@ async fn get_device_lockdown_key(
     // refer to as the "pci_name".
     //
     // In other words, device_id == pci_name.
+    let host_machine_id = carbide_uuid::machine::HostMachineId::try_from(machine_id)
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
     let dpa_interface =
-        db::dpa_interface::get_for_pci_name(&api.database_connection, &machine_id, device_id)
+        db::dpa_interface::get_for_pci_name(&api.database_connection, &host_machine_id, device_id)
             .await
             .map_err(|e| {
                 CarbideError::NotFoundError {
@@ -1316,10 +1318,47 @@ async fn get_device_lockdown_key(
                 }
             })?;
 
-    let lockdown = crate::dpa::lockdown::build_supernic_lockdown_key(
+    // Derive at the version the card is tracked under: the in-flight
+    // `rotating_to_version` if a lock is mid-flight, else the last-confirmed
+    // `current_version`, else the seed. This admin escape hatch does not stage or
+    // promote convergence, so it must not silently migrate a card: unlock uses
+    // the IKM the card is actually locked under, and lock re-locks at that same
+    // version rather than the (possibly advanced) site-wide target.
+    let mut conn = api.database_connection.acquire().await.map_err(|e| {
+        CarbideError::Internal {
+            message: format!(
+                "failed to acquire connection to resolve lockdown IKM version (machine_id={machine_id}, device_id={device_id}): {e}"
+            ),
+        }
+    })?;
+    // Versions are DB-native `i32` (Postgres has no unsigned int); convert to
+    // `u32` once for the derivation call. No row / no tracked version falls back
+    // to the seed version.
+    let version = db::credential_rotation::device_rotation_operation_state(
+        &mut *conn,
+        db::credential_rotation::CredentialRotationType::LockdownIkm,
+        dpa_interface.mac_address,
+    )
+    .await
+    .map_err(|e| CarbideError::Internal {
+        message: format!(
+            "failed to read lockdown rotation state (machine_id={machine_id}, device_id={device_id}): {e}"
+        ),
+    })?
+    .and_then(|s| s.rotating_to_version.or(s.current_version))
+    .unwrap_or(crate::dpa::lockdown::SEED_LOCKDOWN_IKM_VERSION as i32);
+    let ikm_version = u32::try_from(version).map_err(|e| CarbideError::Internal {
+        message: format!(
+            "lockdown IKM version {version} is negative (machine_id={machine_id}, device_id={device_id}): {e}"
+        ),
+    })?;
+    drop(conn);
+
+    let key = crate::dpa::lockdown::build_supernic_lockdown_key(
         &api.database_connection,
         dpa_interface.id,
         &*api.credential_manager,
+        ikm_version,
     )
     .await
     .map_err(|e| CarbideError::Internal {
@@ -1328,5 +1367,5 @@ async fn get_device_lockdown_key(
         ),
     })?;
 
-    Ok(lockdown.key)
+    Ok(key)
 }

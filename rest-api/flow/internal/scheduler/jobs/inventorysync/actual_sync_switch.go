@@ -5,13 +5,10 @@ package inventorysync
 
 import (
 	"context"
-	"net"
-	"time"
 
 	"github.com/rs/zerolog/log"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -31,17 +28,17 @@ const nvosIPDescriptionKey = "nvos_ip"
 // Uses Core's NICo API. Core's NSM backend auto-registers switches, so no
 // registration step is needed.
 //
-// NICo API calls (2 round-trips):
-//   - GetAllExpectedSwitchesLinked: discover Core switch IDs by BMC MAC
+// Primary NICo API calls:
+//   - GetSwitches: list every active Core switch and its BMC MAC
 //   - GetComponentInventory: get firmware, serial, power state from site explorer
 //
 // Flow:
 //  1. DB: get all NVSwitch components with BMCs
-//  2. NICo GetAllExpectedSwitchesLinked: map BMC MAC → Core SwitchId
-//  3. Direct-write external_id (Core's SwitchId) for matched components
+//  2. NICo GetSwitches: map BMC MAC → Core SwitchId
+//  3. Transactionally converge external_id from this snapshot
 //  4. NICo GetComponentInventory: extract firmware_version, serial_number, power_state
 //  5. Direct-write inventory fields to DB
-//  6. Return drifts (missing_in_actual for components without a Core SwitchId)
+//  6. Return current-snapshot drifts in both directions
 func syncNVSwitchesNICo(
 	ctx context.Context,
 	pool *cdb.Session,
@@ -55,62 +52,29 @@ func syncNVSwitchesNICo(
 		return 0, nil, false
 	}
 
-	if len(expectedSwitches) == 0 {
-		return 0, nil, true
-	}
-
-	expectedByBmcMac := make(map[string]*model.Component)
-	for i := range expectedSwitches {
-		sw := &expectedSwitches[i]
-		if len(sw.BMCs) != 1 {
-			log.Error().Msgf("NVSwitch %s has %d BMCs, expected exactly 1; skipping", sw.SerialNumber, len(sw.BMCs))
-			continue
-		}
-		bmcMacAddr, err := net.ParseMAC(sw.BMCs[0].MacAddress)
-		if err != nil || bmcMacAddr == nil {
-			log.Error().Msgf("NVSwitch %s has invalid BMC MAC address %s; skipping", sw.SerialNumber, sw.BMCs[0].MacAddress)
-			continue
-		}
-		expectedByBmcMac[bmcMacAddr.String()] = sw
-	}
-
-	// ID discovery: map BMC MAC → Core SwitchId
-	linked, err := nicoClient.GetAllExpectedSwitchesLinked(ctx)
+	// Actual snapshot: map BMC MAC → Core SwitchId.
+	observed, err := nicoClient.GetSwitches(ctx)
 	if err != nil {
-		log.Error().Msgf("Unable to retrieve linked expected switches from NICo: %v", err)
+		log.Error().Msgf("Unable to retrieve active switches from NICo: %v", err)
 		return 0, nil, false
 	}
-	received = len(linked)
-
-	linkedByMac := make(map[string]nicoapi.LinkedExpectedSwitch)
-	for _, les := range linked {
-		if les.BMCMACAddress != "" {
-			linkedByMac[utils.NormalizeMAC(les.BMCMACAddress)] = les
-		}
+	linkedActual := make([]actualControllerDevice, 0, len(observed))
+	for _, sw := range observed {
+		linkedActual = append(linkedActual, actualControllerDevice{
+			controllerMAC: sw.BmcMac,
+			externalID:    sw.ID,
+		})
+	}
+	received, componentsBySwitchID, drifts, reconcileOK := reconcileActualControllerDevices(
+		ctx, pool, "NVSwitch", expectedSwitches, linkedActual,
+	)
+	if !reconcileOK {
+		return received, nil, false
 	}
 
-	// Direct-write external_id for matched components
-	var switchIDs []*corev1.SwitchId
-	componentsBySwitchID := make(map[string]*model.Component)
-
-	for bmcMac, sw := range expectedByBmcMac {
-		les, found := linkedByMac[bmcMac]
-		if !found || les.SwitchID == "" {
-			continue
-		}
-
-		if sw.ComponentID == nil || *sw.ComponentID != les.SwitchID {
-			switchID := les.SwitchID
-			sw.ComponentID = &switchID
-			if err := sw.Patch(ctx, pool.DB); err != nil {
-				log.Error().Msgf("NVSwitch %s (BMC %s): unable to update external_id: %v", sw.ID, bmcMac, err)
-				continue
-			}
-			log.Info().Msgf("NVSwitch %s (BMC %s): set external_id to Core SwitchId %s", sw.ID, bmcMac, switchID)
-		}
-
-		switchIDs = append(switchIDs, &corev1.SwitchId{Id: les.SwitchID})
-		componentsBySwitchID[les.SwitchID] = sw
+	switchIDs := make([]*corev1.SwitchId, 0, len(componentsBySwitchID))
+	for switchID := range componentsBySwitchID {
+		switchIDs = append(switchIDs, &corev1.SwitchId{Id: switchID})
 	}
 
 	// Fetch inventory from Core for all matched switches. Inventory only feeds
@@ -134,21 +98,6 @@ func syncNVSwitchesNICo(
 	syncSwitchStatuses(ctx, pool, nicoClient, componentsBySwitchID)
 
 	syncSwitchNvosIPs(ctx, pool, nicoClient, componentsBySwitchID)
-
-	// Build drifts for components that don't have a Core SwitchId yet
-	now := time.Now()
-	for _, sw := range expectedByBmcMac {
-		if sw.ComponentID == nil || *sw.ComponentID == "" {
-			compID := sw.ID
-			drifts = append(drifts, model.ComponentDrift{
-				ComponentID: &compID,
-				ExternalID:  nil,
-				DriftType:   model.DriftTypeMissingInActual,
-				Diffs:       []model.FieldDiff{},
-				CheckedAt:   now,
-			})
-		}
-	}
 
 	log.Info().Msgf("NVSwitch NICo sync: %d drift(s) out of %d expected", len(drifts), len(expectedSwitches))
 	return received, drifts, true

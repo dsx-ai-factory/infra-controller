@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use carbide_network::virtualization::VpcVirtualizationType;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use clap::{Parser, ValueEnum};
 use url::Url;
 
@@ -307,7 +307,7 @@ pub struct RunOptions {
         long,
         help = "Use this machine id instead of building it from hardware enumeration. Development/testing only"
     )]
-    pub override_machine_id: Option<MachineId>,
+    pub override_machine_id: Option<DpuMachineId>,
     #[clap(
         long,
         help = "Use this network_virtualization_type for both service network and all instances."
@@ -331,6 +331,15 @@ pub struct RunOptions {
                 When set, the agent sends config updates via gRPC instead of running embedded FMDS."
     )]
     pub fmds_grpc_server: Option<String>,
+    #[clap(
+        long,
+        default_value = "3",
+        value_parser = clap::value_parser!(u64).range(1..),
+        help = "Seconds to wait for one connection attempt to --fmds-grpc-server. The agent \
+                reconnects on every main-loop iteration, so this bounds how long an unreachable \
+                FMDS can hold the loop up. Ignored without --fmds-grpc-server."
+    )]
+    pub fmds_connect_timeout_secs: u64,
     #[clap(
         long,
         default_value = "container-exec",

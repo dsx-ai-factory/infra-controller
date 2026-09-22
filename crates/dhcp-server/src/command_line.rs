@@ -20,7 +20,7 @@ use clap::{Parser, ValueEnum};
 
 #[derive(Parser, Debug, Clone)]
 #[clap(name = "forge-dhcp-server")]
-#[clap(author = "Slack channel #swngc-forge-dev")]
+#[clap(author = "https://github.com/NVIDIA/infra-controller")]
 pub(super) struct Args {
     #[arg(long, help = "Interface name where to bind this server.")]
     pub(super) interfaces: Vec<String>,

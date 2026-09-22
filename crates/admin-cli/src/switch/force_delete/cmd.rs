@@ -26,6 +26,7 @@ pub(super) async fn force_delete(data: Args, api_client: &ApiClient) -> color_ey
         .admin_force_delete_switch(AdminForceDeleteSwitchRequest {
             switch_id: Some(data.switch_id),
             delete_interfaces: data.delete_interfaces,
+            delete_bmc_suppressions: data.delete_bmc_suppressions,
         })
         .await?;
 

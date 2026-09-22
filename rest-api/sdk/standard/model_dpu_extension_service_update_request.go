@@ -26,11 +26,11 @@ type DpuExtensionServiceUpdateRequest struct {
 	Name NullableString `json:"name,omitempty"`
 	// Optional description for the DPU Extension Service
 	Description NullableString `json:"description,omitempty"`
-	// Deployment spec for the DPU Extension Service
+	// Deployment spec for the DPU Extension Service, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. For KubernetesPod this is the same Pod manifest accepted on create. For DpfHelmChart this is the same strict JSON definition accepted on create and updates stable V1 in place.
 	Data NullableString `json:"data,omitempty"`
-	// Credentials to download resources specified in DPU Extension Service data
+	// Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
 	Credentials *DpuExtensionServiceCredentials `json:"credentials,omitempty"`
-	// Observability configuration for the DPU Extension Service version
+	// Observability configuration for the DPU Extension Service version; unsupported for DpfHelmChart
 	Observability *DpuExtensionServiceObservability `json:"observability,omitempty"`
 }
 

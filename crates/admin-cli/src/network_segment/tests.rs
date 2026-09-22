@@ -115,6 +115,36 @@ fn parse_create_controls_slaac_eui64_inference() {
     );
 }
 
+#[test]
+fn create_request_maps_gateway_by_prefix_family() {
+    let command = Cmd::try_parse_from([
+        "network-segment",
+        "create",
+        "--name=segment",
+        "--prefix=192.0.2.0/24",
+        "--gateway=192.0.2.1",
+        "--prefix=2001:db8::/64",
+    ])
+    .expect("dual-stack create command should parse");
+
+    let Cmd::Create(args) = command else {
+        unreachable!("command should parse as network-segment create");
+    };
+    let request = forge::NetworkSegmentCreationRequest::from(args);
+
+    assert_eq!(
+        request
+            .prefixes
+            .into_iter()
+            .map(|prefix| (prefix.prefix, prefix.gateway))
+            .collect::<Vec<_>>(),
+        vec![
+            ("192.0.2.0/24".to_string(), Some("192.0.2.1".to_string())),
+            ("2001:db8::/64".to_string(), None),
+        ]
+    );
+}
+
 // Every malformed invocation is rejected at parse time.
 #[test]
 fn invalid_invocations_are_rejected() {
@@ -126,6 +156,34 @@ fn invalid_invocations_are_rejected() {
         };
         "delete without --id" {
             &["network-segment", "delete"][..] => Fails,
+        }
+
+        "create with an IPv6 gateway" {
+            &[
+                "network-segment",
+                "create",
+                "--name",
+                "segment",
+                "--prefix",
+                "2001:db8::/64",
+                "--gateway",
+                "2001:db8::1",
+            ][..] => Fails,
+        }
+
+        // The creation RPC has no DHCPv6 link-address field, so keep the
+        // former no-op rejected.
+        "create with unsupported --dhcpv6-link-address" {
+            &[
+                "network-segment",
+                "create",
+                "--name",
+                "segment",
+                "--prefix",
+                "2001:db8::/64",
+                "--dhcpv6-link-address",
+                "fe80::1",
+            ][..] => Fails,
         }
     );
 }

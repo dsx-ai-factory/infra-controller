@@ -36,8 +36,10 @@ pub struct TenantConfig {
     pub hostname: Option<String>,
 }
 
+/// A single DNS label: lowercase alphanumeric and dashes, 1-63 octets per RFC 1035.
+/// This is also within the Linux `HOST_NAME_MAX` of 64 bytes.
 pub static HOSTNAME_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$").unwrap());
+    Lazy::new(|| Regex::new(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$").unwrap());
 
 impl TenantConfig {
     /// Validates the tenant configuration
@@ -144,6 +146,30 @@ mod tests {
                     tenant_keyset_ids: vec!["a".to_string(), "b".to_string(), "c".to_string()],
                     hostname: Some("test-instance".to_string()),
                 } => Yields(()),
+            }
+
+            "63-octet hostname (DNS label max) validates" {
+                TenantConfig {
+                    tenant_organization_id: TenantOrganizationId::try_from(
+                        "TenantA".to_string(),
+                    )
+                    .unwrap(),
+                    tenant_keyset_ids: vec![],
+                    hostname: Some("a".repeat(63)),
+                } => Yields(()),
+            }
+
+            "64-octet hostname exceeds the DNS label max and is rejected" {
+                TenantConfig {
+                    tenant_organization_id: TenantOrganizationId::try_from(
+                        "TenantA".to_string(),
+                    )
+                    .unwrap(),
+                    tenant_keyset_ids: vec![],
+                    hostname: Some("a".repeat(64)),
+                } => FailsWith(discriminant(
+                    &ConfigValidationError::InvalidValue(String::new()),
+                )),
             }
         );
     }

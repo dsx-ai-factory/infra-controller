@@ -15,24 +15,20 @@
  * limitations under the License.
  */
 
-use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+use std::str::FromStr;
 
-use carbide_rack::firmware_update::build_new_node_info;
-use carbide_rack::rms_node_type::RmsNodeIdentity;
-use carbide_rack_controller::config::RmsConfig;
+use carbide_secrets::credentials::Credentials;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use component_manager::nv_switch_manager::{
-    ScaleUpFabricResponseStatus, ScaleUpFabricServiceStatuses, ScaleUpFabricStatus,
+    ScaleUpFabricResponseStatus, ScaleUpFabricServiceStatuses, ScaleUpFabricStatus, SwitchEndpoint,
 };
-use component_manager::rms::scale_up_fabric_service_statuses_from_rms;
 use db::switch as db_switch;
-use librms::protos::rack_manager as rms;
+use mac_address::MacAddress;
 use model::rack::FirmwareUpgradeDeviceInfo;
 use sqlx::PgConnection;
-
-use crate as carbide_rack_controller;
 
 pub(super) fn validate_switch_inventory_for_nmx_cluster(
     switches: &[FirmwareUpgradeDeviceInfo],
@@ -55,53 +51,6 @@ pub(super) fn validate_switch_inventory_for_nmx_cluster(
     }
 
     Ok(())
-}
-
-fn build_scale_up_fabric_services_status_request(
-    rack_id: &RackId,
-    switches: &[FirmwareUpgradeDeviceInfo],
-    node_identity: &RmsNodeIdentity,
-) -> rms::BatchGetScaleUpFabricServiceStatusRequest {
-    rms::BatchGetScaleUpFabricServiceStatusRequest {
-        nodes: Some(rms::NodeSet {
-            nodes: switches
-                .iter()
-                .map(|switch| build_new_node_info(rack_id, switch, node_identity))
-                .collect(),
-        }),
-    }
-}
-
-pub(super) async fn batch_get_scale_up_fabric_service_status(
-    rms_config: &RmsConfig,
-    rack_id: &RackId,
-    switches: &[FirmwareUpgradeDeviceInfo],
-    node_identity: &RmsNodeIdentity,
-) -> Result<ScaleUpFabricServiceStatuses, String> {
-    let Some(url) = rms_config.api_url.as_deref().none_if_empty() else {
-        return Err("RMS client not configured".to_string());
-    };
-
-    let rms_client_config = librms::client_config::RmsClientConfig::new(
-        rms_config.root_ca_path.clone(),
-        rms_config.client_cert.clone(),
-        rms_config.client_key.clone(),
-        rms_config.enforce_tls,
-    );
-
-    let rms_api_config = librms::client::RmsApiConfig::new(url, &rms_client_config);
-    let rms_client = librms::RackManagerApi::new(&rms_api_config);
-
-    let response =
-        rms_client
-            .client
-            .batch_get_scale_up_fabric_service_status(
-                build_scale_up_fabric_services_status_request(rack_id, switches, node_identity),
-            )
-            .await
-            .map_err(|error| format!("RMS BatchGetScaleUpFabricServiceStatus failed: {}", error))?;
-
-    Ok(scale_up_fabric_service_statuses_from_rms(response))
 }
 
 pub(super) async fn persist_fabric_manager_statuses(
@@ -159,96 +108,6 @@ pub(super) async fn persist_fabric_manager_statuses(
     }
 
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct SwitchPlacement {
-    pub(super) device: FirmwareUpgradeDeviceInfo,
-    pub(super) tray_index: u32,
-    pub(super) slot_number: Option<u32>,
-}
-
-pub(super) fn select_primary_switch(
-    switches: &[FirmwareUpgradeDeviceInfo],
-    response: &rms::BatchGetNodeDeviceInfoResponse,
-) -> Result<SwitchPlacement, String> {
-    if response.status != rms::ReturnCode::Success as i32 {
-        let details = if response.message.trim().is_empty() {
-            "no error details provided".to_string()
-        } else {
-            response.message.clone()
-        };
-        return Err(format!("RMS BatchGetNodeDeviceInfo failed: {}", details));
-    }
-
-    let switches_by_node_id: HashMap<&str, &FirmwareUpgradeDeviceInfo> = switches
-        .iter()
-        .map(|switch| (switch.node_id.as_str(), switch))
-        .collect();
-    let mut placements = Vec::with_capacity(response.node_device_details.len());
-    let mut seen_node_ids = HashSet::with_capacity(response.node_device_details.len());
-
-    for node_info in &response.node_device_details {
-        let Some(device) = switches_by_node_id.get(node_info.node_id.as_str()) else {
-            return Err(format!(
-                "RMS returned device info for unexpected switch {}",
-                node_info.node_id
-            ));
-        };
-        let Some(tray_index) = node_info.tray_index else {
-            return Err(format!(
-                "RMS did not return tray_index for switch {}",
-                node_info.node_id
-            ));
-        };
-        placements.push(SwitchPlacement {
-            device: (*device).clone(),
-            tray_index,
-            slot_number: node_info.slot_number,
-        });
-        seen_node_ids.insert(node_info.node_id.as_str());
-    }
-
-    if placements.is_empty() {
-        return Err("RMS returned no switch device info for ConfigureNmxCluster".to_string());
-    }
-
-    if placements.len() != switches.len() {
-        let missing = switches
-            .iter()
-            .filter(|switch| !seen_node_ids.contains(switch.node_id.as_str()))
-            .map(|switch| switch.node_id.clone())
-            .collect::<Vec<_>>();
-        return Err(format!(
-            "RMS did not return device info for switches: {}",
-            missing.join(", ")
-        ));
-    }
-
-    placements.sort_by_key(|placement| placement.tray_index);
-
-    if let Some(duplicate_tray_index) = placements.windows(2).find_map(|window| {
-        let left = &window[0];
-        let right = &window[1];
-        (left.tray_index == right.tray_index).then_some(left.tray_index)
-    }) {
-        let duplicate_switches = placements
-            .iter()
-            .filter(|placement| placement.tray_index == duplicate_tray_index)
-            .map(|placement| placement.device.node_id.as_str())
-            .collect::<Vec<_>>();
-        return Err(format!(
-            "RMS returned duplicate tray_index {} for switches: {}",
-            duplicate_tray_index,
-            duplicate_switches.join(", ")
-        ));
-    }
-
-    let Some(primary) = placements.into_iter().next() else {
-        return Err("RMS returned no switch device info for ConfigureNmxCluster".to_string());
-    };
-
-    Ok(primary)
 }
 
 /// Returns the primary switch observed in an RMS ScaleUpFabric status response.
@@ -352,13 +211,61 @@ pub(super) async fn persist_primary_switch(
     Ok(())
 }
 
+/// Builds a Component Manager switch endpoint from RMS firmware inventory.
+///
+/// Falls back to BMC credentials for NVOS when `os_username` or
+/// `os_password` is absent.
+///
+/// # Errors
+///
+/// Returns an error when the BMC or NVOS MAC/IP fields do not parse.
+pub(super) fn switch_endpoint_from_firmware_device(
+    device: &FirmwareUpgradeDeviceInfo,
+) -> Result<SwitchEndpoint, String> {
+    let bmc_mac = MacAddress::from_str(&device.mac)
+        .map_err(|error| format!("switch {} has invalid BMC MAC: {error}", device.node_id))?;
+
+    let bmc_ip = IpAddr::from_str(&device.bmc_ip)
+        .map_err(|error| format!("switch {} has invalid BMC IP: {error}", device.node_id))?;
+
+    let nvos_mac = MacAddress::from_str(device.os_mac.as_deref().unwrap_or_default())
+        .map_err(|error| format!("switch {} has invalid NVOS MAC: {error}", device.node_id))?;
+
+    let nvos_ip = IpAddr::from_str(device.os_ip.as_deref().unwrap_or_default())
+        .map_err(|error| format!("switch {} has invalid NVOS IP: {error}", device.node_id))?;
+
+    let bmc_credentials = Credentials::UsernamePassword {
+        username: device.bmc_username.clone(),
+        password: device.bmc_password.clone(),
+    };
+
+    let nvos_credentials = Credentials::UsernamePassword {
+        username: device
+            .os_username
+            .clone()
+            .unwrap_or_else(|| device.bmc_username.clone()),
+        password: device
+            .os_password
+            .clone()
+            .unwrap_or_else(|| device.bmc_password.clone()),
+    };
+
+    Ok(SwitchEndpoint {
+        bmc_ip,
+        bmc_mac,
+        nvos_ip,
+        nvos_mac,
+        bmc_credentials,
+        nvos_credentials,
+        nvos_host_name: device.os_hostname.clone().none_if_empty(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use carbide_rack::rms_node_type::switch_node_identity_for_profile;
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::{Case, Check, Outcome, check_cases, check_values};
     use carbide_uuid::switch::{SwitchIdSource, SwitchType};
     use component_manager::nv_switch_manager::ScaleUpFabricSwitchStatus;
-    use model::rack_type::{RackProductFamily, RackProfile};
 
     use super::*;
 
@@ -378,94 +285,70 @@ mod tests {
     }
 
     #[test]
-    fn fabric_status_request_uses_descriptor_without_node_type() {
-        let mut profile = RackProfile {
-            product_family: Some(RackProductFamily::Gb300),
-            ..Default::default()
+    fn switch_endpoint_from_firmware_device_validates_each_field() {
+        let with = |mutate: fn(&mut FirmwareUpgradeDeviceInfo)| {
+            let mut device = switch("switch-1");
+            mutate(&mut device);
+            device
         };
 
-        profile.rack_capabilities.switch.vendor = Some("test-switch-vendor".to_string());
+        let discriminating_phrases = [
+            "invalid BMC MAC",
+            "invalid BMC IP",
+            "invalid NVOS MAC",
+            "invalid NVOS IP",
+        ];
 
-        let node_identity = switch_node_identity_for_profile(&profile).unwrap();
-        let rack_id = RackId::from("rack-1");
-        let switches = [switch("switch-1")];
-
-        let request =
-            build_scale_up_fabric_services_status_request(&rack_id, &switches, &node_identity);
-
-        let [node] = request
-            .nodes
-            .expect("request nodes")
-            .nodes
-            .try_into()
-            .unwrap();
-
-        let descriptor = node.node_descriptor.expect("node descriptor");
-
-        assert_eq!(node.r#type, None);
-
-        assert_eq!(
-            descriptor.attributes.get("role").map(String::as_str),
-            Some("switch")
+        check_cases(
+            [
+                Case {
+                    scenario: "valid device",
+                    input: switch("switch-1"),
+                    expect: Outcome::Yields(()),
+                },
+                Case {
+                    scenario: "invalid BMC MAC",
+                    input: with(|d| d.mac = "not-a-mac".to_string()),
+                    expect: Outcome::FailsWith("invalid BMC MAC"),
+                },
+                Case {
+                    scenario: "invalid BMC IP",
+                    input: with(|d| d.bmc_ip = "999.0.0.1".to_string()),
+                    expect: Outcome::FailsWith("invalid BMC IP"),
+                },
+                Case {
+                    scenario: "missing NVOS MAC",
+                    input: with(|d| d.os_mac = None),
+                    expect: Outcome::FailsWith("invalid NVOS MAC"),
+                },
+                Case {
+                    scenario: "missing NVOS IP",
+                    input: with(|d| d.os_ip = None),
+                    expect: Outcome::FailsWith("invalid NVOS IP"),
+                },
+            ],
+            |device| {
+                switch_endpoint_from_firmware_device(&device)
+                    .map(|_| ())
+                    .map_err(|error| {
+                        discriminating_phrases
+                            .into_iter()
+                            .find(|phrase| error.contains(phrase))
+                            .unwrap_or("unexpected error")
+                    })
+            },
         );
     }
 
-    fn node_device_details(
-        node_id: &str,
-        tray_index: u32,
-        slot_number: Option<u32>,
-    ) -> rms::NodeDeviceInfo {
-        rms::NodeDeviceInfo {
-            node_id: node_id.to_string(),
-            tray_index: Some(tray_index),
-            slot_number,
-            ..Default::default()
-        }
-    }
-
     #[test]
-    fn select_primary_switch_picks_lowest_tray_index() -> Result<(), String> {
-        let switches = vec![switch("sw-1"), switch("sw-2"), switch("sw-3")];
-        let response = rms::BatchGetNodeDeviceInfoResponse {
-            status: rms::ReturnCode::Success as i32,
-            node_device_details: vec![
-                node_device_details("sw-1", 3, Some(3)),
-                node_device_details("sw-2", 1, Some(1)),
-                node_device_details("sw-3", 2, Some(2)),
-            ],
-            ..Default::default()
-        };
+    fn switch_endpoint_from_firmware_device_falls_back_to_bmc_credentials() {
+        let mut device = switch("switch-1");
+        device.os_username = None;
+        device.os_password = None;
 
-        let primary = select_primary_switch(&switches, &response)?;
+        let endpoint = switch_endpoint_from_firmware_device(&device).expect("valid device");
 
-        assert_eq!(primary.device.node_id, "sw-2");
-        assert_eq!(primary.tray_index, 1);
-        assert_eq!(primary.slot_number, Some(1));
-
-        Ok(())
-    }
-
-    #[test]
-    fn select_primary_switch_errors_on_duplicate_tray_index() -> Result<(), String> {
-        let switches = vec![switch("sw-1"), switch("sw-2")];
-        let response = rms::BatchGetNodeDeviceInfoResponse {
-            status: rms::ReturnCode::Success as i32,
-            node_device_details: vec![
-                node_device_details("sw-1", 1, Some(1)),
-                node_device_details("sw-2", 1, Some(2)),
-            ],
-            ..Default::default()
-        };
-
-        let Err(error) = select_primary_switch(&switches, &response) else {
-            return Err("selection should fail".to_string());
-        };
-
-        assert!(error.contains("duplicate tray_index 1"));
-        assert!(error.contains("sw-1"));
-        assert!(error.contains("sw-2"));
-
-        Ok(())
+        assert_eq!(endpoint.nvos_credentials, endpoint.bmc_credentials);
     }
 
     #[test]

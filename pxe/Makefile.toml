@@ -40,14 +40,14 @@ MKOSI_PACKAGE_CACHE_DIR = { value = "${REPO_ROOT}/pxe/.mkosi-package-cache", con
 # - using flint tool (BlueField-3 only):
 # `flint -d /dev/mst/mt41692_pciconf0 qbfb`
 #
-DOCA_VERSION = "3.2.2"
-BFB_BUILD = "125"
-BFB_RELEASE = "26.02"
+DOCA_VERSION = "3.2.3"
+BFB_BUILD = "33"
+BFB_RELEASE = "26.06"
 # DPU OS Ubuntu 22.04
 BFB_URL = "https://content.mellanox.com/BlueField/BFBs/Ubuntu22.04"
 BFB_NAME = "bf-bundle-${DOCA_VERSION}-${BFB_BUILD}_${BFB_RELEASE}_ubuntu-22.04_prod.bfb"
 # DOCA HBN Version
-DOCA_HBN_VERSION = "3.2.2"
+DOCA_HBN_VERSION = "3.2.3"
 DOCA_HBN_URL = "nvcr.io/nvidia/doca/doca_hbn:${DOCA_HBN_VERSION}-doca${DOCA_VERSION}"
 DOCA_HBN_CONFIG_URL = "https://api.ngc.nvidia.com/v2/resources/org/nvidia/team/doca/doca_hbn/${DOCA_HBN_VERSION}/files"
 
@@ -72,7 +72,8 @@ cwd = "static/blobs/internal/aarch64"
 
 [tasks.stage-nvinit]
 condition = { env_not_set = ["SA_ENABLEMENT"] }
-# Note that libnss-exec is located here: https://gitlab-master.nvidia.com/ngcsecurity/nvssh/-/tree/master/ansible/roles/nvssh/files
+# CI stages libnss-exec from its configured extras container; local builds must
+# place the required packages in pxe/debs before running this task.
 description = "Stages files required for nvssh into the mkosi image for installation in postinst script"
 script = '''
   cp -R ${REPO_ROOT}/pxe/nvinit_setup mkosi.profiles/scout-oss-x86_64/mkosi.extra/build-output/
@@ -81,8 +82,14 @@ script = '''
   cp -R ${REPO_ROOT}/pxe/debs/libnss-exec_0.2.0-1_arm64.deb mkosi.profiles/scout-oss-aarch64/mkosi.extra/build-output/
 '''
 
+[tasks.test-disk-imaging]
+category = "qcow-imager"
+command = "bash"
+args = ["${REPO_ROOT}/pxe/common_files/disk_imaging_test.sh"]
+
 [tasks.stage-disk_imaging-script]
 description = "Copies the disk_imaging.sh script to the qcow profile directories"
+dependencies = ["test-disk-imaging"]
 script = '''
   cp ${REPO_ROOT}/pxe/common_files/disk_imaging.sh ${REPO_ROOT}/pxe/mkosi.profiles/qcow-imager/mkosi.extra/opt/forge/disk_imaging.sh
   cp ${REPO_ROOT}/pxe/common_files/disk_imaging.sh ${REPO_ROOT}/pxe/mkosi.profiles/qcow-imager-aarch64/mkosi.extra/opt/forge/disk_imaging.sh
@@ -1333,7 +1340,7 @@ script = '''
     set -e
     dhclient oob_net0
     cd /mnt/tmp/
-    curl http://carbide-pxe.forge/api/v0/cloud-init/user-data -o user_data.sh
+    curl http://carbide-pxe.forge/api/v0/cloud-init/dpu/user-data -o user_data.sh
     sed -i '/ZOF/d' user_data.sh
     source user_data.sh
     carbide_modify_os

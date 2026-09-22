@@ -73,4 +73,56 @@ pub enum Error {
         #[source]
         source: syn::Error,
     },
+
+    /// An external mapping does not contain a valid Rust type path.
+    #[error("invalid rust extern path `{rust_type}` for protobuf type `{protobuf_type}`")]
+    InvalidRustExternPath {
+        /// Fully qualified protobuf type name.
+        protobuf_type: String,
+        /// Invalid Rust type path.
+        rust_type: String,
+        /// Rust parser error.
+        #[source]
+        source: syn::Error,
+    },
+
+    /// A file-level external mapping references an unknown protobuf type.
+    #[error("external mapping references unknown protobuf type `{protobuf_type}`")]
+    UnknownExternPathTarget {
+        /// Fully qualified protobuf type name.
+        protobuf_type: String,
+    },
+
+    /// A protobuf type has more than one external mapping.
+    #[error("external mapping for protobuf type `{protobuf_type}` is declared more than once")]
+    RedeclaredExternPath {
+        /// Fully qualified protobuf type name.
+        protobuf_type: String,
+    },
+
+    /// A Rust-only type override references an unknown protobuf message.
+    #[error("rust type override on `{target}` references unknown protobuf message `{replacement}`")]
+    UnknownRustTypeOverride {
+        /// Fully qualified field or method name carrying the annotation.
+        target: String,
+        /// Requested replacement protobuf message.
+        replacement: String,
+    },
+
+    /// A Rust-only type override is not wire-compatible with the public type.
+    #[error(
+        "rust type override on `{target}` changes wire shape from `{original}` to `{replacement}`"
+    )]
+    IncompatibleRustTypeOverride {
+        /// Fully qualified field or method name carrying the annotation.
+        target: String,
+        /// Public protobuf message type.
+        original: String,
+        /// Requested replacement protobuf message.
+        replacement: String,
+    },
+
+    /// An annotated descriptor could not be found in the structural descriptor set.
+    #[error("annotated protobuf descriptor `{0}` is missing from the structural descriptor set")]
+    MissingRustTypeOverrideTarget(String),
 }

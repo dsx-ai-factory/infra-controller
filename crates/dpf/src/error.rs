@@ -48,6 +48,12 @@ pub enum DpfError {
 }
 
 impl DpfError {
+    /// Returns whether this error represents a missing DPF resource.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::NotFound { .. })
+            || matches!(self, Self::KubeError(kube::Error::Api(status)) if status.is_not_found())
+    }
+
     pub fn not_found(kind: &'static str, name: impl Into<String>) -> Self {
         Self::NotFound {
             kind,

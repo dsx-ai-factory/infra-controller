@@ -3,6 +3,7 @@ syntax = "proto3";
 package scout_firmware_upgrade;
 
 import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
 
 message ScoutFirmwareUpgradeTask {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";

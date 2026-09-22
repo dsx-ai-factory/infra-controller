@@ -45,11 +45,12 @@ enum RulePrincipal {
     Flow,
     MaintenanceJobs,
     DsxExchangeConsumer,
-    Anonymous, // Permitted for everything
+    SiteHealthProbe, // synthetic read-only monitoring (#5360)
+    Anonymous,       // Permitted for everything
 }
 use self::RulePrincipal::{
     Agent, Anonymous, BmcProxy, Dhcp, Dns, DsxExchangeConsumer, Flow, ForgeAdminCLI, Health,
-    Machineatron, MaintenanceJobs, Pxe, Scout, SiteAgent, Ssh, SshRs,
+    Machineatron, MaintenanceJobs, Pxe, Scout, SiteAgent, SiteHealthProbe, Ssh, SshRs,
 };
 
 impl InternalRBACRules {
@@ -70,10 +71,13 @@ impl InternalRBACRules {
         x.perm("FindDomain", vec![ForgeAdminCLI]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ChangeVpcRoutingProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateVpcVirtualization", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteVpc", vec![Machineatron, SiteAgent]);
         x.perm("FindVpcIds", vec![SiteAgent, ForgeAdminCLI, Machineatron]);
         x.perm("FindVpcsByIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetVpcRoutingState", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
@@ -136,6 +140,7 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm("ReleaseInstance", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ReleaseInstances", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateInstanceOperatingSystem", vec![SiteAgent]);
         x.perm("UpdateInstanceConfig", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindInstanceIds", vec![ForgeAdminCLI, SiteAgent]);
@@ -219,7 +224,7 @@ impl InternalRBACRules {
         x.perm("RenewMachineCertificate", vec![Agent]);
         x.perm("DiscoveryCompleted", vec![Machineatron, Scout]);
         x.perm("CleanupMachineCompleted", vec![Machineatron, Scout]);
-        x.perm("ReportForgeScoutError", vec![Scout]);
+        x.perm("ReportForgeScoutError", vec![Anonymous]);
         x.perm("ReportScoutFirmwareUpgradeStatus", vec![Scout]);
         x.perm("DiscoverDhcp", vec![Dhcp, Machineatron]);
         x.perm("ExpireDhcpLease", vec![Dhcp, Machineatron]);
@@ -239,6 +244,7 @@ impl InternalRBACRules {
                 Ssh,
                 SshRs,
                 Flow,
+                SiteHealthProbe,
             ],
         );
         x.perm(
@@ -251,6 +257,7 @@ impl InternalRBACRules {
                 Ssh,
                 SshRs,
                 Flow,
+                SiteHealthProbe,
             ],
         );
         x.perm("FindConnectedDevicesByDpuMachineIds", vec![ForgeAdminCLI]);
@@ -310,6 +317,10 @@ impl InternalRBACRules {
         x.perm("AdminForceDeleteRack", vec![ForgeAdminCLI, Machineatron]);
         x.perm("AdminForceDeleteSwitch", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
+            "DecommissionSwitch",
+            vec![ForgeAdminCLI, Machineatron, Flow],
+        );
+        x.perm(
             "AdminForceDeletePowerShelf",
             vec![ForgeAdminCLI, Machineatron],
         );
@@ -338,6 +349,7 @@ impl InternalRBACRules {
         x.perm("GetCredentialRotationStatus", vec![ForgeAdminCLI]);
         x.perm("TriggerBmcCredentialRotation", vec![ForgeAdminCLI]);
         x.perm("TriggerUefiCredentialRotation", vec![ForgeAdminCLI]);
+        x.perm("TriggerNicLockdownCredentialRotation", vec![ForgeAdminCLI]);
         x.perm("GetRouteServers", vec![ForgeAdminCLI]);
         x.perm("AddRouteServers", vec![ForgeAdminCLI]);
         x.perm("RemoveRouteServers", vec![ForgeAdminCLI]);
@@ -353,8 +365,10 @@ impl InternalRBACRules {
         );
         x.perm("DeleteExpectedMachine", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateExpectedMachine", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("PatchExpectedMachine", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateExpectedMachines", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateExpectedMachines", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("PatchExpectedMachines", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetExpectedMachine", vec![ForgeAdminCLI, Flow]);
         x.perm(
             "GetAllExpectedMachines",
@@ -501,6 +515,7 @@ impl InternalRBACRules {
         x.perm("GetIpxeTemplate", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListIpxeTemplates", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindRackStateHistories", vec![ForgeAdminCLI, Machineatron]);
+        x.perm("FindRackHealthHistories", vec![ForgeAdminCLI, Machineatron]);
         x.perm("RebootCompleted", vec![Machineatron, Scout]);
         x.perm("PersistValidationResult", vec![Scout, SiteAgent]);
         x.perm(
@@ -532,9 +547,15 @@ impl InternalRBACRules {
             "GetMachineValidationAttempt",
             vec![ForgeAdminCLI, SiteAgent],
         );
+        x.perm("AppendMachineValidationAttemptLog", vec![Scout]);
+        x.perm(
+            "GetMachineValidationAttemptLogs",
+            vec![ForgeAdminCLI, Scout],
+        );
         x.perm("HeartbeatMachineValidationRun", vec![Scout, SiteAgent]);
         x.perm("AdminBmcReset", vec![ForgeAdminCLI]);
         x.perm("AdminPowerControl", vec![ForgeAdminCLI, SiteAgent, Flow]);
+        x.perm("AdminChassisReset", vec![ForgeAdminCLI, SiteAgent, Flow]);
         x.perm("DisableSecureBoot", vec![ForgeAdminCLI]);
         x.perm("MachineSetup", vec![ForgeAdminCLI]);
         x.perm("SetDpuFirstBootOrder", vec![ForgeAdminCLI]);
@@ -577,7 +598,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "MachineValidationTestVerfied",
-            vec![ForgeAdminCLI, Scout, SiteAgent],
+            vec![ForgeAdminCLI, SiteAgent],
         );
         x.perm(
             "MachineValidationTestNextVersion",
@@ -585,7 +606,11 @@ impl InternalRBACRules {
         );
         x.perm(
             "MachineValidationTestEnableDisableTest",
-            vec![ForgeAdminCLI, SiteAgent, Scout],
+            vec![ForgeAdminCLI, SiteAgent],
+        );
+        x.perm(
+            "MachineValidationTestApproveFullHost",
+            vec![ForgeAdminCLI, SiteAgent],
         );
         x.perm("UpdateMachineValidationRun", vec![Scout, SiteAgent]);
         x.perm("FindInstanceTypeIds", vec![SiteAgent, ForgeAdminCLI]);
@@ -732,6 +757,10 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron, Flow],
         );
         x.perm("CreatePowerShelf", vec![ForgeAdminCLI, Machineatron]);
+        x.perm(
+            "DecommissionPowerShelf",
+            vec![ForgeAdminCLI, Machineatron, Flow],
+        );
         x.perm("DeletePowerShelf", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
             "AddExpectedPowerShelf",
@@ -743,6 +772,10 @@ impl InternalRBACRules {
         );
         x.perm(
             "UpdateExpectedPowerShelf",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "PatchExpectedPowerShelf",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(
@@ -767,6 +800,10 @@ impl InternalRBACRules {
         );
         x.perm(
             "FindPowerShelfStateHistories",
+            vec![ForgeAdminCLI, Machineatron, Flow],
+        );
+        x.perm(
+            "FindPowerShelfHealthHistories",
             vec![ForgeAdminCLI, Machineatron, Flow],
         );
         x.perm(
@@ -797,6 +834,10 @@ impl InternalRBACRules {
         );
         x.perm(
             "UpdateExpectedSwitch",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "PatchExpectedSwitch",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm("GetExpectedSwitch", vec![ForgeAdminCLI, Machineatron, Flow]);
@@ -846,6 +887,10 @@ impl InternalRBACRules {
         );
         x.perm(
             "FindSwitchStateHistories",
+            vec![ForgeAdminCLI, Machineatron, Flow],
+        );
+        x.perm(
+            "FindSwitchHealthHistories",
             vec![ForgeAdminCLI, Machineatron, Flow],
         );
         x.perm("FindRackIds", vec![ForgeAdminCLI, SiteAgent, Flow]);
@@ -1046,6 +1091,11 @@ impl RuleInfo {
                         "nico-dsx-exchange-consumer",
                         "carbide-dsx-exchange-consumer",
                     ),
+                    // New service (no legacy carbide- alias): the synthetic
+                    // monitoring probe, read-only machine queries only (#5360).
+                    RulePrincipal::SiteHealthProbe => vec![Principal::SpiffeServiceIdentifier(
+                        "nico-site-health-probe".to_string(),
+                    )],
                     RulePrincipal::Anonymous => vec![Principal::Anonymous],
                 })
                 .collect(),
@@ -1102,6 +1152,66 @@ mod rbac_rule_tests {
     }
 
     #[test]
+    fn vpc_allocation_operation_permissions() {
+        // Operator certificates map to ExternalUser; its group label is not
+        // compared when matching the rule.
+        for (principal, allowed) in [
+            (
+                Principal::ExternalUser(ExternalUserInfo::new(
+                    None,
+                    "nico-cli-client".to_string(),
+                    None,
+                )),
+                true,
+            ),
+            (
+                Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+                true,
+            ),
+            (
+                Principal::SpiffeServiceIdentifier("nico-dns".to_string()),
+                false,
+            ),
+            (Principal::SpiffeMachineIdentifier("dpu".to_string()), false),
+            (Principal::Anonymous, false),
+        ] {
+            for method in [
+                "ReleaseVpcInactiveVni",
+                "GetVpcRoutingState",
+                "ChangeVpcRoutingProfile",
+            ] {
+                assert_eq!(
+                    InternalRBACRules::allowed_from_static(
+                        method,
+                        std::slice::from_ref(&principal),
+                    ),
+                    allowed,
+                    "{method}: {}",
+                    principal.as_identifier(),
+                );
+            }
+        }
+    }
+
+    /// The probe's service identity can call exactly its two read RPCs, and a
+    /// write RPC stays denied — so dropping SiteHealthProbe from the read
+    /// vectors or pasting it onto a write RPC fails here.
+    #[test]
+    fn site_health_probe_reads_machines_and_nothing_else() {
+        let probe = Principal::SpiffeServiceIdentifier("nico-site-health-probe".to_string());
+        for method in ["FindMachineIds", "FindMachinesByIds"] {
+            assert!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&probe)),
+                "{method}"
+            );
+        }
+        assert!(!InternalRBACRules::allowed_from_static(
+            "SetMaintenance",
+            std::slice::from_ref(&probe),
+        ));
+    }
+
+    #[test]
     fn admin_cli_can_create_network_segments() {
         assert!(InternalRBACRules::allowed_from_static(
             "CreateNetworkSegment",
@@ -1146,13 +1256,12 @@ mod rbac_rule_tests {
             "ReportForgeScoutError",
             &[Principal::SpiffeMachineIdentifier("foo".to_string())]
         ));
-        assert!(!InternalRBACRules::allowed_from_static(
+        // A machine reporting a pre-registration failure presents no certificate,
+        // so it arrives with no principals at all. That case is the reason this
+        // RPC is public.
+        assert!(InternalRBACRules::allowed_from_static(
             "ReportForgeScoutError",
-            &[Principal::ExternalUser(ExternalUserInfo::new(
-                None,
-                "any".to_string(),
-                None
-            ))]
+            &[]
         ));
         assert!(InternalRBACRules::allowed_from_static(
             "GetCloudInitInstructions",
@@ -1189,7 +1298,11 @@ mod rbac_rule_tests {
         ));
 
         // REST admin operations proxy to Core as the site agent (issue #4597).
-        for method in ["AdminPowerControl", "TriggerDpuReprovisioning"] {
+        for method in [
+            "AdminPowerControl",
+            "TriggerDpuReprovisioning",
+            "AdminChassisReset",
+        ] {
             assert!(
                 InternalRBACRules::allowed_from_static(
                     method,

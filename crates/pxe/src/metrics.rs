@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use carbide_instrument::{Event, LabelValue, MetricFamily};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+use opentelemetry::StringValue;
 use tokio::time::sleep;
 
 const TIME_BUCKETS: &[f64; 11] = &[
@@ -64,14 +65,34 @@ pub(crate) fn setup_prometheus() -> PrometheusHandle {
     prometheus_handle
 }
 
-/// The boot-path endpoint an outcome describes, as a bounded metric label:
-/// the two iPXE script routes plus the cloud-init route family
-/// (user-data, meta-data, vendor-data).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+/// Which consumer a cloud-init instruction is intended for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloudInitConsumer {
+    Dpu,
+    Tenant,
+    Scout,
+}
+
+/// The boot-path endpoint an outcome describes, as a bounded metric label.
+/// Cloud-init values are scoped to the consumer rather than the document, so
+/// every document a consumer fetches shares one label value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BootEndpoint {
     Whoami,
     Boot,
-    CloudInit,
+    CloudInit(CloudInitConsumer),
+}
+
+impl LabelValue for BootEndpoint {
+    fn label_value(&self) -> StringValue {
+        StringValue::from(match self {
+            Self::Whoami => "whoami",
+            Self::Boot => "boot",
+            Self::CloudInit(CloudInitConsumer::Dpu) => "cloud_init_dpu",
+            Self::CloudInit(CloudInitConsumer::Tenant) => "cloud_init_tenant",
+            Self::CloudInit(CloudInitConsumer::Scout) => "cloud_init_scout",
+        })
+    }
 }
 
 /// How a boot-path request resolved, as a bounded metric label. Every
@@ -86,6 +107,11 @@ pub(crate) enum BootEndpoint {
 /// structurally boot-only. `ok` means the request resolved to a servable
 /// response; a template that later fails to render returns a real 5xx the
 /// `http_*` metrics count, which is outside this metric's HTTP-200 scope.
+///
+/// Two of these are non-error outcomes on the Scout routes:
+/// `instructions_empty` means no snippets are configured, the supported
+/// default, and `snippet_directory_unreadable` means configured snippets were
+/// silently not applied -- the only one worth alerting on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 pub(crate) enum OutcomeReason {
     Ok,
@@ -94,6 +120,7 @@ pub(crate) enum OutcomeReason {
     InstructionsEmpty,
     InstructionsInvalid,
     MetadataNotFound,
+    SnippetDirectoryUnreadable,
     UpstreamApiError,
 }
 
@@ -167,6 +194,25 @@ pub(crate) struct PxeCustomIpxeFetchFailed {
     pub(super) error: String,
 }
 
+/// A Scout `user-data` request that could not list the snippet directory. The
+/// request is still answered with the no-snippets document, so this Event is
+/// the only signal that configured snippets did not reach the machine.
+#[derive(Event)]
+#[event(
+    event_name = "pxe_snippet_directory_unreadable",
+    metric_family = PxeBootOutcomes,
+    log = error,
+    message = "discovery cloud-init snippet directory could not be read"
+)]
+pub(crate) struct PxeSnippetDirectoryUnreadable {
+    #[label]
+    pub(super) endpoint: BootEndpoint,
+    #[label]
+    pub(super) reason: OutcomeReason,
+    #[context]
+    pub(super) error: String,
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_instrument::emit;
@@ -194,9 +240,19 @@ mod tests {
                     expect: "boot".to_string(),
                 },
                 Check {
-                    scenario: "cloud-init endpoint",
-                    input: BootEndpoint::CloudInit.label_value(),
-                    expect: "cloud_init".to_string(),
+                    scenario: "DPU cloud-init endpoint",
+                    input: BootEndpoint::CloudInit(CloudInitConsumer::Dpu).label_value(),
+                    expect: "cloud_init_dpu".to_string(),
+                },
+                Check {
+                    scenario: "tenant cloud-init endpoint",
+                    input: BootEndpoint::CloudInit(CloudInitConsumer::Tenant).label_value(),
+                    expect: "cloud_init_tenant".to_string(),
+                },
+                Check {
+                    scenario: "Scout cloud-init endpoint",
+                    input: BootEndpoint::CloudInit(CloudInitConsumer::Scout).label_value(),
+                    expect: "cloud_init_scout".to_string(),
                 },
                 Check {
                     scenario: "ok",
@@ -233,6 +289,11 @@ mod tests {
                     input: OutcomeReason::MetadataNotFound.label_value(),
                     expect: "metadata_not_found".to_string(),
                 },
+                Check {
+                    scenario: "snippet directory unreadable",
+                    input: OutcomeReason::SnippetDirectoryUnreadable.label_value(),
+                    expect: "snippet_directory_unreadable".to_string(),
+                },
             ],
             |value| value.to_string(),
         );
@@ -257,7 +318,7 @@ mod tests {
                 reason: OutcomeReason::UpstreamApiError,
             });
             emit(PxeBootOutcome {
-                endpoint: BootEndpoint::CloudInit,
+                endpoint: BootEndpoint::CloudInit(CloudInitConsumer::Tenant),
                 reason: OutcomeReason::MetadataNotFound,
             });
         });
@@ -283,7 +344,10 @@ mod tests {
         assert_eq!(
             metrics.counter_delta(
                 "carbide_pxe_boot_outcomes_total",
-                &[("endpoint", "cloud_init"), ("reason", "metadata_not_found")],
+                &[
+                    ("endpoint", "cloud_init_tenant"),
+                    ("reason", "metadata_not_found")
+                ],
             ),
             1.0,
         );
@@ -332,7 +396,7 @@ mod tests {
                         message: "cloud-init request could not be served".to_string(),
                         event_name: Some("pxe_cloud_init_request_failed".to_string()),
                         metric_name: Some(BOOT_OUTCOMES_METRIC.to_string()),
-                        endpoint: Some("cloud_init".to_string()),
+                        endpoint: Some("cloud_init_tenant".to_string()),
                         reason: Some("metadata_not_found".to_string()),
                         error: Some("metadata is missing".to_string()),
                         counter_delta: 1.0,
@@ -358,7 +422,7 @@ mod tests {
                 let metrics = MetricsCapture::start();
                 let (endpoint, reason, logs) = match failure {
                     FailureEvent::CloudInit => {
-                        let endpoint = BootEndpoint::CloudInit;
+                        let endpoint = BootEndpoint::CloudInit(CloudInitConsumer::Tenant);
                         let reason = OutcomeReason::MetadataNotFound;
                         let logs = capture_logs(|| {
                             emit(PxeCloudInitRequestFailed {

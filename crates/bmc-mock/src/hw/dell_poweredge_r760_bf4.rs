@@ -46,6 +46,10 @@ impl DellPowerEdgeR760Bf4<'_> {
         }
     }
 
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         redfish::manager::Config {
             managers: vec![redfish::manager::SingleConfig {
@@ -73,11 +77,10 @@ impl DellPowerEdgeR760Bf4<'_> {
         }
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
-        let callbacks = Some(callbacks);
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let serial_number = Some(self.product_serial_number.to_string().into());
         let system_id = "System.Embedded.1";
 
@@ -111,10 +114,11 @@ impl DellPowerEdgeR760Bf4<'_> {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("Dell Inc.".into()),
                 model: Some("PowerEdge R760".into()),
+                bios_version: None,
                 eth_interfaces: Some(eth_interfaces),
                 serial_number,
                 boot_order_mode: redfish::computer_system::BootOrderMode::OrderedCollection,
-                callbacks,
+                callbacks: Some(callbacks),
                 chassis: vec!["System.Embedded.1".into()],
                 boot_options: Some(boot_options),
                 bios_mode: redfish::computer_system::BiosMode::DellOem,

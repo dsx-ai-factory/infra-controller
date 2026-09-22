@@ -59,7 +59,12 @@ ports:
     enabled: false
 service:
   enabled: true
+# Bind to the primary pod IP used by the Service. Unbracketed IPv6 endpoints
+# prevent collector startup; brackets also work for IPv4.
 config:
+  extensions:
+    health_check:
+      endpoint: "[${env:MY_POD_IP}]:13133"
   receivers:
     # Null out the chart's default receivers not used here (a null key removes it).
     jaeger: null
@@ -75,9 +80,9 @@ config:
     otlp:
       protocols:
         grpc:
-          endpoint: 0.0.0.0:4317
+          endpoint: "[${env:MY_POD_IP}]:4317"
         http:
-          endpoint: 0.0.0.0:4318
+          endpoint: "[${env:MY_POD_IP}]:4318"
   processors:
     memory_limiter:
       limit_percentage: 80
@@ -113,6 +118,9 @@ config:
       retry_on_failure:
         enabled: false     # best-effort: don't queue traces while Tempo is down
   service:
+    telemetry:
+      metrics:
+        address: "[${env:MY_POD_IP}]:8888"
     pipelines:
       # Remove the chart's default metrics pipeline; only logs + traces run on the agent.
       metrics: null

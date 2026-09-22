@@ -2,12 +2,32 @@
 {{- $namespace := include "nico-machine-a-tron.namespace" . }}
 {{- $baseName := include "nico-machine-a-tron.name" . }}
 
+{{/* Build ordered list of pod names for consistent indexing */}}
+{{- $podList := list }}
+{{- range $podName, $podConfig := .Values.pods }}
+{{- if and $podConfig (or (gt (len ($podConfig.machines | default dict)) 0) (gt (len ($podConfig.racks | default dict)) 0)) }}
+{{- $podList = append $podList $podName }}
+{{- end }}
+{{- end }}
+{{- $podList = $podList | sortAlpha }}
+
+{{/* Check if DHCP relay is enabled */}}
+{{- $dhcpRelayEnabled := include "nico-machine-a-tron.dhcpRelayEnabled" . }}
+
 {{- range $podName, $podConfig := .Values.pods }}
 {{/*
 Skip unconfigured pods
 */}}
 {{- if not (and $podConfig (or (gt (len ($podConfig.machines | default dict)) 0) (gt (len ($podConfig.racks | default dict)) 0))) }}
 {{- continue }}
+{{- end }}
+
+{{/* Get pod index */}}
+{{- $podIndex := 0 }}
+{{- range $i, $p := $podList }}
+{{- if eq $p $podName }}
+{{- $podIndex = $i }}
+{{- end }}
 {{- end }}
 
 {{- $name := printf "%s-%s" $baseName $podName }}
@@ -37,4 +57,34 @@ spec:
       targetPort: ssh
       protocol: TCP
     {{- end }}
+{{- if $dhcpRelayEnabled }}
+{{- $dhcpRelay := $root.Values.dhcpRelay }}
+{{- $relayIP := include "nico-machine-a-tron.dhcpRelayIP" (dict "baseIP" $dhcpRelay.baseIP "podIndex" $podIndex) }}
+{{- $relayPort := $dhcpRelay.listenPort | default 67 }}
+---
+## DHCP Relay Service
+## Provides a stable ClusterIP for receiving DHCP server replies.
+## The ClusterIP is used as the advertise_address in machine-a-tron config.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-dhcp-relay
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "nico-machine-a-tron.labels" $root | nindent 4 }}
+    app: {{ $baseName }}
+    nvidia-infra-controller/dhcp-relay: "true"
+    nvidia-infra-controller/pod-name: {{ $podName | quote }}
+spec:
+  type: ClusterIP
+  clusterIP: {{ $relayIP }}
+  selector:
+    {{- include "nico-machine-a-tron.selectorLabels" $root | nindent 4 }}
+    nvidia-infra-controller/pod-name: {{ $podName | quote }}
+  ports:
+    - port: {{ $relayPort }}
+      name: dhcp-relay
+      targetPort: dhcp-relay
+      protocol: UDP
+{{- end }}
 {{- end }}

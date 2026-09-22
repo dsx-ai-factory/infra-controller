@@ -42,9 +42,7 @@ endpoints that need to call on-site Flow through the generic Flow gRPC proxy.
    `WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED`, matching `ExecuteCoreGRPC`, whose
    IDs are always fresh.
 
-Two helpers in `common` carry this for every migrated handler:
-`common.FlowWorkflowID` applies the transport namespace, and
-`common.ProxyFlowGRPC` dispatches and renders the failure as an Echo response.
+`common.ProxyFlowGRPC` dispatches and renders a proxy failure as an Echo response.
 Use `ExecuteFlowGRPC` directly only in helpers that hand the error back to a
 caller instead of rendering a response, as `resolveTrayIDsBySlot` does; return
 the `*cutil.APIError` unwrapped so the status the proxy chose survives.
@@ -54,19 +52,17 @@ endpoints as the worked example:
 
 - A read whose response shape depends on a query flag must encode that flag, so
   `GetTaskRun` needs `includeStats` in the ID
-  (`flow-grpc-task-run-get-{runID}-{true|false}`). Attaching to an execution
+  (`task-run-get-{runID}-{true|false}`). Attaching to an execution
   started with the other value would return stats presence that contradicts the
   request.
 - A list must hash its query parameters (`QueryParamHash`) into the ID, so two
   different filters never coalesce.
 - A create must never coalesce at all, so `CreateTaskRun` uses a fresh UUID
-  (`flow-grpc-task-run-create-{uuid}`) and `USE_EXISTING` can never match.
+  (`task-run-create-{uuid}`) and `USE_EXISTING` can never match.
 
-Prefix deterministic IDs with the transport (`flow-grpc-`). A deterministic ID
-plus `USE_EXISTING` attaches to whatever execution already holds that name, so
-an ID shared with a different workflow type — a bespoke predecessor still
-running during a rollout, for instance — yields a result payload this proxy
-cannot decode.
+Keep the descriptive IDs derived by handlers; do not add a transport prefix.
+The `flow-grpc-` namespace was a temporary migration safeguard and was retired
+with the bespoke Flow workflows.
 
 ## Timeout Ladder
 
@@ -135,10 +131,10 @@ Confirm these details before editing:
    fields directly unless the API contract already does.
 6. For a new public REST endpoint, register the route and update OpenAPI. For a
    migration from a bespoke workflow to the generic proxy, keep the REST
-   contract and the parameter-derivation rules for the workflow ID unchanged,
-   but namespace the resulting ID by transport as described above. The derived
-   ID string itself must change, otherwise the proxy and the workflow it
-   replaces can attach to each other.
+   contract and the parameter-derivation rules for the workflow ID unchanged.
+   Use a temporary, non-colliding ID namespace while the bespoke and proxy
+   workflows coexist, then restore the original ID when the bespoke workflow is
+   retired.
 
 ## Rollout Requirement
 
@@ -153,7 +149,11 @@ So a handler may not start dispatching through `InvokeFlowGRPC` in the same
 release that first registers it on the site agent. Register the proxy first,
 wait for every site to run that agent, and switch handlers in a later release.
 Retire the workflow a migration replaces in a third release, once no supported
-cloud release still submits it.
+cloud release still submits it. Let executions submitted by the migration
+release reach their bounded completion before restoring the original workflow
+IDs. During a rolling upgrade, old and new cloud replicas use the temporary and
+original IDs respectively, so an identical request can execute once under each
+name; both IDs dispatch the same generic proxy workflow at this stage.
 
 When adding a Flow endpoint, reach for the proxy: there is no longer a bespoke
 Flow workflow to copy, and adding one would reintroduce the per-method

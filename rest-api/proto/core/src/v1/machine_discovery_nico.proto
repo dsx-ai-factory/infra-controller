@@ -45,8 +45,13 @@ message DiscoveryInfo {
   // Enumerates GPU devices on the host
   repeated Gpu gpus = 11;
 
-  // Enumerates Memory devices on the host
-  repeated MemoryDevice memory_devices = 12;
+  // Deprecated: legacy flat list, one entry per physical DIMM. Writers must
+  // emit only memory_device_groups (field 17) and leave this field empty.
+  // Readers must still accept this field: when memory_device_groups has no
+  // group with count > 0 (including when it is empty), readers fall back to
+  // condensing this field (see memory_device_groups for condensation
+  // rules). Otherwise this field is ignored.
+  repeated MemoryDevice memory_devices = 12 [deprecated = true];
 
   // output of dmidecode -t 43 (TPM description)
   optional TpmDescription tpm_description = 13;
@@ -57,6 +62,22 @@ message DiscoveryInfo {
 
   // CPU info on the host per model (even though only one model is expected)
   repeated CpuInfo cpu_info = 16;
+
+  // Condensed memory devices: consecutive runs of identical DIMMs (same
+  // size_mb and mem_type) rolled up into a single group with a count. This
+  // is the preferred field for new writes; readers use it exclusively
+  // whenever it contains at least one group with count > 0 (see
+  // memory_devices, field 12, for the legacy fallback). Only adjacent
+  // identical devices are merged, so groups preserve the original discovery
+  // order and the same (size_mb, mem_type) pair may appear in more than one
+  // non-adjacent group. The sum of `count` across all groups is bounded
+  // (implementations should reject payloads whose total exceeds a fixed
+  // maximum, set far beyond any real DIMM slot count, to avoid unbounded
+  // allocation when a group is expanded back into individual devices; see
+  // MAX_MEMORY_DEVICE_COUNT in crates/api-model/src/hardware_info.rs for the
+  // current value). Groups with count == 0 carry no information and are
+  // dropped by readers rather than treated as an error.
+  repeated MemoryDeviceGroup memory_device_groups = 17;
 }
 
 // protolint:disable FIELD_NAMES_LOWER_SNAKE_CASE
@@ -200,9 +221,28 @@ message Gpu {
   GpuPlatformInfo platform_info = 9;
 }
 
+// A single physical memory device (DIMM). Deprecated in favor of
+// MemoryDeviceGroup; see DiscoveryInfo.memory_devices (field 12).
 message MemoryDevice {
+  // Capacity in MiB. Absent when the size could not be determined.
   optional uint32 size_mb  = 1;
+  // Memory type, e.g. "DDR4", "DDR5". Absent when the type could not be
+  // determined.
   optional string mem_type = 2;
+}
+
+// A run of `count` consecutive, identical DIMMs: same size_mb and same
+// mem_type (including both being absent). See DiscoveryInfo.memory_device_groups
+// (field 17) for condensation, ordering, and bounds semantics.
+message MemoryDeviceGroup {
+  // Same semantics as MemoryDevice.size_mb; shared by every device in the group.
+  optional uint32 size_mb = 1;
+  // Same semantics as MemoryDevice.mem_type; shared by every device in the group.
+  optional string mem_type = 2;
+  // Number of identical devices this group represents. Zero-count groups
+  // are dropped by readers rather than rejected. The sum of `count` across
+  // all groups in a DiscoveryInfo is bounded; see field 17 above.
+  uint32 count = 3;
 }
 
 enum CpuArchitecture {

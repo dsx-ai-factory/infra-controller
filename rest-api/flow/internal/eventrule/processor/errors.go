@@ -14,7 +14,7 @@ import (
 
 // ErrTerminal identifies event-processing failures that cannot succeed on
 // retry without changing the input or persisted state.
-var ErrTerminal = errors.New("terminal event processing error")
+var ErrTerminal = eventrule.ErrTerminalProcessing
 
 func classifyInventoryError(err error) error {
 	if errors.Is(err, inventoryresolver.ErrUnresolvable) {

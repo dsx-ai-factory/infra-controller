@@ -16,7 +16,7 @@
  */
 use std::panic::Location;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{InvalidMachineType, MachineId};
 use db::DatabaseError;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::ManagedHostState;
@@ -308,6 +308,14 @@ impl<S> std::fmt::Display for StateHandlerOutcome<S> {
 /// Error type for handling a Machine State
 #[derive(Debug, thiserror::Error)]
 pub enum StateHandlerError {
+    /// A conditional write rejected the snapshot used by this iteration.
+    /// The processor discards uncommitted writes and queues a fresh pass without
+    /// recording a transition or an operational error.
+    #[error("controller iteration invalidated at {source_ref}")]
+    IterationInvalidated {
+        /// The call site that required the rejected write to apply.
+        source_ref: &'static std::panic::Location<'static>,
+    },
     #[error("unable to perform database transaction: {0}")]
     TransactionError(#[source] Box<sqlx::Error>),
     #[error("failed to advance state: {0}")]
@@ -323,7 +331,7 @@ pub enum StateHandlerError {
     #[error("error releasing from resource pool: {0}")]
     PoolReleaseError(#[source] Box<ResourcePoolError>),
 
-    #[error("invalid host state {1} for DPU {0}")]
+    #[error("invalid host state {1} for machine {0}")]
     InvalidHostState(MachineId, Box<ManagedHostState>),
 
     #[error(transparent)]
@@ -357,6 +365,26 @@ pub enum StateHandlerError {
 
     #[error("spdm error: {0}")]
     SpdmError(#[source] Box<model::attestation::spdm::SpdmHandlerError>),
+
+    // This error is temporary while parts of the codebase migrate to using HostMachineId for places
+    // where only predicted and stable host ID's are acceptable. Any time it is raised is a bug in
+    // the code, so report the caller
+    #[error("bug: invalid machine ID at {location}: {error}")]
+    InvalidHostMachineId {
+        location: &'static std::panic::Location<'static>,
+        error: InvalidMachineType,
+    },
+}
+
+impl From<InvalidMachineType> for StateHandlerError {
+    #[track_caller]
+    fn from(value: InvalidMachineType) -> Self {
+        let location = std::panic::Location::caller();
+        Self::InvalidHostMachineId {
+            location,
+            error: value,
+        }
+    }
 }
 
 impl StateHandlerError {
@@ -366,6 +394,7 @@ impl StateHandlerError {
     /// many metric dimensions.
     pub fn metric_label(&self) -> &'static str {
         match self {
+            StateHandlerError::IterationInvalidated { .. } => "iteration_invalidated",
             StateHandlerError::TransactionError(_) => "transaction_error",
             StateHandlerError::GenericError(_) => "generic_error",
             StateHandlerError::FirmwareUpdateError(_) => "firware_update_error",
@@ -385,6 +414,7 @@ impl StateHandlerError {
                 _ => "resource_cleanup_failed",
             },
             StateHandlerError::SpdmError(_) => "spdm_attestation_error",
+            StateHandlerError::InvalidHostMachineId { .. } => "invalid_host_machine_id",
         }
     }
 }

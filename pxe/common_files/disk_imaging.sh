@@ -65,12 +65,46 @@ function verify_sha() {
 	echo "$sha $file" | $shasum --check 2>&1 | tee $log_output
 }
 
+function find_efi_disk() {
+	for disk in "$@"
+	do
+		if lsblk -nrpo PARTTYPE "$disk" | grep -Eqi '^(c12a7328-f81f-11d2-ba4b-00a0c93ec93b|0xef)$'; then
+			echo "$disk"
+			return 0
+		fi
+	done
+	return 1
+}
+
 function find_bootdisk() {
-	if [ -b /dev/nvme0n1 ]; then
-		image_disk="/dev/nvme0n1"
-	elif [ -b /dev/sda ]; then
-		image_disk="/dev/sda"
+	disks=$(lsblk -bdnpo NAME,SIZE,TYPE | awk '$3 == "disk" { print $1, $2 }' | sort -k2,2n -k1,1V)
+	disk_names=$(echo "$disks" | awk 'NF { print $1 }' | sort -V)
+
+	if [ "$image_disk" == "smallest" ]; then
+		smallest_size=$(echo "$disks" | awk 'NR == 1 { print $2 }')
+		candidate_disks=$(echo "$disks" | awk -v size="$smallest_size" '$2 == size { print $1 }' | sort -V)
+		candidate_count=$(echo "$candidate_disks" | awk 'NF { count++ } END { print count + 0 }')
+
+		selected_disk=
+		if [ "$candidate_count" -gt 1 ]; then
+			selected_disk=$(find_efi_disk $candidate_disks)
+		fi
+		if [ -z "$selected_disk" ]; then
+			selected_disk=$(echo "$candidate_disks" | head -n 1)
+		fi
+		image_disk=$selected_disk
 	else
+		image_disk=$(find_efi_disk $disk_names)
+		if [ -z "$image_disk" ]; then
+			if [ -b /dev/nvme0n1 ]; then
+				image_disk="/dev/nvme0n1"
+			elif [ -b /dev/sda ]; then
+				image_disk="/dev/sda"
+			fi
+		fi
+	fi
+
+	if [ -z "$image_disk" ]; then
 		echo "Boot drive not detected or specified" | tee $log_output
 		exit 1;
 	fi
@@ -183,22 +217,157 @@ function resolve_esp_partition() {
 	fi
 }
 
+function device_is_on_disk() {
+	local device=$1
+	local disk=$2
+	local disk_maj_min
+	local ancestor_output
+	local -a physical_disks
+
+	disk_maj_min=$(lsblk -dnro MAJ:MIN "$disk") || return 1
+	if [ -z "$disk_maj_min" ]; then
+		return 1
+	fi
+
+	ancestor_output=$(lsblk -snro MAJ:MIN,TYPE "$device") || return 1
+	mapfile -t physical_disks < <(
+		printf '%s\n' "$ancestor_output" |
+			awk '$2 == "disk" { print $1 }' |
+			sort -u
+	)
+
+	[ "${#physical_disks[@]}" -eq 1 ] &&
+		[ "${physical_disks[0]}" == "$disk_maj_min" ]
+}
+
+function find_devices_by_identifier() {
+	local identifier_type=$1
+	local identifier=$2
+	local -n devices_out=$3
+	local blkid_diagnostics
+	local blkid_output
+	local blkid_status
+	local blkid_stderr_file
+
+	case "$identifier_type" in
+		UUID|LABEL)
+			;;
+		*)
+			echo "Unsupported block device identifier type: $identifier_type" | tee "$log_output" >&2
+			return 1
+			;;
+	esac
+
+	devices_out=()
+	blkid_stderr_file=$(mktemp) || return 1
+	blkid_output=$(blkid -c /dev/null -t "$identifier_type=$identifier" -o device 2>"$blkid_stderr_file")
+	blkid_status=$?
+	blkid_diagnostics=$(<"$blkid_stderr_file")
+	rm -f "$blkid_stderr_file"
+
+	case "$blkid_status" in
+		0)
+			if [ -z "$blkid_output" ]; then
+				echo "blkid returned success without a device for $identifier_type=$identifier" | tee "$log_output" >&2
+				return 1
+			fi
+			if [ ! -z "$blkid_diagnostics" ]; then
+				echo "blkid warning while looking up $identifier_type=$identifier: $blkid_diagnostics" | tee "$log_output" >&2
+			fi
+			mapfile -t devices_out <<< "$blkid_output"
+			;;
+		2)
+			# blkid uses status 2 for a token that was not found. Only accept
+			# the silent, empty form as an expected no-match result.
+			if [ ! -z "$blkid_output" ] || [ ! -z "$blkid_diagnostics" ]; then
+				echo "blkid failed while looking up $identifier_type=$identifier: stdout=${blkid_output:-<empty>}; stderr=${blkid_diagnostics:-<empty>}" | tee "$log_output" >&2
+				return 1
+			fi
+			;;
+		*)
+			echo "blkid failed while looking up $identifier_type=$identifier with status $blkid_status: stdout=${blkid_output:-<empty>}; stderr=${blkid_diagnostics:-<empty>}" | tee "$log_output" >&2
+			return 1
+			;;
+	esac
+}
+
+function check_identifier_conflicts() {
+	local identifier_type=$1
+	local identifier=$2
+	local disk=$3
+	local -a matching_devices
+	local match_device
+
+	find_devices_by_identifier "$identifier_type" "$identifier" matching_devices || return 1
+	for match_device in "${matching_devices[@]}"; do
+		if ! device_is_on_disk "$match_device" "$disk"; then
+			echo "Device $match_device with $identifier_type=$identifier is not exclusively backed by image disk $disk" | tee "$log_output" >&2
+			return 1
+		fi
+	done
+
+	return 0
+}
+
+function precheck_image_identifiers() {
+	if [ ! -z "$rootfs_uuid" ]; then
+		check_identifier_conflicts UUID "$rootfs_uuid" "$image_disk" || return 1
+	elif [ ! -z "$rootfs_label" ]; then
+		check_identifier_conflicts LABEL "$rootfs_label" "$image_disk" || return 1
+	fi
+	if [ ! -z "$bootfs_uuid" ]; then
+		check_identifier_conflicts UUID "$bootfs_uuid" "$image_disk" || return 1
+	fi
+	if [ ! -z "$efifs_uuid" ]; then
+		check_identifier_conflicts UUID "$efifs_uuid" "$image_disk" || return 1
+	fi
+}
+
+function resolve_device_on_disk() {
+	local identifier_type=$1
+	local identifier=$2
+	local disk=$3
+	local -a matching_devices
+	local match_count
+	local match_device
+
+	find_devices_by_identifier "$identifier_type" "$identifier" matching_devices || return 1
+	match_count=${#matching_devices[@]}
+	if [ "$match_count" -eq 0 ]; then
+		echo "No device found with $identifier_type=$identifier" | tee "$log_output" >&2
+		return 1
+	fi
+	if [ "$match_count" -ne 1 ]; then
+		echo "Expected exactly one device with $identifier_type=$identifier, found $match_count: ${matching_devices[*]}" | tee "$log_output" >&2
+		return 1
+	fi
+
+	match_device=${matching_devices[0]}
+	if ! device_is_on_disk "$match_device" "$disk"; then
+		echo "Device $match_device with $identifier_type=$identifier is not exclusively backed by image disk $disk" | tee "$log_output" >&2
+		return 1
+	fi
+
+	echo "$match_device"
+}
+
 function get_root_dev() {
 	if [ ! -z "$rootfs_uuid" ]; then
-		root_dev=$(blkid -U $rootfs_uuid)
+		root_dev=$(resolve_device_on_disk UUID "$rootfs_uuid" "$image_disk") || return 1
 	elif [ ! -z "$rootfs_label" ]; then
-		root_dev=$(blkid -L $rootfs_label)
+		root_dev=$(resolve_device_on_disk LABEL "$rootfs_label" "$image_disk") || return 1
 	else
-		echo "rootfs_uuid not specified and rootfs_label not determined" | tee $log_output
-		echo "skipping root device changes" | tee $log_output
+		echo "rootfs_uuid not specified and rootfs_label not determined" | tee "$log_output"
+		echo "skipping root device changes" | tee "$log_output"
 	fi
 	if [ ! -z "$efi_label" ]; then
-		efi_dev=$(blkid -L $efi_label)
+		efi_dev=$(resolve_device_on_disk LABEL "$efi_label" "$image_disk") || efi_dev=
 	fi
 	if [ -z "$efi_dev" ] && [ ! -z "$image_disk" ]; then
-		echo "EFI partition not found by label [$efi_label]; falling back to GPT partition type EF00 (EFI System Partition) on $image_disk" | tee $log_output
+		echo "EFI partition not found by label [$efi_label]; falling back to GPT partition type EF00 (EFI System Partition) on $image_disk" | tee "$log_output"
 		efi_dev=$(resolve_esp_partition "$image_disk")
 	fi
+	return 0
 }
 
 function is_port_in_list() {
@@ -269,11 +438,14 @@ function get_serial_port() {
 }
 
 function modify_grub_cfg() {
+	local efi_status
+	local grub_cfg_status
+
 	efi_mounted=
 	if [ ! -d "/mnt/boot/grub" ]; then
 		boot_part=
 		if [ ! -z "$bootfs_uuid" ]; then
-			boot_part=$(blkid -U $bootfs_uuid)
+			boot_part=$(resolve_device_on_disk UUID "$bootfs_uuid" "$image_disk") || return 1
 		fi
 		is_nvme=$(echo $image_disk | grep nvme)
 		if [ -z "$boot_part" ]; then
@@ -291,7 +463,12 @@ function modify_grub_cfg() {
 			mount "$boot_part" /mnt/boot
 		fi
 		# we want to mount efi now as it can contain uefi grub.cfg
-		mount_efi
+		if ! mount_efi; then
+			if [[ $(grep '\/mnt\/boot' /proc/mounts) ]]; then
+				umount /mnt/boot
+			fi
+			return 1
+		fi
 		efi_mounted=true
 		grub_cfg=
 		if [ -f "/mnt/boot/grub/grub.cfg" ]; then
@@ -315,7 +492,15 @@ function modify_grub_cfg() {
 	echo "Updating grub configuration" | tee $log_output
 	# if we skipped grub mount before we want to mount efi now
 	if [ -z "$efi_mounted" ]; then
-		mount_efi
+		if ! mount_efi; then
+			umount /mnt/sys
+			umount /mnt/proc
+			umount /mnt/dev
+			if [[ $(grep '\/mnt\/boot' /proc/mounts) ]]; then
+				umount /mnt/boot
+			fi
+			return 1
+		fi
 	fi
 	# Check if grub2-mkconfig exists, means we are in rhel distro, falback to update-grub if not found
 	if [ -f "/mnt/usr/sbin/grub2-mkconfig" ]; then
@@ -325,11 +510,17 @@ function modify_grub_cfg() {
 			grub_bls_cmd="--update-bls-cmdline"
 		fi
 		chroot /mnt /bin/sh -c "grub2-mkconfig $grub_bls_cmd -o ${grub_cfg#'/mnt'}" 2>&1 | tee $log_output
+		grub_cfg_status=${PIPESTATUS[0]}
 	else
 		chroot /mnt /bin/sh -c update-grub 2>&1 | tee $log_output
+		grub_cfg_status=${PIPESTATUS[0]}
 	fi
 	create_efi_boot_entry
-	set_boot_order
+	efi_status=$?
+	if [ "$efi_status" -eq 0 ]; then
+		set_boot_order
+		efi_status=$?
+	fi
 	umount /mnt/boot/efi 2>&1 | tee $log_output
 	umount /mnt/sys
 	umount /mnt/proc
@@ -337,6 +528,10 @@ function modify_grub_cfg() {
 	if [[ $(grep '\/mnt\/boot' /proc/mounts) ]]; then
 		umount /mnt/boot
 	fi
+	if [ "$grub_cfg_status" -ne 0 ]; then
+		return "$grub_cfg_status"
+	fi
+	return "$efi_status"
 }
 
 function get_part_num() {
@@ -381,6 +576,9 @@ function efi_entry_label() {
 }
 
 function create_efi_boot_entry() {
+	local efi_create_status
+	local efi_list_status
+
 	if ! command -v efibootmgr >/dev/null 2>&1; then
 		echo "efibootmgr not available, skipping EFI boot entry creation" | tee $log_output
 		return 0
@@ -391,11 +589,14 @@ function create_efi_boot_entry() {
 	fi
 
 	shim_arch=
+	boot_csv_name=
 	efi_arch=$(uname -m)
 	if [ "$efi_arch" == "x86_64" ]; then
 		shim_arch="x64"
+		boot_csv_name="BOOTX64.CSV"
 	elif [ "$efi_arch" == "aarch64" ]; then
 		shim_arch="aa64"
+		boot_csv_name="BOOTAA64.CSV"
 	else
 		echo "Unsupported arch $efi_arch for EFI boot entry creation" | tee $log_output
 		return 0
@@ -408,19 +609,74 @@ function create_efi_boot_entry() {
 	# Sort rather than taking whatever the filesystem yields first: an ESP
 	# reprovisioned over a different distro can hold more than one shim (e.g.
 	# a leftover EFI/dgx alongside the new EFI/ubuntu), and -print -quit
-	# would pick between them nondeterministically. Prefer the directory
-	# matching distro_name when it was supplied on the kernel cmdline.
-	shim_paths=$(find /mnt/boot/efi/EFI -mindepth 2 -maxdepth 2 -iname "shim${shim_arch}.efi" 2>/dev/null | sort)
+	# would pick between them nondeterministically. Prefer the distro_name
+	# directory when one was supplied, then a shim paired with an architecture-
+	# matching boot hint CSV whose first field names that shim.
+	shim_paths=$(find /mnt/boot/efi/EFI -mindepth 2 -maxdepth 2 -type f -iname "shim${shim_arch}.efi" 2>/dev/null | sort)
 	if [ -z "$shim_paths" ]; then
 		echo "No shim${shim_arch}.efi found under /mnt/boot/efi/EFI/*, skipping EFI boot entry creation" | tee $log_output
 		return 0
 	fi
-	shim_path=
-	if [ ! -z "$distro_name" ]; then
-		shim_path=$(printf '%s\n' "$shim_paths" | grep -iE "/EFI/$distro_name/[^/]+$" | head -n1)
-	fi
-	if [ -z "$shim_path" ]; then
-		shim_path=$(printf '%s\n' "$shim_paths" | head -n1)
+	shim_path=$(printf '%s\n' "$shim_paths" | head -n1)
+	distro_shim_path=
+	paired_shim_path=
+	paired_csv_label=
+	csv_label=
+	while IFS= read -r candidate_shim; do
+		candidate_dir=$(dirname "$candidate_shim")
+		candidate_distro_name=$(basename "$candidate_dir")
+		candidate_is_distro=
+		if [ ! -z "$distro_name" ] && [ "${candidate_distro_name,,}" == "${distro_name,,}" ]; then
+			candidate_is_distro=true
+			if [ -z "$distro_shim_path" ]; then
+				distro_shim_path="$candidate_shim"
+			fi
+		fi
+
+		# Match shim's lookup order: use BOOT.CSV only when the
+		# architecture-specific file is absent, cannot be decoded, or has no
+		# matching loader record with a non-empty label.
+		candidate_shim_name=$(basename "$candidate_shim")
+		candidate_csv_matches=
+		candidate_csv_label=
+		for candidate_csv_name in "$boot_csv_name" "BOOT.CSV"; do
+			candidate_csv=$(find "$candidate_dir" -maxdepth 1 -type f -iname "$candidate_csv_name" -print -quit 2>/dev/null)
+			[ -z "$candidate_csv" ] && continue
+			candidate_csv_contents=$(iconv -f UTF-16 -t UTF-8 "$candidate_csv" 2>/dev/null)
+			[ $? -ne 0 ] && continue
+
+			# A boot hint can contain more than one loader record.
+			while IFS= read -r candidate_csv_line || [ ! -z "$candidate_csv_line" ]; do
+				candidate_csv_line=${candidate_csv_line%$'\r'}
+				[ -z "$candidate_csv_line" ] && continue
+				IFS=',' read -r candidate_loader candidate_label _ <<< "$candidate_csv_line"
+				if [ ! -z "$candidate_label" ] && [ "${candidate_loader,,}" == "${candidate_shim_name,,}" ]; then
+					candidate_csv_matches=true
+					candidate_csv_label="$candidate_label"
+					break
+				fi
+			done <<< "$candidate_csv_contents"
+			[ "$candidate_csv_matches" == true ] && break
+		done
+		[ "$candidate_csv_matches" != true ] && continue
+
+		if [ "$candidate_is_distro" == true ]; then
+			shim_path="$candidate_shim"
+			csv_label="$candidate_csv_label"
+			break
+		fi
+		if [ -z "$paired_shim_path" ]; then
+			paired_shim_path="$candidate_shim"
+			paired_csv_label="$candidate_csv_label"
+		fi
+	done <<< "$shim_paths"
+	if [ -z "$csv_label" ]; then
+		if [ ! -z "$distro_shim_path" ]; then
+			shim_path="$distro_shim_path"
+		elif [ ! -z "$paired_shim_path" ]; then
+			shim_path="$paired_shim_path"
+			csv_label="$paired_csv_label"
+		fi
 	fi
 	if [ "$(printf '%s\n' "$shim_paths" | wc -l)" -gt 1 ]; then
 		echo "Multiple shim${shim_arch}.efi found on ESP, using $shim_path:" | tee $log_output
@@ -436,11 +692,7 @@ function create_efi_boot_entry() {
 	# authoritative source per the UEFI shim convention: <loader>,<label>,
 	# <optional args>,<description>, UTF-16 encoded), falling back to the
 	# ESP directory name.
-	label=
-	csv_file=$(find "$efi_dir" -maxdepth 1 -iname "*.csv" -print -quit 2>/dev/null)
-	if [ ! -z "$csv_file" ]; then
-		label=$(iconv -f UTF-16 -t UTF-8 "$csv_file" 2>/dev/null | tr -d '\r' | head -n1 | cut -d',' -f2)
-	fi
+	label="$csv_label"
 	if [ -z "$label" ]; then
 		label="$distro_dir"
 	fi
@@ -486,7 +738,11 @@ function create_efi_boot_entry() {
 	fi
 
 	echo "Creating EFI boot entry for $label ($loader_path on $image_disk part $esp_part_num)" | tee $log_output
-	efibootmgr --create --disk "$image_disk" --part "$esp_part_num" --label "$label" --loader "$loader_path" 2>&1 | tee $log_output
+	efibootmgr --create --disk "$image_disk" --part "$esp_part_num" --label "$label" --loader "$loader_path" 2>&1 | tee "$log_output"
+	efi_create_status=${PIPESTATUS[0]}
+	if [ "$efi_create_status" -ne 0 ]; then
+		return "$efi_create_status"
+	fi
 
 	# Resolve the number efibootmgr assigned, so set_boot_order() can rank
 	# this specific entry. It is not echoed in a parseable form, so find it by
@@ -499,7 +755,12 @@ function create_efi_boot_entry() {
 	# delete-by-label is unavailable (efibootmgr <= 17) or fails for any other
 	# reason, and picking a leftover then reintroduces exactly the bug this is
 	# meant to fix. Ordering holds either way.
-	efi_list=$(efibootmgr -v)
+	efi_list=$(efibootmgr -v 2>&1)
+	efi_list_status=$?
+	if [ "$efi_list_status" -ne 0 ]; then
+		echo "Failed to read EFI boot entries after creating $label: $efi_list" | tee "$log_output"
+		return "$efi_list_status"
+	fi
 	installed_os_bootnum=
 	label_matches=0
 	IFS=',' read -r -a created_order <<< "$(echo "$efi_list" | grep '^BootOrder:' | sed -E 's/^BootOrder:[[:space:]]*//')"
@@ -525,11 +786,19 @@ function create_efi_boot_entry() {
 }
 
 function set_boot_order() {
+	local boot_order_status
+	local efi_list_status
+
 	if ! command -v efibootmgr >/dev/null 2>&1; then
 		return 0
 	fi
 
-	efi_list=$(efibootmgr -v)
+	efi_list=$(efibootmgr -v 2>&1)
+	efi_list_status=$?
+	if [ "$efi_list_status" -ne 0 ]; then
+		echo "Could not read current EFI boot entries" | tee "$log_output"
+		return "$efi_list_status"
+	fi
 	current_order_line=$(echo "$efi_list" | grep '^BootOrder:')
 	if [ -z "$current_order_line" ]; then
 		echo "Could not read current BootOrder, skipping reorder" | tee $log_output
@@ -577,19 +846,26 @@ function set_boot_order() {
 	fi
 
 	echo "Setting boot order to: $new_order_csv" | tee $log_output
-	efibootmgr -o "$new_order_csv" 2>&1 | tee $log_output
+	efibootmgr -o "$new_order_csv" 2>&1 | tee "$log_output"
+	boot_order_status=${PIPESTATUS[0]}
+	return "$boot_order_status"
 }
 
 function mount_efi() {
+	local mount_status
+
 	if [ ! -z "$efifs_uuid" ]; then
-		efi_dev=$(blkid -U $efifs_uuid)
+		efi_dev=$(resolve_device_on_disk UUID "$efifs_uuid" "$image_disk") || return 1
 	fi
 	if [ ! -z "$efi_dev" ]; then
 		mkdir -p /mnt/boot/efi
 		mount $efi_dev /mnt/boot/efi 2>&1 | tee $log_output
+		mount_status=${PIPESTATUS[0]}
 	else
 		chroot /mnt /bin/sh -c 'mount /boot/efi' 2>&1 | tee $log_output
+		mount_status=${PIPESTATUS[0]}
 	fi
+	return "$mount_status"
 }
 
 function add_testing_user() {
@@ -683,6 +959,69 @@ function modify_grub_template() {
 	cat $new_grub_template > /mnt/etc/default/grub
 }
 
+function parse_kernel_cmdline_argument() {
+	local argument=$1
+
+	case "$argument" in
+		image_url=*)
+			image_url=${argument#image_url=}
+			;;
+		image_sha=*)
+			image_sha=${argument#image_sha=}
+			;;
+		image_auth_type=*)
+			image_auth_type=${argument#image_auth_type=}
+			;;
+		image_auth_token=*)
+			image_auth_token=${argument#image_auth_token=}
+			;;
+		image_disk=*)
+			image_disk=${argument#image_disk=}
+			;;
+		image_distro_name=*)
+			distro_name=${argument#image_distro_name=}
+			distro_name=${distro_name,,}
+			;;
+		image_distro_version=*)
+			distro_version=${argument#image_distro_version=}
+			;;
+		image_distro_release=*)
+			distro_release=${argument#image_distro_release=}
+			;;
+		"ds=nocloud;s="*|"ds=nocloud-net;s="*)
+			cloud_init_url=${argument#*;s=}
+			;;
+		create_forge_test_user=*)
+			user_pass=${argument#create_forge_test_user=}
+			forge_test_user=${user_pass%%:*}
+			forge_test_pass=${user_pass#*:}
+			;;
+		rootfs_uuid=*)
+			rootfs_uuid=${argument#rootfs_uuid=}
+			;;
+		rootfs_label=*)
+			rootfs_label=${argument#rootfs_label=}
+			;;
+		bootfs_uuid=*)
+			bootfs_uuid=${argument#bootfs_uuid=}
+			;;
+		efifs_uuid=*)
+			efifs_uuid=${argument#efifs_uuid=}
+			;;
+		update_grub_template=*)
+			update_grub_template=${argument#update_grub_template=}
+			;;
+		update_grub_cfg=*)
+			update_grub_cfg=${argument#update_grub_cfg=}
+			;;
+		*)
+			return 1
+			;;
+	esac
+
+	return 0
+}
+
 function main() {
 
 	get_serial_port
@@ -694,79 +1033,17 @@ function main() {
 	#  image_sha=[sha1/sha256/sha384/sha512]
 	# use the disk the tenant specified optionally
 	#  image_disk=/dev/nvme0n1
-	for i in `cat /proc/cmdline`
+	#  image_disk=smallest
+	local -a kernel_arguments
+	local argument
+	read -r -a kernel_arguments < /proc/cmdline
+	for argument in "${kernel_arguments[@]}"
 	do
-		#echo $line
-		line=$(echo $i|grep image_url)
-		if [ ! -z "$line" ]; then
-			image_url=$(echo $line|cut -d'=' -f2)
-		fi
-		line=$(echo $i|grep image_sha)
-		if [ ! -z "$line" ]; then
-			image_sha=$(echo $line|cut -d'=' -f2)
-		fi
-		line=$(echo $i|grep image_auth_type)
-		if [ ! -z "$line" ]; then
-			image_auth_type=$(echo $line|cut -d'=' -f2)
-		fi
-		line=$(echo $i|grep image_auth_token)
-		if [ ! -z "$line" ]; then
-			image_auth_token=$(echo $line|cut -d'=' -f2)
-		fi
-		line=$(echo $i|grep image_disk)
-		if [ ! -z "$line" ]; then
-			image_disk=$(echo $line|cut -d'=' -f2)
-		fi
-		line=$(echo $i|grep image_distro_name)
-		if [ ! -z "$line" ]; then
-			distro_name=$(echo $line|cut -d'=' -f2|tr '[:upper:]' '[:lower:]')
-		fi
-		line=$(echo $i|grep image_distro_version)
-		if [ ! -z "$line" ]; then
-			distro_version=$(echo $line|cut -d'=' -f2)
-		fi
-		line=$(echo $i|grep image_distro_release)
-		if [ ! -z "$line" ]; then
-			distro_release=$(echo $line|cut -d'=' -f2)
-		fi
-		line=$(echo $i|grep 'ds=nocloud-net;s')
-		if [ ! -z "$line" ]; then
-			cloud_init_url=$(echo $line|cut -d'=' -f3)
-		fi
-		line=$(echo $i|grep 'create_forge_test_user')
-		if [ ! -z "$line" ]; then
-			user_pass=$(echo $line|cut -d'=' -f2)
-			forge_test_user=$(echo $user_pass|cut -d':' -f1)
-			forge_test_pass=$(echo $user_pass|cut -d':' -f2)
-		fi
-		line=$(echo $i|grep 'rootfs_uuid')
-		if [ ! -z "$line" ]; then
-			rootfs_uuid=$(echo $line|cut -d'=' -f2)
-		fi
-		line=$(echo $i|grep 'rootfs_label')
-		if [ ! -z "$line" ]; then
-			rootfs_label=$(echo $line|cut -d'=' -f2)
-		else
-			rootfs_label="cloudimg-rootfs" #default rootfs name for cloud images
-		fi
-		line=$(echo $i|grep 'bootfs_uuid')
-		if [ ! -z "$line" ]; then
-			bootfs_uuid=$(echo $line|cut -d'=' -f2)
-		fi
-		line=$(echo $i|grep 'efifs_uuid')
-		if [ ! -z "$line" ]; then
-			efifs_uuid=$(echo $line|cut -d'=' -f2)
-		fi
-		line=$(echo $i|grep 'update_grub_template')
-		if [ ! -z "$line" ]; then
-			update_grub_template=$(echo $line|cut -d'=' -f2)
-		fi
-		line=$(echo $i|grep 'update_grub_cfg')
-		if [ ! -z "$line" ]; then
-			update_grub_cfg=$(echo $line|cut -d'=' -f2)
-		fi
-
+		parse_kernel_cmdline_argument "$argument" || true
 	done
+	if [ -z "$rootfs_uuid" ] && [ -z "$rootfs_label" ]; then
+		rootfs_label="cloudimg-rootfs" #default rootfs name for cloud images
+	fi
 
 	if [ ! -z "$distro_name" ]; then
 		get_distro_image
@@ -798,9 +1075,21 @@ function main() {
 			return 1;
 		fi
 	fi
-	if [ -z "$image_disk" ]; then
+	if [ -z "$image_disk" -o "$image_disk" == "smallest" ]; then
 		find_bootdisk
 	fi
+	resolved_image_disk=$(readlink -e -- "$image_disk")
+	if [ -z "$resolved_image_disk" ] || [ ! -b "$resolved_image_disk" ]; then
+		echo "Image disk $image_disk does not exist or is not a block device" | tee "$log_output"
+		return 1;
+	fi
+	image_disk_type=$(lsblk -dnro TYPE "$resolved_image_disk")
+	if [ "$image_disk_type" != "disk" ]; then
+		echo "Image disk $image_disk is not a whole-disk block device" | tee "$log_output"
+		return 1;
+	fi
+	image_disk=$resolved_image_disk
+	precheck_image_identifiers || return 1
 
 	echo "Imaging $file to $image_disk" | tee $log_output
 	qemu-img convert -p -O raw -S 0 $file $image_disk 2>&1 | tee $log_output
@@ -819,7 +1108,7 @@ function main() {
 	done
 	if [ ! -z "$rootfs_uuid" -o ! -z "$rootfs_label" ]; then
 		# find the root partition/volume
-		get_root_dev
+		get_root_dev || return 1
 		echo "Root device [$root_dev]" | tee $log_output
 		if [ -b "$root_dev" ]; then
 			mount "$root_dev" /mnt 2>&1 | tee $log_output
@@ -829,7 +1118,10 @@ function main() {
 			fi
 			if [ "${update_grub_cfg}" == "yes" ]; then
 				echo "Updating grub cfg" | tee $log_output
-				modify_grub_cfg
+				if ! modify_grub_cfg; then
+					umount /mnt 2>&1 | tee "$log_output"
+					return 1
+				fi
 			fi
 			if [ ! -z "$cloud_init_url" ]; then
 				add_cloud_init
@@ -841,6 +1133,8 @@ function main() {
 	fi
 }
 
-main
-echo "Rebooting" | tee $log_output
-systemctl reboot | tee $log_output
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main
+	echo "Rebooting" | tee $log_output
+	systemctl reboot | tee $log_output
+fi

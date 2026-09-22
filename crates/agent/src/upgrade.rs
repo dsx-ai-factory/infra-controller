@@ -267,7 +267,7 @@ async fn run_upgrade_cmd(upgrade_cmd: &str) -> eyre::Result<()> {
 /// There are rare but real situations, as yet undetermined, where `apt update` will not download
 /// the `Packages` file from our repo. This fixes it.
 /// It's possibly something about the `Release` file that doesn't match it's expectation.
-/// See https://nvbugspro.nvidia.com/bug/4870691
+/// See https://github.com/NVIDIA/infra-controller/issues/5556
 fn clear_apt_metadata_cache() -> eyre::Result<()> {
     const MC: [&str; 2] = [
         "/var/lib/apt/lists/carbide-pxe.forge_public_blobs_internal_apt_dists_focal_Release",

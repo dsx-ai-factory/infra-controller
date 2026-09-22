@@ -73,13 +73,11 @@ async fn match_sku_for_machine(
     mh_snapshot: &ManagedHostStateSnapshot,
 ) -> Result<Option<model::sku::Sku>, StateHandlerError> {
     let sku_status = mh_snapshot.host_snapshot.status.hw_sku.as_ref();
-    if sku_status.is_none()
-        || sku_status.is_some_and(|ss| {
-            ss.last_match_attempt.is_some_and(|t| {
-                t < (Utc::now() - host_handler_params.bom_validation.find_match_interval)
-            })
+    if sku_status.is_none_or(|ss| {
+        ss.last_match_attempt.is_none_or(|t| {
+            t < (Utc::now() - host_handler_params.bom_validation.find_match_interval)
         })
-    {
+    }) {
         let machine_sku =
             db::sku::generate_sku_from_machine(&mut *txn, &mh_snapshot.host_snapshot.id).await?;
         let matching_sku = db::sku::find_matching(txn, &machine_sku).await?;
@@ -188,16 +186,18 @@ async fn generate_missing_sku_for_machine(
     true
 }
 
-/// Helper function to determine if machine should be allowed to allocate even when validation fails
-/// This is useful to avoid blocking allocation when SKU validation issues occur
+/// Determine whether a machine with an assigned SKU can allocate despite validation failure.
 fn should_allow_allocation_on_validation_failure(host_handler_params: &HostHandlerParams) -> bool {
-    // TODO:tmp solution to consider ignore_unassigned_machines for compatibale with some running sites
+    host_handler_params
+        .bom_validation
+        .allow_allocation_on_validation_failure
+}
+
+/// Determine whether a machine without an assigned SKU can bypass BOM validation.
+fn should_ignore_unassigned_machine(host_handler_params: &HostHandlerParams) -> bool {
     host_handler_params
         .bom_validation
         .ignore_unassigned_machines
-        || host_handler_params
-            .bom_validation
-            .allow_allocation_on_validation_failure
 }
 
 pub(crate) async fn handle_bom_validation_requested(
@@ -234,12 +234,13 @@ pub(crate) async fn handle_bom_validation_requested(
                 "Cannot find a matching SKU for machine"
             );
 
-            if should_allow_allocation_on_validation_failure(host_handler_params) {
-                // Case 1.2.1: Allow allocation despite no SKU match
+            if should_ignore_unassigned_machine(host_handler_params) {
+                // Case 1.2.1: Allow allocation without an assigned SKU
                 tracing::info!(
                     machine_id=%mh_snapshot.host_snapshot.id,
-                    "allow_allocation_on_validation_failure is true, staying in Ready state"
+                    "ignore_unassigned_machines is true, staying in Ready state"
                 );
+                txn.commit().await?;
                 return Ok(None);
             } else {
                 // Case 1.2.2: Block allocation, wait for SKU assignment
@@ -354,14 +355,14 @@ async fn advance_to_waiting_for_sku_assignment(
     mh_snapshot: &ManagedHostStateSnapshot,
     host_handler_params: &HostHandlerParams,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    if should_allow_allocation_on_validation_failure(host_handler_params)
+    if should_ignore_unassigned_machine(host_handler_params)
         && mh_snapshot.host_snapshot.config.hw_sku.is_none()
     {
         skip_bom_validation_and_advance(
             txn,
             host_handler_params,
             mh_snapshot,
-            "allow_allocation_when_sku_unassigned",
+            "ignore_unassigned_machine_before_waiting",
         )
         .await
     } else {
@@ -414,7 +415,7 @@ async fn advance_to_machine_validating(
 }
 
 /// Skip BOM validation and proceed to machine validation (or Ready if machine validation is disabled)
-/// Used when BOM validation is disabled or when allow_allocation_on_validation_failure is enabled
+/// Used when BOM validation is disabled or a configured policy bypasses BOM validation
 async fn skip_bom_validation_and_advance(
     txn: PgTransaction<'static>,
     host_handler_params: &HostHandlerParams,
@@ -645,13 +646,13 @@ pub(crate) async fn handle_bom_validation_state(
                         .is_some()
                 {
                     advance_to_updating_inventory(txn, mh_snapshot).await
-                } else if should_allow_allocation_on_validation_failure(host_handler_params) {
+                } else if should_ignore_unassigned_machine(host_handler_params) {
                     // Allow machine to proceed without SKU assignment
                     skip_bom_validation_and_advance(
                         txn,
                         host_handler_params,
                         mh_snapshot,
-                        "allow_allocation_on_validation_failure",
+                        "ignore_unassigned_machine_while_waiting",
                     )
                     .await
                 } else {

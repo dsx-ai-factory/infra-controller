@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+/// DNS database helpers for tests in downstream crates.
+pub mod dns;
 #[cfg(test)]
 pub(crate) mod expected_host;
 #[cfg(test)]

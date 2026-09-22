@@ -20,7 +20,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use machine_a_tron::{LogFormat, TuiHostLogs};
+use machine_a_tron::LogFormat;
 use tracing::Subscriber;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::prelude::*;
@@ -67,7 +67,6 @@ impl Write for LogWriter {
 pub(super) fn init_logging(
     format: LogFormat,
     filename: Option<&str>,
-    tui_host_logs: Option<&TuiHostLogs>,
 ) -> Result<(), Box<dyn Error>> {
     let writer = LogWriter::new(filename)?;
     let env_filter = env_filter();
@@ -80,12 +79,10 @@ pub(super) fn init_logging(
                     .with_writer(move || writer.clone()),
             )
             .with(env_filter)
-            .with(tui_host_logs.map(TuiHostLogs::make_tracing_layer))
             .try_init()?,
         LogFormat::Logfmt => registry()
             .with(logfmt_layer(writer))
             .with(env_filter)
-            .with(tui_host_logs.map(TuiHostLogs::make_tracing_layer))
             .try_init()?,
     }
 

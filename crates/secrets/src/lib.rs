@@ -155,6 +155,17 @@ pub fn create_credential_manager_from(
 #[derive(Debug)]
 pub enum SecretsError {
     GenericError(eyre::Report),
+    /// A local UFM source owns credentials but has no entry for the requested
+    /// fabric; callers should surface the configuration remediation.
+    UfmCredentialReadBlocked {
+        fabric: String,
+    },
+    /// A caller attempted to mutate a persistent UFM credential while local
+    /// sources own UFM credentials; callers should direct the operator to the
+    /// configured local source.
+    UfmCredentialMutationBlocked {
+        fabric: String,
+    },
 }
 
 impl Display for SecretsError {
@@ -163,6 +174,20 @@ impl Display for SecretsError {
             SecretsError::GenericError(report) => {
                 write!(f, "Secrets operation failed: {}", report)
             }
+            SecretsError::UfmCredentialReadBlocked { fabric } => write!(
+                f,
+                "secrets operation failed: credential for UFM fabric {fabric:?} is absent from \
+                 the configured local sources; {}; {}",
+                crate::chained_reader::UFM_LOCAL_CREDENTIAL_REMEDIATION,
+                crate::chained_reader::UFM_BACKEND_SOURCE_REMEDIATION
+            ),
+            SecretsError::UfmCredentialMutationBlocked { fabric } => write!(
+                f,
+                "persistent backend credential mutation is disabled for UFM fabric {fabric:?} \
+                 because local sources own all UFM credentials; {}; {}",
+                crate::chained_reader::UFM_LOCAL_CREDENTIAL_REMEDIATION,
+                crate::chained_reader::UFM_BACKEND_SOURCE_REMEDIATION
+            ),
         }
     }
 }
@@ -177,6 +202,8 @@ impl From<SecretsError> for eyre::Report {
     fn from(value: SecretsError) -> Self {
         match value {
             SecretsError::GenericError(report) => report,
+            value @ SecretsError::UfmCredentialReadBlocked { .. } => eyre::eyre!("{value}"),
+            value @ SecretsError::UfmCredentialMutationBlocked { .. } => eyre::eyre!("{value}"),
         }
     }
 }
