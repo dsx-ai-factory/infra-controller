@@ -1944,7 +1944,6 @@ impl ApiClient {
     }
 
     /// Build an InstanceAllocationRequest from CLI args and machine info.
-    #[allow(deprecated)]
     pub(crate) async fn build_instance_request(
         &self,
         machine: Machine,
@@ -1953,6 +1952,10 @@ impl ApiClient {
         modified_by: Option<String>,
     ) -> CarbideCliResult<rpc::InstanceAllocationRequest> {
         let mut vf_function_id = 0;
+        let discovery_info = machine
+            .status
+            .as_ref()
+            .and_then(|status| status.discovery_info.as_ref());
         let (interface_configs, tenant_org, vpc_id) = if let Some(vpc_id) =
             allocate_instance.flat_vpc_id
         {
@@ -2035,15 +2038,13 @@ impl ApiClient {
             tracing::debug!(vfs_per_pf, "VFs per PF",);
 
             let mut next_device_instance = HashMap::new();
-
-            let Some(interfaces) = machine.discovery_info.map(|di| di.network_interfaces) else {
-                return Err(CarbideCliError::GenericError(format!(
-                    "no interface information for machine: {}",
-                    machine.id.unwrap_or_default()
-                )));
+            let Some(discovery_info) = discovery_info else {
+                return Err(CarbideCliError::GenericError(
+                    "Machine discovery info is required for subnet allocation.".to_string(),
+                ));
             };
 
-            let mut interface_iter = interfaces.iter().filter(|iface| {
+            let mut interface_iter = discovery_info.network_interfaces.iter().filter(|iface| {
                 iface
                     .pci_properties
                     .as_ref()
@@ -2114,7 +2115,7 @@ impl ApiClient {
                 None,
             )
         } else if !allocate_instance.vpc_prefix_id.is_empty() {
-            let Some(discovery_info) = &machine.discovery_info else {
+            let Some(discovery_info) = discovery_info else {
                 return Err(CarbideCliError::GenericError(
                     "Machine discovery info is required for VPC prefix allocation.".to_string(),
                 ));
@@ -3295,21 +3296,22 @@ mod tests {
                     ]);
                 }
                 let args = AllocateInstance::try_parse_from(command).unwrap();
-                // The allocation builder still reads the legacy discovery field.
-                #[allow(deprecated)]
                 let machine = Machine {
-                    discovery_info: Some(DiscoveryInfo {
-                        network_interfaces: ["00:11:22:33:44:55", "00:11:22:33:44:66"]
-                            .into_iter()
-                            .map(|mac_address| NetworkInterface {
-                                mac_address: mac_address.to_string(),
-                                pci_properties: Some(PciDeviceProperties {
-                                    vendor: "Mellanox".to_string(),
-                                    device: "BlueField-3".to_string(),
-                                    ..Default::default()
-                                }),
-                            })
-                            .collect(),
+                    status: Some(rpc::MachineStatus {
+                        discovery_info: Some(DiscoveryInfo {
+                            network_interfaces: ["00:11:22:33:44:55", "00:11:22:33:44:66"]
+                                .into_iter()
+                                .map(|mac_address| NetworkInterface {
+                                    mac_address: mac_address.to_string(),
+                                    pci_properties: Some(PciDeviceProperties {
+                                        vendor: "Mellanox".to_string(),
+                                        device: "BlueField-3".to_string(),
+                                        ..Default::default()
+                                    }),
+                                })
+                                .collect(),
+                            ..Default::default()
+                        }),
                         ..Default::default()
                     }),
                     ..Default::default()

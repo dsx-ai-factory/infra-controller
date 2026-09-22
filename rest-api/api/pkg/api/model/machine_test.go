@@ -498,7 +498,6 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 
 func TestMachine_NewAPIMachineScoutVersion(t *testing.T) {
 	statusVersion := "2.6.1"
-	legacyVersion := "2.5.0"
 
 	tests := []struct {
 		name     string
@@ -509,29 +508,6 @@ func TestMachine_NewAPIMachineScoutVersion(t *testing.T) {
 			name: "uses Machine status value",
 			metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{
 				Status: &corev1.MachineStatus{LastScoutObservedVersion: &statusVersion},
-			}},
-			want: &statusVersion,
-		},
-		{
-			name: "falls back to deprecated Machine value",
-			metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{
-				LastScoutObservedVersion: &legacyVersion,
-			}},
-			want: &legacyVersion,
-		},
-		{
-			name: "falls back when Machine status version is unset",
-			metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{
-				Status:                   &corev1.MachineStatus{},
-				LastScoutObservedVersion: &legacyVersion,
-			}},
-			want: &legacyVersion,
-		},
-		{
-			name: "prefers Machine status value",
-			metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{
-				Status:                   &corev1.MachineStatus{LastScoutObservedVersion: &statusVersion},
-				LastScoutObservedVersion: &legacyVersion,
 			}},
 			want: &statusVersion,
 		},

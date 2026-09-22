@@ -4321,7 +4321,6 @@ message MachineConfig {
 
 message MachineStatus {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  // Deprecated Machine.interfaces is superseded by this field.
   repeated MachineInterface interfaces = 1;
   optional machine_discovery.DiscoveryInfo discovery_info = 2;
   google.protobuf.Timestamp last_reboot_time = 3;
@@ -4355,6 +4354,35 @@ message Machine {
   common.MachineId id = 1;
 
   reserved 4, 5, 6; // Used for timestamps in the past
+  reserved "interfaces",
+           "discovery_info",
+           "last_reboot_time",
+           "last_observation_time",
+           "maintenance_reference",
+           "maintenance_start_time",
+           "associated_host_machine_id",
+           "last_reboot_requested_time",
+           "last_reboot_requested_mode",
+           "dpu_agent_version",
+           "associated_dpu_machine_ids",
+           "health",
+           "firmware_autoupdate",
+           "health_sources",
+           "failure_details",
+           "ib_status",
+           "instance_network_restrictions",
+           "instance_type_id",
+           "capabilities",
+           "hw_sku",
+           "hw_sku_status",
+           "quarantine_state",
+           "hw_sku_device_type",
+           "update_complete",
+           "nvlink_info",
+           "nvlink_status_observation",
+           "spx_status_observation",
+           "last_scout_observed_version",
+           "dpf";
 
   // The current lifecycle state of the machine
   string state = 7;
@@ -4369,20 +4397,9 @@ message Machine {
   // The history of the state for the machine. Only populated if `include_history` is set.
   repeated MachineEvent events = 8;
 
-  // Note: This is not yet removed in this change to limit the amount of breaking
-  // changes at once - but users shouldn't rely on it. The actually interesting
-  // information around interfaces for Instance users is in `Instance::InstanceNetworkStatus`.
-  // Deprecated: use status.interfaces
-  // TODO: change to reserved once rest-api uses MachineStatus
-  repeated MachineInterface interfaces = 9 [deprecated = true];
+  reserved 9; // Was: repeated MachineInterface interfaces = 9;
 
-  // TODO: This field might actually move Instance since the discovered hardware
-  // could be different per lifecycle. When the machine is updated with different
-  // hardware and restarted, the data can change. The Instance would have the
-  // capability to store the actual discovery information for each lifecycle
-  // Deprecated: use status.discovery_info
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional machine_discovery.DiscoveryInfo discovery_info = 10 [deprecated = true];
+  reserved 10; // Was: optional machine_discovery.DiscoveryInfo discovery_info = 10;
 
   // Machine type (DPU or HOST). Set at ingestion time; not operator-mutable.
   MachineType machine_type = 11;
@@ -4390,71 +4407,41 @@ message Machine {
   // BMC connection details. Discovered at ingestion time; not operator-mutable.
   BmcInfo bmc_info = 12;
 
-  // Deprecated: use status.last_reboot_time
-  // TODO: change to reserved once rest-api uses MachineStatus
-  google.protobuf.Timestamp last_reboot_time = 14 [deprecated = true];
+  reserved 14; // Was: google.protobuf.Timestamp last_reboot_time = 14;
   // This is used by legacy versions of forge-admin-cli as well as by Forge Cloud
   reserved 15; // Was NetworkHealth network_health = 15;
-  // Deprecated: use status.last_observation_time
-  // TODO: change to reserved once rest-api uses MachineStatus
-  google.protobuf.Timestamp last_observation_time = 16 [deprecated = true];
+  reserved 16; // Was: google.protobuf.Timestamp last_observation_time = 16;
 
-  // Deprecated: use config.maintenance_reference
-  // TODO: change to reserved once rest-api uses MachineConfig
-  optional string maintenance_reference = 17 [deprecated = true];
+  reserved 17; // Was: optional string maintenance_reference = 17;
 
-  // Deprecated: use config.maintenance_start_time
-  // TODO: change to reserved once rest-api uses MachineConfig
-  optional google.protobuf.Timestamp maintenance_start_time = 18 [deprecated = true];
+  reserved 18; // Was: optional google.protobuf.Timestamp maintenance_start_time = 18;
 
-  // Other machine ids associated with this machine
-  // Deprecated: use status.associated_host_machine_id
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional common.MachineId associated_host_machine_id = 19 [deprecated = true, (carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
+  reserved 19; // Was: optional common.MachineId associated_host_machine_id = 19;
   reserved 20; /* previously: optional common.MachineId associated_dpu_machine_id = 20; */
 
   // Hardware inventory (NIC firmware, etc.). Discovered at ingestion time; not operator-mutable.
   optional MachineInventory inventory = 21;
-  // Deprecated: use status.last_reboot_requested_time
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional google.protobuf.Timestamp last_reboot_requested_time = 22 [deprecated = true];
-  // Deprecated: use status.last_reboot_requested_mode
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional string last_reboot_requested_mode = 23 [deprecated = true];
-
-  // Deprecated: use status.dpu_agent_version
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional string dpu_agent_version = 24 [deprecated = true];
+  reserved 22; // Was: google.protobuf.Timestamp last_reboot_requested_time = 22;
+  reserved 23; // Was: optional string last_reboot_requested_mode = 23;
+  reserved 24; // Was: optional string dpu_agent_version = 24;
 
   // Fields are not ordered numerically, check the whole message for max field number
-  // Deprecated: use status.associated_dpu_machine_ids
-  // TODO: change to reserved once rest-api uses MachineStatus
-  repeated common.MachineId associated_dpu_machine_ids = 26 [deprecated = true, (carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
+  reserved 26; // Was: repeated common.MachineId associated_dpu_machine_ids = 26;
 
   // For Host Machines returns the aggregate health of the host
   // For DPUs, it returns the individual DPU health
-  // Deprecated: use status.health
-  // TODO: change to reserved once rest-api uses MachineStatus
-  health.HealthReport health = 27 [deprecated = true];
+  reserved 27; // Was: health.HealthReport health = 27;
 
-  // Deprecated: use config.firmware_autoupdate
-  // TODO: change to reserved once rest-api uses MachineConfig
-  optional bool firmware_autoupdate = 28 [deprecated = true];
+  reserved 28; // Was: optional bool firmware_autoupdate = 28;
 
   // Health report sources (identified by a specific source name and mode) that are applied
   // to the aggregate health of this machine
-  // Deprecated: use status.health_sources
-  // TODO: change to reserved once rest-api uses MachineStatus
-  repeated HealthSourceOrigin health_sources = 29 [deprecated = true];
+  reserved 29; // Was: repeated HealthSourceOrigin health_sources = 29;
 
-  // Deprecated: use status.failure_details
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional string failure_details = 30 [deprecated = true];
+  reserved 30; // Was: optional string failure_details = 30;
 
   // Infiniband devices information attached to the machine.
-  // Deprecated: use status.ib_status
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional InfinibandStatusObservation ib_status = 32 [deprecated = true];
+  reserved 32; // Was: optional InfinibandStatusObservation ib_status = 32;
 
   // Metadata associated with the Machine
   Metadata metadata = 33;
@@ -4464,46 +4451,23 @@ message Machine {
   string version = 34;
 
   // Restrictions on the network configuration for any instances that can be allocated on this machine.
-  // Deprecated: use status.instance_network_restrictions
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional InstanceNetworkRestrictions instance_network_restrictions = 35 [deprecated = true];
+  reserved 35; // Was: optional InstanceNetworkRestrictions instance_network_restrictions = 35;
 
   // The instance type with which a machine is associated if any.
-  // Deprecated: use config.instance_type_id
-  // TODO: change to reserved once rest-api uses MachineConfig
-  optional string instance_type_id = 36 [deprecated = true];
+  reserved 36; // Was: optional string instance_type_id = 36;
 
   // The known capabilities of a machine
-  // Deprecated: use status.capabilities
-  // TODO: change to reserved once rest-api uses MachineStatus
-  MachineCapabilitiesSet capabilities = 37 [deprecated = true];
+  reserved 37; // Was: MachineCapabilitiesSet capabilities = 37;
 
-  // Deprecated: use config.hw_sku
-  // TODO: change to reserved once rest-api uses MachineConfig
-  optional string hw_sku = 38 [deprecated = true];
-  // Deprecated: use status.hw_sku_status
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional SkuStatus hw_sku_status = 39 [deprecated = true];
+  reserved 38; // Was: optional string hw_sku = 38;
+  reserved 39; // Was: optional SkuStatus hw_sku_status = 39;
+  reserved 40; // Was: optional ManagedHostQuarantineState quarantine_state = 40;
 
-  // Deprecated: use status.quarantine
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional ManagedHostQuarantineState quarantine_state = 40 [deprecated = true];
+  reserved 41; // Was: optional string hw_sku_device_type = 41;
+  reserved 42; // Was: bool update_complete = 42;
+  reserved 43; // Was: optional MachineNVLinkInfo nvlink_info = 43;
 
-  // Deprecated: use status.hw_sku_device_type
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional string hw_sku_device_type = 41 [deprecated = true];
-
-  // Deprecated: use status.update_complete
-  // TODO: change to reserved once rest-api uses MachineStatus
-  bool update_complete = 42 [deprecated = true];
-
-  // Deprecated: use status.nvlink_info
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional MachineNVLinkInfo nvlink_info = 43 [deprecated = true];
-
-  // Deprecated: use status.nvlink
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional MachineNVLinkStatusObservation nvlink_status_observation = 44 [deprecated = true];
+  reserved 44; // Was: optional MachineNVLinkStatusObservation nvlink_status_observation = 44;
 
   // The rack this machine is assigned to (from expected machine record).
   optional common.RackId rack_id = 45;
@@ -4511,18 +4475,12 @@ message Machine {
   // Slot and tray position within the rack (from expected machine record).
   optional PlacementInRack placement_in_rack = 46;
 
-  // Deprecated: use status.spx
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional MachineSpxStatusObservation spx_status_observation = 47 [deprecated = true];
+  reserved 47; // Was: optional MachineSpxStatusObservation spx_status_observation = 47;
 
   // Build version of forge-scout last observed during machine discovery registration.
-  // Deprecated: use status.last_scout_observed_version
-  // TODO: change to reserved once rest-api uses MachineStatus
-  optional string last_scout_observed_version = 48 [deprecated = true];
+  reserved 48; // Was: optional string last_scout_observed_version = 48;
 
-  // Deprecated: use config.dpf
-  // TODO: change to reserved once rest-api uses MachineConfig
-  optional DpfMachineState dpf = 49 [deprecated = true];
+  reserved 49; // Was: optional DpfMachineState dpf = 49;
 
   MachineConfig config = 50;
   MachineStatus status = 51;

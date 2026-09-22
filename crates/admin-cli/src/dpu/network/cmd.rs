@@ -192,7 +192,6 @@ async fn show_dpu_network_config(
     Ok(())
 }
 
-#[allow(deprecated)]
 pub(crate) async fn show_dpu_status(
     api_client: &ApiClient,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
@@ -246,8 +245,12 @@ pub(crate) async fn show_dpu_status(
                 .and_then(|ts| chrono::DateTime::<chrono::Utc>::try_from(ts).ok())
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S.%3f").to_string())
                 .unwrap_or_default();
+            let health = dpu
+                .status
+                .as_ref()
+                .and_then(|status| status.health.as_ref());
             let mut probe_alerts = String::new();
-            if let Some(health) = &dpu.health {
+            if let Some(health) = health {
                 for alert in health.alerts.iter() {
                     if !probe_alerts.is_empty() {
                         probe_alerts.push('\n');
@@ -265,8 +268,7 @@ pub(crate) async fn show_dpu_status(
                     .map(|id| id.to_string())
                     .unwrap_or_default(),
                 st.network_config_version.unwrap_or_default(),
-                dpu.health
-                    .as_ref()
+                health
                     .map(|health| health.alerts.is_empty().to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
                 probe_alerts,

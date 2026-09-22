@@ -519,7 +519,6 @@ fn format_health_alerts(alerts: &[HealthProbeAlert], width: usize) -> String {
         .join(&format!("\n{:<width$}: ", " "))
 }
 
-#[allow(deprecated)]
 pub(super) async fn show(
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     args: Args,
@@ -543,15 +542,21 @@ pub(super) async fn show(
         // so make a few RPC fetches to get everything in the managed host.
         // Start by getting the requested machine
         let requested_machine = api_client.get_machine(machine_id).await?;
+        let status = requested_machine.status.as_ref();
+        let associated_dpu_machine_ids = status
+            .map(|status| status.associated_dpu_machine_ids.as_slice())
+            .unwrap_or_default();
 
-        if !requested_machine.associated_dpu_machine_ids.is_empty() {
+        if !associated_dpu_machine_ids.is_empty() {
             // If requested machine is a host, get the DPUs too.
             let dpu_machines = api_client
-                .get_machines_by_ids(&requested_machine.associated_dpu_machine_ids)
+                .get_machines_by_ids(associated_dpu_machine_ids)
                 .await?
                 .machines;
             [&[requested_machine], dpu_machines.as_slice()].concat()
-        } else if let Some(ref host_id) = requested_machine.associated_host_machine_id {
+        } else if let Some(ref host_id) =
+            status.and_then(|status| status.associated_host_machine_id)
+        {
             // the requested machine is a DPU, get the host machine...
             if let Some(host_machine) = api_client
                 .get_machines_by_ids(&[*host_id])
@@ -560,9 +565,14 @@ pub(super) async fn show(
                 .into_iter()
                 .next()
             {
+                let dpu_machine_ids = host_machine
+                    .status
+                    .as_ref()
+                    .map(|status| status.associated_dpu_machine_ids.as_slice())
+                    .unwrap_or_default();
                 // ... plus get all the other attached DPUs of that host machine.
                 let dpu_machines = api_client
-                    .get_machines_by_ids(host_machine.associated_dpu_machine_ids.as_slice())
+                    .get_machines_by_ids(dpu_machine_ids)
                     .await?
                     .machines;
 

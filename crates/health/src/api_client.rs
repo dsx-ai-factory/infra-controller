@@ -15,10 +15,6 @@
  * limitations under the License.
  */
 
-// The deprecated fields on `rpc::forge::Machine` must still be read here for
-// backwards-compat. See https://github.com/NVIDIA/infra-controller/issues/2793
-#![allow(deprecated)]
-
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::net::IpAddr;
@@ -221,7 +217,12 @@ impl ApiClientWrapper {
             .await
             .map_err(HealthError::ApiInvocationError)?;
 
-        Ok(response.machines.into_iter().next().and_then(|m| m.hw_sku))
+        Ok(response
+            .machines
+            .into_iter()
+            .next()
+            .and_then(|m| m.config)
+            .and_then(|config| config.hw_sku))
     }
 }
 
@@ -550,11 +551,11 @@ impl ApiEndpointSource {
         };
         let addr = BmcAddr::try_from(bmc_info)?;
         let metadata = machine.id.map(|machine_id| {
+            let status = machine.status.as_ref();
+            let discovery_info = status.and_then(|status| status.discovery_info.as_ref());
             EndpointMetadata::Machine(MachineData {
                 machine_id: Some(machine_id),
-                machine_serial: machine
-                    .discovery_info
-                    .as_ref()
+                machine_serial: discovery_info
                     .and_then(|info| info.dmi_data.as_ref())
                     .map(|dmi| dmi.chassis_serial.clone()),
                 system_uuid: SharedSystemUuid::default(),
@@ -566,11 +567,10 @@ impl ApiEndpointSource {
                     .placement_in_rack
                     .as_ref()
                     .and_then(|placement| placement.tray_index),
-                nvlink_domain_uuid: machine
-                    .nvlink_info
-                    .as_ref()
+                nvlink_domain_uuid: status
+                    .and_then(|status| status.nvlink_info.as_ref())
                     .and_then(|info| info.domain_uuid),
-                driver_version: unique_gpu_driver_version(machine.discovery_info.as_ref()),
+                driver_version: unique_gpu_driver_version(discovery_info),
             })
         });
 

@@ -1,7 +1,3 @@
-// The deprecated fields on `rpc::forge::Machine` must still be read here for
-// backwards-compat. See https://github.com/NVIDIA/infra-controller/issues/2793
-#![allow(deprecated)]
-
 mod io;
 use std::collections::HashMap;
 
@@ -52,13 +48,14 @@ impl TryFrom<Machine> for TrayData {
 
     fn try_from(value: Machine) -> Result<Self, Self::Error> {
         let id = value.id.ok_or(RvsError::MissingField("Machine.id"))?;
+        let status = value.status.unwrap_or_default();
 
-        let nvl = value.nvlink_info.map(|info| TrayNvlData {
+        let nvl = status.nvlink_info.map(|info| TrayNvlData {
             domain_uuid: info.domain_uuid,
             gpu_count: info.gpus.len() as u32,
         });
 
-        let ib = value.ib_status.map(|status| {
+        let ib = status.infiniband.map(|status| {
             let port_count = status.ib_interfaces.len() as u32;
             let active_port_count = status
                 .ib_interfaces
