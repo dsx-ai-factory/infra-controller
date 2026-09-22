@@ -992,6 +992,10 @@ pub struct InstanceExtensionServicesNotCurrent;
 ///
 /// Missing or changed snapshots return `NotApplied`; database failures return
 /// `Err`. The caller owns the surrounding transaction.
+///
+/// Legacy attachment IDs represented by an explicit JSON null compare the
+/// same as omitted IDs. Present IDs and all other content remain part of the
+/// comparison.
 pub async fn update_extension_services_config(
     txn: &mut PgConnection,
     instance_id: InstanceId,
@@ -1006,9 +1010,36 @@ pub async fn update_extension_services_config(
         expected_version
     };
 
-    let query = "UPDATE instances SET extension_services_config_version=$1, extension_services_config=$2::jsonb
-        WHERE id=$3 AND extension_services_config_version=$4 AND extension_services_config=$5::jsonb
-        RETURNING id";
+    let query = r#"
+        UPDATE instances
+        SET extension_services_config_version=$1,
+            extension_services_config=$2::jsonb
+        WHERE id=$3
+          AND extension_services_config_version=$4
+          -- Current writers omit absent IDs. Remove only legacy null IDs before
+          -- comparing, while retaining every other field and the attachment order.
+          AND jsonb_set(
+                extension_services_config,
+                '{service_configs}',
+                (
+                    SELECT COALESCE(
+                        jsonb_agg(
+                            CASE
+                                WHEN service_config->'id' = 'null'::jsonb
+                                    THEN service_config - 'id'
+                                ELSE service_config
+                            END
+                            ORDER BY ordinal
+                        ),
+                        '[]'::jsonb
+                    )
+                    FROM jsonb_array_elements(
+                        extension_services_config->'service_configs'
+                    ) WITH ORDINALITY AS services(service_config, ordinal)
+                )
+              ) = $5::jsonb
+        RETURNING id
+    "#;
     let updated_id: Option<InstanceId> = sqlx::query_scalar(query)
         .bind(next_version)
         .bind(sqlx::types::Json(new_config))
@@ -1726,6 +1757,128 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(snapshots.len(), 2);
+    }
+
+    /// Verifies omitted and explicit-null attachment IDs remain readable and
+    /// writable across independent loads, which keeps rolling upgrades safe.
+    #[crate::sqlx_test]
+    async fn legacy_attachments_with_omitted_or_null_ids_remain_writable(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin legacy attachment setup");
+        let instance_id = seed_instance(txn.as_mut(), 0x4a, None).await;
+        let legacy = serde_json::json!({
+            "service_configs": [
+                {
+                    "service_id": ExtensionServiceId::new(),
+                    "version": ConfigVersion::initial(),
+                    "dpu_target": null,
+                    "removed": null
+                },
+                {
+                    "id": null,
+                    "service_id": ExtensionServiceId::new(),
+                    "version": ConfigVersion::initial(),
+                    "dpu_target": null,
+                    "removed": null
+                }
+            ]
+        });
+
+        // Model outgoing writers that omitted an ID or serialized it as null.
+        sqlx::query("UPDATE instances SET extension_services_config = $1 WHERE id = $2")
+            .bind(Json(&legacy))
+            .bind(instance_id)
+            .execute(txn.as_mut())
+            .await
+            .expect("persist predecessor attachment JSON");
+        txn.commit().await.expect("commit predecessor attachment");
+
+        // Load the committed row again and preserve both forms as absent identities.
+        let initial = find_by_id(&pool, instance_id)
+            .await
+            .expect("read older attachment")
+            .expect("seeded instance exists");
+        assert!(
+            initial
+                .config
+                .extension_services
+                .service_configs
+                .iter()
+                .all(|attachment| attachment.id.is_none())
+        );
+        let previous_version = initial.extension_services_config_version;
+
+        // Lock and reload the row before a current writer begins termination.
+        let mut txn = pool.begin().await.expect("begin current attachment update");
+        find_by_id_for_update(txn.as_mut(), instance_id)
+            .await
+            .expect("lock older attachment")
+            .expect("seeded instance exists");
+        let locked = find_by_id(txn.as_mut(), instance_id)
+            .await
+            .expect("reload locked older attachment")
+            .expect("seeded instance exists");
+        let expected_config = locked.config.extension_services;
+        let mut updated_config = expected_config.clone();
+        for attachment in &mut updated_config.service_configs {
+            attachment.removed = Some(Utc::now());
+        }
+        assert_eq!(
+            update_extension_services_config(
+                txn.as_mut(),
+                instance_id,
+                previous_version,
+                &expected_config,
+                &updated_config,
+                true,
+            )
+            .await
+            .expect("update older attachment"),
+            ConditionalWrite::Applied(())
+        );
+        txn.commit()
+            .await
+            .expect("commit current attachment update");
+
+        // A current writer rewrites both forms to the canonical omitted representation.
+        let stored: serde_json::Value =
+            sqlx::query_scalar("SELECT extension_services_config FROM instances WHERE id = $1")
+                .bind(instance_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read rewritten attachment JSON");
+        let stored_configs = stored["service_configs"]
+            .as_array()
+            .expect("stored attachment list");
+        assert_eq!(stored_configs.len(), 2);
+        assert!(
+            stored_configs
+                .iter()
+                .all(|attachment| attachment.get("id").is_none())
+        );
+        let persisted = find_by_id(&pool, instance_id)
+            .await
+            .expect("reread updated older attachment")
+            .expect("seeded instance exists");
+        assert!(
+            persisted
+                .config
+                .extension_services
+                .service_configs
+                .iter()
+                .all(|attachment| attachment.id.is_none())
+        );
+        assert!(
+            persisted
+                .config
+                .extension_services
+                .service_configs
+                .iter()
+                .all(|attachment| attachment.removed.is_some())
+        );
+        assert_eq!(
+            persisted.extension_services_config_version.version_nr(),
+            previous_version.version_nr() + 1
+        );
     }
 
     /// General and OS updates distinguish missing and deleted `Instance`s from

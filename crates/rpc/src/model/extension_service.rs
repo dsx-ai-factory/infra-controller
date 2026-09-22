@@ -22,7 +22,8 @@ use model::extension_service::{
     ExtensionServiceObservabilityConfig, ExtensionServiceObservabilityConfigType,
     ExtensionServiceObservabilityConfigTypeLogging,
     ExtensionServiceObservabilityConfigTypePrometheus, ExtensionServiceSnapshot,
-    ExtensionServiceType, ExtensionServiceVersionInfo,
+    ExtensionServiceType, ExtensionServiceVersionInfo, ServiceVpcAddressFamily,
+    ServiceVpcInterfaceRequirement,
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -64,12 +65,57 @@ impl From<model::extension_service::DpuTarget> for rpc::DpuExtensionServiceDpuTa
     }
 }
 
+impl From<ServiceVpcAddressFamily> for rpc::ServiceVpcAddressFamily {
+    fn from(address_family: ServiceVpcAddressFamily) -> Self {
+        match address_family {
+            ServiceVpcAddressFamily::Ipv4 => Self::Ipv4,
+            ServiceVpcAddressFamily::Ipv6 => Self::Ipv6,
+        }
+    }
+}
+
 impl From<rpc::DpuExtensionServiceDpuTarget> for model::extension_service::DpuTarget {
     fn from(target: rpc::DpuExtensionServiceDpuTarget) -> Self {
         match target {
             rpc::DpuExtensionServiceDpuTarget::Primary => Self::Primary,
             rpc::DpuExtensionServiceDpuTarget::AllActive => Self::AllActive,
             rpc::DpuExtensionServiceDpuTarget::All => Self::All,
+        }
+    }
+}
+
+impl TryFrom<rpc::ServiceVpcInterfaceRequirement> for ServiceVpcInterfaceRequirement {
+    type Error = RpcDataConversionError;
+
+    fn try_from(requirement: rpc::ServiceVpcInterfaceRequirement) -> Result<Self, Self::Error> {
+        let address_family = rpc::ServiceVpcAddressFamily::try_from(requirement.address_family)
+            .map_err(|_| {
+                RpcDataConversionError::InvalidValue(
+                    "service_vpc_interfaces.address_family".to_string(),
+                    requirement.address_family.to_string(),
+                )
+            })?;
+        Ok(Self {
+            // The Rust type has no unspecified variant because every declared
+            // service interface must choose one supported family.
+            address_family: match address_family {
+                rpc::ServiceVpcAddressFamily::Ipv4 => ServiceVpcAddressFamily::Ipv4,
+                rpc::ServiceVpcAddressFamily::Ipv6 => ServiceVpcAddressFamily::Ipv6,
+                rpc::ServiceVpcAddressFamily::Unspecified => {
+                    return Err(RpcDataConversionError::InvalidValue(
+                        "service_vpc_interfaces.address_family".to_string(),
+                        "unspecified".to_string(),
+                    ));
+                }
+            },
+        })
+    }
+}
+
+impl From<ServiceVpcInterfaceRequirement> for rpc::ServiceVpcInterfaceRequirement {
+    fn from(requirement: ServiceVpcInterfaceRequirement) -> Self {
+        Self {
+            address_family: rpc::ServiceVpcAddressFamily::from(requirement.address_family) as i32,
         }
     }
 }
@@ -152,6 +198,11 @@ impl From<ExtensionServiceSnapshot> for rpc::DpuExtensionService {
                 snapshot.lifecycle_state_version,
                 snapshot.lifecycle_state_outcome,
             )),
+            service_vpc_interfaces: snapshot
+                .service_vpc_interfaces
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -284,6 +335,42 @@ mod tests {
     use crate::forge::dpu_extension_service_observability_config::Config;
     use crate::forge::{self as rpc};
 
+    /// Verifies the public wire accepts IPv4 and IPv6 while rejecting missing or
+    /// newer unknown family values instead of choosing a default.
+    #[test]
+    fn service_vpc_requirement_family_conversion_is_strict() {
+        // Both explicit families remain representable even when activation is unavailable.
+        assert_eq!(
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Ipv4 as i32,
+            })
+            .unwrap()
+            .address_family,
+            ServiceVpcAddressFamily::Ipv4
+        );
+        assert_eq!(
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Ipv6 as i32,
+            })
+            .unwrap()
+            .address_family,
+            ServiceVpcAddressFamily::Ipv6
+        );
+
+        // Unspecified and unknown values cannot silently choose a deployment family.
+        assert!(
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Unspecified as i32,
+            })
+            .is_err()
+        );
+        assert!(
+            ServiceVpcInterfaceRequirement::try_from(rpc::ServiceVpcInterfaceRequirement {
+                address_family: i32::MAX,
+            })
+            .is_err()
+        );
+    }
     fn observability_config(
         name: Option<String>,
         config: Option<Config>,

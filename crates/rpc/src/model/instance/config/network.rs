@@ -412,6 +412,7 @@ impl TryFrom<rpc::InstanceNetworkConfig> for InstanceNetworkConfig {
         Ok(Self {
             interfaces,
             auto_config: config.auto_config.map(TryInto::try_into).transpose()?,
+            service_interfaces: vec![],
         })
     }
 }
@@ -432,9 +433,8 @@ impl TryFrom<InstanceNetworkConfig> for rpc::InstanceNetworkConfig {
     type Error = RpcDataConversionError;
 
     fn try_from(config: InstanceNetworkConfig) -> Result<rpc::InstanceNetworkConfig, Self::Error> {
-        // This is where we prep the interface for "external" viewing,
-        // stripping resolved interfaces in the case of an auto config,
-        // but leaving them untouched otherwise.
+        // Service-owned endpoints are always hidden from external callers. Automatic
+        // configs also hide resolved host interfaces while explicit ones remain visible.
         let config = config.into_external_view();
         let mut interfaces = Vec::with_capacity(config.interfaces.len());
         for iface in config.interfaces.into_iter() {
@@ -750,6 +750,7 @@ mod tests {
                         vpc_id: Some(vpc_id),
                     }],
                     auto_config: None,
+                    service_interfaces: vec![],
                 };
 
                 let wire: rpc::InstanceNetworkConfig = config.try_into().unwrap();
@@ -1099,6 +1100,7 @@ mod tests {
                 vpc_id: None,
             }],
             auto_config: None,
+            service_interfaces: vec![],
         };
 
         // Model -> RPC

@@ -136,6 +136,7 @@ impl TryFrom<InstanceExtensionServiceStatus> for rpc::InstanceDpuExtensionServic
             .into(),
             dpu_statuses,
             removed: status.removed,
+            attachment_id: status.attachment_id.map(Into::into),
         })
     }
 }
@@ -267,6 +268,45 @@ impl From<ExtensionServiceStatusObservation> for rpc::DpuExtensionServiceStatusO
                 })
                 .collect(),
             message: observation.message,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies status readback preserves attachment-ID presence so new
+    /// attachments can be matched to endpoints and legacy attachments remain
+    /// readable.
+    #[test]
+    fn attachment_id_presence_is_preserved_in_status_readback() {
+        let cases = [
+            // New attachments expose their stored identity for endpoint correlation.
+            ("identified attachment", Some(uuid::Uuid::new_v4())),
+            // Attachments written by legacy servers expose no invented identity.
+            ("legacy attachment", None),
+        ];
+
+        for (scenario, attachment_id) in cases {
+            // Convert the same aggregate status shape with and without an identity.
+            let status = InstanceExtensionServiceStatus {
+                attachment_id,
+                service_id: ExtensionServiceId::new(),
+                version: ConfigVersion::initial(),
+                overall_status: ExtensionServiceDeploymentStatus::Pending,
+                dpu_statuses: vec![],
+                removed: None,
+            };
+
+            // Public readback must carry exactly the stored presence and value.
+            let readback = rpc::InstanceDpuExtensionServiceStatus::try_from(status)
+                .expect("convert extension-service status");
+            assert_eq!(
+                readback.attachment_id,
+                attachment_id.map(Into::into),
+                "{scenario}",
+            );
         }
     }
 }
