@@ -91,8 +91,14 @@ internal UUIDs that are used to associate instances.
 
 `--nvos-ip-address <NVOS_IP_ADDRESS>`
 
-Static IP for the single wired NVOS port. Requires exactly one
---nvos-mac-address
+Static IP for the single wired NVOS port. The updated switch must have
+exactly one NVOS MAC address. When Core supports PATCH or masked
+updates, omit --nvos-mac-address only if the stored list already
+contains exactly one MAC; otherwise, supply exactly one
+--nvos-mac-address to replace the list. Older servers that support NVOS
+IPs but replace the full record require exactly one --nvos-mac-address
+in this command; omitted fields can be cleared. Servers without NVOS IP
+support ignore this field
 
 `--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`
 
