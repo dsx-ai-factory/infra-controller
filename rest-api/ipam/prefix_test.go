@@ -188,53 +188,68 @@ func TestIpamer_AcquireIP(t *testing.T) {
 	}
 }
 
-func TestIpamer_ReleaseIPFromPrefixIPv4(t *testing.T) {
-	ctx := context.Background()
+func TestIpamer_ReleaseIPFromPrefix(t *testing.T) {
+	tests := []struct {
+		name    string
+		address string
+		wantErr error
+	}{
+		{
+			name:    "equivalent IPv6 spelling",
+			address: "2001:0DB8:0000:0000:0000:0000:0000:0001",
+		},
+		{
+			name:    "malformed address",
+			address: "not-an-address",
+			wantErr: ErrNotFound,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			ipam := New(ctx)
+			prefix, err := ipam.NewPrefix(ctx, "2001:db8::/120")
+			require.NoError(t, err)
+			allocated, err := ipam.AcquireSpecificIP(ctx, prefix.Cidr, "2001:db8::1")
+			require.NoError(t, err)
+
+			err = ipam.ReleaseIPFromPrefix(ctx, prefix.Cidr, test.address)
+			require.ErrorIs(t, err, test.wantErr)
+			_, err = ipam.AcquireSpecificIP(ctx, prefix.Cidr, allocated.IP.String())
+			if test.wantErr == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, ErrAlreadyAllocated)
+			}
+		})
+	}
 
 	testWithBackends(t, func(t *testing.T, ipam *ipamer) {
-		prefix, err := ipam.NewPrefix(ctx, "192.168.0.0/24")
-		require.Nil(t, err)
-		require.NotNil(t, prefix)
-
-		err = ipam.ReleaseIPFromPrefix(ctx, prefix.Cidr, "1.2.3.4")
-		require.NotNil(t, err)
-		//require.True(t, errors.As(err, &NotFoundError{}), "error must be of correct type")
-		require.True(t, errors.Is(err, ErrNotFound), "error must be NotFound")
-		require.Equal(t, "NotFound: unable to release ip:1.2.3.4 because it is not allocated in prefix:192.168.0.0/24", err.Error())
-
-		err = ipam.ReleaseIPFromPrefix(ctx, "4.5.6.7/23", "1.2.3.4")
-		require.NotNil(t, err)
-		//require.True(t, errors.As(err, &NotFoundError{}), "error must be of correct type")
-		require.True(t, errors.Is(err, ErrNotFound), "error must be NotFound")
-		require.Equal(t, "NotFound: unable to find prefix for cidr:4.5.6.7/23", err.Error())
-	})
-}
-
-func TestIpamer_ReleaseIPFromPrefixIPv6(t *testing.T) {
-	ctx := context.Background()
-
-	testWithBackends(t, func(t *testing.T, ipam *ipamer) {
-		prefix, err := ipam.NewPrefix(ctx, "2001:0db8:85a3::/120")
-		require.Nil(t, err)
-		require.NotNil(t, prefix)
-
-		err = ipam.ReleaseIPFromPrefix(ctx, prefix.Cidr, "1.2.3.4")
-		require.NotNil(t, err)
-		//require.True(t, errors.As(err, &NotFoundError{}), "error must be of correct type")
-		require.True(t, errors.Is(err, ErrNotFound), "error must be NotFound")
-		require.Equal(t, "NotFound: unable to release ip:1.2.3.4 because it is not allocated in prefix:2001:db8:85a3::/120", err.Error())
-
-		err = ipam.ReleaseIPFromPrefix(ctx, prefix.Cidr, "1001:0db8:85a3::1")
-		require.NotNil(t, err)
-		//require.True(t, errors.As(err, &NotFoundError{}), "error must be of correct type")
-		require.True(t, errors.Is(err, ErrNotFound), "error must be NotFound")
-		require.Equal(t, "NotFound: unable to release ip:1001:0db8:85a3::1 because it is not allocated in prefix:2001:db8:85a3::/120", err.Error())
-
-		err = ipam.ReleaseIPFromPrefix(ctx, "1001:0db8:85a3::/120", "1.2.3.4")
-		require.NotNil(t, err)
-		//require.True(t, errors.As(err, &NotFoundError{}), "error must be of correct type")
-		require.True(t, errors.Is(err, ErrNotFound), "error must be NotFound")
-		require.Equal(t, "NotFound: unable to find prefix for cidr:1001:0db8:85a3::/120", err.Error())
+		errorTests := []struct {
+			name          string
+			cidr          string
+			missingPrefix string
+			unallocated   []string
+		}{
+			{"IPv4", "192.168.0.0/24", "4.5.6.7/23", []string{"1.2.3.4"}},
+			{"IPv6", "2001:0db8:85a3::/120", "1001:0db8:85a3::/120", []string{"1.2.3.4", "1001:0db8:85a3::1"}},
+		}
+		for _, test := range errorTests {
+			t.Run(test.name, func(t *testing.T) {
+				ctx := context.Background()
+				prefix, err := ipam.NewPrefix(ctx, test.cidr)
+				require.NoError(t, err)
+				require.NotNil(t, prefix)
+				for _, address := range test.unallocated {
+					err = ipam.ReleaseIPFromPrefix(ctx, prefix.Cidr, address)
+					require.ErrorIs(t, err, ErrNotFound)
+					require.Equal(t, fmt.Sprintf("NotFound: unable to release ip:%s because it is not allocated in prefix:%s", address, prefix.Cidr), err.Error())
+				}
+				err = ipam.ReleaseIPFromPrefix(ctx, test.missingPrefix, "1.2.3.4")
+				require.ErrorIs(t, err, ErrNotFound)
+				require.Equal(t, "NotFound: unable to find prefix for cidr:"+test.missingPrefix, err.Error())
+			})
+		}
 	})
 }
 
