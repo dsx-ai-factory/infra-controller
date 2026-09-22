@@ -1183,6 +1183,44 @@ func TestBuildCommands_AllocationConstraintIsUpdateOnly(t *testing.T) {
 			"removed from the OpenAPI spec because the server never registered those routes (NVBug 6232163)")
 }
 
+func TestNewApp_ListAllEmptyCollectionOutputsArray(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		assert.Equal(t, "100", request.URL.Query().Get("pageSize"))
+		assert.Equal(t, "1", request.URL.Query().Get("pageNumber"))
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`[]`))
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+
+	previousStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = writer
+	t.Cleanup(func() {
+		os.Stdout = previousStdout
+	})
+
+	err = app.Run([]string{
+		"nicocli",
+		"--base-url", server.URL,
+		"--org", "test-org",
+		"--api-name", "nico",
+		"--token", "test-token",
+		"machine", "list", "--all",
+	})
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	os.Stdout = previousStdout
+	output, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.JSONEq(t, `[]`, string(output))
+}
+
 func TestNewApp_MachineValidationStartCommandSurface(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err)
