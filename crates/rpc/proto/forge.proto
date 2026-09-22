@@ -2721,14 +2721,6 @@ message IBFabricIdList {
   repeated string ib_fabric_ids = 1;
 }
 
-// Deprecated: use FindNetworkSegmentStateHistories RPC instead
-message NetworkSegmentStateHistory {
-  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  string state = 1;
-  string version = 2;
-  google.protobuf.Timestamp time = 3;
-}
-
 enum NetworkSegmentType {
   TENANT = 0;
   ADMIN = 1;
