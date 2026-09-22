@@ -113,9 +113,11 @@ pub(super) async fn handle_decommissioning(
         SwitchDecommissioningState::WaitingForNvosFactoryReset { job_id } => {
             handle_waiting_for_nvos_factory_reset(job_id, ctx).await
         }
-        SwitchDecommissioningState::NvosFactoryResetOutcomeUnknown { error } => Err(
-            external_error("NVOS factory reset requires operator recovery", error),
-        ),
+        SwitchDecommissioningState::NvosFactoryResetOutcomeUnknown { error } => {
+            Err(StateHandlerError::ManualInterventionRequired(format!(
+                "NVOS factory reset requires operator recovery: {error}"
+            )))
+        }
         SwitchDecommissioningState::RebootingSwitch => {
             handle_rebooting_switch(switch_id, switch, ctx).await
         }
@@ -243,10 +245,12 @@ async fn handle_waiting_for_nvos_factory_reset(
         SwitchFactoryResetState::Completed => Ok(StateHandlerOutcome::transition(decommissioning(
             SwitchDecommissioningState::SuppressingNvosDhcp,
         ))),
-        SwitchFactoryResetState::Failed => Err(external_error(
-            "NVOS factory reset failed",
-            status.error.unwrap_or_default(),
-        )),
+        SwitchFactoryResetState::Failed => {
+            Err(StateHandlerError::ManualInterventionRequired(format!(
+                "NVOS factory reset failed: {}",
+                status.error.unwrap_or_default()
+            )))
+        }
     }
 }
 
