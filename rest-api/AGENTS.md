@@ -223,6 +223,10 @@ verification expectations.
   and batch endpoints, update the full surface together: single create/update
   DTOs, batch create/update DTOs, handlers, DAO input structs, persistence,
   OpenAPI, SDK, and tests. Do not stop after the single handler path.
+- When adding a request field, if the field contains sensitive information
+  (passwords, auth tokens, encryption keys, etc.), add it to the list of
+  fields to be obfuscated in `rest-api/api/pkg/middleware/audit.go`, using
+  the currently listed fields as a guide for what is considered sensitive.
 - Endpoint handlers should use the following name prefix convention consistently (Instance resource used as example):
   - GET single object: GetInstanceHandler
   - GET multiple objects: GetAllInstanceHandler
