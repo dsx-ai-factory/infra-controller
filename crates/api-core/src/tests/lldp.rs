@@ -107,6 +107,7 @@ async fn test_lldp_topology_force_delete(
                 allow_delete_with_orphaned_dpf_crds: false,
                 delete_bmc_suppressions: false,
                 delete_retained_boot_interfaces: false,
+                release_preserved_addresses: false,
             },
         ))
         .await

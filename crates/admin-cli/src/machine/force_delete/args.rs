@@ -35,6 +35,11 @@ suppressions, and retained boot targets):
     --delete-interfaces --delete-bmc-interfaces --delete-bmc-suppressions \
     --delete-retained-boot-interfaces
 
+Force delete and permanently release preserved address reservations \
+instead of parking them:
+    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
+    --delete-interfaces --release-preserved-addresses
+
 ")]
 pub(crate) struct Args {
     #[clap(
@@ -74,6 +79,13 @@ pub(crate) struct Args {
     #[clap(
         long,
         action,
+        help = "Release preserved address reservations for deleted interfaces instead of parking them. Without this, an address marked for preservation is parked so the same MAC can reclaim it on re-ingestion."
+    )]
+    release_preserved_addresses: bool,
+
+    #[clap(
+        long,
+        action,
         help = "Delete machine with allocated instance. This flag acknowledges destroying the user instance as well."
     )]
     pub(super) allow_delete_with_instance: bool,
@@ -96,6 +108,7 @@ impl From<&Args> for AdminForceDeleteMachineRequest {
             allow_delete_with_orphaned_dpf_crds: args.allow_delete_with_orphaned_dpf_crds,
             delete_bmc_suppressions: args.delete_bmc_suppressions,
             delete_retained_boot_interfaces: args.delete_retained_boot_interfaces,
+            release_preserved_addresses: args.release_preserved_addresses,
         }
     }
 }

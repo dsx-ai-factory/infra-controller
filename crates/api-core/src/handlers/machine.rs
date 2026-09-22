@@ -511,7 +511,12 @@ async fn force_delete_cleanup_txn(
                 // The delete retains each row's boot interface pair in
                 // `retained_boot_interfaces`, so a re-ingested machine
                 // recovers its boot target before its first DHCP.
-                db::machine_interface::delete(&interface.id, &mut txn).await?;
+                db::machine_interface::delete(
+                    &interface.id,
+                    &mut txn,
+                    request.release_preserved_addresses,
+                )
+                .await?;
             }
             response.host_interfaces_deleted = true;
         }

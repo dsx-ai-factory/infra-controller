@@ -379,6 +379,15 @@ service Forge {
   // appropriate customer-facing workflow available or where those workflows fail.
   rpc AdminForceDeleteMachine(AdminForceDeleteMachineRequest) returns (AdminForceDeleteMachineResponse);
 
+  // List parked address reservations that outlived their interface, optionally
+  // filtered by owning MAC or by address.
+  rpc AdminFindReservedAddresses(AdminFindReservedAddressesRequest) returns (AdminFindReservedAddressesResponse);
+
+  // Release parked address reservations, making their addresses available to
+  // allocators again. Only parked reservations are affected; active interface
+  // addresses are never released.
+  rpc AdminReleaseReservedAddresses(AdminReleaseReservedAddressesRequest) returns (AdminReleaseReservedAddressesResponse);
+
   // Starts the managed host decommissioning workflow. The host must be Ready.
   rpc DecommissionManagedHost(DecommissionManagedHostRequest) returns (DecommissionManagedHostResponse);
 
@@ -5605,6 +5614,54 @@ message AdminForceDeleteMachineRequest {
   // machine can recover its boot target; set this when a clean rediscovery
   // without prior boot-target memory is intended.
   bool delete_retained_boot_interfaces = 7;
+
+  // Release preserved address reservations for the deleted interfaces instead
+  // of parking them. By default, deleting an interface parks any address it
+  // marked for preservation so the same MAC can reclaim it on re-ingestion; set
+  // this when a permanent wipe should free those addresses immediately.
+  bool release_preserved_addresses = 8;
+}
+
+// A parked address reservation owned by its MAC with no active interface row.
+message ReservedAddress {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // The reserved IP address.
+  string address = 1;
+  // The MAC address that owns the reservation.
+  string reserved_by_mac = 2;
+  // The runtime allocation type of the reserved address (e.g. "Static").
+  string allocation_type = 3;
+}
+
+// Filter for listing or releasing parked address reservations. An empty filter
+// matches every parked reservation; setting both narrows to a single row.
+message AdminFindReservedAddressesRequest {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Restrict to reservations owned by this MAC address.
+  optional string reserved_by_mac = 1;
+  // Restrict to the reservation for this exact address.
+  optional string address = 2;
+}
+
+message AdminFindReservedAddressesResponse {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  repeated ReservedAddress reserved_addresses = 1;
+}
+
+// Release parked reservations matching the filter. At least one of the filter
+// fields must be set so a release cannot clear every reservation by accident.
+message AdminReleaseReservedAddressesRequest {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Release reservations owned by this MAC address.
+  optional string reserved_by_mac = 1;
+  // Release the reservation for this exact address.
+  optional string address = 2;
+}
+
+message AdminReleaseReservedAddressesResponse {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // The addresses that were released.
+  repeated string released_addresses = 1;
 }
 
 message DecommissionManagedHostRequest {

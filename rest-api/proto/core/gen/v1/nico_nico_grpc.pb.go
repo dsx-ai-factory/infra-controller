@@ -191,6 +191,8 @@ const (
 	Forge_FindExploredMlxDevicesByIds_FullMethodName                        = "/forge.Forge/FindExploredMlxDevicesByIds"
 	Forge_UpdateMachineHardwareInfo_FullMethodName                          = "/forge.Forge/UpdateMachineHardwareInfo"
 	Forge_AdminForceDeleteMachine_FullMethodName                            = "/forge.Forge/AdminForceDeleteMachine"
+	Forge_AdminFindReservedAddresses_FullMethodName                         = "/forge.Forge/AdminFindReservedAddresses"
+	Forge_AdminReleaseReservedAddresses_FullMethodName                      = "/forge.Forge/AdminReleaseReservedAddresses"
 	Forge_DecommissionManagedHost_FullMethodName                            = "/forge.Forge/DecommissionManagedHost"
 	Forge_AdminListResourcePools_FullMethodName                             = "/forge.Forge/AdminListResourcePools"
 	Forge_AdminGrowResourcePool_FullMethodName                              = "/forge.Forge/AdminGrowResourcePool"
@@ -839,6 +841,13 @@ type ForgeClient interface {
 	// AdminForceDeleteMachine is a lower level admin tool for cases where there is no
 	// appropriate customer-facing workflow available or where those workflows fail.
 	AdminForceDeleteMachine(ctx context.Context, in *AdminForceDeleteMachineRequest, opts ...grpc.CallOption) (*AdminForceDeleteMachineResponse, error)
+	// List parked address reservations that outlived their interface, optionally
+	// filtered by owning MAC or by address.
+	AdminFindReservedAddresses(ctx context.Context, in *AdminFindReservedAddressesRequest, opts ...grpc.CallOption) (*AdminFindReservedAddressesResponse, error)
+	// Release parked address reservations, making their addresses available to
+	// allocators again. Only parked reservations are affected; active interface
+	// addresses are never released.
+	AdminReleaseReservedAddresses(ctx context.Context, in *AdminReleaseReservedAddressesRequest, opts ...grpc.CallOption) (*AdminReleaseReservedAddressesResponse, error)
 	// Starts the managed host decommissioning workflow. The host must be Ready.
 	DecommissionManagedHost(ctx context.Context, in *DecommissionManagedHostRequest, opts ...grpc.CallOption) (*DecommissionManagedHostResponse, error)
 	// List existing resource pools and their stats
@@ -3180,6 +3189,26 @@ func (c *forgeClient) AdminForceDeleteMachine(ctx context.Context, in *AdminForc
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AdminForceDeleteMachineResponse)
 	err := c.cc.Invoke(ctx, Forge_AdminForceDeleteMachine_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) AdminFindReservedAddresses(ctx context.Context, in *AdminFindReservedAddressesRequest, opts ...grpc.CallOption) (*AdminFindReservedAddressesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdminFindReservedAddressesResponse)
+	err := c.cc.Invoke(ctx, Forge_AdminFindReservedAddresses_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) AdminReleaseReservedAddresses(ctx context.Context, in *AdminReleaseReservedAddressesRequest, opts ...grpc.CallOption) (*AdminReleaseReservedAddressesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdminReleaseReservedAddressesResponse)
+	err := c.cc.Invoke(ctx, Forge_AdminReleaseReservedAddresses_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6922,6 +6951,13 @@ type ForgeServer interface {
 	// AdminForceDeleteMachine is a lower level admin tool for cases where there is no
 	// appropriate customer-facing workflow available or where those workflows fail.
 	AdminForceDeleteMachine(context.Context, *AdminForceDeleteMachineRequest) (*AdminForceDeleteMachineResponse, error)
+	// List parked address reservations that outlived their interface, optionally
+	// filtered by owning MAC or by address.
+	AdminFindReservedAddresses(context.Context, *AdminFindReservedAddressesRequest) (*AdminFindReservedAddressesResponse, error)
+	// Release parked address reservations, making their addresses available to
+	// allocators again. Only parked reservations are affected; active interface
+	// addresses are never released.
+	AdminReleaseReservedAddresses(context.Context, *AdminReleaseReservedAddressesRequest) (*AdminReleaseReservedAddressesResponse, error)
 	// Starts the managed host decommissioning workflow. The host must be Ready.
 	DecommissionManagedHost(context.Context, *DecommissionManagedHostRequest) (*DecommissionManagedHostResponse, error)
 	// List existing resource pools and their stats
@@ -8084,6 +8120,12 @@ func (UnimplementedForgeServer) UpdateMachineHardwareInfo(context.Context, *Upda
 }
 func (UnimplementedForgeServer) AdminForceDeleteMachine(context.Context, *AdminForceDeleteMachineRequest) (*AdminForceDeleteMachineResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AdminForceDeleteMachine not implemented")
+}
+func (UnimplementedForgeServer) AdminFindReservedAddresses(context.Context, *AdminFindReservedAddressesRequest) (*AdminFindReservedAddressesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AdminFindReservedAddresses not implemented")
+}
+func (UnimplementedForgeServer) AdminReleaseReservedAddresses(context.Context, *AdminReleaseReservedAddressesRequest) (*AdminReleaseReservedAddressesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AdminReleaseReservedAddresses not implemented")
 }
 func (UnimplementedForgeServer) DecommissionManagedHost(context.Context, *DecommissionManagedHostRequest) (*DecommissionManagedHostResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DecommissionManagedHost not implemented")
@@ -12154,6 +12196,42 @@ func _Forge_AdminForceDeleteMachine_Handler(srv interface{}, ctx context.Context
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).AdminForceDeleteMachine(ctx, req.(*AdminForceDeleteMachineRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_AdminFindReservedAddresses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdminFindReservedAddressesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AdminFindReservedAddresses(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AdminFindReservedAddresses_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AdminFindReservedAddresses(ctx, req.(*AdminFindReservedAddressesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_AdminReleaseReservedAddresses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdminReleaseReservedAddressesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AdminReleaseReservedAddresses(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AdminReleaseReservedAddresses_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AdminReleaseReservedAddresses(ctx, req.(*AdminReleaseReservedAddressesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -18999,6 +19077,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AdminForceDeleteMachine",
 			Handler:    _Forge_AdminForceDeleteMachine_Handler,
+		},
+		{
+			MethodName: "AdminFindReservedAddresses",
+			Handler:    _Forge_AdminFindReservedAddresses_Handler,
+		},
+		{
+			MethodName: "AdminReleaseReservedAddresses",
+			Handler:    _Forge_AdminReleaseReservedAddresses_Handler,
 		},
 		{
 			MethodName: "DecommissionManagedHost",
