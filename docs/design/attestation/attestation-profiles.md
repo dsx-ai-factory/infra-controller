@@ -23,8 +23,8 @@ background worker collects and verifies the evidence.
 `spdm_enabled` defaults to `false` and no deployment has set it to `true`, so the
 attestation tables are empty everywhere. Nothing below has to preserve current
 behaviour. A site that had enabled it would attest nothing until a profile
-exists, reporting `ClassNotRecorded` while none does; seeding `any` is what ends
-that.
+exists, reporting `ClassNotRecorded` for an endpoint no exploration has
+classified and `NoProfile` for one it has; seeding `any` ends both.
 
 ### 1.1 Feature requirements
 
@@ -386,8 +386,10 @@ attestable to offer, which is what such hardware already does today. `ALL` and a
 denylist both report it, since neither asserts that a component must be there
 and neither caused the emptiness; an allowlist does assert that, so it reports
 `PolicyMatchedNothing` instead. A BMC whose service root advertises no
-collection reports `NoAttestersFound` under every mode, because the selection is
-never evaluated (§5 step 6).
+collection reports `NoAttestersFound` under every mode that reaches it, because
+the selection is never evaluated (§5 step 6). `NONE` never reaches it: it
+settles from the profile alone and reports `AttestationDisabled` without
+connecting.
 
 There are three switches and no others: `spdm_enabled` for the site, `mode: NONE`
 on a real class for one platform, and `any` for everything unprofiled.
@@ -782,8 +784,8 @@ erDiagram
     machines ||--o{ machine_interfaces : has
     machine_interfaces ||--o{ machine_interface_addresses : has
     machine_interface_addresses |o..o| explored_endpoints : "same IP, no FK"
-    explored_endpoints |o..o| attestation_profiles : "class name, no FK"
-    explored_endpoints |o..o| hardware_class_attesters : "class + digest, no FK"
+    explored_endpoints }o..o| attestation_profiles : "class name, no FK"
+    explored_endpoints }o..o| hardware_class_attesters : "class + digest, no FK"
     machines ||--o| spdm_machine_attestation : "one run"
     machines ||--o{ spdm_machine_devices_attestation : "one row per attester"
 
@@ -1060,7 +1062,7 @@ class also emits, which is how a site sees hardware arrive.
 | 2 CRUD (§6)                               | Create, update, delete, get and list reflect each step; `version` increments; a stale `if_version_match` is refused on update and on delete while an omitted one proceeds; a second create for one class fails; an unknown `schema_version` is refused                                                                                                                                                                                                                                                                                 | API and database                                 |
 | 3 Enabling and disabling attesters (§4.2) | Against `HGX_IRoT_GPU_0/1/2` and `HGX_BMC_0`: an allowlist of `prefix: HGX_IRoT_GPU_` selects the three GPUs and not the BMC, a denylist of `exact: HGX_BMC_0` selects the same three, `ALL` selects four, `NONE` selects none. Mixed patterns take the union, overlapping ones select once, and `hgx_irot_gpu_` selects nothing. Per §4.5, an allowlist pattern matching nothing fails while a denylist pattern matching nothing does not | Pure function over a policy and a component list |
 | 4 The hardware class (§4.1)               | Derivation normalises each field, falls back through §4.1's chain, yields `unknown_nomodel` where both are absent, and keeps a reported SKU out of the key; the §6.2 format rule accepts `any` and a two-field name and refuses the rest; a mock BMC records the class its reported fields imply, together with the `ComponentIntegrity` projection and the attester set that class then carries (§7.5); an unexplored endpoint stays `NULL`                                                                                          | Unit, then the explorer against mock BMCs        |
-| 5 The scheduler consults the profile (§5) | With `spdm_enabled` on, a mock GB200 tray resolves its class, finds its profile, and gets one work row per selected attester; every §5.3 outcome is reached, and a failing one writes nothing                                                                                                                                                                                                                                              | Attestation integration                          |
+| 5 The scheduler consults the profile (§5) | With `spdm_enabled` on, a mock GB200 tray resolves its class, finds its profile, and gets one work row per selected attester; every §5.3 outcome is reached, `PartiallySatisfied` writes a row per matched attester, and an outcome that selects nothing writes nothing                                                                                                                                                                                                                                              | Attestation integration                          |
 | 6 Room to refine (§4.4)                   | A document written today reads back with its `schema_version`, so a later shape can be told apart from this one                                                                                                                                                                                                                                                                                                                            | Unit                                             |
 
 Seven cases where an assertion can pass while the behaviour is wrong:
