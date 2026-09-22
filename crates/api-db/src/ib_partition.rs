@@ -27,6 +27,7 @@ use model::resource_pool::{OwnerType, ResourcePool, ResourcePoolEntryState};
 use sqlx::{FromRow, PgConnection};
 
 use crate::db_read::DbReader;
+use crate::resource_pool::ResourcePoolAllocationNotOwned;
 use crate::{
     ColumnInfo, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult,
     FilterableQueryBuilder, ObjectColumnFilter, Transaction,
@@ -294,14 +295,30 @@ pub async fn delete_and_release_pkey(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     match allocation {
-        Some(sqlx::types::Json(ResourcePoolEntryState::Allocated { owner_type, .. })) => {
+        Some(sqlx::types::Json(ResourcePoolEntryState::Allocated { owner, owner_type })) => {
             if owner_type != OwnerType::IBPartition.to_string() {
                 return Err(DatabaseError::FailedPrecondition(format!(
                     "PKey {expected_pkey} in pool `{}` is allocated to {owner_type}, not an IB partition",
                     pkey_pool.name()
                 )));
             }
-            crate::resource_pool::release(pkey_pool, &mut inner_txn, expected_pkey.into()).await?;
+            match crate::resource_pool::release(
+                pkey_pool,
+                &mut inner_txn,
+                expected_pkey.into(),
+                OwnerType::IBPartition,
+                &owner,
+            )
+            .await?
+            {
+                ConditionalWrite::Applied(()) => {}
+                ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
+                    return Err(DatabaseError::FailedPrecondition(format!(
+                        "PKey {expected_pkey} in pool `{}` did not match the locked IB reservation for owner `{owner}`",
+                        pkey_pool.name()
+                    )));
+                }
+            }
         }
         None | Some(sqlx::types::Json(ResourcePoolEntryState::Free)) => {}
     }

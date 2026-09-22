@@ -45,7 +45,9 @@ use model::network_segment::{
     NetworkSegmentType, NewNetworkSegment,
 };
 use model::resource_pool::common::VLANID;
-use model::resource_pool::{ResourcePool, ResourcePoolError, ResourcePoolStats, ValueType};
+use model::resource_pool::{
+    ResourcePool, ResourcePoolEntryState, ResourcePoolError, ResourcePoolStats, ValueType,
+};
 use model::vpc::{NewVpc, UpdateVpcVirtualization, VpcDefinition, VpcStatus};
 use prometheus_text_parser::ParsedPrometheusMetrics;
 use rpc::Metadata;
@@ -347,6 +349,10 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
 
     // Value is allocated
     let mut txn = db_pool.begin().await?;
+    let vni: i32 = sqlx::query_scalar("SELECT vni_id FROM network_segments WHERE id = $1")
+        .bind(segment.id)
+        .fetch_one(&mut *txn)
+        .await?;
     assert_eq!(
         db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
         ResourcePoolStats {
@@ -379,6 +385,12 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
 
     // Value is free
     let mut txn = db_pool.begin().await?;
+    let vni_entry = db::resource_pool::find_value(&mut *txn, &vni.to_string())
+        .await?
+        .into_iter()
+        .find(|entry| entry.pool_name == env.common_pools.ethernet.pool_vni.name())
+        .expect("segment VNI must remain in its pool");
+    assert_eq!(vni_entry.state.0, ResourcePoolEntryState::Free);
     assert_eq!(
         db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
         ResourcePoolStats {

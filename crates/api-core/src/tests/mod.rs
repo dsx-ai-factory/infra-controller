@@ -82,6 +82,7 @@ mod site_explorer;
 mod site_prefix;
 mod sku;
 mod spdm;
+mod spx_partition;
 mod switch;
 mod tenant_identity_config;
 mod tenant_prefix_startup;

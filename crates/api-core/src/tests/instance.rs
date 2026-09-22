@@ -66,6 +66,7 @@ use model::network_segment::{
     NetworkSegmentControllerState, NetworkSegmentSearchConfig, NetworkSegmentType,
     NewNetworkSegment,
 };
+use model::resource_pool::{OwnerType, ResourcePoolEntryState};
 use model::tenant::TenantOrganizationId;
 use model::test_support::ManagedHostConfig;
 use model::vpc_prefix::VpcPrefixConfig;
@@ -5990,6 +5991,26 @@ async fn test_fnn_vrf_loopbacks_are_per_vpc_for_pf_and_vf_on_one_dpu(pool: sqlx:
         .unwrap()
         .expect("retained PF VPC loopback should remain");
     assert_eq!(retained_loopback.loopback_ip.to_string(), first_loopback);
+    let retained_entry = db::resource_pool::find_value(&mut *txn, &first_loopback)
+        .await
+        .expect("find retained PF loopback allocation")
+        .into_iter()
+        .find(|entry| entry.pool_name == env.common_pools.ethernet.pool_vpc_dpu_loopback_ip.name())
+        .expect("retained PF loopback pool entry");
+    assert_eq!(
+        retained_entry.state.0,
+        ResourcePoolEntryState::Allocated {
+            owner: dpu_id.to_string(),
+            owner_type: OwnerType::Machine.to_string(),
+        }
+    );
+    let removed_entry = db::resource_pool::find_value(&mut *txn, &second_loopback)
+        .await
+        .expect("find removed VF loopback allocation")
+        .into_iter()
+        .find(|entry| entry.pool_name == env.common_pools.ethernet.pool_vpc_dpu_loopback_ip.name())
+        .expect("removed VF loopback must remain in its pool");
+    assert_eq!(removed_entry.state.0, ResourcePoolEntryState::Free);
     assert!(
         db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_id, &second_vpc)
             .await

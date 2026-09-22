@@ -3805,12 +3805,17 @@ async fn vpc_deletion_rejects_inconsistent_owned_allocations(
                     .as_ref()
                     .and_then(|status| status.vni)
                     .expect("created VPC has an active VNI");
-                db::resource_pool::release(
-                    &env.common_pools.ethernet.pool_vpc_vni,
-                    &mut txn,
-                    i32::try_from(active_vni)?,
-                )
-                .await?;
+                assert_eq!(
+                    db::resource_pool::release(
+                        &env.common_pools.ethernet.pool_vpc_vni,
+                        &mut txn,
+                        i32::try_from(active_vni)?,
+                        OwnerType::Vpc,
+                        &vpc_id.to_string(),
+                    )
+                    .await?,
+                    db::ConditionalWrite::Applied(()),
+                );
                 &env.common_pools.ethernet.pool_external_vpc_vni
             }
             AllocationState::DuplicateActivePool => &env.common_pools.ethernet.pool_vpc_vni,

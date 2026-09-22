@@ -761,7 +761,17 @@ async fn exact_overlap_requires_one_matching_vni_allocation_per_vpc(
                     )
                     .await?;
                 }
-                db::resource_pool::release(internal_pool, &mut txn, active_vni).await?;
+                assert_eq!(
+                    db::resource_pool::release(
+                        internal_pool,
+                        &mut txn,
+                        active_vni,
+                        OwnerType::Vpc,
+                        &candidate_vpc.to_string(),
+                    )
+                    .await?,
+                    db::ConditionalWrite::Applied(()),
+                );
             }
             AllocationChange::RetainedExisting | AllocationChange::DuplicateExisting => {
                 let extra_pool = match change {
