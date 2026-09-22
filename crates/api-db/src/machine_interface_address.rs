@@ -439,11 +439,19 @@ pub struct ReservedAddress {
 /// the intent so a later teardown parks the address regardless of the current
 /// `ExpectedMachine` declaration. Returns whether a row was marked. Idempotent:
 /// re-marking an already-marked row is a no-op that still reports success.
+///
+/// The interface is locked first, on the same row lock [`park_reserved`] and
+/// interface teardown take. Without it a mark could commit between a concurrent
+/// teardown's park and its address delete: the mark would report success while
+/// the delete removed the freshly marked row, silently losing the reservation.
+/// Holding the lock forces the mark to either land before teardown (so the park
+/// preserves it) or observe the deleted interface and report `false`.
 pub async fn mark_reserved(
     txn: &mut PgConnection,
     interface_id: MachineInterfaceId,
     family: IpAddressFamily,
 ) -> Result<bool, DatabaseError> {
+    lock_interface_for_deletion(&mut *txn, interface_id).await?;
     let query = "UPDATE machine_interface_addresses AS mia
         SET reserved_by_mac = mi.mac_address
         FROM machine_interfaces AS mi
@@ -1612,6 +1620,63 @@ mod tests {
         assert!(find_by_address(txn.as_mut(), v4).await?.is_none());
 
         txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A mark that races an interface teardown must serialize behind the same
+    /// interface lock the teardown holds. Once the teardown commits, the mark
+    /// observes the deleted interface, reports `false`, and creates no
+    /// reservation, so the wiped address cannot reappear as a parked owner.
+    #[crate::sqlx_test]
+    async fn mark_blocks_on_concurrent_interface_deletion(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('mark-races-deletion', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *setup)
+        .await?;
+        let mac: MacAddress = "02:00:00:00:00:34".parse()?;
+        let interface_id = create_test_interface(&mut setup, segment_id, mac, "mark-race").await?;
+        let address: IpAddr = "192.0.2.63".parse()?;
+        insert(&mut setup, interface_id, address, AllocationType::Static).await?;
+        setup.commit().await?;
+
+        // The teardown holds the interface lock through its park and delete.
+        let mut holder = pool.begin().await?;
+        crate::machine_interface::delete(&interface_id, &mut holder, false).await?;
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await?;
+
+        let mut waiter = pool.begin().await?;
+        let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *waiter)
+            .await?;
+
+        let mark = async {
+            let marked = mark_reserved(&mut waiter, interface_id, IpAddressFamily::Ipv4).await?;
+            waiter.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(marked)
+        };
+        let teardown = async {
+            wait_for_interface_lock(&pool, holder_pid, waiter_pid).await?;
+            holder.commit().await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let (mark_result, teardown_result) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(mark, teardown)
+        })
+        .await?;
+        teardown_result?;
+        // The interface is gone, so nothing was marked.
+        assert!(!mark_result?);
+
+        let mut connection = pool.acquire().await?;
+        assert!(find_reserved(&mut connection, None, None).await?.is_empty());
+        assert!(find_by_address(&mut *connection, address).await?.is_none());
         Ok(())
     }
 }
