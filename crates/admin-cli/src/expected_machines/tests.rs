@@ -526,6 +526,32 @@ fn has_duplicate_dpu_serials_flags_repeats() {
     );
 }
 
+#[test]
+fn standalone_boolean_patches_preserve_explicit_false() {
+    scenarios!(
+        run = |(flag, field): (&str, &str)| -> Result<Option<bool>, ErrorKind> {
+            let matches = parse_leaf::<Cmd>(
+                &[
+                    "expected-machine",
+                    "patch",
+                    "--bmc-mac-address",
+                    "00:11:22:33:44:55",
+                    flag,
+                    "false",
+                ],
+                &["patch"],
+            )
+            .map_err(|error| error.kind())?;
+            Ok(matches.get_one::<bool>(field).copied())
+        };
+        "each boolean is a complete patch" {
+            ("--bmc-retain-credentials", "bmc_retain_credentials") => Yields(Some(false)),
+            ("--default_pause_ingestion_and_poweron", "default_pause_ingestion_and_poweron") => Yields(Some(false)),
+            ("--disable-lockdown", "disable_lockdown") => Yields(Some(false)),
+        }
+    );
+}
+
 // validate_patch_with_dpu_serials ensures patch validate()
 // passes with unique DPU serials.
 #[test]
@@ -714,9 +740,6 @@ fn parse_add_rejects_invalid_dpu_policy() {
     );
 }
 
-// `patch --dpu-policy nic`
-// alone (no other patchable fields) satisfies clap's ArgGroup and the
-// `Args::validate()` "at least one field" check.
 #[test]
 fn validate_patch_with_dpu_policy_only() {
     let cmd = Cmd::try_parse_from([
@@ -883,9 +906,6 @@ fn parse_add_rejects_invalid_bmc_ip_allocation() {
     );
 }
 
-// `patch --bmc-ip-allocation retained` alone (no other patchable fields) must
-// satisfy clap's ArgGroup and `Args::validate()`'s "at least one field" check.
-// A patch that sets only this field.
 #[test]
 fn validate_patch_with_bmc_ip_allocation_only() {
     let cmd = Cmd::try_parse_from([

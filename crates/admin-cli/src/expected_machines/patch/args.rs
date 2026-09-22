@@ -44,6 +44,7 @@ use crate::expected_machines::common::HostDpuPolicy;
 #[clap(group(ArgGroup::new("group").required(true).multiple(true).args(&[
 "bmc_username",
 "bmc_password",
+"bmc_retain_credentials",
 "chassis_serial_number",
 "fallback_dpu_serial_numbers",
 "meta_name",
@@ -54,7 +55,9 @@ use crate::expected_machines::common::HostDpuPolicy;
 "dpu_policy",
 "bmc_ip_allocation",
 "dpf_enabled",
+"default_pause_ingestion_and_poweron",
 "interfaces",
+"disable_lockdown",
 ])))]
 #[command(after_long_help = "\
 EXAMPLES:
@@ -255,27 +258,6 @@ impl Args {
                 ));
             }
             _ => {}
-        }
-        // TODO: It is possible to do these checks by clap itself, via arg groups
-        if self.bmc_username.is_none()
-            && self.bmc_password.is_none()
-            && self.chassis_serial_number.is_none()
-            && self.fallback_dpu_serial_numbers.is_none()
-            && self.meta_name.is_none()
-            && self.meta_description.is_none()
-            && self.labels.is_none()
-            && self.sku_id.is_none()
-            && self.rack_id.is_none()
-            && self.dpf_enabled.is_none()
-            && self.bmc_ip_address.is_none()
-            && self.dpu_policy.is_none()
-            && self.bmc_ip_allocation.is_none()
-            && self.interfaces.is_none()
-        {
-            return Err(error(
-                ErrorKind::MissingRequiredArgument,
-                "one of the following options must be specified: bmc-username and bmc-password or chassis-serial-number or fallback-dpu-serial-number or meta-name or meta-description or label or sku-id or rack-id or bmc-ip-address or dpu-policy or bmc-ip-allocation or dpf-enabled or interfaces",
-            ));
         }
         if self
             .fallback_dpu_serial_numbers

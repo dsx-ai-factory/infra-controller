@@ -174,6 +174,26 @@ async fn machine_flags_select_only_supplied_fields() {
             },
         },
         Case {
+            scenario: "standalone lockdown false selects only the nested lifecycle field",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--disable-lockdown",
+                "false",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["host_lifecycle_profile.disable_lockdown"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: Some(false),
+                }),
+                ..Default::default()
+            },
+        },
+        Case {
             scenario: "interface replacement sends omitted policies and explicit resets to Core",
             args: vec![
                 "expected-machine",
