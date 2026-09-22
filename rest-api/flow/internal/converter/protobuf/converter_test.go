@@ -552,6 +552,7 @@ func TestComponentConverter(t *testing.T) {
 		Type:            devicetypes.ComponentTypeCompute,
 		Info:            deviceinfo.NewRandom("TestComponent", 6),
 		FirmwareVersion: "1.0.0",
+		ComponentID:     "machine-123",
 		RackExternalID:  "rack-external-1",
 		Position: component.InRackPosition{
 			SlotID:    26,
@@ -579,6 +580,7 @@ func TestComponentConverter(t *testing.T) {
 			HostId:  int32(shared.Position.HostID),
 		},
 		Bmcs:           make([]*pb.BMCInfo, 0),
+		ComponentId:    shared.ComponentID,
 		NvlDomainId:    &pb.UUID{Id: domainID.String()},
 		RackExternalId: shared.RackExternalID,
 	}
