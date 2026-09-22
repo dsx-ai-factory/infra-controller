@@ -26,7 +26,7 @@ deployments the file is rendered from chart values, so the settings on this page
 TOML that those values produce.
 
 Canonical field reference for all NICo settings:
-[`crates/api-core/src/cfg/README.md`](https://github.com/NVIDIA/infra-controller/blob/main/crates/api-core/src/cfg/README.md).
+[`crates/api-core/src/cfg/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md).
 
 ---
 
