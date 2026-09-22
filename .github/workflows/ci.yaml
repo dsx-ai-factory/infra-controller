@@ -1784,6 +1784,8 @@ jobs:
               values = yaml.safe_load(stream)
           print(yaml.safe_dump({"scrape_configs": values["prometheus"]["prometheusSpec"]["additionalScrapeConfigs"]}))
           PYCONFIG
+          PROMTOOL="${RUNNER_TEMP}/prometheus-${prometheus_version}.linux-amd64/promtool" \
+            /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_ipv6_scraping.py'
 
       - name: Check Core VIP preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
