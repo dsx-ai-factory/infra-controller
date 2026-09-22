@@ -1279,6 +1279,21 @@ mod rbac_rule_tests {
         ));
     }
 
+    /// machine-a-tron simulates Scout agents for its managed machines, so its
+    /// service certificate must be accepted by the Scout streaming endpoint.
+    #[test]
+    fn machine_a_tron_can_open_scout_streams() {
+        let machine_a_tron = Principal::SpiffeServiceIdentifier("machine-a-tron".to_string());
+        assert!(InternalRBACRules::allowed_from_static(
+            "ScoutStream",
+            &[machine_a_tron],
+        ));
+        assert!(!InternalRBACRules::allowed_from_static(
+            "ScoutStream",
+            &[Principal::SpiffeServiceIdentifier("nico-dns".to_string())],
+        ));
+    }
+
     #[test]
     fn admin_cli_can_create_network_segments() {
         assert!(InternalRBACRules::allowed_from_static(
