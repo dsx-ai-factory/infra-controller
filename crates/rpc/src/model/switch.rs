@@ -91,7 +91,6 @@ impl TryFrom<rpc::SwitchConfig> for SwitchConfig {
 impl TryFrom<Switch> for rpc::Switch {
     type Error = RpcDataConversionError;
 
-    #[allow(deprecated)]
     fn try_from(src: Switch) -> Result<Self, Self::Error> {
         let health = derive_switch_aggregate_health(&src.health_reports);
         let fabric_manager_status = src
@@ -190,6 +189,7 @@ impl TryFrom<Switch> for rpc::Switch {
             deleted,
             controller_state,
             bmc_info: src.bmc_info.map(Into::into),
+            #[allow(deprecated)]
             nvos_info: None,
             nvlink_domain_uuid: src.nvlink_domain_uuid,
             state_version,
