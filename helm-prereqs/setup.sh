@@ -135,9 +135,6 @@
 #   ./setup.sh -y                       # skip all prompts, deploy everything automatically
 #   ./setup.sh --skip-core              # skip Phase 6 NICo Core (print command, deploy manually)
 #   ./setup.sh --skip-rest              # skip Phase 7 NICo REST entirely (no repo needed)
-#   ./setup.sh --skip-flow              # skip Phase 7h NICo Flow (REST still installs)
-#                                       #   pair with helm-prereqs/values.yaml::flow.enabled=false
-#                                       #   to skip Flow prerequisites (database / ESO) too
 #   ./setup.sh --skip-rms               # skip the Rack Manager Service (installed by default otherwise)
 #   ./setup.sh --skip-core --skip-rest  # fully non-interactive infra-only run
 #   ./setup.sh --core-values /path/to/values.yaml      # use site-specific values for Phase 6
@@ -186,7 +183,6 @@ cd "${SCRIPT_DIR}"
 AUTO_YES=false
 SKIP_CORE=false
 SKIP_REST=false
-SKIP_FLOW=false
 # DPF (DOCA Platform Framework) DPU provisioning installs by DEFAULT. Opt out
 # with --skip-dpf or NICO_SKIP_DPF=true (e.g. sites with no DPUs, or that still
 # use the deprecated iPXE DPU path). NICO_INSTALL_DPF=false is honored too.
@@ -207,7 +203,6 @@ while [[ $# -gt 0 ]]; do
         -y)             AUTO_YES=true  ;;
         --skip-core)    SKIP_CORE=true ;;
         --skip-rest)    SKIP_REST=true ;;
-        --skip-flow)    SKIP_FLOW=true ;;
         --install-dpf)  INSTALL_DPF=true ;;   # explicit; DPF is the default
         --skip-dpf)     INSTALL_DPF=false ;;
         --install-rms)  INSTALL_RMS=true ;;   # explicit; RMS is the default
@@ -230,7 +225,7 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-flow] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
@@ -240,7 +235,7 @@ done
 # (in-tree rest-api/) and NICO_REST_HELM_DIR (in-tree helm/rest/). Exits 1 if
 # user declines to continue.
 # ---------------------------------------------------------------------------
-export AUTO_YES SKIP_CORE SKIP_REST SKIP_FLOW INSTALL_DPF INSTALL_RMS
+export AUTO_YES SKIP_CORE SKIP_REST INSTALL_DPF INSTALL_RMS
 # Validate INSTALL_DPF BEFORE sourcing preflight — preflight gates its DPF
 # checks on INSTALL_DPF==true, so a garbage NICO_INSTALL_DPF would otherwise
 # silently skip those checks before erroring here.
@@ -2275,105 +2270,101 @@ fi
 # Same pre-apply-cert dance as the site-agent: render the Certificate(s) ahead
 # of the helm install so cert-manager has time to issue them and the pod doesn't
 # hit a FailedMount race on the spiffe / temporal-client-certs secrets.
-if "${SKIP_FLOW}"; then
-    echo "=== [7h/7] NICo Flow — skipped (--skip-flow) ==="
-else
-    _SETUP_PHASE="[7h/7] NICo Flow"
-    echo "=== [7h/7] NICo Flow ==="
+_SETUP_PHASE="[7h/7] NICo Flow"
+echo "=== [7h/7] NICo Flow ==="
 
-    NICO_FLOW_CHART="${SCRIPT_DIR}/../helm/charts/nico-flow"
-    NICO_FLOW_NAMESPACE="flow"
+NICO_FLOW_CHART="${SCRIPT_DIR}/../helm/nico-flow"
+NICO_FLOW_NAMESPACE="flow"
 
-    NICO_FLOW_ARGS=(
-        --namespace "${NICO_FLOW_NAMESPACE}"
-        --create-namespace
-        --set "global.image.repository=${NICO_IMAGE_REGISTRY}"
-        ## Flow ships on the same image release line as NICo REST, so reuse
-        ## NICO_REST_IMAGE_TAG rather than NICO_CORE_IMAGE_TAG.
-        --set "global.image.tag=${NICO_REST_IMAGE_TAG}"
+NICO_FLOW_ARGS=(
+    --namespace "${NICO_FLOW_NAMESPACE}"
+    --create-namespace
+    --set "global.image.repository=${NICO_IMAGE_REGISTRY}"
+    ## Flow ships on the same image release line as NICo REST, so reuse
+    ## NICO_REST_IMAGE_TAG rather than NICO_CORE_IMAGE_TAG.
+    --set "global.image.tag=${NICO_REST_IMAGE_TAG}"
+)
+
+# Render the dockerconfigjson for the chart-managed image-pull-secret. Same
+# pattern as the NICo REST common chart - keep the registry credential on
+# the helm command line so the chart template can install it as a
+# pre-install hook (pod can't pull from nvcr.io otherwise).
+if [[ -n "${REGISTRY_PULL_SECRET:-}" ]]; then
+    _flow_registry_server="${NICO_IMAGE_REGISTRY%%/*}"
+    _flow_docker_cfg="$(printf '{"auths":{"%s":{"username":"%s","password":"%s"}}}' \
+        "${_flow_registry_server}" \
+        "${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
+        "${REGISTRY_PULL_SECRET}" | base64 | tr -d '\n')"
+    NICO_FLOW_ARGS+=(
+        --set "global.imagePullSecrets[0].name=image-pull-secret"
+        --set "imagePullSecret.dockerconfigjson=${_flow_docker_cfg}"
     )
-
-    # Render the dockerconfigjson for the chart-managed image-pull-secret. Same
-    # pattern as the NICo REST common chart — keep the registry credential on
-    # the helm command line so the chart template can install it as a
-    # pre-install hook (pod can't pull from nvcr.io otherwise).
-    if [[ -n "${REGISTRY_PULL_SECRET:-}" ]]; then
-        _flow_registry_server="${NICO_IMAGE_REGISTRY%%/*}"
-        _flow_docker_cfg="$(printf '{"auths":{"%s":{"username":"%s","password":"%s"}}}' \
-            "${_flow_registry_server}" \
-            "${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
-            "${REGISTRY_PULL_SECRET}" | base64 | tr -d '\n')"
-        NICO_FLOW_ARGS+=(
-            --set "global.imagePullSecrets[0].name=image-pull-secret"
-            --set "imagePullSecret.dockerconfigjson=${_flow_docker_cfg}"
-        )
-    fi
-
-    # Pre-apply Certificates so cert-manager can issue secrets before the pod schedules.
-    echo "Pre-applying flow Certificates (SPIFFE + Temporal client)..."
-    helm template flow "${NICO_FLOW_CHART}" \
-        "${NICO_FLOW_ARGS[@]}" \
-        --show-only templates/namespace.yaml | kubectl apply -f -
-    helm template flow "${NICO_FLOW_CHART}" \
-        "${NICO_FLOW_ARGS[@]}" \
-        --show-only templates/certificate.yaml | kubectl apply -f -
-    kubectl annotate certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-        "meta.helm.sh/release-name=flow" \
-        "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-    kubectl annotate certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-        "meta.helm.sh/release-name=flow" \
-        "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-    kubectl label certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-        "app.kubernetes.io/managed-by=Helm" --overwrite
-    kubectl label certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-        "app.kubernetes.io/managed-by=Helm" --overwrite
-
-    # Annotate/label the namespace itself so the Flow release can adopt the
-    # namespace created before the main helm install.
-    kubectl annotate namespace "${NICO_FLOW_NAMESPACE}" \
-        "meta.helm.sh/release-name=flow" \
-        "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-    kubectl label namespace "${NICO_FLOW_NAMESPACE}" \
-        "app.kubernetes.io/managed-by=Helm" --overwrite
-
-    echo "Waiting for cert-manager to issue flow-certificate..."
-    kubectl wait --for=condition=Ready certificate/flow-certificate \
-        -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
-    echo "Waiting for cert-manager to issue temporal-client-certs..."
-    kubectl wait --for=condition=Ready certificate/temporal-client-certs \
-        -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
-
-    # Wait for the Flow DB credential ESO sync to land. Fail fast if the Secret
-    # never appears instead of allowing the helm install to enter an opaque
-    # FailedMount loop.
-    _wait_for_secret() {
-        local _name="$1"
-        local _ns="$2"
-        local _hint="$3"
-        for _i in $(seq 1 24); do
-            if kubectl get secret "${_name}" -n "${_ns}" >/dev/null 2>&1; then
-                echo "  ${_name} ready"
-                return 0
-            fi
-            echo "  Waiting for ${_name} (${_i}/24)..."
-            sleep 5
-        done
-        echo "ERROR: Secret ${_name} did not appear in namespace ${_ns} within 120s."
-        echo "  ${_hint}"
-        return 1
-    }
-
-    echo "Waiting for Flow DB credentials..."
-    _wait_for_secret "flow.nico.nico-pg-cluster.credentials" \
-        "${NICO_FLOW_NAMESPACE}" \
-        "Synced by the flow-db-eso ClusterExternalSecret in nico-prereqs. Check 'kubectl describe clusterexternalsecret flow-db-eso' and confirm helm-prereqs/values.yaml::flow.enabled=true."
-
-    echo "Installing flow helm chart..."
-    helm upgrade --install flow "${NICO_FLOW_CHART}" \
-        "${NICO_FLOW_ARGS[@]}" \
-        --timeout 300s --wait
-    echo "NICo Flow deployed"
 fi
+
+# Pre-apply Certificates so cert-manager can issue secrets before the pod schedules.
+echo "Pre-applying flow Certificates (SPIFFE + Temporal client)..."
+helm template flow "${NICO_FLOW_CHART}" \
+    "${NICO_FLOW_ARGS[@]}" \
+    --show-only templates/namespace.yaml | kubectl apply -f -
+helm template flow "${NICO_FLOW_CHART}" \
+    "${NICO_FLOW_ARGS[@]}" \
+    --show-only templates/certificate.yaml | kubectl apply -f -
+kubectl annotate certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
+    "meta.helm.sh/release-name=flow" \
+    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
+kubectl annotate certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
+    "meta.helm.sh/release-name=flow" \
+    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
+kubectl label certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
+    "app.kubernetes.io/managed-by=Helm" --overwrite
+kubectl label certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
+    "app.kubernetes.io/managed-by=Helm" --overwrite
+
+# Annotate/label the namespace itself so the Flow release can adopt the
+# namespace created before the main helm install.
+kubectl annotate namespace "${NICO_FLOW_NAMESPACE}" \
+    "meta.helm.sh/release-name=flow" \
+    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
+kubectl label namespace "${NICO_FLOW_NAMESPACE}" \
+    "app.kubernetes.io/managed-by=Helm" --overwrite
+
+echo "Waiting for cert-manager to issue flow-certificate..."
+kubectl wait --for=condition=Ready certificate/flow-certificate \
+    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+echo "Waiting for cert-manager to issue temporal-client-certs..."
+kubectl wait --for=condition=Ready certificate/temporal-client-certs \
+    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+
+# Wait for the Flow DB credential ESO sync to land. Fail fast if the Secret
+# never appears instead of allowing the helm install to enter an opaque
+# FailedMount loop.
+_wait_for_secret() {
+    local _name="$1"
+    local _ns="$2"
+    local _hint="$3"
+    for _i in $(seq 1 24); do
+        if kubectl get secret "${_name}" -n "${_ns}" >/dev/null 2>&1; then
+            echo "  ${_name} ready"
+            return 0
+        fi
+        echo "  Waiting for ${_name} (${_i}/24)..."
+        sleep 5
+    done
+    echo "ERROR: Secret ${_name} did not appear in namespace ${_ns} within 120s."
+    echo "  ${_hint}"
+    return 1
+}
+
+echo "Waiting for Flow DB credentials..."
+_wait_for_secret "flow.nico.nico-pg-cluster.credentials" \
+    "${NICO_FLOW_NAMESPACE}" \
+    "Synced by the flow-db-eso ClusterExternalSecret in nico-prereqs. Check 'kubectl describe clusterexternalsecret flow-db-eso'. Flow is mandatory: sites running an external PostgreSQL (helm-prereqs postgresql.enabled=false) must provision a flow database and create this Secret in the '${NICO_FLOW_NAMESPACE}' namespace themselves before running setup.sh."
+
+echo "Installing flow helm chart..."
+helm upgrade --install flow "${NICO_FLOW_CHART}" \
+    "${NICO_FLOW_ARGS[@]}" \
+    --timeout 300s --wait
+echo "NICo Flow deployed"
 
 # --- 7i. NICo REST site-agent -------------------------------------------------
 # The site-agent is a separate chart from the main NICo REST umbrella.
@@ -2567,13 +2558,9 @@ echo "Temporal namespace ready"
 # FLOW_GRPC_ENABLED toggles the site-agent's Flow gRPC client (see
 # carbide-rest/site-agent/pkg/components/config/config_manager.go —
 # strings.ToLower(env)=="true"). Without it, site-agent never opens a
-# connection to the Flow pod deployed in phase 7h. We default it ON when
-# Flow itself is being deployed; users can flip it back via --set when
-# pairing --skip-flow.
+# connection to the Flow pod deployed in phase 7h. Phase 7h has no skip flag
+# and runs whenever REST is installed, so this is always on.
 _FLOW_GRPC_ENABLED="true"
-if "${SKIP_FLOW}"; then
-    _FLOW_GRPC_ENABLED="false"
-fi
 
 helm upgrade --install nico-rest-site-agent "${NICO_SITE_AGENT_CHART}" \
     "${NICO_SITE_AGENT_ARGS[@]}" \

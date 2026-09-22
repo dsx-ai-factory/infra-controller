@@ -25,10 +25,10 @@ fmt:
 	go fmt ./...
 
 docker-build:
-	docker build -t mat-k8s-controller:$(TAG) .
+	docker build -f Dockerfile -t mat-k8s-controller:$(TAG) ../../..
 
 docker-build-latest:
-	docker build -t mat-k8s-controller:latest .
+	docker build -f Dockerfile -t mat-k8s-controller:latest ../../..
 
 clean:
 	rm -rf bin/ coverage.out coverage.html
