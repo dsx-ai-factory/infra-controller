@@ -22,6 +22,7 @@ use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, HealthReportEntry};
 use carbide_uuid::machine::MachineInterfaceId;
 use carbide_uuid::switch::SwitchId;
+use db::db_read::DbReader;
 use db::{ObjectColumnFilter, switch as db_switch};
 use health_report::HealthReportApplyMode;
 use mac_address::MacAddress;
@@ -70,10 +71,10 @@ fn switch_nvos_address(ip: IpAddr) -> rpc::IpAddress {
 /// by switch ID and MAC address so that rows for each MAC are contiguous.
 /// Noncontiguous rows for one MAC would produce duplicate port entries.
 async fn load_switch_nvos_info(
-    txn: &mut PgConnection,
+    db: impl DbReader<'_>,
     switch_ids: &[SwitchId],
 ) -> Result<HashMap<SwitchId, Vec<rpc::SwitchNvosPortInfo>>, CarbideError> {
-    let rows = db_switch::find_switch_nvos_endpoints_by_ids(txn, switch_ids).await?;
+    let rows = db_switch::find_switch_nvos_endpoints_by_ids(db, switch_ids).await?;
     let mut nvos_info_by_switch: HashMap<SwitchId, Vec<rpc::SwitchNvosPortInfo>> = HashMap::new();
 
     for row in rows {
@@ -190,7 +191,7 @@ pub(crate) async fn find_switch(
     let mut nvos_info_by_switch = if switch_ids.is_empty() {
         HashMap::new()
     } else {
-        load_switch_nvos_info(txn.as_mut(), &switch_ids)
+        load_switch_nvos_info(&mut *txn, &switch_ids)
             .await
             .map_err(|e| CarbideError::Internal {
                 message: format!("Failed to get switch NVOS endpoint info: {}", e),
@@ -261,7 +262,7 @@ pub(crate) async fn find_by_ids(
     )
     .await?;
 
-    let mut nvos_info_by_switch = load_switch_nvos_info(txn.as_mut(), &switch_ids)
+    let mut nvos_info_by_switch = load_switch_nvos_info(txn.as_pgconn(), &switch_ids)
         .await
         .map_err(|e| CarbideError::Internal {
             message: format!("Failed to get switch NVOS endpoint info: {}", e),
