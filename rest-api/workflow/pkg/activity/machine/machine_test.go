@@ -1680,6 +1680,78 @@ func TestManageMachine_UpdateMachinesInDB_AddresslessInterface(t *testing.T) {
 	assert.Empty(t, machineInterfaces[0].IPAddresses)
 }
 
+// A reconcile stamps every Machine it writes with the time the reconcile started, and the
+// staleness guard reads that same column. Stamping each statement's own time instead left the
+// write less than one interval old when the next snapshot arrived, so the guard rejected the
+// reconciler's own write as an external change and the fleet reconciled on alternating cycles.
+func TestManageMachine_UpdateMachinesInDB_ReconcilesEveryCycle(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testMachineInitDB(t)
+	defer dbSession.Close()
+	testMachineSetupSchema(t, dbSession)
+
+	ip := testMachineBuildInfrastructureProvider(t, dbSession, "test-ip-org", "test-ip")
+	site := testMachineBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered)
+
+	machineIDs := []string{uuid.NewString(), uuid.NewString()}
+	inventoryReporting := func(vendor string) *corev1.MachineInventory {
+		machines := make([]*corev1.MachineInfo, 0, len(machineIDs))
+		for _, id := range machineIDs {
+			machines = append(machines, &corev1.MachineInfo{
+				Machine: &corev1.Machine{
+					Id:    &corev1.MachineId{Id: id},
+					State: controllerMachineStatePrefixReady,
+					Status: &corev1.MachineStatus{
+						DiscoveryInfo: &corev1.DiscoveryInfo{
+							DmiData: &corev1.DmiData{SysVendor: vendor},
+						},
+					},
+				},
+			})
+		}
+
+		return &corev1.MachineInventory{Machines: machines, Timestamp: timestamppb.Now()}
+	}
+
+	mDAO := cdbm.NewMachineDAO(dbSession)
+	readVendors := func() []string {
+		vendors := make([]string, 0, len(machineIDs))
+		for _, id := range machineIDs {
+			got, err := mDAO.GetByID(ctx, nil, id, nil, false)
+			require.NoError(t, err)
+			require.NotNil(t, got.Vendor)
+			vendors = append(vendors, *got.Vendor)
+		}
+
+		return vendors
+	}
+
+	mm := NewManageMachine(dbSession, nil)
+	require.NoError(t, mm.UpdateMachinesInDB(ctx, site.ID.String(), inventoryReporting("first-vendor")))
+	require.Equal(t, []string{"first-vendor", "first-vendor"}, readVendors())
+
+	// One reconcile anchors every Machine it writes to a single time, so the guard treats the
+	// whole cycle as one event rather than as a spread of per-statement writes.
+	firstPass, err := mDAO.GetByID(ctx, nil, machineIDs[0], nil, false)
+	require.NoError(t, err)
+	secondPass, err := mDAO.GetByID(ctx, nil, machineIDs[1], nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, firstPass.Updated, secondPass.Updated, "want one anchor for the whole reconcile")
+
+	// Age both Machines by exactly one interval to put the next snapshot where the real cadence
+	// puts it. Temporal cron can delay a cycle but never advance it, so this is the closest two
+	// cycles ever are.
+	_, err = dbSession.DB.NewUpdate().
+		Model((*cdbm.Machine)(nil)).
+		Set("updated = updated - ?::interval", cutil.DefaultInventoryReceiptInterval.String()).
+		Where("1 = 1").
+		Exec(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, mm.UpdateMachinesInDB(ctx, site.ID.String(), inventoryReporting("second-vendor")))
+	assert.Equal(t, []string{"second-vendor", "second-vendor"}, readVendors(), "want the next cycle applied, not skipped as externally modified")
+}
+
 func TestNewManageMachine(t *testing.T) {
 	type args struct {
 		dbSession     *cdb.Session
