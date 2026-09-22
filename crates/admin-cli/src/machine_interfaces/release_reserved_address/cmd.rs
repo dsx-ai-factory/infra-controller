@@ -30,18 +30,18 @@ pub(super) async fn handle_release_reserved_address(
         .0
         .admin_release_reserved_addresses(forgerpc::AdminReleaseReservedAddressesRequest {
             reserved_by_mac: args.mac_address.map(|mac| mac.to_string()),
-            address: args.address.map(|address| address.to_string()),
+            ip_address: args.address.map(|address| address.to_string()),
         })
         .await?;
 
-    if resp.released_addresses.is_empty() {
+    if resp.released_ip_addresses.is_empty() {
         println!("No matching reserved addresses to release");
     } else {
         println!(
             "Released {} reserved address(es):",
-            resp.released_addresses.len()
+            resp.released_ip_addresses.len()
         );
-        for address in &resp.released_addresses {
+        for address in &resp.released_ip_addresses {
             println!("  {address}");
         }
     }

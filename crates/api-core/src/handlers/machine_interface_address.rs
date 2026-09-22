@@ -524,10 +524,10 @@ pub(crate) async fn admin_find_reserved_addresses(
     log_request_data(&request);
     let rpc::AdminFindReservedAddressesRequest {
         reserved_by_mac,
-        address,
+        ip_address,
     } = request.into_inner();
     let mac_filter = parse_reserved_mac_filter(reserved_by_mac)?;
-    let address_filter = parse_reserved_address_filter(address)?;
+    let address_filter = parse_reserved_address_filter(ip_address)?;
 
     let mut txn = api.txn_begin().await?;
     let reserved =
@@ -538,7 +538,7 @@ pub(crate) async fn admin_find_reserved_addresses(
     let reserved_addresses = reserved
         .into_iter()
         .map(|r| rpc::ReservedAddress {
-            address: r.address.to_string(),
+            ip_address: r.address.to_string(),
             reserved_by_mac: r.reserved_by_mac.to_string(),
             allocation_type: allocation_type_label(r.allocation_type),
         })
@@ -556,10 +556,10 @@ pub(crate) async fn admin_release_reserved_addresses(
     log_request_data(&request);
     let rpc::AdminReleaseReservedAddressesRequest {
         reserved_by_mac,
-        address,
+        ip_address,
     } = request.into_inner();
     let mac_filter = parse_reserved_mac_filter(reserved_by_mac)?;
-    let address_filter = parse_reserved_address_filter(address)?;
+    let address_filter = parse_reserved_address_filter(ip_address)?;
 
     // Require a scope so an operator cannot release every reservation at once.
     if mac_filter.is_none() && address_filter.is_none() {
@@ -579,7 +579,7 @@ pub(crate) async fn admin_release_reserved_addresses(
     txn.commit().await?;
 
     Ok(Response::new(rpc::AdminReleaseReservedAddressesResponse {
-        released_addresses: released.into_iter().map(|a| a.to_string()).collect(),
+        released_ip_addresses: released.into_iter().map(|a| a.to_string()).collect(),
     }))
 }
 
@@ -931,14 +931,14 @@ mod tests {
             &env.api,
             Request::new(rpc::AdminFindReservedAddressesRequest {
                 reserved_by_mac: None,
-                address: None,
+                ip_address: None,
             }),
         )
         .await?
         .into_inner();
         assert_eq!(listed.reserved_addresses.len(), 1);
         let reserved = &listed.reserved_addresses[0];
-        assert_eq!(reserved.address, parked.to_string());
+        assert_eq!(reserved.ip_address, parked.to_string());
         assert_eq!(reserved.reserved_by_mac, mac.to_string());
         assert_eq!(reserved.allocation_type, "static");
 
@@ -947,7 +947,7 @@ mod tests {
             &env.api,
             Request::new(rpc::AdminReleaseReservedAddressesRequest {
                 reserved_by_mac: None,
-                address: None,
+                ip_address: None,
             }),
         )
         .await;
@@ -958,18 +958,18 @@ mod tests {
             &env.api,
             Request::new(rpc::AdminReleaseReservedAddressesRequest {
                 reserved_by_mac: Some(mac.to_string()),
-                address: None,
+                ip_address: None,
             }),
         )
         .await?
         .into_inner();
-        assert_eq!(released.released_addresses, vec![parked.to_string()]);
+        assert_eq!(released.released_ip_addresses, vec![parked.to_string()]);
 
         let after = admin_find_reserved_addresses(
             &env.api,
             Request::new(rpc::AdminFindReservedAddressesRequest {
                 reserved_by_mac: None,
-                address: None,
+                ip_address: None,
             }),
         )
         .await?
