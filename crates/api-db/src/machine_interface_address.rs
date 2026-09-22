@@ -424,6 +424,137 @@ pub async fn insert_reserved(
     )))
 }
 
+/// A parked address reservation with no active interface, owned by its MAC.
+#[derive(Debug, FromRow, Clone, PartialEq, Eq)]
+pub struct ReservedAddress {
+    pub address: IpAddr,
+    pub reserved_by_mac: MacAddress,
+    pub allocation_type: AllocationType,
+}
+
+/// Mark an interface's address in `family` for cross-lifetime preservation by
+/// recording the interface's own MAC in `reserved_by_mac`.
+///
+/// The row stays active (its `interface_id` is unchanged); the marker records
+/// the intent so a later teardown parks the address regardless of the current
+/// `ExpectedMachine` declaration. Returns whether a row was marked. Idempotent:
+/// re-marking an already-marked row is a no-op that still reports success.
+pub async fn mark_reserved(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+    family: IpAddressFamily,
+) -> Result<bool, DatabaseError> {
+    let query = "UPDATE machine_interface_addresses AS mia
+        SET reserved_by_mac = mi.mac_address
+        FROM machine_interfaces AS mi
+        WHERE mia.interface_id = $1 AND mi.id = $1 AND family(mia.address) = $2";
+    sqlx::query(query)
+        .bind(interface_id)
+        .bind(family.pg_family())
+        .execute(txn)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Park every marked address of an interface before its row is deleted,
+/// converting each to a reservation owned by its MAC with no active interface.
+///
+/// Unmarked addresses are left in place for the caller's own row deletion. The
+/// interface is locked first so the park and the following delete see a stable
+/// row set. Returns the parked addresses.
+pub async fn park_reserved(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+) -> Result<Vec<IpAddr>, DatabaseError> {
+    lock_interface_for_deletion(&mut *txn, interface_id).await?;
+    let query = "UPDATE machine_interface_addresses
+        SET interface_id = NULL
+        WHERE interface_id = $1 AND reserved_by_mac IS NOT NULL
+        RETURNING address";
+    sqlx::query_scalar(query)
+        .bind(interface_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Re-own a parked reservation for `mac` in `family` by attaching it to a newly
+/// ingested interface.
+///
+/// The reservation keeps its MAC marker so it stays preserved across future
+/// teardowns. Callers must confirm the parked address is compatible with the
+/// interface's selected segment before restoring it. Returns the restored
+/// address if a parked reservation existed for the MAC and family.
+pub async fn restore_reserved(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+    mac_address: MacAddress,
+    family: IpAddressFamily,
+) -> Result<Option<IpAddr>, DatabaseError> {
+    let query = "UPDATE machine_interface_addresses
+        SET interface_id = $1
+        WHERE reserved_by_mac = $2::macaddr
+          AND family(address) = $3
+          AND interface_id IS NULL
+        RETURNING address";
+    sqlx::query_scalar(query)
+        .bind(interface_id)
+        .bind(mac_address)
+        .bind(family.pg_family())
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// List parked reservations, optionally narrowed to one MAC and/or address.
+///
+/// Only parked rows are returned (`interface_id IS NULL`); active interface
+/// addresses never appear. Ordered by MAC then family then address for a
+/// deterministic operator listing.
+pub async fn find_reserved(
+    txn: &mut PgConnection,
+    mac_address: Option<MacAddress>,
+    address: Option<IpAddr>,
+) -> Result<Vec<ReservedAddress>, DatabaseError> {
+    let query = "SELECT address, reserved_by_mac, allocation_type
+        FROM machine_interface_addresses
+        WHERE interface_id IS NULL AND reserved_by_mac IS NOT NULL
+          AND ($1::macaddr IS NULL OR reserved_by_mac = $1::macaddr)
+          AND ($2::inet IS NULL OR address = $2::inet)
+        ORDER BY reserved_by_mac, family(address), address";
+    sqlx::query_as(query)
+        .bind(mac_address)
+        .bind(address)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Release parked reservations matching the filter, making their addresses
+/// available to allocators again.
+///
+/// Only parked rows (`interface_id IS NULL`) are affected; active interface
+/// addresses are never released. At least one of `mac_address`/`address` should
+/// be supplied by callers to scope the release. Returns the released addresses.
+pub async fn release_reserved(
+    txn: &mut PgConnection,
+    mac_address: Option<MacAddress>,
+    address: Option<IpAddr>,
+) -> Result<Vec<IpAddr>, DatabaseError> {
+    let query = "DELETE FROM machine_interface_addresses
+        WHERE interface_id IS NULL AND reserved_by_mac IS NOT NULL
+          AND ($1::macaddr IS NULL OR reserved_by_mac = $1::macaddr)
+          AND ($2::inet IS NULL OR address = $2::inet)
+        RETURNING address";
+    sqlx::query_scalar(query)
+        .bind(mac_address)
+        .bind(address)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 /// Assign a static address to an interface. If the interface already
 /// has an address for the same family, the behavior depends on its
 /// allocation type:
@@ -1356,6 +1487,129 @@ mod tests {
             }
             error => panic!("expected an address-in-use error, got {error:?}"),
         }
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// The full marker-driven lifecycle: mark one family, delete the interface
+    /// so the marked address parks while the unmarked one is removed, then
+    /// restore the parked address onto a re-ingested interface for the same MAC.
+    #[crate::sqlx_test]
+    async fn mark_park_and_restore_lifecycle(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('mark-park-restore', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
+        let mac: MacAddress = "02:00:00:00:00:30".parse()?;
+        let interface_id = create_test_interface(&mut txn, segment_id, mac, "lifecycle").await?;
+
+        let v4: IpAddr = "192.0.2.60".parse()?;
+        let v6: IpAddr = "2001:db8::60".parse()?;
+        insert(&mut txn, interface_id, v4, AllocationType::Static).await?;
+        insert(&mut txn, interface_id, v6, AllocationType::Static).await?;
+
+        // Mark only the IPv6 address; IPv4 stays unmarked.
+        assert!(mark_reserved(&mut txn, interface_id, IpAddressFamily::Ipv6).await?);
+
+        // Deleting the interface parks the marked IPv6 and removes the IPv4.
+        crate::machine_interface::delete(&interface_id, &mut txn, false).await?;
+
+        assert!(find_by_address(txn.as_mut(), v4).await?.is_none());
+        let reserved = find_reserved(&mut txn, Some(mac), None).await?;
+        assert_eq!(
+            reserved,
+            vec![ReservedAddress {
+                address: v6,
+                reserved_by_mac: mac,
+                allocation_type: AllocationType::Static,
+            }]
+        );
+
+        // Another MAC cannot claim the parked reservation.
+        let other_segment_interface =
+            create_test_interface(&mut txn, segment_id, "02:00:00:00:00:31".parse()?, "other")
+                .await?;
+        assert!(
+            restore_reserved(
+                &mut txn,
+                other_segment_interface,
+                "02:00:00:00:00:31".parse()?,
+                IpAddressFamily::Ipv6,
+            )
+            .await?
+            .is_none()
+        );
+
+        // The same MAC re-ingests and reclaims its parked address.
+        let reingested = create_test_interface(&mut txn, segment_id, mac, "reingested").await?;
+        let restored = restore_reserved(&mut txn, reingested, mac, IpAddressFamily::Ipv6).await?;
+        assert_eq!(restored, Some(v6));
+        assert!(find_reserved(&mut txn, Some(mac), None).await?.is_empty());
+        let addresses = find_for_interface(&mut txn, reingested).await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, v6);
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// Releasing a parked reservation frees its address; active addresses are
+    /// never touched by a release.
+    #[crate::sqlx_test]
+    async fn release_reserved_frees_parked_addresses(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let mac: MacAddress = "02:00:00:00:00:32".parse()?;
+        let parked: IpAddr = "192.0.2.61".parse()?;
+        insert_reserved(&mut txn, mac, parked, AllocationType::Static).await?;
+
+        assert_eq!(
+            find_reserved(&mut txn, None, None).await?,
+            vec![ReservedAddress {
+                address: parked,
+                reserved_by_mac: mac,
+                allocation_type: AllocationType::Static,
+            }]
+        );
+
+        let released = release_reserved(&mut txn, Some(mac), None).await?;
+        assert_eq!(released, vec![parked]);
+        assert!(find_reserved(&mut txn, None, None).await?.is_empty());
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// A force wipe deletes the interface and releases its marked addresses
+    /// instead of parking them.
+    #[crate::sqlx_test]
+    async fn force_wipe_releases_marked_addresses(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('force-wipe-release', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
+        let mac: MacAddress = "02:00:00:00:00:33".parse()?;
+        let interface_id = create_test_interface(&mut txn, segment_id, mac, "wipe").await?;
+        let v4: IpAddr = "192.0.2.62".parse()?;
+        insert(&mut txn, interface_id, v4, AllocationType::Static).await?;
+        assert!(mark_reserved(&mut txn, interface_id, IpAddressFamily::Ipv4).await?);
+
+        crate::machine_interface::delete(&interface_id, &mut txn, true).await?;
+
+        assert!(find_reserved(&mut txn, None, None).await?.is_empty());
+        assert!(find_by_address(txn.as_mut(), v4).await?.is_none());
 
         txn.rollback().await?;
         Ok(())

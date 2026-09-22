@@ -480,6 +480,7 @@ async fn test_admin_force_delete_orders_locks_against_exploration(pool: sqlx::Pg
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
     });
@@ -563,6 +564,7 @@ async fn test_admin_force_delete_orders_endpoint_locks_by_address(pool: sqlx::Pg
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
     });
@@ -640,6 +642,7 @@ async fn test_admin_force_delete_orders_topology_before_endpoint(pool: sqlx::PgP
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
     });
@@ -983,6 +986,7 @@ fn force_delete_request(machine_id: &impl std::fmt::Display) -> AdminForceDelete
         allow_delete_with_orphaned_dpf_crds: false,
         delete_bmc_suppressions: false,
         delete_retained_boot_interfaces: false,
+        release_preserved_addresses: false,
     }
 }
 
@@ -1168,6 +1172,7 @@ async fn test_admin_force_delete_reads_instance_after_machine_lock(pool: sqlx::P
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
     });
@@ -1835,6 +1840,7 @@ async fn test_admin_force_delete_with_instance_type(pool: sqlx::PgPool) {
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
         .unwrap_err();
@@ -2006,6 +2012,7 @@ async fn test_admin_force_delete_retains_boot_interface_ids(pool: sqlx::PgPool) 
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
         .unwrap()
@@ -2093,6 +2100,7 @@ async fn test_admin_force_delete_clears_suppressions_and_retained_boot(pool: sql
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: true,
             delete_retained_boot_interfaces: true,
+            release_preserved_addresses: false,
         }))
         .await
         .unwrap()
