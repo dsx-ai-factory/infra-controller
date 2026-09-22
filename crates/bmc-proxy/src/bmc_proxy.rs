@@ -1057,11 +1057,6 @@ async fn serve_cached_get(
         CacheOutcome::Miss
     };
     let now = tokio::time::Instant::now();
-    let stale_fallback = || {
-        existing
-            .as_ref()
-            .filter(|entry| entry.usable_on_error(policy, now))
-    };
 
     match outcome {
         FetchOutcome::Fetched(entry) | FetchOutcome::Revalidated(entry) => Ok(answer_from_cache(
@@ -1076,8 +1071,10 @@ async fn serve_cached_get(
             headers,
             body,
         } => {
+            // A caller who asked for a live answer gets the BMC's failure,
+            // never a stored body; `fallback` is `None` for them.
             if status.is_server_error()
-                && let Some(entry) = stale_fallback()
+                && let Some(entry) = fallback
             {
                 return Ok(answer_from_cache(
                     class,
@@ -1101,7 +1098,7 @@ async fn serve_cached_get(
             forward_uncached(&state, target_ip, parts, class, path_and_query, fetched).await
         }
         FetchOutcome::Failed { status, message } => {
-            if let Some(entry) = stale_fallback() {
+            if let Some(entry) = fallback {
                 return Ok(answer_from_cache(
                     class,
                     CacheOutcome::StaleIfError,
@@ -4009,6 +4006,8 @@ mod tests {
         r#"{"Members":[{"@odata.id":"/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0"}]}"#;
     const INVENTORY_ETAG: &str = "\"inv-1\"";
     const SYSTEM_PATH: &str = "/redfish/v1/Systems/System_0";
+    const CHASSIS_PATH: &str = "/redfish/v1/Chassis/C0";
+    const CHASSIS_BODY: &str = r#"{"Id":"C0"}"#;
     const HUGE_PATH: &str = "/redfish/v1/UpdateService/FirmwareInventory/Huge";
     /// One byte past what the store accepts.
     const HUGE_LEN: usize = MAX_BUFFERED_BODY_SIZE + 1;
@@ -4060,6 +4059,9 @@ mod tests {
                 r#"{"PowerState":"On"}"#,
             )
                 .into_response(),
+            (Method::GET, CHASSIS_PATH) => {
+                ([(header::CONTENT_TYPE, "application/json")], CHASSIS_BODY).into_response()
+            }
             (Method::GET, HUGE_PATH) => (
                 [(header::CONTENT_TYPE, "application/json")],
                 vec![b'x'; HUGE_LEN],
@@ -4150,7 +4152,9 @@ mod tests {
     }
 
     /// The fake BMC's proxy: one cached class covers the firmware inventory
-    /// and is held off the cache for an hour after a firmware update post.
+    /// and is held off the cache for an hour after a firmware update post; a
+    /// second, whose entries expire at once, covers chassis so the fallback
+    /// for a failing BMC can be reached without a bypass.
     async fn proxy_in_front_of(upstream: SocketAddr) -> BmcProxyState {
         proxy_with_classes(
             upstream,
@@ -4161,6 +4165,12 @@ mod tests {
             match = ["GET /redfish/v1/UpdateService/FirmwareInventory/**"]
             upstream_timeout = "30s"
             cache = {{ ttl = "1h", stale_if_error = "1h", invalidated_by = ["POST /redfish/v1/UpdateService/**"], hold_after_write = "1h" }}
+
+            [[class]]
+            name = "e2e_volatile"
+            match = ["GET /redfish/v1/Chassis/**"]
+            upstream_timeout = "30s"
+            cache = {{ ttl = "1ms", stale_if_error = "1h" }}
             "#
             ),
         )
@@ -4359,8 +4369,18 @@ mod tests {
         );
         assert_eq!(bmc.hits(Method::GET, HUGE_PATH), 2);
 
-        // With the BMC failing, a bypass that must fetch falls back to the
-        // stored entry.
+        // A chassis entry whose ttl has passed by the time it is read again;
+        // on loopback the next read can land within the same millisecond, so
+        // let the ttl pass explicitly.
+        assert_eq!(
+            send(&state, proxied_request(Method::GET, CHASSIS_PATH, &[])).await,
+            observed(200, Some("miss"), true, CHASSIS_BODY),
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // With the BMC failing, a caller who insisted on a live answer gets
+        // the failure and never a stored body, while a caller who did not,
+        // and whose entry is past its ttl, gets the stored body as a fallback.
         bmc.failing.store(true, Ordering::SeqCst);
         assert_eq!(
             send(
@@ -4372,9 +4392,14 @@ mod tests {
                 ),
             )
             .await,
-            observed(200, Some("stale_if_error"), true, INVENTORY_BODY),
+            observed(503, Some("bypass"), false, ""),
         );
         assert_eq!(bmc.hits(Method::GET, INVENTORY_PATH), 4);
+        assert_eq!(
+            send(&state, proxied_request(Method::GET, CHASSIS_PATH, &[])).await,
+            observed(200, Some("stale_if_error"), true, CHASSIS_BODY),
+        );
+        assert_eq!(bmc.hits(Method::GET, CHASSIS_PATH), 2);
         bmc.failing.store(false, Ordering::SeqCst);
 
         // A write the policy names drops the entry and holds the class off
@@ -4412,8 +4437,15 @@ mod tests {
 
         assert_eq!(lookups("miss"), 3.0);
         assert_eq!(lookups("hit"), 4.0);
-        assert_eq!(lookups("bypass"), 1.0);
-        assert_eq!(lookups("stale_if_error"), 1.0);
+        assert_eq!(lookups("bypass"), 2.0);
+        assert_eq!(lookups("stale_if_error"), 0.0);
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_bmc_proxy_cache_lookups_total",
+                &[("class", "e2e_volatile"), ("outcome", "stale_if_error")],
+            ),
+            1.0,
+        );
         assert_eq!(lookups("held"), 2.0);
         assert_eq!(lookups("uncacheable"), 1.0);
         assert_eq!(lookups("coalesced"), 0.0);

@@ -108,7 +108,7 @@ mechanisms extend this contract rather than replacing it.
 | ------- | ----- | ------- |
 | Response header `X-Nico-Cache` | `hit`, `stale`, `miss`, `coalesced`, `bypass`, `stale_if_error`, `held`, `uncacheable` | How the cache answered a `GET` in a cached class. Present on every such response, absent outside cached classes. |
 | Response header `Age` | seconds | Age of the stored response served. Present when a stored response was served. |
-| Request header `Cache-Control: no-cache`, `no-store`, or `max-age=0`, or `Pragma: no-cache` | | Skip the stored response; the fetched response is still stored. |
+| Request header `Cache-Control: no-cache`, `no-store`, or `max-age=0`, or `Pragma: no-cache` | | Skip the stored response in every case, including as a fallback when the BMC fails; the fetched response is still stored. |
 | Request header `If-None-Match` | the stored `ETag` | Receive `304 Not Modified` from the store. |
 | Span field `bmc_proxy.class` | class name | The class a request was assigned to. |
 
@@ -122,8 +122,14 @@ Metrics, all counters labeled by `class`:
 
 ## Limits
 
-The store is in memory and per proxy replica; two replicas hold two stores and
-may each fetch a resource once. The cache runs at most four fetches against one
+The store is in memory and per proxy replica, and so is invalidation: a write
+through one replica drops that replica's entries, while another replica keeps
+serving its own until their `ttl` ends. Run one replica while cache classes
+are configured, or have callers that need read-after-write consistency send
+`Cache-Control: no-cache`. Within one replica the boundary is the write's
+response: a `GET` that arrives after it observes the BMC's state after the
+write, because the write forgets any fetch that began before it as well as the
+stored entries. The cache runs at most four fetches against one
 BMC at a time and caches only requests whose query is empty or made of
 Redfish's own parameters. Only bodies of at most 8 MiB are stored, the store
 holds at most 256 MiB of bodies per replica, and a larger body in a cached

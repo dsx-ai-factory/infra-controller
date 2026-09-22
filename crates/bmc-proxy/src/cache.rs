@@ -41,6 +41,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -394,7 +395,12 @@ pub(crate) struct ResponseCache {
     entries: MokaCache<CacheKey, Arc<CachedResponse>>,
     class_states: Mutex<HashMap<(IpAddr, ClassName), ClassState>>,
     /// Fetches in progress, for requests to join instead of starting another.
-    in_flight: Mutex<HashMap<CacheKey, watch::Receiver<Option<FetchOutcome>>>>,
+    /// A write to the BMC removes the affected class's entries here too, so
+    /// a request arriving after the write cannot join a fetch that began
+    /// before it and receive what the BMC held then.
+    in_flight: Mutex<HashMap<CacheKey, InFlight>>,
+    /// Source of [`InFlight::id`].
+    next_fetch_id: AtomicU64,
     /// Keys whose last fetch yielded nothing storable, for
     /// [`UNSTORABLE_FETCH_HOLD_OFF`]. Expiry here bounds memory; the window
     /// itself is checked against the recorded instant.
@@ -403,17 +409,33 @@ pub(crate) struct ResponseCache {
     fetch_permits: Mutex<HashMap<IpAddr, Arc<Semaphore>>>,
 }
 
-/// Removes a key from the in-flight map when the fetch task ends, however
-/// it ends: a panic must not leave a dead receiver that every later request
-/// for the key would wait on.
+/// One fetch in progress: what requests join, and which fetch it is.
+struct InFlight {
+    /// Distinguishes this fetch from one that superseded it after a write,
+    /// so a finished fetch removes only its own entry.
+    id: u64,
+    receiver: watch::Receiver<Option<FetchOutcome>>,
+}
+
+/// Removes a fetch's entry from the in-flight map when its task ends,
+/// however it ends: a panic must not leave a dead receiver that every later
+/// request for the key would wait on. Only the entry it made: a write may
+/// have replaced it with a newer fetch that must stay.
 struct InFlightGuard {
     cache: Arc<ResponseCache>,
     key: CacheKey,
+    id: u64,
 }
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        lock(&self.cache.in_flight).remove(&self.key);
+        let mut in_flight = lock(&self.cache.in_flight);
+        if in_flight
+            .get(&self.key)
+            .is_some_and(|entry| entry.id == self.id)
+        {
+            in_flight.remove(&self.key);
+        }
     }
 }
 
@@ -431,6 +453,7 @@ impl ResponseCache {
                 .build(),
             class_states: Mutex::new(HashMap::new()),
             in_flight: Mutex::new(HashMap::new()),
+            next_fetch_id: AtomicU64::new(0),
             hold_offs: MokaCache::builder()
                 .max_capacity(HOLD_OFF_RECORD_CAPACITY)
                 .time_to_live(2 * UNSTORABLE_FETCH_HOLD_OFF)
@@ -560,19 +583,27 @@ impl ResponseCache {
         Fut: Future<Output = UpstreamReply> + Send + 'static,
     {
         let mut in_flight = lock(&self.in_flight);
-        if let Some(receiver) = in_flight.get(&key) {
-            return (receiver.clone(), true);
+        if let Some(entry) = in_flight.get(&key) {
+            return (entry.receiver.clone(), true);
         }
         // Build the fetch and the guard that removes the map entry before
         // inserting it, so nothing that can fail sits between the entry and
         // its remover; a task the runtime drops unrun drops the guard too.
         let fetch = make_fetch();
+        let id = self.next_fetch_id.fetch_add(1, Ordering::Relaxed);
         let guard = InFlightGuard {
             cache: Arc::clone(self),
             key: key.clone(),
+            id,
         };
         let (sender, receiver) = watch::channel(None);
-        in_flight.insert(key.clone(), receiver.clone());
+        in_flight.insert(
+            key.clone(),
+            InFlight {
+                id,
+                receiver: receiver.clone(),
+            },
+        );
         drop(in_flight);
 
         // The task outlives the request that started it, so it gets its own
@@ -778,6 +809,13 @@ impl ResponseCache {
                     state.held_until = now.checked_add(policy.hold_after_write);
                 }
             }
+            // A fetch that began before the write may bring back what the
+            // BMC held then. Its result is stored under the old generation
+            // and never served from the store, but a request arriving now
+            // must not join it either: forget it so the next request starts
+            // a fetch of its own. The old task still finishes for its waiters
+            // and removes only its own entry.
+            lock(&self.in_flight).retain(|key, _| !(key.bmc == bmc && key.class == class.name));
             // The generation already hides the entries; dropping them too
             // frees their weight for live ones instead of letting dead bodies
             // sit out their lifetime.
@@ -1243,6 +1281,73 @@ mod tests {
             );
             tokio::task::yield_now().await;
         }
+    }
+
+    /// A request that arrives after a write must not join a fetch that
+    /// began before it: the write forgets the in-flight fetch, the next
+    /// request starts its own, and the old fetch's end removes only its own
+    /// entry.
+    #[tokio::test]
+    async fn a_write_supersedes_fetches_that_began_before_it() {
+        let table = classes();
+        let catalog = class(&table, "catalog");
+        let cache = Arc::new(ResponseCache::new(MAX_BYTES));
+        let key = key(BMC, &catalog, "/redfish/v1/Systems/S/Processors");
+
+        let start_fetch = |body: &'static str| {
+            let cache = Arc::clone(&cache);
+            let catalog = Arc::clone(&catalog);
+            let key = key.clone();
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let handle = {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                tokio::spawn(async move {
+                    cache
+                        .fetch(key, &catalog, None, move || {
+                            move |_| async move {
+                                started.notify_one();
+                                release.notified().await;
+                                ok_reply(body, None)
+                            }
+                        })
+                        .await
+                })
+            };
+            (handle, started, release)
+        };
+
+        let (before, before_started, before_release) = start_fetch("pre-write");
+        before_started.notified().await;
+
+        cache.invalidate_for_write(
+            BMC,
+            &Method::PATCH,
+            "/redfish/v1/Systems/S/Actions/ComputerSystem.Reset",
+            &table,
+            Instant::now(),
+        );
+
+        let (after, after_started, after_release) = start_fetch("post-write");
+        after_started.notified().await;
+
+        before_release.notify_one();
+        let (outcome, joined) = before.await.expect("the older fetch completes");
+        assert!(!joined);
+        assert_eq!(body_of(&outcome).as_deref(), Some("pre-write"));
+        assert!(
+            cache.in_flight.lock().unwrap().contains_key(&key),
+            "the older fetch's end leaves the newer fetch in flight"
+        );
+
+        after_release.notify_one();
+        let (outcome, joined) = after.await.expect("the newer fetch completes");
+        assert!(!joined, "the request after the write started its own fetch");
+        assert_eq!(body_of(&outcome).as_deref(), Some("post-write"));
+        assert!(cache.in_flight.lock().unwrap().is_empty());
+        let stored = cache.lookup(&key).await.expect("the newer fetch's entry");
+        assert_eq!(String::from_utf8_lossy(&stored.body), "post-write");
     }
 
     /// A fetch that panics must not leave its key wedged: the next fetch

@@ -215,10 +215,12 @@ Behavior that follows from the store:
 - A caller whose `If-None-Match` names the stored `ETag` receives `304 Not
   Modified` without the body being sent.
 - `Cache-Control: no-cache`, `no-store`, or `max-age=0`, or `Pragma:
-  no-cache`, on the request skips the stored response. The fetched response is
-  still stored, unless the class is held after a write or the resource is
-  held off after an unstorable fetch: the cache is shared and exists to
-  protect the BMC, not to serve one caller's preference.
+  no-cache`, on the request skips the stored response in every case: the
+  caller gets what the BMC answers, a `304` included, and gets the BMC's
+  failure rather than a stored fallback. The fetched response is still stored,
+  unless the class is held after a write or the resource is held off after an
+  unstorable fetch: the cache is shared and exists to protect the BMC, not to
+  serve one caller's preference.
 - A write (`POST`, `PUT`, `PATCH`, or `DELETE`) the BMC did not answer with a
   4xx drops the stored responses of every class whose `invalidated_by` it
   matches for that BMC, and starts that class's `hold_after_write` for the
@@ -241,6 +243,15 @@ response: `hit`, `stale`, `miss`, `coalesced`, `bypass`, `stale_if_error`,
 `carbide_bmc_proxy_cache_lookups_total`. When a stored response is served the
 response also carries `Age`, its age in seconds. The store is per proxy
 replica and in memory, bounded to 256 MiB of response bodies.
+
+Invalidation is per replica too. A write through one replica drops that
+replica's entries; another replica keeps serving its own until their `ttl`
+ends, since nothing tells it about the write. While cache classes are
+configured, run the proxy with one replica, or have callers that need to read
+their own writes send `Cache-Control: no-cache`, which refetches on whichever
+replica they reach. Within one replica, a `GET` that arrives after a write's
+response was delivered observes the BMC's state after that write, except for
+writes the BMC applies after answering, which `hold_after_write` covers.
 
 Do not cache resources that carry live state a caller acts on. `Systems`,
 `Chassis`, and `Managers` roots report `PowerState` and are read before power
