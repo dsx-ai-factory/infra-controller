@@ -229,12 +229,13 @@ impl SwitchActor {
         let host_info = self.host_info.clone();
         let machine_config_section = self.machine_config_section.clone();
         let bmc_injection = self.bmc_injection.clone();
-        let (actor, mailbox) = Actor::new(self, SwitchMessage::Run);
+        let (actor, mailbox) = Actor::new();
 
         let join_handle = tokio::task::Builder::new()
             .name(&format!("Switch {mat_id}"))
-            .spawn(actor.run())
+            .spawn(actor.run(self))
             .unwrap();
+        let _ = mailbox.send(SwitchMessage::Run);
 
         SwitchHandle(Arc::new(SwitchActorHandle {
             mailbox,
