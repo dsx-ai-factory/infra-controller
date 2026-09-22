@@ -240,3 +240,26 @@ enabled with a non-empty (and non-null) objectTypes list.
 {{- define "nico-api.perObjectStateMetricsActive" -}}
 {{- if and .Values.service.perObjectStateMetrics.enabled (gt (len (default list .Values.service.perObjectStateMetrics.objectTypes)) 0) -}}true{{- end -}}
 {{- end }}
+
+{{/* Roll nico-api when an input to its ConfigMaps changes. */}}
+{{- define "nico-api.configChecksum" -}}
+{{- $inputs := dict
+  "auth" .Values.auth
+  "bmcProxy" .Values.bmcProxy
+  "componentManager" .Values.componentManager
+  "configFiles" .Values.configFiles
+  "credentials" .Values.credentials
+  "databaseConfig" .Values.databaseConfig
+  "defaultApiConfig" (.Files.Get "files/carbide-api-config.toml")
+  "defaultCasbinPolicy" (.Files.Get "files/casbin-policy.csv")
+  "global" .Values.global
+  "hostname" .Values.hostname
+  "namespaceOverride" .Values.namespaceOverride
+  "releaseNamespace" .Release.Namespace
+  "rms" .Values.rms
+  "service" .Values.service
+  "siteConfig" .Values.siteConfig
+  "vaultClusterInfo" .Values.vaultClusterInfo
+-}}
+{{- $inputs | toJson | sha256sum -}}
+{{- end }}

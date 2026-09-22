@@ -547,11 +547,16 @@ func TestBuildSpectrumXAttachment(t *testing.T, dbSession *cdb.Session, instance
 // TestBuildDpuExtensionService build DPU Extension Service
 func TestBuildDpuExtensionService(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, tenant *cdbm.Tenant, serviceType string, version *string, versionInfo *cdbm.DpuExtensionServiceVersionInfo, activeVersions []string, status string, user *cdbm.User) *cdbm.DpuExtensionService {
 	desdDAO := cdbm.NewDpuExtensionServiceDAO(dbSession)
+	var dpuTarget *string
+	if serviceType == cdbm.DpuExtensionServiceServiceTypeDpfHelmChart {
+		dpuTarget = cutil.GetPtr(cdbm.DpuExtensionServiceDpuTargetAllActive)
+	}
 	des, err := desdDAO.Create(context.Background(), nil, cdbm.DpuExtensionServiceCreateInput{
 		Name:           name,
 		SiteID:         site.ID,
 		TenantID:       tenant.ID,
 		ServiceType:    serviceType,
+		DpuTarget:      dpuTarget,
 		Version:        version,
 		VersionInfo:    versionInfo,
 		ActiveVersions: activeVersions,

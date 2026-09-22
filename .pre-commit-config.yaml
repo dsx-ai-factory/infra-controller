@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# One hook on purpose: the workspace's own pre-commit checks are cargo-make tasks
+# (`cargo make pre-commit-verify-workspace`). Enforcement is the Pulse scan in
+# .github/workflows/security-suite.yml.
+
+repos:
+  - repo: https://github.com/NVIDIA/security-workflows
+    rev: c736f0454dc99764a66af6b906adfcdfbf621985  # frozen: v0.4.0
+    hooks:
+      - id: secret-scan-trufflehog

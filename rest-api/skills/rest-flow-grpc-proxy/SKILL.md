@@ -42,9 +42,13 @@ endpoints that need to call on-site Flow through the generic Flow gRPC proxy.
    `WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED`, matching `ExecuteCoreGRPC`, whose
    IDs are always fresh.
 
-`common.ProxyFlowGRPC` dispatches and renders a proxy failure as an Echo response.
-Use `ExecuteFlowGRPC` directly only in helpers that hand the error back to a
-caller instead of rendering a response, as `resolveTrayIDsBySlot` does; return
+`common.ProxyFlowGRPC` dispatches the request, logs a proxy failure, and returns
+that failure as a `*cutil.APIError`. The HTTP handler must render a non-nil
+error with `cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)` and
+return immediately. Keeping response ownership in the handler prevents a
+success response from following an already-rendered proxy failure. Use
+`ExecuteFlowGRPC` directly only in helpers that hand the error back to a caller
+without the standard proxy-failure log, as `resolveTrayIDsBySlot` does; return
 the `*cutil.APIError` unwrapped so the status the proxy chose survives.
 
 Kinds of ID derivation that must stay in the handler, using the TaskRun

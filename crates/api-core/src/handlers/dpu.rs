@@ -106,19 +106,19 @@ fn deny_prefixes_for_agent(
 
 /// Builds the deprecated deny field with the same address-family contract as `deny_prefixes`.
 ///
-/// Mutual isolation folds site-fabric prefixes into this field, so those prefixes must pass
-/// through the per-DPU filter as well.
+/// Mutual isolation folds the virtualizer's effective site-isolation prefixes into this field,
+/// so those prefixes must pass through the per-DPU address-family filter as well.
 fn deprecated_deny_prefixes_for_agent(
     deny_prefixes: &[String],
-    site_fabric_prefixes: &[IpNetwork],
+    site_isolation_prefixes: &[IpNetwork],
     isolation_behavior: VpcIsolationBehaviorType,
     network_virtualization_type: VpcVirtualizationType,
 ) -> Vec<String> {
     match isolation_behavior {
         VpcIsolationBehaviorType::MutualIsolation => {
-            let site_fabric_prefixes =
-                deny_prefixes_for_agent(site_fabric_prefixes, network_virtualization_type);
-            [site_fabric_prefixes.as_slice(), deny_prefixes].concat()
+            let site_isolation_prefixes =
+                deny_prefixes_for_agent(site_isolation_prefixes, network_virtualization_type);
+            [site_isolation_prefixes.as_slice(), deny_prefixes].concat()
         }
         VpcIsolationBehaviorType::Open => deny_prefixes.to_vec(),
     }
@@ -572,20 +572,28 @@ async fn get_managed_host_network_config_inner(
     let deny_prefixes =
         deny_prefixes_for_agent(&api.eth_data.deny_prefixes, network_virtualization_type);
 
-    let site_fabric_networks = api
-        .eth_data
-        .site_fabric_prefixes
-        .as_ref()
-        .map(|s| s.as_ip_slice())
-        .unwrap_or_default();
+    let tenant_roots = db::site_prefix::find_tenant_prefixes(&mut txn).await?;
+    let site_fabric_networks =
+        super::site_prefix::protected_prefixes(&api.runtime_config, &tenant_roots);
     let site_fabric_prefixes: Vec<String> = site_fabric_networks
         .iter()
-        .map(|net| net.to_string())
+        .map(ToString::to_string)
         .collect();
+
+    let site_fabric_null_routes = if network_virtualization_type == VpcVirtualizationType::Fnn {
+        let items = super::site_prefix::retained_null_routes(api, &mut txn, &tenant_roots)
+            .await?
+            .into_iter()
+            .map(|prefix| prefix.to_string())
+            .collect();
+        Some(rpc_common::StringList { items })
+    } else {
+        None
+    };
 
     let deprecated_deny_prefixes = deprecated_deny_prefixes_for_agent(
         &deny_prefixes,
-        site_fabric_networks,
+        &site_fabric_networks,
         api.runtime_config.vpc_isolation_behavior,
         network_virtualization_type,
     );
@@ -755,6 +763,8 @@ async fn get_managed_host_network_config_inner(
         deprecated_deny_prefixes,
         deny_prefixes,
         site_fabric_prefixes,
+        site_fabric_null_routes,
+        vpc_peer_vnis_authoritative: true,
         anycast_site_prefixes: api
             .runtime_config
             .anycast_site_prefixes
@@ -1187,6 +1197,8 @@ pub(crate) async fn record_dpu_network_status(
     if let Some(astra_config_status) = request.astra_config_status.as_ref() {
         process_astra_config_status(api, &dpu_machine_id, astra_config_status).await?;
     }
+
+    // TODO Handle the LLDP report in the next PR.
 
     // If this all worked and the DPU is healthy, we shouldn't emit a log line
     // If there is any error the report, the logging of the follow-up report is
@@ -1867,7 +1879,7 @@ async fn get_bgp_password(
 }
 
 #[cfg(test)]
-mod deny_prefix_tests {
+mod prefix_policy_tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;

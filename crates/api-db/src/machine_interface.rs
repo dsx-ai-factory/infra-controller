@@ -2000,7 +2000,7 @@ async fn create_static_path(
         if existing.mac_address == *macaddr {
             return Ok(existing);
         }
-        return Err(AddressAlreadyInUseError(
+        return Err(AddressAlreadyInUseError::active(
             address,
             existing.mac_address,
             existing.segment_id,

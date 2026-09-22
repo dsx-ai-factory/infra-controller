@@ -47,6 +47,7 @@ pub(crate) async fn validate_retained_state_in_transaction(
     api: &Api,
     txn: &mut PgConnection,
 ) -> CarbideResult<()> {
+    super::super::site_prefix::validate_retained_isolation(api, txn).await?;
     let duplicate_vpc_ids = db::tenant_prefix_overlap::find_duplicate_vpc_ids(
         &mut *txn,
         api.runtime_config.tenant_prefix_overlap_enabled,
@@ -118,6 +119,9 @@ pub(super) async fn validate_retained_prefixes(
     if pairs.is_empty() {
         return Ok(());
     }
+    let tenant_roots = db::site_prefix::find_tenant_prefixes(&mut *txn).await?;
+    let isolation_routes =
+        super::super::site_prefix::retained_null_routes(api, txn, &tenant_roots).await?;
     let prefix_ids = pairs
         .iter()
         .flat_map(|(first, second)| [*first, *second])
@@ -173,6 +177,7 @@ pub(super) async fn validate_retained_prefixes(
     for (first, second) in pairs {
         if !retained_pair_is_isolated(
             &api.runtime_config,
+            &isolation_routes,
             participant(first)?,
             participant(second)?,
         ) {

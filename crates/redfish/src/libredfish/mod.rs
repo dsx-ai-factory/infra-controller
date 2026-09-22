@@ -35,7 +35,7 @@ pub use auth::RedfishAuth;
 use carbide_instrument::{Event, LabelValue, emit};
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialType, Credentials};
 use carbide_utils::HostPortPair;
-use carbide_utils::redfish::BmcAccessInfo;
+use carbide_utils::redfish::{BmcAccessInfo, redact_redfish_response_body};
 pub use error::{CredentialOpError, RedfishClientCreationError};
 use libredfish::Redfish;
 use libredfish::model::service_root::RedfishVendor;
@@ -769,9 +769,9 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
     }
 }
 
-// Some BMC implementation may return passwords in response body and
-// we can display them to user. This function is helper to remove
-// password leak for password-related refish functions.
+// Some BMC implementations may return passwords in a response body that is
+// later displayed to a user. This helper removes that exposure from
+// password-related Redfish functions.
 pub fn redact_password(err: libredfish::RedfishError, password: &str) -> libredfish::RedfishError {
     redact_passwords(err, &[password])
 }
@@ -821,13 +821,16 @@ fn mask_all(text: &str, needles: &[&str]) -> String {
 
 /// [`redact_password`] over several passwords at once, with union masking
 /// (see [`mask_all`]) so overlapping matches cannot leave fragments of one
-/// password behind after another is replaced.
+/// password behind after another is replaced. JSON response bodies are decoded
+/// first so escaped forms of a password are covered as well.
 pub fn redact_passwords(
     err: libredfish::RedfishError,
     passwords: &[&str],
 ) -> libredfish::RedfishError {
     type RfError = libredfish::RedfishError;
     let redact = |v: String| mask_all(&v, passwords);
+    let redact_response_body =
+        |v: String| redact_redfish_response_body(&v, passwords.iter().copied());
     match err {
         RfError::HTTPErrorCode {
             url,
@@ -836,11 +839,11 @@ pub fn redact_passwords(
         } => RfError::HTTPErrorCode {
             url,
             status_code,
-            response_body: redact(response_body),
+            response_body: redact_response_body(response_body),
         },
         RfError::JsonDeserializeError { url, body, source } => RfError::JsonDeserializeError {
             url,
-            body: redact(body),
+            body: redact_response_body(body),
             source,
         },
         RfError::JsonSerializeError {
@@ -1115,6 +1118,57 @@ mod tests {
             !redact_password(err, PASSWORD)
                 .to_string()
                 .contains(PASSWORD)
+        );
+    }
+
+    #[test]
+    fn password_redact_from_error_decodes_json_strings() {
+        const PASSWORD: &str = "secret";
+        let err = libredfish::RedfishError::HTTPErrorCode {
+            url: "https://example.com/redfish/v1/Systems/1".into(),
+            status_code: http::StatusCode::BAD_REQUEST,
+            response_body: r#"{"error":{"message":"credential s\u0065cret rejected"}}"#.into(),
+        };
+
+        let redacted = redact_password(err, PASSWORD);
+        let libredfish::RedfishError::HTTPErrorCode { response_body, .. } = redacted else {
+            panic!("HTTP error remains an HTTP error after redaction");
+        };
+        let response: serde_json::Value =
+            serde_json::from_str(&response_body).expect("redacted body remains valid JSON");
+        assert_eq!(response["error"]["message"], "credential REDACTED rejected");
+    }
+
+    /// Verifies libredfish's local non-response masker removes the bare Basic
+    /// payload even when the authentication scheme is normalized or omitted.
+    #[test]
+    fn password_redaction_masks_basic_payload_variants_in_local_errors() {
+        // Derive the same complete redaction context retained by the direct
+        // client, then echo its payload through a non-response error variant.
+        let (authorization, sensitive_values) =
+            carbide_utils::redfish::redfish_basic_authorization_context("root", Some("secret"));
+        let payload = &sensitive_values[1];
+        let error = libredfish::RedfishError::GenericError {
+            error: format!(
+                "exact {authorization}; lower basic {payload}; upper BASIC {payload}; bare {payload}"
+            ),
+        };
+        let sensitive_values = sensitive_values
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        // Run the local variant-aware sanitizer rather than the JSON response
+        // path so both masking implementations protect the same credential.
+        let redacted = redact_passwords(error, &sensitive_values);
+        let libredfish::RedfishError::GenericError { error } = redacted else {
+            panic!("generic error remains a generic error after redaction");
+        };
+
+        // The scheme is not itself secret, but no reusable Base64 payload may survive.
+        assert_eq!(
+            error,
+            "exact REDACTED; lower basic REDACTED; upper BASIC REDACTED; bare REDACTED"
         );
     }
 

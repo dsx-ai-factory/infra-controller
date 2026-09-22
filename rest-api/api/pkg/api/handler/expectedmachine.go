@@ -740,21 +740,10 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 			}
 		}
 
-		updateExpectedMachineRequest := em.ToProto(cdbm.ExpectedMachineCredentials{
-			Username: apiRequest.DefaultBmcUsername,
-			Password: apiRequest.DefaultBmcPassword,
-		})
-		// REST storage keeps its current value when this PATCH omits the
-		// address. Core needs the request value instead: nil preserves its
-		// current HostBmc configuration, while an empty string clears it.
-		updateExpectedMachineRequest.BmcIpAddress = apiRequest.BmcIpAddress
-
-		logger.Info().Msg("triggering ExpectedMachine update workflow")
-
-		workflowOptions := tclient.StartWorkflowOptions{
-			ID:                       "expected-machine-update-" + expectedMachine.ID.String(),
-			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-			TaskQueue:                queue.SiteTaskQueue,
+		patchExpectedMachineRequest := apiRequest.ToProto(em)
+		var secretFields []string
+		if apiRequest.DefaultBmcPassword != nil {
+			secretFields = []string{"expectedMachine"}
 		}
 
 		stc, err := uemh.scp.GetClientByID(site.ID)
@@ -763,7 +752,9 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		if apiErr := common.ExecuteSyncWorkflow(ctx, logger, stc, "UpdateExpectedMachine", workflowOptions, updateExpectedMachineRequest); apiErr != nil {
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_PatchExpectedMachine_FullMethodName, patchExpectedMachineRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			logAPIError(logger, apiErr, "failed to patch expected machine")
 			return nil, apiErr
 		}
 		return em, nil
@@ -1600,12 +1591,9 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Machine update data", validationErrors)
 	}
 
-	// Build the inputs and a credentials lookup keyed by the ExpectedMachineID
-	// from each request. After UpdateMultiple returns we look credentials up
-	// by the DB record's ID rather than by slice index, so correlation
-	// doesn't depend on the DAO preserving input order.
-	credsByID := make(map[uuid.UUID]cdbm.ExpectedMachineCredentials, len(apiRequests))
-	bmcIPRequestsByID := make(map[uuid.UUID]*string, len(apiRequests))
+	// The DAO returns rows in its own order. Match each row to the request
+	// by ID so its credentials and field mask stay together.
+	requestsByID := make(map[uuid.UUID]model.APIExpectedMachineUpdateRequest, len(apiRequests))
 	updateInputs := make([]cdbm.ExpectedMachineUpdateInput, 0, len(apiRequests))
 	bmcIPClearIDs := make(map[uuid.UUID]struct{})
 	for _, machineReq := range apiRequests {
@@ -1616,11 +1604,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		}
 
 		emID, _ := uuid.Parse(*machineReq.ID)
-		credsByID[emID] = cdbm.ExpectedMachineCredentials{
-			Username: machineReq.DefaultBmcUsername,
-			Password: machineReq.DefaultBmcPassword,
-		}
-		bmcIPRequestsByID[emID] = machineReq.BmcIpAddress
+		requestsByID[emID] = machineReq
 		bmcIPAddress := machineReq.BmcIpAddress
 		if bmcIPAddress != nil && *bmcIPAddress == "" {
 			bmcIPClearIDs[emID] = struct{}{}
@@ -1684,39 +1668,22 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
 		}
 
-		workflowMachines := make([]*corev1.ExpectedMachine, 0, len(updatedMachines))
+		patches := make([]*corev1.PatchExpectedMachineRequest, 0, len(updatedMachines))
 		for i := range updatedMachines {
 			em := &updatedMachines[i]
-			creds, ok := credsByID[em.ID]
+			request, ok := requestsByID[em.ID]
 			if !ok {
-				// UpdateMultiple returned an ID we didn't ask it to create.
-				// This shouldn't actually happen, so fail loudly instead of
-				// attaching the wrong credentials to a machine.
 				logger.Error().Str("ExpectedMachineID", em.ID.String()).Msg("UpdateMultiple returned a machine with an unrecognized ID")
 				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to correlate updated Expected Machine to request", nil)
 			}
-			workflowMachine := em.ToProto(creds)
-			// Use the PATCH value at the workflow boundary instead of the REST
-			// row, which may contain an address this request did not touch.
-			workflowMachine.BmcIpAddress = bmcIPRequestsByID[em.ID]
-			workflowMachines = append(workflowMachines, workflowMachine)
+			patches = append(patches, request.ToProto(em))
 		}
-
-		logger.Info().Int("Count", len(workflowMachines)).Msg("triggering Expected Machine update workflow")
-
-		// Create workflow request
-		workflowRequest := &corev1.BatchExpectedMachineOperationRequest{
-			ExpectedMachines:     &corev1.ExpectedMachineList{ExpectedMachines: workflowMachines},
-			AcceptPartialResults: false,
-		}
-
-		// Create workflow options. Include a UUID suffix so concurrent batches
-		// of the same size on the same Site don't collide on a single ID.
-		workflowID := fmt.Sprintf("expected-machines-update-batch-%s-%s", site.ID.String(), uuid.New().String())
-		workflowOptions := tclient.StartWorkflowOptions{
-			ID:                       workflowID,
-			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-			TaskQueue:                queue.SiteTaskQueue,
+		patchRequest := &corev1.PatchExpectedMachinesRequest{Patches: patches}
+		var secretFields []string
+		if slices.ContainsFunc(apiRequests, func(request model.APIExpectedMachineUpdateRequest) bool {
+			return request.DefaultBmcPassword != nil
+		}) {
+			secretFields = []string{"patches"}
 		}
 
 		// Get the Temporal client for the site we are working with
@@ -1726,31 +1693,10 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		// Execute workflow and get results
-		workflowRun, werr := stc.ExecuteWorkflow(ctx, workflowOptions, "UpdateExpectedMachines", workflowRequest)
-		if werr != nil {
-			logger.Error().Err(werr).Msg("failed to schedule batch Expected Machine update workflow on Site")
-			return nil, cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to schedule batch Expected Machine update workflow on Site: %v", werr), nil)
-		}
-
-		workflowRunID := workflowRun.GetID()
-		logger = logger.With().Str("WorkflowID", workflowRunID).Logger()
-		logger.Info().Msg("executing Expected Machine update workflow on Site")
-
-		// Get workflow results
-		var workflowResult corev1.BatchExpectedMachineOperationResponse
-
-		werr = workflowRun.Get(ctx, &workflowResult)
-		if werr != nil {
-			logger.Error().Err(werr).Msg("error executing batch Expected Machine update workflow on Site")
-			// Workflow failed entirely - don't commit transaction, changes will be rolled back
-			return nil, cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to execute batch Expected Machine update workflow on Site: %v", werr), nil)
-		}
-
-		// sanity checks since this is all-or-nothing
-		if len(workflowResult.GetResults()) != len(updatedMachines) {
-			logger.Error().Msgf("workflow returned a different number of Expected Machines (expected %d but got %d)", len(updatedMachines), len(workflowResult.GetResults()))
-			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to verify batch Expected Machine update workflow results", nil)
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_PatchExpectedMachines_FullMethodName, patchRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			logAPIError(logger, apiErr, "failed to patch expected machines")
+			return nil, apiErr
 		}
 
 		return updatedMachines, nil

@@ -44,6 +44,7 @@ The following tools must be installed on the build machine:
 | `mkisofs` (Linux) or `xorrisofs` (macOS) | Build ISO |
 
 Install on Ubuntu:
+
 ```bash
 # yq (mikefarah v4) — do NOT use apt-get install yq, that installs the wrong one
 sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
@@ -57,6 +58,7 @@ sudo apt-get install wget curl jq zip gzip genisoimage
 ```
 
 Install on macOS:
+
 ```bash
 brew install yq gomplate wget curl jq zip xorriso
 ```
@@ -65,7 +67,9 @@ brew install yq gomplate wget curl jq zip xorriso
 
 ### Step 1 — Prepare the site config
 
-Copy `site-sample.yaml` and fill in the values for your site.
+Copy `site-sample.yaml` and fill in the values for your site. Where each value comes
+from, and what the datacenter fabric must provide before the site controllers can be
+brought up, is described in [Control Plane Networking](control-plane-network.md).
 
 Required fields: `datacenterAsn`, `siteControllerRoutesAsn`, `bgpAsnStart`, `siteControllerMtuSize`,
 `forgeDpuLoopbackPrefix`, `forgeServiceVipPrefix`, `forgeControlPlanePrefix`, `nameServer`,
@@ -73,8 +77,11 @@ Required fields: `datacenterAsn`, `siteControllerRoutesAsn`, `bgpAsnStart`, `sit
 
 Optional: the entire `fnn` block (only needed for FNN/SMN networking mode). When present,
 `fnn.controlPlaneVni`, `fnn.commonManagedNodeBmcRouteTarget`, `fnn.commonSiteControllerRouteTarget`,
-and `fnn.commonAdminNetworkTarget` are required; `fnn.vpcVrfLoopbackPrefix` and
-`fnn.routeTargetsToImport` are optional.
+and `fnn.commonAdminNetworkTarget` are required; `fnn.vpcVrfLoopbackPrefix` is optional.
+`fnn.routeTargetsToImport` is optional only for a site with no tenant routing profile in
+use and `siteControllerRoutesAsn` equal to `datacenterAsn`; otherwise it must list every
+active profile's common tag and, when the ASNs differ, `<siteControllerRoutesAsn>:50100`
+(see the field notes below). No other field supplies these imports.
 
 ```yaml
 # yaml-language-server: $schema=
@@ -124,6 +131,34 @@ siteControllerNodes:
 The `mac` field is the BlueField **p0** MAC address for each node. If you do not know
 it yet, you can use a placeholder (`aa:aa:aa:aa:aa:aa`) — `post-power-cycle.sh` will
 detect and apply the real MAC automatically at the end of provisioning.
+
+What the build does with each value:
+
+- `datacenterAsn` — the ASN half of every route target the datacenter originates; the three
+  fixed imports (`:900`, `:50400`, `:50100`) are rendered as `<datacenterAsn>:<n>`.
+- `siteControllerRoutesAsn` — the ASN under which the site controllers' routes are exported
+  (`<siteControllerRoutesAsn>:50100`). It may equal `datacenterAsn`. If it differs, add
+  `<siteControllerRoutesAsn>:50100` to `fnn.routeTargetsToImport`, because the fixed `:50100`
+  import is rendered under `datacenterAsn`.
+- `bgpAsnStart` — site controller node *n* (its `nodeId`) gets DPU ASN `bgpAsnStart + n`; the
+  host side of every `/31` peers as `bgpAsnStart`.
+- `forgeDpuLoopbackPrefix` — one `/32` per node, the DPU's VTEP address. It must lie in the same
+  supernet as the managed-host DPU loopback pool and must not overlap it.
+- `forgeControlPlanePrefix` — node *n* gets the *n*-th `/31`; the DPU takes the even address, the
+  host the odd one.
+- `forgeServiceVipPrefix` — split in half by the script: the first half becomes the internal
+  service VIP list (prefix-list rule 30), the second half the external list (rule 40). Only
+  `/32`s from these halves are advertised.
+- `fnn.controlPlaneVni` — the L3VNI of the control-plane VRF, one per site, from the NICo VNI
+  block and in no tenant pool.
+- `fnn.commonManagedNodeBmcRouteTarget`, `fnn.commonSiteControllerRouteTarget`,
+  `fnn.commonAdminNetworkTarget` — the numbers of the three fixed imports (`900`, `50100`,
+  `50400`); the second is also the export number.
+- `fnn.routeTargetsToImport` — additional full route targets (`<asn>:<n>`) to import, for jump
+  hosts, rack devices, storage management and the tenant profiles' common tags. Never the site
+  controllers' own out-of-band segment (`:901`) or a tenant's native target.
+- `fnn.vpcVrfLoopbackPrefix` (optional) — a loopback inside the control-plane VRF for testing the
+  overlay from the DPU; must not overlap the managed-host per-VPC loopback pool.
 
 ---
 
@@ -445,6 +480,7 @@ image over it is slow, and if the DPU is still busy with post-boot initialisatio
 the transfer starts, its receive buffers fill up and the transfer stalls indefinitely.
 
 The scripts mitigate this automatically:
+
 - A **20-second delay** is inserted after the DPU comes online before any file transfer
   begins, giving the DPU time to finish its boot activity
 - SSH keepalives (`ServerAliveInterval=30`, `ServerAliveCountMax=3`) detect a stalled

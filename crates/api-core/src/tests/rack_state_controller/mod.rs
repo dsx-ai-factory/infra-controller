@@ -31,7 +31,7 @@ use model::machine::ManagedHostState;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::rack::{
     ConfigureNmxClusterState, FirmwareUpgradeState, MaintenanceScope, Rack, RackConfig,
-    RackMaintenanceState, RackState, RackValidationState,
+    RackErrorRecoveryPolicy, RackMaintenanceState, RackState, RackValidationState,
 };
 use rpc::forge::StateHistoryRecord;
 use rpc::forge::forge_server::Forge;
@@ -468,6 +468,7 @@ async fn test_error_state_does_nothing_with_controller(
         &rack_id,
         RackState::Error {
             cause: "test error".to_string(),
+            recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
         },
     )
     .await?;

@@ -63,6 +63,7 @@ const_format = { workspace = true }
 data-encoding = { workspace = true }
 eyre = { workspace = true }
 http = { workspace = true }
+ipnetwork = { workspace = true }
 itertools = { workspace = true }
 mac_address = { workspace = true }
 serde_json = { workspace = true }

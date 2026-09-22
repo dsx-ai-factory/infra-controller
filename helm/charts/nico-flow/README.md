@@ -60,25 +60,30 @@ error and restarts until the value is corrected.
 `false`). Strings are rejected at render time, including `--set-string` values
 and `--set flowConfig.disableInventory=yes` (Helm passes `yes` as a string). In
 a values file, Helm's YAML 1.1 parser reads an unquoted `yes` as `true`, so
-prefer `true` and `false` there. Omitting a key from a values file keeps the
-chart default because Helm merges values, but setting it to `null` (including
-`--set flowConfig.disableInventory=null`) removes the key, and the chart rejects
-a missing key instead of falling back to the default.
+prefer `true` and `false` there. A key that is omitted, set to `null`, or
+removed with `--set flowConfig.disableInventory=null` takes the chart default.
 
 ```text
 Error: execution error at (nico-flow/templates/deployment.yaml:...): flowConfig.disableInventory must be a boolean (true or false); got "true"
-Error: execution error at (nico-flow/templates/deployment.yaml:...): flowConfig.disableInventory must be true or false; the key is missing or null
 ```
 
-Override values on the existing release, for example:
+Override values on the existing release, for example. Use
+`--reset-then-reuse-values` (Helm 3.14 or newer) rather than `--reuse-values`,
+which would also reuse the previous chart's defaults and drop any value the
+newer chart added. On Helm 4, add `--force-conflicts` when the chart version
+changes, because objects created outside Helm (the `flow` Namespace, and
+Certificates pre-applied by `setup.sh`) otherwise reject the new chart label:
 
 ```bash
 helm upgrade flow ./helm/charts/nico-flow \
   --namespace flow \
-  --reuse-values \
+  --reset-then-reuse-values \
   --set flowConfig.leakDetectionInterval=5m \
   --set flowConfig.disableInventory=true
 ```
+
+On Helm 4, add `--force-conflicts` after `--reset-then-reuse-values` when the
+chart version changes.
 
 Confirm the rendered file after the rollout:
 
@@ -91,6 +96,9 @@ kubectl get configmap flow-config-files -n flow -o jsonpath='{.data.flowconfig\.
 In chart 0.2.x, `flowConfig` was an optional raw string holding the whole file,
 and the ConfigMap was only created when it was set. From 0.3.0, `flowConfig` is
 a structured map with the keys above, and the ConfigMap is always rendered. A
+release that never set `flowConfig` upgrades without changes: an absent block
+or the 0.2.x empty-string default renders the chart defaults, so the upgrade
+works with `--reset-then-reuse-values` and with `--reuse-values`. A non-empty
 raw-string `flowConfig` fails at render time with `flowConfig must be a map of
 settings ...; see the nico-flow README section "Upgrading from 0.2.x"`. Convert
 an existing override before upgrading:

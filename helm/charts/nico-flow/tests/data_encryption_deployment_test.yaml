@@ -47,3 +47,33 @@ tests:
               items:
                 - key: flow-data-encryption-key
                   path: encryption-key
+
+  - it: mounts the chart-managed key when a reused 0.1.0 release carries no dataEncryption block
+    template: deployment.yaml
+    set:
+      dataEncryption: null
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data-encryption-key
+            secret:
+              secretName: flow-data-encryption-key
+              items:
+                - key: flow-data-encryption-key
+                  path: encryption-key
+
+  - it: mounts the chart-managed key when reused values carry a null dataEncryption.key
+    template: deployment.yaml
+    set:
+      dataEncryption.key: null
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data-encryption-key
+            secret:
+              secretName: flow-data-encryption-key
+              items:
+                - key: flow-data-encryption-key
+                  path: encryption-key

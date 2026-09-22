@@ -643,9 +643,9 @@ else
     # last hosts never finish creating and ingestion stalls short of the
     # target (learned the hard way — a --skip-dpf-sim run wedged at 2838/3000).
     # -------------------------------------------------------------------------
-    # 1. nico-api's access to the DPF namespace for the DPF SDK (mirrors
-    #    helm/charts/nico-api/templates/dpf-rbac.yaml on the setup-dpf-install
-    #    branch, not on main yet — drop this once the chart ships it).
+    # 1. nico-api's access to the DPF namespace for the DPF SDK. This
+    #    standalone workflow reapplies the Role, so keep it aligned with
+    #    helm/charts/nico-api/templates/dpf-rbac.yaml.
     kubectl apply -f - <<NICOAPIDPF >/dev/null
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -663,7 +663,7 @@ rules:
     resources: ["dpunodemaintenances"]
     verbs: ["get", "patch"]
   - apiGroups: ["provisioning.dpu.nvidia.com"]
-    resources: ["dpuflavors"]
+    resources: ["dpuflavors", "dpuflavortemplates"]
     verbs: ["get", "create"]
   - apiGroups: ["provisioning.dpu.nvidia.com"]
     resources: ["dpusets"]
@@ -679,13 +679,14 @@ rules:
     verbs: ["get", "patch"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "create"]
-  # DPF SDK init PATCHes this one Secret on startup; scope the grant to it
-  # rather than every Secret in the namespace.
+    verbs: ["create"]
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: ["bmc-shared-password"]
-    verbs: ["patch"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

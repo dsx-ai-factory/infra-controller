@@ -210,6 +210,7 @@
     - [EventRuleSeverity](#v1-EventRuleSeverity)
     - [EventRuleTargetStrategy](#v1-EventRuleTargetStrategy)
     - [FirmwareControlOperation](#v1-FirmwareControlOperation)
+    - [LeakHandlingStatus](#v1-LeakHandlingStatus)
     - [LeakStatus](#v1-LeakStatus)
     - [OperationRunPhysicalLocationOrdering.Strategy](#v1-OperationRunPhysicalLocationOrdering-Strategy)
     - [OperationRunSafetyGateScope](#v1-OperationRunSafetyGateScope)
@@ -525,6 +526,7 @@ An empty list means no conflicts were detected.
 | nvl_domain_id | [UUID](#v1-UUID) |  | NVLink Domain containing this component&#39;s rack; omitted when unassigned |
 | task_stats | [TaskStats](#v1-TaskStats) |  | Active Tasks that explicitly target this component. |
 | rack_external_id | [string](#string) |  |  |
+| leak_handling_status | [LeakHandlingStatus](#v1-LeakHandlingStatus) |  | Flow&#39;s leakage-handling status for this component. |
 
 
 
@@ -1358,6 +1360,7 @@ or values scoped to supported firmware tray types.
 | end_time | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
 | sub_targets | [string](#string) | repeated | Optional firmware sub-parts within each selected component. Empty means every firmware sub-part supported by that component. |
 | override_readiness_check | [bool](#bool) |  | Bypasses the component readiness gate when the task executes. |
+| override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when the selected component backend applies the update. |
 
 
 
@@ -3480,6 +3483,7 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | sub_targets | [string](#string) | repeated | Optional subset of firmware sub-parts to update within each tray selected by target_spec, e.g. [&#34;bmc&#34;, &#34;nvos&#34;] for switch trays or [&#34;psu&#34;] for powershelf trays. Named &#34;sub_targets&#34; (not &#34;components&#34;) to avoid colliding with OperationTargetSpec.components, which selects tray INSTANCES rather than sub-parts of a tray. Names are lowercase. Empty or omitted means update everything in the bundle (current default behavior). Unknown names are rejected by the downstream component manager. |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the firmware update even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. The flag is intended for operator-supervised maintenance windows where the tenant impact has been acknowledged out-of-band; setting it bypasses the readiness gate that would otherwise block disruptive operations against tenanted hardware. The bypass is recorded in the server log. |
 | authentication_data | [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData) |  | Optional, write-only authentication data for firmware downloads. It is not supported for DPU-only updates or by the legacy NICo compute firmware controller. |
+| override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when deciding whether to apply the update. This allows same-version reapplication and downgrade when the selected component backend supports those operations. It does not bypass readiness checks or state-controller routing. |
 
 
 
@@ -3693,6 +3697,23 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 
 
 
+<a name="v1-LeakHandlingStatus"></a>
+
+### LeakHandlingStatus
+LeakHandlingStatus describes Flow&#39;s handling of a leakage event for a
+component. It describes handling progress, not the component&#39;s current leak
+or power state.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| LEAK_HANDLING_STATUS_UNKNOWN | 0 | Flow could not determine the status. |
+| LEAK_HANDLING_STATUS_NONE | 1 | No supported leakage-handling Task targets this component. |
+| LEAK_HANDLING_STATUS_SHUTTING_DOWN | 2 | A forced-shutdown Task is waiting, pending, or running. |
+| LEAK_HANDLING_STATUS_DOWN | 3 | A forced-shutdown Task completed. This is not current power state. |
+| LEAK_HANDLING_STATUS_FAILED | 4 | The latest supported leakage-handling Task failed or was terminated. |
+
+
+
 <a name="v1-LeakStatus"></a>
 
 ### LeakStatus
@@ -3832,7 +3853,9 @@ execution for the same scope is still active.
 <a name="v1-Phase"></a>
 
 ### Phase
-Phase is Flow&#39;s coarse operability bucket.
+Phase is Flow&#39;s coarse operability bucket. Component phases are derived from
+Core&#39;s type-specific state machines; Rack.operation_status aggregates those
+component phases.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |

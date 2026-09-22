@@ -30,6 +30,7 @@ use ::rpc::forge::{
     self as rpc, FlatInterfaceConfig, ManagedHostNetworkConfigResponse,
     NetworkSecurityGroupRuleAction, NetworkSecurityGroupRuleProtocol,
 };
+use carbide_network::ip::prefix::{IpNet, aggregate};
 use carbide_network::virtualization::{VpcVirtualizationType, build_dual_stack_list};
 use eyre::WrapErr;
 use mac_address::MacAddress;
@@ -316,6 +317,52 @@ fn parse_managed_host_loopback_ips(
     Ok((loopback_ip, loopback_ip_v6))
 }
 
+/// Returns peer VNIs only when Core explicitly marks them as policy-filtered.
+///
+/// The protobuf default is false, so configurations from Core versions that
+/// predate the marker cannot reactivate peerings during a rolling upgrade.
+fn vpc_peer_vnis_for_rendering(authoritative: bool, vnis: &[u32]) -> Vec<u32> {
+    if authoritative {
+        vnis.to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Selects the isolation prefixes for the active virtualizer.
+///
+/// New Core versions resolve FNN null-route policy before transmission and
+/// preserve explicit prefix boundaries in the presence-bearing field. During
+/// an agent-first rolling upgrade, an older Core omits that field and the
+/// agent reduces the legacy site-prefix list to its minimal exact union before
+/// using it as the fallback.
+fn site_isolation_prefixes_for_rendering(
+    virtualization_type: VpcVirtualizationType,
+    config: &rpc::ManagedHostNetworkConfigResponse,
+) -> eyre::Result<Vec<String>> {
+    if virtualization_type == VpcVirtualizationType::Fnn {
+        if let Some(prefixes) = config.site_fabric_null_routes.as_ref() {
+            Ok(prefixes.items.clone())
+        } else {
+            let legacy_prefixes = config
+                .site_fabric_prefixes
+                .iter()
+                .map(|prefix| {
+                    prefix.parse::<IpNet>().map_err(|error| {
+                        eyre::eyre!("invalid legacy site-fabric prefix {prefix}: {error}")
+                    })
+                })
+                .collect::<eyre::Result<Vec<_>>>()?;
+            Ok(aggregate(legacy_prefixes)
+                .into_iter()
+                .map(|prefix| prefix.to_string())
+                .collect())
+        }
+    } else {
+        Ok(config.site_fabric_prefixes.clone())
+    }
+}
+
 /// Update the NVUE network config, returning whether NVUE applied a change.
 /// With `StartupFile` and `skip_post`, only save the desired file and return
 /// whether that file was replaced. Errors from saving or applying the desired
@@ -429,7 +476,10 @@ pub(super) async fn update_nvue(
                 }),
                 vpc_prefixes: admin_interface.vpc_prefixes.clone(),
                 vpc_peer_prefixes: admin_interface.vpc_peer_prefixes.clone(),
-                vpc_peer_vnis: admin_interface.vpc_peer_vnis.clone(),
+                vpc_peer_vnis: vpc_peer_vnis_for_rendering(
+                    nc.vpc_peer_vnis_authoritative,
+                    &admin_interface.vpc_peer_vnis,
+                ),
                 svi_ip: admin_interface.svi_ip.clone(),
                 tenant_vrf_loopback_ip: admin_interface.tenant_vrf_loopback_ip.clone(),
                 network_security_group_id: None, // NSGs are not applied on the admin network.
@@ -493,7 +543,10 @@ pub(super) async fn update_nvue(
                 }),
                 vpc_prefixes: net.vpc_prefixes.clone(),
                 vpc_peer_prefixes: net.vpc_peer_prefixes.clone(),
-                vpc_peer_vnis: net.vpc_peer_vnis.clone(),
+                vpc_peer_vnis: vpc_peer_vnis_for_rendering(
+                    nc.vpc_peer_vnis_authoritative,
+                    &net.vpc_peer_vnis,
+                ),
                 svi_ip: net.svi_ip.clone(),
                 tenant_vrf_loopback_ip: net.tenant_vrf_loopback_ip.clone(),
                 network_security_group_id: net
@@ -613,7 +666,7 @@ pub(super) async fn update_nvue(
         ct_vrf_name: format!("vpc_{}", nc.vpc_vni.unwrap_or_default()),
         ct_access_vlans: access_vlans,
         deny_prefixes: nc.deny_prefixes.clone(),
-        site_fabric_prefixes: nc.site_fabric_prefixes.clone(),
+        site_fabric_prefixes: site_isolation_prefixes_for_rendering(vpc_virtualization_type, nc)?,
         anycast_site_prefixes: nc.anycast_site_prefixes.clone(),
         tenant_host_asn: nc.tenant_host_asn,
         stateful_acls_enabled: nc.stateful_acls_enabled && has_stateful_nsg,
@@ -1908,6 +1961,56 @@ mod tests {
         );
     }
 
+    /// Presence, including an empty list, makes Core's resolved FNN policy
+    /// authoritative. Only an older Core's absent field falls back to an
+    /// aggregated legacy site-prefix list, while ETV retains the original list.
+    #[test]
+    fn site_isolation_prefixes_honor_resolved_fnn_policy_presence() {
+        use carbide_test_support::Outcome::Yields;
+        use carbide_test_support::scenarios;
+
+        // Nested and adjacent legacy roots reveal whether fallback aggregation
+        // is incorrectly applied to authoritative operator policy.
+        let legacy = vec![
+            "10.0.0.0/9".to_string(),
+            "10.128.0.0/9".to_string(),
+            "10.2.0.0/24".to_string(),
+        ];
+        let explicit = vec!["10.0.0.0/8".to_string(), "10.2.0.0/24".to_string()];
+
+        // Keep the legacy source fixed and compare the selected policy before NVUE renders it.
+        scenarios!(
+            run = |(virtualization_type, null_routes): (_, Option<Vec<String>>)| {
+                let config = rpc::ManagedHostNetworkConfigResponse {
+                    site_fabric_prefixes: legacy.clone(),
+                    site_fabric_null_routes: null_routes.map(|items| rpc_common::StringList { items }),
+                    ..Default::default()
+                };
+                site_isolation_prefixes_for_rendering(virtualization_type, &config)
+                    .map_err(|error| error.to_string())
+            };
+            "explicit FNN routes preserve boundaries" {
+                // A child boundary is stronger policy than its parent and must survive.
+                (VpcVirtualizationType::Fnn, Some(explicit.clone())) => Yields(explicit),
+            }
+            "explicit empty FNN routes disable fallback" {
+                // Present-but-empty disables isolation routes instead of inheriting roots.
+                (VpcVirtualizationType::Fnn, Some(vec![])) => Yields(vec![]),
+            }
+            "old Core FNN response uses legacy fallback" {
+                // An absent field identifies old Core and requires the legacy fallback.
+                (VpcVirtualizationType::Fnn, None) => Yields(vec!["10.0.0.0/8".to_string()]),
+            }
+            "ETV ignores the FNN-only field" {
+                // ETV still consumes its legacy ACL list even if the new field is present.
+                (
+                    VpcVirtualizationType::EthernetVirtualizer,
+                    Some(vec!["203.0.113.0/24".to_string()]),
+                ) => Yields(legacy.clone()),
+            }
+        );
+    }
+
     /// Verifies IPv4 site NTP overrides do not suppress DNS-derived DHCPv6 NTP.
     #[test]
     fn test_build_dhcp_ntp_servers() {
@@ -2647,6 +2750,62 @@ esac
         Ok(())
     }
 
+    /// Verifies only Core responses marked authoritative can activate peer VNI
+    /// imports, so an older Core cannot bypass the existing-peering policy.
+    #[tokio::test]
+    async fn peer_vnis_require_an_authoritative_core_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (scenario, authoritative) in [
+            // Old Core supplies peer VNIs without proving its policy filtered them.
+            ("legacy Core response", false),
+            // New Core explicitly certifies the list for route-target imports.
+            ("authoritative Core response", true),
+        ] {
+            // Use a populated peer list so absence of an import proves filtering.
+            let mut network_config = netconf(
+                VpcVirtualizationType::Fnn,
+                32,
+                24,
+                false,
+                None,
+                false,
+                false,
+            );
+            assert!(
+                network_config.tenant_interfaces[0]
+                    .vpc_peer_vnis
+                    .contains(&1_025_187)
+            );
+            network_config.vpc_peer_vnis_authoritative = authoritative;
+
+            // Render through the real agent update path into a temporary HBN tree.
+            let td = tempfile::tempdir()?;
+            let hbn_root = td.path();
+            fs::create_dir_all(hbn_root.join("var/support"))?;
+            fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                HBNDeviceNames::hbn_23(),
+                None,
+            )
+            .await?;
+
+            // The route target must appear exactly when Core authorized the list.
+            let startup_yaml = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+            assert_eq!(
+                startup_yaml.contains("11414:1025187: {}"),
+                authoritative,
+                "{scenario}"
+            );
+        }
+        Ok(())
+    }
+
     // Builds the deprecated compatibility shape consumed by these renderer tests.
     #[allow(deprecated)]
     fn netconf(
@@ -3090,6 +3249,8 @@ esac
             route_servers: vec!["172.43.0.1".to_string(), "172.43.0.2".to_string()],
             deny_prefixes: vec!["192.0.2.0/24".into(), "198.51.100.0/24".into()],
             site_fabric_prefixes: vec!["10.217.0.0/16".into()],
+            site_fabric_null_routes: None,
+            vpc_peer_vnis_authoritative: true,
             deprecated_deny_prefixes: vec![],
             enable_dhcp: true,
             vpc_isolation_behavior: rpc::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
@@ -3630,6 +3791,8 @@ esac
             route_servers: vec!["172.43.0.1".to_string(), "172.43.0.2".to_string()],
             deny_prefixes: vec!["192.0.2.0/24".into(), "198.51.100.0/24".into()],
             site_fabric_prefixes: vec!["10.217.0.0/16".into()],
+            site_fabric_null_routes: None,
+            vpc_peer_vnis_authoritative: true,
             vpc_isolation_behavior: rpc::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
             deprecated_deny_prefixes: vec![],
             enable_dhcp: true,
@@ -3824,6 +3987,8 @@ esac
             route_servers: vec![],
             deny_prefixes: vec![],
             site_fabric_prefixes: vec![],
+            site_fabric_null_routes: None,
+            vpc_peer_vnis_authoritative: false,
             vpc_isolation_behavior: rpc::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
             deprecated_deny_prefixes: vec![],
             enable_dhcp: true,

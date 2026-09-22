@@ -75,10 +75,9 @@ printf '%s\n' "${_vault_token}" | kubectl -n "${VAULT_NS}" exec -i vault-0 -- \
 
         accessors_json="$(vault list -format=json auth/token/accessors)"
         printf "%s\n" "$accessors_json" \
-            | tr -d '\''[]"'\'' \
-            | tr '\'',\'' '\''\n'\'' \
-            | tr -d '\''[:space:]'\'' \
-            | while IFS= read -r accessor; do
+            | tr -d '\''[:space:]"[]'\'' \
+            | tr '\'','\'' '\''\n'\'' \
+            | while IFS= read -r accessor || [ -n "$accessor" ]; do
                 [ -n "$accessor" ] || continue
                 if ! token_json="$(vault token lookup -format=json \
                     -accessor "$accessor" 2>/dev/null)"; then

@@ -160,12 +160,10 @@ impl MachineValidationManager {
         join_set: &mut JoinSet<()>,
         cancel_token: CancellationToken,
     ) -> io::Result<()> {
-        if self.config.enabled {
-            join_set
-                .build_task()
-                .name("machine_validation_manager")
-                .spawn(async move { self.run(cancel_token).await })?;
-        }
+        join_set
+            .build_task()
+            .name("machine_validation_manager")
+            .spawn(async move { self.run(cancel_token).await })?;
         Ok(())
     }
 
@@ -173,7 +171,11 @@ impl MachineValidationManager {
         let timer = PeriodicTimer::new(self.config.run_interval);
         loop {
             let tick = timer.tick();
-            let result = self.run_single_iteration().await;
+            let result = if self.config.enabled {
+                self.run_single_iteration().await
+            } else {
+                self.cleanup_attempt_logs().await
+            };
             managed_loop::record_iteration(LoopManager::MachineValidationManager, &result);
 
             tokio::select! {
@@ -192,6 +194,8 @@ impl MachineValidationManager {
         let mut metrics = MachineValidationMetrics::new();
         let now = chrono::Utc::now();
         let heartbeat_stale_timeout = heartbeat_stale_timeout(self.config.stale_run_timeout);
+
+        self.cleanup_attempt_logs().await?;
 
         // Each reconciliation phase gets its own transaction. PostgreSQL
         // keeps row locks until commit, so sharing a transaction would let a
@@ -306,6 +310,27 @@ impl MachineValidationManager {
         txn.commit().await?;
         completions.into_iter().for_each(carbide_instrument::emit);
 
+        Ok(())
+    }
+
+    async fn cleanup_attempt_logs(&self) -> CarbideResult<()> {
+        // Attempt logs are diagnostic data. Sweep a bounded batch each pass so
+        // retention never turns into an unbounded delete transaction.
+        const ATTEMPT_LOG_CLEANUP_BATCH_SIZE: i64 = 1_000;
+        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let removed = db::machine_validation_execution::delete_expired_attempt_log_chunks(
+            txn.as_pgconn(),
+            self.config.attempt_logs.retention,
+            ATTEMPT_LOG_CLEANUP_BATCH_SIZE,
+        )
+        .await?;
+        txn.commit().await?;
+        if removed > 0 {
+            tracing::info!(
+                removed_attempt_log_chunks = removed,
+                "Removed expired machine validation attempt log chunks"
+            );
+        }
         Ok(())
     }
 }

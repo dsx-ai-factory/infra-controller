@@ -90,9 +90,9 @@ pub fn cidr_to_reverse_zone(prefix: IpNetwork) -> Option<String> {
 
 /// Ensure the reverse-DNS zone for a network prefix exists, deriving its name
 /// from the prefix and creating the domain only if it is not already present.
-/// A network's reverse zone is a consequence of the network existing, so this is
-/// called wherever a network segment is created; non-aligned prefixes are skipped
-/// (see [`cidr_to_reverse_zone`]).
+/// Maintains rollback compatibility with zone-backed DNS. Derived PTR lookup
+/// does not read these rows. Network creation and startup repair call this;
+/// non-aligned prefixes are skipped (see [`cidr_to_reverse_zone`]).
 ///
 /// The transaction-scoped zone lock makes the find-then-create atomic. When
 /// VPC-scoped prefix reuse is enabled, equal prefixes will share one
@@ -605,7 +605,8 @@ mod tests {
         // deleting the final live prefix removes it.
         let mut txn = pool.begin().await.unwrap();
         sqlx::query(
-            "ALTER TABLE network_prefixes DROP CONSTRAINT IF EXISTS network_prefixes_prefix_excl",
+            "ALTER TABLE network_prefixes DROP CONSTRAINT network_prefixes_prefix_excl,
+             DROP CONSTRAINT network_prefixes_global_prefix_excl",
         )
         .execute(txn.as_mut())
         .await
@@ -651,7 +652,8 @@ mod tests {
         // needs the shared zone after both transactions commit.
         let mut setup = pool.begin().await.unwrap();
         sqlx::query(
-            "ALTER TABLE network_prefixes DROP CONSTRAINT IF EXISTS network_prefixes_prefix_excl",
+            "ALTER TABLE network_prefixes DROP CONSTRAINT network_prefixes_prefix_excl,
+             DROP CONSTRAINT network_prefixes_global_prefix_excl",
         )
         .execute(setup.as_mut())
         .await
@@ -707,7 +709,8 @@ mod tests {
         // the final zone exactly once.
         let mut setup = pool.begin().await.unwrap();
         sqlx::query(
-            "ALTER TABLE network_prefixes DROP CONSTRAINT IF EXISTS network_prefixes_prefix_excl",
+            "ALTER TABLE network_prefixes DROP CONSTRAINT network_prefixes_prefix_excl,
+             DROP CONSTRAINT network_prefixes_global_prefix_excl",
         )
         .execute(setup.as_mut())
         .await

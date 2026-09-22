@@ -15,8 +15,6 @@
  * limitations under the License.
  */
 
-#![allow(deprecated)]
-
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::str::FromStr;
@@ -45,7 +43,9 @@ use model::network_segment::{
     NetworkSegmentType, NewNetworkSegment,
 };
 use model::resource_pool::common::VLANID;
-use model::resource_pool::{ResourcePool, ResourcePoolError, ResourcePoolStats, ValueType};
+use model::resource_pool::{
+    ResourcePool, ResourcePoolEntryState, ResourcePoolError, ResourcePoolStats, ValueType,
+};
 use model::vpc::{NewVpc, UpdateVpcVirtualization, VpcDefinition, VpcStatus};
 use prometheus_text_parser::ParsedPrometheusMetrics;
 use rpc::Metadata;
@@ -347,6 +347,10 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
 
     // Value is allocated
     let mut txn = db_pool.begin().await?;
+    let vni: i32 = sqlx::query_scalar("SELECT vni_id FROM network_segments WHERE id = $1")
+        .bind(segment.id)
+        .fetch_one(&mut *txn)
+        .await?;
     assert_eq!(
         db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
         ResourcePoolStats {
@@ -379,6 +383,12 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
 
     // Value is free
     let mut txn = db_pool.begin().await?;
+    let vni_entry = db::resource_pool::find_value(&mut *txn, &vni.to_string())
+        .await?
+        .into_iter()
+        .find(|entry| entry.pool_name == env.common_pools.ethernet.pool_vni.name())
+        .expect("segment VNI must remain in its pool");
+    assert_eq!(vni_entry.state.0, ResourcePoolEntryState::Free);
     assert_eq!(
         db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
         ResourcePoolStats {
@@ -1089,7 +1099,11 @@ async fn test_segment_prefix_in_unconfigured_address_space(
             }
         }
         Ok(segment) => {
-            let prefixes = segment.prefixes.iter().map(|p| p.prefix.as_str());
+            let config = segment
+                .config
+                .as_ref()
+                .expect("created network segment should include config");
+            let prefixes = config.prefixes.iter().map(|p| p.prefix.as_str());
             let prefixes = itertools::join(prefixes, ", ");
             Err(eyre::format_err!(
                 "the API did not reject our request to create a segment using \
@@ -1795,16 +1809,19 @@ async fn test_create_network_segment_with_ipv6_prefix(
         .await?
         .into_inner();
 
-    assert_eq!(response.name, "IPV6_SEGMENT");
-    assert_eq!(response.prefixes.len(), 1);
-    assert_eq!(response.prefixes[0].prefix, "2001:db8::/64");
-    assert!(response.prefixes[0].gateway.is_none());
-    assert!(
-        response
-            .config
-            .as_ref()
-            .is_some_and(|config| config.infer_slaac_eui64_addresses)
-    );
+    let metadata = response
+        .metadata
+        .as_ref()
+        .expect("created network segment should include metadata");
+    let config = response
+        .config
+        .as_ref()
+        .expect("created network segment should include config");
+    assert_eq!(metadata.name, "IPV6_SEGMENT");
+    assert_eq!(config.prefixes.len(), 1);
+    assert_eq!(config.prefixes[0].prefix, "2001:db8::/64");
+    assert!(config.prefixes[0].gateway.is_none());
+    assert!(config.infer_slaac_eui64_addresses);
 
     Ok(())
 }
@@ -1883,15 +1900,19 @@ async fn test_create_dual_stack_tenant_segment(pool: sqlx::PgPool) -> Result<(),
         .await?
         .into_inner();
 
-    assert_eq!(response.name, "DUAL_STACK_SEGMENT");
-    assert_eq!(response.prefixes.len(), 2);
+    let metadata = response
+        .metadata
+        .as_ref()
+        .expect("created network segment should include metadata");
+    let config = response
+        .config
+        .as_ref()
+        .expect("created network segment should include config");
+    assert_eq!(metadata.name, "DUAL_STACK_SEGMENT");
+    assert_eq!(config.prefixes.len(), 2);
 
     // Verify both prefixes are present (order may vary)
-    let prefix_strs: Vec<&str> = response
-        .prefixes
-        .iter()
-        .map(|p| p.prefix.as_str())
-        .collect();
+    let prefix_strs: Vec<&str> = config.prefixes.iter().map(|p| p.prefix.as_str()).collect();
     assert!(prefix_strs.contains(&"192.0.2.0/24"), "IPv4 prefix missing");
     assert!(
         prefix_strs.contains(&"2001:db8::/64"),
@@ -2144,9 +2165,12 @@ async fn flat_vpc_accepts_host_inband_segment(
 
     // Accepting the request is only half of it -- check the segment came back attached to
     // the flat VPC, with the type we asked for.
-    assert_eq!(created.vpc_id, vpc.id);
+    let config = created
+        .config
+        .expect("created network segment should include config");
+    assert_eq!(config.vpc_id, vpc.id);
     assert_eq!(
-        created.segment_type,
+        config.segment_type,
         rpc::forge::NetworkSegmentType::HostInband as i32
     );
 
@@ -2309,8 +2333,24 @@ async fn attach_host_inband_segment_to_same_vpc_is_idempotent(
         .await?
         .into_inner();
 
-    assert_eq!(second.config.unwrap().vpc_id, Some(vpc_id));
-    assert_eq!(second.version, first.version);
+    assert_eq!(second.config.as_ref().unwrap().vpc_id, Some(vpc_id));
+    let second_status = second
+        .status
+        .as_ref()
+        .expect("second status should be present");
+    let second_lifecycle = second_status
+        .lifecycle
+        .as_ref()
+        .expect("second lifecycle should be present");
+    let first_status = first
+        .status
+        .as_ref()
+        .expect("first status should be present");
+    let first_lifecycle = first_status
+        .lifecycle
+        .as_ref()
+        .expect("first lifecycle should be present");
+    assert_eq!(second_lifecycle.version, first_lifecycle.version);
 
     Ok(())
 }

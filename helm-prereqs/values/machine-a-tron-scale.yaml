@@ -71,14 +71,14 @@ mat-k8s-controller:
 # Larger resources for scale testing
 
 # MAT registers all expected machines before binding the redfish port (issue
-# #4298). The startupProbe gates liveness until the port is open, giving
-# enough time even for a 13,500-host pod. Once the port is bound the normal
-# liveness/readiness probes kick in with tight thresholds so real runtime
-# hangs are still caught quickly.
+# #4298). The startupProbe gates liveness until the port is open. Once the
+# port is bound the normal liveness/readiness probes kick in with tight
+# thresholds so real runtime hangs are still caught quickly.
 #
-# failureThreshold calculation: worst-case API round-trip ~2s per host.
-# 13500 hosts / pod × 2s = ~7.5h → round up to 10h to be safe.
-# 10h / 30s period = 1200 attempts.
+# Sizing rule: see the startupProbe comment in the chart values.yaml. Pods in
+# this file define hosts only (no racks, switches or power shelves) and DPUs
+# are not registered, so records = hosts per pod. Sized for HOST_COUNT=4500 in
+# one pod: 4,500 records x 2s = 2.5h; 1200 x 30s = 10h keeps headroom.
 startupProbe:
   tcpSocket:
     port: redfish

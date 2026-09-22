@@ -28,6 +28,8 @@ use carbide_dpf::DpuDeploymentType;
 use carbide_ib_fabric::config::IBFabricConfig;
 use carbide_ib_fabric::ib::{self, GetPartitionOptions, IBFabricManager};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
+use carbide_test_support::Outcome::Yields;
+use carbide_test_support::{Case, check_cases_async};
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait, MachineType};
@@ -37,6 +39,7 @@ use common::api_fixtures::host::host_discover_dhcp;
 use common::api_fixtures::ib_partition::{DEFAULT_TENANT, create_ib_partition};
 use common::api_fixtures::instance::create_instance_with_ib_config;
 use common::api_fixtures::tpm_attestation::EK_CERT_SERIALIZED;
+use common::api_fixtures::vpc::create_vpc;
 use common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_managed_host, create_managed_host_multi_dpu,
     create_managed_host_with_dpf, create_test_env, create_test_env_with_overrides, get_config,
@@ -58,7 +61,8 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{InstanceState, ManagedHostState};
 use model::metadata::Metadata;
 use model::os::{InlineIpxe, OperatingSystem, OperatingSystemVariant};
-use model::resource_pool::{ResourcePoolDef, ResourcePoolType};
+use model::resource_pool::common::{FNN_ASN, LOOPBACK_IP, VPC_DPU_LOOPBACK};
+use model::resource_pool::{OwnerType, ResourcePoolDef, ResourcePoolEntryState, ResourcePoolType};
 use model::site_explorer::ExploredManagedHost;
 use model::tenant::TenantOrganizationId;
 use sqlx::{PgConnection, Row};
@@ -112,6 +116,7 @@ async fn test_admin_force_delete_dpu_only(pool: sqlx::PgPool) {
 
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
+    let (vpc_id, _) = create_vpc(&env, "force-delete loopback".to_string(), None, None).await;
 
     let mut txn = env.pool.begin().await.unwrap();
     let dpu_machine = db::machine::find_one(
@@ -122,6 +127,26 @@ async fn test_admin_force_delete_dpu_only(pool: sqlx::PgPool) {
     .await
     .unwrap()
     .unwrap();
+    let vpc_loopback = db::vpc_dpu_loopback::get_or_allocate_loopback_ip_for_vpc(
+        &env.common_pools,
+        &mut txn,
+        &dpu_machine_id,
+        &vpc_id,
+    )
+    .await
+    .expect("allocate VPC loopback");
+    let allocations = [
+        (
+            LOOPBACK_IP,
+            dpu_machine
+                .network_config
+                .loopback_ip
+                .expect("DPU IPv4 loopback")
+                .to_string(),
+        ),
+        (FNN_ASN, dpu_machine.asn.expect("DPU ASN").to_string()),
+        (VPC_DPU_LOOPBACK, vpc_loopback.to_string()),
+    ];
     assert!(dpu_machine.network_config.loopback_ip_v6.is_some());
     let allocated_loopback_v6_pool_stats = db::resource_pool::stats(
         txn.as_mut(),
@@ -177,6 +202,29 @@ async fn test_admin_force_delete_dpu_only(pool: sqlx::PgPool) {
 
     txn.commit().await.unwrap();
 
+    let db_pool = &env.pool;
+    let allocation_state = |(name, value): (String, String)| async move {
+        let entry = db::resource_pool::find_value(db_pool, &value)
+            .await
+            .expect("find allocation")
+            .into_iter()
+            .find(|entry| entry.pool_name == name)
+            .expect("allocation must remain in its pool");
+        Ok::<_, ()>(entry.state.0)
+    };
+    check_cases_async(
+        allocations.iter().map(|(name, value)| Case {
+            scenario: name,
+            input: (name.to_string(), value.clone()),
+            expect: Yields(ResourcePoolEntryState::Allocated {
+                owner: dpu_machine_id.to_string(),
+                owner_type: OwnerType::Machine.to_string(),
+            }),
+        }),
+        &allocation_state,
+    )
+    .await;
+
     let response = force_delete(&env, &dpu_machine_id).await;
     validate_delete_response(&response, Some(&host.id), &dpu_machine_id);
     assert_eq!(
@@ -189,7 +237,22 @@ async fn test_admin_force_delete_dpu_only(pool: sqlx::PgPool) {
     // Validate that the DPU is gone
     validate_machine_deletion(&env, &dpu_machine_id, None).await;
 
+    check_cases_async(
+        allocations.into_iter().map(|(name, value)| Case {
+            scenario: name,
+            input: (name.to_string(), value),
+            expect: Yields(ResourcePoolEntryState::Free),
+        }),
+        allocation_state,
+    )
+    .await;
     let mut txn = env.pool.begin().await.unwrap();
+    assert!(
+        db::vpc_dpu_loopback::find(&mut txn, &dpu_machine_id, &vpc_id)
+            .await
+            .expect("find deleted VPC loopback")
+            .is_none()
+    );
     let released_loopback_v6_pool_stats = db::resource_pool::stats(
         txn.as_mut(),
         env.common_pools.ethernet.pool_loopback_ip_v6.name(),

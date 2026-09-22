@@ -15,8 +15,8 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
-use db::resource_pool::ResourcePoolDatabaseError;
-use db::{ObjectColumnFilter, WithTransaction, spx_partition};
+use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
+use db::{ConditionalWrite, ObjectColumnFilter, WithTransaction, spx_partition};
 use futures_util::FutureExt;
 use model::resource_pool;
 use model::spx_partition::NewSpxPartition;
@@ -146,9 +146,20 @@ pub(crate) async fn delete(
     if let Some(vni) = resp.vni {
         let mut txn = api.txn_begin().await?;
 
-        db::resource_pool::release(&api.common_pools.ethernet.pool_dpa_vni, &mut txn, vni)
-            .await
-            .map_err(CarbideError::from)?;
+        // A free or reassigned VNI leaves this partition nothing to release.
+        match db::resource_pool::release(
+            &api.common_pools.ethernet.pool_dpa_vni,
+            &mut txn,
+            vni,
+            resource_pool::OwnerType::SpxPartition,
+            &id.to_string(),
+        )
+        .await
+        .map_err(CarbideError::from)?
+        {
+            ConditionalWrite::Applied(())
+            | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+        }
 
         txn.commit().await?;
     }
