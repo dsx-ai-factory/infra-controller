@@ -365,20 +365,42 @@ pub enum ReProvisioningState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum SwitchDecommissioningState {
-    /// Site Explorer is being suppressed before the destructive reset.
+    /// Requests Site Explorer suppression and advances to [`Self::FactoryResetNvos`]
+    /// once suppression is acknowledged.
     SuppressingSiteExplorer,
-    /// NVOS DHCP is suppressed before the factory reset so post-reset discovers are ignored.
-    SuppressingNvosDhcp,
     /// Submits the destructive RMS NVOS factory-reset job.
-    /// Completion is not polled: NVOS DHCP is already suppressed, so the job
-    /// cannot be observed reliably; progress continues after job submission.
+    /// A returned job ID advances to [`Self::WaitingForNvosFactoryReset`]; an unknown
+    /// submission outcome advances to [`Self::NvosFactoryResetOutcomeUnknown`].
     FactoryResetNvos,
-    /// BMC DHCP is suppressed before the BMC factory reset.
+    /// Submission may have succeeded without returning a job ID. Reports an error
+    /// on every iteration without resubmitting or advancing; operator recovery is required.
+    NvosFactoryResetOutcomeUnknown {
+        /// Submission failure explaining why the reset must not be retried automatically.
+        error: String,
+    },
+    /// Polls the saved job ID, waiting while pending and advancing to
+    /// [`Self::SuppressingNvosDhcp`] only on successful completion. A failed job or
+    /// polling error is reported while retaining the job ID; the reset is not resubmitted.
+    WaitingForNvosFactoryReset {
+        /// Opaque RMS job handle retained across controller iterations and restarts.
+        job_id: String,
+    },
+    /// Records NVOS DHCP suppression after the factory reset completes, then advances
+    /// to [`Self::RebootingSwitch`] without waiting for suppression acknowledgement.
+    SuppressingNvosDhcp,
+    /// Requests a forced restart through the BMC and advances to
+    /// [`Self::SuppressingBmcDhcp`] when the request succeeds.
+    RebootingSwitch,
+    /// Records BMC DHCP suppression and advances to [`Self::FactoryResetBmc`]
+    /// without waiting for suppression acknowledgement.
     SuppressingBmcDhcp,
-    /// Issues the BMC factory reset.
+    /// Issues the BMC factory reset and advances to
+    /// [`Self::DeletingManagedCredentials`] when the request succeeds.
     FactoryResetBmc,
-    /// Managed per-device BMC and NVOS credentials are being removed after factory reset.
+    /// Deletes managed BMC and NVOS credentials and their credential-rotation records,
+    /// then advances to [`Self::Decommissioned`] once cleanup succeeds.
     DeletingManagedCredentials,
+    /// Terminal decommissioning state; performs no further work and retains the switch record.
     Decommissioned,
 }
 
@@ -505,8 +527,19 @@ pub fn state_sla(state: &SwitchControllerState, state_version: &ConfigVersion) -
                 std::time::Duration::from_secs(slas::DECOMMISSIONING_SUPPRESSING_NVOS_DHCP),
                 time_in_state,
             ),
-            SwitchDecommissioningState::FactoryResetNvos => StateSla::with_sla(
-                std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_NVOS),
+            SwitchDecommissioningState::FactoryResetNvos
+            | SwitchDecommissioningState::NvosFactoryResetOutcomeUnknown { .. } => {
+                StateSla::with_sla(
+                    std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_NVOS),
+                    time_in_state,
+                )
+            }
+            SwitchDecommissioningState::WaitingForNvosFactoryReset { .. } => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_WAITING_FOR_NVOS_RESET),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::RebootingSwitch => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_REBOOTING_SWITCH),
                 time_in_state,
             ),
             SwitchDecommissioningState::SuppressingBmcDhcp => StateSla::with_sla(

@@ -68,7 +68,7 @@ fn required_arguments_are_validated_before_dispatch() {
             clap::error::ErrorKind::MissingRequiredArgument,
         ),
         (
-            vec!["add", "group-01", "topology", "--member", "{}"],
+            vec!["add", "group-01", "topology", "--rack", "{}"],
             clap::error::ErrorKind::ValueValidation,
         ),
         (
@@ -76,7 +76,17 @@ fn required_arguments_are_validated_before_dispatch() {
                 "add",
                 "group-01",
                 "topology",
-                "--member",
+                "--rack",
+                r#"{"rack_id":"rack-01"}"#,
+            ],
+            clap::error::ErrorKind::ValueValidation,
+        ),
+        (
+            vec![
+                "add",
+                "group-01",
+                "topology",
+                "--rack",
                 r#"{"type":"NVSwitch","manufacturer":"NVIDIA","id":"switch-01"}"#,
             ],
             clap::error::ErrorKind::ValueValidation,
@@ -90,12 +100,20 @@ fn populated_group() -> forge::ExpectedRackGroup {
     forge::ExpectedRackGroup {
         rack_group_id: Some("nvl5-gp1-jhb01".parse().unwrap()),
         topology: "gb200_nvl72r1_c2g4".into(),
-        rack_ids: vec!["rack-01".parse().unwrap(), "rack-02".parse().unwrap()],
-        members: vec![forge::ExpectedRackGroupMember {
-            r#type: "Switch".into(),
-            manufacturer: "NVIDIA".into(),
-            id: "switch-01".into(),
-        }],
+        racks: vec![
+            forge::ExpectedRackGroupRack {
+                rack_id: Some("rack-01".parse().unwrap()),
+                members: vec![forge::ExpectedRackGroupMember {
+                    r#type: "Switch".into(),
+                    manufacturer: "NVIDIA".into(),
+                    id: "switch-01".into(),
+                }],
+            },
+            forge::ExpectedRackGroupRack {
+                rack_id: Some("rack-02".parse().unwrap()),
+                members: vec![],
+            },
+        ],
         metadata: Some(forge::Metadata {
             name: "nvl5-gp1-jhb01".into(),
             description: "test group".into(),
@@ -110,12 +128,10 @@ fn populated_group() -> forge::ExpectedRackGroup {
 #[tokio::test]
 async fn writes_dispatch_expected_rpc_payloads() {
     let attributes = [
-        "--rack-id",
-        "rack-01",
-        "--rack-id",
-        "rack-02",
-        "--member",
-        r#"{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}"#,
+        "--rack",
+        r#"{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}"#,
+        "--rack",
+        r#"{"rack_id":"rack-02","members":[]}"#,
         "--meta-name",
         "nvl5-gp1-jhb01",
         "--meta-description",
@@ -219,7 +235,7 @@ async fn show_renders_public_table_and_json_contract() {
     let rows: Vec<Vec<_>> = output
         .lines()
         .filter(|line| line.starts_with('|'))
-        .map(|line| line.split('|').skip(1).take(7).map(str::trim).collect())
+        .map(|line| line.split('|').skip(1).take(6).map(str::trim).collect())
         .collect();
     assert_eq!(
         rows,
@@ -227,8 +243,7 @@ async fn show_renders_public_table_and_json_contract() {
             vec![
                 "Rack Group ID",
                 "Topology",
-                "Rack IDs",
-                "Members",
+                "Racks",
                 "Name",
                 "Description",
                 "Labels"
@@ -236,13 +251,12 @@ async fn show_renders_public_table_and_json_contract() {
             vec![
                 "nvl5-gp1-jhb01",
                 "gb200_nvl72r1_c2g4",
-                "rack-01, rack-02",
-                "Switch / NVIDIA / switch-01",
+                &serde_json::to_string(&populated_group().racks).unwrap(),
                 "nvl5-gp1-jhb01",
                 "test group",
                 "\"location.datacenter:JHB01\""
             ],
-            vec!["empty-group", "empty-topology", "", "", "", "", ""],
+            vec!["empty-group", "empty-topology", "[]", "", "", ""],
         ]
     );
 
@@ -334,8 +348,7 @@ async fn show_renders_yaml_and_csv() {
             &csv::StringRecord::from(vec![
                 "Rack Group ID",
                 "Topology",
-                "Rack IDs",
-                "Members",
+                "Racks",
                 "Name",
                 "Description",
                 "Labels",
@@ -349,8 +362,7 @@ async fn show_renders_yaml_and_csv() {
                 csv::StringRecord::from(vec![
                     "nvl5-gp1-jhb01",
                     "gb200_nvl72r1_c2g4",
-                    "rack-01, rack-02",
-                    "Switch / NVIDIA / switch-01",
+                    &serde_json::to_string(&populated_group().racks).unwrap(),
                     "nvl5-gp1-jhb01",
                     "quoted \"value\",\nsecond line",
                     "\"location.datacenter:JHB01\"",
@@ -358,7 +370,7 @@ async fn show_renders_yaml_and_csv() {
             );
             assert_eq!(
                 rows[1],
-                csv::StringRecord::from(vec!["empty-group", "empty-topology", "", "", "", "", ""])
+                csv::StringRecord::from(vec!["empty-group", "empty-topology", "[]", "", "", ""])
             );
         }
     }

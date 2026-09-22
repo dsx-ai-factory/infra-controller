@@ -2788,12 +2788,20 @@ message ExpectedRackGroup {
   optional common.RackGroupId rack_group_id = 1;
   // External group-level NVLink topology identifier, non-blank and at most 128 characters.
   string topology = 2;
-  // Non-blank, unique rack IDs, independent of device membership. Input order is preserved; may be empty.
-  repeated common.RackId rack_ids = 3;
+  reserved 3, 5;
+  reserved "rack_ids", "members";
   // Descriptive attributes such as name, manufacturer, and location labels.
   Metadata metadata = 4;
-  // Ordered device identities; (type, manufacturer, id) tuples must be unique. May be empty.
-  repeated ExpectedRackGroupMember members = 5;
+  // Ordered racks and their devices. Rack IDs and device identities are unique across the group.
+  // May be empty; updates replace the complete list.
+  repeated ExpectedRackGroupRack racks = 6;
+}
+
+message ExpectedRackGroupRack {
+  // Required non-blank external rack identifier.
+  optional common.RackId rack_id = 1;
+  // Ordered devices belonging to this rack; may be empty.
+  repeated ExpectedRackGroupMember members = 2;
 }
 
 message ExpectedRackGroupMember {

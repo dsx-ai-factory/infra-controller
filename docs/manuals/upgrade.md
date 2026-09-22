@@ -404,6 +404,18 @@ NICo 2.1 requires `startupProbe` to be explicitly configured in the machine-a-tr
 
 NICo 2.3 raises the default `startupProbe.failureThreshold` from 20 to 120 (60 minutes), sized for a 250-rack site spread over ten pods ([issue 5968](https://github.com/dsx-ai-factory/infra-controller/issues/5968)). The threshold applies to each pod on its own, so size it for the pod that registers the most records. For larger sites, raise `startupProbe.failureThreshold` following the sizing rule in the chart's `values.yaml`, as `helm-prereqs/values/machine-a-tron-scale.yaml` does.
 
+### 2.2 → 2.3: Kustomize deployment deprecated
+
+The Kustomize deployment under `deploy/` (`deploy/kustomization.yaml`,
+`deploy/nico-base`, `deploy/nico-system`, `deploy/nico-unbound-base`) is
+deprecated in 2.3 and will be removed in 2.4. Every service it deploys has a
+Helm chart under `helm/`, and `setup.sh` installs NICo Core from those charts
+only. Kustomize deployments keep working in 2.3 but receive no new
+configuration. Before upgrading to 2.4, install with the Helm charts as
+described in the [quick start](../getting-started/quick-start.md) and retire the
+Kustomize overlays. The `rest-api/deploy/kustomize` bases that `setup.sh` uses
+for cert-manager, PostgreSQL, and Temporal are not affected.
+
 ## Rollback
 
 <Warning>
