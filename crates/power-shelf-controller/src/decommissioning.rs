@@ -45,9 +45,6 @@ pub(super) async fn handle_decommissioning(
         PowerShelfDecommissioningState::FactoryResetBmc => {
             handle_factory_reset_bmc(power_shelf_id, power_shelf, ctx).await
         }
-        PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement => {
-            handle_waiting_for_bmc_dhcp_acknowledgement(power_shelf_id, power_shelf, ctx).await
-        }
         PowerShelfDecommissioningState::DeletingManagedCredentials => {
             handle_deleting_managed_credentials(power_shelf_id, power_shelf, ctx).await
         }
@@ -171,44 +168,9 @@ async fn handle_factory_reset_bmc(
 
     Ok(StateHandlerOutcome::transition(
         PowerShelfControllerState::Decommissioning {
-            decommissioning_state: PowerShelfDecommissioningState::WaitingForBmcDhcpAcknowledgement,
+            decommissioning_state: PowerShelfDecommissioningState::DeletingManagedCredentials,
         },
     ))
-}
-
-async fn handle_waiting_for_bmc_dhcp_acknowledgement(
-    power_shelf_id: &PowerShelfId,
-    power_shelf: &PowerShelf,
-    ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
-) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
-    let bmc_mac = power_shelf
-        .bmc_info
-        .as_ref()
-        .and_then(|info| info.mac)
-        .or(power_shelf.bmc_mac_address)
-        .ok_or_else(|| StateHandlerError::MissingData {
-            object_id: power_shelf_id.to_string(),
-            missing: "bmc_mac",
-        })?;
-    let suppression = db::bmc_suppression::find(
-        &ctx.services.db_pool,
-        bmc_mac,
-        BmcSuppressionSubsystem::Dhcp,
-        BmcSuppressionSource::Decommissioning,
-    )
-    .await?;
-
-    if suppression.is_some_and(|suppression| suppression.acknowledged_at.is_some()) {
-        Ok(StateHandlerOutcome::transition(
-            PowerShelfControllerState::Decommissioning {
-                decommissioning_state: PowerShelfDecommissioningState::DeletingManagedCredentials,
-            },
-        ))
-    } else {
-        Ok(StateHandlerOutcome::wait(
-            "waiting for BMC DHCP suppression acknowledgement".to_string(),
-        ))
-    }
 }
 
 async fn handle_deleting_managed_credentials(

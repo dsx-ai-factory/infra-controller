@@ -327,17 +327,11 @@ impl StateControllerIO for MachineStateControllerIO {
                 }
                 DecommissioningState::PowerCyclingHost => ("decommissioning", "powercyclinghost"),
                 DecommissioningState::PoweringOnHost => ("decommissioning", "poweringonhost"),
-                DecommissioningState::WaitingForOobDhcpAcknowledgement => {
-                    ("decommissioning", "waitingforoobdhcpacknowledgement")
-                }
                 DecommissioningState::SuppressingBmcDhcp => {
                     ("decommissioning", "suppressingbmcdhcp")
                 }
                 DecommissioningState::FactoryResettingBmcs { .. } => {
                     ("decommissioning", "factoryresettingbmcs")
-                }
-                DecommissioningState::WaitingForBmcDhcpAcknowledgement => {
-                    ("decommissioning", "waitingforbmcdhcpacknowledgement")
                 }
                 DecommissioningState::DeletingManagedCredentials => {
                     ("decommissioning", "deletingmanagedcredentials")

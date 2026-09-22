@@ -1546,16 +1546,12 @@ pub enum DecommissioningState {
     PowerCyclingHost,
     /// Powers the host back on after the cycle so OOB rediscovery can proceed.
     PoweringOnHost,
-    /// Waiting for the pre-cycle OOB DHCP suppression to be acknowledged.
-    WaitingForOobDhcpAcknowledgement,
     /// BMC DHCP is suppressed before the BMC factory reset.
     SuppressingBmcDhcp,
     /// Issues BMC factory resets for the host and its DPUs.
     FactoryResettingBmcs {
         completed: HashSet<MachineId>,
     },
-    /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
-    WaitingForBmcDhcpAcknowledgement,
     /// Managed per-device BMC and DPU credentials are being removed after factory reset.
     DeletingManagedCredentials,
     Decommissioned,
@@ -2883,14 +2879,8 @@ impl Display for DecommissioningState {
             DecommissioningState::SuppressingOobDhcp => write!(f, "SuppressingOobDhcp"),
             DecommissioningState::PowerCyclingHost => write!(f, "PowerCyclingHost"),
             DecommissioningState::PoweringOnHost => write!(f, "PoweringOnHost"),
-            DecommissioningState::WaitingForOobDhcpAcknowledgement => {
-                write!(f, "WaitingForOobDhcpAcknowledgement")
-            }
             DecommissioningState::SuppressingBmcDhcp => write!(f, "SuppressingBmcDhcp"),
             DecommissioningState::FactoryResettingBmcs { .. } => write!(f, "FactoryResettingBmcs"),
-            DecommissioningState::WaitingForBmcDhcpAcknowledgement => {
-                write!(f, "WaitingForBmcDhcpAcknowledgement")
-            }
             DecommissioningState::DeletingManagedCredentials => {
                 write!(f, "DeletingManagedCredentials")
             }
@@ -3285,20 +3275,12 @@ pub fn state_sla(
             DecommissioningState::PoweringOnHost => {
                 StateSla::with_sla(slas::DECOMMISSIONING_POWERING_ON_HOST, time_in_state)
             }
-            DecommissioningState::WaitingForOobDhcpAcknowledgement => StateSla::with_sla(
-                slas::DECOMMISSIONING_WAITING_FOR_OOB_DHCP_ACKNOWLEDGEMENT,
-                time_in_state,
-            ),
             DecommissioningState::SuppressingBmcDhcp => {
                 StateSla::with_sla(slas::DECOMMISSIONING_SUPPRESSING_BMC_DHCP, time_in_state)
             }
             DecommissioningState::FactoryResettingBmcs { .. } => {
                 StateSla::with_sla(slas::DECOMMISSIONING_FACTORY_RESETTING_BMCS, time_in_state)
             }
-            DecommissioningState::WaitingForBmcDhcpAcknowledgement => StateSla::with_sla(
-                slas::DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACKNOWLEDGEMENT,
-                time_in_state,
-            ),
             DecommissioningState::DeletingManagedCredentials => StateSla::with_sla(
                 slas::DECOMMISSIONING_DELETING_MANAGED_CREDENTIALS,
                 time_in_state,

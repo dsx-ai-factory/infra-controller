@@ -1350,19 +1350,11 @@ impl MachineStateHandler {
                     )
                     .await
                 }
-                DecommissioningState::WaitingForOobDhcpAcknowledgement => {
-                    decommissioning::handle_waiting_for_oob_dhcp_acknowledgement(mh_snapshot, ctx)
-                        .await
-                }
                 DecommissioningState::SuppressingBmcDhcp => {
                     decommissioning::handle_suppressing_bmc_dhcp(mh_snapshot, ctx).await
                 }
                 DecommissioningState::FactoryResettingBmcs { completed } => {
                     decommissioning::handle_factory_resetting_bmcs(completed, mh_snapshot, ctx)
-                        .await
-                }
-                DecommissioningState::WaitingForBmcDhcpAcknowledgement => {
-                    decommissioning::handle_waiting_for_bmc_dhcp_acknowledgement(mh_snapshot, ctx)
                         .await
                 }
                 DecommissioningState::DeletingManagedCredentials => {

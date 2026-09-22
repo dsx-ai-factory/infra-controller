@@ -110,20 +110,11 @@ pub const DECOMMISSIONING_POWER_CYCLING_HOST: Duration = Duration::from_secs(5 *
 /// SLA for powering the host back on after the decommissioning power cycle.
 pub const DECOMMISSIONING_POWERING_ON_HOST: Duration = Duration::from_secs(5 * 60);
 
-/// SLA for waiting for OOB DHCP suppression acknowledgement after the host power
-/// cycle.
-pub const DECOMMISSIONING_WAITING_FOR_OOB_DHCP_ACKNOWLEDGEMENT: Duration =
-    Duration::from_secs(15 * 60);
-
 /// SLA for recording BMC DHCP suppression during decommissioning.
 pub const DECOMMISSIONING_SUPPRESSING_BMC_DHCP: Duration = Duration::from_secs(5 * 60);
 
 /// SLA for BMC factory reset during decommissioning.
 pub const DECOMMISSIONING_FACTORY_RESETTING_BMCS: Duration = Duration::from_secs(5 * 60);
-
-/// SLA for waiting for BMC DHCP suppression acknowledgement after factory reset.
-pub const DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACKNOWLEDGEMENT: Duration =
-    Duration::from_secs(15 * 60);
 
 /// SLA for deleting managed per-device BMC and DPU credentials during
 /// decommissioning.
