@@ -2114,6 +2114,13 @@ func (mfgsc *MockFlowGrpcServiceClient) PowerResetRack(ctx context.Context, in *
 	return out, nil
 }
 
+func (mfgsc *MockFlowGrpcServiceClient) ACPowerCycleRack(ctx context.Context, in *flowv1.ACPowerCycleRackRequest, opts ...grpc.CallOption) (*flowv1.SubmitTaskResponse, error) {
+	out := &flowv1.SubmitTaskResponse{
+		TaskIds: []*flowv1.UUID{{Id: uuid.NewString()}},
+	}
+	return out, nil
+}
+
 func (mfgsc *MockFlowGrpcServiceClient) BringUpRack(ctx context.Context, in *flowv1.BringUpRackRequest, opts ...grpc.CallOption) (*flowv1.SubmitTaskResponse, error) {
 	out := &flowv1.SubmitTaskResponse{
 		TaskIds: []*flowv1.UUID{{Id: uuid.NewString()}},

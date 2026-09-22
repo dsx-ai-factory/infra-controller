@@ -21,6 +21,7 @@ func init() {
 	forcePowerOffRule := buildForcePowerOffRule()
 	restartRule := buildRestartRule()
 	forceRestartRule := buildForceRestartRule()
+	coldResetRule := buildColdResetRule()
 	firmwareUpgradeRule := buildFirmwareUpgradeRule()
 	bringUpRule := buildBringUpRule()
 	ingestRule := buildIngestRule()
@@ -34,12 +35,39 @@ func init() {
 		ruleKey(common.TaskTypePowerControl, SequenceForcePowerOff): forcePowerOffRule,
 		ruleKey(common.TaskTypePowerControl, SequenceRestart):       restartRule,
 		ruleKey(common.TaskTypePowerControl, SequenceForceRestart):  forceRestartRule,
+		ruleKey(common.TaskTypePowerControl, SequenceColdReset):     coldResetRule,
 		ruleKey(common.TaskTypeFirmwareControl, SequenceUpgrade):    firmwareUpgradeRule,
 		ruleKey(common.TaskTypeFirmwareControl, SequenceDowngrade):  firmwareUpgradeRule, // Same rule
 		ruleKey(common.TaskTypeFirmwareControl, SequenceRollback):   firmwareUpgradeRule, // Same rule
 		ruleKey(common.TaskTypeBringUp, SequenceBringUp):            bringUpRule,
 		ruleKey(common.TaskTypeBringUp, SequenceIngest):             ingestRule,
 		ruleKey(common.TaskTypeDecommission, SequenceDecommission):  decommissionRule,
+	}
+}
+
+// buildColdResetRule creates the hardcoded default rule for an AC power cycle.
+// Only compute trays support this operation; NVSwitch and PowerShelf managers
+// reject ColdReset.
+func buildColdResetRule() *OperationRule {
+	return &OperationRule{
+		Name:          "Hardcoded Default AC Power Cycle",
+		Description:   "AC power cycle compute trays",
+		OperationType: common.TaskTypePowerControl,
+		OperationCode: SequenceColdReset,
+		RuleDefinition: RuleDefinition{
+			Version: CurrentRuleDefinitionVersion,
+			Steps: []SequenceStep{
+				{
+					ComponentType: devicetypes.ComponentTypeCompute,
+					Stage:         1,
+					MaxParallel:   0,
+					Timeout:       20 * time.Minute,
+					MainOperation: ActionConfig{
+						Name: ActionPowerControl,
+					},
+				},
+			},
+		},
 	}
 }
 

@@ -815,6 +815,24 @@ func (rs *FlowServerImpl) PowerResetRack(
 	)
 }
 
+// ACPowerCycleRack triggers a cold AC power cycle for the selected targets.
+func (rs *FlowServerImpl) ACPowerCycleRack(
+	ctx context.Context,
+	req *pb.ACPowerCycleRackRequest,
+) (*pb.SubmitTaskResponse, error) {
+	return rs.handlePowerControlTask(
+		ctx,
+		req.GetTargetSpec(),
+		req.GetDescription(),
+		req.GetQueueOptions(),
+		req.GetRuleId(),
+		&operations.PowerControlTaskInfo{
+			Operation:              operations.PowerOperationColdReset,
+			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+		},
+	)
+}
+
 func (rs *FlowServerImpl) BringUpRack(
 	ctx context.Context,
 	req *pb.BringUpRackRequest,

@@ -988,7 +988,8 @@ PowerControlTray Power control a Tray
 
 Power control a Tray identified by its component ID or component MAC address.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
+`acpowercycle` removes and restores AC power and is unsupported on Viking systems.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1153,7 +1154,8 @@ PowerControlTrays Power control Trays
 
 Power control Trays with optional filters. If no filter is specified, targets all trays in the Site.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
+`acpowercycle` removes and restores AC power and is unsupported on Viking systems.
 
 **Filter constraints:**
 - `rackId` and `rackName` are mutually exclusive

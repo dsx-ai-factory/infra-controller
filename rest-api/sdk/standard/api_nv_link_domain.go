@@ -415,7 +415,8 @@ PowerControlNvlinkDomain Power control an NVLink Domain
 
 Power control an NVLink Domain identified by UUID. Flow resolves the NVLink Domain to its member Racks and creates one task per Rack.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
+`acpowercycle` removes and restores AC power and is unsupported on Viking systems.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -602,7 +603,8 @@ PowerControlNvlinkDomains Power control NVLink Domains
 
 Power control one or more NVLink Domains identified by UUID. Flow resolves each NVLink Domain to its member Racks and creates one task per Rack.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`, `acpowercycle`.
+`acpowercycle` removes and restores AC power and is unsupported on Viking systems.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 

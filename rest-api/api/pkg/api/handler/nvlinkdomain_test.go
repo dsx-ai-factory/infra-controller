@@ -176,6 +176,10 @@ func assertProxiedNVLinkDomainIDs(
 	switch typed := request.(type) {
 	case *flowv1.PowerOnRackRequest:
 		targetSpec = typed.GetTargetSpec()
+	case *flowv1.PowerResetRackRequest:
+		targetSpec = typed.GetTargetSpec()
+	case *flowv1.ACPowerCycleRackRequest:
+		targetSpec = typed.GetTargetSpec()
 	case *flowv1.UpgradeFirmwareRequest:
 		targetSpec = typed.GetTargetSpec()
 	default:
@@ -224,6 +228,7 @@ func TestUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 		wantStatus     int
 		wantProxy      bool
 		flowError      bool
+		wantACCycle    bool
 		wantBody       string
 	}{
 		{
@@ -242,6 +247,15 @@ func TestUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 			wantStatus:     http.StatusInternalServerError,
 			wantProxy:      true,
 			flowError:      true,
+		},
+		{
+			name:           "proxies AC power cycle through shared Flow workflow",
+			nvLinkDomainID: nvLinkDomainID,
+			body:           fmt.Sprintf(`{"siteId":%q,"state":"acpowercycle","ruleId":%q,"overrideReadinessCheck":true}`, fixture.site.ID.String(), ruleID),
+			user:           fixture.providerUser,
+			wantStatus:     http.StatusOK,
+			wantProxy:      true,
+			wantACCycle:    true,
 		},
 		{
 			name:           "rejects malformed domain ID",
@@ -295,19 +309,32 @@ func TestUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 				return
 			}
 
-			assert.Equal(t, flowv1.Flow_PowerOnRack_FullMethodName, captured.request.FullMethod)
-			assert.True(t, strings.HasPrefix(captured.options.ID, "nvlink-domain-power-state-update-on-"))
+			wantMethod := flowv1.Flow_PowerOnRack_FullMethodName
+			wantState := "on"
+			if test.wantACCycle {
+				wantMethod = flowv1.Flow_ACPowerCycleRack_FullMethodName
+				wantState = "acpowercycle"
+			}
+			assert.Equal(t, wantMethod, captured.request.FullMethod)
+			assert.True(t, strings.HasPrefix(captured.options.ID, "nvlink-domain-power-state-update-"+wantState+"-"))
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, captured.options.WorkflowIDConflictPolicy)
-			flowRequest := &flowv1.PowerOnRackRequest{}
-			assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, flowRequest, []string{nvLinkDomainID})
 			if test.flowError {
 				var response map[string]any
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 				assert.Equal(t, "domain not found", response["message"])
 				return
 			}
-			assert.Equal(t, ruleID, flowRequest.GetRuleId().GetId())
-			assert.True(t, flowRequest.GetOverrideReadinessCheck())
+			if test.wantACCycle {
+				flowRequest := &flowv1.ACPowerCycleRackRequest{}
+				assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, flowRequest, []string{nvLinkDomainID})
+				assert.Equal(t, ruleID, flowRequest.GetRuleId().GetId())
+				assert.True(t, flowRequest.GetOverrideReadinessCheck())
+			} else {
+				flowRequest := &flowv1.PowerOnRackRequest{}
+				assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, flowRequest, []string{nvLinkDomainID})
+				assert.Equal(t, ruleID, flowRequest.GetRuleId().GetId())
+				assert.True(t, flowRequest.GetOverrideReadinessCheck())
+			}
 
 			var response model.APIUpdatePowerStateResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
@@ -329,14 +356,15 @@ func TestBatchUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		body       string
-		user       *cdbm.User
-		siteStatus string
-		wantStatus int
-		wantProxy  bool
-		wantData   []string
-		wantBody   string
+		name        string
+		body        string
+		user        *cdbm.User
+		siteStatus  string
+		wantStatus  int
+		wantProxy   bool
+		wantACCycle bool
+		wantData    []string
+		wantBody    string
 	}{
 		{
 			name: "proxies all domain targets through shared Flow workflow",
@@ -348,6 +376,18 @@ func TestBatchUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 			),
 			wantStatus: http.StatusOK,
 			wantProxy:  true,
+		},
+		{
+			name: "proxies AC power cycle for all domain targets",
+			body: fmt.Sprintf(
+				`{"siteId":%q,"domainIds":[%q,%q],"state":"acpowercycle"}`,
+				fixture.site.ID.String(),
+				nvLinkDomainIDs[0],
+				nvLinkDomainIDs[1],
+			),
+			wantStatus:  http.StatusOK,
+			wantProxy:   true,
+			wantACCycle: true,
 		},
 		{
 			name:       "rejects empty domain list",
@@ -410,8 +450,14 @@ func TestBatchUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 				return
 			}
 
-			assert.Equal(t, flowv1.Flow_PowerOnRack_FullMethodName, captured.request.FullMethod)
-			assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, &flowv1.PowerOnRackRequest{}, canonicalNVLinkDomainIDs)
+			if test.wantACCycle {
+				assert.Equal(t, flowv1.Flow_ACPowerCycleRack_FullMethodName, captured.request.FullMethod)
+				flowRequest := &flowv1.ACPowerCycleRackRequest{}
+				assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, flowRequest, canonicalNVLinkDomainIDs)
+			} else {
+				assert.Equal(t, flowv1.Flow_PowerOnRack_FullMethodName, captured.request.FullMethod)
+				assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, &flowv1.PowerOnRackRequest{}, canonicalNVLinkDomainIDs)
+			}
 		})
 	}
 }

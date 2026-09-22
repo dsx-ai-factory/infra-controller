@@ -53,6 +53,11 @@ func TestAPIUpdatePowerStateRequest_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "valid - acpowercycle",
+			request: APIUpdatePowerStateRequest{SiteID: "site-1", State: "acpowercycle"},
+			wantErr: false,
+		},
+		{
 			name:    "invalid - missing siteId",
 			request: APIUpdatePowerStateRequest{State: "on"},
 			wantErr: true,
