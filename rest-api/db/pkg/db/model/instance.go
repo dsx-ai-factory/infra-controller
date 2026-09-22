@@ -206,7 +206,6 @@ func (i *Instance) GetAggregatedStatus(status string, powerStatus *string) strin
 // InstanceCountByStatus holds instance row counts grouped by aggregated API status.
 // Counts reflect the same status values returned on individual Instance objects
 // (lifecycle status with Ready+power overrides applied via instanceAggregatedStatusQuery).
-
 type InstanceCountByStatus struct {
 	Total        int `json:"total"`
 	Pending      int `json:"pending"`

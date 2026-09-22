@@ -6987,8 +6987,7 @@ paths:
                           vendor: Mellanox Technologies
                           count: 2
                       machineInstanceTypes:
-                        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-                          machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+                        - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                           instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                           created: '2019-08-24T14:15:22Z'
                           updated: '2019-08-24T14:15:22Z'
@@ -7014,8 +7013,7 @@ paths:
                           count: 2
                           deviceType: DPU
                       machineInstanceTypes:
-                        - id: 0327339b-f3b7-4de3-9468-7dc29f9f6914
-                          machineId: fm100dsg23d2f4tq4tt5m2hgib5pcldrm3gvefbduau7gj3itgc3iqg3lpg
+                        - machineId: fm100dsg23d2f4tq4tt5m2hgib5pcldrm3gvefbduau7gj3itgc3iqg3lpg
                           instanceTypeId: 771b066a-f2ff-4550-a65d-baef8551167d
                           created: '2025-05-24T14:15:22Z'
                           updated: '2025-05-24T14:15:22Z'
@@ -7422,13 +7420,11 @@ paths:
               examples:
                 example-1:
                   value:
-                    - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-                      machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+                    - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
-                    - id: f690ffcd-06b7-430c-9c2a-b9afd18d77c3
-                      machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
+                    - machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
@@ -7486,18 +7482,15 @@ paths:
               examples:
                 example-1:
                   value:
-                    - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-                      machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+                    - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
-                    - id: f690ffcd-06b7-430c-9c2a-b9afd18d77c3
-                      machineId: fm100ht68sf2m52idrpslcjkpdj5r3tb3j5o0bkfubhoglbq47u18nknfog
+                    - machineId: fm100ht68sf2m52idrpslcjkpdj5r3tb3j5o0bkfubhoglbq47u18nknfog
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
-                    - id: f690ffcd-06b7-430c-9c2a-b9afd18d77c3
-                      machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
+                    - machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
@@ -18259,7 +18252,7 @@ components:
           type: string
           description: Redfish power control action to apply to the Machine. ACPowercycle is not supported on Viking systems.
           enum:
-            - On
+            - 'On'
             - GracefulShutdown
             - ForceOff
             - GracefulRestart
@@ -18503,11 +18496,13 @@ components:
         - machine:
             total: 27
             initializing: 8
-            assigned: 12
+            reset: 0
             ready: 5
+            inUse: 12
             error: 2
             decommissioning: 0
             decommissioned: 0
+            maintenance: 0
             unknown: 0
           ipBlock:
             total: 4
@@ -18539,11 +18534,13 @@ components:
       examples:
         - total: 27
           initializing: 8
-          assigned: 12
+          reset: 0
           ready: 5
+          inUse: 12
           error: 2
           decommissioning: 0
           decommissioned: 0
+          maintenance: 0
           unknown: 0
       properties:
         total:
@@ -18555,9 +18552,9 @@ components:
         reset:
           type: integer
           description: 'Number of Machines in Reset status'
-        assigned:
+        inUse:
           type: integer
-          description: 'Number of Machines in Assigned status'
+          description: 'Number of Machines in use by Tenant Instances'
         ready:
           type: integer
           description: 'Number of Machines in Ready status'
@@ -18570,6 +18567,9 @@ components:
         decommissioned:
           type: integer
           description: 'Number of Machines in Decommissioned status'
+        maintenance:
+          type: integer
+          description: 'Number of Machines in Maintenance status'
         unknown:
           type: integer
           description: 'Number of Machines in Unknown status'
@@ -20181,7 +20181,6 @@ components:
         - Pending
         - Provisioning
         - Ready
-        - Configuring
         - Deleting
         - Error
     VpcCreateRequest:
@@ -20797,7 +20796,6 @@ components:
         - Provisioning
         - Ready
         - Deleting
-        - Deleted
         - Error
     VpcPrefixCreateRequest:
       title: VpcPrefixCreateRequest
@@ -21869,7 +21867,11 @@ components:
           type:
             - string
             - 'null'
-          description: Authentication type for image URL, e.g., 'Basic' or 'Bearer'
+          enum:
+            - Basic
+            - Bearer
+            - null
+          description: Authentication type for image URL
         imageAuthToken:
           type:
             - string
@@ -22018,12 +22020,17 @@ components:
           type:
             - string
             - 'null'
+          enum:
+            - Basic
+            - Bearer
+            - null
           description: 'Optional auth type: Basic or Bearer'
         authToken:
           type:
             - string
             - 'null'
-          description: 'Optional auth token. Redacted in API responses.'
+          writeOnly: true
+          description: 'Optional auth token. Accepted in create/update requests and never returned in API responses.'
         cacheStrategy:
           type: string
           enum:
@@ -22248,7 +22255,11 @@ components:
           type:
             - string
             - 'null'
-          description: 'Authentication type for image URL, if needed, e.g., basic/bearer/token; required if imageAuthToken is specified'
+          enum:
+            - Basic
+            - Bearer
+            - null
+          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified'
         imageAuthToken:
           type:
             - string
@@ -22370,7 +22381,11 @@ components:
           type:
             - string
             - 'null'
-          description: 'Authentication type for image URL, if needed, e.g., basic/bearer/token; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha.'
+          enum:
+            - Basic
+            - Bearer
+            - null
+          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha.'
         imageAuthToken:
           type:
             - string
@@ -22474,8 +22489,7 @@ components:
               threads: 36
               count: 2
           machineInstanceTypes:
-            - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-              machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+            - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
               instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
               created: '2019-08-24T14:15:22Z'
               updated: '2019-08-24T14:15:22Z'
@@ -23116,9 +23130,9 @@ components:
             format: uuid
         sshKeyGroups:
           type: array
-          description: IDs of SSH Key Groups associated with this Instance
+          description: SSH Key Groups associated with this Instance, in summary form
           items:
-            $ref: '#/components/schemas/SshKeyGroup'
+            $ref: '#/components/schemas/SshKeyGroupSummary'
         tpmEkCertificate:
           type:
             - string
@@ -23162,6 +23176,7 @@ components:
         - Rebooting
         - Terminating
         - Error
+        - Unknown
     InstanceCreateRequest:
       title: InstanceCreateRequest
       type: object
@@ -24743,7 +24758,8 @@ components:
             - Compute
             - NVSwitch
             - PowerShelf
-          description: Type of the tray
+            - Unknown
+          description: Type of the tray. `Unknown` is reported when the component type is not recognized.
         name:
           type: string
           description: Name of the tray
@@ -26881,10 +26897,10 @@ components:
     MachineHealthIssue:
       title: MachineHealthIssue
       type: object
+      description: Tenant-reported Machine issue, attached to a Machine online repair request or an Instance delete request. Categories match the Core `IssueCategory` values.
       required:
         - category
         - summary
-        - details
       properties:
         category:
           type: string
@@ -26892,22 +26908,19 @@ components:
             - Hardware
             - Network
             - Performance
-            - Storage
-            - Software
             - Other
           description: High-level category for the tenant-reported issue.
         summary:
-          type:
-            - string
-            - 'null'
-          maxLength: 512
+          type: string
+          minLength: 1
+          maxLength: 1024
           description: Brief description of the issue for operators.
         details:
           type:
             - string
             - 'null'
           maxLength: 8192
-          description: Diagnostic information, logs, ticket numbers, etc.
+          description: Diagnostic information, logs, ticket numbers, etc. Required when entering Machine online repair.
     MachineOnlineRepairPolicy:
       title: MachineOnlineRepairPolicy
       type: object
@@ -26979,7 +26992,7 @@ components:
               acceptRepairTeamAccess: true
               acceptInstanceDeletionRisk: true
         - healthIssue:
-            category: Storage
+            category: Hardware
             summary: Disk errors on OSD
             details: 'Ticket FORGE-12345; smartctl logs attached'
       description: 'Request data to update Machine. Instance Type attribute updates, maintenance attribute updates, labels updates, and in-pool online repair (enter or exit) must be specified in separate requests. They cannot be processed at the same time.'
@@ -27585,18 +27598,11 @@ components:
       type: object
       description: Associates a machine with an Instance Type
       examples:
-        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-          machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+        - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
           instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
           created: '2019-08-24T14:15:22Z'
           updated: '2019-08-24T14:15:22Z'
       properties:
-        id:
-          type: string
-          format: uuid
-          readOnly: true
-          description: 'Deprecated: Use `machineId` when identifying a Machine/Instance Type association. This field will be removed on July 9th, 2026 0:00 UTC.'
-          deprecated: true
         machineId:
           type: string
           description: 'ID of the associated Machine'
@@ -29127,10 +29133,8 @@ components:
           items:
             $ref: '#/components/schemas/SkuInfinibandDevice'
         tpm:
-          type: array
-          description: TPM components
-          items:
-            $ref: '#/components/schemas/SkuTpm'
+          $ref: '#/components/schemas/SkuTpm'
+          description: TPM component
     SkuCpu:
       title: SkuCpu
       type: object
@@ -29509,7 +29513,6 @@ components:
           readOnly: true
         availablePrefixes:
           type: array
-          format: uuid
           description: |
             Example prefixes available to acquire
           items:
@@ -30062,6 +30065,46 @@ components:
         - Synced
         - Error
         - Deleting
+    SshKeyGroupSummary:
+      title: SshKeyGroupSummary
+      type: object
+      description: Summarizes an SSH Key Group
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: Unique UUID v4 identifier for the SSH Key Group
+        name:
+          type: string
+          readOnly: true
+          description: Name of the SSH Key Group
+        description:
+          type:
+            - string
+            - 'null'
+          readOnly: true
+          description: Description of the SSH Key Group
+        version:
+          type:
+            - string
+            - 'null'
+          readOnly: true
+          description: Keyset version of the SSH Key Group
+        status:
+          $ref: '#/components/schemas/SshKeyGroupStatus'
+          readOnly: true
+          description: Status of the SSH Key Group
+        created:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Date/time when the SSH Key Group was created
+        updated:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Date/time when the SSH Key Group was last updated
     SshKeyGroupSiteAssociation:
       title: SshKeyGroupSiteAssociation
       type: object
@@ -31200,8 +31243,46 @@ components:
         tenants:
           type: array
           items:
-            $ref: '#/components/schemas/InstanceTypeStats'
+            $ref: '#/components/schemas/MachineInstanceTypeTenantStats'
           description: 'Per-tenant breakdown for this instance type'
+    MachineInstanceTypeTenantStats:
+      title: MachineInstanceTypeTenantStats
+      description: Per-tenant allocation stats for one Instance Type
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 'Unique UUID v4 identifier for the Tenant'
+        name:
+          type: string
+          description: 'Name of the Tenant'
+        allocated:
+          type: integer
+          description: 'Number of Machines allocated to this Tenant for this Instance Type'
+        usedMachineStats:
+          $ref: '#/components/schemas/MachineStatusBreakdown'
+          description: 'Usage status of Machines for this Tenant and Instance Type'
+        allocations:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineInstanceTypeTenantAllocationStats'
+          description: 'Individual Allocations for this Tenant and Instance Type'
+    MachineInstanceTypeTenantAllocationStats:
+      title: MachineInstanceTypeTenantAllocationStats
+      description: Stats for a single Allocation within a Tenant's Instance Type stats
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 'Unique UUID v4 identifier for the Allocation'
+        name:
+          type: string
+          description: 'Name of the Allocation'
+        allocated:
+          type: integer
+          description: 'Number of Machines in this Allocation for the Instance Type'
     InstanceTypeStats:
       title: InstanceTypeStats
       description: Stats for an instance type including allocation details

@@ -32,7 +32,7 @@ type OperatingSystemIpxeArtifact struct {
 	Sha NullableString `json:"sha,omitempty"`
 	// Optional auth type: Basic or Bearer
 	AuthType NullableString `json:"authType,omitempty"`
-	// Optional auth token. Redacted in API responses.
+	// Optional auth token. Accepted in create/update requests and never returned in API responses.
 	AuthToken NullableString `json:"authToken,omitempty"`
 	// How to handle caching for this artifact
 	CacheStrategy *string `json:"cacheStrategy,omitempty"`

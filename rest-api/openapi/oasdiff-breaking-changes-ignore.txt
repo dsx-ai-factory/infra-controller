@@ -295,3 +295,40 @@ API GET /v2/org/{org}/nico/audit the `items/body` response's property `type` cha
 API GET /v2/org/{org}/nico/audit the `items/queryParams` response's property `type` changed from `string` to `object` for status `200`
 API GET /v2/org/{org}/nico/audit/{auditEntryId} the `body` response's property `type` changed from `string` to `object` for status `200`
 API GET /v2/org/{org}/nico/audit/{auditEntryId} the `queryParams` response's property `type` changed from `string` to `object` for status `200`
+GET /v2/org/{org}/nico/expected-machine the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `object` for status `200`
+POST /v2/org/{org}/nico/expected-machine the `sku/components/tpm` response's property `type` changed from `array<object>` to `object` for status `201`
+PATCH /v2/org/{org}/nico/expected-machine/batch the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `object` for status `200`
+POST /v2/org/{org}/nico/expected-machine/batch the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `object` for status `201`
+GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `sku/components/tpm` response's property `type` changed from `array<object>` to `object` for status `200`
+PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `sku/components/tpm` response's property `type` changed from `array<object>` to `object` for status `200`
+DELETE /v2/org/{org}/nico/instance/{instanceId} the request property `machineHealthIssue/summary` became not nullable
+DELETE /v2/org/{org}/nico/instance/{instanceId} removed the enum value `Software` of the request property `machineHealthIssue/category`
+DELETE /v2/org/{org}/nico/instance/{instanceId} removed the enum value `Storage` of the request property `machineHealthIssue/category`
+DELETE /v2/org/{org}/nico/instance/{instanceId} the `machineHealthIssue/summary` request property's minLength was increased from `0` to `1`
+GET /v2/org/{org}/nico/ipblock the `items/usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+POST /v2/org/{org}/nico/ipblock the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `201`
+GET /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+PATCH /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+GET /v2/org/{org}/nico/ipblock/{ipBlockId}/derived the `items/usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+PATCH /v2/org/{org}/nico/machine/{machineId} the request property `healthIssue/summary` became not nullable
+PATCH /v2/org/{org}/nico/machine/{machineId} removed the enum value `Software` of the request property `healthIssue/category`
+PATCH /v2/org/{org}/nico/machine/{machineId} removed the enum value `Storage` of the request property `healthIssue/category`
+PATCH /v2/org/{org}/nico/machine/{machineId} the `healthIssue/summary` request property's minLength was increased from `0` to `1`
+POST /v2/org/{org}/nico/operating-system request property `imageAuthType` was restricted to a list of enum values
+POST /v2/org/{org}/nico/operating-system request property `ipxeTemplateArtifacts/items/authType` was restricted to a list of enum values
+PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} request property `imageAuthType` was restricted to a list of enum values
+PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} request property `ipxeTemplateArtifacts/items/authType` was restricted to a list of enum values
+GET /v2/org/{org}/nico/sku the `items/components/tpm` response's property `type` changed from `array<object>` to `object` for status `200`
+POST /v2/org/{org}/nico/sku the `components/tpm` request property `type` changed from `array<object>` to `object`
+POST /v2/org/{org}/nico/sku the `components/tpm` response's property `type` changed from `array<object>` to `object` for status `201`
+GET /v2/org/{org}/nico/sku/{skuId} the `components/tpm` response's property `type` changed from `array<object>` to `object` for status `200`
+PATCH /v2/org/{org}/nico/sku/{skuId} the `components/tpm` request property `type` changed from `array<object>` to `object`
+PATCH /v2/org/{org}/nico/sku/{skuId} the `components/tpm` response's property `type` changed from `array<object>` to `object` for status `200`
+GET /v2/org/{org}/nico/subnet the `items/usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+POST /v2/org/{org}/nico/subnet the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `201`
+GET /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+PATCH /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+GET /v2/org/{org}/nico/vpc-prefix the `items/usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+POST /v2/org/{org}/nico/vpc-prefix the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `201`
+GET /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+PATCH /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
