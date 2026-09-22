@@ -5629,7 +5629,7 @@ message ReservedAddress {
   string address = 1;
   // The MAC address that owns the reservation.
   string reserved_by_mac = 2;
-  // The runtime allocation type of the reserved address (e.g. "Static").
+  // The runtime allocation type of the reserved address (e.g. "static").
   string allocation_type = 3;
 }
 
