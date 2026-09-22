@@ -263,6 +263,103 @@ pub struct Endpoint<'a> {
     pause_ingestion_and_poweron: bool,
 }
 
+/// An explored endpoint and the underlay interface it is probed through.
+type Candidate<'a> = (IpAddr, &'a MachineInterfaceSnapshot, &'a ExploredEndpoint);
+
+/// What one iteration probes, in probe order. Operator requests sit outside
+/// the `explorations_per_run` budget; the other three tiers share it.
+#[derive(Debug, Default)]
+struct ExplorationPlan<'a> {
+    /// `exploration_requested` endpoints, by address.
+    priority: Vec<Candidate<'a>>,
+    /// Interfaces with no report yet, by address.
+    unexplored: Vec<(IpAddr, &'a MachineInterfaceSnapshot)>,
+    /// Endpoints preingestion parked with `waiting_for_explorer_refresh`, oldest report first.
+    refresh_waits: Vec<Candidate<'a>>,
+    /// Everything else, oldest report first.
+    routine: Vec<Candidate<'a>>,
+    unexplored_candidates: usize,
+    refresh_wait_candidates: usize,
+    routine_candidates: usize,
+}
+
+impl ExplorationPlan<'_> {
+    fn selected_total(&self) -> usize {
+        self.priority.len() + self.unexplored.len() + self.refresh_waits.len() + self.routine.len()
+    }
+
+    /// Candidate and selected counts per tier, as recorded on the metrics.
+    fn counts(&self) -> [(&'static str, usize); 9] {
+        [
+            ("priority_update_candidates", self.priority.len()),
+            ("unexplored_candidates", self.unexplored_candidates),
+            ("refresh_wait_candidates", self.refresh_wait_candidates),
+            ("routine_update_candidates", self.routine_candidates),
+            ("selected_priority_updates", self.priority.len()),
+            ("selected_unexplored", self.unexplored.len()),
+            ("selected_refresh_waits", self.refresh_waits.len()),
+            ("selected_routine_updates", self.routine.len()),
+            ("selected_total", self.selected_total()),
+        ]
+    }
+}
+
+/// Sorts the candidates into tiers and spends `budget` on them in order:
+/// unexplored endpoints, then refresh waits, then routine updates. Refresh
+/// waits get at least half of what unexplored endpoints leave and all of it
+/// when routine cannot use the rest, so a wave of parked BMCs cannot stop the
+/// routine refresh and routine cannot starve parked BMCs.
+fn plan_explorations<'a>(
+    candidates: Vec<Candidate<'a>>,
+    mut unexplored: Vec<(IpAddr, &'a MachineInterfaceSnapshot)>,
+    budget: usize,
+) -> ExplorationPlan<'a> {
+    let mut priority = Vec::new();
+    let mut refresh_waits = Vec::new();
+    let mut routine = Vec::new();
+    for candidate in candidates {
+        let endpoint = candidate.2;
+        if endpoint.exploration_requested {
+            priority.push(candidate);
+        } else if endpoint.waiting_for_explorer_refresh
+            && endpoint.preingestion_state.parks_for_explorer_refresh()
+        {
+            refresh_waits.push(candidate);
+        } else {
+            routine.push(candidate);
+        }
+    }
+    let oldest_first =
+        |(address, _, endpoint): &Candidate<'a>| (endpoint.report_version.timestamp(), *address);
+    priority.sort_by_key(|(address, _, _)| *address);
+    unexplored.sort_by_key(|(address, _)| *address);
+    refresh_waits.sort_by_key(oldest_first);
+    routine.sort_by_key(oldest_first);
+
+    let unexplored_candidates = unexplored.len();
+    let refresh_wait_candidates = refresh_waits.len();
+    let routine_candidates = routine.len();
+    let budget = budget.min(unexplored_candidates + refresh_wait_candidates + routine_candidates);
+    unexplored.truncate(budget);
+    let remaining = budget - unexplored.len();
+    let refresh_take = refresh_waits.len().min(
+        remaining
+            .div_ceil(2)
+            .max(remaining.saturating_sub(routine.len())),
+    );
+    refresh_waits.truncate(refresh_take);
+    routine.truncate(remaining - refresh_take);
+    ExplorationPlan {
+        priority,
+        unexplored,
+        refresh_waits,
+        routine,
+        unexplored_candidates,
+        refresh_wait_candidates,
+        routine_candidates,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct EndpointExplorationStepDurations {
     redfish_explore: Duration,
@@ -2629,8 +2726,8 @@ impl SiteExplorer {
         // information about the endpoint
         let plan_start = Instant::now();
         let mut delete_endpoints = Vec::new();
-        let mut priority_update_endpoints = Vec::new();
-        let mut update_endpoints = Vec::with_capacity(index.explored_endpoints().len());
+        let mut candidates: Vec<Candidate<'_>> =
+            Vec::with_capacity(index.explored_endpoints().len());
         for (address, endpoint) in index.explored_endpoints() {
             match index.underlay_interface(address) {
                 Some(iface) => {
@@ -2638,30 +2735,17 @@ impl SiteExplorer {
                         tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
                         continue;
                     }
-
-                    if endpoint.exploration_requested {
-                        priority_update_endpoints.push((*address, iface, endpoint));
-                    } else {
-                        update_endpoints.push((*address, iface, endpoint));
-                    }
+                    candidates.push((*address, iface, endpoint));
                 }
                 None => {
                     if endpoint.report.is_power_shelf() {
-                        tracing::info!(bmc_ip_address = %address, "Retaining power shelf endpoint with no underlay interface; power shelves are sourced from their expected static IP")
+                        tracing::info!(bmc_ip_address = %address, "Retaining power shelf endpoint with no underlay interface; power shelves are sourced from their expected static IP");
                     } else {
                         delete_endpoints.push(*address)
                     }
                 }
             }
         }
-        metrics.record_update_explored_endpoints_count(
-            "priority_update_candidates",
-            priority_update_endpoints.len(),
-        );
-        metrics.record_update_explored_endpoints_count(
-            "routine_update_candidates",
-            update_endpoints.len(),
-        );
         metrics.record_update_explored_endpoints_count(
             "stale_delete_candidates",
             delete_endpoints.len(),
@@ -2700,82 +2784,44 @@ impl SiteExplorer {
             "unexplored_candidates",
             unexplored_endpoints.len(),
         );
-        // Now that we gathered the candidates for exploration, let's decide what
-        // we are actually going to explore. The config limits the amount of explorations
-        // per iteration.
-        let num_explore_endpoints = (self.config.explorations_per_run as usize)
-            .min(unexplored_endpoints.len() + update_endpoints.len());
-
-        let mut explore_endpoint_data =
-            Vec::with_capacity(priority_update_endpoints.len() + num_explore_endpoints);
-
-        // Existing endpoints with `exploration_requested` are enqueued
-        // unconditionally and sit outside the per-iteration count budget.
-        // Operators set this flag to request a guaranteed next-tick attempt, so
-        // we must not let the routine refresh budget delay them. Concurrency is
-        // still bounded by the `concurrent_explorations` semaphore below.
-        for (address, iface, endpoint) in priority_update_endpoints {
-            explore_endpoint_data.push(Endpoint {
-                address,
-                iface,
-                last_explored: Some(endpoint),
-                pause_ingestion_and_poweron: endpoint.pause_ingestion_and_poweron,
-                expected: index.matched_expected(&address),
-            });
+        let plan = plan_explorations(
+            candidates,
+            unexplored_endpoints,
+            self.config.explorations_per_run as usize,
+        );
+        for (kind, count) in plan.counts() {
+            metrics.record_update_explored_endpoints_count(kind, count);
         }
 
-        let priority_selected_count = explore_endpoint_data.len();
-        metrics.record_update_explored_endpoints_count(
-            "selected_priority_updates",
-            priority_selected_count,
-        );
-
-        // Next priority are all endpoints that we've never looked at
-        let remaining_explore_endpoints = num_explore_endpoints;
-        for (address, iface) in unexplored_endpoints
-            .iter()
-            .take(remaining_explore_endpoints)
-        {
+        let mut explore_endpoint_data = Vec::with_capacity(plan.selected_total());
+        let ExplorationPlan {
+            priority,
+            unexplored,
+            refresh_waits,
+            routine,
+            ..
+        } = plan;
+        let explored = |(address, iface, endpoint)| Endpoint {
+            address,
+            iface,
+            last_explored: Some(endpoint),
+            pause_ingestion_and_poweron: endpoint.pause_ingestion_and_poweron,
+            expected: index.matched_expected(&address),
+        };
+        explore_endpoint_data.extend(priority.into_iter().map(explored));
+        for (address, iface) in unexplored {
             let pause_ingestion_and_poweron =
                 pause_ingestion_and_poweron(index.expected(), &iface.mac_address);
             explore_endpoint_data.push(Endpoint {
-                address: *address,
+                address,
                 iface,
                 last_explored: None,
                 pause_ingestion_and_poweron,
-                expected: index.matched_expected(address),
+                expected: index.matched_expected(&address),
             });
         }
-        let selected_unexplored = explore_endpoint_data.len() - priority_selected_count;
-        metrics.record_update_explored_endpoints_count("selected_unexplored", selected_unexplored);
-
-        // If we have any capacity available, we update knowledge about endpoints we looked at earlier on
-        let remaining_explore_endpoints =
-            num_explore_endpoints - (explore_endpoint_data.len() - priority_selected_count);
-        if remaining_explore_endpoints != 0 {
-            // Sort endpoints so that we will replace the oldest report first
-            update_endpoints.sort_by_key(|(_address, _machine_interface, endpoint)| {
-                endpoint.report_version.timestamp()
-            });
-            for (address, iface, endpoint) in update_endpoints
-                .into_iter()
-                .take(remaining_explore_endpoints)
-            {
-                explore_endpoint_data.push(Endpoint {
-                    address,
-                    iface,
-                    last_explored: Some(endpoint),
-                    pause_ingestion_and_poweron: endpoint.pause_ingestion_and_poweron,
-                    expected: index.matched_expected(&address),
-                });
-            }
-        }
-        metrics.record_update_explored_endpoints_count(
-            "selected_routine_updates",
-            explore_endpoint_data.len() - priority_selected_count - selected_unexplored,
-        );
-        metrics
-            .record_update_explored_endpoints_count("selected_total", explore_endpoint_data.len());
+        explore_endpoint_data.extend(refresh_waits.into_iter().map(explored));
+        explore_endpoint_data.extend(routine.into_iter().map(explored));
         metrics.record_phase_latency("update_explored_endpoints_plan", plan_start.elapsed());
 
         let task_set = FuturesUnordered::new();
@@ -4819,7 +4865,7 @@ mod tests {
     use carbide_test_support::{Case, Check, check_cases, check_values, value_scenarios};
     use config_version::ConfigVersion;
     use model::site_explorer::{
-        ComputerSystem, Inventory, NetworkAdapter, PreingestionState, Service,
+        ComputerSystem, InitialBmcResetPhase, Inventory, NetworkAdapter, PreingestionState, Service,
     };
 
     use super::*;
@@ -5547,6 +5593,230 @@ mod tests {
             pause_remediation: false,
             boot_interface_mac: None,
             boot_interface_id: None,
+        }
+    }
+
+    /// A candidate for `plan_explorations`: an explored endpoint at `address`
+    /// whose report carries `version`, with the interface it is probed through.
+    fn planned(
+        address: &str,
+        state: PreingestionState,
+        waiting: bool,
+        requested: bool,
+        version: ConfigVersion,
+    ) -> (ExploredEndpoint, MachineInterfaceSnapshot) {
+        let mut endpoint = explored_endpoint(EndpointExplorationReport::default());
+        endpoint.address = address.parse().unwrap();
+        endpoint.preingestion_state = state;
+        endpoint.waiting_for_explorer_refresh = waiting;
+        endpoint.exploration_requested = requested;
+        endpoint.report_version = version;
+        let iface = MachineInterfaceSnapshot::mock_with_mac(MacAddress::new([2, 0, 0, 0, 0, 1]));
+        (endpoint, iface)
+    }
+
+    /// A report version whose timestamp is `micros` after the epoch.
+    fn version_at(micros: i64) -> ConfigVersion {
+        format!("V1-T{micros}").parse().unwrap()
+    }
+
+    fn addresses<T>(selected: &[T], address: impl Fn(&T) -> IpAddr) -> Vec<IpAddr> {
+        selected.iter().map(address).collect()
+    }
+
+    #[test]
+    fn plan_explorations_spends_the_budget_by_tier() {
+        let parked = || PreingestionState::InitialBMCReset {
+            phase: InitialBmcResetPhase::WaitForExplorerRefresh,
+        };
+        struct Case {
+            name: &'static str,
+            // (address, state, waiting, requested, report timestamp in micros)
+            explored: Vec<(&'static str, PreingestionState, bool, bool, i64)>,
+            unexplored: Vec<&'static str>,
+            budget: usize,
+            priority: Vec<&'static str>,
+            selected_unexplored: Vec<&'static str>,
+            refresh_waits: Vec<&'static str>,
+            routine: Vec<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "an operator request is served outside the budget even when parked",
+                explored: vec![
+                    ("10.0.0.1", parked(), true, true, 10),
+                    ("10.0.0.2", PreingestionState::Complete, false, false, 20),
+                ],
+                unexplored: vec![],
+                budget: 0,
+                priority: vec!["10.0.0.1"],
+                selected_unexplored: vec![],
+                refresh_waits: vec![],
+                routine: vec![],
+            },
+            Case {
+                name: "unexplored endpoints take the budget before refresh waits",
+                explored: vec![("10.0.0.1", parked(), true, false, 10)],
+                unexplored: vec!["10.0.1.2", "10.0.1.1"],
+                budget: 2,
+                priority: vec![],
+                selected_unexplored: vec!["10.0.1.1", "10.0.1.2"],
+                refresh_waits: vec![],
+                routine: vec![],
+            },
+            Case {
+                name: "a refresh wait is served before an older routine report",
+                explored: vec![
+                    ("10.0.0.1", PreingestionState::Complete, false, false, 10),
+                    ("10.0.0.2", parked(), true, false, 20),
+                ],
+                unexplored: vec![],
+                budget: 1,
+                priority: vec![],
+                selected_unexplored: vec![],
+                refresh_waits: vec!["10.0.0.2"],
+                routine: vec![],
+            },
+            Case {
+                name: "refresh waits are served oldest report first, so a failed probe rotates to the back",
+                explored: vec![
+                    ("10.0.0.1", parked(), true, false, 30),
+                    ("10.0.0.2", parked(), true, false, 10),
+                    ("10.0.0.3", parked(), true, false, 20),
+                ],
+                unexplored: vec![],
+                budget: 2,
+                priority: vec![],
+                selected_unexplored: vec![],
+                refresh_waits: vec!["10.0.0.2", "10.0.0.3"],
+                routine: vec![],
+            },
+            Case {
+                name: "refresh waits get half of the remaining budget when routine has work",
+                explored: vec![
+                    ("10.0.0.1", parked(), true, false, 10),
+                    ("10.0.0.2", parked(), true, false, 11),
+                    ("10.0.0.3", parked(), true, false, 12),
+                    ("10.0.0.4", PreingestionState::Complete, false, false, 13),
+                    ("10.0.0.5", PreingestionState::Complete, false, false, 14),
+                ],
+                unexplored: vec![],
+                budget: 3,
+                priority: vec![],
+                selected_unexplored: vec![],
+                refresh_waits: vec!["10.0.0.1", "10.0.0.2"],
+                routine: vec!["10.0.0.4"],
+            },
+            Case {
+                name: "refresh waits get the whole remaining budget when routine has nothing",
+                explored: vec![
+                    ("10.0.0.1", parked(), true, false, 10),
+                    ("10.0.0.2", parked(), true, false, 11),
+                    ("10.0.0.3", parked(), true, false, 12),
+                ],
+                unexplored: vec![],
+                budget: 3,
+                priority: vec![],
+                selected_unexplored: vec![],
+                refresh_waits: vec!["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+                routine: vec![],
+            },
+            Case {
+                name: "waits in initial, complete and failed are routine refreshes",
+                explored: vec![
+                    ("10.0.0.1", PreingestionState::Initial, true, false, 10),
+                    ("10.0.0.2", PreingestionState::Complete, true, false, 11),
+                    (
+                        "10.0.0.3",
+                        PreingestionState::Failed {
+                            reason: "bmc never answered".to_string(),
+                        },
+                        true,
+                        false,
+                        12,
+                    ),
+                ],
+                unexplored: vec![],
+                budget: 3,
+                priority: vec![],
+                selected_unexplored: vec![],
+                refresh_waits: vec![],
+                routine: vec!["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+            },
+        ];
+        for case in cases {
+            let explored: Vec<_> = case
+                .explored
+                .iter()
+                .map(|(address, state, waiting, requested, micros)| {
+                    planned(
+                        address,
+                        state.clone(),
+                        *waiting,
+                        *requested,
+                        version_at(*micros),
+                    )
+                })
+                .collect();
+            let unexplored_ifaces: Vec<(IpAddr, MachineInterfaceSnapshot)> = case
+                .unexplored
+                .iter()
+                .map(|address| {
+                    (
+                        address.parse().unwrap(),
+                        MachineInterfaceSnapshot::mock_with_mac(MacAddress::new([
+                            2, 0, 0, 0, 0, 2,
+                        ])),
+                    )
+                })
+                .collect();
+            let plan = plan_explorations(
+                explored
+                    .iter()
+                    .map(|(endpoint, iface)| (endpoint.address, iface, endpoint))
+                    .collect(),
+                unexplored_ifaces
+                    .iter()
+                    .map(|(address, iface)| (*address, iface))
+                    .collect(),
+                case.budget,
+            );
+            let ips = |list: &[&str]| -> Vec<IpAddr> {
+                list.iter().map(|a| a.parse().unwrap()).collect()
+            };
+            assert_eq!(
+                addresses(&plan.priority, |c| c.0),
+                ips(&case.priority),
+                "{}: priority",
+                case.name
+            );
+            assert_eq!(
+                addresses(&plan.unexplored, |c| c.0),
+                ips(&case.selected_unexplored),
+                "{}: unexplored",
+                case.name
+            );
+            assert_eq!(
+                addresses(&plan.refresh_waits, |c| c.0),
+                ips(&case.refresh_waits),
+                "{}: refresh waits",
+                case.name
+            );
+            assert_eq!(
+                addresses(&plan.routine, |c| c.0),
+                ips(&case.routine),
+                "{}: routine",
+                case.name
+            );
+            assert_eq!(
+                plan.selected_total(),
+                case.priority.len()
+                    + case.selected_unexplored.len()
+                    + case.refresh_waits.len()
+                    + case.routine.len(),
+                "{}: total",
+                case.name
+            );
         }
     }
 

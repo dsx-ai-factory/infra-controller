@@ -515,6 +515,33 @@ pub enum PreingestionState {
     Complete,
 }
 
+impl PreingestionState {
+    /// Whether a `waiting_for_explorer_refresh` set in this state is a
+    /// preingestion park that only a fresh exploration report can end. An
+    /// `Initial` wait is a failed probe on an endpoint preingestion has not
+    /// started, and `Complete` and `Failed` waits have no preingestion consumer.
+    pub fn parks_for_explorer_refresh(&self) -> bool {
+        match self {
+            Self::Initial | Self::Complete | Self::Failed { .. } => false,
+            Self::RecheckVersions
+            | Self::ScriptRunning
+            | Self::BfbRecoveryNeeded { .. }
+            | Self::BfbPlatformPowercycle { .. }
+            | Self::BfbCopyInProgress { .. }
+            | Self::BfbInstallationWait { .. }
+            | Self::InitialReset { .. }
+            | Self::InitialBMCReset { .. }
+            | Self::SetNtpServers { .. }
+            | Self::TimeSyncReset { .. }
+            | Self::RackFirmwareUpdateWait { .. }
+            | Self::UpgradeFirmwareWait { .. }
+            | Self::ResetForNewFirmware { .. }
+            | Self::NewFirmwareReportedWait { .. }
+            | Self::RecheckVersionsAfterFailure { .. } => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BfbPlatformPowercyclePhase {
