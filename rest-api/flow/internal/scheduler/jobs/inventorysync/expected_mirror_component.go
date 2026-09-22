@@ -145,7 +145,7 @@ func powerShelfDetailToSpec(d nicoapi.ExpectedPowerShelfDetail) expectedComponen
 }
 
 // populateLabelsIntoSpec fills in the label-derived fields on spec. Each int
-// label parsed by parseLabelInt that turns out to be non-integer is logged
+// label parsed by parseLabelInt that turns out to be invalid is logged
 // and marked in spec.preserveFields so the mirror's update path will keep
 // Flow's existing value for that column instead of overwriting it with the
 // unknown-position sentinel. spec.Type must already be set so the warn
@@ -175,21 +175,21 @@ func populateLabelsIntoSpec(s *expectedComponentSpec, labels map[string]string) 
 			Str("serial", s.SerialNumber).
 			Str("label", lbl.labelKey).
 			Str("raw", raw).
-			Msg("Expected-inventory mirror: Core label is not an integer; preserving Flow's existing value on update (insert path uses unknown position)")
+			Msg("Expected-inventory mirror: Core label is not a non-negative integer; preserving Flow's existing value on update (insert path uses unknown position)")
 	}
 }
 
 // parseLabelInt distinguishes an omitted or empty Core label (the authoritative
-// unknown-position sentinel, ok=true) from a malformed non-empty label
-// (unknown-position sentinel, ok=false). A literal "0" remains a valid zero.
-// The caller preserves Flow's existing value on UPDATE only for malformed
-// labels; an omitted or empty label authoritatively clears a prior position.
+// unknown-position sentinel, ok=true) from a malformed or negative non-empty
+// label (unknown-position sentinel, ok=false). A literal "0" remains valid.
+// The caller preserves Flow's existing value on UPDATE only for invalid labels;
+// an omitted or empty label authoritatively clears a prior position.
 func parseLabelInt(raw string) (int, bool) {
 	if raw == "" {
 		return unknownPositionValue, true
 	}
 	n, err := strconv.Atoi(raw)
-	if err != nil {
+	if err != nil || n < 0 {
 		return unknownPositionValue, false
 	}
 	return n, true

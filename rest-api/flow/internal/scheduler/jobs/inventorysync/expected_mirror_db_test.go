@@ -733,6 +733,18 @@ func TestMirrorComponents_PositionPresence(t *testing.T) {
 			wantTray:   unknownPositionValue,
 			wantHostID: unknownPositionValue,
 		},
+		{
+			name: "negative labels preserve existing position",
+			labels: map[string]string{
+				labelComponentSlotID:  "-2",
+				labelComponentTrayIdx: "-3",
+				labelComponentHostID:  "-4",
+			},
+			preexisting: true,
+			wantSlot:    7,
+			wantTray:    8,
+			wantHostID:  9,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, pool := mirrorTestPool(t)

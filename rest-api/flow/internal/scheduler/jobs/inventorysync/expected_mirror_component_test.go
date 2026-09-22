@@ -20,7 +20,7 @@ import (
 func TestParseLabelInt(t *testing.T) {
 	// Empty input is "Core didn't write this label" — ok=true so callers
 	// authoritatively clear a prior value to the unknown-position sentinel.
-	// Non-empty unparsable input is a Core data bug — ok=false so callers
+	// Non-empty invalid input is a Core data bug — ok=false so callers
 	// can preserve Flow's existing value rather than clobber it.
 	for _, tc := range []struct {
 		in     string
@@ -30,7 +30,7 @@ func TestParseLabelInt(t *testing.T) {
 		{"", unknownPositionValue, true},
 		{"0", 0, true},
 		{"7", 7, true},
-		{"-3", -3, true},
+		{"-3", unknownPositionValue, false},
 		{"abc", unknownPositionValue, false},   // strconv.Atoi rejects non-numeric
 		{"3.14", unknownPositionValue, false},  // strconv.Atoi rejects floats
 		{"  4  ", unknownPositionValue, false}, // strconv.Atoi rejects whitespace
