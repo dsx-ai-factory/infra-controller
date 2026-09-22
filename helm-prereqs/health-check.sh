@@ -452,7 +452,8 @@ if kc get ns "${FLOW_NS}" &>/dev/null; then
             flow-certificate temporal-client-certs nico-roots; do
     _check_secret_exists "${FLOW_NS}" "${_S}"
   done
-elif kc get ns "${REST_NS}" &>/dev/null; then
+# Key "REST installed" on its deployment: setup.sh 7a pre-creates the namespace.
+elif kc get deployment -n "${REST_NS}" nico-rest-api &>/dev/null; then
   fail "flow namespace not present - NICo REST is installed but Flow is missing (setup.sh phase 7h installs it with REST)"
 else
   skip "flow namespace not present - NICo REST not installed (--skip-rest was used); Flow installs together with REST"
