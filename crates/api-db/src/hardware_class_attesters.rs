@@ -48,12 +48,13 @@ pub async fn record(
     Ok(inserted.rows_affected() > 0)
 }
 
-/// One recorded attester set, with how many explored endpoints last reported
-/// it.
+/// One recorded attester set, with how many attesters it holds and how many
+/// explored endpoints last reported it.
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct AttesterSetCount {
     pub hardware_class: String,
     pub attester_digest: String,
+    pub attesters: i32,
     pub endpoints: i64,
 }
 
@@ -65,14 +66,19 @@ pub struct AttesterSetCount {
 /// explored before the set was recorded carry no digest and count under no
 /// set, so the counts for a class can also fall short of its endpoint total.
 pub async fn counts_by_class(db: impl DbReader<'_>) -> DatabaseResult<Vec<AttesterSetCount>> {
+    // Grouped by the set table's primary key, so its `attester_ids` is
+    // functionally dependent and needs no grouping of its own.
     let query = r#"
-        SELECT attesters.hardware_class, attesters.attester_digest, COUNT(endpoints.address) AS endpoints
-        FROM hardware_class_attesters attesters
+        SELECT sets.hardware_class,
+               sets.attester_digest,
+               jsonb_array_length(sets.attester_ids) AS attesters,
+               COUNT(endpoints.address) AS endpoints
+        FROM hardware_class_attesters sets
         LEFT JOIN explored_endpoints endpoints
-            ON endpoints.hardware_class = attesters.hardware_class
-           AND endpoints.attester_digest = attesters.attester_digest
-        GROUP BY attesters.hardware_class, attesters.attester_digest
-        ORDER BY attesters.hardware_class, attesters.attester_digest
+            ON endpoints.hardware_class = sets.hardware_class
+           AND endpoints.attester_digest = sets.attester_digest
+        GROUP BY sets.hardware_class, sets.attester_digest
+        ORDER BY sets.hardware_class, sets.attester_digest
     "#;
     sqlx::query_as(query)
         .fetch_all(db)
@@ -153,12 +159,21 @@ mod test {
 
     /// The counts are what make an odd set traceable to hardware: one endpoint
     /// against seventy-one reads differently from an even split, and a set no
-    /// endpoint currently reports still has to appear.
+    /// endpoint currently reports still has to appear. The sets are sized
+    /// differently from their endpoint tallies so neither count can stand in
+    /// for the other.
     #[crate::sqlx_test]
-    async fn counts_tally_the_endpoints_reporting_each_set(pool: sqlx::PgPool) {
+    async fn counts_tally_the_attesters_and_endpoints_of_each_set(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
-        let common = attester_set(vec![entry("HGX_ERoT_GPU_0", "SPDM")]);
-        let outlier = attester_set(vec![entry("HGX_ERoT_BMC_0", "SPDM")]);
+        let common = attester_set(
+            (0..3)
+                .map(|n| entry(&format!("HGX_ERoT_GPU_{n}"), "SPDM"))
+                .collect(),
+        );
+        let outlier = attester_set(vec![
+            entry("HGX_ERoT_BMC_0", "SPDM"),
+            entry("HGX_ERoT_GPU_0", "SPDM"),
+        ]);
         record(&mut txn, CLASS, &common).await.unwrap();
         record(&mut txn, CLASS, &outlier).await.unwrap();
 
@@ -185,7 +200,7 @@ mod test {
             .await
             .unwrap()
             .into_iter()
-            .map(|count| (count.attester_digest, count.endpoints))
+            .map(|count| (count.attester_digest, count.attesters, count.endpoints))
             .collect();
 
         assert_eq!(
@@ -193,20 +208,14 @@ mod test {
             2,
             "both sets the class has carried are reported"
         );
-        assert_eq!(
+        let of = |digest: &str| {
             counted
                 .iter()
-                .find(|(digest, _)| *digest == common.digest)
-                .map(|(_, endpoints)| *endpoints),
-            Some(2),
-        );
-        assert_eq!(
-            counted
-                .iter()
-                .find(|(digest, _)| *digest == outlier.digest)
-                .map(|(_, endpoints)| *endpoints),
-            Some(1),
-        );
+                .find(|(recorded, _, _)| recorded == digest)
+                .map(|(_, attesters, endpoints)| (*attesters, *endpoints))
+        };
+        assert_eq!(of(&common.digest), Some((3, 2)));
+        assert_eq!(of(&outlier.digest), Some((2, 1)));
     }
 
     /// Two classes can be built around the same baseboard and report the same

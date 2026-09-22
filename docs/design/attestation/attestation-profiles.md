@@ -495,6 +495,9 @@ message AttesterSet {
   // Explored endpoints of this class last reporting this set. Sums to at most
   // the entry's `endpoints`, since an endpoint may have no digest yet.
   int32 endpoints = 2;
+  // How many attesters the set holds. Zero where the BMC reported an SPDM
+  // collection with no SPDM members.
+  int32 attesters = 3;
 }
 
 message GetAttestationCoverageResponse {
@@ -593,41 +596,47 @@ and resolves each group against the profile table:
 
 ```text
 $ nico-admin-cli attestation spdm coverage
-+------------------------------+--------------------+---------------+-------------+-----------------------------+
-| HARDWARE CLASS               | EXPLORED ENDPOINTS | ATTESTER SETS | OWN PROFILE | WOULD USE                   |
-+==============================+====================+===============+=============+=============================+
-| dell-inc_poweredge-r750      | 6                  | 1             | no          | any (all)                   |
-+------------------------------+--------------------+---------------+-------------+-----------------------------+
-| lenovo_thinksystem-sr680a-v3 | 4                  | 1             | yes         | its own profile (none)      |
-+------------------------------+--------------------+---------------+-------------+-----------------------------+
-| nvidia_dgx-gb200             | 72                 | 2             | yes         | its own profile (allowlist) |
-+------------------------------+--------------------+---------------+-------------+-----------------------------+
-| (no class recorded)          | 1                  | 0             | n/a         | any (all)                   |
-+------------------------------+--------------------+---------------+-------------+-----------------------------+
-| any                          | —                  | —             | yes         | its own profile (all)       |
-+------------------------------+--------------------+---------------+-------------+-----------------------------+
++------------------------------+--------------------+-----------+----------+-------------+-----------------------------+
+| HARDWARE CLASS               | EXPLORED ENDPOINTS | ATTESTERS | VARIANTS | OWN PROFILE | WOULD USE                   |
++==============================+====================+===========+==========+=============+=============================+
+| dell-inc_poweredge-r750      | 6                  | 2         | 1        | no          | any (all)                   |
++------------------------------+--------------------+-----------+----------+-------------+-----------------------------+
+| lenovo_thinksystem-sr680a-v3 | 4                  | 4         | 1        | yes         | its own profile (none)      |
++------------------------------+--------------------+-----------+----------+-------------+-----------------------------+
+| nvidia_dgx-gb200             | 72                 | 7, 8      | 2        | yes         | its own profile (allowlist) |
++------------------------------+--------------------+-----------+----------+-------------+-----------------------------+
+| (no class recorded)          | 1                  |           | 0        | n/a         | any (all)                   |
++------------------------------+--------------------+-----------+----------+-------------+-----------------------------+
+| any                          | —                  | —         | —        | yes         | its own profile (all)       |
++------------------------------+--------------------+-----------+----------+-------------+-----------------------------+
 ```
 
 That table holds four findings. Nobody has written a profile for the six R750s,
 so `any` attests them with whatever their BMCs report. The four SR680a V3s have
 a profile of their own that attests nothing, which is a deliberate exclusion
 rather than an oversight — the two rows read differently and only this view
-tells them apart. The 72 GB200 trays share a profile, and two attester sets
-under one class means at least one tray reports different components from the
-rest (§7.5). And one endpoint has no class recorded yet, either because it is
+tells them apart. The 72 GB200 trays share a profile, and the two variants under
+one class mean at least one tray reports seven attesters where the rest report
+eight (§7.5). And one endpoint has no class recorded yet, either because it is
 new or because its explorations are failing, so there is nothing to key on and
 `any` covers it too.
 
 `EXPLORED ENDPOINTS` counts rows of `explored_endpoints` rather than machines,
 because `hardware_class` is recorded per endpoint and a machine can present more
 than one. Hardware nobody has explored has no row at all.
-`ATTESTER SETS` renders how many sets the class has (§7.5); more than one means it
-spans hardware carrying different SPDM-capable components. It does not move when
-an operator switches a component's integrity reporting off, which is a
+`VARIANTS` renders how many attester sets the class has (§7.5); more than one
+means it spans hardware carrying different SPDM-capable components. It does not
+move when an operator switches a component's integrity reporting off, which is a
 configuration difference rather than a hardware one. Zero means nothing has been
-recorded yet, which is every class before its first exploration or attestation.
-The per-set endpoint counts behind the number are in `--format json`, where an
-outlier of one endpoint against seventy-one is the useful detail.
+recorded yet, which is every class before its first exploration.
+`ATTESTERS` renders how many attesters those sets hold, listing every distinct
+count because a class spanning variants of different sizes has no single one —
+`7, 8` is the drift `VARIANTS` counts, said in the units an operator reasons
+about. It is empty for a class with no set recorded, and `0` where a BMC reported
+an SPDM collection holding no SPDM members, which is a variant in its own right.
+Which digests those counts belong to, and how many endpoints report each, are in
+`--format json`, where an outlier of one endpoint against seventy-one is the
+useful detail.
 `OWN PROFILE` is `n/a` for the endpoints carrying no class, since no profile can
 be keyed to them.
 The `any` row carries no counts, because `any` is never recorded on an endpoint.

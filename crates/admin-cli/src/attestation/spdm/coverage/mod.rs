@@ -116,19 +116,39 @@ struct CoverageView {
     /// Absent for the `any` row, which is never recorded on an endpoint.
     explored_endpoints: Option<i32>,
     /// The attester sets recorded for this class. The table shows how many
-    /// there are; the per-set endpoint counts here are what tell an outlier of
-    /// one endpoint from an even split. Absent for the `any` row.
+    /// attesters they hold and how many sets there are; the per-set endpoint
+    /// counts here are what tell an outlier of one endpoint from an even
+    /// split. Absent for the `any` row.
     attester_sets: Option<Vec<AttesterSetView>>,
     own_profile: &'static str,
     would_use: String,
 }
 
-/// One recorded set of attesters, and how many of the class's endpoints last
-/// reported it.
+/// How many attesters a class's recorded sets hold, as one cell.
+///
+/// Every distinct count is listed, because a class spanning sets of different
+/// sizes has no single count, and that is the disagreement the sets are
+/// recorded to surface: a pattern keyed to a class still matches a tray
+/// reporting seven roots of trust instead of eight. Empty until an exploration
+/// records a set, which `VARIANTS` reports as none.
+fn attester_counts(sets: &[AttesterSetView]) -> String {
+    let mut counts: Vec<_> = sets.iter().map(|set| set.attesters).collect();
+    counts.sort_unstable();
+    counts.dedup();
+    counts
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One recorded set of attesters, how many it holds, and how many of the
+/// class's endpoints last reported it.
 #[derive(Serialize)]
 struct AttesterSetView {
     digest: String,
     endpoints: i32,
+    attesters: i32,
 }
 
 /// Every class the site has, then `any`. The `any` row is listed even when no
@@ -154,6 +174,7 @@ fn coverage_views(coverage: &GetAttestationCoverageResponse) -> Vec<CoverageView
                         .map(|set| AttesterSetView {
                             digest: set.digest.clone(),
                             endpoints: set.endpoints,
+                            attesters: set.attesters,
                         })
                         .collect(),
                 ),
@@ -186,7 +207,8 @@ async fn write_coverage(
     table.set_titles(row![
         "HARDWARE CLASS",
         "EXPLORED ENDPOINTS",
-        "ATTESTER SETS",
+        "ATTESTERS",
+        "VARIANTS",
         "OWN PROFILE",
         "WOULD USE"
     ]);
@@ -195,6 +217,10 @@ async fn write_coverage(
             view.hardware_class.as_deref().unwrap_or(NO_CLASS_RECORDED),
             view.explored_endpoints
                 .map(|count| count.to_string())
+                .unwrap_or(NOT_APPLICABLE.to_string()),
+            view.attester_sets
+                .as_deref()
+                .map(attester_counts)
                 .unwrap_or(NOT_APPLICABLE.to_string()),
             view.attester_sets
                 .as_ref()

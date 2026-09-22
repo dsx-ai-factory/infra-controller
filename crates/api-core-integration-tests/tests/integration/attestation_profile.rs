@@ -441,13 +441,15 @@ async fn explored_with_attesters(
 
 /// A profile's patterns cannot show that one tray reports different components
 /// from its peers: a prefix matches either way. Coverage reports the recorded
-/// sets per class so it is visible, and the per-set endpoint counts are what
-/// separate an outlier from an even split.
+/// sets per class so it is visible, with how many attesters each holds and how
+/// many endpoints report it, which is what separates an outlier from an even
+/// split. The sets are sized differently from their endpoint tallies so
+/// neither count can stand in for the other.
 #[sqlx_test]
 async fn coverage_reports_the_attester_sets_each_class_carries(pool: PgPool) {
     let env = TestHarness::builder(pool).build().await;
 
-    let peers = ["HGX_ERoT_GPU_0", "HGX_ERoT_GPU_1"];
+    let peers = ["HGX_ERoT_GPU_0", "HGX_ERoT_GPU_1", "HGX_ERoT_GPU_2"];
     let outlier = ["HGX_ERoT_GPU_0"];
     explored_with_attesters(&env, "192.0.2.1", HARDWARE_CLASS, &peers).await;
     explored_with_attesters(&env, "192.0.2.2", HARDWARE_CLASS, &peers).await;
@@ -462,23 +464,24 @@ async fn coverage_reports_the_attester_sets_each_class_carries(pool: PgPool) {
         .expect("coverage reads")
         .into_inner();
 
-    let sets: Vec<Vec<i32>> = coverage
+    let sets: Vec<Vec<(i32, i32)>> = coverage
         .entries
         .iter()
         .map(|entry| {
             entry
                 .attester_sets
                 .iter()
-                .map(|set| set.endpoints)
+                .map(|set| (set.attesters, set.endpoints))
                 .sorted()
                 .collect()
         })
         .collect();
     assert_eq!(
         sets,
-        [vec![1, 2], Vec::new()],
-        "the class spans two sets, two endpoints on one and the outlier alone; \
-         the class whose endpoint reported no collection carries none"
+        [vec![(1, 1), (3, 2)], Vec::new()],
+        "the class spans two sets, three attesters across two endpoints and the \
+         outlier's one alone; the class whose endpoint reported no collection \
+         carries none"
     );
 
     let digests: Vec<&str> = coverage.entries[0]
