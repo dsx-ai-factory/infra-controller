@@ -17,15 +17,14 @@
 use std::sync::Arc;
 
 use axum::Router;
-use tokio::sync::oneshot;
 
 use crate::auth_router::Authorizer;
 use crate::bmc_state::BmcState;
 use crate::injection::InjectionStore;
 use crate::redfish::manager::ManagerState;
 use crate::{
-    Callbacks, EventServiceConfig, HardwareType, MachineInfo, SystemPowerControl,
-    VirtualMediaDeviceConfig, auth_router, middleware_router, redfish,
+    Callbacks, EventServiceConfig, HardwareType, MachineInfo, VirtualMediaDeviceConfig,
+    auth_router, middleware_router, redfish,
 };
 
 /// Caller control over the hardware profile's EventService.
@@ -56,15 +55,6 @@ pub struct MachineRouterOptions {
     /// An enabled event service still closes streams and clears history on reset;
     /// with both features disabled, resets remain no-ops.
     pub bmc_reset_duration: Option<std::time::Duration>,
-}
-
-#[derive(Debug)]
-pub enum BmcCommand {
-    SetSystemPower {
-        request: SystemPowerControl,
-        reply: Option<oneshot::Sender<SetSystemPowerResult>>,
-    },
-    StateRefreshIndication,
 }
 
 pub type SetSystemPowerResult = Result<(), SetSystemPowerError>;

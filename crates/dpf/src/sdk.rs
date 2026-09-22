@@ -84,7 +84,9 @@ use crate::crds::dpuservices_generated::{
     DPUService, DpuServiceHelmChart, DpuServiceHelmChartSource, DpuServiceSecurity,
     DpuServiceServiceDaemonSet, DpuServiceServiceDaemonSetNodeSelector,
     DpuServiceServiceDaemonSetNodeSelectorNodeSelectorTerms,
-    DpuServiceServiceDaemonSetNodeSelectorNodeSelectorTermsMatchExpressions, DpuServiceSpec,
+    DpuServiceServiceDaemonSetNodeSelectorNodeSelectorTermsMatchExpressions,
+    DpuServiceServiceDaemonSetUpdateStrategy,
+    DpuServiceServiceDaemonSetUpdateStrategyRollingUpdate, DpuServiceSpec,
 };
 use crate::crds::dpuservicetemplates_generated::{
     DPUServiceTemplate, DpuServiceTemplateHelmChart, DpuServiceTemplateHelmChartSource,
@@ -104,11 +106,12 @@ use crate::types::{
     DOCA_HBN_SERVICE_NAME, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF, DPU_AGENT_SERVICE_NAME,
     DPU_ENABLED_NODE_LABEL, DTS_SERVICE_NAME, DetachedDpuServiceDefinition, DpfInterceptBridging,
     DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuMismatch, DpuNodeInfo, DpuNodeSummary,
-    DpuPhase, DpuServiceHelmChartObservation, DpuServiceInterfacePatch,
-    DpuServiceInterfaceTemplateDefinition, DpuServiceInterfaceTemplateType, DpuServiceObservation,
-    DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig,
-    MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE,
-    ServiceConfigPortProtocol, ServiceDefinition, ServiceNADResourceType, ServiceTemplateVersion,
+    DpuPhase, DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation,
+    DpuServiceInterfacePatch, DpuServiceInterfaceTemplateDefinition,
+    DpuServiceInterfaceTemplateType, DpuServiceObservation, DpuServiceVersion, DpuSummary,
+    FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig, MAX_BLUEFIELD_VFS_PER_PF,
+    OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE, ServiceConfigPortProtocol,
+    ServiceDefinition, ServiceNADResourceType, ServiceTemplateVersion,
 };
 #[cfg(test)]
 use crate::types::{DEFAULT_PF_TOTAL_SF_RESERVED, InitDpfResourcesConfigBuilder};
@@ -2399,12 +2402,27 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
                 privileged: Some(service.security_privileged),
                 spiffe: None,
             }),
-            service_daemon_set: Some(DpuServiceServiceDaemonSet {
-                annotations: None,
-                labels: None,
-                node_selector: Some(detached_node_selector(&service.node_selector_labels)),
-                resources: None,
-                update_strategy: None,
+            service_daemon_set: service.service_daemon_set.as_ref().map(|daemon_set| {
+                DpuServiceServiceDaemonSet {
+                    annotations: daemon_set.annotations.clone(),
+                    labels: daemon_set.labels.clone(),
+                    node_selector: daemon_set
+                        .node_selector_labels
+                        .as_ref()
+                        .map(detached_node_selector),
+                    resources: daemon_set.resources.clone(),
+                    update_strategy: daemon_set.update_strategy.as_ref().map(|strategy| {
+                        DpuServiceServiceDaemonSetUpdateStrategy {
+                            r#type: strategy.strategy_type.clone(),
+                            rolling_update: strategy.rolling_update.as_ref().map(|rolling| {
+                                DpuServiceServiceDaemonSetUpdateStrategyRollingUpdate {
+                                    max_surge: rolling.max_surge.clone(),
+                                    max_unavailable: rolling.max_unavailable.clone(),
+                                }
+                            }),
+                        }
+                    }),
+                }
             }),
             service_id: None,
         },
@@ -2416,6 +2434,28 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
 /// controller.  The repository remains the only layer that deals in checked
 /// DPF CR types.
 fn dpu_service_from_resource(service: DPUService) -> Result<DpuServiceObservation, DpfError> {
+    let service_daemon_set = service
+        .spec
+        .service_daemon_set
+        .map(|daemon_set| {
+            Ok::<_, serde_json::Error>(DpuServiceDaemonSetObservation {
+                node_selector: daemon_set
+                    .node_selector
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?,
+                annotations: daemon_set.annotations,
+                labels: daemon_set.labels,
+                resources: daemon_set.resources,
+                update_strategy: daemon_set
+                    .update_strategy
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
+
     Ok(DpuServiceObservation {
         name: service.metadata.name,
         namespace: service.metadata.namespace,
@@ -2435,13 +2475,7 @@ fn dpu_service_from_resource(service: DPUService) -> Result<DpuServiceObservatio
             .spec
             .security
             .and_then(|security| security.privileged),
-        service_daemon_set_node_selector: service
-            .spec
-            .service_daemon_set
-            .as_ref()
-            .and_then(|daemon_set| daemon_set.node_selector.as_ref())
-            .map(serde_json::to_value)
-            .transpose()?,
+        service_daemon_set,
         service_id: service.spec.service_id,
         config_ports_present: service.spec.config_ports.is_some(),
         is_deleting: service.metadata.deletion_timestamp.is_some(),
@@ -6582,6 +6616,8 @@ mod tests {
         );
     }
 
+    /// Provides a detached service with explicit placement so lifecycle tests
+    /// verify that caller-owned DaemonSet settings reach the DPF resource.
     fn test_dpu_service(name: &str) -> DetachedDpuServiceDefinition {
         DetachedDpuServiceDefinition {
             name: name.to_owned(),
@@ -6596,11 +6632,64 @@ mod tests {
             },
             deploy_in_cluster: false,
             security_privileged: false,
-            node_selector_labels: BTreeMap::from([(
+            service_daemon_set: Some(crate::types::DetachedServiceDaemonSet {
+                node_selector_labels: Some(BTreeMap::from([(
+                    "nico/extension-service".to_owned(),
+                    "enabled".to_owned(),
+                )])),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// Verifies explicitly supplied DaemonSet fields survive conversion through
+    /// the generated DPF type, including caller-selected placement.
+    #[test]
+    fn detached_dpu_service_daemon_set_fields_round_trip_through_checked_cr_type() {
+        let mut service = test_dpu_service("extension-service");
+        service.service_daemon_set = Some(crate::types::DetachedServiceDaemonSet {
+            node_selector_labels: Some(BTreeMap::from([(
                 "nico/extension-service".to_owned(),
                 "enabled".to_owned(),
-            )]),
-        }
+            )])),
+            annotations: Some(BTreeMap::from([(
+                "example.com/owner".to_owned(),
+                "tenant".to_owned(),
+            )])),
+            labels: Some(BTreeMap::from([("app".to_owned(), "storage".to_owned())])),
+            resources: Some(BTreeMap::from([(
+                "nvidia.com/bf_sf".to_owned(),
+                IntOrString::String("1".to_owned()),
+            )])),
+            update_strategy: Some(crate::types::DetachedServiceDaemonSetUpdateStrategy {
+                strategy_type: Some("RollingUpdate".to_owned()),
+                rolling_update: Some(crate::types::DetachedServiceDaemonSetRollingUpdate {
+                    max_surge: None,
+                    max_unavailable: Some(IntOrString::Int(1)),
+                }),
+            }),
+        });
+
+        // Convert through the checked CR type to exercise the SDK boundary.
+        let observed = dpu_service_from_resource(dpu_service_to_resource(&service)).unwrap();
+        let observed_daemon_set = observed.service_daemon_set.unwrap();
+        let expected_daemon_set = service.service_daemon_set.unwrap();
+
+        // All caller-supplied fields, including placement, must remain present.
+        assert_eq!(
+            observed_daemon_set.annotations,
+            expected_daemon_set.annotations
+        );
+        assert_eq!(observed_daemon_set.labels, expected_daemon_set.labels);
+        assert_eq!(observed_daemon_set.resources, expected_daemon_set.resources);
+        assert_eq!(
+            observed_daemon_set.update_strategy,
+            Some(json!({
+                "type": "RollingUpdate",
+                "rollingUpdate": {"maxUnavailable": 1},
+            }))
+        );
+        assert!(observed_daemon_set.node_selector.is_some());
     }
 
     #[tokio::test]

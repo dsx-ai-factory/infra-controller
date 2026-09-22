@@ -35,7 +35,7 @@ use url::Url;
 use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult};
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
 use crate::{
-    BmcState, BootOptionKind, Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl,
+    BmcState, BootOptionKind, Callbacks, MockPowerState, ResourceResetType, SetSystemPowerError,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -86,7 +86,7 @@ enum LibvirtMessage {
         reply: oneshot::Sender<Result<(), String>>,
     },
     SendPowerCommand {
-        reset_type: SystemPowerControl,
+        reset_type: ResourceResetType,
     },
     Refresh,
 }
@@ -561,9 +561,9 @@ impl LibvirtBackend {
 
     async fn send_power_command(
         &mut self,
-        reset_type: SystemPowerControl,
+        reset_type: ResourceResetType,
     ) -> Result<(), SetSystemPowerError> {
-        use SystemPowerControl::*;
+        use ResourceResetType::*;
         // Only a cold start loads the saved domain XML. Reboot and reset keep
         // the running domain's boot configuration and their existing semantics.
         if matches!(reset_type, On | ForceOn | PowerCycle) {
@@ -575,16 +575,18 @@ impl LibvirtBackend {
             ForceOff => self.domain_command("destroy").await,
             GracefulRestart => self.domain_command("reboot").await,
             ForceRestart => self.domain_command("reset").await,
-            PowerCycle => {
+            PowerCycle | FullPowerCycle => {
                 self.domain_command("destroy").await?;
                 self.start().await
             }
             Pause => self.domain_command("suspend").await,
             Resume => self.domain_command("resume").await,
             Nmi => self.domain_command("inject-nmi").await,
-            PushPowerButton | Suspend => Err(SetSystemPowerError::BadRequest(format!(
-                "libvirt backend does not support {reset_type:?}"
-            ))),
+            Sleep | Hibernate | PushPowerButton | Suspend | UnsupportedValue => {
+                Err(SetSystemPowerError::BadRequest(format!(
+                    "libvirt backend does not support {reset_type:?}"
+                )))
+            }
         }
     }
 
@@ -633,7 +635,7 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                 }
             }
             LibvirtMessage::SendPowerCommand { reset_type } => {
-                if matches!(reset_type, SystemPowerControl::PowerCycle) {
+                if matches!(reset_type, ResourceResetType::PowerCycle) {
                     *self.power_state.write().expect("power state lock poisoned") =
                         MockPowerState::PowerCycling {
                             since: Instant::now(),
@@ -660,10 +662,7 @@ impl Callbacks for LibvirtCallbacks {
         *self.power_state.read().expect("power state lock poisoned")
     }
 
-    fn send_power_command(
-        &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
+    fn send_power_command(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError> {
         self.mailbox
             .send(LibvirtMessage::SendPowerCommand { reset_type })
             .map_err(|error| SetSystemPowerError::CommandSendError(error.to_string()))

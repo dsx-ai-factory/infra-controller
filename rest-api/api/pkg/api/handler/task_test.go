@@ -22,6 +22,7 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 	tClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+	tp "go.temporal.io/sdk/temporal"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
@@ -32,6 +33,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 func TestGetTaskHandler_Handle(t *testing.T) {
@@ -639,7 +641,9 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 		body           any
 		mockTask       *flowv1.Task
 		mockExecErr    error
+		mockResultErr  error
 		expectedStatus int
+		expectNullData bool
 	}{
 		{
 			name:           "success - cancel task returns 202 Accepted",
@@ -699,6 +703,20 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			mockExecErr:    errors.New("temporal scheduling failed"),
 			expectedStatus: http.StatusInternalServerError,
 		},
+		{
+			name:     "failure - completed task cannot be cancelled",
+			reqOrg:   org,
+			user:     providerUser,
+			taskUUID: taskUUID,
+			body:     model.APICancelTaskRequest{SiteID: site.ID.String()},
+			mockResultErr: tp.NewNonRetryableApplicationError(
+				"task cannot be cancelled",
+				swe.ErrTypeNICoFailedPrecondition,
+				errors.New("task cannot be cancelled (status: failed)"),
+			),
+			expectedStatus: http.StatusPreconditionFailed,
+			expectNullData: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -708,6 +726,8 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
 			if tt.mockTask != nil {
 				testFlowProxyReply(t, mockWorkflowRun, &flowv1.CancelTaskResponse{Task: tt.mockTask})
+			} else if tt.mockResultErr != nil {
+				mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tt.mockResultErr)
 			}
 			testFlowProxyDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_CancelTask_FullMethodName, tt.mockExecErr)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
@@ -736,7 +756,15 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			require.Equal(t, tt.expectedStatus, ec.Response().Status)
 			if tt.expectedStatus != http.StatusAccepted {
+				var apiErr map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
+				require.NotEmpty(t, apiErr["message"])
+				if tt.expectNullData {
+					require.Contains(t, apiErr, "data")
+					assert.Nil(t, apiErr["data"])
+				}
 				return
 			}
 

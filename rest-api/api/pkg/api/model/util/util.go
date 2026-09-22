@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"gopkg.in/yaml.v3"
 )
 
@@ -263,4 +264,21 @@ func ProtobufLabelsFromAPILabels(labels map[string]string) []*corev1.Label {
 		})
 	}
 	return protoLabels
+}
+
+// ExpectedComponentUpdateField associates a Core field path with its request presence.
+type ExpectedComponentUpdateField struct {
+	Path    string
+	Present bool
+}
+
+// ExpectedComponentUpdateMask returns a nonnil mask of present fields in caller order.
+func ExpectedComponentUpdateMask(fields ...ExpectedComponentUpdateField) *fieldmaskpb.FieldMask {
+	mask := &fieldmaskpb.FieldMask{}
+	for _, field := range fields {
+		if field.Present {
+			mask.Paths = append(mask.Paths, field.Path)
+		}
+	}
+	return mask
 }

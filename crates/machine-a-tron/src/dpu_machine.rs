@@ -22,8 +22,7 @@ use std::time::{Duration, Instant};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::MacAddressPool;
 use bmc_mock::{
-    BmcCommand, DpuMachineInfo, DpuSettings, HardwareType, MachineInfo, SetSystemPowerResult,
-    SystemPowerControl,
+    DpuMachineInfo, DpuSettings, HardwareType, MachineInfo, ResourceResetType, SetSystemPowerResult,
 };
 use carbide_uuid::machine::MachineId;
 use eyre::Context;
@@ -33,6 +32,7 @@ use tokio::time::Interval;
 use tracing::instrument;
 use uuid::Uuid;
 
+use crate::bmc_mock_wrapper::BmcCommand;
 use crate::config::{MachineATronContext, PersistedDpuMachine};
 use crate::dhcp_wrapper::{DhcpRelayResult, DhcpResponseInfo, DpuDhcpRelay, DpuDhcpRelayServer};
 use crate::host_machine::HandleMessageResult;
@@ -325,7 +325,7 @@ impl DpuMachine {
 
 enum DpuMachineMessage {
     SetSystemPower {
-        request: SystemPowerControl,
+        request: ResourceResetType,
         reply: Option<oneshot::Sender<SetSystemPowerResult>>,
     },
     WaitUntilMachineUpWithApiState(String, oneshot::Sender<()>),
@@ -408,7 +408,7 @@ impl DpuMachineHandle {
         }))
     }
 
-    pub fn set_system_power(&self, request: SystemPowerControl) -> eyre::Result<()> {
+    pub fn set_system_power(&self, request: ResourceResetType) -> eyre::Result<()> {
         Ok(self.0.message_tx.send(DpuMachineMessage::SetSystemPower {
             request,
             reply: None,

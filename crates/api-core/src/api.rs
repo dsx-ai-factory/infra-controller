@@ -2019,6 +2019,62 @@ impl Forge for Api {
         crate::handlers::expected_rack::delete_all_expected_racks(self, request).await
     }
 
+    async fn add_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroup>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::add_expected_rack_group(self, request).await
+    }
+
+    async fn delete_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroupRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::delete_expected_rack_group(self, request).await
+    }
+
+    async fn update_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroup>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::update_expected_rack_group(self, request).await
+    }
+
+    async fn get_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroupRequest>,
+    ) -> Result<Response<rpc::ExpectedRackGroup>, Status> {
+        crate::handlers::expected_rack_group::get_expected_rack_group(self, request).await
+    }
+
+    async fn find_expected_rack_group_ids(
+        &self,
+        request: Request<rpc::ExpectedRackGroupSearchFilter>,
+    ) -> Result<Response<rpc::ExpectedRackGroupIdList>, Status> {
+        crate::handlers::expected_rack_group::find_ids(self, request).await
+    }
+
+    async fn find_expected_rack_groups_by_ids(
+        &self,
+        request: Request<rpc::ExpectedRackGroupsByIdsRequest>,
+    ) -> Result<Response<rpc::ExpectedRackGroupList>, Status> {
+        crate::handlers::expected_rack_group::find_by_ids(self, request).await
+    }
+
+    async fn replace_all_expected_rack_groups(
+        &self,
+        request: Request<rpc::ExpectedRackGroupList>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::replace_all_expected_rack_groups(self, request).await
+    }
+
+    async fn delete_all_expected_rack_groups(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::delete_all_expected_rack_groups(self, request).await
+    }
+
     async fn find_connected_devices_by_dpu_machine_ids(
         &self,
         request: Request<::rpc::common::DpuMachineIdList>,

@@ -69,6 +69,7 @@ tenant:
   - expected-machine
   - expected-power-shelf
   - expected-rack
+  - expected-rack-group
   - expected-switch
   - operating-system
   - os-image

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
-use bmc_mock::{HostMachineInfo, MockPowerState, SetSystemPowerError, SystemPowerControl};
+use bmc_mock::{HostMachineInfo, MockPowerState, ResourceResetType, SetSystemPowerError};
 use carbide_uuid::machine::MachineId;
 use uuid::Uuid;
 
@@ -73,7 +73,7 @@ impl DeviceHandle {
 
     pub(crate) fn set_system_power(
         &self,
-        request: SystemPowerControl,
+        request: ResourceResetType,
     ) -> Result<(), SetSystemPowerError> {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.set_system_power(request),

@@ -83,11 +83,37 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install yq for umbrella packaging
+        if: matrix.chart == 'helm/rest/nico-rest' && inputs.ngc_path != ''
+        # Keep install-yq-action at v1.1.1 to match the pinned helm-package-push action:
+        # https://github.com/dsx-ai-factory/dsx-github-actions/blob/7de619729962a6bd5e8355b6fb3582a22517d7e5/.github/actions/helm-package-push/action.yml#L64
+        uses: dcarbone/install-yq-action@64b1b9eb28920bb1a4c13c05321df284f9a8f940 # v1.1.1
+        with:
+          version: v4.35.1
+
+      # This matrix also publishes the standalone nico-rest-site-agent, nico-mcp,
+      # and nico-flow charts, and may gain more; only the nico-rest umbrella has
+      # bundled subcharts to rewrite.
+      - name: Prepare umbrella chart versions
+        if: matrix.chart == 'helm/rest/nico-rest' && inputs.ngc_path != ''
+        id: prepare-umbrella
+        env:
+          APP_VERSION: ${{ inputs.app_version }}
+          CHART_VERSION: ${{ inputs.chart_version }}
+        run: |
+          prepared_chart_dir="${RUNNER_TEMP}/nico-rest-chart-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          .github/ci/prepare-rest-umbrella-chart.sh \
+            helm/rest/nico-rest \
+            "${CHART_VERSION}" \
+            "${APP_VERSION}" \
+            "${prepared_chart_dir}"
+          echo "chart_path=${prepared_chart_dir}" >> "${GITHUB_OUTPUT}"
+
       - name: Package and push Helm chart to NGC
         if: ${{ inputs.ngc_path != '' }}
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
         with:
-          chart-path: ${{ matrix.chart }}
+          chart-path: ${{ steps.prepare-umbrella.outputs.chart_path || matrix.chart }}
           chart-version: ${{ inputs.chart_version }}
           app-version: ${{ inputs.app_version }}
           lint: 'false'

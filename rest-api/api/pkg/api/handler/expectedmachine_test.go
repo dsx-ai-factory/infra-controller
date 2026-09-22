@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,18 +20,24 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swutil "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 // testExpectedMachineInitDB initializes a test database session
@@ -1256,6 +1263,20 @@ func TestBmcMacUnchanged(t *testing.T) {
 }
 
 func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "request validation and metadata", run: testUpdateExpectedMachineRequest},
+		{name: "BMC address presence", run: testUpdateExpectedMachineBmcIpAddress},
+		{name: "encrypted BMC credentials", run: testUpdateExpectedMachineBmcCredentials},
+	}
+	for _, test := range tests {
+		t.Run(test.name, test.run)
+	}
+}
+
+func testUpdateExpectedMachineRequest(t *testing.T) {
 	// Setup
 	e := echo.New()
 	dbSession := testExpectedMachineInitDB(t)
@@ -1321,9 +1342,14 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 	var capturedRequest *corev1.ExpectedMachine
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "UpdateExpectedMachine", mock.Anything).
+	scheduleCall := mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
 		Run(func(args mock.Arguments) {
-			capturedRequest, _ = args.Get(3).(*corev1.ExpectedMachine)
+			patch := &corev1.PatchExpectedMachineRequest{}
+			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), patch)
+			capturedRequest = patch.ExpectedMachine
+			assert.Equal(t, corev1.Forge_PatchExpectedMachine_FullMethodName, args.Get(3).(grpcproxy.Request).FullMethod)
+			assert.NotContains(t, patch.UpdateMask.Paths, "bmc_username")
+			assert.NotContains(t, patch.UpdateMask.Paths, "bmc_password")
 		}).
 		Return(mockWorkflowRun, nil)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
@@ -1352,10 +1378,13 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 		requestBody          model.APIExpectedMachineUpdateRequest
 		setupContext         func(c echo.Context)
 		expectedStatus       int
+		scheduleErr          error
+		expectedPaths        []string
+		rejectsCredentials   bool
 		checkResponseContent func(t *testing.T, body []byte)
 	}{
 		{
-			name: "successful update",
+			name: "metadata update excludes null BMC credentials",
 			id:   testEM.ID.String(),
 			requestBody: model.APIExpectedMachineUpdateRequest{
 				ChassisSerialNumber: cutil.GetPtr("UPDATED-CHASSIS-123"),
@@ -1367,6 +1396,25 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testEM.ID.String())
 			},
 			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"metadata.labels", "chassis_serial_number"},
+		},
+		{
+			name: "partial BMC pair rejects accompanying metadata before dispatch",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				DefaultBmcUsername: cutil.GetPtr("incomplete"),
+				Labels:             map[string]string{"env": "must-not-change"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus:     http.StatusBadRequest,
+			rejectsCredentials: true,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				assert.Contains(t, string(body), "defaultBmcPassword")
+			},
 		},
 		{
 			name: "unchanged MAC address spelling is accepted",
@@ -1387,6 +1435,20 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 				assert.Equal(t, testEM.BmcMacAddress, response.BmcMacAddress,
 					"an equivalent spelling must preserve the stored MAC")
 			},
+		},
+		{
+			name: "scheduling failure logs its cause and rolls back metadata",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				Labels: map[string]string{"env": "must-roll-back"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus: http.StatusInternalServerError,
+			scheduleErr:    errors.New("temporal scheduling unavailable"),
 		},
 		{
 			name: "BMC MAC address cannot be changed",
@@ -1466,6 +1528,21 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			scheduleCall.Return(mockWorkflowRun, tt.scheduleErr)
+			workflowCallsBefore := len(mockTemporalClient.Calls)
+			var logs bytes.Buffer
+			var before *cdbm.ExpectedMachine
+			if tt.rejectsCredentials {
+				before, err = emDAO.Get(ctx, nil, testEM.ID, nil, false)
+				require.NoError(t, err)
+			}
+			if tt.scheduleErr != nil {
+				previousLogger := log.Logger
+				log.Logger = zerolog.New(zerolog.SyncWriter(&logs))
+				t.Cleanup(func() { log.Logger = previousLogger })
+				before, err = emDAO.Get(ctx, nil, testEM.ID, nil, false)
+				require.NoError(t, err)
+			}
 			reqBody, _ := json.Marshal(tt.requestBody)
 			url := "/v2/org/" + org + "/nico/expected-machine/" + tt.id
 			req := httptest.NewRequest(http.MethodPatch, url, bytes.NewReader(reqBody))
@@ -1487,6 +1564,25 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())
 			}
+			if tt.scheduleErr != nil {
+				assert.Contains(t, logs.String(), tt.scheduleErr.Error())
+				assert.NotContains(t, rec.Body.String(), tt.scheduleErr.Error())
+				after, readErr := emDAO.Get(ctx, nil, testEM.ID, nil, false)
+				require.NoError(t, readErr)
+				assert.Equal(t, before.Labels, after.Labels, "scheduling failure must roll back metadata")
+			}
+			if tt.rejectsCredentials {
+				assert.Len(t, mockTemporalClient.Calls, workflowCallsBefore)
+				after, readErr := emDAO.Get(ctx, nil, testEM.ID, nil, false)
+				require.NoError(t, readErr)
+				assert.Equal(t, before, after, "invalid credentials must not mutate the cloud row")
+			}
+			if tt.expectedPaths != nil {
+				require.Len(t, mockTemporalClient.Calls, workflowCallsBefore+1)
+				patch := &corev1.PatchExpectedMachineRequest{}
+				testDecodeExpectedComponentPatch(t, mockTemporalClient.Calls[workflowCallsBefore].Arguments.Get(3), site.ID.String(), patch)
+				assert.Equal(t, tt.expectedPaths, patch.UpdateMask.Paths)
+			}
 
 			// Check response content if provided
 			if tt.checkResponseContent != nil && rec.Code == tt.expectedStatus {
@@ -1495,7 +1591,7 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 		})
 	}
 
-	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 2)
+	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 3)
 	require.NotNil(t, capturedRequest)
 	assert.Equal(t, testEM.BmcMacAddress, capturedRequest.GetBmcMacAddress(),
 		"Core must receive the stored BMC MAC spelling")
@@ -1505,7 +1601,7 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 		"PATCH must never change the stored BMC MAC spelling or identity")
 }
 
-func TestUpdateExpectedMachineHandler_BmcIpAddressPatchSemantics(t *testing.T) {
+func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 	e := echo.New()
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
@@ -1529,16 +1625,17 @@ func TestUpdateExpectedMachineHandler_BmcIpAddressPatchSemantics(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, testEM)
 
-	var capturedRequests []*corev1.ExpectedMachine
+	var capturedRequests []*corev1.PatchExpectedMachineRequest
 	mockTemporalClient := &tmocks.Client{}
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "UpdateExpectedMachine", mock.Anything).
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
 		Run(func(args mock.Arguments) {
-			if request, ok := args.Get(3).(*corev1.ExpectedMachine); ok {
-				capturedRequests = append(capturedRequests, request)
-			}
+			patch := &corev1.PatchExpectedMachineRequest{}
+			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), patch)
+			assert.Equal(t, corev1.Forge_PatchExpectedMachine_FullMethodName, args.Get(3).(grpcproxy.Request).FullMethod)
+			capturedRequests = append(capturedRequests, patch)
 		}).
 		Return(mockWorkflowRun, nil)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
@@ -1564,6 +1661,7 @@ func TestUpdateExpectedMachineHandler_BmcIpAddressPatchSemantics(t *testing.T) {
 		wantStatus     int
 		wantIP         *string
 		wantWorkflowIP *string
+		wantPaths      []string
 		requests       int
 	}{
 		{
@@ -1571,6 +1669,7 @@ func TestUpdateExpectedMachineHandler_BmcIpAddressPatchSemantics(t *testing.T) {
 			body:       `{"name":"preserved-address"}`,
 			wantStatus: http.StatusOK,
 			wantIP:     &originalIP,
+			wantPaths:  []string{"metadata.name"},
 		},
 		{
 			name:           "address sets value",
@@ -1578,12 +1677,14 @@ func TestUpdateExpectedMachineHandler_BmcIpAddressPatchSemantics(t *testing.T) {
 			wantStatus:     http.StatusOK,
 			wantIP:         &updatedIP,
 			wantWorkflowIP: &updatedIP,
+			wantPaths:      []string{"bmc_ip_address", "bmc_ip_allocation"},
 		},
 		{
 			name:           "empty string clears address",
 			body:           `{"bmcIpAddress":""}`,
 			wantStatus:     http.StatusOK,
 			wantWorkflowIP: &emptyIP,
+			wantPaths:      []string{"bmc_ip_address"},
 		},
 		{
 			name:       "explicit null preserves address",
@@ -1596,6 +1697,7 @@ func TestUpdateExpectedMachineHandler_BmcIpAddressPatchSemantics(t *testing.T) {
 			body:           `{"bmcIpAddress":""}`,
 			wantStatus:     http.StatusOK,
 			wantWorkflowIP: &emptyIP,
+			wantPaths:      []string{"bmc_ip_address"},
 			requests:       2,
 		},
 	}
@@ -1639,7 +1741,13 @@ func TestUpdateExpectedMachineHandler_BmcIpAddressPatchSemantics(t *testing.T) {
 				assert.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 				assert.Equal(t, tc.wantIP, response.BmcIpAddress)
 				if assert.Len(t, capturedRequests, workflowCount+1) {
-					assert.Equal(t, tc.wantWorkflowIP, capturedRequests[workflowCount].BmcIpAddress)
+					patch := capturedRequests[workflowCount]
+					assert.Equal(t, tc.wantWorkflowIP, patch.ExpectedMachine.BmcIpAddress)
+					require.NotNil(t, patch.UpdateMask)
+					assert.Equal(t, tc.wantPaths, patch.UpdateMask.Paths)
+					if tc.wantWorkflowIP != nil && *tc.wantWorkflowIP != "" {
+						assert.Equal(t, corev1.BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_AUTO, patch.ExpectedMachine.GetBmcIpAllocation())
+					}
 				}
 			}
 		})
@@ -2654,11 +2762,9 @@ func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T
 	assert.False(t, apiResponse.IsDpfEnabled)
 }
 
-// TestUpdateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow is a regression test for the
-// same spec / JSON struct tag mismatch bug described in
-// TestCreateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow, but for the PATCH
-// (single update) endpoint.
-func TestUpdateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow(t *testing.T) {
+// The REST credential names must reach the encrypted Core PATCH request;
+// accepting unrelated JSON keys would leave the credential update empty.
+func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 	e := echo.New()
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
@@ -2688,11 +2794,15 @@ func TestUpdateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow(t *testi
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "UpdateExpectedMachine", mock.Anything).
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
 		Run(func(args mock.Arguments) {
-			if req, ok := args.Get(3).(*corev1.ExpectedMachine); ok {
-				capturedRequest = req
-			}
+			patch := &corev1.PatchExpectedMachineRequest{}
+			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), patch)
+			capturedRequest = patch.ExpectedMachine
+			proxied := args.Get(3).(grpcproxy.Request)
+			assert.Equal(t, corev1.Forge_PatchExpectedMachine_FullMethodName, proxied.FullMethod)
+			testExpectedComponentPatchSecrets(t, proxied, "newpassword456")
+			assert.Equal(t, []string{"bmc_username", "bmc_password"}, patch.UpdateMask.Paths)
 		}).
 		Return(mockWorkflowRun, nil)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
@@ -2734,6 +2844,8 @@ func TestUpdateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow(t *testi
 	err = handler.Handle(c)
 	assert.Nil(t, err)
 	assert.Equal(t, http.StatusOK, rec.Code, "Response: %s", rec.Body.String())
+
+	assert.NotContains(t, rec.Body.String(), "newpassword456")
 
 	// The core regression assertion: before the fix the update workflow would receive
 	// empty strings for BmcUsername and BmcPassword because "bmcUsername"/"bmcPassword"
@@ -2876,6 +2988,19 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 }
 
 func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "request validation and metadata", run: testUpdateExpectedMachinesRequest},
+		{name: "mixed BMC address presence", run: testUpdateExpectedMachinesBmcIpAddress},
+	}
+	for _, test := range tests {
+		t.Run(test.name, test.run)
+	}
+}
+
+func testUpdateExpectedMachinesRequest(t *testing.T) {
 	// Setup
 	e := echo.New()
 	cfg := common.GetTestConfig()
@@ -3007,54 +3132,23 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 
-	// Track workflow request to generate corresponding results
-	var capturedRequest interface{}
-	var workflowFailures map[int]string
-
-	// Capture the workflow request when ExecuteWorkflow is called
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "UpdateExpectedMachines", mock.Anything).
+	var capturedRequest *corev1.PatchExpectedMachinesRequest
+	var capturedProxy grpcproxy.Request
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
 		Run(func(args mock.Arguments) {
-			// Capture the request argument (index 3)
-			capturedRequest = args.Get(3)
-		}).
-		Return(mockWorkflowRun, nil)
-
-	// Mock Get to populate results based on captured request
-	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).
-		Run(func(args mock.Arguments) {
-			// Cast result to BatchExpectedMachineOperationResponse and populate
-			if resultPtr, ok := args.Get(1).(*corev1.BatchExpectedMachineOperationResponse); ok {
-				// Extract machines from the captured request
-				if req, ok := capturedRequest.(*corev1.BatchExpectedMachineOperationRequest); ok {
-					if req.ExpectedMachines != nil && req.ExpectedMachines.ExpectedMachines != nil {
-						// Create results for each machine (all successful for tests)
-						results := make([]*corev1.ExpectedMachineOperationResult, 0, len(req.ExpectedMachines.ExpectedMachines))
-						for idx, machine := range req.ExpectedMachines.ExpectedMachines {
-							if machine != nil && machine.Id != nil {
-								success := true
-								var errMsg *string
-								if workflowFailures != nil {
-									if msg, ok := workflowFailures[idx]; ok {
-										success = false
-										errMsg = &msg
-									}
-								}
-								result := &corev1.ExpectedMachineOperationResult{
-									Id:      machine.Id,
-									Success: success,
-								}
-								if errMsg != nil {
-									result.ErrorMessage = errMsg
-								}
-								results = append(results, result)
-							}
-						}
-						resultPtr.Results = results
-					}
+			capturedRequest = &corev1.PatchExpectedMachinesRequest{}
+			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), capturedRequest)
+			capturedProxy = args.Get(3).(grpcproxy.Request)
+			assert.Equal(t, corev1.Forge_PatchExpectedMachines_FullMethodName, capturedProxy.FullMethod)
+			for _, patch := range capturedRequest.Patches {
+				if patch.ExpectedMachine.BmcPassword == "" {
+					assert.NotContains(t, patch.UpdateMask.Paths, "bmc_username")
+					assert.NotContains(t, patch.UpdateMask.Paths, "bmc_password")
 				}
 			}
 		}).
-		Return(nil)
+		Return(mockWorkflowRun, nil)
+	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
 
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
@@ -3078,13 +3172,41 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 
 	// Test cases
 	tests := []struct {
-		name           string
-		requestBody    []model.APIExpectedMachineUpdateRequest
-		setupContext   func(c echo.Context)
-		expectedStatus int
-		validateResp   func(t *testing.T, body []byte)
-		workflowErrors map[int]string
+		name               string
+		requestBody        []model.APIExpectedMachineUpdateRequest
+		setupContext       func(c echo.Context)
+		expectedStatus     int
+		rejectsCredentials bool
+		validateResp       func(t *testing.T, body []byte)
 	}{
+		{
+			name: "batch credentials remain correlated and encrypted",
+			requestBody: []model.APIExpectedMachineUpdateRequest{
+				{ID: cutil.GetPtr(testEM1.ID.String()), DefaultBmcUsername: cutil.GetPtr("first-admin"), DefaultBmcPassword: cutil.GetPtr("first-secret")},
+				{ID: cutil.GetPtr(testEM2.ID.String()), DefaultBmcUsername: cutil.GetPtr("second-admin"), DefaultBmcPassword: cutil.GetPtr("second-secret")},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusOK,
+			validateResp: func(t *testing.T, body []byte) {
+				require.NotNil(t, capturedRequest)
+				require.Len(t, capturedRequest.Patches, 2)
+				testExpectedComponentPatchSecrets(t, capturedProxy, "first-secret", "second-secret")
+				wantPasswords := map[string]string{testEM1.ID.String(): "first-secret", testEM2.ID.String(): "second-secret"}
+				wantUsernames := map[string]string{testEM1.ID.String(): "first-admin", testEM2.ID.String(): "second-admin"}
+				for _, patch := range capturedRequest.Patches {
+					password := wantPasswords[patch.ExpectedMachine.GetId().GetValue()]
+					require.NotEmpty(t, password)
+					assert.Equal(t, password, patch.ExpectedMachine.BmcPassword)
+					assert.Equal(t, wantUsernames[patch.ExpectedMachine.GetId().GetValue()], patch.ExpectedMachine.BmcUsername)
+					assert.Equal(t, []string{"bmc_username", "bmc_password"}, patch.UpdateMask.Paths)
+					assert.NotContains(t, string(body), password)
+				}
+			},
+		},
 		{
 			name: "successful batch update",
 			requestBody: []model.APIExpectedMachineUpdateRequest{
@@ -3106,6 +3228,11 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 			},
 			expectedStatus: http.StatusOK,
 			validateResp: func(t *testing.T, body []byte) {
+				require.NotNil(t, capturedRequest)
+				require.Len(t, capturedRequest.Patches, 2)
+				for _, patch := range capturedRequest.Patches {
+					assert.Equal(t, []string{"metadata.labels", "chassis_serial_number"}, patch.UpdateMask.Paths)
+				}
 				var response []model.APIExpectedMachine
 				err := json.Unmarshal(body, &response)
 				assert.Nil(t, err)
@@ -3116,6 +3243,23 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 				assert.JSONEq(t, `{}`, string(fields[1]["labels"]))
 				assert.Contains(t, fields[0], "id")
 				assert.NotContains(t, fields[0], "Labels")
+			},
+		},
+		{
+			name: "a partial BMC pair rejects the batch before dispatch",
+			requestBody: []model.APIExpectedMachineUpdateRequest{
+				{ID: cutil.GetPtr(testEM1.ID.String()), DefaultBmcUsername: cutil.GetPtr("first-admin"), DefaultBmcPassword: cutil.GetPtr("first-secret"), Labels: map[string]string{"env": "must-not-change-first"}},
+				{ID: cutil.GetPtr(testEM2.ID.String()), DefaultBmcUsername: cutil.GetPtr("incomplete"), Labels: map[string]string{"env": "must-not-change-second"}},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:     http.StatusBadRequest,
+			rejectsCredentials: true,
+			validateResp: func(t *testing.T, body []byte) {
+				assert.Contains(t, string(body), "defaultBmcPassword")
 			},
 		},
 		{
@@ -3149,13 +3293,13 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 				assert.Equal(t, testEM1.BmcMacAddress, responseByID[testEM1.ID].BmcMacAddress)
 				assert.Equal(t, testEM2.BmcMacAddress, responseByID[testEM2.ID].BmcMacAddress)
 
-				request, ok := capturedRequest.(*corev1.BatchExpectedMachineOperationRequest)
-				require.True(t, ok)
-				workflowMachines := request.GetExpectedMachines().GetExpectedMachines()
+				require.NotNil(t, capturedRequest)
+				workflowMachines := capturedRequest.Patches
 				require.Len(t, workflowMachines, 2)
 
 				workflowByID := make(map[string]*corev1.ExpectedMachine, len(workflowMachines))
-				for _, machine := range workflowMachines {
+				for _, patch := range workflowMachines {
+					machine := patch.ExpectedMachine
 					workflowByID[machine.GetId().GetValue()] = machine
 				}
 				require.Contains(t, workflowByID, testEM1.ID.String())
@@ -3401,8 +3545,16 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			workflowFailures = tt.workflowErrors
 			// Create request
+			workflowCallsBefore := len(mockTemporalClient.Calls)
+			var before []*cdbm.ExpectedMachine
+			if tt.rejectsCredentials {
+				for _, machine := range []*cdbm.ExpectedMachine{testEM1, testEM2} {
+					stored, readErr := emDAO.Get(ctx, nil, machine.ID, nil, false)
+					require.NoError(t, readErr)
+					before = append(before, stored)
+				}
+			}
 			reqBody, _ := json.Marshal(tt.requestBody)
 			req := httptest.NewRequest(http.MethodPatch, "/v2/org/test-org/nico/expected-machine/batch", bytes.NewReader(reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
@@ -3425,13 +3577,21 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 			}
 
 			// Validate response if provided
+			if tt.rejectsCredentials {
+				assert.Len(t, mockTemporalClient.Calls, workflowCallsBefore)
+				for _, machine := range before {
+					after, readErr := emDAO.Get(ctx, nil, machine.ID, nil, false)
+					require.NoError(t, readErr)
+					assert.Equal(t, machine, after, "invalid credentials must not mutate any cloud row")
+				}
+			}
 			if tt.validateResp != nil && rec.Code == tt.expectedStatus {
 				tt.validateResp(t, rec.Body.Bytes())
 			}
 		})
 	}
 
-	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 2)
+	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 3)
 	storedEM1, err := emDAO.Get(ctx, nil, testEM1.ID, nil, false)
 	require.NoError(t, err)
 	storedEM2, err := emDAO.Get(ctx, nil, testEM2.ID, nil, false)
@@ -3440,7 +3600,7 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 	assert.Equal(t, testEM2.BmcMacAddress, storedEM2.BmcMacAddress)
 }
 
-func TestUpdateExpectedMachinesHandler_BmcIpAddressPatchSemantics(t *testing.T) {
+func testUpdateExpectedMachinesBmcIpAddress(t *testing.T) {
 	e := echo.New()
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
@@ -3486,6 +3646,7 @@ func TestUpdateExpectedMachinesHandler_BmcIpAddressPatchSemantics(t *testing.T) 
 		request        map[string]interface{}
 		wantIP         *string
 		wantWorkflowIP *string
+		wantPaths      []string
 		wantName       *string
 	}{
 		{
@@ -3493,6 +3654,7 @@ func TestUpdateExpectedMachinesHandler_BmcIpAddressPatchSemantics(t *testing.T) 
 			machine:        emCleared,
 			request:        map[string]interface{}{"bmcIpAddress": ""},
 			wantWorkflowIP: &emptyIP,
+			wantPaths:      []string{"bmc_ip_address"},
 			wantName:       &clearedName,
 		},
 		{
@@ -3501,6 +3663,7 @@ func TestUpdateExpectedMachinesHandler_BmcIpAddressPatchSemantics(t *testing.T) 
 			request:        map[string]interface{}{"bmcIpAddress": updatedIP},
 			wantIP:         &updatedIP,
 			wantWorkflowIP: &updatedIP,
+			wantPaths:      []string{"bmc_ip_address", "bmc_ip_allocation"},
 			wantName:       &updatedName,
 		},
 		{
@@ -3519,34 +3682,25 @@ func TestUpdateExpectedMachinesHandler_BmcIpAddressPatchSemantics(t *testing.T) 
 		},
 	}
 
-	var capturedRequest *corev1.BatchExpectedMachineOperationRequest
+	var capturedRequest *corev1.PatchExpectedMachinesRequest
 	mockTemporalClient := &tmocks.Client{}
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "UpdateExpectedMachines", mock.Anything).
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
 		Run(func(args mock.Arguments) {
-			capturedRequest, _ = args.Get(3).(*corev1.BatchExpectedMachineOperationRequest)
+			capturedRequest = &corev1.PatchExpectedMachinesRequest{}
+			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), capturedRequest)
+			assert.Equal(t, corev1.Forge_PatchExpectedMachines_FullMethodName, args.Get(3).(grpcproxy.Request).FullMethod)
 		}).
 		Return(mockWorkflowRun, nil)
-	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).
-		Run(func(args mock.Arguments) {
-			response, ok := args.Get(1).(*corev1.BatchExpectedMachineOperationResponse)
-			if !ok || capturedRequest == nil || capturedRequest.ExpectedMachines == nil {
-				return
-			}
-			for _, machine := range capturedRequest.ExpectedMachines.ExpectedMachines {
-				response.Results = append(response.Results, &corev1.ExpectedMachineOperationResult{
-					Id:      machine.Id,
-					Success: true,
-				})
-			}
-		}).
-		Return(nil)
+	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
+
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	requestBody := make([]map[string]interface{}, 0, len(tests))
 	wantByID := make(map[uuid.UUID]*string, len(tests))
 	wantWorkflowIPByID := make(map[uuid.UUID]*string, len(tests))
+	wantPathsByID := make(map[uuid.UUID][]string, len(tests))
 	wantNameByID := make(map[uuid.UUID]*string, len(tests))
 	scenarioByID := make(map[uuid.UUID]string, len(tests))
 	for _, test := range tests {
@@ -3554,6 +3708,7 @@ func TestUpdateExpectedMachinesHandler_BmcIpAddressPatchSemantics(t *testing.T) 
 		requestBody = append(requestBody, test.request)
 		wantByID[test.machine.ID] = test.wantIP
 		wantWorkflowIPByID[test.machine.ID] = test.wantWorkflowIP
+		wantPathsByID[test.machine.ID] = test.wantPaths
 		wantNameByID[test.machine.ID] = test.wantName
 		scenarioByID[test.machine.ID] = test.name
 	}
@@ -3598,13 +3753,47 @@ func TestUpdateExpectedMachinesHandler_BmcIpAddressPatchSemantics(t *testing.T) 
 		assert.Equal(t, wantNameByID[id], stored.Name, scenarioByID[id])
 	}
 
-	if assert.NotNil(t, capturedRequest) && assert.NotNil(t, capturedRequest.ExpectedMachines) {
-		assert.Len(t, capturedRequest.ExpectedMachines.ExpectedMachines, len(wantByID))
-		for _, machine := range capturedRequest.ExpectedMachines.ExpectedMachines {
+	if assert.NotNil(t, capturedRequest) {
+		assert.Len(t, capturedRequest.Patches, len(wantByID))
+		for _, patch := range capturedRequest.Patches {
+			machine := patch.ExpectedMachine
 			id, err := uuid.Parse(machine.Id.Value)
 			assert.NoError(t, err)
 			assert.Equal(t, wantWorkflowIPByID[id], machine.BmcIpAddress, scenarioByID[id])
+			require.NotNil(t, patch.UpdateMask)
+			assert.Equal(t, wantPathsByID[id], patch.UpdateMask.Paths, scenarioByID[id])
+			if id == emUpdated.ID {
+				assert.Equal(t, corev1.BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_AUTO, machine.GetBmcIpAllocation())
+			}
 			assert.Equal(t, wantNameByID[id], machine.Name, scenarioByID[id])
+		}
+	}
+}
+
+func testDecodeExpectedComponentPatch(t *testing.T, request any, siteID string, target proto.Message) {
+	t.Helper()
+	proxied, ok := request.(grpcproxy.Request)
+	require.True(t, ok)
+	payload := proxied.RequestJSON
+	if len(proxied.EncryptedSecrets) > 0 {
+		var err error
+		payload, err = grpcproxy.MergeSecrets(payload, cutil.DecryptData(proxied.EncryptedSecrets, siteID))
+		require.NoError(t, err)
+	}
+	require.NoError(t, protojson.Unmarshal(payload, target))
+}
+
+// Check the captured handler request using the converter used for Temporal payloads.
+// The workflow and Core call are covered by their owning packages.
+func testExpectedComponentPatchSecrets(t *testing.T, request grpcproxy.Request, passwords ...string) {
+	t.Helper()
+	require.NotEmpty(t, request.EncryptedSecrets)
+	payloads, err := swutil.NewTemporalDataConverter().ToPayloads(request)
+	require.NoError(t, err)
+	for _, password := range passwords {
+		assert.NotContains(t, string(request.RequestJSON), password)
+		for _, payload := range payloads.Payloads {
+			assert.False(t, bytes.Contains(payload.Data, []byte(password)), "Temporal request contains a plaintext password")
 		}
 	}
 }

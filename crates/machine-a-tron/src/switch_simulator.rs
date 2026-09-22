@@ -24,13 +24,13 @@ use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId}
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
-    POWER_CYCLE_DELAY, SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
+    Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState, POWER_CYCLE_DELAY,
+    ResourceResetType, SetSystemPowerError, SetSystemPowerResult,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRequestInfo, DhcpRequester, DhcpResponseInfo, vendor_class};
 use crate::machine_state_machine::{MachineStateError, OsImage};
@@ -97,10 +97,7 @@ impl Callbacks for SwitchCallbacks {
         self.state.read().unwrap().power_state
     }
 
-    fn send_power_command(
-        &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
+    fn send_power_command(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError> {
         self.mailbox
             .send(SwitchMessage::Bmc(BmcCommand::SetSystemPower {
                 request: reset_type,
@@ -471,14 +468,14 @@ impl SwitchActor {
         Ok(())
     }
 
-    fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
-        use SystemPowerControl::*;
+    fn set_system_power(&mut self, request: ResourceResetType) -> SetSystemPowerResult {
+        use ResourceResetType::*;
 
         match request {
             On | ForceOn => self.fsm_event(Event::PowerOn),
             GracefulShutdown | ForceOff => self.fsm_event(Event::PowerOff),
             GracefulRestart | ForceRestart | PowerCycle => self.fsm_event(Event::PowerCycle),
-            PushPowerButton | Nmi | Suspend | Pause | Resume => {
+            _ => {
                 return Err(SetSystemPowerError::BadRequest(format!(
                     "Machine-a-tron mock: unsupported power request {request:?}"
                 )));
@@ -580,7 +577,7 @@ impl SwitchHandle {
     /// request obeys the same rules as a Redfish one.
     pub(crate) fn set_system_power(
         &self,
-        request: SystemPowerControl,
+        request: ResourceResetType,
     ) -> Result<(), SetSystemPowerError> {
         SwitchCallbacks {
             state: self.0.live_state.clone(),

@@ -327,15 +327,37 @@ migration. An external endpoint must not resolve to the `psm` or `nsm` Service
 removed by the Flow upgrade.
 
 After those dependencies are handled, upgrade only the existing Flow release
-from the repository root. Reusing the release values preserves site-specific
-image and registry settings; the explicit repository and tag select the target
-Flow image. This is a normal Helm rolling upgrade: do not use `--force` and do
-not patch the Deployment or upgrade `nico-prereqs` first.
+from the repository root. `--reset-then-reuse-values` (Helm 3.14 or newer)
+applies the new chart's defaults and keeps the site-specific values of the
+existing release, such as image and registry settings; the explicit repository
+and tag select the target Flow image. Do not use `--reuse-values` here: it also
+reuses the previous chart's defaults, so values added by the new chart are
+missing and the render fails. On Helm 4, also add `--force-conflicts`: Helm 4
+applies server-side, and the `flow` Namespace and the Certificates that
+`setup.sh` pre-applies are owned by other field managers, so the chart label
+change is otherwise rejected with `conflict occurred while applying object
+/flow /v1, Kind=Namespace`. This is a normal Helm rolling upgrade: do not use
+`--force` and do not patch the Deployment or upgrade `nico-prereqs` first.
 
 ```bash
 helm upgrade flow ./helm/charts/nico-flow \
   --namespace flow \
-  --reuse-values \
+  --reset-then-reuse-values \
+  --set global.image.repository="${NICO_IMAGE_REGISTRY}" \
+  --set global.image.tag="${NICO_REST_IMAGE_TAG}" \
+  --timeout 300s \
+  --wait
+
+kubectl rollout status deployment/flow -n flow --timeout=300s
+```
+
+On Helm 4, run the upgrade with the conflict flag instead:
+
+```bash
+helm upgrade flow ./helm/charts/nico-flow \
+  --namespace flow \
+  --reset-then-reuse-values \
+  --force-conflicts \
   --set global.image.repository="${NICO_IMAGE_REGISTRY}" \
   --set global.image.tag="${NICO_REST_IMAGE_TAG}" \
   --timeout 300s \

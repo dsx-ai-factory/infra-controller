@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::{
-    BmcCommand, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
-    SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
+    BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
+    ResourceResetType, SetSystemPowerError, SetSystemPowerResult,
 };
 use carbide_network::virtualization::build_dual_stack_list;
 use carbide_uuid::machine::{DpuMachineId, InvalidMachineType, MachineId, MachineInterfaceId};
@@ -36,7 +36,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::api_client::{ClientApiError, DpuNetworkStatusArgs, MockDiscoveryData};
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{MachineATronContext, MachineConfig};
 use crate::dhcp_wrapper::{
     DhcpRelayError, DhcpRelayResult, DhcpRequestInfo, DhcpRequester, DhcpResponseInfo,
@@ -186,10 +186,7 @@ impl Callbacks for LiveStateCallbacks {
         self.state.read().unwrap().power_state
     }
 
-    fn send_power_command(
-        &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
+    fn send_power_command(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError> {
         self.command_channel
             .send(BmcCommand::SetSystemPower {
                 request: reset_type,
@@ -1346,14 +1343,17 @@ impl MachineStateMachine {
         Ok(())
     }
 
-    pub(super) fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
-        use SystemPowerControl::*;
+    pub(super) fn set_system_power(&mut self, request: ResourceResetType) -> SetSystemPowerResult {
+        use ResourceResetType::*;
         match request {
             On | ForceOn => self.fsm_event(Event::PowerOn),
-            GracefulRestart | ForceRestart | PowerCycle => self.fsm_event(Event::PowerCycle),
+            GracefulRestart | ForceRestart | PowerCycle | FullPowerCycle => {
+                self.fsm_event(Event::PowerCycle)
+            }
             GracefulShutdown => self.fsm_event(Event::PowerOffGraceful),
             ForceOff => self.fsm_event(Event::PowerOff),
-            PushPowerButton | Nmi | Suspend | Pause | Resume => {
+            PushPowerButton | Nmi | Suspend | Pause | Resume | Sleep | Hibernate
+            | UnsupportedValue => {
                 let msg = format!("Machine-a-tron mock: unsupported power request {request:?}",);
                 tracing::warn!(?request, "unsupported machine-a-tron mock power request",);
                 return Err(SetSystemPowerError::BadRequest(msg));

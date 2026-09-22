@@ -20,7 +20,10 @@ use std::sync::Arc;
 use axum::Router;
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::ipmi_sim::{ConsoleOutputStreamFactory, IpmiSimConfig, IpmiSimHandle};
-use bmc_mock::{BmcState, Callbacks, CombinedServer, HardwareType, HostnameQuerying, MachineInfo};
+use bmc_mock::{
+    BmcState, Callbacks, CombinedServer, HardwareType, HostnameQuerying, MachineInfo,
+    ResourceResetType, SetSystemPowerResult,
+};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -29,6 +32,15 @@ use crate::console_output::ConsoleOutputController;
 use crate::machine_state_machine::MachineStateError;
 use crate::mock_ssh_server;
 use crate::mock_ssh_server::{MockSshServerHandle, PromptBehavior};
+
+#[derive(Debug)]
+pub(crate) enum BmcCommand {
+    SetSystemPower {
+        request: ResourceResetType,
+        reply: Option<tokio::sync::oneshot::Sender<SetSystemPowerResult>>,
+    },
+    StateRefreshIndication,
+}
 
 /// BmcMockWrapper launches a single instance of bmc-mock, configured to mock a single BMC for
 /// either a DPU or a Host. It will rewrite certain responses to customize them for the machines

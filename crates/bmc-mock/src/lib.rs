@@ -103,9 +103,10 @@ pub use machine_info::{
     MachineInfo,
 };
 pub use mock_machine_router::{
-    BmcCommand, EventServiceOverride, MachineRouterOptions, SetSystemPowerError,
-    SetSystemPowerResult, machine_router, machine_router_with_injection_store,
+    EventServiceOverride, MachineRouterOptions, SetSystemPowerError, SetSystemPowerResult,
+    machine_router, machine_router_with_injection_store,
 };
+pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
 pub use rack_info::RackInfo;
 /// BMC account state and the credential snapshot type used to persist and
 /// restore rotated passwords across a mock rebuild.
@@ -263,10 +264,9 @@ pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 /// Backend operations for one BMC, selected by the router's concrete callback type.
 pub trait Callbacks: std::fmt::Debug + Send + Sync + 'static {
     fn get_power_state(&self) -> MockPowerState;
-    fn send_power_command(&self, reset_type: SystemPowerControl)
-    -> Result<(), SetSystemPowerError>;
-    fn set_power_state(&self, reset_type: SystemPowerControl) -> Result<(), SetSystemPowerError> {
-        type C = SystemPowerControl;
+    fn send_power_command(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError>;
+    fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), SetSystemPowerError> {
+        type C = ResourceResetType;
         match (reset_type, self.get_power_state()) {
             (
                 C::GracefulShutdown | C::ForceOff | C::GracefulRestart | C::ForceRestart,
@@ -300,49 +300,6 @@ pub trait Callbacks: std::fmt::Debug + Send + Sync + 'static {
 
 pub trait HostnameQuerying: std::fmt::Debug + Send + Sync {
     fn get_hostname(&'_ self) -> Cow<'_, str>;
-}
-
-// https://www.dmtf.org/sites/default/files/standards/documents/DSP2046_2023.3.html
-// 6.5.5.1 ResetType
-#[derive(Debug, Deserialize, Serialize, PartialEq, Clone, Copy)]
-pub enum SystemPowerControl {
-    /// Power on a machine
-    On,
-    /// Graceful host shutdown
-    GracefulShutdown,
-    /// Forcefully powers a machine off
-    ForceOff,
-    /// Graceful restart. Asks the OS to restart via ACPI
-    /// - Might restart DPUs if no OS is running
-    /// - Will not apply pending BIOS/UEFI setting changes
-    GracefulRestart,
-    /// Force restart. This is equivalent to pressing the reset button on the front panel.
-    /// - Will not restart DPUs
-    /// - Will apply pending BIOS/UEFI setting changes
-    ForceRestart,
-
-    //
-    // libredfish doesn't support these yet, and not all vendors provide them
-    //
-
-    // Cut then restore the power
-    PowerCycle,
-
-    // Forcefully power a machine on (?)
-    ForceOn,
-
-    // Like it says, pretend the button got pressed
-    PushPowerButton,
-
-    // Non-maskable interrupt then power off
-    Nmi,
-
-    // Write state to disk and power off
-    Suspend,
-
-    // VM / Hypervisor
-    Pause,
-    Resume,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -780,34 +780,247 @@ func TestMirrorComponents_NoLabelsStillMirrored(t *testing.T) {
 	assert.Empty(t, got.SerialNumber)
 }
 
+// Clearing labels must store SQL NULL rather than empty strings so several
+// components can remain unlabelled without colliding on the unique index.
+func TestMirrorComponents_ClearingLabelsReleasesUniqueSlots(t *testing.T) {
+	ctx, pool := mirrorTestPool(t)
+
+	specs := []expectedComponentSpec{
+		computeSpec("Mfg", "C-CLEAR-1", "aa:bb:cc:dd:ee:45"),
+		computeSpec("Mfg", "C-CLEAR-2", "aa:bb:cc:dd:ee:46"),
+	}
+	mirrorExpectedComponents(ctx, pool, compType(), specs, map[string]uuid.UUID{})
+
+	for i := range specs {
+		specs[i].Manufacturer = ""
+		specs[i].SerialNumber = ""
+	}
+	mirrorExpectedComponents(ctx, pool, compType(), specs, map[string]uuid.UUID{})
+
+	nullLabels, err := pool.DB.NewSelect().
+		Model((*model.Component)(nil)).
+		Where("manufacturer IS NULL").
+		Where("serial_number IS NULL").
+		Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, len(specs), nullLabels)
+}
+
 // Relabelling a chassis in Core must not fork the component: the host BMC MAC
 // is its identity, so the existing row is updated in place.
 func TestMirrorComponents_MatchByMACSurvivesRelabel(t *testing.T) {
-	ctx, pool := mirrorTestPool(t)
+	for _, tc := range []struct {
+		name          string
+		componentType devicetypes.ComponentType
+		mac           string
+	}{
+		{"ExpectedMachine", devicetypes.ComponentTypeCompute, "aa:bb:cc:dd:ee:51"},
+		{"ExpectedSwitch", devicetypes.ComponentTypeNVSwitch, "aa:bb:cc:dd:ee:52"},
+		{"ExpectedPowerShelf", devicetypes.ComponentTypePowerShelf, "aa:bb:cc:dd:ee:53"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			componentType := devicetypes.ComponentTypeToString(tc.componentType)
+			component := model.Component{
+				Name:         "component",
+				Type:         componentType,
+				Manufacturer: "OldMfg",
+				SerialNumber: "OLD-SERIAL",
+				Description:  map[string]any{expectedDescriptionKey: "old description"},
+			}
+			require.NoError(t, component.Create(ctx, pool.DB))
+			hostBMC := model.BMC{
+				MacAddress:  tc.mac,
+				Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
+				ComponentID: component.ID,
+			}
+			_, err := pool.DB.NewInsert().Model(&hostBMC).Exec(ctx)
+			require.NoError(t, err)
 
-	const mac = "aa:bb:cc:dd:ee:51"
-	c := model.Component{Type: compType(), Manufacturer: "Mfg", SerialNumber: "C-OLD"}
-	require.NoError(t, c.Create(ctx, pool.DB))
-	hostBMC := model.BMC{
-		MacAddress:  mac,
-		Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
-		ComponentID: c.ID,
+			spec := expectedComponentSpec{
+				Type:         componentType,
+				Name:         "component",
+				Manufacturer: "NewMfg",
+				SerialNumber: "NEW-SERIAL",
+				Description:  "new description",
+				BMC:          expectedBMCSpec{MACAddress: tc.mac},
+			}
+			mirrorExpectedComponents(ctx, pool, componentType,
+				[]expectedComponentSpec{spec}, map[string]uuid.UUID{})
+
+			total, err := pool.DB.NewSelect().Model((*model.Component)(nil)).Count(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, 1, total, "the MAC match must update in place, not insert a second component")
+
+			got, err := (&model.Component{ID: component.ID}).GetIncludingDeleted(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Nil(t, got.DeletedAt)
+			assert.Equal(t, component.ID, got.ID)
+			assert.Equal(t, "NewMfg", got.Manufacturer)
+			assert.Equal(t, "NEW-SERIAL", got.SerialNumber)
+			assert.Equal(t, "new description", got.Description[expectedDescriptionKey])
+
+			spec.Manufacturer = ""
+			spec.SerialNumber = ""
+			mirrorExpectedComponents(ctx, pool, componentType,
+				[]expectedComponentSpec{spec}, map[string]uuid.UUID{})
+
+			got, err = (&model.Component{ID: component.ID}).GetIncludingDeleted(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Empty(t, got.Manufacturer, "Core clearing manufacturer must clear Flow's stale value")
+			assert.Empty(t, got.SerialNumber, "Core clearing serial_number must clear Flow's stale value")
+			assert.Equal(t, component.ID, got.ID, "clearing descriptive labels must keep the component UUID")
+		})
 	}
-	_, err := pool.DB.NewInsert().Model(&hostBMC).Exec(ctx)
-	require.NoError(t, err)
+}
 
-	mirrorExpectedComponents(ctx, pool, compType(),
-		[]expectedComponentSpec{computeSpec("Mfg", "C-NEW", mac)},
-		map[string]uuid.UUID{})
+// Label transfers and swaps must converge in one pass regardless of spec order.
+// The host BMC MAC, not the chassis pair, identifies each component.
+func TestMirrorComponents_ChassisLabelOwnershipTransitions(t *testing.T) {
+	type labels struct {
+		name         string
+		manufacturer string
+		serial       string
+		mac          string
+	}
 
-	total, err := pool.DB.NewSelect().Model((*model.Component)(nil)).Count(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 1, total, "the MAC match must update in place, not insert a second component")
+	for _, tc := range []struct {
+		name    string
+		initial []labels
+		desired []labels
+	}{
+		{
+			name: "transfer is ordered recipient before current owner",
+			initial: []labels{
+				{name: "owner", manufacturer: "Mfg", serial: "PAIR-A", mac: "aa:bb:cc:dd:ee:71"},
+				{name: "recipient", manufacturer: "Mfg", serial: "PAIR-B", mac: "aa:bb:cc:dd:ee:72"},
+			},
+			desired: []labels{
+				{name: "recipient", manufacturer: "Mfg", serial: "PAIR-A", mac: "aa:bb:cc:dd:ee:72"},
+				{name: "owner", manufacturer: "Mfg", serial: "PAIR-C", mac: "aa:bb:cc:dd:ee:71"},
+			},
+		},
+		{
+			name: "two components swap pairs",
+			initial: []labels{
+				{name: "left", manufacturer: "Mfg", serial: "PAIR-LEFT", mac: "aa:bb:cc:dd:ee:73"},
+				{name: "right", manufacturer: "Mfg", serial: "PAIR-RIGHT", mac: "aa:bb:cc:dd:ee:74"},
+			},
+			desired: []labels{
+				{name: "left", manufacturer: "Mfg", serial: "PAIR-RIGHT", mac: "aa:bb:cc:dd:ee:73"},
+				{name: "right", manufacturer: "Mfg", serial: "PAIR-LEFT", mac: "aa:bb:cc:dd:ee:74"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			idsByName := make(map[string]uuid.UUID, len(tc.initial))
+			for _, initial := range tc.initial {
+				component := model.Component{
+					Name:         initial.name,
+					Type:         compType(),
+					Manufacturer: initial.manufacturer,
+					SerialNumber: initial.serial,
+				}
+				require.NoError(t, component.Create(ctx, pool.DB))
+				idsByName[initial.name] = component.ID
+				bmc := model.BMC{
+					MacAddress:  initial.mac,
+					Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
+					ComponentID: component.ID,
+				}
+				_, err := pool.DB.NewInsert().Model(&bmc).Exec(ctx)
+				require.NoError(t, err)
+			}
 
-	got, err := (&model.Component{ID: c.ID}).GetIncludingDeleted(ctx, pool.DB)
-	require.NoError(t, err)
-	assert.Nil(t, got.DeletedAt)
-	assert.Equal(t, "C-OLD", got.SerialNumber, "a populated serial is not overwritten by Core's new one")
+			specs := make([]expectedComponentSpec, 0, len(tc.desired))
+			for _, desired := range tc.desired {
+				specs = append(specs, expectedComponentSpec{
+					Type:         compType(),
+					Name:         desired.name,
+					Manufacturer: desired.manufacturer,
+					SerialNumber: desired.serial,
+					BMC:          expectedBMCSpec{MACAddress: desired.mac},
+				})
+			}
+
+			mirrorExpectedComponents(ctx, pool, compType(), specs, map[string]uuid.UUID{})
+
+			total, err := pool.DB.NewSelect().Model((*model.Component)(nil)).Count(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, len(tc.initial), total)
+			for _, desired := range tc.desired {
+				id := idsByName[desired.name]
+				got, err := (&model.Component{ID: id}).GetIncludingDeleted(ctx, pool.DB)
+				require.NoError(t, err)
+				assert.Nil(t, got.DeletedAt)
+				assert.Equal(t, desired.manufacturer, got.Manufacturer)
+				assert.Equal(t, desired.serial, got.SerialNumber)
+			}
+		})
+	}
+}
+
+func TestMirrorComponents_ClaimsNaturalKeyAcrossComponentTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		existingRecipient bool
+	}{
+		{name: "update", existingRecipient: true},
+		{name: "insert"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			owner := model.Component{
+				Name:         "switch-owner",
+				Type:         devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch),
+				Manufacturer: "Mfg",
+				SerialNumber: "CROSS-TYPE-PAIR",
+			}
+			require.NoError(t, owner.Create(ctx, pool.DB))
+
+			recipientMAC := "aa:bb:cc:dd:ee:81"
+			var recipientID uuid.UUID
+			if tc.existingRecipient {
+				recipient := model.Component{
+					Name:         "compute-recipient",
+					Type:         compType(),
+					Manufacturer: "Mfg",
+					SerialNumber: "OLD-COMPUTE-PAIR",
+				}
+				require.NoError(t, recipient.Create(ctx, pool.DB))
+				recipientID = recipient.ID
+				_, err := pool.DB.NewInsert().Model(&model.BMC{
+					MacAddress:  recipientMAC,
+					Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
+					ComponentID: recipient.ID,
+				}).Exec(ctx)
+				require.NoError(t, err)
+			}
+
+			spec := expectedComponentSpec{
+				Type:         compType(),
+				Name:         "compute-recipient",
+				Manufacturer: "Mfg",
+				SerialNumber: "CROSS-TYPE-PAIR",
+				BMC:          expectedBMCSpec{MACAddress: recipientMAC},
+			}
+			mirrorExpectedComponents(ctx, pool, compType(), []expectedComponentSpec{spec}, map[string]uuid.UUID{})
+
+			var recipient model.Component
+			require.NoError(t, pool.DB.NewSelect().Model(&recipient).Where("name = ?", spec.Name).Scan(ctx))
+			if tc.existingRecipient {
+				assert.Equal(t, recipientID, recipient.ID, "an update must keep the recipient UUID")
+			}
+			assert.Equal(t, spec.Manufacturer, recipient.Manufacturer)
+			assert.Equal(t, spec.SerialNumber, recipient.SerialNumber)
+
+			gotOwner, err := (&model.Component{ID: owner.ID}).GetIncludingDeleted(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Empty(t, gotOwner.Manufacturer)
+			assert.Empty(t, gotOwner.SerialNumber)
+		})
+	}
 }
 
 // Swapping a BMC board changes the MAC Core reports. The natural key adopts the

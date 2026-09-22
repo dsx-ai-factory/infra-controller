@@ -46,6 +46,9 @@ use crate::expected_machines::common::HostDpuPolicy;
 "bmc_password",
 "chassis_serial_number",
 "fallback_dpu_serial_numbers",
+"meta_name",
+"meta_description",
+"labels",
 "sku_id",
 "bmc_ip_address",
 "dpu_policy",
@@ -258,6 +261,9 @@ impl Args {
             && self.bmc_password.is_none()
             && self.chassis_serial_number.is_none()
             && self.fallback_dpu_serial_numbers.is_none()
+            && self.meta_name.is_none()
+            && self.meta_description.is_none()
+            && self.labels.is_none()
             && self.sku_id.is_none()
             && self.rack_id.is_none()
             && self.dpf_enabled.is_none()
@@ -268,7 +274,7 @@ impl Args {
         {
             return Err(error(
                 ErrorKind::MissingRequiredArgument,
-                "one of the following options must be specified: bmc-username and bmc-password or chassis-serial-number or fallback-dpu-serial-number or sku-id or rack-id or bmc-ip-address or dpu-policy or bmc-ip-allocation or dpf-enabled or interfaces",
+                "one of the following options must be specified: bmc-username and bmc-password or chassis-serial-number or fallback-dpu-serial-number or meta-name or meta-description or label or sku-id or rack-id or bmc-ip-address or dpu-policy or bmc-ip-allocation or dpf-enabled or interfaces",
             ));
         }
         if self

@@ -16,9 +16,6 @@
  */
 
 //! IPMI-over-HTTP mock handler for testing.
-//!
-//! Receives JSON requests from `IPMIToolHttpImpl` and translates them
-//! into `BmcCommand::SetSystemPower` calls to machine-a-tron.
 
 use axum::routing::post;
 use axum::{Json, Router};
@@ -26,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bmc_state::BmcState;
 use crate::redfish::log_service::LogEntryDraft;
-use crate::{Callbacks, SystemPowerControl};
+use crate::{Callbacks, ResourceResetType};
 
 /// Request body for IPMI mock endpoint.
 #[derive(Debug, Deserialize)]
@@ -77,12 +74,12 @@ async fn handle_ipmi<C: Callbacks>(
     let response = match req.action.as_str() {
         "chassis_power_reset" => {
             tracing::info!("IPMI: chassis power reset");
-            match callbacks.send_power_command(SystemPowerControl::ForceRestart) {
+            match callbacks.send_power_command(ResourceResetType::ForceRestart) {
                 Ok(()) => {
                     if let Some(system) = state.system_state.primary_system_odata_id() {
                         state.record_event(LogEntryDraft::reset_requested(
                             &system,
-                            SystemPowerControl::ForceRestart,
+                            ResourceResetType::ForceRestart,
                         ));
                     }
                     IpmiResponse::ok()
@@ -103,7 +100,7 @@ async fn handle_ipmi<C: Callbacks>(
         }
         "dpu_legacy_boot" => {
             tracing::info!("IPMI: dpu legacy boot");
-            match callbacks.send_power_command(SystemPowerControl::ForceRestart) {
+            match callbacks.send_power_command(ResourceResetType::ForceRestart) {
                 Ok(()) => IpmiResponse::ok(),
                 Err(e) => {
                     tracing::error!(error = ?e, "dpu legacy boot failed");

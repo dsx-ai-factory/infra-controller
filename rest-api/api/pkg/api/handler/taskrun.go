@@ -163,13 +163,13 @@ func (h CreateTaskRunHandler) Handle(c echo.Context) error {
 
 	var flowResponse flowv1.CreateOperationRunResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_CreateOperationRun_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Flow's CreateOperationRun returns only the new run's ID. Echo the known
@@ -263,13 +263,13 @@ func (h GetTaskRunHandler) Handle(c echo.Context) error {
 
 	var flowResponse flowv1.GetOperationRunResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_GetOperationRun_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	run := flowResponse.GetOperationRun()
@@ -361,13 +361,13 @@ func (h GetAllTaskRunHandler) Handle(c echo.Context) error {
 
 	var flowResponse flowv1.ListOperationRunsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ListOperationRuns_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	apiRuns := make([]*model.APITaskRun, 0, len(flowResponse.GetOperationRuns()))
@@ -472,13 +472,13 @@ func (h GetAllTaskRunTargetHandler) Handle(c echo.Context) error {
 
 	var flowResponse flowv1.ListOperationRunTargetsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ListOperationRunTargets_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	apiTargets := make([]*model.APITaskRunTarget, 0, len(flowResponse.GetTargets()))
@@ -525,13 +525,13 @@ func executeRunLifecycleAction(
 
 	var flowResponse flowv1.OperationRun
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		fullMethod,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	apiRun := &model.APITaskRun{}
