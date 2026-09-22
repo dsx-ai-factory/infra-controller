@@ -41,7 +41,7 @@ pub(super) async fn handle_show_reserved_addresses(
         .0
         .admin_find_reserved_addresses(forgerpc::AdminFindReservedAddressesRequest {
             reserved_by_mac: args.mac_address.map(|mac| mac.to_string()),
-            address: args.address.map(|address| address.to_string()),
+            ip_address: args.address.map(|address| address.to_string()),
         })
         .await?;
 
@@ -49,9 +49,9 @@ pub(super) async fn handle_show_reserved_addresses(
         .reserved_addresses
         .iter()
         .map(|reserved| ReservedAddressRow {
-            address: reserved.address.clone(),
+            address: reserved.ip_address.clone(),
             reserved_by_mac: reserved.reserved_by_mac.clone(),
-            family: if reserved.address.contains(':') {
+            family: if reserved.ip_address.contains(':') {
                 "IPv6".into()
             } else {
                 "IPv4".into()

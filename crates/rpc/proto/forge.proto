@@ -5626,7 +5626,7 @@ message AdminForceDeleteMachineRequest {
 message ReservedAddress {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   // The reserved IP address.
-  string address = 1;
+  string ip_address = 1;
   // The MAC address that owns the reservation.
   string reserved_by_mac = 2;
   // The runtime allocation type of the reserved address (e.g. "static").
@@ -5639,8 +5639,8 @@ message AdminFindReservedAddressesRequest {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   // Restrict to reservations owned by this MAC address.
   optional string reserved_by_mac = 1;
-  // Restrict to the reservation for this exact address.
-  optional string address = 2;
+  // Restrict to the reservation for this exact IP address.
+  optional string ip_address = 2;
 }
 
 message AdminFindReservedAddressesResponse {
@@ -5654,14 +5654,14 @@ message AdminReleaseReservedAddressesRequest {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   // Release reservations owned by this MAC address.
   optional string reserved_by_mac = 1;
-  // Release the reservation for this exact address.
-  optional string address = 2;
+  // Release the reservation for this exact IP address.
+  optional string ip_address = 2;
 }
 
 message AdminReleaseReservedAddressesResponse {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  // The addresses that were released.
-  repeated string released_addresses = 1;
+  // The IP addresses that were released.
+  repeated string released_ip_addresses = 1;
 }
 
 message DecommissionManagedHostRequest {

@@ -5416,10 +5416,10 @@ message AdminForceDeleteMachineRequest {
 // A parked address reservation owned by its MAC with no active interface row.
 message ReservedAddress {
   // The reserved IP address.
-  string address = 1;
+  string ip_address = 1;
   // The MAC address that owns the reservation.
   string reserved_by_mac = 2;
-  // The runtime allocation type of the reserved address (e.g. "Static").
+  // The runtime allocation type of the reserved address (e.g. "static").
   string allocation_type = 3;
 }
 
@@ -5428,8 +5428,8 @@ message ReservedAddress {
 message AdminFindReservedAddressesRequest {
   // Restrict to reservations owned by this MAC address.
   optional string reserved_by_mac = 1;
-  // Restrict to the reservation for this exact address.
-  optional string address = 2;
+  // Restrict to the reservation for this exact IP address.
+  optional string ip_address = 2;
 }
 
 message AdminFindReservedAddressesResponse {
@@ -5441,13 +5441,13 @@ message AdminFindReservedAddressesResponse {
 message AdminReleaseReservedAddressesRequest {
   // Release reservations owned by this MAC address.
   optional string reserved_by_mac = 1;
-  // Release the reservation for this exact address.
-  optional string address = 2;
+  // Release the reservation for this exact IP address.
+  optional string ip_address = 2;
 }
 
 message AdminReleaseReservedAddressesResponse {
-  // The addresses that were released.
-  repeated string released_addresses = 1;
+  // The IP addresses that were released.
+  repeated string released_ip_addresses = 1;
 }
 
 message DecommissionManagedHostRequest {

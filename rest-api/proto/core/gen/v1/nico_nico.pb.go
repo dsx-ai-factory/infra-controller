@@ -29116,10 +29116,10 @@ func (x *AdminForceDeleteMachineRequest) GetReleasePreservedAddresses() bool {
 type ReservedAddress struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The reserved IP address.
-	Address string `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	IpAddress string `protobuf:"bytes,1,opt,name=ip_address,json=ipAddress,proto3" json:"ip_address,omitempty"`
 	// The MAC address that owns the reservation.
 	ReservedByMac string `protobuf:"bytes,2,opt,name=reserved_by_mac,json=reservedByMac,proto3" json:"reserved_by_mac,omitempty"`
-	// The runtime allocation type of the reserved address (e.g. "Static").
+	// The runtime allocation type of the reserved address (e.g. "static").
 	AllocationType string `protobuf:"bytes,3,opt,name=allocation_type,json=allocationType,proto3" json:"allocation_type,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -29155,9 +29155,9 @@ func (*ReservedAddress) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{336}
 }
 
-func (x *ReservedAddress) GetAddress() string {
+func (x *ReservedAddress) GetIpAddress() string {
 	if x != nil {
-		return x.Address
+		return x.IpAddress
 	}
 	return ""
 }
@@ -29182,8 +29182,8 @@ type AdminFindReservedAddressesRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Restrict to reservations owned by this MAC address.
 	ReservedByMac *string `protobuf:"bytes,1,opt,name=reserved_by_mac,json=reservedByMac,proto3,oneof" json:"reserved_by_mac,omitempty"`
-	// Restrict to the reservation for this exact address.
-	Address       *string `protobuf:"bytes,2,opt,name=address,proto3,oneof" json:"address,omitempty"`
+	// Restrict to the reservation for this exact IP address.
+	IpAddress     *string `protobuf:"bytes,2,opt,name=ip_address,json=ipAddress,proto3,oneof" json:"ip_address,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -29225,9 +29225,9 @@ func (x *AdminFindReservedAddressesRequest) GetReservedByMac() string {
 	return ""
 }
 
-func (x *AdminFindReservedAddressesRequest) GetAddress() string {
-	if x != nil && x.Address != nil {
-		return *x.Address
+func (x *AdminFindReservedAddressesRequest) GetIpAddress() string {
+	if x != nil && x.IpAddress != nil {
+		return *x.IpAddress
 	}
 	return ""
 }
@@ -29282,8 +29282,8 @@ type AdminReleaseReservedAddressesRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Release reservations owned by this MAC address.
 	ReservedByMac *string `protobuf:"bytes,1,opt,name=reserved_by_mac,json=reservedByMac,proto3,oneof" json:"reserved_by_mac,omitempty"`
-	// Release the reservation for this exact address.
-	Address       *string `protobuf:"bytes,2,opt,name=address,proto3,oneof" json:"address,omitempty"`
+	// Release the reservation for this exact IP address.
+	IpAddress     *string `protobuf:"bytes,2,opt,name=ip_address,json=ipAddress,proto3,oneof" json:"ip_address,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -29325,19 +29325,19 @@ func (x *AdminReleaseReservedAddressesRequest) GetReservedByMac() string {
 	return ""
 }
 
-func (x *AdminReleaseReservedAddressesRequest) GetAddress() string {
-	if x != nil && x.Address != nil {
-		return *x.Address
+func (x *AdminReleaseReservedAddressesRequest) GetIpAddress() string {
+	if x != nil && x.IpAddress != nil {
+		return *x.IpAddress
 	}
 	return ""
 }
 
 type AdminReleaseReservedAddressesResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The addresses that were released.
-	ReleasedAddresses []string `protobuf:"bytes,1,rep,name=released_addresses,json=releasedAddresses,proto3" json:"released_addresses,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The IP addresses that were released.
+	ReleasedIpAddresses []string `protobuf:"bytes,1,rep,name=released_ip_addresses,json=releasedIpAddresses,proto3" json:"released_ip_addresses,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *AdminReleaseReservedAddressesResponse) Reset() {
@@ -29370,9 +29370,9 @@ func (*AdminReleaseReservedAddressesResponse) Descriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{340}
 }
 
-func (x *AdminReleaseReservedAddressesResponse) GetReleasedAddresses() []string {
+func (x *AdminReleaseReservedAddressesResponse) GetReleasedIpAddresses() []string {
 	if x != nil {
-		return x.ReleasedAddresses
+		return x.ReleasedIpAddresses
 	}
 	return nil
 }
@@ -70447,27 +70447,28 @@ const file_nico_nico_proto_rawDesc = "" +
 	"#allow_delete_with_orphaned_dpf_crds\x18\x05 \x01(\bR\x1eallowDeleteWithOrphanedDpfCrds\x126\n" +
 	"\x17delete_bmc_suppressions\x18\x06 \x01(\bR\x15deleteBmcSuppressions\x12E\n" +
 	"\x1fdelete_retained_boot_interfaces\x18\a \x01(\bR\x1cdeleteRetainedBootInterfaces\x12>\n" +
-	"\x1brelease_preserved_addresses\x18\b \x01(\bR\x19releasePreservedAddresses\"|\n" +
-	"\x0fReservedAddress\x12\x18\n" +
-	"\aaddress\x18\x01 \x01(\tR\aaddress\x12&\n" +
+	"\x1brelease_preserved_addresses\x18\b \x01(\bR\x19releasePreservedAddresses\"\x81\x01\n" +
+	"\x0fReservedAddress\x12\x1d\n" +
+	"\n" +
+	"ip_address\x18\x01 \x01(\tR\tipAddress\x12&\n" +
 	"\x0freserved_by_mac\x18\x02 \x01(\tR\rreservedByMac\x12'\n" +
-	"\x0fallocation_type\x18\x03 \x01(\tR\x0eallocationType\"\x8f\x01\n" +
+	"\x0fallocation_type\x18\x03 \x01(\tR\x0eallocationType\"\x97\x01\n" +
 	"!AdminFindReservedAddressesRequest\x12+\n" +
-	"\x0freserved_by_mac\x18\x01 \x01(\tH\x00R\rreservedByMac\x88\x01\x01\x12\x1d\n" +
-	"\aaddress\x18\x02 \x01(\tH\x01R\aaddress\x88\x01\x01B\x12\n" +
-	"\x10_reserved_by_macB\n" +
+	"\x0freserved_by_mac\x18\x01 \x01(\tH\x00R\rreservedByMac\x88\x01\x01\x12\"\n" +
 	"\n" +
-	"\b_address\"k\n" +
+	"ip_address\x18\x02 \x01(\tH\x01R\tipAddress\x88\x01\x01B\x12\n" +
+	"\x10_reserved_by_macB\r\n" +
+	"\v_ip_address\"k\n" +
 	"\"AdminFindReservedAddressesResponse\x12E\n" +
-	"\x12reserved_addresses\x18\x01 \x03(\v2\x16.forge.ReservedAddressR\x11reservedAddresses\"\x92\x01\n" +
+	"\x12reserved_addresses\x18\x01 \x03(\v2\x16.forge.ReservedAddressR\x11reservedAddresses\"\x9a\x01\n" +
 	"$AdminReleaseReservedAddressesRequest\x12+\n" +
-	"\x0freserved_by_mac\x18\x01 \x01(\tH\x00R\rreservedByMac\x88\x01\x01\x12\x1d\n" +
-	"\aaddress\x18\x02 \x01(\tH\x01R\aaddress\x88\x01\x01B\x12\n" +
-	"\x10_reserved_by_macB\n" +
+	"\x0freserved_by_mac\x18\x01 \x01(\tH\x00R\rreservedByMac\x88\x01\x01\x12\"\n" +
 	"\n" +
-	"\b_address\"V\n" +
-	"%AdminReleaseReservedAddressesResponse\x12-\n" +
-	"\x12released_addresses\x18\x01 \x03(\tR\x11releasedAddresses\"R\n" +
+	"ip_address\x18\x02 \x01(\tH\x01R\tipAddress\x88\x01\x01B\x12\n" +
+	"\x10_reserved_by_macB\r\n" +
+	"\v_ip_address\"[\n" +
+	"%AdminReleaseReservedAddressesResponse\x122\n" +
+	"\x15released_ip_addresses\x18\x01 \x03(\tR\x13releasedIpAddresses\"R\n" +
 	"\x1eDecommissionManagedHostRequest\x120\n" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\tmachineId\"!\n" +
