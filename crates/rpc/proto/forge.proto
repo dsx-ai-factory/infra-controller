@@ -2690,6 +2690,10 @@ message SwitchStatus {
   LifecycleStatus lifecycle = 9;
   optional string fabric_manager_status = 10;
   optional FabricManagerStatus fabric_manager_status_details = 11;
+
+  // NVOS management ports, ordered by MAC address. Addresses within each port
+  // are ordered by address family, IPv4 before IPv6.
+  repeated SwitchNvosPortInfo nvos_ports = 12;
 }
 
 message PlacementInRack {
@@ -2727,8 +2731,9 @@ message Switch {
   reserved 12, 13;
   bool is_primary = 14;
 
-  // NVOS host endpoint
-  SwitchNvosInfo nvos_info = 15;
+  // Deprecated: use status.nvos_ports. A resolved endpoint is retained here
+  // for compatibility, preferring IPv4 and then the lowest-MAC port.
+  SwitchNvosInfo nvos_info = 15 [deprecated = true];
 
   // NVLink domain UUID
   common.NVLinkDomainId nvlink_domain_uuid = 16;
@@ -11267,4 +11272,22 @@ message MachineValidationAttemptLogList {
   repeated MachineValidationAttemptLogChunk chunks = 1;
   // True when more chunks remain after this page's last sequence.
   bool has_more = 2;
+}
+
+// An IP address paired with its explicitly identified address family. The
+// family must be V4 or V6 and must match the address string.
+message IpAddress {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  AddressFamily address_family = 1;
+  string address = 2;
+}
+
+// Address information for one physical NVOS management port.
+message SwitchNvosPortInfo {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  optional string mac = 1;
+  // Optional TCP service port used to reach NVOS on this management endpoint.
+  optional uint32 service_port = 2;
+  // At most one address per family, ordered IPv4 before IPv6.
+  repeated IpAddress addresses = 3;
 }

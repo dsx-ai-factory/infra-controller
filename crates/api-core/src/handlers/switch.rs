@@ -15,11 +15,14 @@
  * limitations under the License.
  */
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, HealthReportEntry};
 use carbide_uuid::machine::MachineInterfaceId;
+use carbide_uuid::switch::SwitchId;
+use db::db_read::DbReader;
 use db::{ObjectColumnFilter, switch as db_switch};
 use health_report::HealthReportApplyMode;
 use mac_address::MacAddress;
@@ -50,21 +53,96 @@ async fn associated_switch_macs(
     Ok(macs)
 }
 
-fn switch_nvos_info_from_endpoint_row(
-    row: &db_switch::SwitchEndpointRow,
-) -> Option<rpc::SwitchNvosInfo> {
-    let ip = row.nvos_ip.as_ref().map(ToString::to_string);
-    let mac = row.nvos_mac.as_ref().map(ToString::to_string);
+fn switch_nvos_address(ip: IpAddr) -> rpc::IpAddress {
+    let address_family = match ip {
+        IpAddr::V4(_) => rpc::AddressFamily::V4,
+        IpAddr::V6(_) => rpc::AddressFamily::V6,
+    };
 
-    if ip.is_none() && mac.is_none() {
-        return None;
+    rpc::IpAddress {
+        address_family: address_family.into(),
+        address: ip.to_string(),
+    }
+}
+
+/// Groups NVOS endpoint rows into one port entry per MAC address.
+///
+/// This relies on [`db_switch::find_switch_nvos_endpoints_by_ids`] ordering rows
+/// by switch ID and MAC address so that rows for each MAC are contiguous.
+/// Noncontiguous rows for one MAC would produce duplicate port entries.
+async fn load_switch_nvos_info(
+    db: impl DbReader<'_>,
+    switch_ids: &[SwitchId],
+) -> Result<HashMap<SwitchId, Vec<rpc::SwitchNvosPortInfo>>, CarbideError> {
+    let rows = db_switch::find_switch_nvos_endpoints_by_ids(db, switch_ids).await?;
+    let mut nvos_info_by_switch: HashMap<SwitchId, Vec<rpc::SwitchNvosPortInfo>> = HashMap::new();
+
+    for row in rows {
+        let Some(mac) = row.nvos_mac.map(|mac| mac.to_string()) else {
+            continue;
+        };
+
+        let nvos_ports = nvos_info_by_switch.entry(row.switch_id).or_default();
+        if nvos_ports.last().and_then(|port| port.mac.as_ref()) != Some(&mac) {
+            nvos_ports.push(rpc::SwitchNvosPortInfo {
+                mac: Some(mac),
+                service_port: None,
+                addresses: Vec::new(),
+            });
+        }
+
+        if let Some(ip) = row.nvos_ip {
+            nvos_ports
+                .last_mut()
+                .expect("an NVOS port was added for the current MAC")
+                .addresses
+                .push(switch_nvos_address(ip));
+        }
     }
 
+    for nvos_ports in nvos_info_by_switch.values_mut() {
+        for nvos_port in nvos_ports {
+            nvos_port
+                .addresses
+                .sort_by_key(|address| address.address_family);
+        }
+    }
+
+    Ok(nvos_info_by_switch)
+}
+
+fn legacy_switch_nvos_info(nvos_ports: &[rpc::SwitchNvosPortInfo]) -> Option<rpc::SwitchNvosInfo> {
+    let nvos_port = nvos_ports
+        .iter()
+        .find(|port| {
+            port.addresses
+                .iter()
+                .any(|address| address.address_family == i32::from(rpc::AddressFamily::V4))
+        })
+        .or_else(|| nvos_ports.iter().find(|port| !port.addresses.is_empty()))
+        .or_else(|| nvos_ports.first())?;
+    let address = nvos_port
+        .addresses
+        .iter()
+        .find(|address| address.address_family == i32::from(rpc::AddressFamily::V4))
+        .or_else(|| nvos_port.addresses.first());
+
     Some(rpc::SwitchNvosInfo {
-        ip,
-        mac,
-        port: None,
+        ip: address.map(|address| address.address.clone()),
+        mac: nvos_port.mac.clone(),
+        port: nvos_port.service_port,
     })
+}
+
+#[allow(deprecated)]
+fn populate_switch_nvos_info(
+    rpc_switch: &mut rpc::Switch,
+    nvos_ports: Vec<rpc::SwitchNvosPortInfo>,
+) {
+    rpc_switch.nvos_info = legacy_switch_nvos_info(&nvos_ports);
+    if let Some(status) = rpc_switch.status.as_mut() {
+        status.nvos_ports = nvos_ports;
+    }
 }
 
 pub(crate) async fn find_switch(
@@ -110,17 +188,14 @@ pub(crate) async fn find_switch(
     };
 
     let switch_ids: Vec<_> = switch_list.iter().map(|switch| switch.id).collect();
-    let endpoint_info_map: std::collections::HashMap<_, _> = if switch_ids.is_empty() {
-        std::collections::HashMap::new()
+    let mut nvos_info_by_switch = if switch_ids.is_empty() {
+        HashMap::new()
     } else {
-        db_switch::find_switch_endpoints_by_ids(&mut *txn, &switch_ids)
+        load_switch_nvos_info(&mut *txn, &switch_ids)
             .await
             .map_err(|e| CarbideError::Internal {
-                message: format!("Failed to get switch endpoint info: {}", e),
+                message: format!("Failed to get switch NVOS endpoint info: {}", e),
             })?
-            .into_iter()
-            .map(|row| (row.switch_id, row))
-            .collect()
     };
 
     txn.commit().await.map_err(|e| CarbideError::Internal {
@@ -131,13 +206,10 @@ pub(crate) async fn find_switch(
         .into_iter()
         .map(|s| {
             let id = s.id;
-            let endpoint_info = endpoint_info_map.get(&id);
+            let nvos_ports = nvos_info_by_switch.remove(&id).unwrap_or_default();
 
-            // `bmc_info` is populated by the switch load query and carried
-            // through the model->rpc conversion; only nvos_info is stitched in
-            // here from the endpoint lookup.
             rpc::Switch::try_from(s).map(|mut rpc_switch| {
-                rpc_switch.nvos_info = endpoint_info.and_then(switch_nvos_info_from_endpoint_row);
+                populate_switch_nvos_info(&mut rpc_switch, nvos_ports);
                 rpc_switch
             })
         })
@@ -190,15 +262,11 @@ pub(crate) async fn find_by_ids(
     )
     .await?;
 
-    let endpoint_info_map: std::collections::HashMap<_, _> =
-        db_switch::find_switch_endpoints_by_ids(&mut txn, &switch_ids)
-            .await
-            .map_err(|e| CarbideError::Internal {
-                message: format!("Failed to get switch endpoint info: {}", e),
-            })?
-            .into_iter()
-            .map(|row| (row.switch_id, row))
-            .collect();
+    let mut nvos_info_by_switch = load_switch_nvos_info(txn.as_pgconn(), &switch_ids)
+        .await
+        .map_err(|e| CarbideError::Internal {
+            message: format!("Failed to get switch NVOS endpoint info: {}", e),
+        })?;
 
     txn.rollback_or_log("read-only load of switches by id")
         .await;
@@ -207,13 +275,10 @@ pub(crate) async fn find_by_ids(
         .into_iter()
         .map(|s| {
             let id = s.id;
-            let endpoint_info = endpoint_info_map.get(&id);
+            let nvos_ports = nvos_info_by_switch.remove(&id).unwrap_or_default();
 
-            // `bmc_info` is populated by the switch load query and carried
-            // through the model->rpc conversion; only nvos_info is stitched in
-            // here from the endpoint lookup.
             rpc::Switch::try_from(s).map(|mut rpc_switch| {
-                rpc_switch.nvos_info = endpoint_info.and_then(switch_nvos_info_from_endpoint_row);
+                populate_switch_nvos_info(&mut rpc_switch, nvos_ports);
                 rpc_switch
             })
         })
@@ -681,52 +746,84 @@ async fn remove_switch_health_report_by_source(
 
 #[cfg(test)]
 mod switch_nvos_info_tests {
-    use std::net::IpAddr;
-    use std::str::FromStr;
+    use ::rpc::forge as rpc;
 
-    use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
-    use db::switch::SwitchEndpointRow;
-    use mac_address::MacAddress;
+    use super::legacy_switch_nvos_info;
 
-    use super::switch_nvos_info_from_endpoint_row;
+    fn address(address_family: rpc::AddressFamily, address: &str) -> rpc::IpAddress {
+        rpc::IpAddress {
+            address_family: address_family.into(),
+            address: address.to_string(),
+        }
+    }
 
-    fn endpoint_row(nvos_mac: Option<&str>, nvos_ip: Option<&str>) -> SwitchEndpointRow {
-        SwitchEndpointRow {
-            switch_id: SwitchId::new(SwitchIdSource::Tpm, [0u8; 32], SwitchType::NvLink),
-            bmc_mac: MacAddress::from_str("b8:3f:d2:1a:44:9c").unwrap(),
-            bmc_ip: IpAddr::from_str("10.0.0.1").unwrap(),
-            nvos_mac: nvos_mac.map(|mac| MacAddress::from_str(mac).unwrap()),
-            nvos_ip: nvos_ip.map(|ip| IpAddr::from_str(ip).unwrap()),
-            nvos_hostname: None,
+    fn port(mac: &str, addresses: Vec<rpc::IpAddress>) -> rpc::SwitchNvosPortInfo {
+        rpc::SwitchNvosPortInfo {
+            mac: Some(mac.to_string()),
+            service_port: None,
+            addresses,
         }
     }
 
     #[test]
-    fn returns_none_when_ip_and_mac_are_missing() {
-        assert!(switch_nvos_info_from_endpoint_row(&endpoint_row(None, None)).is_none());
+    fn returns_none_without_declared_ports() {
+        assert!(legacy_switch_nvos_info(&[]).is_none());
     }
 
     #[test]
-    fn preserves_ip_and_mac_independently() {
-        let ip_only = switch_nvos_info_from_endpoint_row(&endpoint_row(None, Some("10.2.14.52")))
-            .expect("ip-only nvos info");
-        assert_eq!(ip_only.ip.as_deref(), Some("10.2.14.52"));
-        assert!(ip_only.mac.is_none());
+    fn skips_an_unresolved_port_when_a_later_port_has_an_address() {
+        let ports = vec![
+            port("44:44:33:33:01:00", Vec::new()),
+            port(
+                "44:44:33:33:01:01",
+                vec![address(rpc::AddressFamily::V6, "2001:db8::10")],
+            ),
+        ];
 
-        let mac_only =
-            switch_nvos_info_from_endpoint_row(&endpoint_row(Some("b8:3f:d2:1a:44:9d"), None))
-                .expect("mac-only nvos info");
-        assert!(mac_only.ip.is_none());
-        assert_eq!(mac_only.mac.as_deref(), Some("B8:3F:D2:1A:44:9D"));
+        let info = legacy_switch_nvos_info(&ports).expect("NVOS info");
+        assert_eq!(info.mac.as_deref(), Some("44:44:33:33:01:01"));
+        assert_eq!(info.ip.as_deref(), Some("2001:db8::10"));
     }
 
     #[test]
-    fn leaves_port_unset() {
-        let info = switch_nvos_info_from_endpoint_row(&endpoint_row(
-            Some("b8:3f:d2:1a:44:9d"),
-            Some("10.2.14.52"),
-        ))
-        .expect("nvos info");
-        assert!(info.port.is_none());
+    fn prefers_ipv4_across_resolved_ports() {
+        let ports = vec![
+            port(
+                "44:44:33:33:01:00",
+                vec![address(rpc::AddressFamily::V6, "2001:db8::10")],
+            ),
+            port(
+                "44:44:33:33:01:01",
+                vec![address(rpc::AddressFamily::V4, "10.2.14.52")],
+            ),
+        ];
+
+        let info = legacy_switch_nvos_info(&ports).expect("NVOS info");
+        assert_eq!(info.mac.as_deref(), Some("44:44:33:33:01:01"));
+        assert_eq!(info.ip.as_deref(), Some("10.2.14.52"));
+    }
+
+    #[test]
+    fn copies_service_port_to_legacy_info() {
+        let mut nvos_port = port(
+            "44:44:33:33:01:00",
+            vec![address(rpc::AddressFamily::V4, "10.2.14.52")],
+        );
+        nvos_port.service_port = Some(8443);
+
+        let info = legacy_switch_nvos_info(&[nvos_port]).expect("NVOS info");
+        assert_eq!(info.port, Some(8443));
+    }
+
+    #[test]
+    fn falls_back_to_the_first_declared_port_when_all_are_unresolved() {
+        let ports = vec![
+            port("44:44:33:33:01:00", Vec::new()),
+            port("44:44:33:33:01:01", Vec::new()),
+        ];
+
+        let info = legacy_switch_nvos_info(&ports).expect("NVOS info");
+        assert_eq!(info.mac.as_deref(), Some("44:44:33:33:01:00"));
+        assert!(info.ip.is_none());
     }
 }

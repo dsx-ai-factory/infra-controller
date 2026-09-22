@@ -144,6 +144,7 @@ impl TryFrom<Switch> for rpc::Switch {
                         lifecycle: Some(lifecycle),
                         fabric_manager_status,
                         fabric_manager_status_details,
+                        nvos_ports: Vec::new(),
                     }
                 }
                 (None, fabric_manager_status, fabric_manager_status_details) => rpc::SwitchStatus {
@@ -158,6 +159,7 @@ impl TryFrom<Switch> for rpc::Switch {
                     lifecycle: Some(lifecycle),
                     fabric_manager_status,
                     fabric_manager_status_details,
+                    nvos_ports: Vec::new(),
                 },
             },
         );
@@ -187,6 +189,7 @@ impl TryFrom<Switch> for rpc::Switch {
             deleted,
             controller_state,
             bmc_info: src.bmc_info.map(Into::into),
+            #[allow(deprecated)]
             nvos_info: None,
             nvlink_domain_uuid: src.nvlink_domain_uuid,
             state_version,
