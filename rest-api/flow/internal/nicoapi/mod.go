@@ -15,6 +15,8 @@ import (
 
 // Client allow us to have both a real implemenation and a mock implementation for unit tests which can be switched transparently
 type Client interface {
+	// Close releases the connection and certificate watcher after callers stop using the client.
+	Close() error
 	Version(ctx context.Context) (string, error)
 	GetMachines(ctx context.Context) ([]MachineDetail, error)
 	GetLeakingMachineIds(ctx context.Context) ([]string, error)

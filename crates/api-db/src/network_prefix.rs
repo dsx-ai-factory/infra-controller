@@ -14,6 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! Database operations for network prefixes.
+//!
+//! Explicit result columns keep this table's queries working across column
+//! additions. Cached wildcard statements otherwise fail with PostgreSQL's
+//! "cached plan must not change result type".
+
 use std::net::IpAddr;
 
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
@@ -24,6 +31,19 @@ use sqlx::PgConnection;
 
 use super::DatabaseError;
 use crate::db_read::DbReader;
+
+/// Returns whether a constraint reports a NetworkPrefix overlap conflict.
+/// Core uses the same names for client errors and bounded allocation retries.
+pub fn is_overlap_constraint(constraint: Option<&str>) -> bool {
+    matches!(
+        constraint,
+        Some(
+            "network_prefixes_prefix_excl"
+                | "network_prefixes_global_prefix_excl"
+                | "network_prefixes_scoped_prefix_excl"
+        )
+    )
+}
 
 fn ip_to_u128(ip: IpAddr) -> u128 {
     match ip {
@@ -113,7 +133,9 @@ pub async fn containing_prefix(
     txn: impl DbReader<'_>,
     prefix: &str,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let query = "SELECT * FROM network_prefixes
+    let query = "SELECT id, segment_id, prefix, gateway, dhcpv6_link_address,
+            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip
+        FROM network_prefixes
         WHERE prefix && $1::inet
         ORDER BY segment_id, prefix";
     let container = sqlx::query_as(query)
@@ -136,7 +158,8 @@ pub async fn find_allocation_occupancy(
     vpc_prefix: IpNetwork,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
     let query = r#"
-        SELECT np.*
+        SELECT np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address,
+               np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip
         FROM network_prefixes np
         WHERE np.prefix && $1::cidr
           AND (np.vpc_prefix_id = $2 OR np.vpc_prefix_id IS NULL)
@@ -154,7 +177,9 @@ pub async fn find(
     txn: &mut PgConnection,
     uuid: NetworkPrefixId,
 ) -> Result<NetworkPrefix, DatabaseError> {
-    let query = "select * from network_prefixes where id=$1";
+    let query = "SELECT id, segment_id, prefix, gateway, dhcpv6_link_address,
+            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip
+        FROM network_prefixes WHERE id=$1";
     sqlx::query_as(query)
         .bind(uuid)
         .fetch_one(txn)
@@ -169,8 +194,12 @@ pub async fn find_by<'a, C: super::ColumnInfo<'a, TableType = NetworkPrefix>>(
     txn: &mut PgConnection,
     filter: super::ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let mut query =
-        super::FilterableQueryBuilder::new("SELECT * FROM network_prefixes").filter(&filter);
+    let mut query = super::FilterableQueryBuilder::new(
+        "SELECT id, segment_id, prefix, gateway, dhcpv6_link_address,
+            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip
+        FROM network_prefixes",
+    )
+    .filter(&filter);
 
     query
         .build_query_as()
@@ -213,7 +242,9 @@ pub async fn find_by_vpc(
     txn: &mut PgConnection,
     vpc_id: VpcId,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let query = "SELECT np.* FROM network_prefixes np \
+    let query = "SELECT np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address, \
+            np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip \
+            FROM network_prefixes np \
             INNER JOIN network_segments ns ON np.segment_id = ns.id \
             WHERE np.vpc_prefix_id IS NULL AND ns.vpc_id = $1 ORDER BY ns.created";
 
@@ -231,7 +262,9 @@ pub async fn find_by_vpcs(
     txn: &mut PgConnection,
     vpc_ids: &Vec<VpcId>,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let query = "SELECT np.* FROM network_prefixes np
+    let query = "SELECT np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address,
+            np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip
+            FROM network_prefixes np
             INNER JOIN network_segments ns ON np.segment_id = ns.id
             WHERE np.vpc_prefix_id IS NULL AND ns.vpc_id = ANY($1) ORDER BY ns.created";
 
@@ -272,7 +305,8 @@ pub async fn create_for(
     let mut inserted_prefixes: Vec<NetworkPrefix> = Vec::with_capacity(prefixes.len());
     let query = "INSERT INTO network_prefixes (segment_id, prefix, gateway, dhcpv6_link_address, num_reserved)
             VALUES ($1::uuid, $2::cidr, $3::inet, $4::inet, $5::integer)
-            RETURNING *";
+            RETURNING id, segment_id, prefix, gateway, dhcpv6_link_address,
+                num_reserved, vpc_prefix_id, vpc_prefix, svi_ip";
     for prefix in prefixes {
         let new_prefix: NetworkPrefix = sqlx::query_as(query)
             .bind(segment_id)
@@ -305,16 +339,32 @@ pub async fn delete_for_segment(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-// Update the VPC prefix for this segment prefix using the values
-// from the specified vpc_prefix.
+/// Associates a segment prefix with its exact VPC prefix.
+/// Only explicitly non-stretched Tenant linknets in the same VPC inherit scope.
+/// Tenant segments created through the public API and legacy segments without
+/// `can_stretch = false` remain global even after adoption.
 pub async fn set_vpc_prefix(
     value: &mut NetworkPrefix,
     txn: &mut PgConnection,
     vpc_prefix_id: &VpcPrefixId,
     prefix: &IpNetwork,
 ) -> Result<(), DatabaseError> {
-    let query =
-        "UPDATE network_prefixes SET vpc_prefix_id=$1, vpc_prefix=$2 WHERE id=$3 RETURNING *";
+    let query = r#"
+        UPDATE network_prefixes AS np
+        SET vpc_prefix_id = $1,
+            vpc_prefix = $2,
+            overlap_vpc_id = CASE
+                WHEN ns.network_segment_type = 'tenant'
+                    AND ns.can_stretch = false
+                    AND ns.vpc_id = vp.vpc_id
+                THEN vp.overlap_vpc_id
+                ELSE NULL
+            END
+        FROM network_vpc_prefixes AS vp, network_segments AS ns
+        WHERE np.id = $3 AND vp.id = $1 AND ns.id = np.segment_id
+        RETURNING np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address,
+            np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip
+    "#;
     let network_prefix = sqlx::query_as::<_, NetworkPrefix>(query)
         .bind(vpc_prefix_id)
         .bind(prefix)
@@ -335,7 +385,9 @@ pub async fn set_svi_ip(
     prefix_id: NetworkPrefixId,
     svi_ip: &IpAddr,
 ) -> Result<(), DatabaseError> {
-    let query = "UPDATE network_prefixes SET svi_ip=$1::inet WHERE id=$2 RETURNING *";
+    let query = "UPDATE network_prefixes SET svi_ip=$1::inet WHERE id=$2
+        RETURNING id, segment_id, prefix, gateway, dhcpv6_link_address,
+            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip";
     sqlx::query_as::<_, NetworkPrefix>(query)
         .bind(svi_ip)
         .bind(prefix_id)
@@ -351,6 +403,21 @@ mod tests {
     use config_version::ConfigVersion;
 
     use super::*;
+
+    #[test]
+    fn overlap_constraint_names_share_one_error_classification() {
+        carbide_test_support::value_scenarios!(run = is_overlap_constraint;
+            "overlap constraints" {
+                Some("network_prefixes_prefix_excl") => true,
+                Some("network_prefixes_global_prefix_excl") => true,
+                Some("network_prefixes_scoped_prefix_excl") => true,
+            }
+            "other database failures" {
+                Some("network_prefix_family") => false,
+                None => false,
+            }
+        );
+    }
 
     #[crate::sqlx_test]
     async fn allocation_occupancy_uses_exact_parent_and_global_unparented_prefixes(
@@ -377,7 +444,8 @@ mod tests {
         // that future state in this isolated test database so this query's
         // exact-parent behavior is protected now.
         sqlx::query(
-            "ALTER TABLE network_vpc_prefixes DROP CONSTRAINT network_vpc_prefixes_globally_unique",
+            "ALTER TABLE network_vpc_prefixes DROP CONSTRAINT network_vpc_prefixes_globally_unique,
+             DROP CONSTRAINT network_vpc_prefixes_global_prefix_excl",
         )
         .execute(&mut *txn)
         .await?;

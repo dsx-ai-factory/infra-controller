@@ -76,13 +76,25 @@ pub(crate) async fn create_credential(
             ).into());
         }
         rpc::CredentialType::SiteWideBmcRoot => {
-            set_sitewide_bmc_root_credentials(api, password)
-                .await
-                .map_err(|e| {
-                    CarbideError::internal(format!(
-                        "error setting site wide BMC root credentials: {e:?} "
-                    ))
-                })?;
+            if password.is_empty() {
+                return Err(CarbideError::InvalidArgument(
+                    "site-wide BMC root password must not be empty".to_string(),
+                )
+                .into());
+            }
+            set_sitewide_bmc_root_credentials(api, password).await?;
+            if let Err(error) =
+                crate::dpa::lockdown::ensure_lockdown_ikm_seeded(&*api.credential_manager).await
+            {
+                // The requested credential write is already durable. Startup
+                // installs a retry task for this idempotent compatibility seed,
+                // so returning an RPC error would incorrectly invite the caller
+                // to repeat a write that already succeeded.
+                tracing::warn!(
+                    error = %error,
+                    "site-wide BMC root was stored; initial NIC lockdown IKM seeding is deferred to the background retry"
+                );
+            }
         }
         rpc::CredentialType::SiteWideNicLockdownIkm => {
             set_sitewide_nic_lockdown_ikm(api, password)
@@ -107,7 +119,7 @@ pub(crate) async fn create_credential(
                     )
                     .await
                     .map_err(|error| {
-                        map_ufm_credential_mutation_error(
+                        map_credential_mutation_error(
                             format!("error setting credential for ufm {username}"),
                             error,
                         )
@@ -381,7 +393,7 @@ pub(crate) async fn delete_credential(
                     )
                     .await
                     .map_err(|error| {
-                        map_ufm_credential_mutation_error(
+                        map_credential_mutation_error(
                             format!("error deleting credential for ufm {username}"),
                             error,
                         )
@@ -454,9 +466,10 @@ pub(crate) async fn delete_credential(
     Ok(Response::new(rpc::CredentialDeletionResult {}))
 }
 
-fn map_ufm_credential_mutation_error(context: String, error: SecretsError) -> CarbideError {
+fn map_credential_mutation_error(context: String, error: SecretsError) -> CarbideError {
     match error {
-        error @ SecretsError::UfmCredentialMutationBlocked { .. } => {
+        error @ (SecretsError::UfmCredentialMutationBlocked { .. }
+        | SecretsError::BmcSiteWideRootV0CredentialMutationBlocked) => {
             CarbideError::FailedPrecondition(error.to_string())
         }
         error => CarbideError::internal(format!("{context}: {error:?}")),
@@ -567,12 +580,13 @@ pub(crate) async fn get_bmc_credentals(
         .await
         .map_err(|err| match err {
             crate::credentials::BmcSessionError::AvoidLockout { .. }
-            | crate::credentials::BmcSessionError::NoSessionService { .. } => {
-                // Both are "we refuse to attempt session creation" outcomes
-                // that the operator can resolve (rotate creds, or flip the
-                // basic-auth-fallback flag). FailedPrecondition matches the
-                // gRPC semantics: the request is well-formed but the
-                // server-side state forbids it.
+            | crate::credentials::BmcSessionError::NoSessionService { .. }
+            | crate::credentials::BmcSessionError::MissingRootCredentials(_) => {
+                // These are "we refuse to attempt session creation" outcomes
+                // that the operator can resolve (configure/rotate creds, or
+                // flip the basic-auth-fallback flag). FailedPrecondition
+                // matches the gRPC semantics: the request is well-formed but
+                // the server-side state forbids it.
                 Status::failed_precondition(err.to_string())
             }
             crate::credentials::BmcSessionError::Store(_) => Status::internal(err.to_string()),
@@ -765,7 +779,9 @@ async fn set_bmc_credentials(
     api.credential_manager
         .set_credentials(credential_key, credentials)
         .await
-        .map_err(|e| CarbideError::internal(format!("error setting credential for BMC: {e:?} ")))
+        .map_err(|error| {
+            map_credential_mutation_error("error setting credential for BMC".to_string(), error)
+        })
 }
 
 async fn write_ufm_certs(api: &Api, fabric: String) -> Result<(), CarbideError> {

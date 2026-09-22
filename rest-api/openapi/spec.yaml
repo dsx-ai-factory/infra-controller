@@ -1404,10 +1404,30 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: |-
+            Core rejected a `SiteWideRoot` write because
+            `bmc_site_wide_root_source` is `local`. Before any managed device
+            uses version 0, supply or correct it through the configured local
+            environment or credential file. After ingestion, leave the local
+            value unchanged and use BMC credential rotation to advance to a
+            backend-managed version. `BMCRoot` writes remain supported.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       operationId: create-or-update-bmc-credential
       description: |-
         Create or update a site-wide or per-BMC root credential. Equivalent
         to `nico-admin-cli credential add-bmc`.
+
+        When `kind` is `SiteWideRoot` and Core uses
+        `bmc_site_wide_root_source = "local"`, Core rejects the write with 412;
+        before any managed device uses version 0, supply or correct it through
+        the configured local environment or credential file. After ingestion,
+        leave the local value unchanged and use BMC credential rotation to
+        advance to a backend-managed version. This source policy does not block
+        `BMCRoot` writes.
 
         User must have authorization role with `PROVIDER_ADMIN` suffix.
   '/v2/org/{org}/nico/credential/uefi':
@@ -4778,7 +4798,10 @@ paths:
                   labels:
                     environment: staging
                     rack: B2
-        description: Expected Machine update request
+        description: |-
+          Expected Machine update request.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -4929,7 +4952,10 @@ paths:
                     labels:
                       environment: staging
                       rack: B3
-        description: Array of Expected Machine update requests
+        description: |-
+          Array of Expected Machine update requests.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Every item must use the same field set except bmcIpAddress; values may differ between items.
         required: true
       responses:
         '200':
@@ -5147,7 +5173,10 @@ paths:
                   labels:
                     environment: staging
                     rack: B2
-        description: Expected Power Shelf update request
+        description: |-
+          Expected Power Shelf update request.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -5732,7 +5761,10 @@ paths:
                   labels:
                     environment: staging
                     rack: B2
-        description: Expected Switch update request
+        description: |-
+          Expected Switch update request.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings. To change NVOS credentials, provide both nvOsUsername and nvOsPassword as non-empty strings. Each pair can be updated independently in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -12074,6 +12106,8 @@ paths:
                               macAddress: 'AA:BB:CC:DD:EE:01'
                               ipAddress: 10.0.0.101
                           powerState: 'on'
+                          leakStatus: Leaking
+                          leakHandlingStatus: ShuttingDown
           headers:
             X-Pagination:
               schema:
@@ -12162,6 +12196,8 @@ paths:
                             macAddress: 'AA:BB:CC:DD:EE:01'
                             ipAddress: 10.0.0.101
                         powerState: 'on'
+                        leakStatus: NoLeak
+                        leakHandlingStatus: None
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -12820,6 +12856,18 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Task has already finished with status `Succeeded` or `Failed` and cannot be cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                terminal-task:
+                  value:
+                    source: nico
+                    message: 'task cannot be cancelled: task 550e8400-e29b-41d4-a716-446655440000 has status failed'
+                    data: null
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -14274,6 +14322,8 @@ paths:
                       description: Compute tray in slot 1
                       firmwareVersion: 2.1.0
                       powerState: 'on'
+                      leakStatus: Leaking
+                      leakHandlingStatus: Down
                       position:
                         slotId: 1
                         trayIdx: 0
@@ -14345,6 +14395,8 @@ paths:
                     description: Compute tray in slot 1
                     firmwareVersion: 2.1.0
                     powerState: 'on'
+                    leakStatus: Leaking
+                    leakHandlingStatus: Failed
                     position:
                       slotId: 1
                       trayIdx: 0
@@ -24432,6 +24484,8 @@ components:
                   macAddress: 'AA:BB:CC:DD:EE:01'
                   ipAddress: 10.0.0.101
               powerState: 'on'
+              leakStatus: Leaking
+              leakHandlingStatus: ShuttingDown
       properties:
         id:
           type: string
@@ -24645,6 +24699,8 @@ components:
             - NoLeak
             - Leaking
           description: Whether the component is considered leaking coolant
+        leakHandlingStatus:
+          $ref: '#/components/schemas/LeakHandlingStatus'
     BMCInfo:
       title: BMCInfo
       type: object
@@ -24676,6 +24732,8 @@ components:
           description: Compute tray in slot 1
           firmwareVersion: 2.1.0
           powerState: 'on'
+          leakStatus: NoLeak
+          leakHandlingStatus: None
           position:
             slotId: 1
             trayIdx: 0
@@ -24738,6 +24796,8 @@ components:
             - NoLeak
             - Leaking
           description: Whether the tray is considered leaking coolant
+        leakHandlingStatus:
+          $ref: '#/components/schemas/LeakHandlingStatus'
         position:
           $ref: '#/components/schemas/TrayPosition'
           description: 'Position of the Tray within the Rack'
@@ -26218,6 +26278,21 @@ components:
         error:
           type: string
           description: Failure summary when `status == failed`. Truncated to 512 bytes.
+    LeakHandlingStatus:
+      title: LeakHandlingStatus
+      type: string
+      description: |-
+        Flow's leakage-handling status. Unknown means Flow could not determine the status;
+        None means no supported handling task exists; ShuttingDown means a forced-shutdown
+        task is waiting, pending, or running; Down means it completed; and Failed means the
+        latest supported handling task failed or was terminated. Down describes handling
+        progress, not the component's current power state.
+      enum:
+        - Unknown
+        - None
+        - ShuttingDown
+        - Down
+        - Failed
     TaskReportV1Status:
       title: TaskReportV1Status
       type: string
@@ -27874,7 +27949,7 @@ components:
       description: |-
         Request data to update an existing Expected Machine.
 
-        Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
+        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
 
         For single updates (PATCH /expected-machine/{id}), the id field is optional in body and will be ignored if provided (the ID from the URL path is used).
 
@@ -27914,14 +27989,17 @@ components:
           type:
             - string
             - 'null'
+          minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Machine's BMC
+          description: Username for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
         defaultBmcPassword:
           type:
             - string
             - 'null'
+          minLength: 1
+          writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Machine's BMC
+          description: Password for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
         chassisSerialNumber:
           type:
             - string
@@ -28209,7 +28287,7 @@ components:
       description: |-
         Request data to update an existing Expected Power Shelf.
 
-        Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
+        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -28242,14 +28320,17 @@ components:
           type:
             - string
             - 'null'
+          minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Power Shelf's BMC
+          description: Username for accessing the Expected Power Shelf's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
         defaultBmcPassword:
           type:
             - string
             - 'null'
+          minLength: 1
+          writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Power Shelf's BMC
+          description: Password for accessing the Expected Power Shelf's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
         shelfSerialNumber:
           type:
             - string
@@ -28770,7 +28851,7 @@ components:
       description: |-
         Request data to update an existing Expected Switch.
 
-        Note: BMC and NvOS credentials (username/password) are only accepted during creation and updates but are not returned in responses.
+        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings. To change NVOS credentials, provide both nvOsUsername and nvOsPassword as non-empty strings. Each pair can be updated independently in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -28807,14 +28888,17 @@ components:
           type:
             - string
             - 'null'
+          minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Switch's BMC
+          description: Username for accessing the Expected Switch's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
         defaultBmcPassword:
           type:
             - string
             - 'null'
+          minLength: 1
+          writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Switch's BMC
+          description: Password for accessing the Expected Switch's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
         switchSerialNumber:
           type:
             - string
@@ -28826,12 +28910,15 @@ components:
           type:
             - string
             - 'null'
-          description: NvOS username for the Expected Switch
+          minLength: 1
+          description: NvOS username for the Expected Switch. Omission or null preserves the value; a non-empty value requires nvOsPassword in the same request.
         nvOsPassword:
           type:
             - string
             - 'null'
-          description: NvOS password for the Expected Switch
+          minLength: 1
+          writeOnly: true
+          description: NvOS password for the Expected Switch. Omission or null preserves the value; a non-empty value requires nvOsUsername in the same request.
         nvosMacAddresses:
           type: array
           uniqueItems: true
@@ -30407,6 +30494,96 @@ components:
         observability:
           $ref: '#/components/schemas/DpuExtensionServiceObservability'
           description: Observability configuration for this DPU Extension Service version
+    DpuExtensionServiceDpfHelmChartData:
+      title: DpuExtensionServiceDpfHelmChartData
+      type: object
+      additionalProperties: false
+      description: DpfHelmChart configuration documented as an object; requests serialize this object into the `data` string.
+      required:
+        - repoURL
+        - chartName
+        - chartVersion
+        - security.privileged
+      properties:
+        repoURL:
+          type: string
+          minLength: 1
+          pattern: '^(https://|oci://)'
+          description: Helm repository URL beginning with https:// or oci://
+        chartName:
+          type: string
+          minLength: 1
+          description: Helm chart name
+        chartVersion:
+          type: string
+          minLength: 1
+          description: Helm chart version
+        security.privileged:
+          type: boolean
+          description: DPF privileged-workload setting. This is a literal dotted key, not a nested security object; false is valid.
+        values:
+          type: [object, 'null']
+          additionalProperties: true
+          description: Optional chart values. values.serviceDaemonSet.nodeSelector is reserved for NICo and must not be supplied.
+        serviceDaemonSet:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartServiceDaemonSet'
+    DpuExtensionServiceDpfHelmChartServiceDaemonSet:
+      title: DpuExtensionServiceDpfHelmChartServiceDaemonSet
+      type: [object, 'null']
+      additionalProperties: false
+      description: Optional tenant-configurable DaemonSet settings. NICo owns nodeSelector.
+      properties:
+        labels:
+          type: [object, 'null']
+          additionalProperties:
+            type: string
+          description: Optional labels passed to DPF for the service DaemonSet
+        annotations:
+          type: [object, 'null']
+          additionalProperties:
+            type: string
+          description: Optional annotations passed to DPF for the service DaemonSet
+        resources:
+          type: [object, 'null']
+          additionalProperties:
+            $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+          description: Optional resource quantities, for example {"nvidia.com/bf_sf":1,"memory":"500Mi"}
+        updateStrategy:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartUpdateStrategy'
+    DpuExtensionServiceDpfHelmChartUpdateStrategy:
+      title: DpuExtensionServiceDpfHelmChartUpdateStrategy
+      type: [object, 'null']
+      additionalProperties: false
+      description: Optional update strategy passed to DPF
+      properties:
+        type:
+          type: [string, 'null']
+          description: Update strategy type, typically RollingUpdate or OnDelete
+        rollingUpdate:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartRollingUpdate'
+    DpuExtensionServiceDpfHelmChartRollingUpdate:
+      title: DpuExtensionServiceDpfHelmChartRollingUpdate
+      type: [object, 'null']
+      additionalProperties: false
+      description: Optional rolling-update limits passed to DPF
+      properties:
+        maxSurge:
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+            - type: 'null'
+          description: Optional additional pod count or percentage string, for example 1 or "25%"
+        maxUnavailable:
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+            - type: 'null'
+          description: Optional unavailable pod count or percentage string, for example 1 or "25%"
+    DpuExtensionServiceDpfHelmChartIntOrString:
+      title: DpuExtensionServiceDpfHelmChartIntOrString
+      description: Integer or string value accepted by DPF
+      oneOf:
+        - type: integer
+          format: int32
+        - type: string
     DpuExtensionServiceCreateRequest:
       title: DpuExtensionServiceCreateRequest
       type: object
@@ -30427,6 +30604,12 @@ components:
                 prometheus:
                   scrapeIntervalSeconds: 30
                   endpoint: busybox:9090
+        - name: storage-client
+          description: DPF-managed storage client
+          serviceType: DpfHelmChart
+          dpuTarget: AllActive
+          siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security.privileged":true,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
       properties:
         name:
           type: string
@@ -30450,9 +30633,15 @@ components:
           format: uuid
           description: ID for the Site the DPU Extension Service belongs to
         data:
-          type: string
-          maxLength: 131072
-          description: Deployment spec, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. KubernetesPod requires a parseable Pod manifest declaring at least one container, whose kind, when present, is Pod. DpfHelmChart requires a strict JSON object with repoURL, chartName, chartVersion, security.privileged, and optional values; repoURL must use https:// or oci://, and serviceDaemonSet.nodeSelector is unsupported.
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartData'
+            - type: string
+              maxLength: 131072
+          description: |-
+            Deployment specification as a string, limited to 131072 UTF-8 bytes.
+            Use a YAML/JSON Pod manifest for KubernetesPod or JSON-encoded Helm
+            configuration for DpfHelmChart. The object schema documents the Helm
+            structure; requests must still send a string.
         credentials:
           $ref: '#/components/schemas/DpuExtensionServiceCredentials'
           description: Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
@@ -30492,11 +30681,12 @@ components:
             - 'null'
           description: Optional description for the DPU Extension Service
         data:
-          type:
-            - string
-            - 'null'
-          maxLength: 131072
-          description: Deployment spec for the DPU Extension Service, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. For KubernetesPod this is the same Pod manifest accepted on create. For DpfHelmChart this is the same strict JSON definition accepted on create and updates stable V1 in place.
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartData'
+            - type: string
+              maxLength: 131072
+            - type: 'null'
+          description: Replacement deployment spec using the create request's format. Omission or null leaves the existing configuration unchanged.
         credentials:
           $ref: '#/components/schemas/DpuExtensionServiceCredentials'
           description: Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart

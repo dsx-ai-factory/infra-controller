@@ -281,6 +281,25 @@ func TestManagerImpl_SubmitTask(t *testing.T) {
 	})
 }
 
+func TestManagerImpl_CancelTask(t *testing.T) {
+	taskID := uuid.New()
+	store := &managerTaskStore{tasksByID: map[uuid.UUID]*taskdef.Task{
+		taskID: {
+			ID:     taskID,
+			Status: taskcommon.TaskStatusFailed,
+		},
+	}}
+	executor := &managerExecutor{}
+	manager := &ManagerImpl{taskStore: store, executor: executor}
+
+	err := manager.CancelTask(context.Background(), taskID)
+
+	require.ErrorIs(t, err, ErrTaskNotCancellable)
+	require.ErrorContains(t, err, "status failed")
+	require.Zero(t, executor.terminateCalls)
+	require.Empty(t, store.statusUpdates)
+}
+
 func TestValidateSubmissionRackTargets_InjectExpectationNeedsNoRule(t *testing.T) {
 	rackID := uuid.New()
 	resolvedRack := newTestRack(rackID, "rack-1")
@@ -1491,6 +1510,13 @@ func (s *managerTaskStore) ListNonTerminalTasksForRacks(
 	_ []uuid.UUID,
 ) ([]*taskdef.Task, error) {
 	panic("managerTaskStore.ListNonTerminalTasksForRacks: not implemented")
+}
+
+func (s *managerTaskStore) LatestLeakageShutdownTaskStatuses(
+	_ context.Context,
+	_ []uuid.UUID,
+) (map[uuid.UUID]taskcommon.TaskStatus, error) {
+	panic("managerTaskStore.LatestLeakageShutdownTaskStatuses: not implemented")
 }
 
 func (s *managerTaskStore) UpdateScheduledTask(_ context.Context, task *taskdef.Task) error {

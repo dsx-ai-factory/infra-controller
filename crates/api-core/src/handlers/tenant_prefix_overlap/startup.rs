@@ -47,6 +47,7 @@ pub(crate) async fn validate_retained_state_in_transaction(
     api: &Api,
     txn: &mut PgConnection,
 ) -> CarbideResult<()> {
+    super::super::site_prefix::validate_retained_isolation(api, txn).await?;
     let duplicate_vpc_ids = db::tenant_prefix_overlap::find_duplicate_vpc_ids(
         &mut *txn,
         api.runtime_config.tenant_prefix_overlap_enabled,
@@ -118,18 +119,9 @@ pub(super) async fn validate_retained_prefixes(
     if pairs.is_empty() {
         return Ok(());
     }
-    // Retained validation must use the same null routes that Core renders to
-    // FNN. New admission deliberately continues to use current configuration
-    // so retiring roots cannot authorize additional prefix reuse.
-    let retained_operator_roots = if api.runtime_config.site_fabric_null_routes.is_none() {
-        db::site_prefix::find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn)
-            .await?
-    } else {
-        vec![]
-    };
-    let isolation_routes = api
-        .runtime_config
-        .resolved_site_fabric_null_routes(&retained_operator_roots);
+    let tenant_roots = db::site_prefix::find_tenant_prefixes(&mut *txn).await?;
+    let isolation_routes =
+        super::super::site_prefix::retained_null_routes(api, txn, &tenant_roots).await?;
     let prefix_ids = pairs
         .iter()
         .flat_map(|(first, second)| [*first, *second])

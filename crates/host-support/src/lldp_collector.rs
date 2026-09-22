@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::Builder;
 use tracing::{debug, warn};
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum LldpCollectorError {
     #[error("LLDP error: {0}")]
     Lldp(String),

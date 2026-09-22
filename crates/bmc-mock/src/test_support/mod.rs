@@ -33,9 +33,9 @@ use crate::mac_address_pool::{
 };
 use crate::machine_info::DpuSettings;
 use crate::{
-    BmcState, Callbacks, CombinedServer, DpuMachineInfo, HardwareType, HostMachineInfo,
-    ListenerOrAddress, MachineInfo, MachineRouterOptions, MockPowerState, SetSystemPowerError,
-    SystemPowerControl, machine_router,
+    ActionError, BmcState, Callbacks, CombinedServer, DpuMachineInfo, HardwareType,
+    HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions, MockPowerState,
+    ResourceResetType, machine_router,
 };
 
 pub mod axum_http_client;
@@ -45,7 +45,7 @@ pub mod axum_http_client;
 #[derive(Debug, Default)]
 pub struct TestCallbacks {
     power_state: MockPowerState,
-    pub(crate) commands: Mutex<Vec<SystemPowerControl>>,
+    pub(crate) commands: Mutex<Vec<ResourceResetType>>,
     pub(crate) refresh_count: AtomicUsize,
     command_received: Notify,
 }
@@ -81,10 +81,11 @@ impl Callbacks for TestCallbacks {
         self.power_state
     }
 
-    fn send_power_command(
+    async fn computer_system_reset(
         &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.power_state.validate_reset_type(reset_type)?;
         self.commands.lock().unwrap().push(reset_type);
         self.command_received.notify_one();
         Ok(())

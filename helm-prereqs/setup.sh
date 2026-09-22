@@ -85,9 +85,12 @@
 #                          Default: "" (the kubeadm convention); set to "true"
 #                          on distributions that label with a value.
 #   NICO_DPF_BMC_ROOT_PASSWORD
-#                          Site-wide BMC root password. REQUIRED unless --skip-dpf.
-#                          setup.sh deploys Core with DPF off, sets this via
-#                          nico-admin-cli, then enables DPF and restarts carbide-api.
+#                          Site-wide BMC root password used to seed a
+#                          setup-managed version-0 credential Secret before
+#                          the single Core rollout. Optional when DPF is
+#                          installed; rejected with --skip-core or --skip-dpf.
+#                          When unset, setup reuses its existing Secret or
+#                          leaves the credential backend-managed.
 #   NICO_DPF_DPU_AGENT_CHART_VERSION
 #                          Helm chart version for nico-dpu-agent. Defaults to the
 #                          version baked into the carbide-api binary at build time
@@ -155,6 +158,27 @@
 #     REGISTRY_PULL_SECRET is set unless logs are protected.
 # =============================================================================
 set -euo pipefail
+
+# Keep the password in this shell only. It is setup input, not runtime
+# configuration, and must not be inherited by any child process. Disable
+# xtrace while capturing it so `bash -x` cannot print the plaintext.
+# This script handles credentials in several later functions, whose local
+# variables would also be exported under allexport. Keep it disabled for the
+# entire setup process rather than restoring it after this initial capture.
+if [[ "$-" == *a* ]]; then
+    set +a
+fi
+_BMC_V0_CAPTURE_RESTORE_XTRACE=false
+if [[ "$-" == *x* ]]; then
+    set +x
+    _BMC_V0_CAPTURE_RESTORE_XTRACE=true
+fi
+_BMC_V0_BOOTSTRAP_PASSWORD="${NICO_DPF_BMC_ROOT_PASSWORD:-}"
+unset NICO_DPF_BMC_ROOT_PASSWORD
+if "${_BMC_V0_CAPTURE_RESTORE_XTRACE}"; then
+    set -x
+fi
+unset _BMC_V0_CAPTURE_RESTORE_XTRACE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -232,6 +256,28 @@ case "${INSTALL_CONTOUR}" in
     true|false) ;;
     *) echo "Error: NICO_INSTALL_CONTOUR must be true or false (got '${INSTALL_CONTOUR}')"; exit 1 ;;
 esac
+
+# `--debug` or `bash -x` may have enabled xtrace since the early capture.
+# Keep validation from expanding the password into the trace.
+_BMC_V0_VALIDATE_RESTORE_XTRACE=false
+if [[ "$-" == *x* ]]; then
+    set +x
+    _BMC_V0_VALIDATE_RESTORE_XTRACE=true
+fi
+if ! "${INSTALL_DPF}" && [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+    echo "Error: NICO_DPF_BMC_ROOT_PASSWORD cannot be used with --skip-dpf." >&2
+    echo "  Unset the variable or install DPF." >&2
+    exit 1
+fi
+if "${SKIP_CORE}" && [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+    echo "Error: NICO_DPF_BMC_ROOT_PASSWORD cannot be used with --skip-core." >&2
+    echo "  Unset the variable or install NICo Core." >&2
+    exit 1
+fi
+if "${_BMC_V0_VALIDATE_RESTORE_XTRACE}"; then
+    set -x
+fi
+unset _BMC_V0_VALIDATE_RESTORE_XTRACE
 
 # The predecessor Flow chart bundled PSM and NSM in the Flow Deployment. This
 # release does not provide an automatic migration for those workloads. Stop
@@ -361,14 +407,6 @@ NICO_RMS_NGC_API_KEY="${NICO_RMS_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}"
 # rms-api-server.rack-manager.svc.cluster.local, and the ESO sync,
 # health-check, and clean.sh all assume it. Not overridable by design.
 _RMS_NS="rack-manager"
-# Site-wide BMC root password. Optional: when provided, setup.sh calls
-# nico-admin-cli (phase 6b) to store the credential via the API so DPU
-# provisioning starts immediately. When omitted, carbide-api starts cleanly
-# without it (fixed in #4167 — the DPF SDK init is now best-effort when a
-# 60 s refresh interval is configured) and the operator must set the credential
-# manually via `nico-admin-cli credential add-bmc --kind=site-wide-root`
-# before DPU provisioning will work.
-NICO_DPF_BMC_ROOT_PASSWORD="${NICO_DPF_BMC_ROOT_PASSWORD:-}"
 # Optional chart-version overrides for NICo-owned DPF services. Useful when
 # testing a dev/PR image whose baked-in version was never published to the
 # chart registry — point at the latest published version instead.
@@ -386,27 +424,231 @@ _SETUP_PHASE="initializing"
 # cold-start deadlock break, so the EXIT trap can restore Fail if we abort in
 # between and never leave admission validation fail-open.
 _KAMAJI_WH_RELAXED=false
+# Set after the normal-flow cleanup below succeeds. Until then, the EXIT trap
+# retries the cleanup so legacy plaintext credentials cannot survive a failure
+# in an earlier installation phase.
+_LEGACY_DPF_BOOTSTRAP_CLEANED=false
+_BMC_V0_BOOTSTRAP_SECRET_NAME="nico-bmc-v0-credentials"
+_BMC_V0_BOOTSTRAP_SECRET_KEY="credentials.yaml"
+_BMC_V0_BOOTSTRAP_PURPOSE="bmc-site-wide-root-v0"
+_BMC_V0_BOOTSTRAP_ENABLED=false
+_CORE_VALUES_INSPECTOR_CHART="${SCRIPT_DIR}/internal/core-values-inspector"
+
+_append_bmc_v0_core_values() {
+    NICO_CORE_CMD+=(
+        --set-string "nico-api.credentials.bmcSiteWideRootSource=local"
+        --set-string "nico-api.credentials.file.existingSecret.name=${_BMC_V0_BOOTSTRAP_SECRET_NAME}"
+        --set-string "nico-api.credentials.file.existingSecret.key=${_BMC_V0_BOOTSTRAP_SECRET_KEY}"
+    )
+}
+
+_nico_api_credential_file_secret_name() {
+    local _file="$1"
+    local _rendered=""
+    local _secret_json=""
+    local _secret_name=""
+
+    if ! _rendered="$(helm template core-values-inspector \
+            "${_CORE_VALUES_INSPECTOR_CHART}" \
+            -f "${_file}" \
+            --show-only templates/credential-file-secret-name.yaml)"; then
+        echo "Error: could not parse nico-api credential-file values in ${_file}." >&2
+        return 1
+    fi
+
+    _secret_json="$(printf '%s\n' "${_rendered}" | awk '
+        /^[[:space:]]*\{"credentialFileSecretName":/ {
+            sub(/^[[:space:]]*/, "")
+            print
+            exit
+        }
+    ')"
+    if [[ -z "${_secret_json}" ]] || \
+       ! _secret_name="$(printf '%s\n' "${_secret_json}" | \
+            jq -er '.credentialFileSecretName | strings')"; then
+        echo "Error: nico-api credential-file values in ${_file} did not render a Secret name." >&2
+        return 1
+    fi
+
+    printf '%s\n' "${_secret_name}"
+}
+
+_prepare_bmc_v0_bootstrap_secret_untraced() {
+    local _configured_secret="${1:-}"
+    local _secret_json=""
+    local _purpose=""
+    local _encoded_credentials=""
+    local _existing_password_b64=""
+    local _bootstrap_password_b64=""
+
+    _BMC_V0_BOOTSTRAP_ENABLED=false
+
+    # The setup-managed credential exists only to bootstrap DPF. A non-DPF
+    # rerun must not adopt a leftover Secret or force local credential
+    # ownership onto Core.
+    if ! "${INSTALL_DPF}"; then
+        return 0
+    fi
+
+    if [[ -n "${_configured_secret}" && \
+          "${_configured_secret}" != "${_BMC_V0_BOOTSTRAP_SECRET_NAME}" ]]; then
+        if [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+            echo "Error: NICO_DPF_BMC_ROOT_PASSWORD cannot replace the configured credential-file Secret '${_configured_secret}'." >&2
+            echo "  Add bmc_site_wide_root to that Secret and omit the environment variable." >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    if ! _secret_json="$(kubectl get secret "${_BMC_V0_BOOTSTRAP_SECRET_NAME}" \
+            -n nico-system --ignore-not-found -o json)"; then
+        echo "Error: could not inspect Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME}." >&2
+        return 1
+    fi
+
+    if [[ -n "${_secret_json}" ]]; then
+        _purpose="$(jq -r \
+            '.metadata.annotations["nico.nvidia.com/credential-purpose"] // ""' \
+            <<< "${_secret_json}")"
+        if [[ "${_purpose}" != "${_BMC_V0_BOOTSTRAP_PURPOSE}" ]]; then
+            if [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+                echo "Error: Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME} exists but is not managed by setup.sh." >&2
+                echo "  Rename it, configure it explicitly without NICO_DPF_BMC_ROOT_PASSWORD, or remove it after verifying it is unused." >&2
+                return 1
+            fi
+            return 0
+        fi
+
+        if ! _encoded_credentials="$(jq -er \
+                --arg key "${_BMC_V0_BOOTSTRAP_SECRET_KEY}" \
+                '.data[$key] | strings' <<< "${_secret_json}")" || \
+           [[ -z "${_encoded_credentials}" ]] || \
+           ! _existing_password_b64="$(printf '%s' "${_encoded_credentials}" | base64 -d | \
+                jq -jer 'select(.bmc_site_wide_root.username == "admin") | .bmc_site_wide_root.password | strings | select(length > 0)' | \
+                base64 | tr -d '\n')" || \
+           [[ -z "${_existing_password_b64}" ]]; then
+            echo "Error: setup-managed Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME} is malformed." >&2
+            return 1
+        fi
+        if [[ -n "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+            _bootstrap_password_b64="$(printf '%s' "${_BMC_V0_BOOTSTRAP_PASSWORD}" | \
+                base64 | tr -d '\n')"
+            if [[ "${_existing_password_b64}" != "${_bootstrap_password_b64}" ]]; then
+                echo "Error: NICO_DPF_BMC_ROOT_PASSWORD differs from the existing setup-managed version-0 credential." >&2
+                echo "  setup.sh will not replace a credential that managed hardware may already use." >&2
+                return 1
+            fi
+        fi
+
+        _BMC_V0_BOOTSTRAP_ENABLED=true
+        echo "Reusing setup-managed site-wide BMC version-0 Secret"
+        return 0
+    fi
+
+    if [[ -n "${_configured_secret}" && -z "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]]; then
+        echo "Error: configured credential-file Secret nico-system/${_configured_secret} does not exist." >&2
+        echo "  Create it or set NICO_DPF_BMC_ROOT_PASSWORD so setup.sh can seed it." >&2
+        return 1
+    fi
+
+    [[ -z "${_BMC_V0_BOOTSTRAP_PASSWORD}" ]] && return 0
+
+    if ! printf '%s' "${_BMC_V0_BOOTSTRAP_PASSWORD}" | \
+        jq -Rs '{bmc_site_wide_root: {username: "admin", password: .}}' | \
+        kubectl create secret generic "${_BMC_V0_BOOTSTRAP_SECRET_NAME}" \
+            -n nico-system \
+            --from-file="${_BMC_V0_BOOTSTRAP_SECRET_KEY}=/dev/stdin" \
+            --dry-run=client -o json | \
+        jq --arg purpose "${_BMC_V0_BOOTSTRAP_PURPOSE}" '
+            .metadata.labels = ((.metadata.labels // {}) +
+                {"app.kubernetes.io/managed-by": "helm-prereqs"}) |
+            .metadata.annotations = ((.metadata.annotations // {}) +
+                {"nico.nvidia.com/credential-purpose": $purpose})
+        ' | kubectl create -f - >/dev/null; then
+        echo "Error: could not create Secret nico-system/${_BMC_V0_BOOTSTRAP_SECRET_NAME}." >&2
+        return 1
+    fi
+
+    _BMC_V0_BOOTSTRAP_ENABLED=true
+    echo "Created setup-managed site-wide BMC version-0 Secret"
+}
+
+_prepare_bmc_v0_bootstrap_secret() {
+    local _restore_xtrace=false
+    local _prepare_rc=0
+
+    # This function reads and decodes the credential. Keep the complete path
+    # out of bash xtrace even when setup runs with --debug.
+    if [[ "$-" == *x* ]]; then
+        set +x
+        _restore_xtrace=true
+    fi
+    _prepare_bmc_v0_bootstrap_secret_untraced "$@" || _prepare_rc=$?
+    if "${_restore_xtrace}"; then
+        set -x
+    fi
+    return "${_prepare_rc}"
+}
+
+_current_core_uses_setup_bmc_v0_secret() {
+    local _release_names=""
+    local _current_values=""
+    local _jq_rc=0
+
+    if ! _release_names="$(helm list \
+            --namespace nico-system --filter '^nico$' --short)"; then
+        echo "Error: could not inspect installed NICo Core releases." >&2
+        return 2
+    fi
+    [[ "${_release_names}" == "nico" ]] || return 1
+
+    if ! _current_values="$(helm get values nico \
+            --namespace nico-system --output json)"; then
+        echo "Error: could not inspect installed NICo Core values." >&2
+        return 2
+    fi
+    jq -e \
+        --arg name "${_BMC_V0_BOOTSTRAP_SECRET_NAME}" \
+        --arg key "${_BMC_V0_BOOTSTRAP_SECRET_KEY}" '
+            .["nico-api"].credentials.bmcSiteWideRootSource == "local" and
+            .["nico-api"].credentials.file.existingSecret.name == $name and
+            .["nico-api"].credentials.file.existingSecret.key == $key
+        ' <<< "${_current_values}" >/dev/null || _jq_rc=$?
+    case "${_jq_rc}" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *)
+            echo "Error: installed NICo Core values are not valid JSON." >&2
+            return 2
+            ;;
+    esac
+}
+
+_cleanup_legacy_dpf_bootstrap_credentials() {
+    local _job_rc=0
+    local _secret_rc=0
+
+    # Stop the credential Job first: a still-running pod holds the BMC password
+    # in its environment, so it must be gone before its source Secrets.
+    kubectl delete job dpf-set-bmc-root -n nico-system \
+        --ignore-not-found --wait=true --timeout=60s >/dev/null || _job_rc=$?
+    kubectl delete secret dpf-bmc-root-pw dpf-admincli-cert -n nico-system \
+        --ignore-not-found >/dev/null || _secret_rc=$?
+
+    if (( _job_rc != 0 )); then
+        return "${_job_rc}"
+    fi
+    return "${_secret_rc}"
+}
 
 _on_failure() {
     local _rc=$?
     local _cmd="${BASH_COMMAND}"
-    # Always remove the DPF two-phase rendered-values tempfiles (they hold the
-    # full site config) and the freshly issued admin client key/cert, regardless
-    # of success or failure. Runs on every EXIT, so the private key is wiped even
-    # when errexit aborts _dpf_set_bmc_root before its own explicit cleanup.
-    rm -f "${_DPF_ON_VALUES:-}" "${_DPF_OFF_VALUES:-}" 2>/dev/null || true
-    rm -rf "${_DPF_CERT_JSON:-}" "${_DPF_CERT_DIR:-}" 2>/dev/null || true
-    # Drop the ephemeral BMC-root + admin-cert Secrets if a mid-run errexit
-    # skipped _dpf_set_bmc_root's own cleanup — the plaintext site-wide BMC
-    # password must never linger in the cluster after setup exits.
-    if [[ "${INSTALL_DPF:-false}" == "true" ]]; then
-        # Stop the credential Job first: a still-running pod holds the BMC
-        # password in its environment, so it must be gone before (not after)
-        # its source Secrets are removed.
-        kubectl delete job dpf-set-bmc-root -n nico-system \
-            --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
-        kubectl delete secret dpf-bmc-root-pw dpf-admincli-cert -n nico-system \
-            --ignore-not-found >/dev/null 2>&1 || true
+    # Always remove the rendered DPF values tempfile (it holds the full site
+    # config), regardless of success or failure.
+    rm -f "${_DPF_VALUES:-}" 2>/dev/null || true
+    if [[ "${_LEGACY_DPF_BOOTSTRAP_CLEANED:-false}" != "true" ]]; then
+        _cleanup_legacy_dpf_bootstrap_credentials >/dev/null 2>&1 || true
     fi
     # Restore Kamaji's DataStore webhook to Fail if a mid-run errexit left it
     # relaxed to Ignore during the deadlock break — never exit fail-open.
@@ -875,6 +1117,12 @@ echo "Vault AppRole credentials ready"
 #     targets the dpf-operator-system namespace created here.
 #     See docs/manuals/dpf.md for the full background.
 # ---------------------------------------------------------------------------
+# Remove credentials left by an obsolete two-phase DPF bootstrap that was
+# interrupted before its EXIT trap could run. The old Job must be gone before
+# its source Secrets so no surviving pod keeps either credential in memory.
+_cleanup_legacy_dpf_bootstrap_credentials
+_LEGACY_DPF_BOOTSTRAP_CLEANED=true
+
 if "${INSTALL_DPF}"; then
     _SETUP_PHASE="[5b] DPF operator stack"
     echo "=== [5b] DPF (DOCA Platform Framework) ${NICO_DPF_VERSION} ==="
@@ -1117,156 +1365,13 @@ if "${INSTALL_DPF}"; then
         sleep 10
     done
 
-    # 5b.8 [dpf] is NOT enabled in the Core config here. The two-phase approach
-    #      (Core DPF-off first, then DPF-on after phase 6b) lets setup.sh call
-    #      nico-admin-cli to set the BMC root credential while carbide-api is
-    #      already up. carbide-api can start with DPF enabled even when the
-    #      credential is absent (#4167), but setting it before enabling DPF
-    #      ensures DPU provisioning begins immediately without waiting for the
-    #      first 60 s refresh tick.
-    echo "DPF stack installed (carbide-api DPF enablement happens after Core in phase 6)"
+    # 5b.8 Core is deployed with [dpf] enabled after these prerequisites exist.
+    #      carbide-api can initialize DPF without the site-wide BMC root and its
+    #      refresh task writes bmc-shared-password after the credential appears.
+    echo "DPF stack installed (Core will start with carbide-api DPF enabled in phase 6)"
 else
     echo "Skipping DPF (--skip-dpf / NICO_SKIP_DPF=true). DPUs, if any, use the deprecated iPXE path."
 fi
-
-# ---------------------------------------------------------------------------
-# Set the site-wide BMC root password via nico-admin-cli. Used by phase 6b.
-# Issues a short-lived admin client cert from the nicoca PKI (per
-# docs/provisioning/ingesting-hosts.md), then runs the CLI (bundled in the
-# NICo image at /opt/carbide/nico-admin-cli) as an in-cluster Job that reaches
-# carbide-api through its external LoadBalancer, verifying TLS with the
-# issued CA and authenticating with the client cert.
-# ---------------------------------------------------------------------------
-_dpf_set_bmc_root() {
-    local _hostname _lbip _vault_token
-    # `|| true` so a no-match grep (nothing to resolve) doesn't trip `set -e`
-    # via pipefail before the guard below can report a clean error.
-    # Strip an inline YAML "# comment" before quotes/space so a value left with
-    # the shipped trailing comment (hostname: "api.foo" # REQUIRED: ...) doesn't
-    # bleed the comment text into the hostname (which would break API_URL and the
-    # Job hostAliases). Matches preflight's _strip_comments.
-    _hostname="$( { grep -E '^[[:space:]]+hostname:' "${_CORE_VALUES_FILE}" | head -1 \
-        | sed -E "s/.*hostname:[[:space:]]*//; s/[[:space:]]+#.*$//; s/[\"']//g" | tr -d '[:space:]'; } || true)"
-    _lbip="$(kubectl get svc nico-api-external -n nico-system \
-        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
-    if [[ -z "${_hostname}" || -z "${_lbip}" ]]; then
-        echo "ERROR: could not resolve nico-api hostname (${_hostname:-?}) or LB IP (${_lbip:-?})"
-        return 1
-    fi
-    echo "Setting site-wide BMC root password (api ${_hostname} -> ${_lbip})..."
-
-    # 1. Issue a short-lived admin client cert from the nicoca PKI.
-    _vault_token="$(kubectl -n "${VAULT_NS}" get secret vaultroottoken \
-        -o jsonpath='{.data.token}' | base64 -d)"
-    # Script-global (not local) so the EXIT trap wipes the private key if we
-    # fail before the explicit cleanup below — errexit skips the rest of the fn.
-    _DPF_CERT_JSON="$(mktemp)"; _DPF_CERT_DIR="$(mktemp -d)"
-    # Feed the Vault ROOT token via stdin, never as an exec argument: kubectl
-    # encodes argv into the API-server audit log (requestURI) and it surfaces in
-    # vault-0's process list, exposing the full-privilege root token. `read`
-    # pulls it from stdin inside the pod; the CN (not secret) rides in as $1.
-    printf '%s\n' "${_vault_token}" | kubectl -n "${VAULT_NS}" exec -i vault-0 -- \
-        sh -c 'read -r VAULT_TOKEN; export VAULT_TOKEN VAULT_SKIP_VERIFY=true
-               vault write -format=json nicoca/issue/nico-cluster \
-                 common_name="$1" ttl=1h' _ "${_hostname}" > "${_DPF_CERT_JSON}"
-    jq -r '.data.certificate' "${_DPF_CERT_JSON}" > "${_DPF_CERT_DIR}/client.crt"
-    jq -r '.data.private_key' "${_DPF_CERT_JSON}" > "${_DPF_CERT_DIR}/client.key"
-    jq -r '.data.issuing_ca'  "${_DPF_CERT_JSON}" > "${_DPF_CERT_DIR}/ca.crt"
-    kubectl create secret generic dpf-admincli-cert -n nico-system \
-        --from-file=client.crt="${_DPF_CERT_DIR}/client.crt" \
-        --from-file=client.key="${_DPF_CERT_DIR}/client.key" \
-        --from-file=ca.crt="${_DPF_CERT_DIR}/ca.crt" \
-        --dry-run=client -o yaml | kubectl apply -f -
-    kubectl create secret generic dpf-bmc-root-pw -n nico-system \
-        --from-file=password=<(printf '%s' "${NICO_DPF_BMC_ROOT_PASSWORD}") \
-        --dry-run=client -o yaml | kubectl apply -f -
-    rm -rf "${_DPF_CERT_JSON}" "${_DPF_CERT_DIR}"; _DPF_CERT_JSON=""; _DPF_CERT_DIR=""
-
-    # 2. Run nico-admin-cli as a Job against carbide-api's external endpoint.
-    kubectl delete job dpf-set-bmc-root -n nico-system --ignore-not-found >/dev/null 2>&1
-    kubectl apply -f - <<EOF
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: dpf-set-bmc-root
-  namespace: nico-system
-spec:
-  backoffLimit: 3
-  # Hard-bound the Job so a stuck/retrying pod can't keep the BMC password in
-  # its environment past the poll deadline below.
-  activeDeadlineSeconds: 180
-  ttlSecondsAfterFinished: 600
-  template:
-    spec:
-      restartPolicy: Never
-      imagePullSecrets:
-        - name: imagepullsecret
-      hostAliases:
-        - ip: "${_lbip}"
-          hostnames: ["${_hostname}"]
-      volumes:
-        - name: cert
-          secret:
-            secretName: dpf-admincli-cert
-      containers:
-        - name: admincli
-          image: "${NICO_IMAGE_REGISTRY}/nvmetal-carbide:${NICO_CORE_IMAGE_TAG}"
-          command: ["/opt/carbide/nico-admin-cli"]
-          args:
-            - credential
-            - add-bmc
-            - --kind=site-wide-root
-            - --username=admin
-            - --password=\$(BMC_ROOT_PASSWORD)
-          env:
-            - name: API_URL
-              value: "https://${_hostname}:443"
-            - name: ROOT_CA_PATH
-              value: /certs/ca.crt
-            - name: CLIENT_CERT_PATH
-              value: /certs/client.crt
-            - name: CLIENT_KEY_PATH
-              value: /certs/client.key
-            - name: BMC_ROOT_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: dpf-bmc-root-pw
-                  key: password
-          volumeMounts:
-            - name: cert
-              mountPath: /certs
-              readOnly: true
-EOF
-    # Poll for either terminal state so a failed Job (bad password, cert
-    # rejected) is caught immediately instead of burning the full timeout.
-    echo "Waiting for the BMC-root Job to complete..."
-    local _job_ok=false _deadline _s _f
-    _deadline=$(( $(date +%s) + 180 ))
-    while (( $(date +%s) < _deadline )); do
-        _s="$(kubectl get job dpf-set-bmc-root -n nico-system \
-            -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
-        _f="$(kubectl get job dpf-set-bmc-root -n nico-system \
-            -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
-        [[ "${_s}" == "1" ]] && { _job_ok=true; break; }
-        [[ "${_f}" == "True" ]] && break
-        sleep 3
-    done
-    if [[ "${_job_ok}" != "true" ]]; then
-        echo "ERROR: nico-admin-cli BMC-root Job did not complete. Recent logs:"
-        kubectl logs job/dpf-set-bmc-root -n nico-system --tail=40 2>/dev/null || true
-        # Delete (and wait for) the Job so no pod keeps the BMC password in its
-        # environment before we remove the Secrets below.
-        kubectl delete job dpf-set-bmc-root -n nico-system \
-            --ignore-not-found --wait=true >/dev/null 2>&1 || true
-    fi
-    # Always remove the plaintext BMC password + client-cert secrets — on the
-    # failure path too, so the site-wide BMC password never lingers in the
-    # cluster after a failed enablement.
-    kubectl delete secret dpf-bmc-root-pw dpf-admincli-cert -n nico-system \
-        --ignore-not-found >/dev/null 2>&1
-    [[ "${_job_ok}" == "true" ]] || return 1
-    echo "Site-wide BMC root password set."
-}
 
 if ! "${SKIP_CORE}"; then
     # Create imagepullsecret in nico-system so the API migrate hook can pull its
@@ -1446,33 +1551,22 @@ else
     _CORE_VALUES_ARG="${CORE_VALUES:-helm-prereqs/values/nico-core.yaml}"
 
     if "${INSTALL_DPF}"; then
-        # Two-phase DPF enablement: Core is deployed with DPF OFF first so that
-        # carbide-api is running when setup.sh tries to set the site-wide BMC
-        # root credential via nico-admin-cli (phase 6b). If the credential is
-        # not provided here the password step is skipped and DPF-on is still
-        # deployed — carbide-api tolerates a missing credential at startup
-        # (#4167) and writes the K8s Secret on the next refresh tick once the
-        # operator sets the credential manually. Build both value files.
-        _DPF_ON_VALUES="$(mktemp -t nico-core-dpf-on.XXXXXX)"
-        _DPF_OFF_VALUES="$(mktemp -t nico-core-dpf-off.XXXXXX)"
+        # Render one DPF-enabled values file. carbide-api's production DPF SDK
+        # always runs a 60 s BMC credential refresh. local_first/backend may
+        # start without the site-wide BMC root, but DPUDevice registration waits
+        # until the refresh publishes bmc-shared-password. Authoritative local
+        # mode requires version 0 before startup when v0 is current or the
+        # current target cannot be resolved.
+        _DPF_VALUES="$(mktemp -t nico-core-dpf.XXXXXX)"
         if [[ -n "${CORE_VALUES}" ]]; then
             # --core-values is expected to carry a [dpf] block with enabled=true.
-            cp "${_CORE_VALUES_FILE}" "${_DPF_ON_VALUES}"
+            cp "${_CORE_VALUES_FILE}" "${_DPF_VALUES}"
         else
             # default file: the [dpf] block ships '#dpf# '-commented; uncomment it.
-            sed -E 's/^([[:space:]]*)#dpf# ?/\1/' "${_CORE_VALUES_FILE}" > "${_DPF_ON_VALUES}"
+            sed -E 's/^([[:space:]]*)#dpf# ?/\1/' "${_CORE_VALUES_FILE}" > "${_DPF_VALUES}"
         fi
-        # DPF-OFF = DPF-ON with the [dpf] section's own `enabled` forced to false.
-        # Only the direct [dpf] key is targeted: entering any other top-level
-        # [section] clears the in-block state so we never flip a later
-        # section's `enabled` when [dpf] has no inline `enabled =` of its own.
-        awk '
-            /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { indpf = ($0 ~ /^[[:space:]]*\[dpf\][[:space:]]*$/) ? 1 : 0 }
-            indpf==1 && /^[[:space:]]*enabled[[:space:]]*=/ { sub(/=[[:space:]]*true/, "= false"); indpf=0 }
-            { print }
-        ' "${_DPF_ON_VALUES}" > "${_DPF_OFF_VALUES}"
 
-        # Inject per-service chart-version overrides into both value files.
+        # Inject per-service chart-version overrides into the rendered values.
         # These let operators (and QA) pin NICo-owned DPF service charts to a
         # published version when testing a dev/PR image whose baked-in version
         # does not exist in the registry.
@@ -1532,14 +1626,13 @@ else
             ' "${file}" > "${file}.tmp" && mv "${file}.tmp" "${file}"
             rm -f "${_inject_file}"
         }
-        _dpf_inject_service_overrides "${_DPF_ON_VALUES}"
-        _dpf_inject_service_overrides "${_DPF_OFF_VALUES}"
+        _dpf_inject_service_overrides "${_DPF_VALUES}"
 
-        # Guard against a silent no-op: if the ON values don't actually enable
+        # Guard against a silent no-op: if the rendered values don't enable
         # [dpf] (e.g. --core-values with no/commented [dpf] block, or an inline
-        # [dpf] table the toggle can't read), the two-phase flow would deploy
-        # Core, "enable" nothing, restart, and falsely report success while
-        # carbide-api runs DPF-off. Fail early with an actionable message.
+        # [dpf] table the check can't read), setup would falsely report success
+        # while carbide-api runs without DPF. Fail early with an actionable
+        # message.
         _dpf_site_enabled() {   # prints the [dpf] section's `enabled` value, or "absent"
             awk '
                 /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { indpf = ($0 ~ /^[[:space:]]*\[dpf\][[:space:]]*$/) ? 1 : 0 }
@@ -1551,7 +1644,7 @@ else
                 END { if (!found) print "absent" }
             ' "$1"
         }
-        if [[ "$(_dpf_site_enabled "${_DPF_ON_VALUES}")" != "true" ]]; then
+        if [[ "$(_dpf_site_enabled "${_DPF_VALUES}")" != "true" ]]; then
             echo "Error: DPF is enabled (the default), but the site config has no '[dpf]' table with"
             echo "  'enabled = true' on its own line."
             if [[ -n "${CORE_VALUES}" ]]; then
@@ -1562,40 +1655,7 @@ else
             fi
             exit 1
         fi
-        if [[ "$(_dpf_site_enabled "${_DPF_OFF_VALUES}")" == "true" ]]; then
-            echo "Error: could not disable [dpf] for the first-phase (DPF-off) Core deploy."
-            echo "  Write [dpf] as a standard table header with 'enabled = true' on its own line."
-            exit 1
-        fi
-
-        # Idempotent re-run: if the LIVE site config already has DPF enabled (a
-        # prior run reached phase 6b), carbide-api is already up with the site-wide
-        # BMC root set. Re-running the DPF-OFF phase would rewrite the ConfigMap to
-        # enabled=false and — if phase 6b then failed — leave the site DPF-disabled
-        # on the next pod restart ([dpf] is read only at startup). So detect that
-        # state and deploy DPF-ON directly, skipping the down-cycle and BMC step.
-        # The live ConfigMap's [dpf].enabled=true is only ever persisted by phase
-        # 6b's DPF-ON upgrade, which runs strictly AFTER _dpf_set_bmc_root sets the
-        # site-wide BMC root — so enabled=true alone implies BMC is set. Detect it
-        # from the ConfigMap ONLY: gating on live pod health would false-negative
-        # during a healthy in-progress rollout and wrongly re-run the destructive
-        # down-cycle this check exists to prevent. (A fresh install has no such
-        # ConfigMap; a prior run that failed before phase 6b left it enabled=false.)
-        _dpf_already_on=false
-        _live_site_toml="$(kubectl get configmap nico-api-site-config-files -n nico-system \
-            -o jsonpath='{.data.nico-api-site-config\.toml}' 2>/dev/null || true)"
-        if [[ -n "${_live_site_toml}" ]] \
-           && [[ "$(_dpf_site_enabled <(printf '%s\n' "${_live_site_toml}"))" == "true" ]]; then
-            _dpf_already_on=true
-        fi
-        if "${_dpf_already_on}"; then
-            echo "DPF already enabled in the live site config — skipping the DPF-off down-cycle;"
-            echo "the BMC-root credential is refreshed in phase 6b (idempotent re-run)."
-            _CORE_VALUES_ARG="${_DPF_ON_VALUES}"
-        else
-            # Deploy the DPF-OFF version in this phase; phase 6b upgrades to DPF-ON.
-            _CORE_VALUES_ARG="${_DPF_OFF_VALUES}"
-        fi
+        _CORE_VALUES_ARG="${_DPF_VALUES}"
     fi
 
     NICO_CORE_CMD=(
@@ -1610,6 +1670,21 @@ else
         # Create the nico-api-dpf Role/RoleBinding in dpf-operator-system so
         # carbide-api can manage DPF CRs (chart template dpf-rbac.yaml).
         NICO_CORE_CMD+=(--set "nico-api.dpf.rbacCreate=true")
+    elif _current_core_uses_setup_bmc_v0_secret; then
+        # `--skip-dpf` controls DPF installation; it must not silently remove
+        # a credential mount already used by Core. Preserve only the exact
+        # active setup configuration, not a merely existing Secret that Core
+        # has never adopted. Do this before rendering the manual command too.
+        _BMC_V0_BOOTSTRAP_ENABLED=true
+        echo "Preserving installed setup-managed site-wide BMC version-0 configuration"
+    else
+        _current_bmc_rc=$?
+        if (( _current_bmc_rc != 1 )); then
+            exit "${_current_bmc_rc}"
+        fi
+    fi
+    if "${_BMC_V0_BOOTSTRAP_ENABLED}"; then
+        _append_bmc_v0_core_values
     fi
     _NICO_CORE_CMD_DISPLAY=""
     for _arg in "${NICO_CORE_CMD[@]}"; do
@@ -1665,66 +1740,37 @@ else
         echo ""
     fi
     if [[ "${_reply:-Y}" =~ ^[Yy]$ ]]; then
+        if "${INSTALL_DPF}"; then
+            # Do not inspect or persist the bootstrap credential until the
+            # operator has accepted the Core deployment. A declined DPF run
+            # leaves any existing Secret and ownership mode alone.
+            _CONFIGURED_CREDENTIAL_FILE_SECRET="$(_nico_api_credential_file_secret_name \
+                "${_CORE_VALUES_FILE}")"
+            _prepare_bmc_v0_bootstrap_secret "${_CONFIGURED_CREDENTIAL_FILE_SECRET}"
+            if "${_BMC_V0_BOOTSTRAP_ENABLED}"; then
+                _append_bmc_v0_core_values
+            fi
+        fi
         _SETUP_PHASE="[6/6] NICo Core"
         echo "=== [6/6] NICo Core ==="
+        # The nico-api chart hashes its ConfigMap inputs into the pod
+        # template. A rerun with an unchanged image but changed site config
+        # therefore performs the required rollout within this single Helm
+        # upgrade; an unchanged rerun does not restart Core.
         (cd "${SCRIPT_DIR}/.." && "${NICO_CORE_CMD[@]}")
 
-        # -------------------------------------------------------------------
-        # 6b. DPF enablement in carbide-api. Core is up with DPF OFF; now set
-        #     the site-wide BMC root password (required by the DPF SDK) via
-        #     nico-admin-cli, then upgrade Core to DPF ON, which rolls
-        #     carbide-api so it initializes the DPF SDK.
-        # -------------------------------------------------------------------
-        if "${INSTALL_DPF}" && "${_dpf_already_on:-false}"; then
-            # Skip the destructive DPF-off down-cycle. If a BMC root password
-            # was supplied (e.g. a rotation), reconcile it via nico-admin-cli;
-            # otherwise carbide-api's 60 s refresh task will pick it up from
-            # Vault automatically — no action needed here.
-            _SETUP_PHASE="[6b] DPF already enabled — refreshing BMC-root credential"
-            echo "=== [6b] DPF already enabled — refreshing BMC-root credential ==="
-            kubectl rollout status deployment/nico-api -n nico-system --timeout=300s
-            if [[ -n "${NICO_DPF_BMC_ROOT_PASSWORD}" ]]; then
-                _dpf_set_bmc_root
-            else
-                echo "NICO_DPF_BMC_ROOT_PASSWORD not set — skipping BMC-root reconcile (carbide-api refresh task handles rotation automatically)."
-            fi
-        elif "${INSTALL_DPF}"; then
-            _SETUP_PHASE="[6b] DPF enablement"
-            echo "=== [6b] Enabling DPF in carbide-api ==="
-            kubectl rollout status deployment/nico-api -n nico-system --timeout=300s
-            if [[ -n "${NICO_DPF_BMC_ROOT_PASSWORD}" ]]; then
-                _dpf_set_bmc_root
-            else
-                echo "NICO_DPF_BMC_ROOT_PASSWORD not set — skipping BMC-root credential setup."
-                echo "Set the site-wide BMC root via: nico-admin-cli credential add-bmc --kind=site-wide-root --password='<password>'"
-                echo "carbide-api will pick it up within 60 s of it being set."
-            fi
-            echo "Upgrading NICo Core to enable [dpf]..."
-            (cd "${SCRIPT_DIR}/.." && helm upgrade --install nico ./helm \
-                --namespace nico-system -f "${_DPF_ON_VALUES}" \
-                --set-string "global.image.repository=${NICO_IMAGE_REGISTRY}/nvmetal-carbide" \
-                --set-string "global.image.tag=${NICO_CORE_IMAGE_TAG}" \
-                --set "nico-api.dpf.rbacCreate=true" \
-                --timeout 600s --wait)
-            # The helm upgrade only rewrites the site-config ConfigMap; the
-            # nico-api pod template is unchanged, so it does NOT roll on its own
-            # and carbide-api keeps its in-memory DPF-off config ([dpf] is read
-            # at startup only). Force a restart so it re-reads [dpf].enabled=true
-            # and creates the DPF init objects (BFB, DPUFlavor, DPUDeployment).
-            echo "Restarting carbide-api so it reads the DPF-enabled config..."
-            kubectl rollout restart deployment/nico-api -n nico-system
-            kubectl rollout status deployment/nico-api -n nico-system --timeout=300s
-            echo "DPF enabled in carbide-api"
+        if "${INSTALL_DPF}"; then
+            echo "DPF is enabled. DPU provisioning waits until the site-wide BMC root"
+            echo "is available from the watched credential file or persistent backend."
+            echo "See docs/manuals/dpf.md §3.6 for the supported credential workflows."
         fi
         _CORE_INSTALLED_THIS_RUN=true
     elif "${INSTALL_DPF}"; then
-        # The DPF path deploys from a mktemp values file that the EXIT trap
-        # deletes, and enablement is a two-phase flow (deploy DPF-off, set the
-        # site-wide BMC root password, re-deploy DPF-on) that can't be reduced to
-        # a single command — so point back at setup.sh rather than print a stale
-        # helm command the operator can't actually run.
-        echo "Skipped. Re-run setup.sh to deploy NICo Core (DPF enablement is a two-phase"
-        echo "flow driven by this script), or pass --skip-dpf to deploy without DPF."
+        # The DPF path deploys from a rendered mktemp values file that the EXIT
+        # trap deletes, so point back at setup.sh rather than print a command
+        # whose values path will no longer exist.
+        echo "Skipped. Re-run setup.sh to deploy NICo Core with DPF enabled,"
+        echo "or pass --skip-dpf to deploy without DPF."
     else
         echo "Skipped. To deploy manually, run from $(dirname "${SCRIPT_DIR}"):"
         echo "  ${_NICO_CORE_CMD_DISPLAY}"

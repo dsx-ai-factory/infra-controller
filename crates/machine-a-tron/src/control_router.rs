@@ -24,7 +24,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
 use bmc_mock::injection::{InjectionStore, Rule, RuleId};
-use bmc_mock::{HardwareType, MockPowerState, RackPlacement, SystemPowerControl, TrayPlacement};
+use bmc_mock::{HardwareType, MockPowerState, RackPlacement, ResourceResetType, TrayPlacement};
 use carbide_uuid::rack::RackId;
 use chrono::{SecondsFormat, Utc};
 use mac_address::MacAddress;
@@ -283,17 +283,17 @@ impl RmsInventory for ControlState {
 
 /// The Redfish reset an RMS power operation stands for; RMS documents `RESET`
 /// as a power cycle and `OFF` as a graceful shutdown.
-fn power_control_for(op: PowerOperation) -> eyre::Result<SystemPowerControl> {
+fn power_control_for(op: PowerOperation) -> eyre::Result<ResourceResetType> {
     Ok(match op {
         PowerOperation::Unspecified => eyre::bail!("power operation is unspecified"),
-        PowerOperation::On | PowerOperation::ForceOn => SystemPowerControl::On,
+        PowerOperation::On | PowerOperation::ForceOn => ResourceResetType::On,
         PowerOperation::Off | PowerOperation::GracefulShutdown => {
-            SystemPowerControl::GracefulShutdown
+            ResourceResetType::GracefulShutdown
         }
-        PowerOperation::ForceOff => SystemPowerControl::ForceOff,
-        PowerOperation::Reset => SystemPowerControl::PowerCycle,
-        PowerOperation::GracefulRestart => SystemPowerControl::GracefulRestart,
-        PowerOperation::ForceRestart => SystemPowerControl::ForceRestart,
+        PowerOperation::ForceOff => ResourceResetType::ForceOff,
+        PowerOperation::Reset => ResourceResetType::PowerCycle,
+        PowerOperation::GracefulRestart => ResourceResetType::GracefulRestart,
+        PowerOperation::ForceRestart => ResourceResetType::ForceRestart,
     })
 }
 

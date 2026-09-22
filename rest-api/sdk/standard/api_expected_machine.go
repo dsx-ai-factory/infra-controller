@@ -181,7 +181,7 @@ type ApiBatchUpdateExpectedMachinesRequest struct {
 	expectedMachineUpdateRequest *[]ExpectedMachineUpdateRequest
 }
 
-// Array of Expected Machine update requests
+// Array of Expected Machine update requests.  Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Every item must use the same field set except bmcIpAddress; values may differ between items.
 func (r ApiBatchUpdateExpectedMachinesRequest) ExpectedMachineUpdateRequest(expectedMachineUpdateRequest []ExpectedMachineUpdateRequest) ApiBatchUpdateExpectedMachinesRequest {
 	r.expectedMachineUpdateRequest = &expectedMachineUpdateRequest
 	return r
@@ -1326,7 +1326,7 @@ type ApiUpdateExpectedMachineRequest struct {
 	expectedMachineUpdateRequest *ExpectedMachineUpdateRequest
 }
 
-// Expected Machine update request
+// Expected Machine update request.  Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
 func (r ApiUpdateExpectedMachineRequest) ExpectedMachineUpdateRequest(expectedMachineUpdateRequest ExpectedMachineUpdateRequest) ApiUpdateExpectedMachineRequest {
 	r.expectedMachineUpdateRequest = &expectedMachineUpdateRequest
 	return r

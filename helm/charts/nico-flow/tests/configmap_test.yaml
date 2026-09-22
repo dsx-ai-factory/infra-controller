@@ -62,12 +62,29 @@ tests:
       - failedTemplate:
           errorPattern: flowConfig.disableInventory must be a boolean \(true or false\); got "true"
 
-  - it: rejects a null boolean
+  - it: falls back to the default for a null key
     set:
       flowConfig.disableInventory: null
     asserts:
-      - failedTemplate:
-          errorPattern: flowConfig.disableInventory must be true or false; the key is missing or null
+      - matchRegex:
+          path: data["flowconfig.yaml"]
+          pattern: 'disable_inventory: false'
+
+  - it: renders the defaults when a reused 0.1.0 release carries no flowConfig block
+    set:
+      flowConfig: null
+    asserts:
+      - matchRegex:
+          path: data["flowconfig.yaml"]
+          pattern: 'inventory_run_frequency: "1m"'
+
+  - it: renders the defaults when a reused 0.2.x release carries the empty-string flowConfig default
+    set:
+      flowConfig: ""
+    asserts:
+      - matchRegex:
+          path: data["flowconfig.yaml"]
+          pattern: 'leak_detection_interval: "1m"'
 
   - it: rejects the 0.2.x raw-string flowConfig
     set:

@@ -588,6 +588,18 @@ WRN no machine-a-tron instances discovered
 Check that bmc-mock Services have the `nvidia-infra-controller/mat-service=true`
 label.
 
+### Pod Killed During Startup (Exit 137)
+
+```text
+Startup probe failed: dial tcp ...:1266: connect: connection refused
+```
+
+machine-a-tron binds its Redfish port only after it has registered every
+expected rack, host, switch, and power shelf with nico-api. The default
+`startupProbe` allows 120 x 30 s = 60 min. If registration takes longer,
+raise `startupProbe.failureThreshold` in your values file; the sizing rule is
+in the `startupProbe` comment in the chart's `values.yaml`.
+
 ### View Generated Config
 
 ```bash

@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::{
-    BmcCommand, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
-    SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
+    ActionError, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
+    ResourceResetType,
 };
 use carbide_network::virtualization::build_dual_stack_list;
 use carbide_uuid::machine::{DpuMachineId, InvalidMachineType, MachineId, MachineInterfaceId};
@@ -36,7 +36,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::api_client::{ClientApiError, DpuNetworkStatusArgs, MockDiscoveryData};
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{MachineATronContext, MachineConfig};
 use crate::dhcp_wrapper::{
     DhcpRelayError, DhcpRelayResult, DhcpRequestInfo, DhcpRequester, DhcpResponseInfo,
@@ -179,6 +179,16 @@ impl LiveStateCallbacks {
             command_channel,
         }
     }
+
+    pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        self.get_power_state().validate_reset_type(reset_type)?;
+        self.command_channel
+            .send(BmcCommand::SetSystemPower {
+                request: reset_type,
+                reply: None,
+            })
+            .map_err(|err| ActionError::Internal(err.into()))
+    }
 }
 
 impl Callbacks for LiveStateCallbacks {
@@ -186,16 +196,11 @@ impl Callbacks for LiveStateCallbacks {
         self.state.read().unwrap().power_state
     }
 
-    fn send_power_command(
+    async fn computer_system_reset(
         &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
-        self.command_channel
-            .send(BmcCommand::SetSystemPower {
-                request: reset_type,
-                reply: None,
-            })
-            .map_err(|err| SetSystemPowerError::CommandSendError(err.to_string()))
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.set_power_state(reset_type)
     }
 
     fn state_refresh_indication(&self) {
@@ -1346,17 +1351,25 @@ impl MachineStateMachine {
         Ok(())
     }
 
-    pub(super) fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
-        use SystemPowerControl::*;
+    pub(super) fn set_system_power(
+        &mut self,
+        request: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        use ResourceResetType::*;
         match request {
             On | ForceOn => self.fsm_event(Event::PowerOn),
-            GracefulRestart | ForceRestart | PowerCycle => self.fsm_event(Event::PowerCycle),
+            GracefulRestart | ForceRestart | PowerCycle | FullPowerCycle => {
+                self.fsm_event(Event::PowerCycle)
+            }
             GracefulShutdown => self.fsm_event(Event::PowerOffGraceful),
             ForceOff => self.fsm_event(Event::PowerOff),
-            PushPowerButton | Nmi | Suspend | Pause | Resume => {
-                let msg = format!("Machine-a-tron mock: unsupported power request {request:?}",);
+            PushPowerButton | Nmi | Suspend | Pause | Resume | Sleep | Hibernate
+            | UnsupportedValue => {
                 tracing::warn!(?request, "unsupported machine-a-tron mock power request",);
-                return Err(SetSystemPowerError::BadRequest(msg));
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "machine-a-tron mock: unsupported power request {:?}",
+                    request
+                )));
             }
         };
         self.update_live_state();

@@ -203,38 +203,28 @@ func TestStillReportedByCore(t *testing.T) {
 	}
 }
 
-func TestClearComponentLabelsIfSlotTaken(t *testing.T) {
+func TestComponentChassisSlotOwnedByOther(t *testing.T) {
 	owner := &model.Component{ID: uuid.New(), Manufacturer: "Foxconn", SerialNumber: "SN-1"}
 	flowByNaturalKey := map[string]*model.Component{
 		naturalKey("Foxconn", "SN-1"): owner,
 	}
 
-	t.Run("labels held by another component are dropped", func(t *testing.T) {
-		desired := model.Component{Manufacturer: "Foxconn", SerialNumber: "SN-1"}
-		clearComponentLabelsIfSlotTaken(&desired, flowByNaturalKey, uuid.New(), "Compute")
-		assert.Empty(t, desired.Manufacturer)
-		assert.Empty(t, desired.SerialNumber)
-	})
+	tests := []struct {
+		name    string
+		desired model.Component
+		want    bool
+	}{
+		{name: "pair held by another component", desired: model.Component{ID: uuid.New(), Manufacturer: "Foxconn", SerialNumber: "SN-1"}, want: true},
+		{name: "pair held by the desired component", desired: model.Component{ID: owner.ID, Manufacturer: "Foxconn", SerialNumber: "SN-1"}},
+		{name: "unclaimed pair", desired: model.Component{ID: uuid.New(), Manufacturer: "Wistron", SerialNumber: "SN-9"}},
+		{name: "half-populated pair", desired: model.Component{ID: uuid.New(), SerialNumber: "SN-1"}},
+	}
 
-	t.Run("the component already holding the pair keeps it", func(t *testing.T) {
-		desired := model.Component{Manufacturer: "Foxconn", SerialNumber: "SN-1"}
-		clearComponentLabelsIfSlotTaken(&desired, flowByNaturalKey, owner.ID, "Compute")
-		assert.Equal(t, "Foxconn", desired.Manufacturer)
-		assert.Equal(t, "SN-1", desired.SerialNumber)
-	})
-
-	t.Run("an unclaimed pair is kept", func(t *testing.T) {
-		desired := model.Component{Manufacturer: "Wistron", SerialNumber: "SN-9"}
-		clearComponentLabelsIfSlotTaken(&desired, flowByNaturalKey, uuid.Nil, "Compute")
-		assert.Equal(t, "Wistron", desired.Manufacturer)
-		assert.Equal(t, "SN-9", desired.SerialNumber)
-	})
-
-	t.Run("a half-populated pair occupies no slot and is left alone", func(t *testing.T) {
-		desired := model.Component{SerialNumber: "SN-1"}
-		clearComponentLabelsIfSlotTaken(&desired, flowByNaturalKey, uuid.Nil, "Compute")
-		assert.Equal(t, "SN-1", desired.SerialNumber)
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, componentChassisSlotOwnedByOther(flowByNaturalKey, &tc.desired))
+		})
+	}
 }
 
 func TestResolveRackID(t *testing.T) {
@@ -295,12 +285,14 @@ func TestDiffComponentFields(t *testing.T) {
 	rackB := uuid.New()
 	base := func() *model.Component {
 		return &model.Component{
-			Name:      "n",
-			Model:     "m",
-			SlotID:    1,
-			TrayIndex: 2,
-			HostID:    3,
-			RackID:    rackA,
+			Name:         "n",
+			Manufacturer: "maker",
+			SerialNumber: "serial",
+			Model:        "m",
+			SlotID:       1,
+			TrayIndex:    2,
+			HostID:       3,
+			RackID:       rackA,
 		}
 	}
 
@@ -354,12 +346,14 @@ func TestDiffComponentFields(t *testing.T) {
 	}
 
 	for name, mutate := range map[string]func(*model.Component){
-		"name":       func(c *model.Component) { c.Name = "n2" },
-		"model":      func(c *model.Component) { c.Model = "m2" },
-		"slot_id":    func(c *model.Component) { c.SlotID = 9 },
-		"tray_index": func(c *model.Component) { c.TrayIndex = 9 },
-		"host_id":    func(c *model.Component) { c.HostID = 9 },
-		"rack_id":    func(c *model.Component) { c.RackID = rackB },
+		"name":          func(c *model.Component) { c.Name = "n2" },
+		"manufacturer":  func(c *model.Component) { c.Manufacturer = "new-maker" },
+		"serial_number": func(c *model.Component) { c.SerialNumber = "new-serial" },
+		"model":         func(c *model.Component) { c.Model = "m2" },
+		"slot_id":       func(c *model.Component) { c.SlotID = 9 },
+		"tray_index":    func(c *model.Component) { c.TrayIndex = 9 },
+		"host_id":       func(c *model.Component) { c.HostID = 9 },
+		"rack_id":       func(c *model.Component) { c.RackID = rackB },
 	} {
 		t.Run("change in "+name+" is detected", func(t *testing.T) {
 			desired := base()
@@ -383,7 +377,7 @@ func TestDiffComponentFields(t *testing.T) {
 	})
 }
 
-func TestApplyComponentChanges_DoesNotTouchIdentityOrRuntimeFields(t *testing.T) {
+func TestApplyComponentChanges_ConvergesCoreFieldsWithoutTouchingIdentityOrRuntimeFields(t *testing.T) {
 	id := uuid.New()
 	rackA := uuid.New()
 	rackB := uuid.New()
@@ -403,9 +397,11 @@ func TestApplyComponentChanges_DoesNotTouchIdentityOrRuntimeFields(t *testing.T)
 		},
 	}
 	desired := &model.Component{
-		Name:   "new",
-		Model:  "new-model",
-		RackID: rackB,
+		Name:         "new",
+		Manufacturer: "Wistron",
+		SerialNumber: "SN-2",
+		Model:        "new-model",
+		RackID:       rackB,
 	}
 
 	applyComponentChanges(existing, desired, expectedComponentSpec{Description: "Core description"})
@@ -414,8 +410,8 @@ func TestApplyComponentChanges_DoesNotTouchIdentityOrRuntimeFields(t *testing.T)
 	assert.Equal(t, "new-model", existing.Model)
 	assert.Equal(t, rackB, existing.RackID)
 	assert.Equal(t, "Compute", existing.Type, "Type is identity; mirror must not touch")
-	assert.Equal(t, "Foxconn", existing.Manufacturer, "Manufacturer is identity")
-	assert.Equal(t, "SN-1", existing.SerialNumber, "SerialNumber is identity")
+	assert.Equal(t, "Wistron", existing.Manufacturer, "manufacturer is Core-owned metadata")
+	assert.Equal(t, "SN-2", existing.SerialNumber, "serial_number is Core-owned metadata")
 	require.NotNil(t, existing.ComponentID)
 	assert.Equal(t, "runtime-id", *existing.ComponentID, "external_id is runtime-owned")
 	assert.Equal(t, "10.0.0.2", existing.Description["nvos_ip"], "runtime-owned description entry must survive")

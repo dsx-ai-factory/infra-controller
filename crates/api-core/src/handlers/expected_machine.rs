@@ -39,8 +39,8 @@ use crate::handlers::static_address_metrics::{
 };
 
 lazy_static! {
-    // Verify what serial is alphanumeric string with, allows dashes '-' and underscores '_'
-    static ref CHASSIS_SERIAL_REGEX: Regex = Regex::new(r"^[A-Za-z0-9_-]{4,64}$").unwrap();
+    // Keep the maximum at 32 to match `expected_machines.serial_number`.
+    static ref CHASSIS_SERIAL_REGEX: Regex = Regex::new(r"^[A-Za-z0-9_-]{4,32}$").unwrap();
 }
 
 /// Returns one expected machine by database id or BMC MAC (from `ExpectedMachineRequest`).
@@ -350,7 +350,8 @@ impl TryFrom<rpc::PatchExpectedMachineRequest> for ExpectedMachinePatch {
             && !CHASSIS_SERIAL_REGEX.is_match(&patch.chassis_serial_number)
         {
             return Err(CarbideError::InvalidArgument(
-                "chassis serial is not formatted properly".to_string(),
+                "chassis serial must contain 4-32 ASCII letters, digits, hyphens, or underscores"
+                    .to_string(),
             ));
         }
         if fields.contains(UpdateField::FallbackDpuSerialNumbers)
@@ -1560,7 +1561,7 @@ mod tests {
         assert!(!CHASSIS_SERIAL_REGEX.is_match("A495122X5503847\r"));
         assert!(!CHASSIS_SERIAL_REGEX.is_match("ABC.123"));
 
-        let too_long = "A".repeat(65);
+        let too_long = "A".repeat(33);
         assert!(!CHASSIS_SERIAL_REGEX.is_match(&too_long));
     }
 

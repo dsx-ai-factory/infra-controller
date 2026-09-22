@@ -228,6 +228,7 @@ const (
 	Forge_RemoveRouteServers_FullMethodName                                 = "/forge.Forge/RemoveRouteServers"
 	Forge_ReplaceRouteServers_FullMethodName                                = "/forge.Forge/ReplaceRouteServers"
 	Forge_UpdateAgentReportedInventory_FullMethodName                       = "/forge.Forge/UpdateAgentReportedInventory"
+	Forge_ReportLldpNeighbors_FullMethodName                                = "/forge.Forge/ReportLldpNeighbors"
 	Forge_UpdateInstancePhoneHomeLastContact_FullMethodName                 = "/forge.Forge/UpdateInstancePhoneHomeLastContact"
 	Forge_SetHostUefiPassword_FullMethodName                                = "/forge.Forge/SetHostUefiPassword"
 	Forge_ClearHostUefiPassword_FullMethodName                              = "/forge.Forge/ClearHostUefiPassword"
@@ -270,6 +271,14 @@ const (
 	Forge_GetAllExpectedRacks_FullMethodName                                = "/forge.Forge/GetAllExpectedRacks"
 	Forge_ReplaceAllExpectedRacks_FullMethodName                            = "/forge.Forge/ReplaceAllExpectedRacks"
 	Forge_DeleteAllExpectedRacks_FullMethodName                             = "/forge.Forge/DeleteAllExpectedRacks"
+	Forge_AddExpectedRackGroup_FullMethodName                               = "/forge.Forge/AddExpectedRackGroup"
+	Forge_DeleteExpectedRackGroup_FullMethodName                            = "/forge.Forge/DeleteExpectedRackGroup"
+	Forge_UpdateExpectedRackGroup_FullMethodName                            = "/forge.Forge/UpdateExpectedRackGroup"
+	Forge_GetExpectedRackGroup_FullMethodName                               = "/forge.Forge/GetExpectedRackGroup"
+	Forge_FindExpectedRackGroupIds_FullMethodName                           = "/forge.Forge/FindExpectedRackGroupIds"
+	Forge_FindExpectedRackGroupsByIds_FullMethodName                        = "/forge.Forge/FindExpectedRackGroupsByIds"
+	Forge_ReplaceAllExpectedRackGroups_FullMethodName                       = "/forge.Forge/ReplaceAllExpectedRackGroups"
+	Forge_DeleteAllExpectedRackGroups_FullMethodName                        = "/forge.Forge/DeleteAllExpectedRackGroups"
 	Forge_AttestQuote_FullMethodName                                        = "/forge.Forge/AttestQuote"
 	Forge_CreateInstanceType_FullMethodName                                 = "/forge.Forge/CreateInstanceType"
 	Forge_FindInstanceTypeIds_FullMethodName                                = "/forge.Forge/FindInstanceTypeIds"
@@ -917,6 +926,8 @@ type ForgeClient interface {
 	ReplaceRouteServers(ctx context.Context, in *RouteServers, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(ctx context.Context, in *DpuAgentInventoryReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	ReportLldpNeighbors(ctx context.Context, in *LldpNeighborReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(ctx context.Context, in *InstancePhoneHomeLastContactRequest, opts ...grpc.CallOption) (*InstancePhoneHomeLastContactResponse, error)
 	// Set Host UEFI password
@@ -1010,6 +1021,17 @@ type ForgeClient interface {
 	ReplaceAllExpectedRacks(ctx context.Context, in *ExpectedRackList, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Delete all expected racks in site
 	DeleteAllExpectedRacks(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Expected Rack Group Management
+	AddExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	DeleteExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Replace the full record, including both lists and metadata.
+	UpdateExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	GetExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*ExpectedRackGroup, error)
+	FindExpectedRackGroupIds(ctx context.Context, in *ExpectedRackGroupSearchFilter, opts ...grpc.CallOption) (*ExpectedRackGroupIdList, error)
+	FindExpectedRackGroupsByIds(ctx context.Context, in *ExpectedRackGroupsByIdsRequest, opts ...grpc.CallOption) (*ExpectedRackGroupList, error)
+	// Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
+	ReplaceAllExpectedRackGroups(ctx context.Context, in *ExpectedRackGroupList, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	DeleteAllExpectedRackGroups(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Perform Attestation Procedure for Measured Boot
 	AttestQuote(ctx context.Context, in *AttestQuoteRequest, opts ...grpc.CallOption) (*AttestQuoteResponse, error)
 	// InstanceType
@@ -3524,6 +3546,16 @@ func (c *forgeClient) UpdateAgentReportedInventory(ctx context.Context, in *DpuA
 	return out, nil
 }
 
+func (c *forgeClient) ReportLldpNeighbors(ctx context.Context, in *LldpNeighborReport, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_ReportLldpNeighbors_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) UpdateInstancePhoneHomeLastContact(ctx context.Context, in *InstancePhoneHomeLastContactRequest, opts ...grpc.CallOption) (*InstancePhoneHomeLastContactResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InstancePhoneHomeLastContactResponse)
@@ -3938,6 +3970,86 @@ func (c *forgeClient) DeleteAllExpectedRacks(ctx context.Context, in *emptypb.Em
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_DeleteAllExpectedRacks_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) AddExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_AddExpectedRackGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) DeleteExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_DeleteExpectedRackGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) UpdateExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_UpdateExpectedRackGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*ExpectedRackGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectedRackGroup)
+	err := c.cc.Invoke(ctx, Forge_GetExpectedRackGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindExpectedRackGroupIds(ctx context.Context, in *ExpectedRackGroupSearchFilter, opts ...grpc.CallOption) (*ExpectedRackGroupIdList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectedRackGroupIdList)
+	err := c.cc.Invoke(ctx, Forge_FindExpectedRackGroupIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindExpectedRackGroupsByIds(ctx context.Context, in *ExpectedRackGroupsByIdsRequest, opts ...grpc.CallOption) (*ExpectedRackGroupList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectedRackGroupList)
+	err := c.cc.Invoke(ctx, Forge_FindExpectedRackGroupsByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ReplaceAllExpectedRackGroups(ctx context.Context, in *ExpectedRackGroupList, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_ReplaceAllExpectedRackGroups_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) DeleteAllExpectedRackGroups(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_DeleteAllExpectedRackGroups_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6860,6 +6972,8 @@ type ForgeServer interface {
 	ReplaceRouteServers(context.Context, *RouteServers) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(context.Context, *DpuAgentInventoryReport) (*emptypb.Empty, error)
+	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	ReportLldpNeighbors(context.Context, *LldpNeighborReport) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(context.Context, *InstancePhoneHomeLastContactRequest) (*InstancePhoneHomeLastContactResponse, error)
 	// Set Host UEFI password
@@ -6953,6 +7067,17 @@ type ForgeServer interface {
 	ReplaceAllExpectedRacks(context.Context, *ExpectedRackList) (*emptypb.Empty, error)
 	// Delete all expected racks in site
 	DeleteAllExpectedRacks(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
+	// Expected Rack Group Management
+	AddExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error)
+	DeleteExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*emptypb.Empty, error)
+	// Replace the full record, including both lists and metadata.
+	UpdateExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error)
+	GetExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*ExpectedRackGroup, error)
+	FindExpectedRackGroupIds(context.Context, *ExpectedRackGroupSearchFilter) (*ExpectedRackGroupIdList, error)
+	FindExpectedRackGroupsByIds(context.Context, *ExpectedRackGroupsByIdsRequest) (*ExpectedRackGroupList, error)
+	// Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
+	ReplaceAllExpectedRackGroups(context.Context, *ExpectedRackGroupList) (*emptypb.Empty, error)
+	DeleteAllExpectedRackGroups(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	// Perform Attestation Procedure for Measured Boot
 	AttestQuote(context.Context, *AttestQuoteRequest) (*AttestQuoteResponse, error)
 	// InstanceType
@@ -8024,6 +8149,9 @@ func (UnimplementedForgeServer) ReplaceRouteServers(context.Context, *RouteServe
 func (UnimplementedForgeServer) UpdateAgentReportedInventory(context.Context, *DpuAgentInventoryReport) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateAgentReportedInventory not implemented")
 }
+func (UnimplementedForgeServer) ReportLldpNeighbors(context.Context, *LldpNeighborReport) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportLldpNeighbors not implemented")
+}
 func (UnimplementedForgeServer) UpdateInstancePhoneHomeLastContact(context.Context, *InstancePhoneHomeLastContactRequest) (*InstancePhoneHomeLastContactResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateInstancePhoneHomeLastContact not implemented")
 }
@@ -8149,6 +8277,30 @@ func (UnimplementedForgeServer) ReplaceAllExpectedRacks(context.Context, *Expect
 }
 func (UnimplementedForgeServer) DeleteAllExpectedRacks(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteAllExpectedRacks not implemented")
+}
+func (UnimplementedForgeServer) AddExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddExpectedRackGroup not implemented")
+}
+func (UnimplementedForgeServer) DeleteExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteExpectedRackGroup not implemented")
+}
+func (UnimplementedForgeServer) UpdateExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedRackGroup not implemented")
+}
+func (UnimplementedForgeServer) GetExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*ExpectedRackGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetExpectedRackGroup not implemented")
+}
+func (UnimplementedForgeServer) FindExpectedRackGroupIds(context.Context, *ExpectedRackGroupSearchFilter) (*ExpectedRackGroupIdList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindExpectedRackGroupIds not implemented")
+}
+func (UnimplementedForgeServer) FindExpectedRackGroupsByIds(context.Context, *ExpectedRackGroupsByIdsRequest) (*ExpectedRackGroupList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindExpectedRackGroupsByIds not implemented")
+}
+func (UnimplementedForgeServer) ReplaceAllExpectedRackGroups(context.Context, *ExpectedRackGroupList) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReplaceAllExpectedRackGroups not implemented")
+}
+func (UnimplementedForgeServer) DeleteAllExpectedRackGroups(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteAllExpectedRackGroups not implemented")
 }
 func (UnimplementedForgeServer) AttestQuote(context.Context, *AttestQuoteRequest) (*AttestQuoteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AttestQuote not implemented")
@@ -12616,6 +12768,24 @@ func _Forge_UpdateAgentReportedInventory_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_ReportLldpNeighbors_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LldpNeighborReport)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReportLldpNeighbors(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReportLldpNeighbors_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReportLldpNeighbors(ctx, req.(*LldpNeighborReport))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_UpdateInstancePhoneHomeLastContact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(InstancePhoneHomeLastContactRequest)
 	if err := dec(in); err != nil {
@@ -13368,6 +13538,150 @@ func _Forge_DeleteAllExpectedRacks_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).DeleteAllExpectedRacks(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_AddExpectedRackGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroup)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AddExpectedRackGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AddExpectedRackGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AddExpectedRackGroup(ctx, req.(*ExpectedRackGroup))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_DeleteExpectedRackGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).DeleteExpectedRackGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_DeleteExpectedRackGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).DeleteExpectedRackGroup(ctx, req.(*ExpectedRackGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_UpdateExpectedRackGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroup)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).UpdateExpectedRackGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_UpdateExpectedRackGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).UpdateExpectedRackGroup(ctx, req.(*ExpectedRackGroup))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetExpectedRackGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetExpectedRackGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetExpectedRackGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetExpectedRackGroup(ctx, req.(*ExpectedRackGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindExpectedRackGroupIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroupSearchFilter)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindExpectedRackGroupIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindExpectedRackGroupIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindExpectedRackGroupIds(ctx, req.(*ExpectedRackGroupSearchFilter))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindExpectedRackGroupsByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroupsByIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindExpectedRackGroupsByIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindExpectedRackGroupsByIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindExpectedRackGroupsByIds(ctx, req.(*ExpectedRackGroupsByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ReplaceAllExpectedRackGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroupList)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReplaceAllExpectedRackGroups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReplaceAllExpectedRackGroups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReplaceAllExpectedRackGroups(ctx, req.(*ExpectedRackGroupList))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_DeleteAllExpectedRackGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).DeleteAllExpectedRackGroups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_DeleteAllExpectedRackGroups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).DeleteAllExpectedRackGroups(ctx, req.(*emptypb.Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -18725,6 +19039,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_UpdateAgentReportedInventory_Handler,
 		},
 		{
+			MethodName: "ReportLldpNeighbors",
+			Handler:    _Forge_ReportLldpNeighbors_Handler,
+		},
+		{
 			MethodName: "UpdateInstancePhoneHomeLastContact",
 			Handler:    _Forge_UpdateInstancePhoneHomeLastContact_Handler,
 		},
@@ -18891,6 +19209,38 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteAllExpectedRacks",
 			Handler:    _Forge_DeleteAllExpectedRacks_Handler,
+		},
+		{
+			MethodName: "AddExpectedRackGroup",
+			Handler:    _Forge_AddExpectedRackGroup_Handler,
+		},
+		{
+			MethodName: "DeleteExpectedRackGroup",
+			Handler:    _Forge_DeleteExpectedRackGroup_Handler,
+		},
+		{
+			MethodName: "UpdateExpectedRackGroup",
+			Handler:    _Forge_UpdateExpectedRackGroup_Handler,
+		},
+		{
+			MethodName: "GetExpectedRackGroup",
+			Handler:    _Forge_GetExpectedRackGroup_Handler,
+		},
+		{
+			MethodName: "FindExpectedRackGroupIds",
+			Handler:    _Forge_FindExpectedRackGroupIds_Handler,
+		},
+		{
+			MethodName: "FindExpectedRackGroupsByIds",
+			Handler:    _Forge_FindExpectedRackGroupsByIds_Handler,
+		},
+		{
+			MethodName: "ReplaceAllExpectedRackGroups",
+			Handler:    _Forge_ReplaceAllExpectedRackGroups_Handler,
+		},
+		{
+			MethodName: "DeleteAllExpectedRackGroups",
+			Handler:    _Forge_DeleteAllExpectedRackGroups_Handler,
 		},
 		{
 			MethodName: "AttestQuote",

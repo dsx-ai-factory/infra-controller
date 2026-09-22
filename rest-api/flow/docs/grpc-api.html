@@ -1000,6 +1000,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.LeakHandlingStatus"><span class="badge">E</span>LeakHandlingStatus</a>
+                </li>
+
+                <li>
                   <a href="#v1.LeakStatus"><span class="badge">E</span>LeakStatus</a>
                 </li>
 
@@ -1645,6 +1649,13 @@ not returned as a conflict against the proposed replacement operation. </p></td>
                   <td><a href="#string">string</a></td>
                   <td></td>
                   <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>leak_handling_status</td>
+                  <td><a href="#v1.LeakHandlingStatus">LeakHandlingStatus</a></td>
+                  <td></td>
+                  <td><p>Flow&#39;s leakage-handling status for this component. </p></td>
                 </tr>
 
             </tbody>
@@ -8419,6 +8430,47 @@ Wire value 1 preserves backward compatibility with the former bool true (queue).
           </tbody>
         </table>
 
+        <h3 id="v1.LeakHandlingStatus">LeakHandlingStatus</h3>
+        <p>LeakHandlingStatus describes Flow's handling of a leakage event for a</p><p>component. It describes handling progress, not the component's current leak</p><p>or power state.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>LEAK_HANDLING_STATUS_UNKNOWN</td>
+                <td>0</td>
+                <td><p>Flow could not determine the status.</p></td>
+              </tr>
+
+              <tr>
+                <td>LEAK_HANDLING_STATUS_NONE</td>
+                <td>1</td>
+                <td><p>No supported leakage-handling Task targets this component.</p></td>
+              </tr>
+
+              <tr>
+                <td>LEAK_HANDLING_STATUS_SHUTTING_DOWN</td>
+                <td>2</td>
+                <td><p>A forced-shutdown Task is waiting, pending, or running.</p></td>
+              </tr>
+
+              <tr>
+                <td>LEAK_HANDLING_STATUS_DOWN</td>
+                <td>3</td>
+                <td><p>A forced-shutdown Task completed. This is not current power state.</p></td>
+              </tr>
+
+              <tr>
+                <td>LEAK_HANDLING_STATUS_FAILED</td>
+                <td>4</td>
+                <td><p>The latest supported leakage-handling Task failed or was terminated.</p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
         <h3 id="v1.LeakStatus">LeakStatus</h3>
         <p>LeakStatus is Flow's view of whether coolant leak detection has fired for</p><p>a component. The leak-detection loop sets it from core's tray-leak-detection</p><p>health alert; LEAK_STATUS_UNKNOWN is the resting value for components the</p><p>loop has not yet evaluated.</p>
         <table class="enum-table">
@@ -8774,7 +8826,7 @@ exists, this includes every materialized phase.</p></td>
         </table>
 
         <h3 id="v1.Phase">Phase</h3>
-        <p>Phase is Flow's coarse operability bucket.</p>
+        <p>Phase is Flow's coarse operability bucket. Component phases are derived from</p><p>Core's type-specific state machines; Rack.operation_status aggregates those</p><p>component phases.</p>
         <table class="enum-table">
           <thead>
             <tr><td>Name</td><td>Number</td><td>Description</td></tr>
