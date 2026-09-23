@@ -744,7 +744,7 @@ func (r ApiGetAllMachineRequest) TenantId(tenantId string) ApiGetAllMachineReque
 	return r
 }
 
-// Filter Machines that are assigned to an Instance. siteId must be specified when using this param.
+// Optional assignment filter. &#x60;true&#x60; returns assigned Machines; &#x60;false&#x60; returns unassigned Machines. Omit to include both. &#x60;siteId&#x60; is required when this parameter is supplied, and &#x60;false&#x60; cannot be combined with &#x60;tenantId&#x60;; invalid combinations return HTTP 400. Combine &#x60;false&#x60; with &#x60;status&#x3D;Ready&#x60; to find candidates for Instance creation. Assignment is checked independently of lifecycle status.
 func (r ApiGetAllMachineRequest) HasInstance(hasInstance bool) ApiGetAllMachineRequest {
 	r.hasInstance = &hasInstance
 	return r
@@ -826,6 +826,12 @@ GetAllMachine Retrieve all Machines
 Get all Machines visible to the caller.
 
 Infrastructure Provider callers receive Machines owned by their Provider. Tenant Admin callers receive Machines only from Sites where `TargetedInstanceCreation` is effective. The siteId query parameter is optional and further restricts either result set.
+
+Machine lifecycle status and Instance assignment are independent. To find `Ready`, unassigned
+candidates for Instance creation, supply `siteId`, `status=Ready`, and `hasInstance=false`.
+Filtering by `status=Ready` alone can include assigned Machines. These filters do not reserve
+a Machine or guarantee creation; the create endpoint rechecks assignment and can return HTTP
+409 if another request has assigned the Machine.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

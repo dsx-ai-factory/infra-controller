@@ -8454,6 +8454,10 @@ paths:
         Before targeting a released machine, check that its `status` is `Ready` and its `instanceId` is
         `null`. These checks do not reserve the machine or guarantee creation: another request can assign
         it before this request is processed, and other creation prerequisites still apply.
+
+        To list `Ready`, unassigned candidates, use the Machine list endpoint with `siteId`,
+        `status=Ready`, and `hasInstance=false`. An assignment conflict can still occur after listing;
+        retry with a bounded backoff after the assignment clears, or select another candidate.
       requestBody:
         content:
           application/json:
@@ -10408,6 +10412,12 @@ paths:
         Get all Machines visible to the caller.
 
         Infrastructure Provider callers receive Machines owned by their Provider. Tenant Admin callers receive Machines only from Sites where `TargetedInstanceCreation` is effective. The siteId query parameter is optional and further restricts either result set.
+
+        Machine lifecycle status and Instance assignment are independent. To find `Ready`, unassigned
+        candidates for Instance creation, supply `siteId`, `status=Ready`, and `hasInstance=false`.
+        Filtering by `status=Ready` alone can include assigned Machines. These filters do not reserve
+        a Machine or guarantee creation; the create endpoint rechecks assignment and can return HTTP
+        409 if another request has assigned the Machine.
       parameters:
         - schema:
             type: string
@@ -10438,7 +10448,12 @@ paths:
             type: boolean
           in: query
           name: hasInstance
-          description: Filter Machines that are assigned to an Instance. siteId must be specified when using this param.
+          description: >-
+            Optional assignment filter. `true` returns assigned Machines; `false` returns unassigned
+            Machines. Omit to include both. `siteId` is required when this parameter is supplied, and
+            `false` cannot be combined with `tenantId`; invalid combinations return HTTP 400. Combine
+            `false` with `status=Ready` to find candidates for Instance creation. Assignment is checked
+            independently of lifecycle status.
         - schema:
             type: boolean
           in: query

@@ -222,6 +222,10 @@ Before targeting a released machine, check that its `status` is `Ready` and its 
 `null`. These checks do not reserve the machine or guarantee creation: another request can assign
 it before this request is processed, and other creation prerequisites still apply.
 
+To list `Ready`, unassigned candidates, use the Machine list endpoint with `siteId`,
+`status=Ready`, and `hasInstance=false`. An assignment conflict can still occur after listing;
+retry with a bounded backoff after the assignment clears, or select another candidate.
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@return ApiCreateInstanceRequest
