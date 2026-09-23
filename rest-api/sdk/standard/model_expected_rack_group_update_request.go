@@ -20,9 +20,9 @@ import (
 // checks if the ExpectedRackGroupUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &ExpectedRackGroupUpdateRequest{}
 
-// ExpectedRackGroupUpdateRequest Request data to update an existing Expected Rack Group.  For single updates (PATCH /expected-rack-group/{id}), the `id` field is optional in the body and must match the path ID when provided.  The `rackGroupId` field is immutable on update — omit it or provide the existing value.  Chassis identity and physical location information are conveyed via well-known label keys in `labels`: - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model` - `location.region`, `location.datacenter`, `location.room`, `location.position`
+// ExpectedRackGroupUpdateRequest Request data to update an existing Expected Rack Group.  For updates (`PATCH /expected-rack-group/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A supplied string must match the URL path UUID in lowercase, hyphenated form. Empty strings, invalid UUIDs, and mismatched IDs are rejected with HTTP 400.  The `rackGroupId` field is immutable on update — omit it or provide the existing value.  Chassis identity and physical location information are conveyed via well-known label keys in `labels`: - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model` - `location.region`, `location.datacenter`, `location.room`, `location.position`
 type ExpectedRackGroupUpdateRequest struct {
-	// Unique identifier (UUID) of the Expected Rack Group to update. Optional for single Expected Rack Group update (must be empty or match the id from the URL path).
+	// Unique identifier (UUID) of the Expected Rack Group to update. Can be omitted or set to `null`. A supplied string must match the URL path UUID in lowercase, hyphenated form. Empty strings, invalid UUIDs, and mismatched IDs are rejected with HTTP 400.
 	Id NullableString `json:"id,omitempty"`
 	// Operator-supplied rack group identifier. Immutable on update: omit this field, send `null`, or provide the existing value as a compatibility no-op. A changed value is rejected because Core uses rackGroupId as the identity key.
 	RackGroupId NullableString `json:"rackGroupId,omitempty"`

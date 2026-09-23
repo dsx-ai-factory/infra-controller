@@ -150,7 +150,9 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 
 // APIExpectedMachineUpdateRequest is the data structure to capture user request to update an ExpectedMachine
 type APIExpectedMachineUpdateRequest struct {
-	// ID is required for batch updates (must be empty or match path value for single update)
+	// ID is required and non-null for batch updates. For a single PATCH, it
+	// can be omitted or null; a supplied string must match the path UUID in
+	// lowercase hyphenated form. Empty strings are invalid for both.
 	ID *string `json:"id"`
 	// BmcMacAddress may reassert the ExpectedMachine's current BMC MAC, but
 	// cannot change it after creation.
