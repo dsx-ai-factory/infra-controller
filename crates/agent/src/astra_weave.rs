@@ -114,23 +114,19 @@ fn weave_ew_virtual_network_attachment_spec_from_astra_attachment(
             });
         }
         SpxAttachmentType::Ovs => {
-            let Some(network_name) = astra_attachment_status
-                .attachment_ovs
-                .as_ref()
-                .and_then(|attachment_ovs| attachment_ovs.network_name.as_ref())
-                .filter(|network_name| !network_name.is_empty())
-            else {
-                return Err(State {
-                    phase: Phase::Error.into(),
-                    reason: "Missing Astra OVN network_name".to_string(),
-                    message: "create_virtual_network_attachment".to_string(),
-                });
-            };
-
             spec.attachment_type = AttachmentType::Ovs.into();
             spec.attachment_ovs = Some(AttachmentOvs {
-                ovn_network_name: Some(network_name.to_string()),
-                bridge_name: String::new(),
+                // ovn_network_name is optional; carry through whatever the status
+                // provides, or None if it is absent.
+                ovn_network_name: astra_attachment_status
+                    .attachment_ovs
+                    .as_ref()
+                    .and_then(|attachment_ovs| attachment_ovs.network_name.clone()),
+                bridge_name: astra_attachment_status
+                    .attachment_ovs
+                    .as_ref()
+                    .map(|attachment_ovs| attachment_ovs.bridge_name.clone())
+                    .unwrap_or_default(),
             });
         }
     }
