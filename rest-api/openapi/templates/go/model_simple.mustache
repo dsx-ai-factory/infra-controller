@@ -203,7 +203,7 @@ func (o *{{classname}}) Get{{name}}() {{vendorExtensions.x-go-base-type}} {
 {{/isNullable}}
 }
 
-// Get{{name}}Ok returns a tuple with the {{name}} field value if set, nil otherwise
+// Get{{name}}Ok returns a tuple with the {{name}} field value if set, {{#isFreeFormObject}}an empty map{{/isFreeFormObject}}{{^isFreeFormObject}}nil{{/isFreeFormObject}} otherwise
 // and a boolean to check if the value has been set.
 {{#isNullable}}
 // NOTE: If the value is an explicit nil, `nil, true` will be returned

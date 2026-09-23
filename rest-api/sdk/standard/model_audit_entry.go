@@ -144,7 +144,7 @@ func (o *AuditEntry) GetQueryParams() map[string][]string {
 	return o.QueryParams
 }
 
-// GetQueryParamsOk returns a tuple with the QueryParams field value if set, nil otherwise
+// GetQueryParamsOk returns a tuple with the QueryParams field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetQueryParamsOk() (map[string][]string, bool) {
 	if o == nil || IsNil(o.QueryParams) {
@@ -443,7 +443,7 @@ func (o *AuditEntry) GetExtraData() map[string]interface{} {
 	return o.ExtraData
 }
 
-// GetExtraDataOk returns a tuple with the ExtraData field value if set, nil otherwise
+// GetExtraDataOk returns a tuple with the ExtraData field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *AuditEntry) GetExtraDataOk() (map[string]interface{}, bool) {
 	if o == nil || IsNil(o.ExtraData) {

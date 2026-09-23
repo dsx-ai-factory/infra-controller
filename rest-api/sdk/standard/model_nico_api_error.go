@@ -120,7 +120,7 @@ func (o *NICoAPIError) GetData() map[string]interface{} {
 	return o.Data
 }
 
-// GetDataOk returns a tuple with the Data field value if set, nil otherwise
+// GetDataOk returns a tuple with the Data field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *NICoAPIError) GetDataOk() (map[string]interface{}, bool) {

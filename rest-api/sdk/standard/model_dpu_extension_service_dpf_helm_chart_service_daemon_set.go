@@ -57,7 +57,7 @@ func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) GetLabels() map[string
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, nil otherwise
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) GetLabelsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Labels) {
@@ -89,7 +89,7 @@ func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) GetAnnotations() map[s
 	return o.Annotations
 }
 
-// GetAnnotationsOk returns a tuple with the Annotations field value if set, nil otherwise
+// GetAnnotationsOk returns a tuple with the Annotations field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) GetAnnotationsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Annotations) {
@@ -121,7 +121,7 @@ func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) GetResources() map[str
 	return o.Resources
 }
 
-// GetResourcesOk returns a tuple with the Resources field value if set, nil otherwise
+// GetResourcesOk returns a tuple with the Resources field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceDpfHelmChartServiceDaemonSet) GetResourcesOk() (map[string]DpuExtensionServiceDpfHelmChartIntOrString, bool) {
 	if o == nil || IsNil(o.Resources) {

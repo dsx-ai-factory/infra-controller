@@ -756,7 +756,7 @@ func (o *ExpectedSwitchCreateRequest) GetLabels() map[string]string {
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, nil otherwise
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *ExpectedSwitchCreateRequest) GetLabelsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Labels) {
