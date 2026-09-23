@@ -134,9 +134,13 @@ spec:
           expr: |
             (
               sum(carbide_hosts_health_status_count{healthy="false"})
-              - sum(carbide_hosts_unhealthy_by_classification_count{classification="SuppressExternalAlerting"})
+              - (sum(carbide_hosts_unhealthy_by_classification_count{classification="SuppressExternalAlerting"}) or vector(0))
             )
-            / sum(carbide_hosts_health_status_count) > 0.1
+            /
+            (
+              sum(carbide_hosts_health_status_count)
+              - (sum(carbide_hosts_unhealthy_by_classification_count{classification="SuppressExternalAlerting"}) or vector(0))
+            ) > 0.1
             and sum(carbide_machines_total) > 40
           for: 5m
           labels:
