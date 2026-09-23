@@ -36,6 +36,22 @@ uptime_seconds() {
 	fi
 }
 
+sleep_before_deadline() {
+	deadline_seconds=$1
+	current_seconds=$(uptime_seconds)
+	remaining_seconds=$((deadline_seconds - current_seconds))
+
+	if [ "$remaining_seconds" -le 0 ]; then
+		return 1
+	fi
+
+	sleep_seconds=$network_poll_interval
+	if [ "$sleep_seconds" -gt "$remaining_seconds" ]; then
+		sleep_seconds=$remaining_seconds
+	fi
+	sleep "$sleep_seconds"
+}
+
 script_result=failed
 script_exit_reason=unexpected_exit
 script_start_seconds=$(uptime_seconds)
@@ -112,8 +128,8 @@ case "$preferred_mac" in
 esac
 preferred_mac=$(printf '%s\n' "$preferred_mac" | tr '[:upper:]' '[:lower:]')
 
-probe_attempts=0
-probe_max_attempts=$(((network_wait_seconds + network_poll_interval - 1) / network_poll_interval + 1))
+probe_start_seconds=$(uptime_seconds)
+probe_deadline_seconds=$((probe_start_seconds + network_wait_seconds))
 
 preferred_interface=
 while :
@@ -158,12 +174,10 @@ do
 
 	[ -z "$not_ready" ] && break
 
-	probe_attempts=$((probe_attempts + 1))
-	if [ "$probe_attempts" -ge "$probe_max_attempts" ]; then
+	if ! sleep_before_deadline "$probe_deadline_seconds"; then
 		echo "Scout network configuration timed out: interface=${preferred_interface:-<none>} mac=$preferred_mac reason=$not_ready waited=${network_wait_seconds}s" >&2
 		finish failed preferred_interface_timeout 1
 	fi
-	sleep "$network_poll_interval"
 done
 
 runtime_network_file="$networkd_runtime_dir/00-forge-scout-nonpreferred.network"
@@ -241,13 +255,15 @@ echo "Selected preferred network interface: interface=$preferred_interface mac=$
 failed=false
 failure_reason=unknown_failure
 
-wait_attempts=$probe_max_attempts
+reconfiguration_start_seconds=$(uptime_seconds)
+reconfiguration_deadline_seconds=$((reconfiguration_start_seconds + network_wait_seconds))
 wait_complete=false
 wait_failed=false
-while [ "$#" -gt 0 ] && [ "$wait_attempts" -gt 0 ]
+while [ "$#" -gt 0 ]
 do
 	all_interfaces_complete=true
 	incomplete_interfaces=
+	incomplete_report=
 	for interface
 	do
 		# A removed interface is safe; if it reappears, networkd will apply the
@@ -322,8 +338,12 @@ do
 
 		all_interfaces_complete=false
 		incomplete_interfaces="${incomplete_interfaces}${incomplete_interfaces:+ }$interface"
-		if [ "$wait_attempts" -eq 1 ]; then
-			echo "Network interface still incomplete: interface=$interface reason=$incomplete_reason${incomplete_detail:+ $incomplete_detail}" >&2
+		incomplete_message="Network interface still incomplete: interface=$interface reason=$incomplete_reason${incomplete_detail:+ $incomplete_detail}"
+		if [ -n "$incomplete_report" ]; then
+			incomplete_report="$incomplete_report
+$incomplete_message"
+		else
+			incomplete_report=$incomplete_message
 		fi
 	done
 
@@ -335,9 +355,9 @@ do
 		break
 	fi
 
-	wait_attempts=$((wait_attempts - 1))
-	if [ "$wait_attempts" -gt 0 ]; then
-		sleep "$network_poll_interval"
+	if ! sleep_before_deadline "$reconfiguration_deadline_seconds"; then
+		[ -z "$incomplete_report" ] || printf '%s\n' "$incomplete_report" >&2
+		break
 	fi
 done
 
