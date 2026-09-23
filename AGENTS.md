@@ -107,9 +107,17 @@ cargo make build-cli
 # Run all tests
 cargo test
 
+# Build and run tests with full debug information for gdb or lldb
+cargo test --profile test-debug
+
 # Build prerequisites first, then test (recommended for integration tests)
 cargo make correctly-execute-tests
 ```
+
+The default `test` profile retains source line information while limiting test artifact size. Use
+`--profile test-debug` only when a source-level debugger needs full variable and type information;
+see the [Build Guide](docs/development/build-guide.md#test-binaries-and-debugger-support) for the
+profile trade-off.
 
 When writing tests, prefer the **table-driven** style and helpers from
 `carbide-test-support`; use the [Testing section in `STYLE_GUIDE.md`](STYLE_GUIDE.md#testing)
