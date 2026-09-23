@@ -514,7 +514,8 @@ fn entry_to_log(
     if let Some(event_id) = &entry.event_id {
         attributes.push((Cow::Borrowed("event_id"), event_id.clone()));
     }
-    if let Some(timestamp) = &entry.event_timestamp {
+    // Some events omit EventTimestamp and expose Created.
+    if let Some(timestamp) = entry.event_timestamp.as_ref().or(entry.created.as_ref()) {
         attributes.push((Cow::Borrowed("event_timestamp"), timestamp.to_string()));
     }
     if let Some(group_id) = nullable_ref(&entry.event_group_id) {
@@ -735,6 +736,45 @@ mod tests {
                 },
             ],
             observe_message_identity,
+        );
+    }
+
+    fn observe_event_timestamp((event_timestamp, created): (Option<&str>, &str)) -> Option<String> {
+        let mut value = json!({
+            "@odata.id": "/redfish/v1/Chassis/powershelf/LogServices/EventLog/Entries/1",
+            "Id": "1",
+            "Name": "Power shelf event",
+            "EntryType": "Event",
+            "Message": "PSU fault",
+            "Created": created
+        });
+        if let Some(event_timestamp) = event_timestamp {
+            value["EventTimestamp"] = json!(event_timestamp);
+        }
+        let entry: nv_redfish::schema::log_entry::LogEntry =
+            serde_json::from_value(value).expect("valid Redfish log entry");
+        let CollectorEvent::Log(record) = entry_to_log(&entry, None, EVENTLOG, false) else {
+            panic!("expected log event");
+        };
+        attribute(&record, "event_timestamp")
+    }
+
+    #[test]
+    fn event_timestamp_falls_back_to_created() {
+        check_values(
+            [
+                Check {
+                    scenario: "Created stands in for an absent EventTimestamp",
+                    input: (None, "2026-05-14T10:00:00Z"),
+                    expect: Some("2026-05-14T10:00:00Z".to_string()),
+                },
+                Check {
+                    scenario: "EventTimestamp wins over Created",
+                    input: (Some("2026-09-01T12:00:00Z"), "2026-05-14T10:00:00Z"),
+                    expect: Some("2026-09-01T12:00:00Z".to_string()),
+                },
+            ],
+            observe_event_timestamp,
         );
     }
 
