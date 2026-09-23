@@ -66,6 +66,7 @@ mod errors;
 mod expected_machines;
 mod expected_power_shelf;
 mod expected_rack;
+mod expected_rack_group;
 mod expected_switch;
 mod extension_service;
 mod firmware;
@@ -117,6 +118,8 @@ mod switch;
 mod table_utils;
 mod tenant;
 mod tenant_keyset;
+#[cfg(test)]
+mod test_expected_component_patch;
 #[cfg(test)]
 mod test_support;
 mod tpm_ca;
@@ -270,6 +273,7 @@ async fn main() -> color_eyre::Result<()> {
         CliCommand::ExpectedMachine(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedPowerShelf(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedRack(cmd) => cmd.dispatch(ctx).await?,
+        CliCommand::ExpectedRackGroup(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedSwitch(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExtensionService(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::Firmware(cmd) => cmd.dispatch(ctx).await?,

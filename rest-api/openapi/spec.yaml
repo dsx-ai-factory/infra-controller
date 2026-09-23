@@ -1404,10 +1404,30 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: |-
+            Core rejected a `SiteWideRoot` write because
+            `bmc_site_wide_root_source` is `local`. Before any managed device
+            uses version 0, supply or correct it through the configured local
+            environment or credential file. After ingestion, leave the local
+            value unchanged and use BMC credential rotation to advance to a
+            backend-managed version. `BMCRoot` writes remain supported.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       operationId: create-or-update-bmc-credential
       description: |-
         Create or update a site-wide or per-BMC root credential. Equivalent
         to `nico-admin-cli credential add-bmc`.
+
+        When `kind` is `SiteWideRoot` and Core uses
+        `bmc_site_wide_root_source = "local"`, Core rejects the write with 412;
+        before any managed device uses version 0, supply or correct it through
+        the configured local environment or credential file. After ingestion,
+        leave the local value unchanged and use BMC credential rotation to
+        advance to a backend-managed version. This source policy does not block
+        `BMCRoot` writes.
 
         User must have authorization role with `PROVIDER_ADMIN` suffix.
   '/v2/org/{org}/nico/credential/uefi':
@@ -1819,6 +1839,13 @@ paths:
           required: true
           description: ID of the Site
         - schema:
+            type: string
+            minLength: 1
+          name: machineId
+          in: query
+          required: false
+          description: Only return endpoints whose exploration report has this Machine ID. Omit to return all endpoints in the Site.
+        - schema:
             $ref: '#/components/schemas/PageNumber'
           name: pageNumber
           in: query
@@ -1872,6 +1899,8 @@ paths:
       operationId: get-all-site-explorer-endpoint
       description: |-
         Retrieve explored endpoints discovered by Site Explorer for a Site. Use `ID_ASC` or `ID_DESC` to order by endpoint ID; the default is `ID_ASC`.
+
+        Optional `machineId` filtering is applied before pagination and the total count. It requires a site-agent and nico-api version that supports the filter; older versions may ignore it and return unfiltered results and pagination totals. An empty or malformed Machine ID returns HTTP 400 when the filter is supported.
 
         The response is paged over Core `FindExploredEndpointIds` followed by
         `FindExploredEndpointsByIds`. Pagination metadata is returned in the
@@ -4769,7 +4798,10 @@ paths:
                   labels:
                     environment: staging
                     rack: B2
-        description: Expected Machine update request
+        description: |-
+          Expected Machine update request.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -4920,7 +4952,10 @@ paths:
                     labels:
                       environment: staging
                       rack: B3
-        description: Array of Expected Machine update requests
+        description: |-
+          Array of Expected Machine update requests.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Every item must use the same field set except bmcIpAddress; values may differ between items.
         required: true
       responses:
         '200':
@@ -5138,7 +5173,10 @@ paths:
                   labels:
                     environment: staging
                     rack: B2
-        description: Expected Power Shelf update request
+        description: |-
+          Expected Power Shelf update request.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -5723,7 +5761,10 @@ paths:
                   labels:
                     environment: staging
                     rack: B2
-        description: Expected Switch update request
+        description: |-
+          Expected Switch update request.
+
+          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings. To change NVOS credentials, provide both nvOsUsername and nvOsPassword as non-empty strings. Each pair can be updated independently in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -11873,8 +11914,10 @@ paths:
             X-Pagination:
               schema:
                 type: string
-                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
+                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "TYPE_ASC"}'
               description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-machine-capabilities
@@ -11947,15 +11990,13 @@ paths:
         - schema:
             type: string
             enum:
-              - STATUS_ASC
-              - STATUS_DESC
-              - CREATED_ASC
-              - CREATED_DESC
-              - UPDATED_ASC
-              - UPDATED_DESC
+              - TYPE_ASC
+              - TYPE_DESC
+            default: TYPE_ASC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: |-
+            Ordering for pagination query. TYPE_ASC orders capability type ascending and TYPE_DESC orders it descending. Defaults to TYPE_ASC. Ties are ordered by name, frequency, capacity, vendor, count, deviceType, inactiveDevices, and internal ID, all ascending with null values last.
   '/v2/org/{org}/nico/rack':
     parameters:
       - schema:
@@ -12065,6 +12106,8 @@ paths:
                               macAddress: 'AA:BB:CC:DD:EE:01'
                               ipAddress: 10.0.0.101
                           powerState: 'on'
+                          leakStatus: Leaking
+                          leakHandlingStatus: ShuttingDown
           headers:
             X-Pagination:
               schema:
@@ -12153,6 +12196,8 @@ paths:
                             macAddress: 'AA:BB:CC:DD:EE:01'
                             ipAddress: 10.0.0.101
                         powerState: 'on'
+                        leakStatus: NoLeak
+                        leakHandlingStatus: None
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -12811,6 +12856,18 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Task has already finished with status `Succeeded` or `Failed` and cannot be cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                terminal-task:
+                  value:
+                    source: nico
+                    message: 'task cannot be cancelled: task 550e8400-e29b-41d4-a716-446655440000 has status failed'
+                    data: null
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
@@ -14265,6 +14322,8 @@ paths:
                       description: Compute tray in slot 1
                       firmwareVersion: 2.1.0
                       powerState: 'on'
+                      leakStatus: Leaking
+                      leakHandlingStatus: Down
                       position:
                         slotId: 1
                         trayIdx: 0
@@ -14336,6 +14395,8 @@ paths:
                     description: Compute tray in slot 1
                     firmwareVersion: 2.1.0
                     powerState: 'on'
+                    leakStatus: Leaking
+                    leakHandlingStatus: Failed
                     position:
                       slotId: 1
                       trayIdx: 0
@@ -16667,6 +16728,59 @@ paths:
           $ref: '#/components/responses/GenericHttpError'
         '503':
           $ref: '#/components/responses/TenantIdentityCoreUnavailable'
+  '/v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the provider organization authorizing the operation
+      - schema:
+          type: string
+          format: uuid
+        name: siteID
+        in: path
+        required: true
+        description: ID of the target Site
+    post:
+      summary: Reencrypt Tenant Identity Secrets
+      tags:
+        - Tenant Identity
+      operationId: reencrypt-tenant-identity-secrets
+      description: |-
+        Re-wrap stored `tenant_identity_config` ciphertext with the Site's
+        current master encryption key (KEK rotation). This is a
+        site-operator operation, not a per-tenant one.
+
+        User must have authorization role with `PROVIDER_ADMIN` suffix in the URL `{org}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantIdentityReencryptSecretsRequest'
+      responses:
+        '200':
+          description: Reencryption completed; counters and any per-field failures are reported in the body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantIdentityReencryptSecretsResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          description: Internal server error while loading the Infrastructure Provider or Site, resolving the scoped Tenant or its Site allocation, retrieving the Site Temporal client, dispatching the Core proxy workflow, or decoding its response.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/TenantIdentityCoreUnavailable'
+        '504':
+          description: The Core proxy workflow did not return a result before its execution or caller deadline.
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/site/{siteID}/.well-known/jwks.json':
     parameters:
       - schema:
@@ -24370,6 +24484,8 @@ components:
                   macAddress: 'AA:BB:CC:DD:EE:01'
                   ipAddress: 10.0.0.101
               powerState: 'on'
+              leakStatus: Leaking
+              leakHandlingStatus: ShuttingDown
       properties:
         id:
           type: string
@@ -24583,6 +24699,8 @@ components:
             - NoLeak
             - Leaking
           description: Whether the component is considered leaking coolant
+        leakHandlingStatus:
+          $ref: '#/components/schemas/LeakHandlingStatus'
     BMCInfo:
       title: BMCInfo
       type: object
@@ -24614,6 +24732,8 @@ components:
           description: Compute tray in slot 1
           firmwareVersion: 2.1.0
           powerState: 'on'
+          leakStatus: NoLeak
+          leakHandlingStatus: None
           position:
             slotId: 1
             trayIdx: 0
@@ -24676,6 +24796,8 @@ components:
             - NoLeak
             - Leaking
           description: Whether the tray is considered leaking coolant
+        leakHandlingStatus:
+          $ref: '#/components/schemas/LeakHandlingStatus'
         position:
           $ref: '#/components/schemas/TrayPosition'
           description: 'Position of the Tray within the Rack'
@@ -24828,6 +24950,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this operation to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -24872,6 +25003,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this operation to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -24982,7 +25122,15 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -24997,6 +25145,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this batch to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -26008,6 +26165,15 @@ components:
           description: |-
             Operation Rule to pin for each target's firmware Task. Null to let
             Flow's default rule resolution pick one.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -26112,6 +26278,21 @@ components:
         error:
           type: string
           description: Failure summary when `status == failed`. Truncated to 512 bytes.
+    LeakHandlingStatus:
+      title: LeakHandlingStatus
+      type: string
+      description: |-
+        Flow's leakage-handling status. Unknown means Flow could not determine the status;
+        None means no supported handling task exists; ShuttingDown means a forced-shutdown
+        task is waiting, pending, or running; Down means it completed; and Failed means the
+        latest supported handling task failed or was terminated. Down describes handling
+        progress, not the component's current power state.
+      enum:
+        - Unknown
+        - None
+        - ShuttingDown
+        - Down
+        - Failed
     TaskReportV1Status:
       title: TaskReportV1Status
       type: string
@@ -26147,7 +26328,15 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         targets:
           type: array
           items:
@@ -26200,6 +26389,15 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this batch to the named rule and overrides Flow's default rule
             resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -26335,7 +26533,15 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         targets:
           type: array
           items:
@@ -26387,6 +26593,15 @@ components:
           description: |-
             Optional Operation Rule UUID. When set, pins this firmware update to
             the named rule and overrides Flow's default rule resolution.
+        overrideVersionCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, request that the selected component backend override
+            firmware version-based checks when deciding whether to apply the
+            update. This permits same-version reapplication and downgrade when
+            supported. It does not bypass readiness checks or state-controller
+            routing.
         overrideReadinessCheck:
           type: boolean
           default: false
@@ -26611,7 +26826,9 @@ components:
           readOnly: true
         isUsableByTenant:
           type: boolean
-          description: Indicates whether the machine is usable by or currently in use by a tenant.
+          description: >-
+            Indicates whether the machine is usable by or currently in use by a tenant. It does not indicate that a
+            Machine is available for Instance creation.
           readOnly: true
         statusHistory:
           type: array
@@ -27732,7 +27949,7 @@ components:
       description: |-
         Request data to update an existing Expected Machine.
 
-        Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
+        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
 
         For single updates (PATCH /expected-machine/{id}), the id field is optional in body and will be ignored if provided (the ID from the URL path is used).
 
@@ -27772,14 +27989,17 @@ components:
           type:
             - string
             - 'null'
+          minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Machine's BMC
+          description: Username for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
         defaultBmcPassword:
           type:
             - string
             - 'null'
+          minLength: 1
+          writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Machine's BMC
+          description: Password for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
         chassisSerialNumber:
           type:
             - string
@@ -28067,7 +28287,7 @@ components:
       description: |-
         Request data to update an existing Expected Power Shelf.
 
-        Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
+        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -28100,14 +28320,17 @@ components:
           type:
             - string
             - 'null'
+          minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Power Shelf's BMC
+          description: Username for accessing the Expected Power Shelf's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
         defaultBmcPassword:
           type:
             - string
             - 'null'
+          minLength: 1
+          writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Power Shelf's BMC
+          description: Password for accessing the Expected Power Shelf's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
         shelfSerialNumber:
           type:
             - string
@@ -28628,7 +28851,7 @@ components:
       description: |-
         Request data to update an existing Expected Switch.
 
-        Note: BMC and NvOS credentials (username/password) are only accepted during creation and updates but are not returned in responses.
+        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings. To change NVOS credentials, provide both nvOsUsername and nvOsPassword as non-empty strings. Each pair can be updated independently in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -28665,14 +28888,17 @@ components:
           type:
             - string
             - 'null'
+          minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Switch's BMC
+          description: Username for accessing the Expected Switch's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
         defaultBmcPassword:
           type:
             - string
             - 'null'
+          minLength: 1
+          writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Switch's BMC
+          description: Password for accessing the Expected Switch's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
         switchSerialNumber:
           type:
             - string
@@ -28684,12 +28910,15 @@ components:
           type:
             - string
             - 'null'
-          description: NvOS username for the Expected Switch
+          minLength: 1
+          description: NvOS username for the Expected Switch. Omission or null preserves the value; a non-empty value requires nvOsPassword in the same request.
         nvOsPassword:
           type:
             - string
             - 'null'
-          description: NvOS password for the Expected Switch
+          minLength: 1
+          writeOnly: true
+          description: NvOS password for the Expected Switch. Omission or null preserves the value; a non-empty value requires nvOsUsername in the same request.
         nvosMacAddresses:
           type: array
           uniqueItems: true
@@ -30132,6 +30361,9 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        dpuTarget:
+          $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
+          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
         siteId:
           type: string
           format: uuid
@@ -30181,6 +30413,16 @@ components:
         - Error
         - Updating
         - Deleting
+    DpuExtensionServiceDpuTarget:
+      title: DpuExtensionServiceDpuTarget
+      type:
+        - string
+        - 'null'
+      description: DPU placement policy. Primary targets the host's primary attached DPU; AllActive targets DPUs used by instance networking, including legacy fallbacks; All targets every attached DPU.
+      enum:
+        - Primary
+        - AllActive
+        - All
     DpuExtensionServiceSummary:
       title: DpuExtensionServiceSummary
       type: object
@@ -30206,6 +30448,9 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        dpuTarget:
+          $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
+          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
         latestVersion:
           type:
             - string
@@ -30249,6 +30494,96 @@ components:
         observability:
           $ref: '#/components/schemas/DpuExtensionServiceObservability'
           description: Observability configuration for this DPU Extension Service version
+    DpuExtensionServiceDpfHelmChartData:
+      title: DpuExtensionServiceDpfHelmChartData
+      type: object
+      additionalProperties: false
+      description: DpfHelmChart configuration documented as an object; requests serialize this object into the `data` string.
+      required:
+        - repoURL
+        - chartName
+        - chartVersion
+        - security.privileged
+      properties:
+        repoURL:
+          type: string
+          minLength: 1
+          pattern: '^(https://|oci://)'
+          description: Helm repository URL beginning with https:// or oci://
+        chartName:
+          type: string
+          minLength: 1
+          description: Helm chart name
+        chartVersion:
+          type: string
+          minLength: 1
+          description: Helm chart version
+        security.privileged:
+          type: boolean
+          description: DPF privileged-workload setting. This is a literal dotted key, not a nested security object; false is valid.
+        values:
+          type: [object, 'null']
+          additionalProperties: true
+          description: Optional chart values. values.serviceDaemonSet.nodeSelector is reserved for NICo and must not be supplied.
+        serviceDaemonSet:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartServiceDaemonSet'
+    DpuExtensionServiceDpfHelmChartServiceDaemonSet:
+      title: DpuExtensionServiceDpfHelmChartServiceDaemonSet
+      type: [object, 'null']
+      additionalProperties: false
+      description: Optional tenant-configurable DaemonSet settings. NICo owns nodeSelector.
+      properties:
+        labels:
+          type: [object, 'null']
+          additionalProperties:
+            type: string
+          description: Optional labels passed to DPF for the service DaemonSet
+        annotations:
+          type: [object, 'null']
+          additionalProperties:
+            type: string
+          description: Optional annotations passed to DPF for the service DaemonSet
+        resources:
+          type: [object, 'null']
+          additionalProperties:
+            $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+          description: Optional resource quantities, for example {"nvidia.com/bf_sf":1,"memory":"500Mi"}
+        updateStrategy:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartUpdateStrategy'
+    DpuExtensionServiceDpfHelmChartUpdateStrategy:
+      title: DpuExtensionServiceDpfHelmChartUpdateStrategy
+      type: [object, 'null']
+      additionalProperties: false
+      description: Optional update strategy passed to DPF
+      properties:
+        type:
+          type: [string, 'null']
+          description: Update strategy type, typically RollingUpdate or OnDelete
+        rollingUpdate:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartRollingUpdate'
+    DpuExtensionServiceDpfHelmChartRollingUpdate:
+      title: DpuExtensionServiceDpfHelmChartRollingUpdate
+      type: [object, 'null']
+      additionalProperties: false
+      description: Optional rolling-update limits passed to DPF
+      properties:
+        maxSurge:
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+            - type: 'null'
+          description: Optional additional pod count or percentage string, for example 1 or "25%"
+        maxUnavailable:
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString'
+            - type: 'null'
+          description: Optional unavailable pod count or percentage string, for example 1 or "25%"
+    DpuExtensionServiceDpfHelmChartIntOrString:
+      title: DpuExtensionServiceDpfHelmChartIntOrString
+      description: Integer or string value accepted by DPF
+      oneOf:
+        - type: integer
+          format: int32
+        - type: string
     DpuExtensionServiceCreateRequest:
       title: DpuExtensionServiceCreateRequest
       type: object
@@ -30269,6 +30604,12 @@ components:
                 prometheus:
                   scrapeIntervalSeconds: 30
                   endpoint: busybox:9090
+        - name: storage-client
+          description: DPF-managed storage client
+          serviceType: DpfHelmChart
+          dpuTarget: AllActive
+          siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security.privileged":true,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
       properties:
         name:
           type: string
@@ -30284,14 +30625,23 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        dpuTarget:
+          $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
+          description: Required for DpfHelmChart services and unsupported for KubernetesPod services
         siteId:
           type: string
           format: uuid
           description: ID for the Site the DPU Extension Service belongs to
         data:
-          type: string
-          maxLength: 131072
-          description: Deployment spec, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. KubernetesPod requires a parseable Pod manifest declaring at least one container, whose kind, when present, is Pod. DpfHelmChart requires a strict JSON object with repoURL, chartName, chartVersion, security.privileged, and optional values; repoURL must use https:// or oci://, and serviceDaemonSet.nodeSelector is unsupported.
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartData'
+            - type: string
+              maxLength: 131072
+          description: |-
+            Deployment specification as a string, limited to 131072 UTF-8 bytes.
+            Use a YAML/JSON Pod manifest for KubernetesPod or JSON-encoded Helm
+            configuration for DpfHelmChart. The object schema documents the Helm
+            structure; requests must still send a string.
         credentials:
           $ref: '#/components/schemas/DpuExtensionServiceCredentials'
           description: Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
@@ -30331,11 +30681,12 @@ components:
             - 'null'
           description: Optional description for the DPU Extension Service
         data:
-          type:
-            - string
-            - 'null'
-          maxLength: 131072
-          description: Deployment spec for the DPU Extension Service, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. For KubernetesPod this is the same Pod manifest accepted on create. For DpfHelmChart this is the same strict JSON definition accepted on create and updates stable V1 in place.
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartData'
+            - type: string
+              maxLength: 131072
+            - type: 'null'
+          description: Replacement deployment spec using the create request's format. Omission or null leaves the existing configuration unchanged.
         credentials:
           $ref: '#/components/schemas/DpuExtensionServiceCredentials'
           description: Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
@@ -31307,6 +31658,105 @@ components:
           type: string
           description: 'Date/time when the token delegation configuration was last updated'
           format: date-time
+    TenantIdentityReencryptSecretsRequest:
+      title: TenantIdentityReencryptSecretsRequest
+      description: |-
+        Request to re-wrap stored tenant identity secrets with the Site's
+        current master encryption key (KEK rotation).
+      type: object
+      example:
+        organizationId: tenant-corp
+        dryRun: true
+      properties:
+        organizationId:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: |-
+            Optional tenant organization identifier (`org`), not the tenant's
+            REST resource UUID or display name. A non-null value must contain
+            one or more ASCII letters, digits, underscores, or hyphens; empty
+            and whitespace-containing strings are rejected, not treated as
+            site-wide scope. The value is matched case-insensitively and is
+            lowercased before the Tenant lookup and before it reaches Core. The
+            tenant must have an allocation and tenant identity configuration on
+            the Site; only that organization's secrets are re-wrapped. The URL
+            `{org}` separately identifies the provider authorizing the
+            operation. If omitted or null, every row in the Site's tenant
+            identity store is processed.
+        dryRun:
+          type: boolean
+          description: When true, decrypt and validate only; no changes are written.
+          default: false
+    TenantIdentityReencryptFailure:
+      title: TenantIdentityReencryptFailure
+      description: A single per-field re-wrap failure.
+      type: object
+      required:
+        - organizationId
+        - field
+        - error
+      properties:
+        organizationId:
+          type: string
+          description: Org whose secret failed to re-wrap.
+        field:
+          type: string
+          description: Name of the field that failed to re-wrap.
+        error:
+          type: string
+          description: Error describing why the field could not be re-wrapped.
+    TenantIdentityReencryptSecretsResponse:
+      title: TenantIdentityReencryptSecretsResponse
+      description: Counters and per-field failures from a reencrypt run.
+      type: object
+      example:
+        rowsExamined: 3
+        rowsUpdated: 2
+        rowsSkippedAllOnTarget: 1
+        fieldsReencrypted: 4
+        fieldsSkippedOnTarget: 2
+        rowsFailed: 0
+        failures: []
+        currentEncryptionKeyId: key-2
+      required:
+        - rowsExamined
+        - rowsUpdated
+        - rowsSkippedAllOnTarget
+        - fieldsReencrypted
+        - fieldsSkippedOnTarget
+        - rowsFailed
+        - failures
+        - currentEncryptionKeyId
+      properties:
+        rowsExamined:
+          type: integer
+          description: Number of rows examined.
+        rowsUpdated:
+          type: integer
+          description: Number of rows re-wrapped with the current key.
+        rowsSkippedAllOnTarget:
+          type: integer
+          description: Number of rows skipped because all fields were already on the target key.
+        fieldsReencrypted:
+          type: integer
+          description: Number of individual fields re-wrapped.
+        fieldsSkippedOnTarget:
+          type: integer
+          description: Number of fields skipped because they were already on the target key.
+        rowsFailed:
+          type: integer
+          description: Number of rows with at least one field that failed to re-wrap.
+        failures:
+          type: array
+          description: Per-field re-wrap failures; an empty array when none occurred.
+          items:
+            $ref: '#/components/schemas/TenantIdentityReencryptFailure'
+        currentEncryptionKeyId:
+          type: string
+          description: Site machine_identity.current_encryption_key_id used as the re-wrap target.
     TenantIdentityJWKS:
       title: TenantIdentityJWKS
       description: |-

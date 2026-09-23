@@ -100,9 +100,9 @@ explored.
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--dpf-enabled <DPF_ENABLED>`
 
@@ -111,9 +111,9 @@ value.
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--bmc-ip-address <BMC_IP_ADDRESS>`
 
@@ -135,9 +135,9 @@ factory-default credentials in Vault as-is
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--dpu-policy <DPU_POLICY>`
 
@@ -151,11 +151,11 @@ accepted: `dpu-mode` maps to `manage`, `nic-mode` to `nic`, and
 
 *Possible values:*
 
-- manage
-
-- nic
-
-- ignore
+> - manage
+>
+> - nic
+>
+> - ignore
 
 `--bmc-ip-allocation <BMC_IP_ALLOCATION>`
 
@@ -169,15 +169,15 @@ record. Unset preserves the existing per-host value.
 
 *Possible values:*
 
-- unspecified
-
-- auto
-
-- dynamic
-
-- fixed
-
-- retained
+> - unspecified
+>
+> - auto
+>
+> - dynamic
+>
+> - fixed
+>
+> - retained
 
 `--interfaces <INTERFACES>`
 
@@ -203,9 +203,9 @@ behavior of locking down the server after configuring the BIOS.
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
@@ -213,9 +213,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

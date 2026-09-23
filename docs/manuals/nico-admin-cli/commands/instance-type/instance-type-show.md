@@ -30,9 +30,9 @@ Optional, show counts for allocations of instance types
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--extended`
 
@@ -48,9 +48,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

@@ -34,9 +34,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 
@@ -64,9 +64,9 @@ Interface type (e.g. SVPC or ASTRA)
 
 *Possible values:*
 
-- svpc
-
-- astra
+> - svpc
+>
+> - astra
 
 [*DEVICE_DESCRIPTION*]
 

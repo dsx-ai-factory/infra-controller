@@ -10,6 +10,7 @@ import "common.proto";
 import "dns.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
+import "google/protobuf/field_mask.proto";
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 import "health.proto";
@@ -417,6 +418,13 @@ service Forge {
   rpc TriggerHostReprovisioning(HostReprovisioningRequest) returns (google.protobuf.Empty);
   // List hosts waiting for reprovisioning
   rpc ListHostsWaitingForReprovisioning(HostReprovisioningListRequest) returns (HostReprovisioningListResponse);
+
+  // Trigger a reset of a managed host: tear down its instance and DPF
+  // resources, then re-ingest it from DPU discovery.
+  rpc TriggerManagedHostReset(ManagedHostResetRequest) returns (google.protobuf.Empty);
+  // List managed hosts waiting for reset
+  rpc ListManagedHostsWaitingForReset(ManagedHostResetListRequest) returns (ManagedHostResetListResponse);
+
   // Operator "force-converge this BMC now" escape hatch for a single host/DPU
   // BMC. This is asynchronous: the handler only persists (Set) or removes
   // (Clear) the machine's `bmc_credential_rotation_requested` flag and returns;
@@ -493,6 +501,9 @@ service Forge {
   // MachineInventory
   rpc UpdateAgentReportedInventory(DpuAgentInventoryReport) returns (google.protobuf.Empty);
 
+  // Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+  rpc ReportLldpNeighbors(LldpNeighborReport) returns (google.protobuf.Empty);
+
   // Phone Home
   rpc UpdateInstancePhoneHomeLastContact(InstancePhoneHomeLastContactRequest) returns (InstancePhoneHomeLastContactResponse);
 
@@ -512,6 +523,8 @@ service Forge {
   rpc DeleteExpectedMachine(ExpectedMachineRequest) returns (google.protobuf.Empty);
   // Update the BMC credentials for a specific username/password
   rpc UpdateExpectedMachine(ExpectedMachine) returns (google.protobuf.Empty);
+  // Atomically update only the selected fields; omitted fields remain unchanged.
+  rpc PatchExpectedMachine(PatchExpectedMachineRequest) returns (google.protobuf.Empty);
   // Get the BMC credentials for a specific expected machine
   rpc GetExpectedMachine(ExpectedMachineRequest) returns (ExpectedMachine);
   // Get the BMC credentials for all expected machines
@@ -533,6 +546,8 @@ service Forge {
   rpc CreateExpectedMachines(BatchExpectedMachineOperationRequest) returns (BatchExpectedMachineOperationResponse);
   // Batch update expected machines
   rpc UpdateExpectedMachines(BatchExpectedMachineOperationRequest) returns (BatchExpectedMachineOperationResponse);
+  // Apply every patch in one transaction. Any failure rolls back the whole batch.
+  rpc PatchExpectedMachines(PatchExpectedMachinesRequest) returns (google.protobuf.Empty);
 
   // Expected Power Shelf Management
   // Add expected power shelf
@@ -541,6 +556,8 @@ service Forge {
   rpc DeleteExpectedPowerShelf(ExpectedPowerShelfRequest) returns (google.protobuf.Empty);
   // Update the BMC credentials for a specific username/password
   rpc UpdateExpectedPowerShelf(ExpectedPowerShelf) returns (google.protobuf.Empty);
+  // Atomically update only the selected fields; omitted fields remain unchanged.
+  rpc PatchExpectedPowerShelf(PatchExpectedPowerShelfRequest) returns (google.protobuf.Empty);
   // Get the BMC credentials for a specific expected power shelf
   rpc GetExpectedPowerShelf(ExpectedPowerShelfRequest) returns (ExpectedPowerShelf);
   // Get the BMC credentials for all expected power shelves
@@ -559,6 +576,8 @@ service Forge {
   rpc DeleteExpectedSwitch(ExpectedSwitchRequest) returns (google.protobuf.Empty);
   // Update the BMC credentials for a specific username/password
   rpc UpdateExpectedSwitch(ExpectedSwitch) returns (google.protobuf.Empty);
+  // Atomically update only the selected fields; omitted fields remain unchanged.
+  rpc PatchExpectedSwitch(PatchExpectedSwitchRequest) returns (google.protobuf.Empty);
   // Get the BMC credentials for a specific expected switch
   rpc GetExpectedSwitch(ExpectedSwitchRequest) returns (ExpectedSwitch);
   // Get the BMC credentials for all expected switches
@@ -585,6 +604,18 @@ service Forge {
   rpc ReplaceAllExpectedRacks(ExpectedRackList) returns (google.protobuf.Empty);
   // Delete all expected racks in site
   rpc DeleteAllExpectedRacks(google.protobuf.Empty) returns (google.protobuf.Empty);
+
+  // Expected Rack Group Management
+  rpc AddExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
+  rpc DeleteExpectedRackGroup(ExpectedRackGroupRequest) returns (google.protobuf.Empty);
+  // Replace the full record, including both lists and metadata.
+  rpc UpdateExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
+  rpc GetExpectedRackGroup(ExpectedRackGroupRequest) returns (ExpectedRackGroup);
+  rpc FindExpectedRackGroupIds(ExpectedRackGroupSearchFilter) returns (ExpectedRackGroupIdList);
+  rpc FindExpectedRackGroupsByIds(ExpectedRackGroupsByIdsRequest) returns (ExpectedRackGroupList);
+  // Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
+  rpc ReplaceAllExpectedRackGroups(ExpectedRackGroupList) returns (google.protobuf.Empty);
+  rpc DeleteAllExpectedRackGroups(google.protobuf.Empty) returns (google.protobuf.Empty);
 
   // Perform Attestation Procedure for Measured Boot
   rpc AttestQuote	(AttestQuoteRequest) returns (AttestQuoteResponse);
@@ -719,6 +750,12 @@ service Forge {
 
   // Machine-Validation attempt detail
   rpc GetMachineValidationAttempt(MachineValidationAttemptGetRequest) returns (MachineValidationAttempt);
+
+  // Append the next ordered stdout or stderr chunk while an attempt is active.
+  rpc AppendMachineValidationAttemptLog(MachineValidationAttemptLogAppendRequest) returns (MachineValidationAttemptLogAppendResponse);
+
+  // Read a cursor-based page of persisted attempt logs.
+  rpc GetMachineValidationAttemptLogs(MachineValidationAttemptLogGetRequest) returns (MachineValidationAttemptLogList);
 
   // Machine-Validation run and active attempt heartbeat
   rpc HeartbeatMachineValidationRun(MachineValidationHeartbeatRequest) returns (MachineValidationHeartbeatResponse);
@@ -1738,6 +1775,16 @@ message RuntimeConfig {
   bool svpc_enabled = 55;
   bool astra_enabled = 56;
   bool ewethers_enabled = 57;
+
+  // Operator FNN null routes reported by the anonymous Version RPC. When
+  // site_fabric_null_routes is omitted from site configuration, this includes
+  // site_fabric_prefixes and removed operator-managed roots while they contain
+  // a VpcPrefix or VPC-attached direct NetworkPrefix. Tenant-managed roots are
+  // not added here; this is not a complete audit of DPU isolation routes. Use
+  // GetManagedHostNetworkConfig for the tenant-inclusive FNN response, with RBAC
+  // enforced. An explicit list is returned without checking tenant coverage.
+  // Older Core versions omit this field; an empty items list is authoritative.
+  optional common.StringList site_fabric_null_routes = 58;
 }
 
 message EchoRequest {
@@ -2239,6 +2286,8 @@ message VpcPeeringList {
 }
 
 message VpcPeeringCreationRequest {
+  // ETV and FNN VPCs are incompatible. Requests that pair them return
+  // INVALID_ARGUMENT regardless of the configured VPC peering policy.
   common.VpcId vpc_id = 1;
   common.VpcId peer_vpc_id = 2;
 
@@ -2827,6 +2876,65 @@ message LinkedExpectedSwitch {
   optional common.RackId rack_id = 6;
 }
 
+message ExpectedRackGroup {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Required external identifier, non-blank and at most 128 characters.
+  optional common.RackGroupId rack_group_id = 1;
+  // External group-level NVLink topology identifier, non-blank and at most 128 characters.
+  string topology = 2;
+  reserved 3, 5;
+  reserved "rack_ids", "members";
+  // Descriptive attributes such as name, manufacturer, and location labels.
+  Metadata metadata = 4;
+  // Ordered racks and their devices. Rack IDs and device identities are unique across the group.
+  // May be empty; updates replace the complete list.
+  repeated ExpectedRackGroupRack racks = 6;
+}
+
+message ExpectedRackGroupRack {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Required non-blank external rack identifier.
+  optional common.RackId rack_id = 1;
+  // Ordered devices belonging to this rack; may be empty.
+  repeated ExpectedRackGroupMember members = 2;
+}
+
+message ExpectedRackGroupMember {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Core rack capability spelling: Compute, Switch, or PowerShelf (case-sensitive).
+  string type = 1;
+  // Non-blank external manufacturer name.
+  string manufacturer = 2;
+  // Non-blank external inventory identifier.
+  string id = 3;
+}
+
+message ExpectedRackGroupRequest {
+  // Required external identifier, non-blank and at most 128 characters.
+  string rack_group_id = 1;
+}
+
+message ExpectedRackGroupList {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  repeated ExpectedRackGroup expected_rack_groups = 1;
+}
+
+// Lists identifiers only; callers fetch complete records in bounded batches.
+message ExpectedRackGroupSearchFilter {
+}
+
+message ExpectedRackGroupIdList {
+  // Identifiers sorted lexicographically by the database.
+  repeated common.RackGroupId rack_group_ids = 1;
+}
+
+message ExpectedRackGroupsByIdsRequest {
+  // Non-empty batch, limited by the server's max_find_by_ids setting.
+  // Invalid identifiers are rejected; valid but absent identifiers are omitted.
+  // Results contain each existing record once, sorted by rack_group_id.
+  repeated common.RackGroupId rack_group_ids = 1;
+}
+
 message ExpectedRack {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   // The rack identifier. Same rack_id referenced by expected machines, switches, and power shelves.
@@ -2853,14 +2961,6 @@ message IBFabricSearchFilter {
 
 message IBFabricIdList {
   repeated string ib_fabric_ids = 1;
-}
-
-// Deprecated: use FindNetworkSegmentStateHistories RPC instead
-message NetworkSegmentStateHistory {
-  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  string state = 1;
-  string version = 2;
-  google.protobuf.Timestamp time = 3;
 }
 
 enum NetworkSegmentType {
@@ -2919,41 +3019,41 @@ message NetworkSegment {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   common.NetworkSegmentId id = 1;
 
-  // Deprecated: use config.vpc_id
-  common.VpcId vpc_id = 2 [deprecated = true];
-  // Deprecated: use metadata.name
-  string name = 3 [deprecated = true];
-  // Deprecated: use config.subdomain_id
-  optional common.DomainId subdomain_id = 4 [deprecated = true];
-  // Deprecated: use config.mtu
-  optional int32 mtu = 5 [deprecated = true];
-  // Deprecated: use config.prefixes
-  repeated NetworkPrefix prefixes = 6 [deprecated = true];
+  reserved 2;  // was: common.VpcId vpc_id, replaced with config.vpc_id
+  reserved "vpc_id";
+  reserved 3;  // was: string name, replaced with metadata.name
+  reserved "name";
+  reserved 4;  // was: optional common.DomainId subdomain_id, replaced with config.subdomain_id
+  reserved "subdomain_id";
+  reserved 5;  // was: optional int32 mtu, replaced with config.mtu
+  reserved "mtu";
+  reserved 6;  // was: repeated NetworkPrefix prefixes, replaced with config.prefixes
+  reserved "prefixes";
 
   // Not sure if we actually still need those
   google.protobuf.Timestamp created = 11;
   google.protobuf.Timestamp updated = 12;
   google.protobuf.Timestamp deleted = 13;
 
-  // Deprecated: use config.segment_type
-  NetworkSegmentType segment_type = 14 [deprecated = true];
-  // Deprecated: use status.flags
-  repeated NetworkSegmentFlag flags = 15 [deprecated = true];
+  reserved 14;  // was: NetworkSegmentType segment_type, replaced with config.segment_type
+  reserved "segment_type";
+  reserved 15;  // was: repeated NetworkSegmentFlag flags, replaced with status.flags
+  reserved "flags";
 
   NetworkSegmentConfig config = 16;
   NetworkSegmentStatus status = 17;
   Metadata metadata = 18;
 
-  // Deprecated: use status.lifecycle.version
-  string version = 99 [deprecated = true];
-  // Deprecated: use status.tenant_state (coarse) or status.lifecycle.state (full controller state)
-  TenantState state = 100 [deprecated = true];
-  // Deprecated: use FindNetworkSegmentStateHistories RPC
-  repeated NetworkSegmentStateHistory history = 101 [deprecated = true];
-  // Deprecated: use status.lifecycle.state_reason
-  optional ControllerStateReason state_reason = 102 [deprecated = true];
-  // Deprecated: use status.lifecycle.sla
-  StateSla state_sla = 103 [deprecated = true];
+  reserved 99;  // was: string version, replaced with status.lifecycle.version
+  reserved "version";
+  reserved 100;  // was: TenantState state, replaced with status.tenant_state and status.lifecycle.state
+  reserved "state";
+  reserved 101;  // was: repeated NetworkSegmentStateHistory history, replaced with FindNetworkSegmentStateHistories
+  reserved "history";
+  reserved 102;  // was: optional ControllerStateReason state_reason, replaced with status.lifecycle.state_reason
+  reserved "state_reason";
+  reserved 103;  // was: StateSla state_sla, replaced with status.lifecycle.sla
+  reserved "state_sla";
 }
 
 message NetworkSegmentCreationRequest {
@@ -4545,6 +4645,54 @@ message MachineInventorySoftwareComponent {
   string url = 3;
 }
 
+// Why a machine's LLDP snapshot is being reported. Lets nico-api tell a fresh
+// snapshot from an unchanged one and from a machine that could not read its
+// neighbors at all.
+enum LldpReportResult {
+  option (carbide.codegen.v1.enum_derive) = "serde::Serialize";
+  // Explicit zero value so an omitted result cannot read as a fresh snapshot.
+  LLDP_REPORT_RESULT_UNSPECIFIED = 0;
+  // `interfaces` holds a snapshot that differs from the last one nico-api
+  // acknowledged. An empty `interfaces` here means the machine genuinely sees
+  // no neighbors.
+  LLDP_REPORT_RESULT_UPDATED = 1;
+  // The snapshot matches the last one nico-api acknowledged; `interfaces` is
+  // empty and nothing needs reconciling.
+  LLDP_REPORT_RESULT_UNCHANGED = 2;
+  // The reporter could not read its LLDP neighbors; `interfaces` is empty. It
+  // repeats on every poll for as long as collection keeps failing.
+  LLDP_REPORT_RESULT_COLLECTION_FAILED = 3;
+}
+
+// One LLDP collection attempt on a machine.
+message LldpReport {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Required. LLDP_REPORT_RESULT_UNSPECIFIED will be rejected, so a
+  // default-constructed report cannot be mistaken for a fresh snapshot.
+  LldpReportResult result = 1;
+  // Populated only for LLDP_REPORT_RESULT_UPDATED, where an empty list is
+  // meaningful: the machine genuinely sees no neighbors.
+  repeated InterfaceLldp interfaces = 2;
+}
+
+// Full snapshot of a machine's current LLDP neighbors, keyed by local NIC MAC.
+// Sent by a scout; a DPU agent reports through DpuNetworkStatus.lldp instead.
+message LldpNeighborReport {
+  // Required. A report that names no machine is rejected.
+  common.MachineId machine_id = 1;
+  // Required. An absent report is rejected; use
+  // LLDP_REPORT_RESULT_COLLECTION_FAILED to say the neighbors could not be
+  // read.
+  LldpReport report = 2;
+}
+
+message InterfaceLldp {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Local NIC MAC address (the machine's own port).
+  string mac_address = 1;
+  machine_discovery.LldpSwitchData lldp = 2;
+}
+
 // Summary of a health report source: its mode and source identifier.
 message HealthSourceOrigin {
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
@@ -5016,8 +5164,16 @@ message ManagedHostNetworkConfigResponse {
   // IP prefixes to be denied in the DPU ACL rules.
   repeated string deny_prefixes = 18;
 
-  // List of IP prefixes (in CIDR notation) that are assigned for tenant
-  // use within this site.
+  // Minimal exact union of configured site_fabric_prefixes and every retained
+  // tenant-managed SitePrefix. Retiring operator roots and explicit null-route
+  // overrides do not change this legacy input. New FNN agents prefer the
+  // optional site_fabric_null_routes field below. When that field is
+  // absent in a response from an older Core, a new FNN agent reduces this list
+  // to its minimal exact union before rendering fallback blackhole routes.
+  // Other virtualizers consume this field directly. With mutual isolation,
+  // FNN installs floating blackhole routes while ETV enforces an IPv4
+  // isolation ACL only when the rendered configuration has no NSG. Open
+  // isolation installs neither form of enforcement.
   repeated string site_fabric_prefixes = 19;
 
   // Level of VPC isolation to apply
@@ -5031,6 +5187,23 @@ message ManagedHostNetworkConfigResponse {
   // site-level configured NTP server IPs
   // If empty, the agent may fall back to resolving carbide-ntp.forge for compatibility.
   repeated string ntp_servers = 22;
+
+  // True when Core authoritatively applied its stored-peering activation
+  // policy to every FlatInterfaceConfig.vpc_peer_vnis list in this response.
+  // Agents must ignore those lists when this is false. Older Core versions do
+  // not send this field, so rolling upgrades fail closed.
+  bool vpc_peer_vnis_authoritative = 23;
+
+  // Final FNN blackhole routes resolved by Core. Presence is authoritative,
+  // including a present empty list, and each distinct prefix boundary must be
+  // rendered. New agents fall back to site_fabric_prefixes only when this is
+  // absent in a response from an older Core. Non-FNN responses omit it.
+  // Unlike RuntimeConfig, inherited routes include all retained tenant-managed
+  // SitePrefixes. An explicit override keeps its distinct boundaries. Under
+  // mutual isolation, Core rejects every FNN response, including Admin-only
+  // responses, if that override leaves a retained tenant root without a covering
+  // route. Unused roots and roots in Deleting still require coverage in that mode.
+  optional common.StringList site_fabric_null_routes = 24;
 
   // Enable forge DHCP on HBN.
   // Deprecated: It is always enabled now.
@@ -5109,8 +5282,8 @@ message ManagedHostNetworkConfigResponse {
 
   // Due to limitations in Cumulus Linux route-leaking,
   // some sites may require all VRFs to use the same VNI.
-  // Isolation is still possible via ACLs, and route-imports
-  // will still use the dynamically allocated VNI for deriving
+  // FNN isolation still uses per-VRF site-fabric null routes, and
+  // route-imports still use the dynamically allocated VNI for deriving
   // route-targets.
   optional uint32 site_global_vpc_vni = 117;
 
@@ -5277,7 +5450,11 @@ message FlatInterfaceConfig {
   // Is this interface using L2 or L3.
   bool is_l2_segment = 15;
 
+  // Peer prefixes retained for ETV and older DPU agents. Current FNN agents
+  // establish peering only by importing the peer VNIs below.
   repeated string vpc_peer_prefixes = 16;
+  // Peer VNIs imported as EVPN route targets by FNN. Empty when stored VPC
+  // peerings are disabled by vpc_peering_policy_on_existing.
   repeated uint32 vpc_peer_vnis = 17;
 
   // MTU size
@@ -5953,6 +6130,9 @@ message DpuNetworkStatus {
   optional string dpu_extension_service_version = 15;
   repeated DpuExtensionServiceStatusObservation dpu_extension_services = 16;
   optional AstraConfigStatus astra_config_status = 17;
+  // LLDP neighbors this DPU sees, attached to the status push rather than sent
+  // on its own RPC. Absent when the agent did not attempt a collection.
+  optional LldpReport lldp = 18;
 }
 
 message LastDhcpRequest {
@@ -7593,6 +7773,8 @@ message MachineValidationPlugin {
   string parameters_json = 3;
   bool privileged = 4;
   bool host_access_full = 5;
+  // Plugin implementation type. `container` is the currently supported type.
+  string type = 6;
 }
 
 message MachineValidationTestFullHostApprovalRequest {
@@ -7631,10 +7813,14 @@ message MachineValidationRunResponse {
   string message = 1;
 }
 
+// Machine capability device categories. SPECTRUM_X identifies DPA-interface
+// inventory that can supply attachment selectors; it does not indicate
+// site-level enablement or full reference-architecture readiness.
 enum MachineCapabilityDeviceType {
   MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN = 0;
   MACHINE_CAPABILITY_DEVICE_TYPE_DPU = 1;
   MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK = 2;
+  MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X = 3;
 }
 
 message MachineCapabilityAttributesCpu {
@@ -7677,7 +7863,9 @@ message MachineCapabilityAttributesStorage {
 
 message MachineCapabilityAttributesNetwork {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // For SPECTRUM_X, the exact value accepted by InstanceSpxAttachment.device.
   string name                                                   = 1;
+  // For SPECTRUM_X, valid device_instance values are [0, count), resolved in PCI-name order.
   uint32 count                                                  = 2;
   optional string vendor                                        = 3;
   optional MachineCapabilityDeviceType device_type              = 4;
@@ -10855,6 +11043,39 @@ message InterfaceAddressConfig {
   optional string tenant_vrf_loopback_ip = 7;
 }
 
+message ManagedHostResetRequest {
+  enum Mode {
+    // Zero value so an omitted mode is rejected, not defaulted to an action.
+    Unspecified = 0;
+    Set = 1;
+    Clear = 2;
+  }
+  // Host to reset. Not a DPU: a reset tears down every DPU attached to the
+  // host, so it is only expressible against the host.
+  common.MachineId machine_id = 1;
+  Mode mode = 2;
+  UpdateInitiator initiator = 3;
+
+  // Operator acknowledgment that resetting an assigned host destroys the live
+  // tenant instance and its data. The server rejects a Set on an assigned host
+  // unless this is set.
+  bool allow_reset_with_instance = 4;
+}
+
+message ManagedHostResetListRequest {
+}
+
+message ManagedHostResetListResponse {
+  message ManagedHostResetListItem {
+    common.MachineId id = 1; // Host machine ID
+    string state = 2; // ManagedHost state
+    string initiator = 3; // Who requested this reset.
+    google.protobuf.Timestamp requested_at = 4; // When the reset was requested.
+    optional google.protobuf.Timestamp started_at = 5; // When the reset started.
+  }
+  repeated ManagedHostResetListItem hosts = 1;
+}
+
 // Selects a fixed, versioned mlxconfig profile for DPU provisioning.
 enum DpuNvConfigProfile {
   // No platform profile is selected.
@@ -10984,4 +11205,173 @@ message VpcChangeRoutingProfileRequest {
   // it and may choose another VNI. Verify the returned profile and active VNI;
   // a mismatched or lost response does not undo a committed change.
   optional uint32 vni = 4;
+}
+
+// Partial update of an existing expected power shelf, selected by ID.
+message PatchExpectedPowerShelfRequest {
+  // Required. expected_power_shelf_id identifies the row. A nonempty BMC MAC
+  // may reassert the stored identity but cannot change it.
+  ExpectedPowerShelf expected_power_shelf = 1;
+  // Required; an empty mask checks existence without changing the row.
+  // Paths: bmc_username, bmc_password, shelf_serial_number, bmc_ip_address,
+  // bmc_retain_credentials, rack_id, metadata.name, metadata.description,
+  // metadata.labels.
+  // Unselected values are ignored. Selected values replace the stored field,
+  // including empty labels, an absent `rack_id` (clear), and an empty BMC IP
+  // (clear). Nonempty IPs must parse as IPv4 or IPv6. A selected
+  // `bmc_retain_credentials` must be present; false is an update.
+  // BMC username and password can be selected independently; unselected values
+  // stay unchanged. Selected credentials must be nonempty and cannot be cleared.
+  // Only the listed paths are accepted; duplicate paths have no additional effect.
+  // Selected metadata leaves use empty values when metadata is absent.
+  // Selected labels replace the collection; keys must be unique, and absent
+  // label values become empty strings. Label order is not preserved.
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+// Partial update of an existing expected switch, selected by ID.
+message PatchExpectedSwitchRequest {
+  // Required. expected_switch_id identifies the row. A nonempty BMC MAC
+  // may reassert the stored identity but cannot change it.
+  ExpectedSwitch expected_switch = 1;
+  // Required; an empty mask checks existence without changing the row.
+  // Paths: bmc_username, bmc_password, switch_serial_number, bmc_ip_address,
+  // bmc_retain_credentials, rack_id, nvos_mac_addresses, nvos_ip_address,
+  // nvos_username, nvos_password, metadata.name, metadata.description,
+  // metadata.labels.
+  // Unselected values are ignored. Selected values replace the stored field,
+  // including empty collections, an absent `rack_id` (clear), and an empty BMC
+  // IP (clear). A selected `nvos_ip_address` clears with an absent or empty value.
+  // Nonempty IPs must parse as IPv4 or IPv6. A selected `bmc_retain_credentials`
+  // must be present; false is an update. BMC and NVOS usernames and passwords
+  // can each be selected independently; unselected values stay unchanged.
+  // Selected credentials must be present and nonempty and cannot be cleared.
+  // If either NVOS credential is set after merging, both must be present and
+  // nonempty. Configuring them for the first time requires both values.
+  // The merged NVOS IP, when set, requires exactly one NVOS MAC; both fields
+  // can change in the same patch. Only the listed paths are accepted;
+  // duplicate paths have no additional effect.
+  // Selected metadata leaves use empty values when metadata is absent.
+  // Selected labels replace the collection; keys must be unique, and absent
+  // label values become empty strings. Label order is not preserved.
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+// Partial update of an existing expected machine, selected by ID.
+message PatchExpectedMachineRequest {
+  // Required. id identifies the row. A nonempty BMC MAC may reassert the stored
+  // identity but cannot change it.
+  ExpectedMachine expected_machine = 1;
+  // Required; an empty mask checks existence without changing the row.
+  // Paths: bmc_username, bmc_password, chassis_serial_number,
+  // fallback_dpu_serial_numbers, sku_id, rack_id, is_dpf_enabled,
+  // default_pause_ingestion_and_poweron, bmc_retain_credentials, dpu_mode,
+  // bmc_ip_address, bmc_ip_allocation, host_nics,
+  // host_lifecycle_profile.disable_lockdown,
+  // metadata.name, metadata.description, metadata.labels.
+  //
+  // Unselected values are ignored. Selected values replace the stored field,
+  // including empty collections, false, and absent `sku_id` or `rack_id` (clear).
+  // A selected `bmc_ip_address` must be present: an empty string clears it,
+  // otherwise it must parse as IPv4 or IPv6. Selected optional booleans and
+  // enums must be present. False disables the selected setting; for
+  // `disable_lockdown`, it restores lockdown. `DPU_MODE_UNSPECIFIED` resets to
+  // site inheritance. Selecting only `bmc_ip_address` preserves the merged
+  // allocation policy; an address incompatible with that policy is rejected.
+  // Select `bmc_ip_allocation` with `BMC_IP_ALLOCATION_TYPE_UNSPECIFIED` to
+  // reset allocation to inference from the BMC address. Unknown enum values
+  // are rejected.
+  // Selecting Dynamic or Retained allocation clears a stored fixed address;
+  // selecting a nonempty BMC address with either policy is invalid.
+  //
+  // Selecting `host_nics` replaces the entire list, including an empty list.
+  // Matched interfaces retain omitted roles and allocation policies under
+  // `ExpectedHostNic`'s update rules; explicit Unspecified resets them.
+  // Selected top-level `bmc_ip_address` and `bmc_ip_allocation` override the
+  // nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
+  // only the mask selects interface replacement.
+  //
+  // A selected `chassis_serial_number` must contain 4-32 ASCII letters,
+  // digits, hyphens, or underscores. Selected `fallback_dpu_serial_numbers`
+  // must not contain duplicate strings.
+  //
+  // Selected metadata leaves use empty values when metadata is absent.
+  // Selected labels replace the collection; keys must be unique, and absent
+  // label values become empty strings. Label order is not preserved.
+  // Every nonempty patch validates the complete merged metadata. The name
+  // must contain 0-256 ASCII bytes; the description may contain up to 1024
+  // UTF-8 bytes. At most 16 labels are allowed. Label keys must contain
+  // 1-255 ASCII bytes, and label values may contain up to 255 UTF-8 bytes.
+  //
+  // BMC username and password can be selected independently; unselected values
+  // stay unchanged. Selected credentials must be nonempty and cannot be cleared.
+  // Only the listed paths are accepted; duplicate paths have no additional effect.
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+// Atomic batch of expected-machine patches. Each ID may appear only once.
+message PatchExpectedMachinesRequest {
+  // Each item follows PatchExpectedMachineRequest. All validation and writes
+  // succeed together or no row changes. No resource or credentials are echoed
+  // in the response. An empty list is invalid.
+  repeated PatchExpectedMachineRequest patches = 1;
+}
+
+// The source stream for a Machine Validation attempt-log chunk.
+enum MachineValidationAttemptLogStream {
+  MACHINE_VALIDATION_ATTEMPT_LOG_STREAM_UNSPECIFIED = 0;
+  MACHINE_VALIDATION_ATTEMPT_LOG_STREAM_STDOUT = 1;
+  MACHINE_VALIDATION_ATTEMPT_LOG_STREAM_STDERR = 2;
+}
+
+// One stdout or stderr chunk emitted by a running validation attempt. Sequence
+// numbers start at one, are contiguous within an attempt, and are assigned by
+// the producer. Retrying an accepted sequence with identical stream and content
+// succeeds without adding a duplicate; reusing it with different data fails.
+// Timestamps are set by the server when the chunk is first accepted.
+message MachineValidationAttemptLogChunk {
+  common.UUID attempt_id = 1;
+  uint32 sequence = 2;
+  MachineValidationAttemptLogStream stream = 3;
+  google.protobuf.Timestamp created_at = 4;
+  string content = 5;
+}
+
+message MachineValidationAttemptLogAppendRequest {
+  common.UUID attempt_id = 1;
+  // The next positive, contiguous sequence number for this attempt.
+  uint32 sequence = 2;
+  // The stdout or stderr source stream. UNSPECIFIED is invalid.
+  MachineValidationAttemptLogStream stream = 3;
+  // Non-empty UTF-8 content within the site's configured chunk limit.
+  string content = 4;
+}
+
+message MachineValidationAttemptLogAppendResponse {
+  // True when the chunk was accepted, including an idempotent retry.
+  // False when logging is disabled, the attempt is no longer active, or the
+  // per-attempt size limit was reached. Disabled storage and inactive attempts
+  // both return accepted=false and truncated=false. Invalid input returns an
+  // RPC error.
+  bool accepted = 1;
+  // True only when the per-attempt size limit prevented acceptance.
+  bool truncated = 2;
+}
+
+message MachineValidationAttemptLogGetRequest {
+  common.UUID attempt_id = 1;
+  // Return chunks with a sequence strictly greater than this value. Use zero
+  // for the first page and the last returned sequence for the next page.
+  uint32 after_sequence = 2;
+  // Maximum chunks to return. Zero defaults to 100; values from 1 through 100
+  // are accepted and larger values return INVALID_ARGUMENT, even when storage
+  // is disabled. Disabled storage otherwise returns an empty page.
+  uint32 limit = 3;
+}
+
+message MachineValidationAttemptLogList {
+  // Chunks in ascending sequence order.
+  repeated MachineValidationAttemptLogChunk chunks = 1;
+  // True when more chunks remain after this page's last sequence.
+  bool has_more = 2;
 }

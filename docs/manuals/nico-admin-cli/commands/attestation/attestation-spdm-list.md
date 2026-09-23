@@ -31,9 +31,9 @@ Filter attestation machines by selector
 
 *Possible values:*
 
-- in-progress
-
-- unsuccessful
+> - in-progress
+>
+> - unsuccessful
 
 `--extended`
 
@@ -49,9 +49,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

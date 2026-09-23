@@ -100,7 +100,7 @@ stateDiagram-v2
         R_Ready --> R_Error : child device failure detected
         R_Maintenance --> R_Error : timeout or failure
         R_Validating --> R_Error : validation failure
-        R_Error --> R_Ready : all child devices healthy again
+        R_Error --> R_Ready : component failure and all child devices healthy
         R_Error --> R_Maintenance : on-demand maintenance requested
         R_Ready --> R_Deleting : marked for deletion
         R_Deleting --> [*] : final delete
@@ -149,7 +149,7 @@ stateDiagram-v2
     Ready --> Discovering : topology_changed
     Ready --> Error : child device in error/failed state
 
-    Error --> Ready : all child devices healthy again
+    Error --> Ready : component failure and all child devices healthy
     Error --> Maintenance : maintenance_requested
 
     Ready --> Deleting : marked for deletion
@@ -266,8 +266,10 @@ The rack is fully operational. While ready, it monitors child health and accepts
 
 - **Entry:** From `Maintenance`, `Validating`, or `Ready` on failure.
 - **Exit:**
-  - To **Ready** when all child devices are healthy again.
+  - To **Ready** when a component-origin error is marked for automatic recovery and all child devices are healthy again.
   - To **Maintenance** when on-demand maintenance is requested from error state.
+
+Maintenance-origin errors remain in **Error** until a new maintenance request is submitted. Errors without recovery metadata retain automatic component-readiness recovery.
 
 #### Deleting (R_Deleting)
 

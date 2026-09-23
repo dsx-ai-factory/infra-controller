@@ -21,7 +21,7 @@ use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::maintenance::first_maintenance_state;
 use carbide_rack_controller::ready::all_components_ready;
 use carbide_uuid::rack::RackId;
-use model::rack::{Rack, RackConfig, RackState};
+use model::rack::{Rack, RackConfig, RackErrorRecoveryPolicy, RackState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -33,6 +33,7 @@ pub async fn handle_error(
     _state: &mut Rack,
     config: &RackConfig,
     cause: &str,
+    recovery_policy: RackErrorRecoveryPolicy,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     if let Some(scope) = &config.maintenance_requested {
@@ -67,6 +68,18 @@ pub async fn handle_error(
             maintenance_state: first_maintenance_state(scope),
         })
         .with_txn(txn));
+    }
+
+    if recovery_policy == RackErrorRecoveryPolicy::MaintenanceRequestRequired {
+        tracing::error!(
+            rack_id = %id,
+            cause = %cause,
+            "Rack maintenance failed; a new maintenance request is required",
+        );
+
+        return Ok(StateHandlerOutcome::wait(format!(
+            "rack maintenance failed: {cause}"
+        )));
     }
 
     if all_components_ready(id, ctx).await? {

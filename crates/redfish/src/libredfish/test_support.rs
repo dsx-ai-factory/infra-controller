@@ -135,6 +135,11 @@ struct RedfishSimState {
     /// override replaces the default body, so `create_client_error` cannot
     /// reach it).
     uefi_setup_client_creation_error: Option<String>,
+    /// Observe and pause one UEFI setup call while a test changes the site target.
+    uefi_setup_pause: Option<(
+        tokio::sync::oneshot::Sender<Credentials>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
     /// BIOS attribute map returned by `bios()` when set; the sim's `bios()`
     /// is otherwise unimplemented. Lets unit tests drive the default
     /// `BmcCredentialOps::uefi_setup` DPU body past its attribute probe.
@@ -507,6 +512,21 @@ impl RedfishSim {
     /// [`Self::set_uefi_setup_client_creation_error`].
     pub fn clear_uefi_setup_client_creation_error(&self) {
         self.state.lock().unwrap().uefi_setup_client_creation_error = None;
+    }
+
+    /// Pause the next successful UEFI setup call. The receiver reports the
+    /// credential sent to the device; sending on the returned sender (or
+    /// dropping it) allows setup to complete. Later calls are not paused.
+    pub fn pause_next_uefi_setup(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<Credentials>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (started, credentials) = tokio::sync::oneshot::channel();
+        let (resume, paused) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().uefi_setup_pause = Some((started, paused));
+        (credentials, resume)
     }
 
     /// Set the BIOS attribute map returned by the sim client's `bios()`,
@@ -2604,18 +2624,27 @@ impl super::BmcCredentialOps for RedfishSim {
         &self,
         _access: &carbide_utils::redfish::BmcAccessInfo,
         dpu: bool,
-        _sitewide_uefi_credentials: carbide_secrets::credentials::Credentials,
+        sitewide_uefi_credentials: carbide_secrets::credentials::Credentials,
     ) -> Result<Option<String>, super::CredentialOpError> {
-        let mut state = self.state.lock().unwrap();
-        // Fail before recording the action: the op never reached the device.
-        if let Some(error) = state.uefi_setup_client_creation_error.clone() {
-            return Err(super::CredentialOpError::ClientCreation(
-                RedfishClientCreationError::RedfishError(RedfishError::GenericError { error }),
-            ));
+        let pause = {
+            let mut state = self.state.lock().unwrap();
+            // Fail before recording the action: the op never reached the device.
+            if let Some(error) = state.uefi_setup_client_creation_error.clone() {
+                return Err(super::CredentialOpError::ClientCreation(
+                    RedfishClientCreationError::RedfishError(RedfishError::GenericError { error }),
+                ));
+            }
+            state
+                .platform_actions
+                .push(RedfishSimPlatformAction::UefiSetup { dpu });
+            state.uefi_setup_pause.take()
+        };
+        if let Some((started, resume)) = pause {
+            started
+                .send(sitewide_uefi_credentials)
+                .expect("setup observer dropped");
+            resume.await.ok();
         }
-        state
-            .platform_actions
-            .push(RedfishSimPlatformAction::UefiSetup { dpu });
         Ok(None)
     }
 }

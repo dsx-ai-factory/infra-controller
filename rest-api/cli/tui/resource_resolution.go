@@ -6,9 +6,14 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+
+	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
 )
 
 // GeneratedResourceDescriptor describes how an OpenAPI parameter can be
@@ -47,6 +52,8 @@ func CanonicalGeneratedResourceType(commandName, parameter string) string {
 		return "infiniband-partition"
 	case "nv-link-logical-partition":
 		return "nvlink-logical-partition"
+	case "spectrum-x-partition":
+		return "spectrumx-partition"
 	case "component":
 		return "tray-component"
 	case "run":
@@ -78,6 +85,13 @@ func GeneratedPathResourceDescriptor(commandName, parameter string) GeneratedRes
 	case commandName == "instance-type machine-association delete" && strings.EqualFold(parameter, "machineAssociationId"):
 		descriptor.ResourceType = "instance-type-machine"
 		descriptor.ParentParameter = "instanceTypeId"
+	case commandName == "machine label-values list" && parameter == "key":
+		descriptor.ResourceType = "machine-label-key"
+	case commandName == "expected-machine label-values list" && parameter == "key":
+		descriptor.ResourceType = "expected-machine-label-key"
+	case strings.HasPrefix(commandName, "machine ") && parameter == "chassisId":
+		descriptor.ResourceType = "machine-chassis"
+		descriptor.ParentParameter = "machineId"
 	}
 
 	if descriptor.ResourceType == "rule" || descriptor.ResourceType == "task-run" {
@@ -107,6 +121,14 @@ func (s *Session) ResolveGeneratedResource(
 ) (item *NamedItem, supported bool, err error) {
 	if s == nil {
 		return nil, false, fmt.Errorf("interactive session is required")
+	}
+	if value != "" {
+		switch descriptor.ResourceType {
+		case "machine-label-key", "expected-machine-label-key", "machine-chassis":
+			// Explicit keys and chassis IDs don't depend on discovery and
+			// must retain their exact spelling for the API.
+			return &NamedItem{Name: value, ID: value}, true, nil
+		}
 	}
 	items, supported, err := s.GeneratedResourceItems(ctx, descriptor, resolvedValues)
 	if err != nil || !supported {
@@ -195,6 +217,13 @@ func (s *Session) GeneratedResourceItems(
 		}
 		items, err := s.fetchInstanceTypeMachines(ctx, parent)
 		return items, true, err
+	case "machine-chassis":
+		parent, err := requiredResolvedValue(descriptor, resolvedValues)
+		if err != nil {
+			return nil, true, err
+		}
+		items, err := s.fetchMachineChassis(parent)
+		return items, true, err
 	case "rule":
 		siteID := strings.TrimSpace(resolvedValues[descriptor.ScopeParameter])
 		if siteID == "" {
@@ -234,6 +263,116 @@ func requiredResolvedValue(descriptor GeneratedResourceDescriptor, resolvedValue
 		)
 	}
 	return value, nil
+}
+
+func (s *Session) fetchDPUMachines(_ context.Context) ([]NamedItem, error) {
+	if s.Scope.SiteID == "" {
+		return nil, fmt.Errorf("siteId must be resolved before DPU machines")
+	}
+	machines, err := s.fetchAll(apiPath(s, "dpu"), map[string]string{"siteId": s.Scope.SiteID})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]NamedItem, 0, len(machines))
+	for _, machine := range machines {
+		items = append(items, NamedItem{
+			Name: machineDisplayName(machine), ID: str(machine, "id"), Status: str(machine, "state"),
+			Labels: extractLabels(machine), Raw: machine,
+		})
+	}
+	return items, nil
+}
+
+func (s *Session) fetchSpectrumXPartitions(ctx context.Context) ([]NamedItem, error) {
+	tenantID, err := s.getTenantID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	query := map[string]string{"tenantId": tenantID}
+	if s.Scope.SiteID != "" {
+		query["siteId"] = s.Scope.SiteID
+	}
+	partitions, err := s.fetchAll(apiPath(s, "spectrumx-partition"), query)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]NamedItem, 0, len(partitions))
+	for _, partition := range partitions {
+		if str(partition, "tenantId") != tenantID {
+			continue
+		}
+		items = append(items, NamedItem{
+			Name: str(partition, "name"), ID: str(partition, "id"), Status: str(partition, "status"),
+			Labels: extractLabels(partition), Raw: partition,
+		})
+	}
+	return items, nil
+}
+
+func (s *Session) fetchLabelKeys(resourceType string) ([]NamedItem, error) {
+	query := map[string]string{"pageSize": "100"}
+	if s.Scope.SiteID != "" {
+		query["siteId"] = s.Scope.SiteID
+	}
+	items := make([]NamedItem, 0)
+	for page := 1; page <= 1000; page++ {
+		query["pageNumber"] = strconv.Itoa(page)
+		raw, _, err := s.Client.Do("GET", apiPath(s, resourceType+"/label/key"), nil, query, nil)
+		if err != nil {
+			return nil, err
+		}
+		var keys []string
+		err = json.Unmarshal(raw, &keys)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s label keys: %w", resourceType, err)
+		}
+		for _, key := range keys {
+			items = append(items, NamedItem{Name: key, ID: key})
+		}
+		if len(keys) < 100 {
+			return items, nil
+		}
+	}
+	return nil, fmt.Errorf("%s label keys exceed 1000 pages", resourceType)
+}
+
+func (s *Session) fetchMachineChassis(machineID string) ([]NamedItem, error) {
+	machine, err := s.fetchResourceObject("machine/" + url.PathEscape(machineID))
+	if err != nil {
+		return nil, err
+	}
+	siteID := str(machine, "siteId")
+	if siteID == "" {
+		return nil, fmt.Errorf("machine %s has no siteId", machineID)
+	}
+	endpoints, err := s.fetchAll(apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID, "machineId": machineID})
+	// REST versions without `machineId` reject the query before listing.
+	// The report check below still selects the machine on those servers.
+	var apiErr *appcli.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
+		apiErr.Message == "Unknown query parameter specified in request: machineId" {
+		endpoints, err = s.fetchAll(apiPath(s, "site-explorer/endpoint"), map[string]string{"siteId": siteID})
+	}
+	if err != nil {
+		return nil, err
+	}
+	var items []NamedItem
+	for _, endpoint := range endpoints {
+		report, _ := endpoint["report"].(map[string]interface{})
+		if str(report, "machineId") != machineID {
+			continue
+		}
+		rawChassis, _ := report["chassis"].([]interface{})
+		for _, raw := range rawChassis {
+			chassis, _ := raw.(map[string]interface{})
+			id := str(chassis, "id")
+			if id == "" {
+				continue
+			}
+			items = append(items, NamedItem{Name: id, ID: id, Raw: chassis})
+		}
+	}
+	return items, nil
 }
 
 func (s *Session) fetchAllocationConstraints(allocationID string) ([]NamedItem, error) {

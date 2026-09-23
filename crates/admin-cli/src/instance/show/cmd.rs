@@ -637,10 +637,10 @@ async fn get_vpc_for_interface_network_segment(
         .await?;
 
     if !network_segments.network_segments.is_empty()
-        && let Some(vpc_id) = network_segments.network_segments.first().and_then(|s| {
-            #[allow(deprecated)]
-            s.config.as_ref().and_then(|c| c.vpc_id).or(s.vpc_id)
-        })
+        && let Some(vpc_id) = network_segments
+            .network_segments
+            .first()
+            .and_then(|s| s.config.as_ref().and_then(|c| c.vpc_id))
     {
         let vpc_ids: Vec<VpcId> = vec![vpc_id];
         Ok(api_client

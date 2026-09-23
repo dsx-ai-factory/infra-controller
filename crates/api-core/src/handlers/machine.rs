@@ -15,7 +15,8 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::time::Duration;
 
 use ::rpc::errors::RpcDataConversionError;
@@ -23,8 +24,13 @@ use ::rpc::forge as rpc;
 use ::rpc::model::machine::ManagedHostStateSnapshotRpc;
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
-use carbide_uuid::machine::{DpuMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
+};
+use db::ConditionalWrite;
+use db::resource_pool::ResourcePoolAllocationNotOwned;
 use libredfish::SystemPowerControl;
+use model::bmc_info::BmcInfo;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::hardware_info::MachineNvLinkInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -32,6 +38,7 @@ use model::machine::{
     DpuMachine, HostMachine, LoadSnapshotOptions, Machine, MachineStatus, ManagedHostState,
     ManagedHostStateSnapshot,
 };
+use model::machine_interface::InterfaceType;
 use model::metadata::Metadata;
 use model::network_segment::NetworkSegmentType;
 use tonic::{Request, Response, Status};
@@ -96,7 +103,7 @@ pub(crate) async fn find_machine_ids_by_bmc_ips(
 
     let pairs = db::machine_topology::find_machine_bmc_pairs(
         &api.database_connection,
-        request.into_inner().bmc_ips,
+        &request.into_inner().bmc_ips,
     )
     .await?;
     let rpc_pairs = rpc::MachineIdBmcIpPairs {
@@ -146,6 +153,20 @@ pub(crate) async fn find_machines_by_ids(
     )
     .await?;
 
+    // SpectrumX attachment selectors are live DPA-interface inventory, not a
+    // signal that SpectrumX is enabled or fully ready at the site. Load all
+    // requested hosts' device-description groups in one narrow, aggregated query.
+    let host_machine_ids = snapshots
+        .keys()
+        .filter_map(|machine_id| match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Host(host_id) => Some(host_id),
+            HostOrDpuId::Dpu(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let spectrum_x_capabilities_by_machine =
+        db::dpa_interface::find_spectrum_x_capabilities_by_machine_ids(&mut txn, &host_machine_ids)
+            .await?;
+
     txn.commit().await?;
 
     let sla_config = model::machine::slas::MachineSlaConfig::new(
@@ -156,6 +177,7 @@ pub(crate) async fn find_machines_by_ids(
     Ok(Response::new(snapshot_map_to_rpc_machines(
         snapshots,
         &sla_config,
+        spectrum_x_capabilities_by_machine,
     )))
 }
 
@@ -296,13 +318,52 @@ pub(crate) async fn update_machine_metadata(
     Ok(tonic::Response::new(()))
 }
 
+/// `force_delete_bmc_records` removes discovery records and, when requested,
+/// the BMC interface only while its captured identity still belongs to this
+/// machine. Discovery rows must already be locked before taking interface
+/// locks. The return value reports an actual BMC interface deletion.
+async fn force_delete_bmc_records(
+    txn: &mut sqlx::PgConnection,
+    machine_id: &MachineId,
+    bmc_info: &BmcInfo,
+    delete_bmc_interface: bool,
+    locked_explored_host: Option<IpAddr>,
+    locked_explored_endpoints: &HashSet<IpAddr>,
+) -> Result<bool, CarbideError> {
+    let Some(address) = bmc_info.ip else {
+        return Ok(false);
+    };
+    let Some(interface) =
+        db::machine_interface::find_optional_for_update_by_ip(txn, address).await?
+    else {
+        return Ok(false);
+    };
+    if Some(interface.id) != bmc_info.machine_interface_id
+        || interface.machine_id != Some(*machine_id)
+        || Some(interface.mac_address) != bmc_info.mac
+        || interface.interface_type != InterfaceType::Bmc
+    {
+        return Ok(false);
+    }
+
+    // An absent discovery row was not locked, so a later insert must survive.
+    if locked_explored_host == Some(address) {
+        db::explored_managed_host::delete_by_host_bmc_addr(txn, address).await?;
+    }
+    if locked_explored_endpoints.contains(&address) {
+        db::explored_endpoints::delete(txn, address).await?;
+    }
+    if delete_bmc_interface {
+        db::machine_interface::delete(&interface.id, txn).await?;
+    }
+    Ok(delete_bmc_interface)
+}
+
 /// Runs the DB cleanup transaction for a force-delete.
 ///
-/// All operations follow the lock-ordering established for the rest of the
-/// system so this transaction cannot deadlock with the site-explorer or
-/// allocator under normal conditions. When it does lose a deadlock race, the
-/// caller retries: every operation here is idempotent because a deadlock
-/// causes Postgres to roll back this transaction, leaving the DB unchanged.
+/// Exploration rows precede interface rows, matching Site Explorer's pairing
+/// writes. Other writers can still form a deadlock; the caller retries after
+/// Postgres rolls back this transaction, leaving the DB unchanged.
 ///
 /// Response flags are accumulated into a local value and returned only after
 /// commit. A Postgres rollback does not restore in-memory state, so keeping
@@ -379,59 +440,74 @@ async fn force_delete_cleanup_txn(
         Vec::new()
     };
 
-    // Clean up the explored tables next, in site-explorer's write order
+    // Lock the explored tables next, in site-explorer's write order
     // (`explored_managed_hosts`, then each machine topology and its
-    // `explored_endpoints` row, then interface rows), so this delete and a
-    // concurrent exploration pass can't hold the same tables in opposite
-    // orders.
-    if let Some(machine) = host_machine
+    // `explored_endpoints` row, then interface rows). Defer deletion until
+    // the locked BMC interface confirms that the captured owner still matches.
+    let locked_explored_host = if let Some(machine) = host_machine
         && let Some(addr) = machine.status.bmc_info.ip
+        && db::explored_managed_host::lock_by_host_bmc_addr(&mut txn, addr).await?
     {
-        // If this delete waited out a concurrent exploration rewrite, its
-        // statement snapshot can miss the row that rewrite re-inserted; the
-        // leftover clears on the next exploration pass, which rebuilds the
-        // table from the (now deleted) explored endpoints.
-        db::explored_managed_host::delete_by_host_bmc_addr(&mut txn, addr).await?;
-    }
+        Some(addr)
+    } else {
+        None
+    };
 
     let mut machines_by_bmc_ip = machines
         .iter()
         .filter_map(|machine| machine.status.bmc_info.ip.map(|address| (address, machine)))
         .collect::<Vec<_>>();
-    // Any transaction touching multiple explored_endpoints needs to sort them the same way to avoid
-    // deadlocks: sort by IP.
+    // Match Site Explorer's pairing order so the two paths do not take
+    // endpoint locks in opposite orders.
     machines_by_bmc_ip.sort_by_key(|(address, _)| *address);
 
+    let mut locked_explored_endpoints = HashSet::new();
     for (addr, machine) in machines_by_bmc_ip {
         tracing::info!(
             bmc_ip_address = %addr,
             machine_id = %machine.id,
-            "Cleaning up explored endpoint",
+            "Locking explored endpoint for cleanup",
         );
 
         // Site Explorer refreshes firmware in machine_topologies before it
         // updates this endpoint. Lock in the same order; force_cleanup later
         // deletes the already-locked topology row.
         db::machine_topology::lock_by_machine_id(&mut txn, machine.id).await?;
-        db::explored_endpoints::delete(&mut txn, addr).await?;
+        if db::explored_endpoints::lock_by_address(&mut txn, addr).await? {
+            locked_explored_endpoints.insert(addr);
+        }
     }
 
     if let Some(machine) = host_machine {
-        if request.delete_bmc_interfaces
-            && let Some(bmc_ip) = machine.status.bmc_info.ip
-        {
-            response.host_bmc_interface_associated = true;
-            if db::machine_interface::delete_by_ip(&mut txn, bmc_ip)
-                .await?
-                .is_some()
-            {
-                response.host_bmc_interface_deleted = true;
-            }
-        }
+        response.host_bmc_interface_associated =
+            request.delete_bmc_interfaces && machine.status.bmc_info.ip.is_some();
+        response.host_bmc_interface_deleted = force_delete_bmc_records(
+            &mut txn,
+            &machine.id,
+            &machine.status.bmc_info,
+            request.delete_bmc_interfaces,
+            locked_explored_host,
+            &locked_explored_endpoints,
+        )
+        .await?;
+        // Lock current ownership before `force_cleanup` clears it, excluding
+        // IDs already reassigned. Restrict deletion to captured IDs below:
+        // the response identifies interfaces from this request's snapshot.
+        let owned_interfaces = if request.delete_interfaces {
+            db::machine_interface::find_by_machine_id_for_update(&mut txn, &machine.id).await?
+        } else {
+            Vec::new()
+        };
         db::machine::force_cleanup(&mut txn, &machine.id).await?;
 
         if request.delete_interfaces {
-            for interface in &machine.status.interfaces {
+            for interface in owned_interfaces.iter().filter(|interface| {
+                machine
+                    .status
+                    .interfaces
+                    .iter()
+                    .any(|captured| captured.id == interface.id)
+            }) {
                 // The delete retains each row's boot interface pair in
                 // `retained_boot_interfaces`, so a re-ingested machine
                 // recovers its boot target before its first DHCP.
@@ -455,7 +531,9 @@ async fn force_delete_cleanup_txn(
     }
 
     for dpu_machine in dpu_machines {
-        // Free up all loopback IPs allocated for this DPU.
+        let owner_id = dpu_machine.id.to_string();
+        // Free the DPU's loopbacks. Free or reassigned values leave this DPU
+        // no reservation to release.
         db::vpc_dpu_loopback::delete_and_deallocate(
             &api.common_pools,
             &dpu_machine.id,
@@ -465,12 +543,18 @@ async fn force_delete_cleanup_txn(
         .await?;
 
         if let Some(loopback_ip) = dpu_machine.network_config.loopback_ip {
-            db::resource_pool::release(
+            match db::resource_pool::release(
                 &api.common_pools.ethernet.pool_loopback_ip,
                 &mut txn,
                 loopback_ip,
+                model::resource_pool::OwnerType::Machine,
+                &owner_id,
             )
             .await?
+            {
+                ConditionalWrite::Applied(())
+                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+            }
         }
 
         // The machine snapshot predates `ForceDeletion`, so a concurrent
@@ -480,40 +564,74 @@ async fn force_delete_cleanup_txn(
             &api.common_pools.ethernet.pool_loopback_ip_v6,
             &mut txn,
             model::resource_pool::OwnerType::Machine,
-            &dpu_machine.id.to_string(),
+            &owner_id,
         )
         .await
         .map_err(CarbideError::from)?
         {
-            db::resource_pool::release(
+            // The lookup locks this DPU's reservation, so a rejected release
+            // is an invariant failure.
+            match db::resource_pool::release(
                 &api.common_pools.ethernet.pool_loopback_ip_v6,
                 &mut txn,
                 loopback_ip_v6,
+                model::resource_pool::OwnerType::Machine,
+                &owner_id,
             )
             .await?
+            {
+                ConditionalWrite::Applied(()) => {}
+                ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "DPU `{}` no longer owns loopback IP `{loopback_ip_v6}`",
+                        dpu_machine.id,
+                    )));
+                }
+            }
         }
 
         db::network_devices::dpu_to_network_device_map::delete(&mut txn, &dpu_machine.id).await?;
 
-        if request.delete_bmc_interfaces
-            && let Some(bmc_ip) = dpu_machine.status.bmc_info.ip
-        {
-            response.dpu_bmc_interface_associated = true;
-            if db::machine_interface::delete_by_ip(&mut txn, bmc_ip)
-                .await?
-                .is_some()
+        response.dpu_bmc_interface_associated |=
+            request.delete_bmc_interfaces && dpu_machine.status.bmc_info.ip.is_some();
+        response.dpu_bmc_interface_deleted |= force_delete_bmc_records(
+            &mut txn,
+            &dpu_machine.id,
+            &dpu_machine.status.bmc_info,
+            request.delete_bmc_interfaces,
+            None,
+            &locked_explored_endpoints,
+        )
+        .await?;
+        if let Some(asn) = dpu_machine.asn {
+            match db::resource_pool::release(
+                &api.common_pools.ethernet.pool_fnn_asn,
+                &mut txn,
+                asn,
+                model::resource_pool::OwnerType::Machine,
+                &owner_id,
+            )
+            .await?
             {
-                response.dpu_bmc_interface_deleted = true;
+                ConditionalWrite::Applied(())
+                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
             }
         }
-        if let Some(asn) = dpu_machine.asn {
-            db::resource_pool::release(&api.common_pools.ethernet.pool_fnn_asn, &mut txn, asn)
-                .await?;
-        }
+        let owned_interfaces = if request.delete_interfaces {
+            db::machine_interface::find_by_machine_id_for_update(&mut txn, &dpu_machine.id).await?
+        } else {
+            Vec::new()
+        };
         db::machine::force_cleanup(&mut txn, &dpu_machine.id).await?;
 
         if request.delete_interfaces {
-            for interface in &dpu_machine.status.interfaces {
+            for interface in owned_interfaces.iter().filter(|interface| {
+                dpu_machine
+                    .status
+                    .interfaces
+                    .iter()
+                    .any(|captured| captured.id == interface.id)
+            }) {
                 db::machine_interface::delete(&interface.id, &mut txn).await?;
             }
             response.dpu_interfaces_deleted = true;
@@ -961,16 +1079,43 @@ pub(crate) async fn get_dpu_info_list(
 fn snapshot_map_to_rpc_machines(
     snapshots: HashMap<MachineId, ManagedHostStateSnapshot>,
     sla_config: &model::machine::slas::MachineSlaConfig,
+    mut spectrum_x_capabilities_by_machine: HashMap<
+        HostMachineId,
+        Vec<db::dpa_interface::SpectrumXDeviceCapability>,
+    >,
 ) -> rpc::MachineList {
     let mut result = rpc::MachineList {
         machines: Vec::with_capacity(snapshots.len()),
     };
 
-    for (machine_id, snapshot) in snapshots.into_iter() {
+    for (machine_id, snapshot) in snapshots {
         let dpu_machine_id = DpuMachineId::try_from(machine_id).ok();
-        if let Some(rpc_machine) =
+        let spectrum_x_capabilities = match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Host(host_id) => spectrum_x_capabilities_by_machine
+                .remove(&host_id)
+                .map(spectrum_x_capabilities),
+            HostOrDpuId::Dpu(_) => None,
+        };
+        if let Some(mut rpc_machine) =
             snapshot.into_rpc_machine_state(dpu_machine_id.as_ref(), sla_config)
         {
+            if let Some(spectrum_x_capabilities) = spectrum_x_capabilities
+                && !spectrum_x_capabilities.is_empty()
+            {
+                let capabilities = rpc_machine
+                    .status
+                    .get_or_insert_default()
+                    .capabilities
+                    .get_or_insert_default();
+                capabilities.network.extend(spectrum_x_capabilities);
+                capabilities.network.sort_unstable_by(|a, b| {
+                    a.name.cmp(&b.name).then(a.device_type.cmp(&b.device_type))
+                });
+                #[allow(deprecated)]
+                {
+                    rpc_machine.capabilities = Some(capabilities.clone());
+                }
+            }
             result.machines.push(rpc_machine);
         }
         // A log message for the None case is already emitted inside
@@ -978,6 +1123,20 @@ fn snapshot_map_to_rpc_machines(
     }
 
     result
+}
+
+fn spectrum_x_capabilities(
+    devices: Vec<db::dpa_interface::SpectrumXDeviceCapability>,
+) -> Vec<rpc::MachineCapabilityAttributesNetwork> {
+    devices
+        .into_iter()
+        .map(|device| rpc::MachineCapabilityAttributesNetwork {
+            name: device.device,
+            count: device.count,
+            vendor: None,
+            device_type: Some(rpc::MachineCapabilityDeviceType::SpectrumX as i32),
+        })
+        .collect()
 }
 
 async fn clear_bmc_credentials<ID: MachineIdSubtypeTrait>(

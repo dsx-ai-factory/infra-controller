@@ -36,11 +36,11 @@ Include soft-deleted VPC prefixes
 
 *Possible values:*
 
-- exclude: Exclude deleted resources (default behavior)
-
-- only: Return only deleted resources
-
-- include: Include both deleted and non-deleted resources
+> - exclude: Exclude deleted resources (default behavior)
+>
+> - only: Return only deleted resources
+>
+> - include: Include both deleted and non-deleted resources
 
 `--extended`
 
@@ -56,9 +56,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

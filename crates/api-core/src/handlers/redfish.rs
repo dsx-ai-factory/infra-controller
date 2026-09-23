@@ -25,10 +25,10 @@ use carbide_utils::HostPortPair;
 use carbide_utils::redfish::{format_forwarded_host_parameter, parse_uri_host_ip};
 use chrono::{DateTime, Local};
 use db::redfish_actions::{
-    approve_request, delete_request, fetch_request, find_serials, insert_request, list_requests,
-    set_applied, update_response,
+    ActionNotClaimed, ApprovalNotRecorded, approve_request, delete_request, fetch_request,
+    find_serials, insert_request, list_requests, set_applied, update_response,
 };
-use db::{Transaction, TransactionVending};
+use db::{ConditionalWrite, Transaction, TransactionVending};
 use http::header::CONTENT_TYPE;
 use http::uri::Authority;
 use http::{HeaderMap, HeaderValue, Uri};
@@ -192,11 +192,15 @@ pub(crate) async fn redfish_approve_action(
         );
     }
 
-    let is_approved = approve_request(approver, request, &mut txn).await?;
-    if !is_approved {
-        return Err(
-            CarbideError::InvalidArgument("user already approved request".to_owned()).into(),
-        );
+    match approve_request(approver, request, &mut txn).await? {
+        ConditionalWrite::Applied(()) => {}
+        ConditionalWrite::NotApplied(ApprovalNotRecorded) => {
+            // Another request can record this user's approval or cancel the
+            // action after our read.
+            return Err(
+                CarbideError::InvalidArgument("user already approved request".to_owned()).into(),
+            );
+        }
     }
     txn.commit().await?;
 
@@ -230,9 +234,14 @@ pub(crate) async fn redfish_apply_action(
 
     let ip_to_serial = find_serials(&action_request.machine_ips, &mut txn).await?;
 
-    let is_applied = set_applied(applier, request, &mut txn).await?;
-    if !is_applied {
-        return Err(CarbideError::InvalidArgument("request was already applied".to_owned()).into());
+    match set_applied(applier, request, &mut txn).await? {
+        ConditionalWrite::Applied(()) => {}
+        ConditionalWrite::NotApplied(ActionNotClaimed) => {
+            // Another request can apply or cancel the action after our read.
+            return Err(
+                CarbideError::InvalidArgument("request was already applied".to_owned()).into(),
+            );
+        }
     }
 
     let mut uris: Vec<(Uri, usize)> = Vec::with_capacity(action_request.machine_ips.len());

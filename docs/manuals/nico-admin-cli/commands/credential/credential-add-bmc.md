@@ -26,11 +26,11 @@ The BMC Credential kind
 
 *Possible values:*
 
-- site-wide-root
-
-- bmc-root
-
-- bmc-forge-admin
+> - site-wide-root
+>
+> - bmc-root
+>
+> - bmc-forge-admin
 
 `--password <PASSWORD>`
 
@@ -58,9 +58,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

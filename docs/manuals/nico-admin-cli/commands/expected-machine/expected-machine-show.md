@@ -21,7 +21,8 @@ Show expected machine data
 
 `--id <ID>`
 
-ID (UUID) of the expected machine to show.
+ID (UUID) of the expected machine to show. Cannot be combined with a BMC
+MAC address.
 
 `--extended`
 
@@ -37,9 +38,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 
@@ -47,7 +48,8 @@ Print help (see a summary with -h)
 
 [*BMC_MAC_ADDRESS*]
 
-BMC MAC address of the expected machine to show. Leave unset for all.
+BMC MAC address of the expected machine to show. Omit both this address
+and --id to list all expected machines.
 
 ## Examples
 

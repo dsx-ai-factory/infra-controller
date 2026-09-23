@@ -3,6 +3,7 @@
 This guide explains how to add a new operation to the Temporal workflow executor in the Flow system.
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Adding a New Operation](#adding-a-new-operation)
@@ -133,8 +134,9 @@ func (a *Activities) HealthCheck(
 ```
 
 **Key points:**
-- Receiver is `*Activities`; use the typed capability helper (e.g., 
-  `a.requireHealthStatusReader`, `a.requirePowerController`) to obtain the 
+
+- Receiver is `*Activities`; use the typed capability helper (e.g.,
+  `a.requireHealthStatusReader`, `a.requirePowerController`) to obtain the
   operation interface before invoking methods
 - First non-receiver parameter is always `context.Context`
 - Activities are retried automatically per the workflow's retry policy
@@ -223,6 +225,7 @@ func healthCheck(
 `registerTaskWorkflow` derives the `Timeout` from `operations.GetOperationOptions` and builds the `Unmarshal` closure via `unmarshalAndValidate`, so neither needs to be written by hand. `manager.Execute()` looks up the descriptor by `OperationType` and submits it to Temporal — no changes to `manager.go` are needed.
 
 **Key points:**
+
 - `registerTaskWorkflow` is the standard entry point for task-dispatched workflows; use `register()` directly only for internal workflows that have no `TaskType`
 - `WorkflowName` is what Temporal uses internally; keep it stable — it need not match the Go function name
 - `WorkflowFunc` can be unexported to decouple Go symbol renames from the stable Temporal name
@@ -350,6 +353,7 @@ resp, err := executor.Execute(ctx, &req)
 ### Rule-based execution
 
 For operations that fan out across component types, use `executeRuleBasedOperation()`. It drives execution through the `RuleDefinition` attached to the task:
+
 - Stages run sequentially
 - Steps within a stage run in parallel via `genericComponentStepWorkflow` child workflows
 - Each step can have pre/post actions and a configurable `max_parallel` batch size
@@ -380,7 +384,7 @@ for i, target := range targets {
 }
 for i, f := range futures {
     if err := f.Get(ctx, nil); err != nil {
-        return fmt.Errorf("component %s failed: %w", targets[i].ComponentIDs[0], err)
+        return fmt.Errorf("target %s failed: %w", targets[i].String(), err)
     }
 }
 ```

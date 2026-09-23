@@ -57,7 +57,7 @@ use model::machine::{
     DpuOsOperationalState, DpuRepresentorStatus, FailureDetails, HostMachine, HostProfile, Machine,
     MachineInterfaceSnapshot, MachineLastRebootRequested, MachineLastRebootRequestedMode,
     MachineMaintenanceOperation, MachineValidationContext, ManagedHostState, ReprovisionRequest,
-    UpgradeDecision,
+    ResetRequest, UpgradeDecision,
 };
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::metadata::Metadata;
@@ -1062,24 +1062,26 @@ impl From<MachineObservationNotCurrent> for DatabaseError {
     }
 }
 
-/// Stores a network observation when its timestamp passes the database freshness
-/// check, or no timestamp is stored. Returns `NotApplied` for a missing machine
-/// or rejected timestamp. The JSON and SQLx timestamp conversions can differ
-/// below microsecond precision, so equal instants are not always accepted.
+/// Stores a network observation when its timestamp is at least as recent as the
+/// stored one, or no timestamp is stored. Compares both JSON timestamps at
+/// PostgreSQL's microsecond precision. Returns `NotApplied` for a missing
+/// machine or rejected timestamp.
 pub async fn update_network_status_observation(
     txn: &mut PgConnection,
     machine_id: &DpuMachineId,
     observation: &MachineNetworkStatusObservation,
 ) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
+    // Parse both timestamps from JSON so they round alike. SQLx truncates
+    // separately bound timestamps to microseconds.
     let query = "UPDATE machines SET network_status_observation = $1::json WHERE id = $2 AND
                 (
                     (network_status_observation->>'observed_at' IS NULL)
-                    OR ((network_status_observation->>'observed_at')::timestamp <= $3::timestamp)
+                    OR ((network_status_observation->>'observed_at')::timestamp
+                        <= ($1::json->>'observed_at')::timestamp)
                 ) RETURNING id";
     let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
         .bind(machine_id)
-        .bind(observation.observed_at)
         .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -1106,6 +1108,9 @@ pub struct ExtensionServiceObservationNotCurrent;
 /// is a single JSONB update: PostgreSQL serializes concurrent row updates and
 /// `jsonb_set` retains every other service-type entry.
 ///
+/// Compares the stored and incoming JSON timestamps at PostgreSQL's microsecond
+/// precision, accepting equal timestamps and newer observations.
+///
 /// Returns `Applied(())` when the observation is stored. A conditional miss
 /// returns `NotApplied` if the machine exists when rechecked, or
 /// [`DatabaseError::NotFoundError`] if it is absent. The identity recheck is
@@ -1128,7 +1133,7 @@ pub async fn update_extension_service_status_observation(
           AND (
               extension_service_status_observations -> $2 IS NULL
               OR (extension_service_status_observations -> $2 ->> 'observed_at')::timestamptz
-                    <= $4::timestamptz
+                    <= ($3::jsonb->>'observed_at')::timestamptz
           )
         RETURNING id
     "#;
@@ -1136,7 +1141,6 @@ pub async fn update_extension_service_status_observation(
         .bind(machine_id)
         .bind(service_type.to_string())
         .bind(sqlx::types::Json(observation))
-        .bind(observation.observed_at)
         .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -2251,6 +2255,92 @@ pub async fn list_machines_requested_for_host_reprovisioning(
         .map_err(|e| DatabaseError::query(query.as_str(), e))
 }
 
+/// Records a reset request, replacing a pending one. Reports false if one has already started.
+pub async fn trigger_managed_host_reset_request(
+    txn: &mut PgConnection,
+    initiator: &str,
+    machine_id: &MachineId,
+) -> Result<bool, DatabaseError> {
+    let req = ResetRequest {
+        requested_at: chrono::Utc::now(),
+        initiator: initiator.to_string(),
+        started_at: None,
+    };
+
+    let query = "UPDATE machines SET reset_requested=$2
+                     WHERE id=$1
+                       AND (reset_requested IS NULL
+                            OR reset_requested->'started_at' = 'null'::jsonb) RETURNING id";
+    let requested = sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
+        .bind(sqlx::types::Json(req))
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(requested.is_some())
+}
+
+/// Marks the reset as started, which closes it to `Clear` and stops the hinge re-firing.
+/// Guarded on `IS NOT NULL` because `jsonb_set` on a `NULL` column reports success unchanged.
+pub async fn update_managed_host_reset_start_time(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+) -> Result<(), DatabaseError> {
+    let query = r#"UPDATE machines
+                        SET reset_requested=
+                                    jsonb_set(reset_requested, '{started_at}', $2, true)
+                       WHERE id=$1 AND reset_requested IS NOT NULL RETURNING id"#;
+    let _id = sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
+        .bind(sqlx::types::Json(chrono::Utc::now()))
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(())
+}
+
+/// Clears a reset request and reports whether a row matched, optionally sparing a started one.
+pub async fn clear_managed_host_reset_request(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    only_if_not_started: bool,
+) -> Result<bool, DatabaseError> {
+    let query = if only_if_not_started {
+        "UPDATE machines SET reset_requested=NULL
+            WHERE id=$1 AND reset_requested->'started_at' = 'null'::jsonb RETURNING id"
+    } else {
+        "UPDATE machines SET reset_requested=NULL WHERE id=$1 RETURNING id"
+    };
+
+    let cleared = sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::new("clear reset_requested", e))?;
+
+    Ok(cleared.is_some())
+}
+
+pub async fn list_machines_requested_for_reset(
+    txn: impl DbReader<'_>,
+) -> Result<Vec<HostMachine>, DatabaseError> {
+    lazy_static! {
+        // Oldest first with the id breaking ties, since Postgres guarantees no order otherwise.
+        // Cast because the stored text has variable fractional digits and will not sort.
+        static ref query: String = format!(
+            "{} WHERE m.reset_requested IS NOT NULL
+                ORDER BY (m.reset_requested->>'requested_at')::timestamptz, m.id",
+            JSON_MACHINE_SNAPSHOT_QUERY.deref()
+        );
+    }
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query.as_str(), e))
+}
+
 /// Apply dpu agent upgrade policy to a single DPU.
 /// Returns Ok(true) if it needs upgrading, Ok(false) otherwise.
 pub async fn apply_agent_upgrade_policy(
@@ -2960,18 +3050,24 @@ pub async fn clear_decommission_requested(
         .map_err(|error| DatabaseError::new("clear_decommission_requested", error))
 }
 
+/// Clears only the maintenance request that the controller completed.
+/// A missing machine or a different pending request returns `NotApplied`.
 pub async fn clear_machine_maintenance_requested(
     txn: &mut PgConnection,
     machine_id: impl MachineIdSubtypeTrait,
-) -> DatabaseResult<()> {
-    let query =
-        "UPDATE machines SET machine_maintenance_requested = NULL WHERE id = $1 RETURNING id";
-    sqlx::query_as::<_, MachineId>(query)
+    request: &model::machine::MachineMaintenanceRequest,
+) -> DatabaseResult<ConditionalWrite<(), crate::MaintenanceRequestNotCurrent>> {
+    let query = "UPDATE machines SET machine_maintenance_requested = NULL WHERE id = $1 AND machine_maintenance_requested = $2 RETURNING id";
+    let cleared = sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
-        .fetch_one(txn)
+        .bind(sqlx::types::Json(request))
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::new("clear_machine_maintenance_requested", e))?;
-    Ok(())
+    Ok(match cleared {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent),
+    })
 }
 
 /// Record an operator "force-converge this BMC now" request on the machine that
@@ -3857,6 +3953,83 @@ mod test {
     }
 
     #[crate::sqlx_test]
+    async fn network_observations_compare_fractional_timestamps(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::machine::DpuMachineId;
+        use chrono::{DateTime, Duration, Utc};
+        use model::machine::network::MachineNetworkStatusObservation;
+
+        use super::{MachineObservationNotCurrent, update_network_status_observation};
+        use crate::ConditionalWrite::{self, Applied, NotApplied};
+
+        let machine_id: DpuMachineId =
+            "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng".parse()?;
+        let observed_at = DateTime::from_timestamp(1_722_000_000, 123_456_789).unwrap();
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        struct Case {
+            scenario: &'static str,
+            observed_at: DateTime<Utc>,
+            expect: ConditionalWrite<(), MachineObservationNotCurrent>,
+        }
+        let mut expected = None;
+        for case in [
+            Case {
+                scenario: "first observation",
+                observed_at,
+                expect: Applied(()),
+            },
+            Case {
+                scenario: "equal timestamp replaces the payload",
+                observed_at,
+                expect: Applied(()),
+            },
+            Case {
+                scenario: "older observation preserves the payload",
+                observed_at: observed_at - Duration::microseconds(1),
+                expect: NotApplied(MachineObservationNotCurrent),
+            },
+        ] {
+            let observation = MachineNetworkStatusObservation {
+                machine_id,
+                agent_version: Some(case.scenario.to_string()),
+                observed_at: case.observed_at,
+                network_config_version: None,
+                client_certificate_expiry: None,
+                agent_version_superseded_at: None,
+                instance_network_observation: None,
+                fabric_interfaces: Vec::new(),
+            };
+            let mut txn = pool.begin().await?;
+            let result =
+                update_network_status_observation(txn.as_mut(), &machine_id, &observation).await?;
+            txn.commit().await?;
+            assert_eq!(result, case.expect, "{}", case.scenario);
+            if let Applied(()) = case.expect {
+                expected = Some(observation);
+            }
+            let persisted: sqlx::types::Json<MachineNetworkStatusObservation> =
+                sqlx::query_scalar("SELECT network_status_observation FROM machines WHERE id = $1")
+                    .bind(machine_id)
+                    .fetch_one(&pool)
+                    .await?;
+            assert_eq!(Some(persisted.0), expected, "{}", case.scenario);
+        }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     async fn extension_service_observations_preserve_per_service_timestamp_order(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3879,7 +4052,7 @@ mod test {
             config_version: ConfigVersion::initial(),
             instance_config_version: None,
             extension_service_statuses: Vec::new(),
-            observed_at: DateTime::from_timestamp(1_722_000_000, 0).unwrap(),
+            observed_at: DateTime::from_timestamp(1_722_000_000, 123_456_789).unwrap(),
         };
         let mut txn = pool.begin().await?;
         let missing = update_extension_service_status_observation(

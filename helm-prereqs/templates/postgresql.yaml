@@ -50,11 +50,9 @@ spec:
       - superuser
       - createdb
     {{- end }}
-    {{- if .Values.flow.enabled }}
     flow.nico:
       - superuser
       - createdb
-    {{- end }}
     {{- if .Values.rms.enabled }}
     # No role flags: rms.nico owns only the rms database (databases: below);
     # the RMS migrations create tables/indexes there and need nothing wider.
@@ -77,9 +75,7 @@ spec:
     {{- if .Values.rest.enabled }}
     nico_rest: nico-rest.nico
     {{- end }}
-    {{- if .Values.flow.enabled }}
     flow: flow.nico
-    {{- end }}
     {{- if .Values.rms.enabled }}
     rms: rms.nico
     {{- end }}

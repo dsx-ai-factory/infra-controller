@@ -27,7 +27,10 @@ use component_manager::power_shelf_manager::{
 use db::power_shelf as db_power_shelf;
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
-use model::power_shelf::{PowerShelf, PowerShelfControllerState, PowerShelfMaintenanceOperation};
+use model::power_shelf::{
+    PowerShelf, PowerShelfControllerState, PowerShelfMaintenanceOperation,
+    PowerShelfMaintenanceRequest,
+};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -40,36 +43,48 @@ pub async fn handle_maintenance(
     state: &mut PowerShelf,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
-    let operation = match &state.controller_state.value {
-        PowerShelfControllerState::Maintenance { operation } => *operation,
-        _ => unreachable!("handle_maintenance called with non-Maintenance state"),
+    let PowerShelfControllerState::Maintenance { operation, request } =
+        &state.controller_state.value
+    else {
+        unreachable!("handle_maintenance called with non-Maintenance state");
     };
+    let request = request.as_ref();
 
     match operation {
         PowerShelfMaintenanceOperation::PowerOn => {
-            handle_power_on(power_shelf_id, state, ctx).await
+            handle_power_on(power_shelf_id, state, request, ctx).await
         }
         PowerShelfMaintenanceOperation::PowerOff => {
-            handle_power_off(power_shelf_id, state, ctx).await
+            handle_power_off(power_shelf_id, state, request, ctx).await
         }
     }
 }
 
 async fn handle_power_on(
     power_shelf_id: &PowerShelfId,
-    state: &mut PowerShelf,
+    state: &PowerShelf,
+    request: Option<&PowerShelfMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
     tracing::info!(
         power_shelf_id = %power_shelf_id,
         "PowerShelf maintenance: PowerOn"
     );
-    invoke_power_operation(power_shelf_id, state, ctx, PowerAction::On, "PowerOn").await
+    invoke_power_operation(
+        power_shelf_id,
+        state,
+        request,
+        ctx,
+        PowerAction::On,
+        "PowerOn",
+    )
+    .await
 }
 
 async fn handle_power_off(
     power_shelf_id: &PowerShelfId,
-    state: &mut PowerShelf,
+    state: &PowerShelf,
+    request: Option<&PowerShelfMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
     tracing::info!(
@@ -79,6 +94,7 @@ async fn handle_power_off(
     invoke_power_operation(
         power_shelf_id,
         state,
+        request,
         ctx,
         PowerAction::ForceOff,
         "PowerOff",
@@ -90,11 +106,11 @@ async fn handle_power_off(
 /// Builds a `PowerShelfEndpoint` with the power shelf's BMC connection details
 /// and dispatches `power_control` against the configured backend. Returns to
 /// `Ready` on success or transitions to `Error` on failure. In both terminal
-/// cases the `power_shelf_maintenance_requested` row is cleared so the
-/// controller does not re-enter `Maintenance` on the next iteration.
+/// cases only the completed request is cleared. A replacement remains pending.
 async fn invoke_power_operation(
     power_shelf_id: &PowerShelfId,
     state: &PowerShelf,
+    request: Option<&PowerShelfMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
     action: PowerAction,
     operation_label: &'static str,
@@ -102,6 +118,7 @@ async fn invoke_power_operation(
     let Some(component_manager) = ctx.services.component_manager.as_ref() else {
         return finish_maintenance_with_error(
             power_shelf_id,
+            request,
             ctx,
             format!(
                 "PowerShelf {} maintenance ({}): component manager not configured",
@@ -114,6 +131,7 @@ async fn invoke_power_operation(
     let Some(rack_id) = state.rack_id.as_ref() else {
         return finish_maintenance_with_error(
             power_shelf_id,
+            request,
             ctx,
             format!(
                 "PowerShelf {} maintenance ({}): power shelf has no rack association",
@@ -134,6 +152,7 @@ async fn invoke_power_operation(
         Err(cause) => {
             return finish_maintenance_with_error(
                 power_shelf_id,
+                request,
                 ctx,
                 format!(
                     "PowerShelf {} maintenance ({}): {}",
@@ -167,12 +186,13 @@ async fn invoke_power_operation(
                     backend = component_manager.power_shelf.name(),
                     "Power shelf power control succeeded; returning PowerShelf to Ready"
                 );
-                let mut txn = ctx.services.db_pool.begin().await?;
-                db_power_shelf::clear_power_shelf_maintenance_requested(&mut txn, *power_shelf_id)
-                    .await?;
-                return Ok(
-                    StateHandlerOutcome::transition(PowerShelfControllerState::Ready).with_txn(txn),
-                );
+                return finish_maintenance(
+                    power_shelf_id,
+                    request,
+                    ctx,
+                    PowerShelfControllerState::Ready,
+                )
+                .await;
             }
 
             let summary = result
@@ -190,7 +210,7 @@ async fn invoke_power_operation(
                 "PowerShelf {} maintenance ({}): power control failed: {}",
                 power_shelf_id, operation_label, summary
             );
-            finish_maintenance_with_error(power_shelf_id, ctx, cause).await
+            finish_maintenance_with_error(power_shelf_id, request, ctx, cause).await
         }
         Err(error) => {
             let cause = format!(
@@ -205,7 +225,7 @@ async fn invoke_power_operation(
                 error = %error,
                 "Power shelf power control transport error",
             );
-            finish_maintenance_with_error(power_shelf_id, ctx, cause).await
+            finish_maintenance_with_error(power_shelf_id, request, ctx, cause).await
         }
     }
 }
@@ -274,16 +294,49 @@ async fn lookup_bmc_credentials(
     }
 }
 
-/// Clear the pending maintenance request and transition to `Error` with the
-/// given cause. Clearing the request is what breaks the
-/// `Error -> Ready -> Maintenance -> Error` loop on persistent failures and
-/// forces the operator to explicitly re-request maintenance to retry.
+/// Acknowledge the failed request so it does not retry indefinitely. A newer
+/// request remains available to the `Error` state's maintenance admission.
 async fn finish_maintenance_with_error(
     power_shelf_id: &PowerShelfId,
+    request: Option<&PowerShelfMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
     cause: String,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
+    finish_maintenance(
+        power_shelf_id,
+        request,
+        ctx,
+        PowerShelfControllerState::Error { cause },
+    )
+    .await
+}
+
+async fn finish_maintenance(
+    power_shelf_id: &PowerShelfId,
+    request: Option<&PowerShelfMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
+    next_state: PowerShelfControllerState,
+) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
+    let Some(request) = request else {
+        // Older saved states cannot identify the request that started this
+        // operation. Preserve the pending request, even if that repeats work.
+        tracing::warn!(
+            %power_shelf_id,
+            "Maintenance completed without its original request; preserving pending maintenance"
+        );
+        return Ok(StateHandlerOutcome::transition(next_state));
+    };
+
     let mut txn = ctx.services.db_pool.begin().await?;
-    db_power_shelf::clear_power_shelf_maintenance_requested(&mut txn, *power_shelf_id).await?;
-    Ok(StateHandlerOutcome::transition(PowerShelfControllerState::Error { cause }).with_txn(txn))
+    if let db::ConditionalWrite::NotApplied(reason) =
+        db_power_shelf::clear_power_shelf_maintenance_requested(&mut txn, *power_shelf_id, request)
+            .await?
+    {
+        tracing::debug!(
+            %power_shelf_id,
+            ?reason,
+            "Completed maintenance request is no longer pending"
+        );
+    }
+    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
 }

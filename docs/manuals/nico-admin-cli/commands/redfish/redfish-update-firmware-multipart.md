@@ -30,21 +30,21 @@ Firmware type, ignored by some platforms and optional on others
 
 *Possible values:*
 
-- bmc
-
-- uefi
-
-- erotbmc
-
-- erotbios
-
-- cpldmid
-
-- cpldmb
-
-- cpldpdb
-
-- hgxbmc
+> - bmc
+>
+> - uefi
+>
+> - erotbmc
+>
+> - erotbios
+>
+> - cpldmid
+>
+> - cpldmb
+>
+> - cpldpdb
+>
+> - hgxbmc
 
 `--extended`
 
@@ -60,9 +60,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

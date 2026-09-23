@@ -36,13 +36,13 @@ default)
 
 *Possible values:*
 
-- bf2
-
-- bf3
-
-- bf4
-
-- unknown
+> - bf2
+>
+> - bf3
+>
+> - bf4
+>
+> - unknown
 
 `--extended`
 
@@ -58,9 +58,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

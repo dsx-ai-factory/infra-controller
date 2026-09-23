@@ -16,17 +16,14 @@
  */
 
 //! IPMI-over-HTTP mock handler for testing.
-//!
-//! Receives JSON requests from `IPMIToolHttpImpl` and translates them
-//! into `BmcCommand::SetSystemPower` calls to machine-a-tron.
 
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::SystemPowerControl;
 use crate::bmc_state::BmcState;
 use crate::redfish::log_service::LogEntryDraft;
+use crate::{Callbacks, ResourceResetType};
 
 /// Request body for IPMI mock endpoint.
 #[derive(Debug, Deserialize)]
@@ -59,12 +56,12 @@ impl IpmiResponse {
 }
 
 /// Add IPMI routes to the router.
-pub(super) fn add_routes(router: Router<BmcState>) -> Router<BmcState> {
-    router.route("/ipmi", post(handle_ipmi))
+pub(super) fn add_routes<C: Callbacks>(router: Router<BmcState<C>>) -> Router<BmcState<C>> {
+    router.route("/ipmi", post(handle_ipmi::<C>))
 }
 
-async fn handle_ipmi(
-    axum::extract::State(state): axum::extract::State<BmcState>,
+async fn handle_ipmi<C: Callbacks>(
+    axum::extract::State(state): axum::extract::State<BmcState<C>>,
     Json(req): Json<IpmiRequest>,
 ) -> Json<IpmiResponse> {
     tracing::debug!(action = %req.action, "IPMI mock request");
@@ -77,12 +74,15 @@ async fn handle_ipmi(
     let response = match req.action.as_str() {
         "chassis_power_reset" => {
             tracing::info!("IPMI: chassis power reset");
-            match callbacks.send_power_command(SystemPowerControl::ForceRestart) {
+            match callbacks
+                .computer_system_reset(ResourceResetType::ForceRestart)
+                .await
+            {
                 Ok(()) => {
                     if let Some(system) = state.system_state.primary_system_odata_id() {
                         state.record_event(LogEntryDraft::reset_requested(
                             &system,
-                            SystemPowerControl::ForceRestart,
+                            ResourceResetType::ForceRestart,
                         ));
                     }
                     IpmiResponse::ok()
@@ -103,7 +103,10 @@ async fn handle_ipmi(
         }
         "dpu_legacy_boot" => {
             tracing::info!("IPMI: dpu legacy boot");
-            match callbacks.send_power_command(SystemPowerControl::ForceRestart) {
+            match callbacks
+                .computer_system_reset(ResourceResetType::ForceRestart)
+                .await
+            {
                 Ok(()) => IpmiResponse::ok(),
                 Err(e) => {
                     tracing::error!(error = ?e, "dpu legacy boot failed");

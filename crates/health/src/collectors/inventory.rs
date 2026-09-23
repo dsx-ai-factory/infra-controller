@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
-use nv_redfish::Resource;
 use nv_redfish::chassis::{Chassis, PowerSupply};
 use nv_redfish::computer_system::{ComputerSystem, Drive, Memory, Processor, Storage};
 use nv_redfish::core::{Bmc, ToSnakeCase};
@@ -191,6 +190,15 @@ pub(crate) enum DiscoveredEntity<B: Bmc> {
         /// standard `PowerCapacityWatts` is absent. LiteOn is the only source
         /// today; see `discover_power_supplies`.
         oem_capacity_watts: Option<f64>,
+        /// Whether this PSU is currently outputting power, parsed from a
+        /// vendor OEM schema. No standard `PowerSupply` field carries this;
+        /// Delta is the only source today, via `Oem.deltaenergysystems.Power`.
+        oem_power_output: Option<bool>,
+        /// Target fan speed in percent, parsed from a vendor OEM schema. No
+        /// standard `PowerSupply` field carries this either; Delta is the
+        /// only source today, via `Oem.deltaenergysystems.FanSpeedTarget`.
+        /// `0` means PSU-controlled.
+        oem_fan_speed_target_percent: Option<i64>,
     },
     Chassis {
         entity: Arc<Chassis<B>>,
@@ -237,12 +245,12 @@ impl<B: Bmc> DiscoveredEntity<B> {
     pub(crate) fn base_attributes(&self) -> Vec<MetricLabel> {
         match self {
             DiscoveredEntity::Processor { entity, system, .. } => vec![
-                (Cow::Borrowed("processor_id"), entity.raw().base.id.clone()),
-                (Cow::Borrowed("system_id"), system.raw().base.id.clone()),
+                (Cow::Borrowed("processor_id"), entity.raw().id.clone()),
+                (Cow::Borrowed("system_id"), system.raw().id.clone()),
             ],
             DiscoveredEntity::Memory { entity, system, .. } => vec![
-                (Cow::Borrowed("memory_id"), entity.raw().base.id.clone()),
-                (Cow::Borrowed("system_id"), system.raw().base.id.clone()),
+                (Cow::Borrowed("memory_id"), entity.raw().id.clone()),
+                (Cow::Borrowed("system_id"), system.raw().id.clone()),
             ],
             DiscoveredEntity::Drive {
                 entity,
@@ -250,21 +258,18 @@ impl<B: Bmc> DiscoveredEntity<B> {
                 storage,
                 ..
             } => vec![
-                (Cow::Borrowed("drive_id"), entity.raw().base.id.clone()),
-                (Cow::Borrowed("storage_id"), storage.raw().base.id.clone()),
-                (Cow::Borrowed("system_id"), system.raw().base.id.clone()),
+                (Cow::Borrowed("drive_id"), entity.raw().id.clone()),
+                (Cow::Borrowed("storage_id"), storage.raw().id.clone()),
+                (Cow::Borrowed("system_id"), system.raw().id.clone()),
             ],
             DiscoveredEntity::PowerSupply {
                 entity, chassis, ..
             } => vec![
-                (
-                    Cow::Borrowed("powersupply_id"),
-                    entity.raw().base.id.clone(),
-                ),
-                (Cow::Borrowed("chassis_id"), chassis.raw().base.id.clone()),
+                (Cow::Borrowed("powersupply_id"), entity.raw().id.clone()),
+                (Cow::Borrowed("chassis_id"), chassis.raw().id.clone()),
             ],
             DiscoveredEntity::Chassis { entity, .. } => {
-                vec![(Cow::Borrowed("chassis_id"), entity.raw().base.id.clone())]
+                vec![(Cow::Borrowed("chassis_id"), entity.raw().id.clone())]
             }
         }
     }
@@ -346,16 +351,16 @@ impl<B: Bmc> DiscoveredEntity<B> {
     /// since an id is only unique within its own collection.
     pub(crate) fn gpu_slot_id(&self) -> Option<String> {
         match self {
-            DiscoveredEntity::Chassis { entity, .. } => Some(entity.raw().base.id.clone()),
-            DiscoveredEntity::Processor { entity, .. } => Some(entity.raw().base.id.clone()),
+            DiscoveredEntity::Chassis { entity, .. } => Some(entity.raw().id.clone()),
+            DiscoveredEntity::Processor { entity, .. } => Some(entity.raw().id.clone()),
             _ => None,
         }
     }
 
     pub(crate) fn gpu_origin_path(&self) -> Option<String> {
         let odata_id = match self {
-            DiscoveredEntity::Chassis { entity, .. } => entity.odata_id().to_string(),
-            DiscoveredEntity::Processor { entity, .. } => entity.odata_id().to_string(),
+            DiscoveredEntity::Chassis { entity, .. } => entity.raw().odata_id.to_string(),
+            DiscoveredEntity::Processor { entity, .. } => entity.raw().odata_id.to_string(),
             _ => return None,
         };
         Some(normalize_odata_id(&odata_id).to_string())
@@ -363,11 +368,11 @@ impl<B: Bmc> DiscoveredEntity<B> {
 
     pub(crate) fn key(&self) -> String {
         match self {
-            DiscoveredEntity::Processor { entity, .. } => entity.odata_id().to_string(),
-            DiscoveredEntity::Memory { entity, .. } => entity.odata_id().to_string(),
-            DiscoveredEntity::Drive { entity, .. } => entity.odata_id().to_string(),
-            DiscoveredEntity::PowerSupply { entity, .. } => entity.odata_id().to_string(),
-            DiscoveredEntity::Chassis { entity, .. } => entity.odata_id().to_string(),
+            DiscoveredEntity::Processor { entity, .. } => entity.raw().odata_id.to_string(),
+            DiscoveredEntity::Memory { entity, .. } => entity.raw().odata_id.to_string(),
+            DiscoveredEntity::Drive { entity, .. } => entity.raw().odata_id.to_string(),
+            DiscoveredEntity::PowerSupply { entity, .. } => entity.raw().odata_id.to_string(),
+            DiscoveredEntity::Chassis { entity, .. } => entity.raw().odata_id.to_string(),
         }
     }
 
@@ -389,15 +394,33 @@ impl<B: Bmc> DiscoveredEntity<B> {
             DiscoveredEntity::PowerSupply {
                 entity,
                 oem_capacity_watts,
+                oem_power_output,
+                oem_fan_speed_target_percent,
                 ..
             } => {
                 let raw = entity.raw();
-                let mut metrics = Vec::with_capacity(2);
+                let mut metrics = Vec::with_capacity(5);
                 if let Some(value) = raw.power_capacity_watts.flatten().or(*oem_capacity_watts) {
                     metrics.push(DerivedMetric {
                         metric_type: "powersupply_capacity",
                         unit: "watts",
                         value,
+                        labels: Vec::new(),
+                    });
+                }
+                if let Some(power_output) = oem_power_output {
+                    metrics.push(DerivedMetric {
+                        metric_type: "powersupply_output_enabled",
+                        unit: "bool",
+                        value: if *power_output { 1.0 } else { 0.0 },
+                        labels: Vec::new(),
+                    });
+                }
+                if let Some(fan_speed_target) = oem_fan_speed_target_percent {
+                    metrics.push(DerivedMetric {
+                        metric_type: "powersupply_fan_speed_target",
+                        unit: "percentage",
+                        value: *fan_speed_target as f64,
                         labels: Vec::new(),
                     });
                 }

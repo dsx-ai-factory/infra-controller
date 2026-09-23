@@ -25,9 +25,8 @@ type DpuExtensionServiceUpdateRequest struct {
 	// Name for the DPU Extension Service. Must be unique for a given Tenant
 	Name NullableString `json:"name,omitempty"`
 	// Optional description for the DPU Extension Service
-	Description NullableString `json:"description,omitempty"`
-	// Deployment spec for the DPU Extension Service, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. For KubernetesPod this is the same Pod manifest accepted on create. For DpfHelmChart this is the same strict JSON definition accepted on create and updates stable V1 in place.
-	Data NullableString `json:"data,omitempty"`
+	Description NullableString                               `json:"description,omitempty"`
+	Data        NullableDpuExtensionServiceUpdateRequestData `json:"data,omitempty"`
 	// Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
 	Credentials *DpuExtensionServiceCredentials `json:"credentials,omitempty"`
 	// Observability configuration for the DPU Extension Service version; unsupported for DpfHelmChart
@@ -138,9 +137,9 @@ func (o *DpuExtensionServiceUpdateRequest) UnsetDescription() {
 }
 
 // GetData returns the Data field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *DpuExtensionServiceUpdateRequest) GetData() string {
+func (o *DpuExtensionServiceUpdateRequest) GetData() DpuExtensionServiceUpdateRequestData {
 	if o == nil || IsNil(o.Data.Get()) {
-		var ret string
+		var ret DpuExtensionServiceUpdateRequestData
 		return ret
 	}
 	return *o.Data.Get()
@@ -149,7 +148,7 @@ func (o *DpuExtensionServiceUpdateRequest) GetData() string {
 // GetDataOk returns a tuple with the Data field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *DpuExtensionServiceUpdateRequest) GetDataOk() (*string, bool) {
+func (o *DpuExtensionServiceUpdateRequest) GetDataOk() (*DpuExtensionServiceUpdateRequestData, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -165,8 +164,8 @@ func (o *DpuExtensionServiceUpdateRequest) HasData() bool {
 	return false
 }
 
-// SetData gets a reference to the given NullableString and assigns it to the Data field.
-func (o *DpuExtensionServiceUpdateRequest) SetData(v string) {
+// SetData gets a reference to the given NullableDpuExtensionServiceUpdateRequestData and assigns it to the Data field.
+func (o *DpuExtensionServiceUpdateRequest) SetData(v DpuExtensionServiceUpdateRequestData) {
 	o.Data.Set(&v)
 }
 

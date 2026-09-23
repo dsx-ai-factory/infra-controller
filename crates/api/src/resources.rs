@@ -20,16 +20,20 @@ use std::sync::Arc;
 
 use carbide_api_core::bootstrap::acquire_vault_import_work_lock;
 use carbide_api_core::cfg::file::{
-    CarbideConfig, CredentialBackend, ImportSource, ProviderConfig, SecretsConfig,
-    UfmCredentialSource,
+    BmcSiteWideRootSource, CarbideConfig, CredentialBackend, ImportSource, ProviderConfig,
+    SecretsConfig, UfmCredentialSource,
 };
 use carbide_api_core::secrets::{PostgresCredentialManager, SecretRouting, SecretsContext};
 use carbide_kms_provider::{
     DEFAULT_TRANSIT_MOUNT, IntegratedKmsProvider, KmsBackend, MultiKmsProvider, TransitKmsProvider,
 };
 use carbide_secrets::certificates::CertificateProvider;
-use carbide_secrets::chained_reader::{NonUfmCredentialReader, UfmBackendCredentialBlocker};
+use carbide_secrets::chained_reader::{
+    BmcSiteWideRootV0BackendCredentialBlocker, NonBmcSiteWideRootV0CredentialReader,
+    NonUfmCredentialReader, UfmBackendCredentialBlocker,
+};
 use carbide_secrets::credentials::{
+    BmcCredentialType, BmcSiteWideRootV0CredentialMutationBlocker, CredentialKey,
     CredentialManager, CredentialPrefix, CredentialReader, CredentialWriter,
     UfmCredentialMutationBlocker,
 };
@@ -107,11 +111,12 @@ pub(crate) async fn setup_resources(
 
     // With a [secrets] section, the credential chain and write target come from
     // `backends`/`writer` -- generally defaulting to env -> file -> vault
-    // writing to vault. `credentials.ufm_source` can retain that read order or
-    // select one authoritative UFM source. The one-time vault import is
-    // independent: it runs iff `import_from` is set. Without the section, the
-    // store comes from CARBIDE_CREDENTIAL_STORE: vault (the default), or an
-    // in-memory store for development and testing.
+    // writing to vault. The source policies under `[credentials]` can retain
+    // that read order or select authoritative local/backend ownership for UFM
+    // and site-wide BMC root version 0. The one-time vault import is independent:
+    // it runs iff `import_from` is set. Without the section, the store comes from
+    // CARBIDE_CREDENTIAL_STORE: vault (the default), or an in-memory store for
+    // development and testing.
     let (writer, chain, secrets_context): CredentialRuntimeParts = if let Some(secrets_config) =
         &carbide_config.secrets
     {
@@ -174,6 +179,9 @@ pub(crate) async fn setup_resources(
                     exclude_ufm: carbide_config
                         .credentials
                         .uses_authoritative_local_ufm_credentials(),
+                    exclude_bmc_site_wide_root_v0: carbide_config
+                        .credentials
+                        .uses_authoritative_local_bmc_site_wide_root(),
                 },
                 &routing,
                 kms.as_ref(),
@@ -228,7 +236,7 @@ pub(crate) async fn setup_resources(
     };
     // Apply the UFM mutation policy once, after selecting either persistent
     // writer path, so the two setup branches cannot drift apart.
-    let writer = credential_writer_with_ufm_policy(carbide_config, writer);
+    let writer = credential_writer_with_local_source_policies(carbide_config, writer);
     let credential_manager = create_credential_manager_from(writer, chain);
 
     Ok(RuntimeResources {
@@ -439,11 +447,11 @@ async fn local_credential_readers(
     };
     let mut local_readers: Vec<Box<dyn CredentialReader>> =
         [env_reader, file_reader].into_iter().flatten().collect();
-    match carbide_config.credentials.ufm_source {
-        UfmCredentialSource::LocalFirst => Ok(local_readers),
+    let mut local_readers = match carbide_config.credentials.ufm_source {
+        UfmCredentialSource::LocalFirst => local_readers,
         UfmCredentialSource::Backend => {
             let local_chain = carbide_secrets::ChainedCredentialReader::from(local_readers);
-            Ok(vec![Box::new(NonUfmCredentialReader::new(local_chain))])
+            vec![Box::new(NonUfmCredentialReader::new(local_chain)) as Box<dyn CredentialReader>]
         }
         UfmCredentialSource::Local => {
             validate_local_ufm_credentials(carbide_config, &local_readers).await?;
@@ -452,6 +460,25 @@ async fn local_credential_readers(
                  disabled"
             );
             local_readers.push(Box::new(UfmBackendCredentialBlocker));
+            local_readers
+        }
+    };
+
+    match carbide_config.credentials.bmc_site_wide_root_source {
+        BmcSiteWideRootSource::LocalFirst => Ok(local_readers),
+        BmcSiteWideRootSource::Backend => {
+            let local_chain = carbide_secrets::ChainedCredentialReader::from(local_readers);
+            Ok(vec![
+                Box::new(NonBmcSiteWideRootV0CredentialReader::new(local_chain))
+                    as Box<dyn CredentialReader>,
+            ])
+        }
+        BmcSiteWideRootSource::Local => {
+            tracing::info!(
+                "local environment/file sources own site-wide BMC root version 0; persistent \
+                 backend access is disabled for that credential"
+            );
+            local_readers.push(Box::new(BmcSiteWideRootV0BackendCredentialBlocker));
             Ok(local_readers)
         }
     }
@@ -505,18 +532,23 @@ fn file_credentials_config(
         .unwrap_or_else(|| credential_config.file.clone())
 }
 
-fn credential_writer_with_ufm_policy(
+fn credential_writer_with_local_source_policies(
     carbide_config: &CarbideConfig,
-    writer: Arc<dyn CredentialWriter>,
+    mut writer: Arc<dyn CredentialWriter>,
 ) -> Arc<dyn CredentialWriter> {
     if carbide_config
         .credentials
         .uses_authoritative_local_ufm_credentials()
     {
-        Arc::new(UfmCredentialMutationBlocker::new(writer))
-    } else {
-        writer
+        writer = Arc::new(UfmCredentialMutationBlocker::new(writer));
     }
+    if carbide_config
+        .credentials
+        .uses_authoritative_local_bmc_site_wide_root()
+    {
+        writer = Arc::new(BmcSiteWideRootV0CredentialMutationBlocker::new(writer));
+    }
+    writer
 }
 
 /// Build the KMS stack from the `[secrets.kms]` config: construct every
@@ -647,8 +679,8 @@ fn build_kms_backend(
 /// This is orthogonal to the reader chain and writer: an import seeds
 /// Postgres with eligible Vault secrets, but the read order and write target
 /// stay exactly as `backends` / `writer` set them -- importing changes neither.
-/// UFM paths are ineligible while local sources own UFM credentials so the
-/// import cannot bypass that site-wide ownership boundary.
+/// UFM paths and site-wide BMC root version 0 are ineligible while local
+/// sources own them, so the import cannot bypass either ownership boundary.
 ///
 /// Rolling upgrades still need care once writes move to Postgres: a replica
 /// running an older config can write rotated credentials to its own writer,
@@ -670,6 +702,7 @@ fn build_kms_backend(
 struct VaultImportOptions<'a> {
     secrets: &'a SecretsConfig,
     exclude_ufm: bool,
+    exclude_bmc_site_wide_root_v0: bool,
 }
 
 async fn import_vault_secrets_once(
@@ -713,16 +746,28 @@ async fn import_vault_secrets_once(
         // here would let a genuinely empty or misconfigured import source
         // pass the empty-vault guard in `validate_vault_import_selection`
         // below and permanently record nothing.
-        let (secrets, excluded_prefix_found) = vault_client
-            .get_secrets_strict_excluding_prefixes(excluded_prefixes)
+        let bmc_site_wide_root_v0_path = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        }
+        .to_key_str();
+        let excluded_paths = if options.exclude_bmc_site_wide_root_v0 {
+            vec![bmc_site_wide_root_v0_path.as_ref()]
+        } else {
+            Vec::new()
+        };
+        let (secrets, excluded_ufm_prefix_found, excluded_bmc_site_wide_root_v0) = vault_client
+            .get_secrets_strict_excluding(excluded_prefixes, &excluded_paths)
             .await
             .map_err(eyre::Report::from)
             .wrap_err("enumerate vault secrets for import")?;
-        validate_vault_import_selection(secrets.len(), excluded_prefix_found)?;
+        let excluded_local_credential_found =
+            excluded_ufm_prefix_found || excluded_bmc_site_wide_root_v0;
+        validate_vault_import_selection(secrets.len(), excluded_local_credential_found)?;
 
         tracing::info!(
             import_secret_count = secrets.len(),
-            excluded_prefix_found,
+            excluded_ufm_prefix_found,
+            excluded_bmc_site_wide_root_v0,
             approach = ?options.secrets.import_approach,
             "Importing secrets from vault"
         );
@@ -1047,7 +1092,8 @@ mod tests {
             let mut carbide_config = carbide_api_core::test_support::default_config::get();
             carbide_config.credentials.ufm_source = ufm_source;
             let backend = Arc::new(MemoryCredentialStore::default());
-            let writer = credential_writer_with_ufm_policy(&carbide_config, backend.clone());
+            let writer =
+                credential_writer_with_local_source_policies(&carbide_config, backend.clone());
 
             let result = writer.set_credentials(&key, &credentials).await;
 
@@ -1084,6 +1130,133 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn bmc_site_wide_root_source_controls_v0_read_precedence() {
+        enum Expected {
+            Local,
+            Backend,
+            Blocked,
+        }
+
+        let dir = tempfile::tempdir().expect("create credential directory");
+        let path = dir.path().join("credentials.json");
+        let key = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        };
+        let local_credentials = Credentials::new("root", "local-password");
+        let backend_credentials = Credentials::new("root", "backend-password");
+        let cases = [
+            (
+                "local-first preserves the file override",
+                r#"{"bmc_site_wide_root":{"username":"root","password":"local-password"}}"#,
+                BmcSiteWideRootSource::LocalFirst,
+                Expected::Local,
+            ),
+            (
+                "local-first preserves backend fallback for upgrades",
+                "{}",
+                BmcSiteWideRootSource::LocalFirst,
+                Expected::Backend,
+            ),
+            (
+                "local ownership does not gate reader construction",
+                "{}",
+                BmcSiteWideRootSource::Local,
+                Expected::Blocked,
+            ),
+            (
+                "local ownership overrides an existing backend value",
+                r#"{"bmc_site_wide_root":{"username":"root","password":"local-password"}}"#,
+                BmcSiteWideRootSource::Local,
+                Expected::Local,
+            ),
+            (
+                "backend ownership ignores the file entry",
+                r#"{"bmc_site_wide_root":{"username":"root","password":"local-password"}}"#,
+                BmcSiteWideRootSource::Backend,
+                Expected::Backend,
+            ),
+        ];
+
+        for (name, file_contents, source, expected) in cases {
+            tokio::fs::write(&path, file_contents)
+                .await
+                .unwrap_or_else(|error| panic!("{name}: write credential file: {error}"));
+            let mut carbide_config = carbide_api_core::test_support::default_config::get();
+            carbide_config.credentials.bmc_site_wide_root_source = source;
+            let credential_config = CredentialConfig {
+                env: carbide_secrets::EnvCredentialsConfig {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+                file: carbide_secrets::FileCredentialsConfig {
+                    enabled: Some(true),
+                    path: Some(path.clone()),
+                    poll_interval: Some(std::time::Duration::from_secs(60)),
+                },
+                ..Default::default()
+            };
+            let mut readers = local_credential_readers(&carbide_config, &credential_config)
+                .await
+                .unwrap_or_else(|error| panic!("{name}: construct readers: {error}"));
+            let backend = MemoryCredentialStore::default();
+            backend
+                .set_credentials(&key, &backend_credentials)
+                .await
+                .expect("seed backend");
+            readers.push(Box::new(backend));
+            let chain = carbide_secrets::ChainedCredentialReader::from(readers);
+
+            match expected {
+                Expected::Local => assert_eq!(
+                    chain.get_credentials(&key).await.expect("read local v0"),
+                    Some(local_credentials.clone()),
+                    "{name}"
+                ),
+                Expected::Backend => assert_eq!(
+                    chain.get_credentials(&key).await.expect("read backend v0"),
+                    Some(backend_credentials.clone()),
+                    "{name}"
+                ),
+                Expected::Blocked => assert!(matches!(
+                    chain.get_credentials(&key).await,
+                    Err(SecretsError::BmcSiteWideRootV0CredentialReadBlocked)
+                )),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_bmc_site_wide_root_source_controls_only_v0_mutations() {
+        let v0 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        };
+        let v1 = CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRootVersioned { version: 1 },
+        };
+        let credentials = Credentials::new("root", "password");
+        let mut carbide_config = carbide_api_core::test_support::default_config::get();
+        carbide_config.credentials.bmc_site_wide_root_source = BmcSiteWideRootSource::Local;
+        let backend = Arc::new(MemoryCredentialStore::default());
+        let writer = credential_writer_with_local_source_policies(&carbide_config, backend.clone());
+
+        assert!(matches!(
+            writer.set_credentials(&v0, &credentials).await,
+            Err(SecretsError::BmcSiteWideRootV0CredentialMutationBlocked)
+        ));
+        writer
+            .set_credentials(&v1, &credentials)
+            .await
+            .expect("versioned root mutation must remain enabled");
+        assert_eq!(
+            backend
+                .get_credentials_from_writer(&v1)
+                .await
+                .expect("read versioned backend credential"),
+            Some(credentials)
+        );
     }
 
     /// The pool builder rejects zero-valued lifecycle settings before it

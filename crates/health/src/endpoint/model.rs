@@ -129,8 +129,12 @@ pub struct EndpointSnapshot {
 }
 
 impl BmcEndpoint {
+    /// Returns the MAC identity, or `ip:<address>` when the inventory has no MAC.
     pub fn key(&self) -> String {
-        self.addr.mac.to_string()
+        match self.addr.mac {
+            Some(mac) => mac.to_string(),
+            None => format!("ip:{}", self.addr.ip),
+        }
     }
 
     pub fn hash_key(&self) -> Cow<'static, str> {
@@ -145,7 +149,7 @@ impl BmcEndpoint {
     /// Returns the endpoint identity used for collector log state.
     ///
     /// Machines prefer their NICo ID, switches use their serial number, and PowerShelves prefer
-    /// their serial number followed by their NICo ID. Other cases use the BMC MAC address.
+    /// their serial number followed by their NICo ID. Other cases use the endpoint key.
     pub fn log_identity(&self) -> Cow<'_, str> {
         match &self.metadata {
             Some(EndpointMetadata::Machine(MachineData {
@@ -158,11 +162,11 @@ impl BmcEndpoint {
                 } else if let Some(id) = power_shelf.id {
                     Cow::Owned(id.to_string())
                 } else {
-                    Cow::Owned(self.addr.mac.to_string())
+                    Cow::Owned(self.key())
                 }
             }
             Some(EndpointMetadata::Switch(switch)) => Cow::Borrowed(&switch.serial),
-            _ => Cow::Owned(self.addr.mac.to_string()),
+            _ => Cow::Owned(self.key()),
         }
     }
 
@@ -326,10 +330,21 @@ pub enum BmcCredentials {
 pub struct BmcAddr {
     pub ip: IpAddr,
     pub port: Option<u16>,
-    pub mac: MacAddress,
+    /// Discovered MAC or the synthetic MAC retained for IPv4 cluster inventory.
+    /// Absent for IPv6 cluster inventory, which uses the full IP as its endpoint key.
+    pub mac: Option<MacAddress>,
 }
 
 impl BmcAddr {
+    /// Keeps registry IDs distinct when Prometheus replaces address punctuation.
+    pub(crate) fn registry_key(&self) -> String {
+        match (self.mac, self.ip) {
+            (Some(mac), _) => mac.to_string(),
+            (None, IpAddr::V4(ip)) => format!("ip_v4_{:08x}", u32::from(ip)),
+            (None, IpAddr::V6(ip)) => format!("ip_v6_{:032x}", u128::from(ip)),
+        }
+    }
+
     /// Builds the BMC base URL. IPv6 literals are bracketed so the URL
     /// authority parses — a bare `IpAddr` Display leaves IPv6 unbracketed,
     /// which `Url::parse` would otherwise reject.
@@ -404,7 +419,7 @@ mod tests {
         BmcAddr {
             ip: IpAddr::from_str(ip).unwrap(),
             port,
-            mac: MacAddress::from_str("00:11:22:33:44:55").unwrap(),
+            mac: Some(MacAddress::from_str("00:11:22:33:44:55").unwrap()),
         }
     }
 
@@ -445,6 +460,7 @@ mod tests {
         );
 
         assert_eq!(endpoint.switch_connect_host_for_uri(), "[2001:db8::1]");
+        assert_eq!(endpoint.key(), "00:11:22:33:44:55");
     }
 
     #[test]

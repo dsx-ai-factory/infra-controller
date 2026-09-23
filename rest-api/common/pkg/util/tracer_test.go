@@ -4,12 +4,15 @@
 package util
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -192,4 +195,16 @@ func Test_CreateChildInContext(t *testing.T) {
 			assert.Equal(t, span, tt.args.expectSpan)
 		})
 	}
+
+	t.Run("missing tracer is a debug-level no-op", func(t *testing.T) {
+		var logOutput bytes.Buffer
+		logger := zerolog.New(&logOutput)
+
+		_, span := tracerSpan.CreateChildInContext(ctx2, "test", logger)
+
+		assert.Nil(t, span)
+		var logEntry map[string]interface{}
+		require.NoError(t, json.Unmarshal(logOutput.Bytes(), &logEntry))
+		assert.Equal(t, zerolog.LevelDebugValue, logEntry[zerolog.LevelFieldName])
+	})
 }

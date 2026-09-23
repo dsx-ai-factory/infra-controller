@@ -27,17 +27,17 @@ Credential family to report on
 
 *Possible values:*
 
-- bmc
-
-- host-uefi
-
-- dpu-uefi
-
-- nvos
-
-- lockdown-ikm
-
-- dpu-bmc-service
+> - bmc
+>
+> - host-uefi
+>
+> - dpu-uefi
+>
+> - nvos
+>
+> - lockdown-ikm
+>
+> - dpu-bmc-service
 
 `--mac-address <MAC_ADDRESS>`
 
@@ -57,9 +57,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

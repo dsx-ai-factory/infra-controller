@@ -22,14 +22,15 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use carbide_instrument::red;
 use carbide_secrets::credentials::{CredentialReader, Credentials};
 use carbide_utils::HostPortPair;
-use carbide_utils::redfish::format_forwarded_host_parameter;
+use carbide_utils::redfish::{
+    format_forwarded_host_parameter, redfish_basic_authorization_context,
+};
 use libredfish::model::service_root::RedfishVendor;
 use libredfish::{Endpoint, Redfish};
 
-use crate::libredfish::instrumented::{InstrumentedRedfish, REDFISH_BACKEND};
+use crate::libredfish::instrumented::{InstrumentedRedfish, instrumented_redfish_initialization};
 use crate::libredfish::{RedfishAuth, RedfishClientCreationError, RedfishClientPool};
 
 /// Formats a host for the URL authority that `libredfish` constructs internally.
@@ -111,6 +112,20 @@ impl RedfishClientPool for RedfishClientPoolImpl {
                 (username, password)
             }
         };
+        // Keep every secret representation libredfish places on the wire as
+        // redaction context for initialization and later operation failures.
+        let authentication_sensitive_values = if let Some(username) = username.as_deref() {
+            let (_, sensitive_values) =
+                redfish_basic_authorization_context(username, password.as_deref());
+            sensitive_values
+        } else {
+            password
+                .as_deref()
+                .filter(|password| !password.is_empty())
+                .map(str::to_string)
+                .into_iter()
+                .collect()
+        };
 
         let endpoint = Endpoint {
             host: libredfish_endpoint_host(host).into_owned(),
@@ -138,9 +153,9 @@ impl RedfishClientPool for RedfishClientPoolImpl {
         // are metered like any other Redfish operation.
         let client = match vendor {
             // Auto-detect vendor from the service root.
-            None => red::instrumented(
-                REDFISH_BACKEND,
+            None => instrumented_redfish_initialization(
                 "create_client",
+                authentication_sensitive_values.iter().map(String::as_str),
                 self.pool
                     .create_client_with_custom_headers(endpoint, custom_headers),
             )
@@ -159,9 +174,9 @@ impl RedfishClientPool for RedfishClientPoolImpl {
                 .map_err(RedfishClientCreationError::RedfishError)
                 .map(|c| c as Box<dyn Redfish>)?,
             // Use the provided vendor directly.
-            Some(vendor) => red::instrumented(
-                REDFISH_BACKEND,
+            Some(vendor) => instrumented_redfish_initialization(
                 "create_client",
+                authentication_sensitive_values.iter().map(String::as_str),
                 self.pool
                     .create_client_with_vendor(endpoint, vendor, custom_headers),
             )
@@ -171,7 +186,10 @@ impl RedfishClientPool for RedfishClientPoolImpl {
 
         // Every client the pool creates goes out decorated, so each Redfish
         // call records the per-operation RED triad no matter the call site.
-        Ok(Box::new(InstrumentedRedfish::new(client)))
+        Ok(Box::new(InstrumentedRedfish::new(
+            client,
+            authentication_sensitive_values,
+        )))
     }
 
     fn credential_reader(&self) -> &dyn CredentialReader {
@@ -269,9 +287,9 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
         )];
 
         let client = match vendor {
-            None => red::instrumented(
-                REDFISH_BACKEND,
+            None => instrumented_redfish_initialization(
                 "create_client",
+                [],
                 self.pool
                     .create_client_with_custom_headers(endpoint, custom_headers),
             )
@@ -282,9 +300,9 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
                 .create_standard_client_with_custom_headers(endpoint, custom_headers)
                 .map_err(RedfishClientCreationError::RedfishError)
                 .map(|c| c as Box<dyn Redfish>)?,
-            Some(vendor) => red::instrumented(
-                REDFISH_BACKEND,
+            Some(vendor) => instrumented_redfish_initialization(
                 "create_client",
+                [],
                 self.pool
                     .create_client_with_vendor(endpoint, vendor, custom_headers),
             )
@@ -292,7 +310,7 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
             .map_err(RedfishClientCreationError::RedfishError)?,
         };
 
-        Ok(Box::new(InstrumentedRedfish::new(client)))
+        Ok(Box::new(InstrumentedRedfish::new(client, Vec::new())))
     }
 
     fn credential_reader(&self) -> &dyn CredentialReader {

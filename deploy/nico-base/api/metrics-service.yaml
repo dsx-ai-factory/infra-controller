@@ -23,6 +23,7 @@ metadata:
     app: nico-api
     app.kubernetes.io/metrics: nico-api
 spec:
+  ipFamilyPolicy: PreferDualStack
   ports:
     - port: 1080
       name: http

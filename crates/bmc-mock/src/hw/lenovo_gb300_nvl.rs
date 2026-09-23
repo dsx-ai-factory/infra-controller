@@ -103,10 +103,10 @@ impl LenovoGB300Nvl<'_> {
         }
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "System_0";
         // TODO: It is PXE but apparently if enable HTTP in bios HTTP
         // (Uefi) boot options will show up here...

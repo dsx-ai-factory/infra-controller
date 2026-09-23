@@ -31,9 +31,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 
@@ -49,17 +49,17 @@ The virtualizer to use for this VPC
 
 *Possible values:*
 
-- ethernet-virtualizer
-
-- fnn
-
-- flat: `Flat` is for VPCs whose tenant instances live directly on the
-  underlay (zero-DPU hosts, or hosts with their DPU in NIC mode) and
-  whose interfaces are bound to `HostInband` network segments rather
-  than a NICo-managed overlay. Flat VPCs are still real tenant VPCs with
-  a VNI and NSGs, but NICo doesnt drive their data plane -- routing and
-  ACL enforcement between Flat VPCs and other VPCs is the network
-  operators responsibility
+> - ethernet-virtualizer
+>
+> - fnn
+>
+> - flat: `Flat` is for VPCs whose tenant instances live directly on
+>   the underlay (zero-DPU hosts, or hosts with their DPU in NIC mode)
+>   and whose interfaces are bound to `HostInband` network segments
+>   rather than a NICo-managed overlay. Flat VPCs are still real tenant
+>   VPCs with a VNI and NSGs, but NICo doesnt drive their data plane --
+>   routing and ACL enforcement between Flat VPCs and other VPCs is the
+>   network operators responsibility
 
 ## Examples
 

@@ -20,8 +20,8 @@ use rpc::admin_cli::OutputFormat;
 use crate::{
     attestation, bmc_machine, boot_interface, boot_override, browse, component_manager,
     compute_allocation, credential, devenv, domain, dpa, dpu, dpu_remediation, expected_machines,
-    expected_power_shelf, expected_rack, expected_switch, extension_service, firmware,
-    generate_docs, generate_man, generate_shell_complete, host, ib_partition, instance,
+    expected_power_shelf, expected_rack, expected_rack_group, expected_switch, extension_service,
+    firmware, generate_docs, generate_man, generate_shell_complete, host, ib_partition, instance,
     instance_type, inventory, ip, ipxe_template, jump, machine, machine_interfaces,
     machine_validation, managed_host, managed_switch, mlx, network_devices, network_security_group,
     network_segment, nvl_domain, nvl_logical_partition, nvl_partition, nvlink_nmxc_endpoints,
@@ -233,6 +233,8 @@ pub(crate) enum CliCommand {
     ExpectedPowerShelf(expected_power_shelf::Cmd),
     #[clap(about = "Expected rack handling", subcommand, visible_alias = "er")]
     ExpectedRack(expected_rack::Cmd),
+    #[clap(about = "Expected rack group handling", subcommand)]
+    ExpectedRackGroup(expected_rack_group::Cmd),
     #[clap(about = "Expected switch handling", subcommand, visible_alias = "ew")]
     ExpectedSwitch(expected_switch::Cmd),
     #[clap(

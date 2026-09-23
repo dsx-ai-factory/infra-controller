@@ -755,7 +755,7 @@ impl ProjectionFixture {
             .expect("processors should load")
             .expect("processors link should exist")
             .into_iter()
-            .map(|entity| (entity.raw().base.id.clone(), Arc::new(entity)))
+            .map(|entity| (entity.raw().id.clone(), Arc::new(entity)))
             .collect();
         let memory = system
             .memory_modules()
@@ -763,7 +763,7 @@ impl ProjectionFixture {
             .expect("memory should load")
             .expect("memory link should exist")
             .into_iter()
-            .map(|entity| (entity.raw().base.id.clone(), Arc::new(entity)))
+            .map(|entity| (entity.raw().id.clone(), Arc::new(entity)))
             .collect();
         let storage = Arc::new(
             system
@@ -781,7 +781,7 @@ impl ProjectionFixture {
             .expect("drives should load")
             .expect("drives should exist")
             .into_iter()
-            .map(|entity| (entity.raw().base.id.clone(), Arc::new(entity)))
+            .map(|entity| (entity.raw().id.clone(), Arc::new(entity)))
             .collect();
 
         let chassis: HashMap<_, _> = root
@@ -793,7 +793,7 @@ impl ProjectionFixture {
             .await
             .expect("chassis members should load")
             .into_iter()
-            .map(|entity| (entity.raw().base.id.clone(), Arc::new(entity)))
+            .map(|entity| (entity.raw().id.clone(), Arc::new(entity)))
             .collect();
         let parent_chassis = chassis
             .get("CH0")
@@ -804,7 +804,7 @@ impl ProjectionFixture {
             .await
             .expect("power supplies should load")
             .into_iter()
-            .map(|entity| (entity.raw().base.id.clone(), Arc::new(entity)))
+            .map(|entity| (entity.raw().id.clone(), Arc::new(entity)))
             .collect();
 
         Self {
@@ -934,24 +934,32 @@ impl ProjectionFixture {
                 chassis: self.chassis("CH0"),
                 sensors: Vec::new(),
                 oem_capacity_watts: None,
+                oem_power_output: None,
+                oem_fan_speed_target_percent: None,
             },
             TestEntity::SparsePowerSupply => DiscoveredEntity::PowerSupply {
                 entity: self.power_supply("PS-sparse"),
                 chassis: self.chassis("CH0"),
                 sensors: Vec::new(),
                 oem_capacity_watts: None,
+                oem_power_output: None,
+                oem_fan_speed_target_percent: None,
             },
             TestEntity::PowerSupplyWithOemCapacity => DiscoveredEntity::PowerSupply {
                 entity: self.power_supply("PS0"),
                 chassis: self.chassis("CH0"),
                 sensors: Vec::new(),
                 oem_capacity_watts: Some(5500.0),
+                oem_power_output: None,
+                oem_fan_speed_target_percent: None,
             },
             TestEntity::OemCapacityPowerSupply => DiscoveredEntity::PowerSupply {
                 entity: self.power_supply("PS-sparse"),
                 chassis: self.chassis("CH0"),
                 sensors: Vec::new(),
                 oem_capacity_watts: Some(5500.0),
+                oem_power_output: None,
+                oem_fan_speed_target_percent: None,
             },
             TestEntity::Chassis => DiscoveredEntity::Chassis {
                 entity: self.chassis("CH0"),

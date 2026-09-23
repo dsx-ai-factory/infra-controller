@@ -27,9 +27,9 @@ The UEFI kind
 
 *Possible values:*
 
-- dpu
-
-- host
+> - dpu
+>
+> - host
 
 `--password=<PASSWORD>`
 
@@ -49,9 +49,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

@@ -39,6 +39,7 @@ use model::instance::status::extension_service::{
 };
 use model::machine::ManagedHostStateSnapshot;
 use sqlx::PgConnection;
+use state_controller::CheckApplied as _;
 use state_controller::state_handler::StateHandlerError;
 
 use crate::dpf::DpfOperations;
@@ -494,10 +495,12 @@ pub(super) async fn cleanup_terminated_extension_services(
         txn,
         instance.id,
         instance.extension_services_config_version,
+        &instance.config.extension_services,
         &new_config,
         false,
     )
-    .await?;
+    .await?
+    .check_applied()?;
 
     extension_services_status
         .extension_services

@@ -1,0 +1,177 @@
+## =============================================================================
+## flow — task, policy, and automation service
+## =============================================================================
+## Flow listens for gRPC requests on port 50051 and stores its state in Postgres
+## on the shared nico-pg-cluster.
+##
+## Deploys into a dedicated `flow` namespace.  The namespace must carry the
+## label nico.nvidia.com/managed=true so ESO syncs nico-roots in.
+## =============================================================================
+
+## Global settings (overridden by umbrella chart)
+global:
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  certificate:
+    duration: 720h0m0s
+    renewBefore: 360h0m0s
+    privateKey:
+      algorithm: ECDSA
+      size: 384
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+  spiffe:
+    trustDomain: nico.local
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: site-controller
+
+## Override the release namespace (defaults to helm install -n <namespace>)
+namespaceOverride: ""
+
+replicas: 1
+serviceAccountName: flow
+automountServiceAccountToken: true
+
+## flow's GetDeploymentEnv requires FLOW_ENV to be set to one of
+## "development", "staging", or "production". There is no implicit default in
+## carbide-rest/flow/internal/service/config.go — an unset value causes the
+## flow container to exit on startup validation. Override per environment.
+flowEnv: production
+
+## Flow image override.
+images:
+  flow:
+    repository: ""   # defaults to <global.image.repository>/nico-flow
+    tag: ""          # defaults to global.image.tag
+
+ports:
+  flow: 50051
+
+resources:
+  flow:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1
+      memory: 1Gi
+## SPIFFE certificate for the Flow Service DNS name.
+##
+## Two identities live in this struct:
+##   - serviceName + extraDnsNames drive the *intra-cluster* identity: Service
+##     DNS, the cert commonName, and additional DNS SANs. These are what
+##     in-cluster peers dial.
+##   - apiIdentity.{namespace,serviceName} drive the *SPIFFE URI* baked into
+##     the cert SAN. nico-api's auth middleware validates client certs against
+##     its own spiffe_service_base_paths and InternalRBACRules — and rejects
+##     any cert SAN that carries more than one URI (crates/authn/src/lib.rs
+##     enforces "exactly 1 URI"). So this URI must be correct on its own; no
+##     extraUris escape hatch.
+certificate:
+  name: flow-certificate
+  serviceName: flow
+  extraDnsNames: []
+  ## SPIFFE URI components — emitted as the single URI SAN on the cert.
+  ## Defaults target nico-api with the upstream RBAC rename (PR #1907) in
+  ## place: serviceName `nico-flow` is accepted by the matcher alongside the
+  ## legacy `carbide-flow` alias. Override if your deployment uses different
+  ## base paths or principal names.
+  apiIdentity:
+    namespace: nico-system
+    serviceName: nico-flow
+
+## Temporal mTLS client certificate.
+## Issued by the nico-rest-ca-issuer ClusterIssuer (installed by nico-rest setup).
+temporalCert:
+  enabled: true
+  name: temporal-client-certs
+  secretName: temporal-client-certs
+  duration: 2160h0m0s
+  renewBefore: 360h0m0s
+  commonName: temporal-client
+  dnsNames:
+    - temporal-client
+    - flow
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  issuerRef:
+    kind: ClusterIssuer
+    name: nico-rest-ca-issuer
+    group: cert-manager.io
+
+## Database connection settings.
+database:
+  host: nico-pg-cluster.postgres.svc.cluster.local
+  port: 5432
+  ## CA cert that the containers use for the postgres TLS connection.
+  ## Mounted from the SPIFFE secret (same ca.crt the operator signs with).
+  certPath: /var/run/secrets/spiffe.io/ca.crt
+  flow:
+    name: flow
+    credentialsSecret: flow.nico.nico-pg-cluster.credentials
+
+## NICo Core API endpoint (gRPC) that flow calls.
+nicoCoreApi:
+  url: nico-api.nico-system.svc.cluster.local:1079
+
+## Temporal endpoint and namespace.
+temporal:
+  host: temporal-frontend-headless.temporal.svc.cluster.local
+  port: 7233
+  namespace: flow
+  enableTls: true
+  serverName: interservice.server.temporal.local
+  certPath: /var/run/secrets/temporal-client-certs
+
+## Encryption key used to keep sensitive Flow data out of plaintext database
+## records and Temporal payload history. By default, the chart reuses the
+## existing flow-data-encryption-key Secret or generates a key from 32 random
+## bytes if the Secret does not exist. Helm retains a chart-managed Secret when
+## the release is uninstalled. GitOps deployments that render charts without
+## cluster access must provision a Secret separately and set existingSecret to
+## its name so each render is deterministic. The Secret must contain a
+## flow-data-encryption-key entry whose value is a base64 encoding of exactly 32
+## random bytes. value accepts the same format and is mutually exclusive with
+## existingSecret. A configured value must match a chart-managed Secret that
+## already exists. Key rotation is not supported.
+dataEncryption:
+  key:
+    existingSecret: ""
+    value: ""
+
+## Runtime settings rendered into the flow-config-files ConfigMap and mounted
+## at /etc/flow/flowconfig.yaml. Defaults match the built-in defaults in
+## rest-api/flow/internal/config/config.go, so an unchanged block behaves the
+## same as running without a config file.
+##
+## Intervals are Go duration strings such as "30s", "1m", or "1h30m" and must
+## be greater than zero; the toggles must be YAML booleans. The chart rejects
+## other values at render time. Changing any value rolls the Flow Deployment.
+flowConfig:
+  ## Interval between inventory synchronisation runs. Duration, default 1m.
+  inventoryRunFrequency: 1m
+  ## Skip the periodic inventory synchronisation job. Boolean, default false.
+  disableInventory: false
+  ## Interval between leak detection runs. Duration, default 1m.
+  leakDetectionInterval: 1m
+  ## Skip the periodic leak detection job. Boolean, default false.
+  disableLeakDetection: false
+
+extraEnv:
+  flow: []
+
+## Docker registry pull secret created by the chart in the flow namespace.
+## setup.sh phase 7h renders dockerconfigjson from REGISTRY_PULL_SECRET and
+## passes it via --set. The default placeholder ({"auths":{}}) lets the
+## chart install on air-gapped / pre-loaded clusters without overrides.
+## Set create=false to skip if the secret is provisioned out of band.
+imagePullSecret:
+  create: true
+  dockerconfigjson: "eyJhdXRocyI6e319"

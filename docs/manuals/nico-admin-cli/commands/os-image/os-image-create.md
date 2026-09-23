@@ -49,9 +49,9 @@ Create a source volume for block storage use.
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `-s, --capacity <CAPACITY>`
 
@@ -111,9 +111,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

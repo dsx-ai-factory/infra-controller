@@ -314,7 +314,6 @@ impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
 
 /// The initial candidate attempt plus one retry after an overlap conflict.
 const PREFIX_ALLOCATION_TOTAL_ATTEMPTS: usize = 2;
-const NETWORK_PREFIX_OVERLAP_CONSTRAINT: &str = "network_prefixes_prefix_excl";
 
 /// Address-family component of a canonical allocation group.
 ///
@@ -512,7 +511,7 @@ fn is_network_prefix_overlap_conflict(error: &CarbideError) -> bool {
         CarbideError::DBError(db::AnnotatedSqlxError {
             source: sqlx::Error::Database(database_error),
             ..
-        }) if database_error.constraint() == Some(NETWORK_PREFIX_OVERLAP_CONSTRAINT)
+        }) if db::network_prefix::is_overlap_constraint(database_error.constraint())
     )
 }
 
@@ -2275,7 +2274,6 @@ pub(crate) async fn batch_allocate_instances(
                 txn.as_mut(),
                 &request.config,
                 None,
-                true,
             )
             .await?;
         }
@@ -2601,15 +2599,20 @@ pub(crate) fn sort_spx_by_slot(
     sorted_spx_hw_info_vec.sort_by(|a, b| a.pci_name.cmp(&b.pci_name));
 
     for spx in sorted_spx_hw_info_vec {
-        if let Some(device) = &spx.device_description.clone() {
-            let entry: &mut Vec<DpaInterface> = spx_hw_map.entry(device.clone()).or_default();
-            entry.push(spx);
-        } else {
-            tracing::info!(
+        let Some(device) = spx
+            .device_description
+            .clone()
+            .filter(|device| !device.is_empty())
+        else {
+            tracing::debug!(
                 spx = ?spx,
-                "SPX device description is missing",
+                "SpectrumX device description is missing or empty",
             );
-        }
+            continue;
+        };
+
+        let entry: &mut Vec<DpaInterface> = spx_hw_map.entry(device).or_default();
+        entry.push(spx);
     }
 
     spx_hw_map

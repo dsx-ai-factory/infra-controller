@@ -2,7 +2,7 @@
 
 CLI and system utilities.
 
-For global flags, setup, and task-oriented documentation, refer to [the CLI reference index](./README.md).
+For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admin-cli.md). Browse all command groups in the [CLI reference index](./README.md).
 
 | Command | Description |
 |---|---|

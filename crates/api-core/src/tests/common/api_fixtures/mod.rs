@@ -483,6 +483,7 @@ impl TestEnv {
             ManagedHostState::RotatingBmc { .. } => state.clone(),
             ManagedHostState::RotatingHostUefi { .. } => state.clone(),
             ManagedHostState::Decommissioning { .. } => state.clone(),
+            ManagedHostState::Reset { .. } => state.clone(),
             ManagedHostState::RotatingDpuUefi { .. } => state.clone(),
             ManagedHostState::RotatingNicLockdown => state.clone(),
             ManagedHostState::BomValidating { .. } => state.clone(),
@@ -1256,7 +1257,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
     // Seed the site-wide host and DPU UEFI site-default credentials (version 0).
     // These are written during site setup in production; tests don't run that.
     // UEFI setup resolves and reads the site-wide credential in the controller
-    // (`resolve_site_uefi_credentials`) through `redfish_client_pool`'s reader --
+    // (`read_site_uefi_credentials`) through `redfish_client_pool`'s reader --
     // which in tests is the `RedfishSim`'s own store -- before calling the
     // (mocked) `uefi_setup`, so a missing credential surfaces as a hard error.
     // Seed centrally so every machine-driving test has them regardless of fixture.
@@ -1487,12 +1488,17 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
                         .machine_validation_config
                         .approved_plugin_registries
                         .clone(),
+                    allowed_plugin_types: config
+                        .machine_validation_config
+                        .allowed_plugin_types
+                        .clone(),
                     allow_privileged_plugins: config
                         .machine_validation_config
                         .allow_privileged_plugins,
                     allow_full_host_plugins: config
                         .machine_validation_config
                         .allow_full_host_plugins,
+                    attempt_logs: config.machine_validation_config.attempt_logs.clone(),
                 })
                 .bom_validation(config.bom_validation)
                 .instance_autoreboot_period(
@@ -2323,6 +2329,7 @@ pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
             .map(|instance| instance.dpu_extension_service_version),
         dpu_extension_services,
         astra_config_status: None,
+        lldp: None,
     };
     tracing::trace!(
         network_config_version = %status.network_config_version.as_ref().unwrap(),

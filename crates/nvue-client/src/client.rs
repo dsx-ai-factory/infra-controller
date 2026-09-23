@@ -627,7 +627,249 @@ pub struct RequestFailed {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use http::StatusCode;
+
     use super::*;
+    use crate::test_support::{
+        ConfigRevisionHandler, MockNvueServer, MockRequest, MockResponse, NvueMockHandler,
+        handler_fn, respond_once,
+    };
+    use crate::types::bgp::BgpPeerState;
+
+    #[tokio::test]
+    async fn get_bgp_neighbors_filtered_returns_neighbors() {
+        let handler = handler_fn(|request| {
+            (request.matches(Method::GET, "/nvue_v1/vrf/default/router/bgp/neighbor")
+                && matches!(
+                    request.query_pairs().as_slice(),
+                    [(key, value)] if key == "include" && value == "/*/state"
+                ))
+            .then(|| {
+                MockResponse::json(
+                    StatusCode::OK,
+                    &serde_json::json!({
+                        "p0_if": {"state": "established"},
+                        "p1_if": {"state": "active"},
+                    }),
+                )
+            })
+        });
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+
+        let neighbors = client
+            .get_bgp_neighbors_filtered("default", FieldFilter::new().include("/*/state"))
+            .await
+            .expect("BGP neighbor request should succeed")
+            .expect("BGP neighbor response should contain neighbors");
+
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(
+            neighbors.get("p0_if").and_then(|peer| peer.state.as_ref()),
+            Some(&BgpPeerState::Established)
+        );
+        assert_eq!(
+            neighbors.get("p1_if").and_then(|peer| peer.state.as_ref()),
+            Some(&BgpPeerState::Active)
+        );
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn apply_config_revision_polls_until_applied() {
+        let pending_revision = handler_fn(|request| {
+            request
+                .route_captures(Method::GET, "/nvue_v1/revision/{revision_id}")
+                .map(|_| {
+                    MockResponse::json(
+                        StatusCode::OK,
+                        &serde_json::json!({
+                            "state": "apply",
+                            "transition": {"progress": "pending"},
+                        }),
+                    )
+                })
+        });
+
+        // Since ConfigRevisionHandler doesn't model the "pending" state, we'll
+        // fake it by making the revision pending the first time the client asks,
+        // before allowing the real revision handler to respond.
+        let (respond_pending_once, checkpoint) =
+            respond_once(pending_revision).with_response_checkpoint();
+        let handler = ConfigRevisionHandler::default().with_override(respond_pending_once);
+
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let revision_id = client
+            .create_config_revision()
+            .await
+            .expect("revision creation should succeed");
+        let revision_path = format!("/nvue_v1/revision/{revision_id}");
+
+        let mut apply_future = Box::pin(client.apply_config_revision(&revision_id));
+        tokio::select! {
+            () = checkpoint.wait_until_reached() => {}
+            result = &mut apply_future => {
+                panic!("revision apply completed before pending response: {result:?}");
+            }
+        }
+        tokio::time::pause();
+        tokio::time::advance(NvueClient::APPLY_CONFIG_REVISION_POLL_INTERVAL).await;
+        apply_future.await.expect("revision apply should succeed");
+
+        assert_eq!(
+            server.summarize_requests(),
+            [
+                "POST /nvue_v1/revision".to_string(),
+                format!("PATCH {revision_path}"),
+                format!("GET {revision_path}"),
+                format!("GET {revision_path}"),
+            ]
+        );
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn apply_config_revision_times_out_with_last_pending_status() {
+        let pending_response = handler_fn(|request: &MockRequest| {
+            request
+                .route_captures(Method::GET, "/nvue_v1/revision/{revision_id}")
+                .map(|_| {
+                    MockResponse::json(
+                        StatusCode::OK,
+                        &serde_json::json!({"state":"apply","transition":{"progress":"pending"},}),
+                    )
+                })
+        });
+
+        let (pending_revisions, checkpoints) = pending_response.with_response_checkpoints();
+        let handler = ConfigRevisionHandler::default().with_override(pending_revisions);
+
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let revision_id = client
+            .create_config_revision()
+            .await
+            .expect("revision creation should succeed");
+
+        let mut apply_future = Box::pin(client.apply_config_revision(&revision_id));
+
+        tokio::select! {
+            () = checkpoints.wait_until_response(1) => {}
+            result = &mut apply_future => {
+                panic!("revision apply completed before pending response: {result:?}");
+            }
+        }
+        // At this point we know the first pending response has been produced
+        // (though we don't know whether the client has consumed it). Calling
+        // tokio's `pause()` disconnects the runtime's clock from the wall
+        // clock and allows it to auto-advance if timers are the only thing it's
+        // waiting on.
+        tokio::time::pause();
+        let paused_at = tokio::time::Instant::now();
+        tokio::select! {
+            () = checkpoints.wait_until_response(2) => {}
+            result = &mut apply_future => {
+                panic!("revision apply completed before second pending response: {result:?}");
+            }
+        }
+        // Now, we know the second pending response has been produced and the
+        // client is definitely inside the polling loop (since it has provably
+        // consumed the earlier pending response). Fast-forward the runtime's
+        // clock so that we reach the timeout.
+        let elapsed_while_paused = tokio::time::Instant::now() - paused_at;
+        tokio::time::advance(
+            NvueClient::APPLY_CONFIG_REVISION_TIMEOUT.saturating_sub(elapsed_while_paused),
+        )
+        .await;
+
+        match apply_future.await {
+            Err(error) => {
+                let NvueClientError::RevisionApplyFailed {
+                    revision_id: failed_revision_id,
+                    reason: RevisionApplyFailureReason::Timeout { waited },
+                    last_state,
+                    progress,
+                    error_issues,
+                } = error
+                else {
+                    panic!("unexpected revision apply error: {error:?}");
+                };
+
+                assert_eq!(failed_revision_id, revision_id);
+                assert!(waited >= NvueClient::APPLY_CONFIG_REVISION_TIMEOUT);
+                assert_eq!(last_state.as_deref(), Some("apply"));
+                assert_eq!(progress.as_deref(), Some("pending"));
+                assert!(error_issues.is_empty());
+            }
+            Ok(()) => panic!("revision apply should time out"),
+        }
+
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn push_config_applies_changed_config_then_skips_same_config() {
+        let config = NvueConfig {
+            bridge: None,
+            evpn: None,
+            interface: None,
+            nve: None,
+            router: None,
+            system: Some(serde_json::json!({"hostname": "leaf-1"})),
+            vrf: None,
+            acl: None,
+        };
+        let expected_config =
+            serde_json::to_value(&config).expect("test configuration should serialize");
+        let handler = Arc::new(ConfigRevisionHandler::default());
+        let server = MockNvueServer::start(Arc::clone(&handler)).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+
+        let first_revision_id = client
+            .push_config(&config)
+            .await
+            .expect("configuration push should succeed");
+        assert_eq!(first_revision_id.as_deref(), Some("1"));
+        assert_eq!(handler.get_applied_config(), expected_config);
+
+        let second_revision_id = client
+            .push_config(&config)
+            .await
+            .expect("configuration push should succeed");
+
+        assert_eq!(second_revision_id, None);
+        assert_eq!(
+            server.summarize_requests(),
+            [
+                "POST /nvue_v1/revision",
+                "DELETE /nvue_v1/?rev=1",
+                "PATCH /nvue_v1/?rev=1",
+                "GET /nvue_v1/?diff=applied&rev=1&filled=false",
+                "PATCH /nvue_v1/revision/1",
+                "GET /nvue_v1/revision/1",
+                "POST /nvue_v1/revision",
+                "DELETE /nvue_v1/?rev=2",
+                "PATCH /nvue_v1/?rev=2",
+                "GET /nvue_v1/?diff=applied&rev=2&filled=false",
+            ]
+        );
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
 
     #[test]
     fn field_filter_empty_has_no_query_pairs() {

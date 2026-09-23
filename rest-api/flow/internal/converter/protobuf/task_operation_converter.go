@@ -72,6 +72,7 @@ func TaskOperationFrom(spec *pb.TaskOperation) (operations.Operation, error) {
 			EndTime:                endTime,
 			SubTargets:             slices.Clone(typed.FirmwareControl.GetSubTargets()),
 			OverrideReadinessCheck: typed.FirmwareControl.GetOverrideReadinessCheck(),
+			OverrideVersionCheck:   typed.FirmwareControl.GetOverrideVersionCheck(),
 		}
 	default:
 		return nil, fmt.Errorf("unsupported task operation %T", typed)
@@ -120,6 +121,7 @@ func TaskOperationTo(operation operations.Operation) (*pb.TaskOperation, error) 
 			Operation:              firmwareOperation,
 			SubTargets:             slices.Clone(typed.SubTargets),
 			OverrideReadinessCheck: typed.OverrideReadinessCheck,
+			OverrideVersionCheck:   typed.OverrideVersionCheck,
 		}
 		if typed.TargetVersion != "" {
 			targetVersion := typed.TargetVersion

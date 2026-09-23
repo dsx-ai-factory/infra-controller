@@ -54,10 +54,12 @@ export NICO_REST_IMAGE_TAG=NICO_REST_TAG             # e.g. 2.0.0-pr-58-g38a54a3
 # export REGISTRY_PULL_SECRET=RAW_API_KEY            # optional; raw key for authenticated registries
 
 # DPF (DOCA Platform Framework) DPU provisioning installs BY DEFAULT.
-# Set these three variables, or pass --skip-dpf to opt out:
+# Set these two variables, or pass --skip-dpf to opt out:
 export NICO_DPF_DPU_INTERFACE=<nic-facing-dpus>     # controller NIC for the DPU cluster VIP
 export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>  # floating IP the DPUs use to reach their control plane
-export NICO_DPF_BMC_ROOT_PASSWORD=<bmc-password>    # site-wide BMC root password
+# Supply version 0 of the site-wide BMC root through the local credential chain
+# (required before startup in authoritative local mode), or through the API
+# after installation when local_first/backend mode is selected.
 # Refer to helm-prereqs/README.md §DPF for full variable reference.
 
 # 3. Customize site-specific values
@@ -84,6 +86,12 @@ cd helm-prereqs
 ```
 
 See [helm-prereqs/README.md](helm-prereqs/README.md) for the full reference: PKI architecture, PostgreSQL setup, phase-by-phase description, secrets reference, and troubleshooting.
+
+## Contributing
+
+See the [contribution guide](CONTRIBUTING.md) for instructions on setting
+up a development environment and submitting changes, and the
+[code of conduct](CODE_OF_CONDUCT.md) for contributor expectations.
 
 ## Release Notice
 

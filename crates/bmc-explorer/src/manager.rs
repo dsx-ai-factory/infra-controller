@@ -22,6 +22,7 @@ use carbide_network::{deserialize_input_mac_to_address, is_locally_administered_
 use model::site_explorer::{
     EthernetInterface as ModelEthernetInterface, Manager as ModelManager, UefiDevicePath,
 };
+use nv_redfish::Bmc;
 use nv_redfish::ethernet_interface::EthernetInterface;
 use nv_redfish::host_interface::HostInterface;
 use nv_redfish::manager::Manager;
@@ -29,7 +30,6 @@ use nv_redfish::oem::ami::config_bmc::ConfigBmc;
 use nv_redfish::oem::dell::attributes::DellAttributes;
 use nv_redfish::oem::lenovo::security_service::LenovoSecurityService;
 use nv_redfish::oem::supermicro::{KcsInterface, SysLockdown};
-use nv_redfish::{Bmc, Resource};
 
 use crate::Error;
 
@@ -161,7 +161,7 @@ impl<B: Bmc> ExploredManager<B> {
                         Ok(port) => port,
                         Err(error) => {
                             tracing::warn!(
-                                manager_id = %manager.id(),
+                                manager_id = %manager.raw().id,
                                 ipmi_port = ?reported_port,
                                 error = %error,
                                 "Ignoring invalid IPMI port reported by Redfish",
@@ -207,7 +207,7 @@ impl<B: Bmc> ExploredManager<B> {
                             // ignore this error and create the interface with an empty mac address
                             // in the exploration report
                             tracing::debug!(
-                                interface_id = %iface.id(),
+                                interface_id = %iface.raw().id,
                                 link_status = ?iface.link_status(),
                                 error = %err,
                                 "could not parse MAC address for a disabled interface"
@@ -221,13 +221,13 @@ impl<B: Bmc> ExploredManager<B> {
                 // Warn if the manager eth0 MAC is locally-administered: a real BMC MAC is
                 // globally unique, so this signals transient pre-sync data (seen briefly
                 // after a BMC reboot) that would poison anything keyed on the BMC MAC.
-                if iface.id().inner().eq_ignore_ascii_case("eth0")
+                if iface.raw().id.eq_ignore_ascii_case("eth0")
                     && let Some(mac) = mac_address
                     && is_locally_administered_mac(mac)
                 {
                     tracing::warn!(
                         target: "carbide_diagnostics::locally_administered_mac",
-                        manager_id = %self.manager.id().inner(),
+                        manager_id = %self.manager.raw().id,
                         eth0_mac_address = %mac,
                         "manager eth0 MAC is locally-administered (transient pre-sync data?)",
                     );
@@ -241,8 +241,8 @@ impl<B: Bmc> ExploredManager<B> {
                     .map_err(|err| Error::InvalidValue(format!("UefiDevicePath: {err}")))?;
 
                 Ok(ModelEthernetInterface {
-                    description: iface.description().map(|v| v.to_string()),
-                    id: Some(iface.id().to_string()),
+                    description: iface.raw().description.clone().flatten(),
+                    id: Some(iface.raw().id.clone()),
                     interface_enabled: iface.interface_enabled(),
                     mac_address,
                     link_status: iface.link_status().map(|s| format!("{s:?}")),
@@ -252,7 +252,7 @@ impl<B: Bmc> ExploredManager<B> {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(ModelManager {
-            id: self.manager.id().inner().to_string(),
+            id: self.manager.raw().id.clone(),
             ethernet_interfaces,
             ipmi_port: self.ipmi_port,
         })

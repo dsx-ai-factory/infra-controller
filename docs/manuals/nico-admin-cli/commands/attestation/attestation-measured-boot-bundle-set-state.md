@@ -43,9 +43,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 
@@ -61,15 +61,15 @@ The state to set for this bundle.
 
 *Possible values:*
 
-- pending
-
-- active
-
-- obsolete
-
-- retired
-
-- revoked
+> - pending
+>
+> - active
+>
+> - obsolete
+>
+> - retired
+>
+> - revoked
 
 ## Examples
 

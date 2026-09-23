@@ -20,17 +20,17 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
+use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
-    POWER_CYCLE_DELAY, SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
+    ActionError, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
+    POWER_CYCLE_DELAY, ResourceResetType,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRequestInfo, DhcpRequester, DhcpResponseInfo, vendor_class};
 use crate::machine_state_machine::{MachineStateError, OsImage};
@@ -92,21 +92,28 @@ struct SwitchCallbacks {
     mailbox: ActorMailbox<SwitchMessage>,
 }
 
-impl Callbacks for SwitchCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        self.state.read().unwrap().power_state
-    }
-
-    fn send_power_command(
-        &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
+impl SwitchCallbacks {
+    pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        self.get_power_state().validate_reset_type(reset_type)?;
         self.mailbox
             .send(SwitchMessage::Bmc(BmcCommand::SetSystemPower {
                 request: reset_type,
                 reply: None,
             }))
-            .map_err(|error| SetSystemPowerError::CommandSendError(error.to_string()))
+            .map_err(|error| ActionError::Internal(error.into()))
+    }
+}
+
+impl Callbacks for SwitchCallbacks {
+    fn get_power_state(&self) -> MockPowerState {
+        self.state.read().unwrap().power_state
+    }
+
+    async fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.set_power_state(reset_type)
     }
 
     fn state_refresh_indication(&self) {
@@ -471,16 +478,17 @@ impl SwitchActor {
         Ok(())
     }
 
-    fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
-        use SystemPowerControl::*;
+    fn set_system_power(&mut self, request: ResourceResetType) -> Result<(), ActionError> {
+        use ResourceResetType::*;
 
         match request {
             On | ForceOn => self.fsm_event(Event::PowerOn),
             GracefulShutdown | ForceOff => self.fsm_event(Event::PowerOff),
             GracefulRestart | ForceRestart | PowerCycle => self.fsm_event(Event::PowerCycle),
-            PushPowerButton | Nmi | Suspend | Pause | Resume => {
-                return Err(SetSystemPowerError::BadRequest(format!(
-                    "Machine-a-tron mock: unsupported power request {request:?}"
+            _ => {
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "machine-a-tron mock: unsupported power request {:?}",
+                    request
                 )));
             }
         }
@@ -574,6 +582,20 @@ pub(crate) struct SwitchHandle(Arc<SwitchActorHandle>);
 impl SwitchHandle {
     pub(crate) fn mat_id(&self) -> Uuid {
         self.0.mat_id
+    }
+
+    /// Drive power through the guard the BMC mock uses, so an RMS power
+    /// request obeys the same rules as a Redfish one.
+    pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
+        SwitchCallbacks {
+            state: self.0.live_state.clone(),
+            mailbox: self.0.mailbox.clone(),
+        }
+        .set_power_state(request)
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        self.0.live_state.read().unwrap().power_state
     }
 
     pub(crate) fn pause(&self) -> eyre::Result<()> {

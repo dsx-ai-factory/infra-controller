@@ -1,0 +1,75 @@
+# Preserve the IPv4 pod template across DHCPv6 toggles and existing values formats.
+suite: DHCPv4 pod preservation
+templates: [deployment.yaml]
+chart:
+  version: 1.0.0
+set:
+  global.image.repository: example.invalid/core
+  global.image.tag: pinned
+tests:
+  # Pin the established pod template, including Kubernetes-defaulted port fields.
+  - it: retains the IPv4 pod with chart defaults
+    asserts: &ipv4Pod
+      - equal:
+          path: spec.template
+          value:
+            metadata:
+              labels:
+                helm.sh/chart: nico-dhcp-1.0.0
+                app.kubernetes.io/managed-by: Helm
+                app.kubernetes.io/part-of: site-controller
+                app.kubernetes.io/name: nico-dhcp
+                app.kubernetes.io/component: dhcp
+            spec:
+              serviceAccountName: nico-dhcp
+              containers:
+                - name: nico-dhcp
+                  image: example.invalid/core:pinned
+                  command: [sh, -c, 'mkdir -vp /var/run/kea /var/lib/kea && /sbin/kea-dhcp4 -c /tmp/kea_config.json']
+                  env:
+                    - {name: FORGE_CLIENT_CERT_PATH, value: /var/run/secrets/spiffe.io/tls.crt}
+                    - {name: FORGE_CLIENT_KEY_PATH, value: /var/run/secrets/spiffe.io/tls.key}
+                    - {name: FORGE_ROOT_CAFILE_PATH, value: /var/run/secrets/spiffe.io/ca.crt}
+                    - {name: NICO_CLIENT_CERT_PATH, value: /var/run/secrets/spiffe.io/tls.crt}
+                    - {name: NICO_CLIENT_KEY_PATH, value: /var/run/secrets/spiffe.io/tls.key}
+                    - {name: NICO_ROOT_CAFILE_PATH, value: /var/run/secrets/spiffe.io/ca.crt}
+                    - {name: RUST_BACKTRACE, value: full}
+                    - {name: RUST_LIB_BACKTRACE, value: "0"}
+                  imagePullPolicy: IfNotPresent
+                  securityContext:
+                    capabilities:
+                      add: [SYS_PTRACE]
+                  ports:
+                    - {name: udp, containerPort: 67}
+                    - {name: metrics, containerPort: 1089}
+                  volumeMounts:
+                    - {name: spiffe, mountPath: /var/run/secrets/spiffe.io, readOnly: true}
+                    - {name: config, mountPath: /tmp}
+              volumes:
+                - name: spiffe
+                  secret:
+                    secretName: nico-dhcp-certificate
+                - name: config
+                  configMap:
+                    defaultMode: 420
+                    name: nico-dhcp-config
+
+  # Older values may quote the port while Kubernetes still requires a number.
+  - it: retains the IPv4 pod with a quoted metrics port
+    set:
+      metrics.port: "1089"
+    asserts: *ipv4Pod
+
+  # New DHCPv6 defaults must not be necessary to render an older release's values.
+  - it: retains the IPv4 pod without either DHCPv6 values map
+    set:
+      dhcp: null
+      v6ExternalService: null
+    asserts: *ipv4Pod
+
+  # Enabling the separate writer must not change even v4 pod annotations or ports.
+  - it: retains the IPv4 pod when DHCPv6 is enabled
+    set:
+      dhcp.v6Enabled: true
+      dhcp.v6ServerIdentifier: "020000000001"
+    asserts: *ipv4Pod

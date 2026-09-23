@@ -66,6 +66,15 @@ pass "kubectl: cluster reachable"
 # --------------------------------------------------------------------------
 section "Namespace Detection"
 
+# Two-label names may be `service.namespace`; longer names must include `.svc`.
+_service_namespace() {
+  local address="${1#*://}"
+  address="$(printf '%s' "${address}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${address}" =~ ^[a-z0-9-]+\.([a-z0-9-]+)(\.svc(\.[a-z0-9.-]+)?)?(:[0-9]+)?(/.*)?$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
 # NICo namespace: find the namespace containing vault-cluster-info
 if [[ -z "${NICO_NS:-}" ]]; then
   NICO_NS=$(kubectl get configmap -A \
@@ -79,7 +88,7 @@ fi
 if [[ -z "${VAULT_NS:-}" ]]; then
   _VAULT_SVC=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
     -o jsonpath='{.data.VAULT_SERVICE}' || true)
-  VAULT_NS=$(printf '%s' "${_VAULT_SVC}" | sed 's|https\?://||' | cut -d: -f1 | cut -d. -f2)
+  VAULT_NS=$(_service_namespace "${_VAULT_SVC}")
   VAULT_NS="${VAULT_NS:-vault}"
 fi
 VAULT_ADDR=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
@@ -91,7 +100,7 @@ VAULT_ADDR=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
 if [[ -z "${POSTGRES_NS:-}" ]]; then
   _DB_HOST=$(kc get configmap -n "${NICO_NS}" nico-system-nico-database-config \
     -o jsonpath='{.data.DB_HOST}' || true)
-  POSTGRES_NS=$(printf '%s' "${_DB_HOST}" | cut -d. -f2)
+  POSTGRES_NS=$(_service_namespace "${_DB_HOST}")
   POSTGRES_NS="${POSTGRES_NS:-postgres}"
 fi
 
@@ -418,12 +427,15 @@ fi
 # --------------------------------------------------------------------------
 section "NICo Pods"
 _check_deployment  "${NICO_NS}" nico-api
+_check_deployment  "${NICO_NS}" nico-bmc-proxy
 _check_deployment  "${NICO_NS}" nico-dhcp
 _check_statefulset "${NICO_NS}" nico-dns
+_check_deployment  "${NICO_NS}" nico-hardware-health
 _check_deployment  "${NICO_NS}" nico-pxe
+_check_deployment  "${NICO_NS}" nico-ssh-console-rs
 
 # Optional pods: warn if the deployment doesn't exist, fail if it exists but isn't ready
-for _OPT_DEP in nico-hardware-health nico-ssh-console-rs nico-dsx-exchange-consumer; do
+for _OPT_DEP in nico-dsx-exchange-consumer; do
   if kc get deployment -n "${NICO_NS}" "${_OPT_DEP}" &>/dev/null; then
     _check_deployment "${NICO_NS}" "${_OPT_DEP}"
   else
@@ -433,14 +445,18 @@ done
 
 section "NICo Flow"
 FLOW_NS="${FLOW_NS:-flow}"
+REST_NS="${REST_NS:-nico-rest}"
 if kc get ns "${FLOW_NS}" &>/dev/null; then
   _check_deployment "${FLOW_NS}" flow
   for _S in flow.nico.nico-pg-cluster.credentials \
             flow-certificate temporal-client-certs nico-roots; do
     _check_secret_exists "${FLOW_NS}" "${_S}"
   done
+# Key "REST installed" on its deployment: setup.sh 7a pre-creates the namespace.
+elif kc get deployment -n "${REST_NS}" nico-rest-api &>/dev/null; then
+  fail "flow namespace not present - NICo REST is installed but Flow is missing (setup.sh phase 7h installs it with REST)"
 else
-  skip "flow namespace not present — flow disabled or not yet deployed"
+  skip "flow namespace not present - NICo REST not installed (--skip-rest was used); Flow installs together with REST"
 fi
 
 section "RMS (Rack Manager Service)"

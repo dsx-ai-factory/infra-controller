@@ -11,8 +11,8 @@ Target power shelves
 
 ```text
 nico-admin-cli component-manager component-power-control power-shelf
-<--power-shelf-id> [--extended] [--sort-by]
-[-h|--help]
+[--power-shelf-id] [--mac-address] [--extended]
+[--sort-by] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -24,6 +24,11 @@ Target power shelves
 `--power-shelf-id <POWER_SHELF_IDS>...`
 
 Power shelf IDs to target
+
+`--mac-address <MAC_ADDRESSES>...`
+
+Device MAC addresses to target (BMC MAC for compute/switch, PMC MAC for
+power shelf)
 
 `--extended`
 
@@ -39,9 +44,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

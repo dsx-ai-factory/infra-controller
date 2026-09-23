@@ -25,6 +25,52 @@ helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
 When `mat-k8s-controller` is enabled, it always deploys into the same namespace
 as nico-machine-a-tron. The controller does not support a separate namespace.
 
+## Helm-Only Deployment
+
+The chart creates the Kubernetes resources that
+`helm-prereqs/setup-machine-a-tron.sh` otherwise creates: the namespace, its
+`nico.nvidia.com/managed` label, and the image pull Secret. Those resources need
+no setup script after helm-prereqs has installed the cert-manager ClusterIssuer
+and the External Secrets Operator (ESO):
+
+- `global.namespaceOverride` with `createNamespace: true` creates the namespace
+  and labels it `nico.nvidia.com/managed: "true"`, so the `nico-roots`
+  ClusterExternalSecret from helm-prereqs syncs the site CA into it.
+- `imagePullSecret.create: true` creates the `machine-a-tron-pull` Secret from the
+  base64-encoded Docker configuration JSON in `imagePullSecret.dockerconfigjson`.
+  Reference it from `global.imagePullSecrets`.
+- A pod that defines only `racks` (clearing the default group with
+  `machines.rack-machines: null`) still gets the bare `[machines]` table that
+  machine-a-tron requires at startup.
+
+The chart does not seed the site-default Vault credentials or write the NICo
+Core site configuration. Follow the
+[deployment guide](../../../docs/development/machine-a-tron-deployment.md) for
+those steps.
+
+The example scopes the Docker configuration JSON to the registry that
+machine-a-tron pulls from and uses the registry login variables from the
+deployment guide. It writes the base64-encoded payload to a temporary file that
+`mktemp` creates with mode 0600. Passing the file with `--set-file` keeps the
+credential out of Helm's process arguments, and the last step removes the file:
+
+```bash
+registry="${NICO_IMAGE_REGISTRY%%/*}"
+user="${REGISTRY_PULL_USERNAME:-\$oauthtoken}"
+auth="$(printf '%s' "${user}:${REGISTRY_PULL_SECRET}" | base64 | tr -d '\n')"
+dockerconfig="$(mktemp)"  # created with mode 0600
+printf '{"auths":{"%s":{"username":"%s","password":"%s","auth":"%s"}}}' \
+  "$registry" "$user" "$REGISTRY_PULL_SECRET" "$auth" \
+  | base64 | tr -d '\n' > "$dockerconfig"
+helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
+  --set global.namespaceOverride=nico-mat \
+  --set imagePullSecret.create=true \
+  --set-file imagePullSecret.dockerconfigjson="$dockerconfig" \
+  --set 'global.imagePullSecrets[0].name=machine-a-tron-pull' \
+  -f my-values.yaml
+rm -f "$dockerconfig"
+```
+
 ## Deployment Modes
 
 | Mode | Use Case | Real HW Compatible | Network Setup |
@@ -56,9 +102,43 @@ ufmMock:
 
 For the default `mat-0` pod and chart name, the endpoint is
 `https://nico-machine-a-tron-mat-0-bmc-mock.<namespace>.svc.cluster.local:1266`.
-The chart does not aggregate InfiniBand inventory across multiple
-machine-a-tron pods. A full `configFiles.matConfigs` override owns the complete
-MAT configuration, including its `[ufm_mock]` section.
+Each embedded mock exposes only its own pod's inventory; the protocol gateway
+below aggregates across pods. A full `configFiles.matConfigs` override owns the
+complete MAT configuration, including its `[ufm_mock]` section.
+
+### Protocol gateway
+
+In controller mode, `mat-k8s-controller.gateway.enabled: true` adds the
+`mat-protocol-gateway` container to the controller pod. The gateway takes the
+machine-a-tron instances the controller discovers and serves one UFM API whose
+InfiniBand inventory covers all of them, so a multi-pod deployment needs a
+single NICo fabric configuration. It listens over HTTPS behind the ClusterIP
+Service `<release>-mat-k8s-controller-gateway`; for a release named
+`nico-machine-a-tron` in `nico-system` the endpoint is
+`https://nico-machine-a-tron-mat-k8s-controller-gateway.nico-system.svc.cluster.local:8443`
+with `/ufmRestV3` as the UFM API path. The gateway exits and is restarted by
+the kubelet whenever the set of discovered instances changes. Partitions and
+other state created through the UFM API are lost on that restart; ports return
+with the first inventory poll and callers must re-create partitions once
+`/readyz` returns 200 again.
+
+The controller image ships both binaries: `dev/k8s/machine-a-tron-controller/Dockerfile`
+builds the Go controller and `mat-protocol-gateway` from the repository root,
+and the `mat-k8s-controller` image published by this repository's CI is built
+from it. The gateway's listener certificate is issued through
+`global.certificate.issuerRef`. The gateway re-reads the mounted certificate
+and key every 30 seconds, so a renewed certificate is served without a
+container restart. For its inventory requests to the
+machine-a-tron pods it trusts that certificate's CA unless
+`mat-k8s-controller.config.insecureSkipVerify` is set, which disables
+certificate verification for those requests only; the listener is unaffected.
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `mat-k8s-controller.gateway.enabled` | `false` | Add the gateway container, Service, ConfigMap and Certificate |
+| `mat-k8s-controller.gateway.port` | `8443` | HTTPS port of the UFM API, the probes and the Service |
+| `mat-k8s-controller.gateway.existingAuthSecret` | `""` | Secret with a `token` key for UFM HTTP Basic auth. Empty means the `nico-machine-a-tron-ufm-mock-auth` Secret this chart generates; the gateway does not inherit `ufmMock.existingAuthSecret`. Required whenever that default Secret is absent or renamed: set it to the Secret holding the token when `ufmMock.existingAuthSecret` is set, `ufmMock.enabled` is `false`, or the parent chart uses `nameOverride`, or the gateway fails to start |
+| `mat-k8s-controller.gateway.resources` | 100m/256Mi requests, 1 CPU/1Gi limits | Gateway container resources |
 
 ## Logging
 
@@ -473,6 +553,44 @@ To use API mode (default), don't set `dhcpRelay.baseIP` (or set it to empty stri
 
 ---
 
+## Site Health Probe (synthetic monitoring)
+
+The chart ships a `nico-site-health-probe` subchart (disabled by default —
+it needs a site-provided image before it can run; set
+`nico-site-health-probe.enabled=true` alongside the image override): a
+single-replica Rust service that continuously runs read-only probes against
+the site's APIs and exposes latency/outcome metrics on `:9009/metrics`
+(`carbide_site_health_probe_*`). Source: `crates/site-health-probe`; the
+metric set is documented in the
+[subchart README](charts/nico-site-health-probe/README.md).
+
+- **gRPC probe** (on by default): `FindMachineIds` + a first-page
+  `FindMachinesByIds` against nico-api — the `machine show` read path,
+  including the PostgreSQL round-trip. Authenticates with a SPIFFE mTLS cert
+  issued by the site's ClusterIssuer under the identity
+  `spiffe://<trustDomain>/<namespace>/sa/nico-site-health-probe` (namespace
+  defaults to the release namespace), which nico-api's internal RBAC grants
+  read-only access.
+- **REST probes** (off by default): `GET /v2/org/<org>/nico/machine` and
+  `/instance` against nico-rest-api via a Keycloak service-account client.
+  Enabling them requires site inputs — the org, the token URL, a client
+  secret in an existing Secret, and the REST CA bundle (`restCa`) since
+  nico-rest serves TLS from its own issuer. See the subchart values.
+
+Disable with `nico-site-health-probe.enabled=false`. Override the image
+(`nico-site-health-probe.image.repository/tag`) — the default has no registry
+prefix and will not resolve in real clusters.
+
+> **Certificate note:** like the machine-a-tron pod certs, the probe's TLS
+> secret (`nico-site-health-probe-tls`; with `nameOverride` set it is
+> `<nameOverride>-tls`) survives chart uninstalls. After a reinstall that
+> rotated the site CA, delete the stale secret so cert-manager reissues it:
+> `kubectl delete secret nico-site-health-probe-tls -n <ns>` (substitute the
+> override-derived name if set).
+
+<!-- TODO(#5360-followup): active lifecycle probes (machine_count: 1=canary,
+     all=scale test) and progress p50/p95/p99 reporting. -->
+
 ## Troubleshooting
 
 ### ClusterIP already allocated
@@ -503,6 +621,18 @@ WRN no machine-a-tron instances discovered
 
 Check that bmc-mock Services have the `nvidia-infra-controller/mat-service=true`
 label.
+
+### Pod Killed During Startup (Exit 137)
+
+```text
+Startup probe failed: dial tcp ...:1266: connect: connection refused
+```
+
+machine-a-tron binds its Redfish port only after it has registered every
+expected rack, host, switch, and power shelf with nico-api. The default
+`startupProbe` allows 120 x 30 s = 60 min. If registration takes longer,
+raise `startupProbe.failureThreshold` in your values file; the sizing rule is
+in the `startupProbe` comment in the chart's `values.yaml`.
 
 ### View Generated Config
 

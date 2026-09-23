@@ -47,9 +47,11 @@ behavior.
 | `route_servers` | `Vec<String>` | `[]` | `networking` | Route server IPs for L2VPN Ethernet Virtual network support. |
 | `enable_route_servers` | `bool` | `false` | `networking` | Enables route server injection into DPU FRR configs for L2VPN. |
 | `deny_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 CIDR prefixes that tenant instances are blocked from reaching. FNN generates family-specific NVUE ACL policies; all non-FNN virtualizers apply the IPv4 prefixes only. |
-| `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IP prefixes (v4/v6) assigned for tenant use within this site. |
+| `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 prefixes assigned for tenant use within this site. With `mutual_isolation`, ETV enforces the IPv4 prefixes with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL. With `open`, that ACL is not installed. On upgrade, authoritative Core scans persisted Ready and Deleting operator-managed SitePrefixes even when this list is empty. It assigns an unparented legacy VpcPrefix when exactly one operator root contains it; ambiguous parentage blocks startup. With a nonempty list, missing parentage also blocks startup. Listen-only replicas require an authoritative Core to assign unresolved lineage first. |
+| `site_fabric_null_routes` | `Option<Vec<IpNetwork>>` | Inherited roots | `networking` | IPv4 and IPv6 prefixes installed by FNN as blackhole routes under `mutual_isolation`. Omission combines `site_fabric_prefixes`, every retained tenant-managed SitePrefix, and removed operator-managed roots that still contain a VpcPrefix or VPC-attached direct NetworkPrefix, reducing them to their minimal exact union. Soft-deleted children retain operator coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative: each CIDR uses its network address and exact duplicates are removed, but parent, child, and adjacent entries are not aggregated. Under mutual isolation, new tenant roots require an equal or broader explicit route; startup rejects an override that leaves any retained tenant root uncovered. An empty list (`[]`) installs no null routes and cannot support tenant roots under mutual isolation. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. An effective `/0` null route and `leak_default_route_from_underlay = true` for the same address family are unsupported because the imported default wins the equal-prefix distance comparison. With `open`, the routes are not installed and tenant coverage is not required. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules) and [overlap checks](#tenant-prefix-overlap-checks). |
 | `tenant_prefix_overlap_enabled` | `bool` | `false` | `networking` | Site opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). The existing `VpcPrefix` exclusion continues to prevent overlapping `VpcPrefix` persistence until the cutover tracked by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892). |
 | `max_site_prefixes_per_tenant` | `u32` | `8` | `networking` | Maximum tenant-managed SitePrefixes retained for one tenant at this site. Prefixes awaiting removal still count against this limit and keep their CIDR reserved. |
+| `max_site_prefix_isolation_rules` | `u32` | `64` | `networking` | Maximum compacted legacy DPU site-prefix input for new tenant-root admission under mutual isolation; accepts `0` through `64`. Open isolation does not enforce this limit. This is not an FNN route-capacity limit. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules). |
 | `anycast_site_prefixes` | `Vec<Ipv4Network>` | `[]` | `networking` | Aggregate IPv4 prefixes containing tenant-announced prefixes (e.g., BYOIP). **Deprecated.** Use [`routing_profiles.allowed_anycast_prefixes`](#fnnroutingprofileconfig) instead. |
 | `common_tenant_host_asn` | `Option<u32>` | — | `networking` | ASN that tenants use to peer with the DPU. If unset, any ASN is accepted. |
 | `vpc_isolation_behavior` | `VpcIsolationBehaviorType` | `MutualIsolation` | `networking` | VPC isolation policy: `mutual_isolation` or `open`. |
@@ -72,8 +74,8 @@ behavior.
 | `machine_update_run_interval` | `Option<u64>` | — | `machines` | Interval (seconds) at which the machine update manager checks for updates. |
 | `retained_boot_interface_window` | `Option<Duration>` | — | `machines` | How long a retained boot interface pair (`retained_boot_interfaces` table) stays applicable after its `machine_interfaces` row was deleted. Unset retains forever; set a window (e.g. `30d`) so a MAC reappearing on different hardware doesn't inherit an obsolete Redfish interface id. |
 | `site_explorer` | `SiteExplorerConfig` | *(see below)* | `hardware` | SiteExplorer hardware discovery settings (see [SiteExplorerConfig](#siteexplorerconfig)). |
-| `vpc_peering_policy` | `Option<VpcPeeringPolicy>` | — | `networking` | Policy for VPC peering based on network virtualization type at creation time. |
-| `vpc_peering_policy_on_existing` | `Option<VpcPeeringPolicy>` | — | `networking` | Policy for whether existing VPC peerings should be active. |
+| `vpc_peering_policy` | `Option<VpcPeeringPolicy>` | — | `networking` | VPC peering creation policy. `exclusive` admits capability-compatible pairs, while `none` or omission disables creation. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. ETV/FNN requests always return `InvalidArgument`. |
+| `vpc_peering_policy_on_existing` | `Option<VpcPeeringPolicy>` | — | `networking` | Activation policy for stored VPC peerings. Omission falls back to `vpc_peering_policy`. `exclusive` enables the virtualization-specific mechanism only for compatible pairs: ETV emits peer-prefix ACL permits, while FNN imports peer-VNI route targets. `none` disables both mechanisms. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. |
 | `attestation_enabled` | `bool` | `false` | `security` | Enables TPM-based machine attestation (adds `Measuring` state before `Ready`). |
 | `bmc_rotation_enabled` | `bool` | `false` | `security` | Site-wide kill-switch for passive BMC credential rotation. When `false` (default), a Ready host never auto-enters `RotatingBmc`; the force-converge escape hatch bypasses it. |
 | `uefi_rotation_enabled` | `bool` | `false` | `security` | Site-wide kill-switch for passive UEFI credential rotation (host and DPU). When `false` (default), a Ready host never auto-enters `RotatingHostUefi` nor drives its DPUs into `RotatingDpuUefi`; the per-machine force-converge escape hatch bypasses it. |
@@ -188,9 +190,11 @@ field.
 NICo trims outer whitespace from `product_family` and vendor values and requires
 both to be non-empty. It does not validate either value against a fixed list.
 RMS determines whether each role/vendor/product-family combination is supported
-when a request is made. See
-[Supported RMS descriptor combinations](../../../../docs/configuration/component-manager-rms.md#supported-rms-descriptor-combinations),
-including VRNVL72.
+when a request is made. Refer to the
+[Hardware Compatibility List](https://docs.nvidia.com/rms/documentation/reference/hardware-compatibility-list)
+as a compatibility reference. The list includes hardware under development, and
+inclusion does not imply qualification, certification, or support. Confirm
+support for each combination against the deployed RMS release.
 
 For product families other than `gb200` and `gb300`, the `GetRackProfile`
 `product_family` enum is `UNSPECIFIED`. The configured string remains available
@@ -226,6 +230,7 @@ rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
 [rack_profiles.NVL72.firmware_object]
 url = "https://firmware.example.com/objects/nvl72.json"
 fetch_timeout = "30s"
+access_token_credential = "nvl72-artifacts"
 
 [rack_profiles.NVL72.rack_capabilities.compute]
 vendor = "NVIDIA"
@@ -241,18 +246,25 @@ count = 8
 ```
 
 `firmware_object` supplies the SOT JSON for automatic rack firmware and switch
-NVOS image updates. When `firmware_object` is configured for a profile with
-switches, the document must include an NVOS image whose firmware type matches
+NVOS image updates and for automatic compute-tray firmware updates during
+pre-ingestion. When `firmware_object` is configured for a profile with switches,
+the document must include an NVOS image whose firmware type matches
 `rack_hardware_class`. NICo requests `prod` when `rack_hardware_class` is
 omitted. RMS records an asynchronous update failure when the document does not
 contain the required image. If `firmware_object` is omitted, NICo skips both
-automatic update phases. An explicit maintenance request can supply a firmware
-object instead. If no firmware object is available while a switch in the
-maintenance scope is already waiting for an NVOS update, the rack transitions
-to `Error` instead of skipping the NVOS phase.
-`fetch_timeout` defaults to `30s`.
+automatic rack maintenance phases and the compute-tray pre-ingestion update. An
+explicit maintenance request can supply a firmware object instead. If no
+firmware object is available while a selected switch is in
+`WaitingForNVOSUpgrade` for a reprovision request whose initiator is
+`rack-{rack_id}`, the rack transitions to `Error` instead of skipping the NVOS
+phase. `fetch_timeout` defaults to `30s`.
 
-Example: GB300 rack with Lenovo compute trays and Delta power shelves:
+`access_token_credential` optionally names a credential that contains a
+firmware artifact access token. NICo reads the secret when compute-tray
+pre-ingestion starts. When the field is omitted, NICo sends the RMS no-auth
+sentinel.
+
+Example: GB300 rack with NVIDIA compute trays and Delta power shelves:
 
 ```toml
 [component_manager]
@@ -265,7 +277,7 @@ product_family = "gb300"
 rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
 
 [rack_profiles.NVL72_GB300.rack_capabilities.compute]
-vendor = "Lenovo"
+vendor = "NVIDIA"
 count = 18
 
 [rack_profiles.NVL72_GB300.rack_capabilities.switch]
@@ -808,7 +820,7 @@ client-certificate authentication is not used.
 | `route_targets_on_exports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets added to routes exported by the DPU. |
 | `internal` | `Option<bool>` | — (effective `false`) | Whether the profile uses internal VNI allocation. This property cannot be overridden on a VPC. |
 | `tenant_prefix_overlap_eligible` | `bool` | `false` | Base routing profile opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). This setting cannot be overridden on a VPC. |
-| `leak_default_route_from_underlay` | `Option<bool>` | — (effective `false`) | Leak the default route from the underlay/default VRF into tenant VRFs. |
+| `leak_default_route_from_underlay` | `Option<bool>` | — (effective `false`) | Leak the default route from the underlay/default VRF into tenant VRFs. Do not enable this for an address family whose effective `site_fabric_null_routes` contains `/0`; the imported default has a better administrative distance than the equal-prefix blackhole. |
 | `leak_tenant_host_routes_to_underlay` | `Option<bool>` | — (effective `false`) | Leak tenant host routes into the underlay/default VRF. |
 | `tenant_leak_communities_accepted` | `Option<bool>` | — (effective `false`) | Honor route-leak communities sent by the tenant host OS. |
 | `accepted_leaks_from_underlay` | `Option<Vec<PrefixFilterPolicyEntry>>` | — (effective `[]`) | Specific underlay/default VRF prefixes allowed to leak into tenant VRFs. Routing only; does not affect ACLs. |
@@ -818,6 +830,102 @@ client-certificate authentication is not used.
 Unset properties retain presence information so a VPC's inline
 `routing_profile_overrides` can inherit them. After the named profile and VPC
 override are combined, properties still unset use the effective defaults above.
+
+### SitePrefix isolation rules
+
+Core includes current configured `site_fabric_prefixes` and retained tenant-managed
+SitePrefixes in the legacy DPU `site_fabric_prefixes` input. Duplicate, contained,
+and adjacent prefixes are combined only when the resulting list covers exactly
+the same addresses. This legacy list is sorted by address family, address, and
+prefix length. Logical SitePrefix records and their ownership are unchanged.
+
+An empty configured `site_fabric_prefixes` list contributes no operator roots;
+it does not remove retained tenant-managed SitePrefixes from the legacy list.
+A site with neither configured nor tenant roots sends an empty legacy list.
+Including a root in this field alone does not prove isolation on an older agent.
+
+FNN uses the separate `site_fabric_null_routes` response field. When the setting
+is omitted, Core includes configured roots, every retained tenant root, and
+retiring operator roots while their VpcPrefixes or VPC-attached direct
+NetworkPrefixes remain. Soft deletion does not end operator-root retention.
+These routes are reduced to their minimal exact union and sorted by CIDR string.
+The anonymous `Version` RPC keeps its existing operator-route output: configured
+and retained operator roots, without tenant-managed SitePrefixes. Its
+`RuntimeConfig.site_fabric_null_routes` field is not a complete audit of DPU
+isolation routes. Use `GetManagedHostNetworkConfig` to inspect the tenant-inclusive
+FNN response; built-in RBAC restricts that RPC when `bypass_rbac` is false.
+
+An explicit `site_fabric_null_routes` list is not augmented with either kind of
+retained root. Its distinct boundaries are preserved, including nested and
+adjacent entries. Under mutual isolation, new tenant roots must be covered by one equal or broader
+explicit route; several narrower routes do not qualify. Uncovered creation
+returns `FailedPrecondition` without persisting the root or its history.
+Startup applies the same coverage check to every retained tenant root, including
+unused roots and roots in `Deleting`, even when `tenant_prefix_overlap_enabled`
+is false and no VpcPrefixes overlap.
+An explicit empty list therefore blocks new tenant roots and prevents startup
+while any tenant roots remain. Every FNN DPU response, including an Admin-only
+response, repeats this check against retained roots, so a root admitted by
+another Core replica cannot silently lose coverage under a different explicit
+override. ETV responses do not apply this FNN coverage check. Version still
+reports the explicit override without checking tenant coverage, so operators
+can inspect it. Existing create retries still return their root.
+
+With `vpc_isolation_behavior = "open"`, DPUs install no isolation routes. Tenant
+creation, startup, and DPU responses therefore do not require explicit-route
+coverage in this mode; an explicit empty list remains valid with retained roots.
+
+To recover startup or FNN configuration serving after an override loses coverage,
+restore an explicit list that covers every retained tenant root, or omit
+`site_fabric_null_routes` to inherit them, then restart the affected Core replicas.
+Requesting deletion does not remove a retained root from the check. Recovery
+does not require manual database edits.
+
+Older Core versions can create tenant roots without checking an explicit
+null-route override. If old and new API processes overlap during an upgrade,
+an old process can create an uncovered root after the new process passes its
+startup check. New FNN responses then fail the coverage check.
+
+For mutual-isolation sites using an explicit override, prevent that sequence
+with the existing tenant quota:
+
+1. Set `max_site_prefixes_per_tenant = 0` on every API process and finish restarting
+   or draining the processes and requests using the previous setting. This
+   blocks new tenant roots while preserving unchanged creation retries.
+2. Check that every explicit override covers all retained tenant roots, or omit
+   `site_fabric_null_routes` to inherit them.
+3. Upgrade every API process before restoring the tenant quota. If returning to
+   an older version, keep creation blocked while versions overlap.
+
+This creation freeze is unnecessary when the old API and its requests are fully
+stopped before the new API starts, or when null routes are inherited. Setting
+`tenant_prefix_overlap_enabled = false` does not block SitePrefix creation.
+
+`max_site_prefix_isolation_rules` limits the compacted legacy list when creating a
+tenant-managed root. It defaults to `64` and accepts integers from `0` through
+`64`; configuration loading rejects other values. Changes require restarting
+Core. Under mutual isolation, zero blocks new roots. Open isolation does not
+enforce this limit. The initial ceiling is an operational restriction,
+not an FNN null-route count or a hardware-capacity guarantee. Retiring operator
+roots and explicit null-route overrides are excluded from the count. Raising
+the ceiling requires the qualification tracked
+by [#3902](https://github.com/dsx-ai-factory/infra-controller/issues/3902).
+The separate `max_site_prefixes_per_tenant` quota still counts logical tenant roots.
+
+If existing use exceeds a lowered limit, new roots are rejected even when adding
+one would compact the list below that limit. Existing roots continue to render,
+and a retry using an existing ID and unchanged immutable fields still returns
+that root. Core reports `ResourceExhausted` with the current, proposed, and maximum
+legacy input counts for rejected creation. Exceeding the limit does not itself
+block startup or truncate either DPU input. New tenant roots intersecting a configured
+`deny_prefixes` entry are rejected with `InvalidArgument`.
+
+Tenant roots remain included in every retained lifecycle state, including
+`Deleting`, even when `tenant_prefix_overlap_enabled` is false. New tenant roots remain
+`Provisioning` and cannot be used for new VpcPrefixes until the DPU readiness
+work in [#6314](https://github.com/dsx-ai-factory/infra-controller/issues/6314).
+Retiring operator roots are excluded from the legacy input but remain in inherited
+FNN null routes until their children are hard-deleted.
 
 ### Tenant prefix overlap checks
 
@@ -878,56 +986,29 @@ imports; there are no transitive peer imports. Prefixes awaiting removal still
 count. These writers also check the combined networks of each affected Instance,
 including Instances waiting for their network segments and pending replacements.
 
-VPC routing-profile changes, VPC NSG assignments, and NSG rule changes check
-the affected tenant-serving FNN interfaces. An Instance's explicit NSG replaces
-its VPC's NSG. Discovery boot suppresses NSGs but still uses the routing profile.
-Allocated Instances remain relevant even before their controllers leave Admin
-networking, including while waiting for network segments. Pending networks and
-deleting Instances not yet in the controller's return-to-Admin state also count.
-Core rejects unsafe policy changes on these paths with `FailedPrecondition`,
-even before duplicate CIDRs exist. Unused definitions remain editable.
-Metadata updates, unchanged stored policy,
-and proven restrictions do not take the overlap transaction lock unless a
-concurrent update changes the policy they replace. With overlap enabled,
-`UpdateVpc` and `UpdateNetworkSecurityGroup` can return `FailedPrecondition` if
-a VPC or NSG changes while the request waits for its row lock. With overlap
-disabled, requests without `if_version_match` instead use the latest locked
-record and repeat any needed policy checks. Explicit version conditions still
-apply in either mode.
+VPC routing-profile changes check the affected tenant-serving FNN interfaces. Allocated Instances remain relevant even before their controllers leave Admin networking, including while waiting for network segments. Pending networks and deleting Instances not yet in the controller's return-to-Admin state also count. Core rejects unsafe routing-profile changes on these paths with `FailedPrecondition`, even before duplicate CIDRs exist. Unused definitions remain editable. Metadata updates, unchanged stored routing policy, and proven restrictions do not take the overlap transaction lock unless a concurrent update changes the policy they replace. With overlap enabled, `UpdateVpc` can return `FailedPrecondition` if the VPC changes while the request waits for its row lock. With overlap disabled, requests without `if_version_match` instead use the latest locked record and repeat any needed routing-policy checks. Explicit version conditions still apply in either mode.
 
-Instance allocation and network expansion check all VPCs used by the requested,
-current, and pending networks together, including their direct peer imports.
-An Instance must not connect to overlapping address space from different VPCs,
-even when those VPCs are otherwise isolated. Core returns `InvalidArgument`
-for that conflict. With overlap enabled, allocation, network expansion, and
-NSG changes also check the effective FNN policy before duplicate CIDRs exist.
-Effective NSG rules must be deny-only, and `stateful_egress` must be disabled
-when `stateful_acls_enabled` is enabled; unsafe policy returns
-`FailedPrecondition`. Network expansion also requires an eligible resolved
-routing profile and safe site-wide policy.
+Instance allocation and network expansion check all VPCs used by the requested, current, and pending networks together, including their direct peer imports. An Instance must not connect to overlapping address space from different VPCs, even when those VPCs are otherwise isolated. Core returns `InvalidArgument` for that conflict. With overlap enabled, allocation and network expansion also check the effective FNN routing policy before duplicate CIDRs exist. Network expansion requires an eligible resolved routing profile and safe site-wide policy. NSG permits and stateful egress do not participate in overlap admission: FNN isolation is enforced by routing blackholes, which ACL policy cannot bypass.
 
-When `tenant_prefix_overlap_enabled = false` but another VPC still uses the
-same addresses, Instance allocation and network expansion return
-`InvalidArgument`; unsafe NSG changes return `FailedPrecondition`. Prefixes
-being deleted still count. Metadata edits, removal of unchanged interfaces,
-and safe NSG replacements remain available. A request cannot replace a pending
-network update. Requests that need admission take the overlap transaction lock
-before resource locks, including when the gate is off. A waiting Instance
-update reloads its dependencies but keeps its original configuration version;
-if that version changed, the request returns `FailedPrecondition`.
+New prefix reuse requires coverage from the explicit `site_fabric_null_routes`
+configuration when present. When omitted, the participant tenant-managed
+SitePrefixes supply inherited coverage even outside configured operator ranges.
+Retained-state validation uses all retained tenant roots and retiring operator
+roots, matching the routes sent to FNN. Retiring operator roots do not authorize
+new reuse. An explicit empty list disables tenant prefix reuse.
 
-With the gate off, peering and VPC virtualization changes also reject new
-imports of overlapping address space involving a tenant-managed `VpcPrefix`.
-Existing imports and nonexpanding changes remain available. Unsafe VPC and NSG
-policy changes are rejected where an affected Instance can reach that duplicate
-address space.
+When `tenant_prefix_overlap_enabled = false` but another VPC still uses the same addresses, Instance allocation and network expansion return `InvalidArgument`. Prefixes being deleted still count. Metadata edits and removal of unchanged interfaces remain available. A request cannot replace a pending network update. Requests that need admission take the overlap transaction lock before resource locks, including when the gate is off. A waiting Instance update reloads its dependencies but keeps its original configuration version. If that version changed, the request returns `FailedPrecondition`.
+
+With the gate off, peering and VPC virtualization changes also reject new imports of overlapping address space involving a tenant-managed `VpcPrefix`. Existing imports and nonexpanding changes remain available. Unsafe routing-profile changes are rejected where an affected Instance can reach that duplicate address space.
 
 Core checks retained prefixes, peer imports, Instance networks, and effective
 FNN policy before starting controllers or the API listener, including with
 `listen_only = true`. Startup network seeding and Admin VPC attachment check
 their changes before committing. An unsafe retained configuration fails startup.
 Tenant DPU configuration requests also check their retained networks before
-returning tenant interfaces; Admin-only responses remain available for cleanup.
+returning tenant interfaces. Admin-only responses skip the per-Instance network
+checks; under mutual isolation, every FNN response still checks explicit
+null-route coverage for all retained tenant roots.
 With overlap enabled, the policy checks apply to every retained FNN network on
 a DPU Instance, even before duplicate prefixes exist.
 These checks coordinate with admission writers through the same transaction
@@ -935,11 +1016,13 @@ lock. DPU configuration requests share the read lock with each other.
 A routing writer holding the exclusive lock blocks configuration requests
 across the site until its transaction ends.
 
-With overlap disabled, these startup and tenant DPU checks apply only to
+With overlap disabled, the retained VPC routing checks apply only to
 overlaps involving a tenant-managed `VpcPrefix`. Overlaps between existing
 operator-managed or rootless prefixes do not activate them. This preserves
 existing configurations, including Admin networks, without weakening the
-checks on tenant-managed prefixes retained after disabling overlap.
+checks on tenant-managed prefixes retained after disabling overlap. Explicit
+null-route coverage for retained tenant roots is required under mutual
+isolation, even without duplicate VPC prefixes.
 
 Turning off the site or profile admission opt-in does not invalidate safely
 isolated existing networks. Prefixes and their tenant-managed SitePrefixes may
@@ -953,6 +1036,48 @@ and [Instance admission](https://github.com/dsx-ai-factory/infra-controller/issu
 Even when the application accepts an eligible pair, the existing `VpcPrefix`
 exclusion rejects overlapping `VpcPrefix` persistence until the cutover tracked
 by [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892).
+
+**Stored Prefix Scope**
+
+`network_vpc_prefixes.overlap_vpc_id` and `network_prefixes.overlap_vpc_id` are
+internal database fields, not API or configuration settings. `NULL` means the
+row remains globally exclusive. Core sets a VPC ID only for a new IPv4
+`VpcPrefix` using an eligible tenant-managed SitePrefix and routing profile,
+with the site overlap gate enabled and the site-wide isolation policy described
+above. An explicit `site_fabric_null_routes` override must cover the prefix.
+Without an override, scope selection does not require containment in configured
+operator ranges. Scope does not authorize overlap: pair admission still checks
+effective route coverage and all other overlap requirements described above.
+Generated, non-stretched Tenant linknets inherit that ID from their exact
+parent. Direct segments remain global even when a VpcPrefix adopts them.
+
+Existing rows and inserts from older binaries remain global. An older binary
+can also create a global child beneath a scoped parent. The additive migration
+retains both original global exclusions, so application rollback does not allow
+overlap or require a database rollback. The four additional exclusions protect
+global rows from each other and scoped rows within the same VPC, including rows
+awaiting deletion. They do not compare a global row with a scoped row.
+
+The migration blocks reads and writes to these prefix tables while building
+the indexes. It releases the locks when it commits. Cached wildcard queries on
+the outgoing API's connections can still fail until that API is replaced.
+
+The following read-only query must return ten rows, all with `convalidated = t`.
+The scope checks and foreign key prove that each non-null key agrees with its
+stored VPC/parent relationship; the original exclusions still prevent overlap.
+This is a structural check, not approval to drop those exclusions: the
+[#3892 cutover](https://github.com/dsx-ai-factory/infra-controller/issues/3892)
+must also make every writer and allocation check respect global scope, including
+parented global children, and verify the supported application versions.
+Core's startup checks continue to validate runtime routing policy.
+
+```sql
+SELECT conname, convalidated
+FROM pg_catalog.pg_constraint
+WHERE conrelid IN ('public.network_vpc_prefixes'::regclass, 'public.network_prefixes'::regclass)
+  AND (conname LIKE '%overlap%' OR contype = 'x')
+ORDER BY conname;
+```
 
 ### `VpcDefinition`
 
@@ -1161,8 +1286,21 @@ be propagated there by DPF.
 | `stale_run_timeout` | `Duration` | `24h` | Grace period before an active validation run is considered stale. Values below `90s` are raised to `90s` to avoid marking healthy heartbeat-based runs stale. |
 | `tests` | `Vec<MachineValidationTestConfig>` | `[]` | Per-test enable/disable overrides. |
 | `approved_plugin_registries` | `Vec<String>` | `[]` | Registries allowed for Machine Validation plugin images. Empty denies plugin registration; legacy tests are unaffected. |
+| `allowed_plugin_types` | `Vec<String>` | `["container"]` | Plugin execution types allowed for the site. Empty denies plugin registration; the only accepted value is `container`. |
 | `allow_privileged_plugins` | `bool` | `false` | Allows registration of plugins that request the privileged container profile. |
 | `allow_full_host_plugins` | `bool` | `false` | Allows registration of privileged plugins that request a writable host-root mount. Each revision still needs separate approval before it can be enabled. |
+| `attempt_logs` | `MachineValidationAttemptLogConfig` | enabled, 16 KiB/chunk, 1 MiB/attempt, 30d | Site-wide storage policy for Machine Validation attempt logs. |
+
+### `MachineValidationAttemptLogConfig`
+
+TOML section: `[machine_validation_config.attempt_logs]`.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | `bool` | `true` | Persists plugin stdout/stderr chunks. When false, appended chunks are discarded. |
+| `max_chunk_bytes` | `usize` | `16384` | Maximum stored UTF-8 bytes per chunk; must be greater than zero and no more than `16384` when enabled. |
+| `max_attempt_bytes` | `usize` | `1048576` | Maximum total stored UTF-8 bytes per attempt; must be at least `max_chunk_bytes` and no more than `1048576` when enabled. |
+| `retention` | `Duration` | `30d` | Non-negative retention duration for terminal-attempt logs. Cleanup runs in bounded batches even when Machine Validation is disabled. |
 
 ### `BomValidationConfig`
 
@@ -1209,14 +1347,15 @@ be propagated there by DPF.
 ### `CredentialsConfig`
 
 The optional `[credentials]` section configures non-secret locations from which
-NICo reads operator-managed credentials. Non-UFM credentials continue to read
-the local environment and file sources before the configured persistent
-backends. `ufm_source` controls the read precedence and mutation policy for UFM
-credentials.
+NICo reads operator-managed credentials. Most credentials continue to read the
+local environment and file sources before the configured persistent backends.
+`ufm_source` controls the policy for UFM credentials, and
+`bmc_site_wide_root_source` controls version 0 of the site-wide BMC root.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `ufm_source` | `UfmCredentialSource` | `local_first` | UFM credential policy. `local_first` reads environment/file entries before falling back to the persistent backend and writes to the backend. `backend` ignores local UFM entries. `local` makes environment/file entries authoritative and rejects persistent-backend UFM mutations. |
+| `bmc_site_wide_root_source` | `BmcSiteWideRootSource` | `local_first` | Version 0 site-wide BMC root policy. `local_first` reads environment, then file, before falling back to the persistent backend and writes to the backend. `backend` ignores the local v0 entry. `local` reads environment, then file, with no backend fallback and rejects backend v0 mutations. Versioned roots always use persistent backends. |
 | `file` | `Option<CredentialFileSourceConfig>` | — | Watched JSON or YAML static-credential file (see [CredentialFileSourceConfig](#credentialfilesourceconfig)). When present, it replaces the legacy file source selected by `CARBIDE_CREDENTIALS_FILE_*`; the environment source remains first when enabled. |
 
 When `ufm_source = "local"` and InfiniBand management is enabled, startup
@@ -1224,6 +1363,33 @@ requires a local `ufm_auth_by_fabric` entry for every configured fabric. The
 mode is all-or-nothing: NICo does not fall back to Vault or Postgres for a
 missing fabric. When `ufm_source` is omitted, `local_first` preserves the
 pre-existing local-override behavior.
+
+When `bmc_site_wide_root_source = "local"`, readers report a missing local
+version 0 as unavailable without falling back to a persistent backend. With
+DPF enabled, Core requires local v0 before startup on both fresh and existing
+sites whenever v0 is current or the current target cannot be resolved. This
+prevents a rolling update from activating local ownership while an older
+replica can still register a DPU that uses the shared credential. On a transient
+rotation-target read failure, a present local v0 permits startup and retry. After
+accepting local v0, NICo retains that last shared value and logs an error if the
+entry disappears. To recover, restore the local value unchanged. The default pinned DPF
+v26.4.0 does not support BMC credential rotation, so NICo retains the shared
+Secret. Adopting and validating supporting DPF behavior is tracked by
+[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other current
+BMC rotation targets follow the same retention rule when absent from their
+authoritative source. During background refresh, a transient source-read
+failure retains the last published Secret and is retried.
+The setting does not affect versioned site-wide BMC roots,
+per-device BMC credentials, or BMC rotation.
+
+Treat a local version 0 value as bootstrap and ingestion input. Watched reload
+may add or correct it before any managed device begins using version 0. After
+ingestion starts, keep it unchanged: changing only the read source does not
+update BMC hardware or credential-convergence records. Use coordinated BMC
+credential rotation to advance to a backend-managed version instead. On DPF
+sites, do not rotate while DPF manages any DPU: the shared BMC Secret cannot
+authenticate a fleet split between old and new passwords; see
+[#6147](https://github.com/NVIDIA/infra-controller/issues/6147).
 
 #### Environment credential source
 
@@ -1244,11 +1410,16 @@ export CARBIDE_STATIC_CREDENTIAL__UFM_AUTH_BY_FABRIC__DEFAULT__PASSWORD=bearer-t
 ```
 
 Environment credentials are snapshotted at process startup. Changing them
-requires restarting `nico-api`; use the watched file source for runtime
-credential rotation. With `ufm_source = "local_first"`, an environment entry
+requires restarting `nico-api`; use the watched file source for supported
+live-reload workflows. The site-wide BMC root version 0 has the bootstrap-only
+boundary described above. With `ufm_source = "local_first"`, an environment entry
 overrides the corresponding file and persistent-backend entries. With
 `ufm_source = "local"`, every configured fabric must be present in the enabled
 environment/file sources.
+
+For version 0 of the site-wide BMC root, the environment entry likewise
+precedes the file entry in `local_first` and `local` modes. Versioned roots do
+not use either local source.
 
 ### `CredentialFileSourceConfig`
 
@@ -1269,15 +1440,31 @@ ufm_auth_by_fabric:
     password: bearer-token-or-empty
 ```
 
+A sparse file may instead contain only version 0 of the site-wide BMC root:
+
+```yaml
+bmc_site_wide_root:
+  username: root
+  password: example
+```
+
+With `bmc_site_wide_root_source = "local"`, the watched Kubernetes Secret may
+supply or correct this value before ingestion without restarting NICo. Do not
+change it after a managed device begins using version 0; use coordinated BMC
+rotation to advance to a backend-managed version instead. DPF sites must not
+rotate while DPUs rely on the shared BMC Secret; see
+[#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Use a Secret
+rather than a ConfigMap for credential data.
+
 ### `SecretsConfig`
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `kms` | `KmsConfig` | **required** | KMS backend configuration (see [KmsConfig](#kmsconfig)). |
 | `routing` | `HashMap<String, String>` | **required** | Maps path prefixes to the `kek_id` that encrypts new writes under them, longest prefix winning. A `/` catch-all entry is required. Reads never consult routing — every stored row records the KEK that wrote it. |
-| `backends` | `Vec<CredentialBackend>` | `[vault]` | The persistent-backend read order, highest priority first (first match wins). Enabled local overrides are tried first for non-UFM credentials. UFM reads use these backends directly in `backend` mode and as fallback in `local_first` mode. |
-| `writer` | `CredentialBackend` | `vault` | Where new credential writes go. Set to `postgres` to send new writes to the journal; independent of `backends`. UFM mutations are rejected when `credentials.ufm_source = "local"`. |
-| `import_from` | `Option<ImportSource>` | — | A source backend to import secrets from at startup. Only `vault` is supported. When `credentials.ufm_source = "local"`, the import does not traverse or read `ufm/`; an import containing only excluded UFM entries still records completion. Unset means a fresh site with nothing to import. |
+| `backends` | `Vec<CredentialBackend>` | `[vault]` | The persistent-backend read order, highest priority first (first match wins). Enabled local overrides are normally tried first. Source policies may make selected local entries authoritative or suppress them. |
+| `writer` | `CredentialBackend` | `vault` | Where new credential writes go. Set to `postgres` to send new writes to the journal; independent of `backends`. Mutations are rejected for credentials whose source policy is `local`. |
+| `import_from` | `Option<ImportSource>` | — | A source backend to import secrets from at startup. Only `vault` is supported. The import excludes the `ufm/` subtree when `credentials.ufm_source = "local"`, and only the unversioned site-wide BMC root when `credentials.bmc_site_wide_root_source = "local"`. An excluded-only import still records completion. Unset means a fresh site with nothing to import. |
 | `import_approach` | `ImportApproach` | `missing_only` | How to treat secrets that already exist in Postgres during import. |
 
 ### `KmsConfig`

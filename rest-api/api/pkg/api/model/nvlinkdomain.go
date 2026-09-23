@@ -57,6 +57,9 @@ type APINVLinkDomainFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck bypasses readiness checks for the operation.
 	// See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// OverrideVersionCheck overrides firmware version-based checks for the
+	// operation. See APIUpdateFirmwareRequest for semantics.
+	OverrideVersionCheck bool `json:"overrideVersionCheck"`
 }
 
 // Validate checks the firmware-update fields.
@@ -83,6 +86,9 @@ type APIBatchNVLinkDomainFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck applies the readiness bypass to every spawned task.
 	// See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// OverrideVersionCheck applies the firmware version-check override to every
+	// spawned task. See APIUpdateFirmwareRequest for semantics.
+	OverrideVersionCheck bool `json:"overrideVersionCheck"`
 }
 
 // Validate checks the NVLink Domain IDs and firmware-update fields.

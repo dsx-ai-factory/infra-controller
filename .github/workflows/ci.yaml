@@ -218,6 +218,7 @@ jobs:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.cargo/**'
               - 'Makefile.toml'
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yaml'
@@ -906,7 +907,7 @@ jobs:
     uses: ./.github/workflows/docker-build.yml
     with:
       dockerfile_path: dev/k8s/machine-a-tron-controller/Dockerfile
-      context_path: dev/k8s/machine-a-tron-controller
+      context_path: .
       image_name: ${{ needs.prepare.outputs.image_registry }}/mat-k8s-controller
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/mat-k8s-controller:${{ needs.prepare.outputs.major_minor_version }}-latest
@@ -917,6 +918,40 @@ jobs:
       scan: true
       tag_latest: false
       timeout_minutes: 30
+    secrets: inherit
+
+  build-site-health-probe:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.source_files_changed == 'true'
+      }}
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      dockerfile_path: crates/site-health-probe/Dockerfile
+      context_path: .
+      # No layer cache, same reasoning as machine-a-tron above: the Dockerfile
+      # does `COPY . .` before the cargo build, so any new commit invalidates
+      # the builder layer and nothing expensive can ever be restored.
+      cache: false
+      build_args: >-
+        ${{ format('{{"VERSION":"{0}","CI_COMMIT_SHORT_SHA":"{1}"}}',
+          needs.prepare.outputs.version,
+          needs.prepare.outputs.short_sha) }}
+      image_name: ${{ needs.prepare.outputs.image_registry }}/site-health-probe
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/site-health-probe:${{ needs.prepare.outputs.major_minor_version }}-latest
+      platforms: linux/amd64,linux/arm64
+      runner: linux-amd64-cpu16
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: false
+      scan: true
+      tag_latest: false
+      timeout_minutes: 60
     secrets: inherit
 
   # Like the release-container builds above, deliberately not gated on
@@ -1011,6 +1046,9 @@ jobs:
               /etc/init.d/postgresql start
               sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;"
               createdb root
+              # Test IPv6 with a separate login without changing the SQLx build database.
+              sudo -u postgres psql -c "CREATE ROLE nico_ipv6_test LOGIN PASSWORD \$\$nico_ipv6_test\$\$;"
+              export NICO_TEST_POSTGRES_URL="postgresql://nico_ipv6_test:nico_ipv6_test@[::1]:5432/postgres?sslmode=disable"
               cargo make test-release-container-services
               sccache --show-stats || true
               echo "sccache directory holds $(du -sh /sccache | cut -f1)"
@@ -1727,6 +1765,32 @@ jobs:
           lint: 'true'
           template: 'true'
 
+      - name: Validate IPv6 Prometheus scrape configuration
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml
+          # Use upstream promtool with Kubernetes discovery, matching kube-prometheus-stack 59.1.0.
+          prometheus_version=2.52.0
+          prometheus_archive="prometheus-${prometheus_version}.linux-amd64.tar.gz"
+          curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${prometheus_version}/${prometheus_archive}" \
+            -o "${RUNNER_TEMP}/${prometheus_archive}"
+          printf '%s  %s\n' '7f31c5d6474bbff3e514e627e0b7a7fbbd4e5cea3f315fd0b76cad50be4c1ba3' "${RUNNER_TEMP}/${prometheus_archive}" \
+            | sha256sum --check --status
+          tar -xzf "${RUNNER_TEMP}/${prometheus_archive}" -C "${RUNNER_TEMP}" \
+            "prometheus-${prometheus_version}.linux-amd64/promtool"
+          /usr/bin/python3 - <<'PYCONFIG' | "${RUNNER_TEMP}/prometheus-${prometheus_version}.linux-amd64/promtool" check config /dev/stdin
+          import yaml
+          with open("helm-prereqs/observability/values-nico-ipv6-scraping.yaml") as stream:
+              values = yaml.safe_load(stream)
+          print(yaml.safe_dump({"scrape_configs": values["prometheus"]["prometheusSpec"]["additionalScrapeConfigs"]}))
+          PYCONFIG
+          PROMTOOL="${RUNNER_TEMP}/prometheus-${prometheus_version}.linux-amd64/promtool" \
+            /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_ipv6_scraping.py'
+
+      - name: Check Core VIP preflight
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
+
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
@@ -1734,16 +1798,20 @@ jobs:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
           charts: >-
+            bluefield/charts/nico-dpu-agent
+            bluefield/charts/nico-fmds
+            bluefield/charts/nico-otelcol
             helm
             helm/charts/nico-api
             helm/charts/nico-bmc-proxy
             helm/charts/nico-dhcp
             helm/charts/nico-dns
             helm/charts/nico-dsx-exchange-consumer
-            helm/charts/nico-flow
+            helm/nico-flow
             helm/charts/nico-hardware-health
             helm/charts/nico-machine-a-tron
             helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
+            helm/charts/nico-machine-a-tron/charts/nico-site-health-probe
             helm/charts/nico-pxe
             helm/charts/nico-ssh-console-rs
             helm/charts/unbound
@@ -1795,8 +1863,33 @@ jobs:
           lint: 'true'
           template: 'true'
 
+      - name: Run Helm unit tests
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
+        with:
+          plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
+          registry-password: ${{ secrets.NVCR_TOKEN }}
+          charts: helm-prereqs
+
+      - name: Test observability release status
+        run: bash helm-prereqs/tests/install-observability-release-status_test.sh
+
+      - name: Test observability setup gate
+        run: bash helm-prereqs/tests/setup-observability-core-gate_test.sh
+
+      - name: Test legacy Flow upgrade guard
+        run: bash helm-prereqs/tests/setup-legacy-flow-upgrade-guard_test.sh
+
+      - name: Test Flow cleanup order
+        run: bash helm-prereqs/tests/setup-flow-cleanup-order_test.sh
+
+      - name: Test legacy Flow manager cleanup
+        run: bash helm-prereqs/tests/cleanup-legacy-flow-managers_test.sh
+
       - name: Test Vault Kubernetes URLs
         run: bash helm-prereqs/tests/vault-kubernetes-url_test.sh
+
+      - name: Test health check namespaces
+        run: bash helm-prereqs/tests/health-check-namespaces_test.sh
 
       - name: Test observability installer DPU output
         run: bash helm-prereqs/tests/install-observability-dpu-output_test.sh
@@ -1806,6 +1899,9 @@ jobs:
 
       - name: Test observability install summary
         run: bash helm-prereqs/tests/install-observability-summary_test.sh
+
+      - name: Test DPF single Core deployment
+        run: bash helm-prereqs/tests/setup-dpf-single-core-deploy_test.sh
 
   build-push-helm-prereqs-chart:
     needs:
@@ -2048,12 +2144,24 @@ jobs:
           lint: 'true'
           template: 'true'
 
+      - name: Test nico-dhcp-server listener command
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml busybox
+          /usr/bin/python3 -B bluefield/charts/nico-dhcp-server/tests/test_listener_command.py
+
       - name: Validate nico-fmds chart
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@94bde998f5d7965576b0c663db7d5d709c918167
         with:
           chart-path: bluefield/charts/nico-fmds
           lint: 'true'
           template: 'true'
+
+      - name: Test nico-fmds listener command
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml busybox
+          /usr/bin/python3 -B bluefield/charts/nico-fmds/tests/test_listener_command.py
 
   build-push-bluefield-helm-charts:
     needs:
@@ -2130,6 +2238,7 @@ jobs:
       - build-release-container-aarch64
       - build-machine-a-tron
       - build-mat-k8s-controller
+      - build-site-health-probe
       - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
@@ -2193,6 +2302,7 @@ jobs:
           IMAGES["build-release-artifacts-x86-host"]="${{ needs.build-release-artifacts-x86-host.outputs.image_ref }}"
           IMAGES["build-release-artifacts-arm-host"]="${{ needs.build-release-artifacts-arm-host.outputs.image_ref }}"
           IMAGES["build-mat-k8s-controller"]="${{ needs.build-mat-k8s-controller.outputs.image_ref }}"
+          IMAGES["build-site-health-probe"]="${{ needs.build-site-health-probe.outputs.image_ref }}"
 
           for job in "${!IMAGES[@]}"; do
             image="${IMAGES[$job]}"
@@ -2237,6 +2347,7 @@ jobs:
       - build-release-container-aarch64
       - build-machine-a-tron
       - build-mat-k8s-controller
+      - build-site-health-probe
       - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
@@ -2314,6 +2425,7 @@ jobs:
       - merge-manifests-nvmetal-carbide
       - build-machine-a-tron
       - build-mat-k8s-controller
+      - build-site-health-probe
       - test-release-container-services
 
       # CLI images

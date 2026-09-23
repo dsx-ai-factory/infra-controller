@@ -25,9 +25,9 @@ Redfish Manager.Reset type. Omit for the vendor default
 
 *Possible values:*
 
-- graceful
-
-- force
+> - graceful
+>
+> - force
 
 `--extended`
 
@@ -43,9 +43,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

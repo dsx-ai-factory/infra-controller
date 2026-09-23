@@ -3,7 +3,7 @@
 
 .PHONY: test postgres-up postgres-down ensure-postgres postgres-wait clean check-source-headers fix-source-headers check-command-bundle
 .PHONY: build docker-build docker-build-local
-.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-site-workflow test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
+.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-site-workflow test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
 .PHONY: validate-openapi preview-openapi generate-client
 .PHONY: core-proto core-proto-clean core-proto-fetch core-proto-fmt core-protogen flow-proto flow-protogen tools-build tools-clean
 .PHONY: pre-commit-install pre-commit-run pre-commit-update
@@ -263,7 +263,10 @@ test-nvswitch-manager:
 test-sdk-simple:
 	go test ./sdk/simple -count=1
 
-test: test-ipam test-db test-api test-auth test-common test-cert-manager test-site-workflow test-site-manager test-workflow test-site-agent test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple
+test-mcp:
+	cd mcp && go test -p 1 ./... -count=1
+
+test: test-ipam test-db test-api test-auth test-common test-cert-manager test-site-workflow test-site-manager test-workflow test-site-agent test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp
 
 build:
 	mkdir -p $(BUILD_DIR)
@@ -898,9 +901,6 @@ generate-sdk: $(OPENAPI_GENERATOR_JAR)
 # OpenAPI Spec Validation
 # =============================================================================
 
-# Keep published HTML on the same renderer instead of upgrading it during API changes.
-REDOCLY_CLI_VERSION := 2.52.1
-
 # Validate OpenAPI spec using Redocly CLI (Docker)
 lint-openapi:
 	npx @redocly/cli lint --skip-rule=no-ambiguous-paths ./openapi/spec.yaml
@@ -909,9 +909,6 @@ lint-openapi:
 preview-openapi:
 	@echo "Starting Redoc UI at http://127.0.0.1:8090"
 	docker run -it --rm -p 8090:80 -v ./openapi/spec.yaml:/usr/share/nginx/html/openapi.yaml -e SPEC_URL=openapi.yaml -e REDOC_OPTIONS="expand-responses=200,201 schemas-expansion-level=2" redocly/redoc:v2.5.1
-
-publish-openapi:
-	npx @redocly/cli@$(REDOCLY_CLI_VERSION) build-docs --config=./openapi/redocly.yaml ./openapi/spec.yaml -o ./docs/index.html
 
 # =============================================================================
 # Pre-commit Hooks (TruffleHog Secret Detection)

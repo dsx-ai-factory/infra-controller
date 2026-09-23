@@ -14,11 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-mod actor;
 pub mod api_client;
 pub mod api_throttler;
 mod bmc_mock_wrapper;
 mod config;
+mod console_output;
 mod control_router;
 mod desired_firmware;
 mod device_handle;
@@ -40,6 +40,7 @@ mod mock_ssh_server;
 mod power_shelf_fsm;
 mod power_shelf_simulator;
 mod rack;
+mod scout_stream;
 mod simulator_registry;
 mod status;
 mod switch_fsm;
@@ -53,6 +54,7 @@ pub use config::{
     MachineATronContext, MachineConfig, PersistedDevice, PersistedDpuMachine, RackConfig,
     RackModelConfig, WiwynnGb200RackConfig,
 };
+pub use console_output::ConsoleOutputController;
 pub use control_router::{ControlState, append as append_control_routes};
 pub use desired_firmware::spawn_desired_firmware_refresher;
 pub use device_handle::DeviceHandle;

@@ -40,6 +40,7 @@ pub mod dpu_remediation;
 pub mod expected_machine;
 pub mod expected_power_shelf;
 pub mod expected_rack;
+pub mod expected_rack_group;
 pub mod expected_switch;
 pub mod explored_endpoints;
 pub mod explored_managed_host;
@@ -109,7 +110,9 @@ pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
 
-pub use conditional_write::{ConditionalWrite, ControllerStateNotCurrent};
+pub use conditional_write::{
+    ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

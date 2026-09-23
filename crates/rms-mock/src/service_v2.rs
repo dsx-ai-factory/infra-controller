@@ -24,7 +24,7 @@
 
 use librms::protos::rack_manager_v2::rack_manager_v2_server::RackManagerV2;
 
-use crate::envelope::BatchOutcome;
+use crate::envelope::{BatchOutcome, matched_or_not};
 use crate::fabric::Candidate;
 use crate::{RmsMock, rms_v2};
 
@@ -63,11 +63,13 @@ impl RackManagerV2 for RmsMock {
             // complete it.
             None => self
                 .jobs
-                .start_failing("", rack_id, BatchOutcome::of(&refs).message),
+                .start_failing(rack_id, BatchOutcome::of(&matched_or_not(&refs)).message),
         };
 
         Ok(tonic::Response::new(
-            rms_v2::ConfigureScaleUpFabricManagerResponse { job_id },
+            rms_v2::ConfigureScaleUpFabricManagerResponse {
+                job_id: job_id.into(),
+            },
         ))
     }
 }

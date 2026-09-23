@@ -22,7 +22,8 @@ Delete expected machine
 
 `--id <ID>`
 
-ID (UUID) of the expected machine to delete.
+ID (UUID) of the expected machine to delete. Provide exactly one of this
+ID or the BMC MAC address.
 
 `--extended`
 
@@ -38,9 +39,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 
@@ -48,7 +49,8 @@ Print help (see a summary with -h)
 
 [*BMC_MAC_ADDRESS*]
 
-BMC MAC address of the expected machine to delete.
+BMC MAC address of the expected machine to delete. Provide exactly one
+of this address or --id.
 
 ## Examples
 

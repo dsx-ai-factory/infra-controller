@@ -27,9 +27,11 @@ name = "rms_mock"
 
 [dependencies]
 axum = { workspace = true }
+eyre = { workspace = true }
 librms = { workspace = true }
 mac_address = { workspace = true }
 serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 
@@ -37,4 +39,3 @@ tracing = { workspace = true }
 tokio = { features = ["full"], workspace = true }
 axum = { features = ["http2"], workspace = true }
 carbide-test-support = { path = "../test-support" }
-serde_json = { workspace = true }

@@ -21,7 +21,7 @@ Erase all expected switches
 
 `--confirm`
 
-Confirm that you want to erase all records.
+Required to erase all expected switch records.
 
 `--extended`
 
@@ -37,9 +37,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

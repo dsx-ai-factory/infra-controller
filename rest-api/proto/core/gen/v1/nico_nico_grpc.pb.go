@@ -205,6 +205,8 @@ const (
 	Forge_ListDpuWaitingForReprovisioning_FullMethodName                    = "/forge.Forge/ListDpuWaitingForReprovisioning"
 	Forge_TriggerHostReprovisioning_FullMethodName                          = "/forge.Forge/TriggerHostReprovisioning"
 	Forge_ListHostsWaitingForReprovisioning_FullMethodName                  = "/forge.Forge/ListHostsWaitingForReprovisioning"
+	Forge_TriggerManagedHostReset_FullMethodName                            = "/forge.Forge/TriggerManagedHostReset"
+	Forge_ListManagedHostsWaitingForReset_FullMethodName                    = "/forge.Forge/ListManagedHostsWaitingForReset"
 	Forge_TriggerBmcCredentialRotation_FullMethodName                       = "/forge.Forge/TriggerBmcCredentialRotation"
 	Forge_TriggerUefiCredentialRotation_FullMethodName                      = "/forge.Forge/TriggerUefiCredentialRotation"
 	Forge_TriggerNicLockdownCredentialRotation_FullMethodName               = "/forge.Forge/TriggerNicLockdownCredentialRotation"
@@ -228,6 +230,7 @@ const (
 	Forge_RemoveRouteServers_FullMethodName                                 = "/forge.Forge/RemoveRouteServers"
 	Forge_ReplaceRouteServers_FullMethodName                                = "/forge.Forge/ReplaceRouteServers"
 	Forge_UpdateAgentReportedInventory_FullMethodName                       = "/forge.Forge/UpdateAgentReportedInventory"
+	Forge_ReportLldpNeighbors_FullMethodName                                = "/forge.Forge/ReportLldpNeighbors"
 	Forge_UpdateInstancePhoneHomeLastContact_FullMethodName                 = "/forge.Forge/UpdateInstancePhoneHomeLastContact"
 	Forge_SetHostUefiPassword_FullMethodName                                = "/forge.Forge/SetHostUefiPassword"
 	Forge_ClearHostUefiPassword_FullMethodName                              = "/forge.Forge/ClearHostUefiPassword"
@@ -235,6 +238,7 @@ const (
 	Forge_AddExpectedMachine_FullMethodName                                 = "/forge.Forge/AddExpectedMachine"
 	Forge_DeleteExpectedMachine_FullMethodName                              = "/forge.Forge/DeleteExpectedMachine"
 	Forge_UpdateExpectedMachine_FullMethodName                              = "/forge.Forge/UpdateExpectedMachine"
+	Forge_PatchExpectedMachine_FullMethodName                               = "/forge.Forge/PatchExpectedMachine"
 	Forge_GetExpectedMachine_FullMethodName                                 = "/forge.Forge/GetExpectedMachine"
 	Forge_GetAllExpectedMachines_FullMethodName                             = "/forge.Forge/GetAllExpectedMachines"
 	Forge_ReplaceAllExpectedMachines_FullMethodName                         = "/forge.Forge/ReplaceAllExpectedMachines"
@@ -243,9 +247,11 @@ const (
 	Forge_GetAllUnexpectedMachines_FullMethodName                           = "/forge.Forge/GetAllUnexpectedMachines"
 	Forge_CreateExpectedMachines_FullMethodName                             = "/forge.Forge/CreateExpectedMachines"
 	Forge_UpdateExpectedMachines_FullMethodName                             = "/forge.Forge/UpdateExpectedMachines"
+	Forge_PatchExpectedMachines_FullMethodName                              = "/forge.Forge/PatchExpectedMachines"
 	Forge_AddExpectedPowerShelf_FullMethodName                              = "/forge.Forge/AddExpectedPowerShelf"
 	Forge_DeleteExpectedPowerShelf_FullMethodName                           = "/forge.Forge/DeleteExpectedPowerShelf"
 	Forge_UpdateExpectedPowerShelf_FullMethodName                           = "/forge.Forge/UpdateExpectedPowerShelf"
+	Forge_PatchExpectedPowerShelf_FullMethodName                            = "/forge.Forge/PatchExpectedPowerShelf"
 	Forge_GetExpectedPowerShelf_FullMethodName                              = "/forge.Forge/GetExpectedPowerShelf"
 	Forge_GetAllExpectedPowerShelves_FullMethodName                         = "/forge.Forge/GetAllExpectedPowerShelves"
 	Forge_ReplaceAllExpectedPowerShelves_FullMethodName                     = "/forge.Forge/ReplaceAllExpectedPowerShelves"
@@ -254,6 +260,7 @@ const (
 	Forge_AddExpectedSwitch_FullMethodName                                  = "/forge.Forge/AddExpectedSwitch"
 	Forge_DeleteExpectedSwitch_FullMethodName                               = "/forge.Forge/DeleteExpectedSwitch"
 	Forge_UpdateExpectedSwitch_FullMethodName                               = "/forge.Forge/UpdateExpectedSwitch"
+	Forge_PatchExpectedSwitch_FullMethodName                                = "/forge.Forge/PatchExpectedSwitch"
 	Forge_GetExpectedSwitch_FullMethodName                                  = "/forge.Forge/GetExpectedSwitch"
 	Forge_GetAllExpectedSwitches_FullMethodName                             = "/forge.Forge/GetAllExpectedSwitches"
 	Forge_ReplaceAllExpectedSwitches_FullMethodName                         = "/forge.Forge/ReplaceAllExpectedSwitches"
@@ -266,6 +273,14 @@ const (
 	Forge_GetAllExpectedRacks_FullMethodName                                = "/forge.Forge/GetAllExpectedRacks"
 	Forge_ReplaceAllExpectedRacks_FullMethodName                            = "/forge.Forge/ReplaceAllExpectedRacks"
 	Forge_DeleteAllExpectedRacks_FullMethodName                             = "/forge.Forge/DeleteAllExpectedRacks"
+	Forge_AddExpectedRackGroup_FullMethodName                               = "/forge.Forge/AddExpectedRackGroup"
+	Forge_DeleteExpectedRackGroup_FullMethodName                            = "/forge.Forge/DeleteExpectedRackGroup"
+	Forge_UpdateExpectedRackGroup_FullMethodName                            = "/forge.Forge/UpdateExpectedRackGroup"
+	Forge_GetExpectedRackGroup_FullMethodName                               = "/forge.Forge/GetExpectedRackGroup"
+	Forge_FindExpectedRackGroupIds_FullMethodName                           = "/forge.Forge/FindExpectedRackGroupIds"
+	Forge_FindExpectedRackGroupsByIds_FullMethodName                        = "/forge.Forge/FindExpectedRackGroupsByIds"
+	Forge_ReplaceAllExpectedRackGroups_FullMethodName                       = "/forge.Forge/ReplaceAllExpectedRackGroups"
+	Forge_DeleteAllExpectedRackGroups_FullMethodName                        = "/forge.Forge/DeleteAllExpectedRackGroups"
 	Forge_AttestQuote_FullMethodName                                        = "/forge.Forge/AttestQuote"
 	Forge_CreateInstanceType_FullMethodName                                 = "/forge.Forge/CreateInstanceType"
 	Forge_FindInstanceTypeIds_FullMethodName                                = "/forge.Forge/FindInstanceTypeIds"
@@ -343,6 +358,8 @@ const (
 	Forge_FindMachineValidationRunItemIds_FullMethodName                    = "/forge.Forge/FindMachineValidationRunItemIds"
 	Forge_FindMachineValidationRunItemsByIds_FullMethodName                 = "/forge.Forge/FindMachineValidationRunItemsByIds"
 	Forge_GetMachineValidationAttempt_FullMethodName                        = "/forge.Forge/GetMachineValidationAttempt"
+	Forge_AppendMachineValidationAttemptLog_FullMethodName                  = "/forge.Forge/AppendMachineValidationAttemptLog"
+	Forge_GetMachineValidationAttemptLogs_FullMethodName                    = "/forge.Forge/GetMachineValidationAttemptLogs"
 	Forge_HeartbeatMachineValidationRun_FullMethodName                      = "/forge.Forge/HeartbeatMachineValidationRun"
 	Forge_RemoveMachineValidationExternalConfig_FullMethodName              = "/forge.Forge/RemoveMachineValidationExternalConfig"
 	Forge_GetMachineValidationTests_FullMethodName                          = "/forge.Forge/GetMachineValidationTests"
@@ -849,6 +866,11 @@ type ForgeClient interface {
 	TriggerHostReprovisioning(ctx context.Context, in *HostReprovisioningRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(ctx context.Context, in *HostReprovisioningListRequest, opts ...grpc.CallOption) (*HostReprovisioningListResponse, error)
+	// Trigger a reset of a managed host: tear down its instance and DPF
+	// resources, then re-ingest it from DPU discovery.
+	TriggerManagedHostReset(ctx context.Context, in *ManagedHostResetRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// List managed hosts waiting for reset
+	ListManagedHostsWaitingForReset(ctx context.Context, in *ManagedHostResetListRequest, opts ...grpc.CallOption) (*ManagedHostResetListResponse, error)
 	// Operator "force-converge this BMC now" escape hatch for a single host/DPU
 	// BMC. This is asynchronous: the handler only persists (Set) or removes
 	// (Clear) the machine's `bmc_credential_rotation_requested` flag and returns;
@@ -911,6 +933,8 @@ type ForgeClient interface {
 	ReplaceRouteServers(ctx context.Context, in *RouteServers, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(ctx context.Context, in *DpuAgentInventoryReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	ReportLldpNeighbors(ctx context.Context, in *LldpNeighborReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(ctx context.Context, in *InstancePhoneHomeLastContactRequest, opts ...grpc.CallOption) (*InstancePhoneHomeLastContactResponse, error)
 	// Set Host UEFI password
@@ -927,6 +951,8 @@ type ForgeClient interface {
 	DeleteExpectedMachine(ctx context.Context, in *ExpectedMachineRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedMachine(ctx context.Context, in *ExpectedMachine, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedMachine(ctx context.Context, in *PatchExpectedMachineRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected machine
 	GetExpectedMachine(ctx context.Context, in *ExpectedMachineRequest, opts ...grpc.CallOption) (*ExpectedMachine, error)
 	// Get the BMC credentials for all expected machines
@@ -947,6 +973,8 @@ type ForgeClient interface {
 	CreateExpectedMachines(ctx context.Context, in *BatchExpectedMachineOperationRequest, opts ...grpc.CallOption) (*BatchExpectedMachineOperationResponse, error)
 	// Batch update expected machines
 	UpdateExpectedMachines(ctx context.Context, in *BatchExpectedMachineOperationRequest, opts ...grpc.CallOption) (*BatchExpectedMachineOperationResponse, error)
+	// Apply every patch in one transaction. Any failure rolls back the whole batch.
+	PatchExpectedMachines(ctx context.Context, in *PatchExpectedMachinesRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Expected Power Shelf Management
 	// Add expected power shelf
 	AddExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelf, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -954,6 +982,8 @@ type ForgeClient interface {
 	DeleteExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelfRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelf, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedPowerShelf(ctx context.Context, in *PatchExpectedPowerShelfRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected power shelf
 	GetExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelfRequest, opts ...grpc.CallOption) (*ExpectedPowerShelf, error)
 	// Get the BMC credentials for all expected power shelves
@@ -971,6 +1001,8 @@ type ForgeClient interface {
 	DeleteExpectedSwitch(ctx context.Context, in *ExpectedSwitchRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedSwitch(ctx context.Context, in *ExpectedSwitch, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedSwitch(ctx context.Context, in *PatchExpectedSwitchRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected switch
 	GetExpectedSwitch(ctx context.Context, in *ExpectedSwitchRequest, opts ...grpc.CallOption) (*ExpectedSwitch, error)
 	// Get the BMC credentials for all expected switches
@@ -996,6 +1028,17 @@ type ForgeClient interface {
 	ReplaceAllExpectedRacks(ctx context.Context, in *ExpectedRackList, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Delete all expected racks in site
 	DeleteAllExpectedRacks(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Expected Rack Group Management
+	AddExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	DeleteExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Replace the full record, including both lists and metadata.
+	UpdateExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	GetExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*ExpectedRackGroup, error)
+	FindExpectedRackGroupIds(ctx context.Context, in *ExpectedRackGroupSearchFilter, opts ...grpc.CallOption) (*ExpectedRackGroupIdList, error)
+	FindExpectedRackGroupsByIds(ctx context.Context, in *ExpectedRackGroupsByIdsRequest, opts ...grpc.CallOption) (*ExpectedRackGroupList, error)
+	// Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
+	ReplaceAllExpectedRackGroups(ctx context.Context, in *ExpectedRackGroupList, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	DeleteAllExpectedRackGroups(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Perform Attestation Procedure for Measured Boot
 	AttestQuote(ctx context.Context, in *AttestQuoteRequest, opts ...grpc.CallOption) (*AttestQuoteResponse, error)
 	// InstanceType
@@ -1094,6 +1137,10 @@ type ForgeClient interface {
 	FindMachineValidationRunItemsByIds(ctx context.Context, in *MachineValidationRunItemsByIdsRequest, opts ...grpc.CallOption) (*MachineValidationRunItemList, error)
 	// Machine-Validation attempt detail
 	GetMachineValidationAttempt(ctx context.Context, in *MachineValidationAttemptGetRequest, opts ...grpc.CallOption) (*MachineValidationAttempt, error)
+	// Append the next ordered stdout or stderr chunk while an attempt is active.
+	AppendMachineValidationAttemptLog(ctx context.Context, in *MachineValidationAttemptLogAppendRequest, opts ...grpc.CallOption) (*MachineValidationAttemptLogAppendResponse, error)
+	// Read a cursor-based page of persisted attempt logs.
+	GetMachineValidationAttemptLogs(ctx context.Context, in *MachineValidationAttemptLogGetRequest, opts ...grpc.CallOption) (*MachineValidationAttemptLogList, error)
 	// Machine-Validation run and active attempt heartbeat
 	HeartbeatMachineValidationRun(ctx context.Context, in *MachineValidationHeartbeatRequest, opts ...grpc.CallOption) (*MachineValidationHeartbeatResponse, error)
 	// Remove ExternalConfig
@@ -3276,6 +3323,26 @@ func (c *forgeClient) ListHostsWaitingForReprovisioning(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *forgeClient) TriggerManagedHostReset(ctx context.Context, in *ManagedHostResetRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_TriggerManagedHostReset_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ListManagedHostsWaitingForReset(ctx context.Context, in *ManagedHostResetListRequest, opts ...grpc.CallOption) (*ManagedHostResetListResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ManagedHostResetListResponse)
+	err := c.cc.Invoke(ctx, Forge_ListManagedHostsWaitingForReset_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) TriggerBmcCredentialRotation(ctx context.Context, in *BmcCredentialRotationRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
@@ -3506,6 +3573,16 @@ func (c *forgeClient) UpdateAgentReportedInventory(ctx context.Context, in *DpuA
 	return out, nil
 }
 
+func (c *forgeClient) ReportLldpNeighbors(ctx context.Context, in *LldpNeighborReport, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_ReportLldpNeighbors_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) UpdateInstancePhoneHomeLastContact(ctx context.Context, in *InstancePhoneHomeLastContactRequest, opts ...grpc.CallOption) (*InstancePhoneHomeLastContactResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InstancePhoneHomeLastContactResponse)
@@ -3570,6 +3647,16 @@ func (c *forgeClient) UpdateExpectedMachine(ctx context.Context, in *ExpectedMac
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_UpdateExpectedMachine_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) PatchExpectedMachine(ctx context.Context, in *PatchExpectedMachineRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedMachine_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3656,6 +3743,16 @@ func (c *forgeClient) UpdateExpectedMachines(ctx context.Context, in *BatchExpec
 	return out, nil
 }
 
+func (c *forgeClient) PatchExpectedMachines(ctx context.Context, in *PatchExpectedMachinesRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedMachines_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) AddExpectedPowerShelf(ctx context.Context, in *ExpectedPowerShelf, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
@@ -3680,6 +3777,16 @@ func (c *forgeClient) UpdateExpectedPowerShelf(ctx context.Context, in *Expected
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_UpdateExpectedPowerShelf_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) PatchExpectedPowerShelf(ctx context.Context, in *PatchExpectedPowerShelfRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedPowerShelf_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3760,6 +3867,16 @@ func (c *forgeClient) UpdateExpectedSwitch(ctx context.Context, in *ExpectedSwit
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_UpdateExpectedSwitch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) PatchExpectedSwitch(ctx context.Context, in *PatchExpectedSwitchRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_PatchExpectedSwitch_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3880,6 +3997,86 @@ func (c *forgeClient) DeleteAllExpectedRacks(ctx context.Context, in *emptypb.Em
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_DeleteAllExpectedRacks_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) AddExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_AddExpectedRackGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) DeleteExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_DeleteExpectedRackGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) UpdateExpectedRackGroup(ctx context.Context, in *ExpectedRackGroup, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_UpdateExpectedRackGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetExpectedRackGroup(ctx context.Context, in *ExpectedRackGroupRequest, opts ...grpc.CallOption) (*ExpectedRackGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectedRackGroup)
+	err := c.cc.Invoke(ctx, Forge_GetExpectedRackGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindExpectedRackGroupIds(ctx context.Context, in *ExpectedRackGroupSearchFilter, opts ...grpc.CallOption) (*ExpectedRackGroupIdList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectedRackGroupIdList)
+	err := c.cc.Invoke(ctx, Forge_FindExpectedRackGroupIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindExpectedRackGroupsByIds(ctx context.Context, in *ExpectedRackGroupsByIdsRequest, opts ...grpc.CallOption) (*ExpectedRackGroupList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectedRackGroupList)
+	err := c.cc.Invoke(ctx, Forge_FindExpectedRackGroupsByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ReplaceAllExpectedRackGroups(ctx context.Context, in *ExpectedRackGroupList, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_ReplaceAllExpectedRackGroups_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) DeleteAllExpectedRackGroups(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_DeleteAllExpectedRackGroups_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -4650,6 +4847,26 @@ func (c *forgeClient) GetMachineValidationAttempt(ctx context.Context, in *Machi
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MachineValidationAttempt)
 	err := c.cc.Invoke(ctx, Forge_GetMachineValidationAttempt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) AppendMachineValidationAttemptLog(ctx context.Context, in *MachineValidationAttemptLogAppendRequest, opts ...grpc.CallOption) (*MachineValidationAttemptLogAppendResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MachineValidationAttemptLogAppendResponse)
+	err := c.cc.Invoke(ctx, Forge_AppendMachineValidationAttemptLog_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetMachineValidationAttemptLogs(ctx context.Context, in *MachineValidationAttemptLogGetRequest, opts ...grpc.CallOption) (*MachineValidationAttemptLogList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MachineValidationAttemptLogList)
+	err := c.cc.Invoke(ctx, Forge_GetMachineValidationAttemptLogs_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6720,6 +6937,11 @@ type ForgeServer interface {
 	TriggerHostReprovisioning(context.Context, *HostReprovisioningRequest) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(context.Context, *HostReprovisioningListRequest) (*HostReprovisioningListResponse, error)
+	// Trigger a reset of a managed host: tear down its instance and DPF
+	// resources, then re-ingest it from DPU discovery.
+	TriggerManagedHostReset(context.Context, *ManagedHostResetRequest) (*emptypb.Empty, error)
+	// List managed hosts waiting for reset
+	ListManagedHostsWaitingForReset(context.Context, *ManagedHostResetListRequest) (*ManagedHostResetListResponse, error)
 	// Operator "force-converge this BMC now" escape hatch for a single host/DPU
 	// BMC. This is asynchronous: the handler only persists (Set) or removes
 	// (Clear) the machine's `bmc_credential_rotation_requested` flag and returns;
@@ -6782,6 +7004,8 @@ type ForgeServer interface {
 	ReplaceRouteServers(context.Context, *RouteServers) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(context.Context, *DpuAgentInventoryReport) (*emptypb.Empty, error)
+	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	ReportLldpNeighbors(context.Context, *LldpNeighborReport) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(context.Context, *InstancePhoneHomeLastContactRequest) (*InstancePhoneHomeLastContactResponse, error)
 	// Set Host UEFI password
@@ -6798,6 +7022,8 @@ type ForgeServer interface {
 	DeleteExpectedMachine(context.Context, *ExpectedMachineRequest) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedMachine(context.Context, *ExpectedMachine) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedMachine(context.Context, *PatchExpectedMachineRequest) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected machine
 	GetExpectedMachine(context.Context, *ExpectedMachineRequest) (*ExpectedMachine, error)
 	// Get the BMC credentials for all expected machines
@@ -6818,6 +7044,8 @@ type ForgeServer interface {
 	CreateExpectedMachines(context.Context, *BatchExpectedMachineOperationRequest) (*BatchExpectedMachineOperationResponse, error)
 	// Batch update expected machines
 	UpdateExpectedMachines(context.Context, *BatchExpectedMachineOperationRequest) (*BatchExpectedMachineOperationResponse, error)
+	// Apply every patch in one transaction. Any failure rolls back the whole batch.
+	PatchExpectedMachines(context.Context, *PatchExpectedMachinesRequest) (*emptypb.Empty, error)
 	// Expected Power Shelf Management
 	// Add expected power shelf
 	AddExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error)
@@ -6825,6 +7053,8 @@ type ForgeServer interface {
 	DeleteExpectedPowerShelf(context.Context, *ExpectedPowerShelfRequest) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedPowerShelf(context.Context, *PatchExpectedPowerShelfRequest) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected power shelf
 	GetExpectedPowerShelf(context.Context, *ExpectedPowerShelfRequest) (*ExpectedPowerShelf, error)
 	// Get the BMC credentials for all expected power shelves
@@ -6842,6 +7072,8 @@ type ForgeServer interface {
 	DeleteExpectedSwitch(context.Context, *ExpectedSwitchRequest) (*emptypb.Empty, error)
 	// Update the BMC credentials for a specific username/password
 	UpdateExpectedSwitch(context.Context, *ExpectedSwitch) (*emptypb.Empty, error)
+	// Atomically update only the selected fields; omitted fields remain unchanged.
+	PatchExpectedSwitch(context.Context, *PatchExpectedSwitchRequest) (*emptypb.Empty, error)
 	// Get the BMC credentials for a specific expected switch
 	GetExpectedSwitch(context.Context, *ExpectedSwitchRequest) (*ExpectedSwitch, error)
 	// Get the BMC credentials for all expected switches
@@ -6867,6 +7099,17 @@ type ForgeServer interface {
 	ReplaceAllExpectedRacks(context.Context, *ExpectedRackList) (*emptypb.Empty, error)
 	// Delete all expected racks in site
 	DeleteAllExpectedRacks(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
+	// Expected Rack Group Management
+	AddExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error)
+	DeleteExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*emptypb.Empty, error)
+	// Replace the full record, including both lists and metadata.
+	UpdateExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error)
+	GetExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*ExpectedRackGroup, error)
+	FindExpectedRackGroupIds(context.Context, *ExpectedRackGroupSearchFilter) (*ExpectedRackGroupIdList, error)
+	FindExpectedRackGroupsByIds(context.Context, *ExpectedRackGroupsByIdsRequest) (*ExpectedRackGroupList, error)
+	// Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
+	ReplaceAllExpectedRackGroups(context.Context, *ExpectedRackGroupList) (*emptypb.Empty, error)
+	DeleteAllExpectedRackGroups(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	// Perform Attestation Procedure for Measured Boot
 	AttestQuote(context.Context, *AttestQuoteRequest) (*AttestQuoteResponse, error)
 	// InstanceType
@@ -6965,6 +7208,10 @@ type ForgeServer interface {
 	FindMachineValidationRunItemsByIds(context.Context, *MachineValidationRunItemsByIdsRequest) (*MachineValidationRunItemList, error)
 	// Machine-Validation attempt detail
 	GetMachineValidationAttempt(context.Context, *MachineValidationAttemptGetRequest) (*MachineValidationAttempt, error)
+	// Append the next ordered stdout or stderr chunk while an attempt is active.
+	AppendMachineValidationAttemptLog(context.Context, *MachineValidationAttemptLogAppendRequest) (*MachineValidationAttemptLogAppendResponse, error)
+	// Read a cursor-based page of persisted attempt logs.
+	GetMachineValidationAttemptLogs(context.Context, *MachineValidationAttemptLogGetRequest) (*MachineValidationAttemptLogList, error)
 	// Machine-Validation run and active attempt heartbeat
 	HeartbeatMachineValidationRun(context.Context, *MachineValidationHeartbeatRequest) (*MachineValidationHeartbeatResponse, error)
 	// Remove ExternalConfig
@@ -7865,6 +8112,12 @@ func (UnimplementedForgeServer) TriggerHostReprovisioning(context.Context, *Host
 func (UnimplementedForgeServer) ListHostsWaitingForReprovisioning(context.Context, *HostReprovisioningListRequest) (*HostReprovisioningListResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListHostsWaitingForReprovisioning not implemented")
 }
+func (UnimplementedForgeServer) TriggerManagedHostReset(context.Context, *ManagedHostResetRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method TriggerManagedHostReset not implemented")
+}
+func (UnimplementedForgeServer) ListManagedHostsWaitingForReset(context.Context, *ManagedHostResetListRequest) (*ManagedHostResetListResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListManagedHostsWaitingForReset not implemented")
+}
 func (UnimplementedForgeServer) TriggerBmcCredentialRotation(context.Context, *BmcCredentialRotationRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method TriggerBmcCredentialRotation not implemented")
 }
@@ -7934,6 +8187,9 @@ func (UnimplementedForgeServer) ReplaceRouteServers(context.Context, *RouteServe
 func (UnimplementedForgeServer) UpdateAgentReportedInventory(context.Context, *DpuAgentInventoryReport) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateAgentReportedInventory not implemented")
 }
+func (UnimplementedForgeServer) ReportLldpNeighbors(context.Context, *LldpNeighborReport) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportLldpNeighbors not implemented")
+}
 func (UnimplementedForgeServer) UpdateInstancePhoneHomeLastContact(context.Context, *InstancePhoneHomeLastContactRequest) (*InstancePhoneHomeLastContactResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateInstancePhoneHomeLastContact not implemented")
 }
@@ -7954,6 +8210,9 @@ func (UnimplementedForgeServer) DeleteExpectedMachine(context.Context, *Expected
 }
 func (UnimplementedForgeServer) UpdateExpectedMachine(context.Context, *ExpectedMachine) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedMachine not implemented")
+}
+func (UnimplementedForgeServer) PatchExpectedMachine(context.Context, *PatchExpectedMachineRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedMachine not implemented")
 }
 func (UnimplementedForgeServer) GetExpectedMachine(context.Context, *ExpectedMachineRequest) (*ExpectedMachine, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetExpectedMachine not implemented")
@@ -7979,6 +8238,9 @@ func (UnimplementedForgeServer) CreateExpectedMachines(context.Context, *BatchEx
 func (UnimplementedForgeServer) UpdateExpectedMachines(context.Context, *BatchExpectedMachineOperationRequest) (*BatchExpectedMachineOperationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedMachines not implemented")
 }
+func (UnimplementedForgeServer) PatchExpectedMachines(context.Context, *PatchExpectedMachinesRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedMachines not implemented")
+}
 func (UnimplementedForgeServer) AddExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method AddExpectedPowerShelf not implemented")
 }
@@ -7987,6 +8249,9 @@ func (UnimplementedForgeServer) DeleteExpectedPowerShelf(context.Context, *Expec
 }
 func (UnimplementedForgeServer) UpdateExpectedPowerShelf(context.Context, *ExpectedPowerShelf) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedPowerShelf not implemented")
+}
+func (UnimplementedForgeServer) PatchExpectedPowerShelf(context.Context, *PatchExpectedPowerShelfRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedPowerShelf not implemented")
 }
 func (UnimplementedForgeServer) GetExpectedPowerShelf(context.Context, *ExpectedPowerShelfRequest) (*ExpectedPowerShelf, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetExpectedPowerShelf not implemented")
@@ -8011,6 +8276,9 @@ func (UnimplementedForgeServer) DeleteExpectedSwitch(context.Context, *ExpectedS
 }
 func (UnimplementedForgeServer) UpdateExpectedSwitch(context.Context, *ExpectedSwitch) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedSwitch not implemented")
+}
+func (UnimplementedForgeServer) PatchExpectedSwitch(context.Context, *PatchExpectedSwitchRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchExpectedSwitch not implemented")
 }
 func (UnimplementedForgeServer) GetExpectedSwitch(context.Context, *ExpectedSwitchRequest) (*ExpectedSwitch, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetExpectedSwitch not implemented")
@@ -8047,6 +8315,30 @@ func (UnimplementedForgeServer) ReplaceAllExpectedRacks(context.Context, *Expect
 }
 func (UnimplementedForgeServer) DeleteAllExpectedRacks(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteAllExpectedRacks not implemented")
+}
+func (UnimplementedForgeServer) AddExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddExpectedRackGroup not implemented")
+}
+func (UnimplementedForgeServer) DeleteExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteExpectedRackGroup not implemented")
+}
+func (UnimplementedForgeServer) UpdateExpectedRackGroup(context.Context, *ExpectedRackGroup) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateExpectedRackGroup not implemented")
+}
+func (UnimplementedForgeServer) GetExpectedRackGroup(context.Context, *ExpectedRackGroupRequest) (*ExpectedRackGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetExpectedRackGroup not implemented")
+}
+func (UnimplementedForgeServer) FindExpectedRackGroupIds(context.Context, *ExpectedRackGroupSearchFilter) (*ExpectedRackGroupIdList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindExpectedRackGroupIds not implemented")
+}
+func (UnimplementedForgeServer) FindExpectedRackGroupsByIds(context.Context, *ExpectedRackGroupsByIdsRequest) (*ExpectedRackGroupList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindExpectedRackGroupsByIds not implemented")
+}
+func (UnimplementedForgeServer) ReplaceAllExpectedRackGroups(context.Context, *ExpectedRackGroupList) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReplaceAllExpectedRackGroups not implemented")
+}
+func (UnimplementedForgeServer) DeleteAllExpectedRackGroups(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteAllExpectedRackGroups not implemented")
 }
 func (UnimplementedForgeServer) AttestQuote(context.Context, *AttestQuoteRequest) (*AttestQuoteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AttestQuote not implemented")
@@ -8278,6 +8570,12 @@ func (UnimplementedForgeServer) FindMachineValidationRunItemsByIds(context.Conte
 }
 func (UnimplementedForgeServer) GetMachineValidationAttempt(context.Context, *MachineValidationAttemptGetRequest) (*MachineValidationAttempt, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetMachineValidationAttempt not implemented")
+}
+func (UnimplementedForgeServer) AppendMachineValidationAttemptLog(context.Context, *MachineValidationAttemptLogAppendRequest) (*MachineValidationAttemptLogAppendResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AppendMachineValidationAttemptLog not implemented")
+}
+func (UnimplementedForgeServer) GetMachineValidationAttemptLogs(context.Context, *MachineValidationAttemptLogGetRequest) (*MachineValidationAttemptLogList, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetMachineValidationAttemptLogs not implemented")
 }
 func (UnimplementedForgeServer) HeartbeatMachineValidationRun(context.Context, *MachineValidationHeartbeatRequest) (*MachineValidationHeartbeatResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method HeartbeatMachineValidationRun not implemented")
@@ -12094,6 +12392,42 @@ func _Forge_ListHostsWaitingForReprovisioning_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_TriggerManagedHostReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ManagedHostResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).TriggerManagedHostReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_TriggerManagedHostReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).TriggerManagedHostReset(ctx, req.(*ManagedHostResetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ListManagedHostsWaitingForReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ManagedHostResetListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ListManagedHostsWaitingForReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ListManagedHostsWaitingForReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ListManagedHostsWaitingForReset(ctx, req.(*ManagedHostResetListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_TriggerBmcCredentialRotation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(BmcCredentialRotationRequest)
 	if err := dec(in); err != nil {
@@ -12508,6 +12842,24 @@ func _Forge_UpdateAgentReportedInventory_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_ReportLldpNeighbors_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LldpNeighborReport)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReportLldpNeighbors(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReportLldpNeighbors_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReportLldpNeighbors(ctx, req.(*LldpNeighborReport))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_UpdateInstancePhoneHomeLastContact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(InstancePhoneHomeLastContactRequest)
 	if err := dec(in); err != nil {
@@ -12630,6 +12982,24 @@ func _Forge_UpdateExpectedMachine_Handler(srv interface{}, ctx context.Context, 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).UpdateExpectedMachine(ctx, req.(*ExpectedMachine))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_PatchExpectedMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedMachineRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedMachine(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedMachine_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedMachine(ctx, req.(*PatchExpectedMachineRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -12778,6 +13148,24 @@ func _Forge_UpdateExpectedMachines_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_PatchExpectedMachines_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedMachinesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedMachines(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedMachines_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedMachines(ctx, req.(*PatchExpectedMachinesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_AddExpectedPowerShelf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ExpectedPowerShelf)
 	if err := dec(in); err != nil {
@@ -12828,6 +13216,24 @@ func _Forge_UpdateExpectedPowerShelf_Handler(srv interface{}, ctx context.Contex
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).UpdateExpectedPowerShelf(ctx, req.(*ExpectedPowerShelf))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_PatchExpectedPowerShelf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedPowerShelfRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedPowerShelf(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedPowerShelf_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedPowerShelf(ctx, req.(*PatchExpectedPowerShelfRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -12972,6 +13378,24 @@ func _Forge_UpdateExpectedSwitch_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).UpdateExpectedSwitch(ctx, req.(*ExpectedSwitch))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_PatchExpectedSwitch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchExpectedSwitchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).PatchExpectedSwitch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_PatchExpectedSwitch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).PatchExpectedSwitch(ctx, req.(*PatchExpectedSwitchRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -13188,6 +13612,150 @@ func _Forge_DeleteAllExpectedRacks_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).DeleteAllExpectedRacks(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_AddExpectedRackGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroup)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AddExpectedRackGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AddExpectedRackGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AddExpectedRackGroup(ctx, req.(*ExpectedRackGroup))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_DeleteExpectedRackGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).DeleteExpectedRackGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_DeleteExpectedRackGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).DeleteExpectedRackGroup(ctx, req.(*ExpectedRackGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_UpdateExpectedRackGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroup)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).UpdateExpectedRackGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_UpdateExpectedRackGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).UpdateExpectedRackGroup(ctx, req.(*ExpectedRackGroup))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetExpectedRackGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetExpectedRackGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetExpectedRackGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetExpectedRackGroup(ctx, req.(*ExpectedRackGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindExpectedRackGroupIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroupSearchFilter)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindExpectedRackGroupIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindExpectedRackGroupIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindExpectedRackGroupIds(ctx, req.(*ExpectedRackGroupSearchFilter))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindExpectedRackGroupsByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroupsByIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindExpectedRackGroupsByIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindExpectedRackGroupsByIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindExpectedRackGroupsByIds(ctx, req.(*ExpectedRackGroupsByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ReplaceAllExpectedRackGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectedRackGroupList)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReplaceAllExpectedRackGroups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReplaceAllExpectedRackGroups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReplaceAllExpectedRackGroups(ctx, req.(*ExpectedRackGroupList))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_DeleteAllExpectedRackGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).DeleteAllExpectedRackGroups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_DeleteAllExpectedRackGroups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).DeleteAllExpectedRackGroups(ctx, req.(*emptypb.Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -14574,6 +15142,42 @@ func _Forge_GetMachineValidationAttempt_Handler(srv interface{}, ctx context.Con
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).GetMachineValidationAttempt(ctx, req.(*MachineValidationAttemptGetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_AppendMachineValidationAttemptLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MachineValidationAttemptLogAppendRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AppendMachineValidationAttemptLog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AppendMachineValidationAttemptLog_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AppendMachineValidationAttemptLog(ctx, req.(*MachineValidationAttemptLogAppendRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetMachineValidationAttemptLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MachineValidationAttemptLogGetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetMachineValidationAttemptLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetMachineValidationAttemptLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetMachineValidationAttemptLogs(ctx, req.(*MachineValidationAttemptLogGetRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -18417,6 +19021,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_ListHostsWaitingForReprovisioning_Handler,
 		},
 		{
+			MethodName: "TriggerManagedHostReset",
+			Handler:    _Forge_TriggerManagedHostReset_Handler,
+		},
+		{
+			MethodName: "ListManagedHostsWaitingForReset",
+			Handler:    _Forge_ListManagedHostsWaitingForReset_Handler,
+		},
+		{
 			MethodName: "TriggerBmcCredentialRotation",
 			Handler:    _Forge_TriggerBmcCredentialRotation_Handler,
 		},
@@ -18509,6 +19121,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_UpdateAgentReportedInventory_Handler,
 		},
 		{
+			MethodName: "ReportLldpNeighbors",
+			Handler:    _Forge_ReportLldpNeighbors_Handler,
+		},
+		{
 			MethodName: "UpdateInstancePhoneHomeLastContact",
 			Handler:    _Forge_UpdateInstancePhoneHomeLastContact_Handler,
 		},
@@ -18535,6 +19151,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateExpectedMachine",
 			Handler:    _Forge_UpdateExpectedMachine_Handler,
+		},
+		{
+			MethodName: "PatchExpectedMachine",
+			Handler:    _Forge_PatchExpectedMachine_Handler,
 		},
 		{
 			MethodName: "GetExpectedMachine",
@@ -18569,6 +19189,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_UpdateExpectedMachines_Handler,
 		},
 		{
+			MethodName: "PatchExpectedMachines",
+			Handler:    _Forge_PatchExpectedMachines_Handler,
+		},
+		{
 			MethodName: "AddExpectedPowerShelf",
 			Handler:    _Forge_AddExpectedPowerShelf_Handler,
 		},
@@ -18579,6 +19203,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateExpectedPowerShelf",
 			Handler:    _Forge_UpdateExpectedPowerShelf_Handler,
+		},
+		{
+			MethodName: "PatchExpectedPowerShelf",
+			Handler:    _Forge_PatchExpectedPowerShelf_Handler,
 		},
 		{
 			MethodName: "GetExpectedPowerShelf",
@@ -18611,6 +19239,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateExpectedSwitch",
 			Handler:    _Forge_UpdateExpectedSwitch_Handler,
+		},
+		{
+			MethodName: "PatchExpectedSwitch",
+			Handler:    _Forge_PatchExpectedSwitch_Handler,
 		},
 		{
 			MethodName: "GetExpectedSwitch",
@@ -18659,6 +19291,38 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteAllExpectedRacks",
 			Handler:    _Forge_DeleteAllExpectedRacks_Handler,
+		},
+		{
+			MethodName: "AddExpectedRackGroup",
+			Handler:    _Forge_AddExpectedRackGroup_Handler,
+		},
+		{
+			MethodName: "DeleteExpectedRackGroup",
+			Handler:    _Forge_DeleteExpectedRackGroup_Handler,
+		},
+		{
+			MethodName: "UpdateExpectedRackGroup",
+			Handler:    _Forge_UpdateExpectedRackGroup_Handler,
+		},
+		{
+			MethodName: "GetExpectedRackGroup",
+			Handler:    _Forge_GetExpectedRackGroup_Handler,
+		},
+		{
+			MethodName: "FindExpectedRackGroupIds",
+			Handler:    _Forge_FindExpectedRackGroupIds_Handler,
+		},
+		{
+			MethodName: "FindExpectedRackGroupsByIds",
+			Handler:    _Forge_FindExpectedRackGroupsByIds_Handler,
+		},
+		{
+			MethodName: "ReplaceAllExpectedRackGroups",
+			Handler:    _Forge_ReplaceAllExpectedRackGroups_Handler,
+		},
+		{
+			MethodName: "DeleteAllExpectedRackGroups",
+			Handler:    _Forge_DeleteAllExpectedRackGroups_Handler,
 		},
 		{
 			MethodName: "AttestQuote",
@@ -18967,6 +19631,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetMachineValidationAttempt",
 			Handler:    _Forge_GetMachineValidationAttempt_Handler,
+		},
+		{
+			MethodName: "AppendMachineValidationAttemptLog",
+			Handler:    _Forge_AppendMachineValidationAttemptLog_Handler,
+		},
+		{
+			MethodName: "GetMachineValidationAttemptLogs",
+			Handler:    _Forge_GetMachineValidationAttemptLogs_Handler,
 		},
 		{
 			MethodName: "HeartbeatMachineValidationRun",

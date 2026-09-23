@@ -21,6 +21,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use carbide_utils::none_if_empty::NoneIfEmpty;
@@ -44,7 +45,7 @@ use crate::crds::dpudeployments_generated::{
 };
 #[cfg(test)]
 use crate::crds::dpudevices_generated::DpuDeviceCluster;
-use crate::crds::dpudevices_generated::{DPUDevice, DpuDeviceSpec};
+use crate::crds::dpudevices_generated::{DPUDevice, DpuDeviceBmcFactoryResetPolicy, DpuDeviceSpec};
 use crate::crds::dpunodes_generated::{
     DPUNode, DpuNodeDpus, DpuNodeNodeRebootMethod, DpuNodeNodeRebootMethodExternal, DpuNodeSpec,
 };
@@ -84,7 +85,9 @@ use crate::crds::dpuservices_generated::{
     DPUService, DpuServiceHelmChart, DpuServiceHelmChartSource, DpuServiceSecurity,
     DpuServiceServiceDaemonSet, DpuServiceServiceDaemonSetNodeSelector,
     DpuServiceServiceDaemonSetNodeSelectorNodeSelectorTerms,
-    DpuServiceServiceDaemonSetNodeSelectorNodeSelectorTermsMatchExpressions, DpuServiceSpec,
+    DpuServiceServiceDaemonSetNodeSelectorNodeSelectorTermsMatchExpressions,
+    DpuServiceServiceDaemonSetUpdateStrategy,
+    DpuServiceServiceDaemonSetUpdateStrategyRollingUpdate, DpuServiceSpec,
 };
 use crate::crds::dpuservicetemplates_generated::{
     DPUServiceTemplate, DpuServiceTemplateHelmChart, DpuServiceTemplateHelmChartSource,
@@ -104,11 +107,12 @@ use crate::types::{
     DOCA_HBN_SERVICE_NAME, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF, DPU_AGENT_SERVICE_NAME,
     DPU_ENABLED_NODE_LABEL, DTS_SERVICE_NAME, DetachedDpuServiceDefinition, DpfInterceptBridging,
     DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuMismatch, DpuNodeInfo, DpuNodeSummary,
-    DpuPhase, DpuServiceHelmChartObservation, DpuServiceInterfacePatch,
-    DpuServiceInterfaceTemplateDefinition, DpuServiceInterfaceTemplateType, DpuServiceObservation,
-    DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig,
-    MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE,
-    ServiceConfigPortProtocol, ServiceDefinition, ServiceNADResourceType, ServiceTemplateVersion,
+    DpuPhase, DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation,
+    DpuServiceInterfacePatch, DpuServiceInterfaceTemplateDefinition,
+    DpuServiceInterfaceTemplateType, DpuServiceObservation, DpuServiceVersion, DpuSummary,
+    FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig, MAX_BLUEFIELD_VFS_PER_PF,
+    OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE, ServiceConfigPortProtocol,
+    ServiceDefinition, ServiceNADResourceType, ServiceTemplateVersion,
 };
 #[cfg(test)]
 use crate::types::{DEFAULT_PF_TOTAL_SF_RESERVED, InitDpfResourcesConfigBuilder};
@@ -204,6 +208,7 @@ pub struct DpfSdk<R, L = NoLabels> {
     repo: Arc<R>,
     namespace: String,
     labeler: L,
+    shared_bmc_password_ready: Arc<AtomicBool>,
     _bmc_refresh_guard: Option<tokio_util::sync::DropGuard>,
 }
 
@@ -284,24 +289,45 @@ where
     /// credential does not exist yet. When a refresh interval is configured the
     /// initial read is therefore best-effort: initialization continues without
     /// the Secret, and the refresh task writes it as soon as the credential
-    /// appears — no restart needed. Without a refresh interval nothing would
-    /// ever retry, so there a failed read stays fatal.
+    /// appears — no restart needed. New DPUDevice registration remains blocked
+    /// until the shared credential has been accepted and published.
+    ///
+    /// Authoritative local ownership is the exception: local version 0 must be
+    /// present before startup. This value-based activation criterion is safe
+    /// across rolling deployments, where an older replica may still register a
+    /// DPUDevice while the replacement replica starts.
+    /// Without a refresh interval nothing would ever retry, so there a failed
+    /// read stays fatal.
     async fn init_secret_and_task(self) -> Result<DpfSdk<R, L>, DpfError> {
         let repo = Arc::new(self.repo);
         let namespace = self.namespace;
         let provider = self.bmc_password_provider;
+        let shared_bmc_password_ready = Arc::new(AtomicBool::new(false));
 
         let password = match provider.get_bmc_password().await {
             Ok(password) => {
                 write_bmc_secret::<R>(&repo, &namespace, &password).await?;
+                shared_bmc_password_ready.store(true, Ordering::Release);
                 Some(password)
             }
             Err(error) if self.bmc_password_refresh_interval.is_some() => {
-                tracing::warn!(
-                    %error,
-                    secret = SECRET_NAME,
-                    "BMC password unavailable; DPF secret will be written once the credential is set"
-                );
+                if error.is_local_bmc_password_source_unavailable() {
+                    return Err(error);
+                }
+                if error.is_bmc_password_source_unavailable() {
+                    tracing::warn!(
+                        %error,
+                        secret = SECRET_NAME,
+                        tracking_issue = "https://github.com/NVIDIA/infra-controller/issues/6147",
+                        "BMC password source is unavailable; retaining any existing DPF BMC Secret because NICo's DPF integration uses one shared credential"
+                    );
+                } else {
+                    tracing::warn!(
+                        %error,
+                        secret = SECRET_NAME,
+                        "BMC password unavailable; DPF secret will be written once the credential is set"
+                    );
+                }
                 None
             }
             Err(error) => return Err(error),
@@ -314,6 +340,7 @@ where
                 provider,
                 password,
                 interval,
+                shared_bmc_password_ready.clone(),
                 self.join_set,
             )?)
         } else {
@@ -324,6 +351,7 @@ where
             repo,
             namespace,
             labeler: self.labeler,
+            shared_bmc_password_ready,
             _bmc_refresh_guard: guard,
         })
     }
@@ -382,9 +410,9 @@ async fn write_bmc_secret<R: K8sConfigRepository>(
 /// value that should be remembered for the next comparison.
 ///
 /// `last_password` is `None` when no password has been written yet — either
-/// because the credential was unset at startup, or because every write since
-/// has failed. That case writes on the next successful read, which is how a
-/// site that boots without the site-wide BMC root recovers on its own.
+/// because the credential was unset at startup or because every write since has
+/// failed. That case writes on the next successful read, which is how a site
+/// that boots without the site-wide BMC root recovers on its own.
 async fn refresh_bmc_secret_if_changed<R: K8sConfigRepository>(
     repo: &R,
     namespace: &str,
@@ -399,6 +427,16 @@ async fn refresh_bmc_secret_if_changed<R: K8sConfigRepository>(
             } else {
                 Some(new_pw)
             }
+        }
+        Err(e) if e.is_bmc_password_source_unavailable() => {
+            if last_password.is_some() {
+                tracing::error!(
+                    error = %e,
+                    tracking_issue = "https://github.com/NVIDIA/infra-controller/issues/6147",
+                    "Retaining the last accepted DPF BMC Secret because NICo's DPF integration uses one shared credential"
+                );
+            }
+            last_password
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to read BMC password");
@@ -415,6 +453,7 @@ fn spawn_bmc_refresh<R, P>(
     provider: P,
     password: Option<String>,
     interval: Duration,
+    shared_bmc_password_ready: Arc<AtomicBool>,
     join_set: Option<&mut tokio::task::JoinSet<()>>,
 ) -> Result<tokio_util::sync::DropGuard, DpfError>
 where
@@ -435,6 +474,9 @@ where
             last_password =
                 refresh_bmc_secret_if_changed(repo.as_ref(), &namespace, &provider, last_password)
                     .await;
+            if last_password.is_some() {
+                shared_bmc_password_ready.store(true, Ordering::Release);
+            }
         }
     };
 
@@ -2399,12 +2441,27 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
                 privileged: Some(service.security_privileged),
                 spiffe: None,
             }),
-            service_daemon_set: Some(DpuServiceServiceDaemonSet {
-                annotations: None,
-                labels: None,
-                node_selector: Some(detached_node_selector(&service.node_selector_labels)),
-                resources: None,
-                update_strategy: None,
+            service_daemon_set: service.service_daemon_set.as_ref().map(|daemon_set| {
+                DpuServiceServiceDaemonSet {
+                    annotations: daemon_set.annotations.clone(),
+                    labels: daemon_set.labels.clone(),
+                    node_selector: daemon_set
+                        .node_selector_labels
+                        .as_ref()
+                        .map(detached_node_selector),
+                    resources: daemon_set.resources.clone(),
+                    update_strategy: daemon_set.update_strategy.as_ref().map(|strategy| {
+                        DpuServiceServiceDaemonSetUpdateStrategy {
+                            r#type: strategy.strategy_type.clone(),
+                            rolling_update: strategy.rolling_update.as_ref().map(|rolling| {
+                                DpuServiceServiceDaemonSetUpdateStrategyRollingUpdate {
+                                    max_surge: rolling.max_surge.clone(),
+                                    max_unavailable: rolling.max_unavailable.clone(),
+                                }
+                            }),
+                        }
+                    }),
+                }
             }),
             service_id: None,
         },
@@ -2416,6 +2473,28 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
 /// controller.  The repository remains the only layer that deals in checked
 /// DPF CR types.
 fn dpu_service_from_resource(service: DPUService) -> Result<DpuServiceObservation, DpfError> {
+    let service_daemon_set = service
+        .spec
+        .service_daemon_set
+        .map(|daemon_set| {
+            Ok::<_, serde_json::Error>(DpuServiceDaemonSetObservation {
+                node_selector: daemon_set
+                    .node_selector
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?,
+                annotations: daemon_set.annotations,
+                labels: daemon_set.labels,
+                resources: daemon_set.resources,
+                update_strategy: daemon_set
+                    .update_strategy
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
+
     Ok(DpuServiceObservation {
         name: service.metadata.name,
         namespace: service.metadata.namespace,
@@ -2435,13 +2514,7 @@ fn dpu_service_from_resource(service: DPUService) -> Result<DpuServiceObservatio
             .spec
             .security
             .and_then(|security| security.privileged),
-        service_daemon_set_node_selector: service
-            .spec
-            .service_daemon_set
-            .as_ref()
-            .and_then(|daemon_set| daemon_set.node_selector.as_ref())
-            .map(serde_json::to_value)
-            .transpose()?,
+        service_daemon_set,
         service_id: service.spec.service_id,
         config_ports_present: service.spec.config_ports.is_some(),
         is_deleting: service.metadata.deletion_timestamp.is_some(),
@@ -2550,6 +2623,13 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
             return Ok(());
         }
 
+        if !self.shared_bmc_password_ready.load(Ordering::Acquire) {
+            return Err(DpfError::BmcPasswordSourceUnavailable(
+                "cannot register a DPUDevice until the shared BMC credential has been accepted and published"
+                    .to_string(),
+            ));
+        }
+
         // Build values field from astra_nics configuration passed in.
         let values = match astra_nics {
             Some(nics) => Some(astra_underlay_configuration(&cr_name, &nics)?),
@@ -2584,7 +2664,10 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
                 cluster: None,
                 nic_device_count: None,
                 values,
-                bmc_factory_reset_policy: None,
+                // NICo owns BMC initialization and decommissioning. Resetting
+                // again here can discard NICo-managed network and credential
+                // state and trip the BMC authentication lockout protection.
+                bmc_factory_reset_policy: Some(DpuDeviceBmcFactoryResetPolicy::Never),
             },
             status: None,
         };
@@ -5404,6 +5487,10 @@ mod tests {
             .unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].spec.serial_number, "SN123456");
+        assert!(matches!(
+            devices[0].spec.bmc_factory_reset_policy.as_ref(),
+            Some(DpuDeviceBmcFactoryResetPolicy::Never)
+        ));
     }
 
     #[test]
@@ -6376,7 +6463,47 @@ mod tests {
     #[derive(Clone, Default)]
     struct SecretTrackingMock {
         secrets_written: Arc<std::sync::Mutex<Vec<String>>>,
+        dpu_devices: Arc<RwLock<Vec<DPUDevice>>>,
         fail_writes: bool,
+    }
+
+    #[async_trait]
+    impl crate::repository::DpuDeviceRepository for SecretTrackingMock {
+        async fn get(&self, name: &str, _ns: &str) -> Result<Option<DPUDevice>, DpfError> {
+            Ok(self
+                .dpu_devices
+                .read()
+                .unwrap()
+                .iter()
+                .find(|device| device.metadata.name.as_deref() == Some(name))
+                .cloned())
+        }
+
+        async fn list(&self, _ns: &str) -> Result<Vec<DPUDevice>, DpfError> {
+            Ok(self.dpu_devices.read().unwrap().clone())
+        }
+
+        async fn create(&self, device: &DPUDevice) -> Result<DPUDevice, DpfError> {
+            self.dpu_devices.write().unwrap().push(device.clone());
+            Ok(device.clone())
+        }
+
+        async fn patch(
+            &self,
+            _name: &str,
+            _ns: &str,
+            _patch: serde_json::Value,
+        ) -> Result<(), DpfError> {
+            Ok(())
+        }
+
+        async fn delete(&self, name: &str, _ns: &str) -> Result<(), DpfError> {
+            self.dpu_devices
+                .write()
+                .unwrap()
+                .retain(|device| device.metadata.name.as_deref() != Some(name));
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -6445,16 +6572,58 @@ mod tests {
         }
     }
 
-    /// Provider that always fails, standing in for a site where the site-wide
-    /// BMC root credential has not been set yet.
-    struct UnsetBmcPasswordProvider;
+    /// Provider that always reports a transient backend failure.
+    struct TransientBmcPasswordFailureProvider;
 
     #[async_trait]
-    impl BmcPasswordProvider for UnsetBmcPasswordProvider {
+    impl BmcPasswordProvider for TransientBmcPasswordFailureProvider {
         async fn get_bmc_password(&self) -> Result<String, DpfError> {
-            Err(DpfError::InvalidState(
-                "Site wide BMC root credentials not set".into(),
+            Err(DpfError::InvalidState("temporary backend failure".into()))
+        }
+    }
+
+    struct InvalidatedBmcPasswordProvider;
+
+    #[async_trait]
+    impl BmcPasswordProvider for InvalidatedBmcPasswordProvider {
+        async fn get_bmc_password(&self) -> Result<String, DpfError> {
+            Err(DpfError::BmcPasswordSourceUnavailable(
+                "local version 0 is missing".into(),
             ))
+        }
+    }
+
+    struct MissingLocalV0BmcPasswordProvider;
+
+    #[async_trait]
+    impl BmcPasswordProvider for MissingLocalV0BmcPasswordProvider {
+        async fn get_bmc_password(&self) -> Result<String, DpfError> {
+            Err(DpfError::LocalBmcPasswordSourceUnavailable(
+                "local version 0 is missing".into(),
+            ))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct MutableBmcPasswordProvider(Arc<RwLock<Option<String>>>);
+
+    #[async_trait]
+    impl BmcPasswordProvider for MutableBmcPasswordProvider {
+        async fn get_bmc_password(&self) -> Result<String, DpfError> {
+            self.0.read().unwrap().clone().ok_or_else(|| {
+                DpfError::BmcPasswordSourceUnavailable("BMC credential is missing".to_string())
+            })
+        }
+    }
+
+    fn test_dpu_device_info() -> DpuDeviceInfo {
+        DpuDeviceInfo {
+            device_id: "dpu-001".to_string(),
+            dpu_bmc_ip: "10.0.0.10".parse().unwrap(),
+            host_bmc_ip: "10.0.0.1".parse().unwrap(),
+            serial_number: "SN123456".to_string(),
+            dpu_machine_id: "dpu-bbb".to_string(),
+            is_primary: true,
         }
     }
 
@@ -6528,53 +6697,160 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_refresh_stays_unwritten_while_password_unavailable() {
+    async fn test_refresh_retains_state_during_transient_read_failure() {
         let mock = SecretTrackingMock::default();
 
-        let result =
-            refresh_bmc_secret_if_changed(&mock, TEST_NAMESPACE, &UnsetBmcPasswordProvider, None)
-                .await;
+        let result = refresh_bmc_secret_if_changed(
+            &mock,
+            TEST_NAMESPACE,
+            &TransientBmcPasswordFailureProvider,
+            None,
+        )
+        .await;
 
         assert_eq!(result, None);
         assert!(mock.secrets_written.lock().unwrap().is_empty());
     }
 
-    /// A fresh site sets the site-wide BMC root credential *through* the API,
-    /// so initialization must survive the credential being unset, leaving the
-    /// Secret to the refresh task.
     #[tokio::test]
-    async fn test_build_succeeds_when_bmc_password_unset_and_refresh_configured() {
+    async fn test_refresh_retains_secret_when_source_is_unavailable() {
         let mock = SecretTrackingMock::default();
 
-        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, UnsetBmcPasswordProvider)
-            .with_bmc_password_refresh_interval(Duration::from_secs(3600))
-            .build_without_resources()
-            .await
-            .expect("initialization tolerates an unset BMC password");
+        let result = refresh_bmc_secret_if_changed(
+            &mock,
+            TEST_NAMESPACE,
+            &InvalidatedBmcPasswordProvider,
+            Some("stale-password".into()),
+        )
+        .await;
+
+        assert_eq!(result.as_deref(), Some("stale-password"));
+        assert!(mock.secrets_written.lock().unwrap().is_empty());
+    }
+
+    /// A refresh task retries transient source failures after initialization.
+    #[tokio::test]
+    async fn test_build_succeeds_on_transient_read_failure_with_refresh_configured() {
+        let mock = SecretTrackingMock::default();
+
+        let sdk = DpfSdkBuilder::new(
+            mock.clone(),
+            TEST_NAMESPACE,
+            TransientBmcPasswordFailureProvider,
+        )
+        .with_bmc_password_refresh_interval(Duration::from_secs(3600))
+        .build_without_resources()
+        .await
+        .expect("initialization tolerates a transient credential read failure");
 
         assert_eq!(sdk.namespace(), TEST_NAMESPACE);
         assert!(mock.secrets_written.lock().unwrap().is_empty());
     }
 
-    /// Without a refresh task nothing would ever retry the read, so an unset
-    /// credential stays fatal rather than leaving the Secret permanently absent.
     #[tokio::test]
-    async fn test_build_fails_when_bmc_password_unset_and_no_refresh_configured() {
+    async fn test_build_tolerates_unavailable_source_with_refresh_configured() {
         let mock = SecretTrackingMock::default();
 
-        let Err(error) = DpfSdkBuilder::new(mock, TEST_NAMESPACE, UnsetBmcPasswordProvider)
+        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, InvalidatedBmcPasswordProvider)
+            .with_bmc_password_refresh_interval(Duration::from_secs(3600))
             .build_without_resources()
             .await
+            .expect("initialization defers an unavailable credential source");
+
+        assert_eq!(sdk.namespace(), TEST_NAMESPACE);
+        assert!(mock.secrets_written.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_v0_must_exist_before_startup() {
+        let mock = SecretTrackingMock::default();
+        let Err(error) =
+            DpfSdkBuilder::new(mock, TEST_NAMESPACE, MissingLocalV0BmcPasswordProvider)
+                .with_bmc_password_refresh_interval(Duration::from_secs(3600))
+                .build_without_resources()
+                .await
         else {
-            panic!("an unset BMC password with no refresh task is fatal");
+            panic!("authoritative local ownership without v0 must not activate");
         };
 
         assert!(
-            matches!(error, DpfError::InvalidState(msg) if msg.contains("BMC root credentials")),
+            matches!(&error, DpfError::LocalBmcPasswordSourceUnavailable(message) if message.contains("local version 0 is missing")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_credential_blocks_dpu_registration() {
+        let mock = SecretTrackingMock::default();
+
+        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, InvalidatedBmcPasswordProvider)
+            .with_bmc_password_refresh_interval(Duration::from_secs(3600))
+            .build_without_resources()
+            .await
+            .expect("a fresh DPF site may wait for a non-authoritative credential source");
+
+        assert_eq!(sdk.namespace(), TEST_NAMESPACE);
+        assert!(mock.secrets_written.lock().unwrap().is_empty());
+        assert!(matches!(
+            sdk.register_dpu_device(test_dpu_device_info(), None)
+                .await,
+            Err(DpfError::BmcPasswordSourceUnavailable(message))
+                if message.contains("cannot register a DPUDevice")
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dpu_registration_unblocks_after_credential_is_published() {
+        let mock = SecretTrackingMock::default();
+        let provider = MutableBmcPasswordProvider::default();
+
+        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, provider.clone())
+            .with_bmc_password_refresh_interval(Duration::from_secs(60))
+            .build_without_resources()
+            .await
+            .expect("a fresh DPF site may wait for a non-authoritative credential source");
+        assert!(
+            sdk.register_dpu_device(test_dpu_device_info(), None)
+                .await
+                .is_err()
+        );
+
+        *provider.0.write().unwrap() = Some("local-password".to_string());
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+
+        sdk.register_dpu_device(test_dpu_device_info(), None)
+            .await
+            .expect("registration resumes after the shared credential is published");
+        assert_eq!(
+            mock.secrets_written.lock().unwrap().as_slice(),
+            &["local-password"]
+        );
+    }
+
+    /// Without a refresh task nothing would ever retry the read, so a transient
+    /// source failure stays fatal rather than leaving the Secret absent.
+    #[tokio::test]
+    async fn test_build_fails_on_transient_read_failure_without_refresh_configured() {
+        let mock = SecretTrackingMock::default();
+
+        let Err(error) =
+            DpfSdkBuilder::new(mock, TEST_NAMESPACE, TransientBmcPasswordFailureProvider)
+                .build_without_resources()
+                .await
+        else {
+            panic!("a transient BMC password failure with no refresh task is fatal");
+        };
+
+        assert!(
+            matches!(error, DpfError::InvalidState(msg) if msg.contains("backend failure")),
             "unexpected error"
         );
     }
 
+    /// Provides a detached service with explicit placement so lifecycle tests
+    /// verify that caller-owned DaemonSet settings reach the DPF resource.
     fn test_dpu_service(name: &str) -> DetachedDpuServiceDefinition {
         DetachedDpuServiceDefinition {
             name: name.to_owned(),
@@ -6589,11 +6865,64 @@ mod tests {
             },
             deploy_in_cluster: false,
             security_privileged: false,
-            node_selector_labels: BTreeMap::from([(
+            service_daemon_set: Some(crate::types::DetachedServiceDaemonSet {
+                node_selector_labels: Some(BTreeMap::from([(
+                    "nico/extension-service".to_owned(),
+                    "enabled".to_owned(),
+                )])),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// Verifies explicitly supplied DaemonSet fields survive conversion through
+    /// the generated DPF type, including caller-selected placement.
+    #[test]
+    fn detached_dpu_service_daemon_set_fields_round_trip_through_checked_cr_type() {
+        let mut service = test_dpu_service("extension-service");
+        service.service_daemon_set = Some(crate::types::DetachedServiceDaemonSet {
+            node_selector_labels: Some(BTreeMap::from([(
                 "nico/extension-service".to_owned(),
                 "enabled".to_owned(),
-            )]),
-        }
+            )])),
+            annotations: Some(BTreeMap::from([(
+                "example.com/owner".to_owned(),
+                "tenant".to_owned(),
+            )])),
+            labels: Some(BTreeMap::from([("app".to_owned(), "storage".to_owned())])),
+            resources: Some(BTreeMap::from([(
+                "nvidia.com/bf_sf".to_owned(),
+                IntOrString::String("1".to_owned()),
+            )])),
+            update_strategy: Some(crate::types::DetachedServiceDaemonSetUpdateStrategy {
+                strategy_type: Some("RollingUpdate".to_owned()),
+                rolling_update: Some(crate::types::DetachedServiceDaemonSetRollingUpdate {
+                    max_surge: None,
+                    max_unavailable: Some(IntOrString::Int(1)),
+                }),
+            }),
+        });
+
+        // Convert through the checked CR type to exercise the SDK boundary.
+        let observed = dpu_service_from_resource(dpu_service_to_resource(&service)).unwrap();
+        let observed_daemon_set = observed.service_daemon_set.unwrap();
+        let expected_daemon_set = service.service_daemon_set.unwrap();
+
+        // All caller-supplied fields, including placement, must remain present.
+        assert_eq!(
+            observed_daemon_set.annotations,
+            expected_daemon_set.annotations
+        );
+        assert_eq!(observed_daemon_set.labels, expected_daemon_set.labels);
+        assert_eq!(observed_daemon_set.resources, expected_daemon_set.resources);
+        assert_eq!(
+            observed_daemon_set.update_strategy,
+            Some(json!({
+                "type": "RollingUpdate",
+                "rollingUpdate": {"maxUnavailable": 1},
+            }))
+        );
+        assert!(observed_daemon_set.node_selector.is_some());
     }
 
     #[tokio::test]

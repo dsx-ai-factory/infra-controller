@@ -377,13 +377,23 @@ pub(crate) async fn start_runtime(
         db::site_prefix::reconcile_configured(&mut txn, &carbide_config.site_fabric_prefixes)
             .await?;
 
-        if !carbide_config.site_fabric_prefixes.is_empty() {
+        // Persisted roots can be retiring after the final configured root is
+        // removed, so current configuration alone cannot decide whether
+        // legacy VpcPrefix lineage must be repaired and validated.
+        if db::site_prefix::operator_managed_prefixes_exist(&mut txn).await? {
             let lineage =
                 db::site_prefix::backfill_vpc_prefix_site_prefix_lineage(&mut txn).await?;
+            let require_parent_for_every_vpc_prefix =
+                !carbide_config.site_fabric_prefixes.is_empty();
+            let blocking_missing_vpc_prefix_ids = if require_parent_for_every_vpc_prefix {
+                lineage.missing_vpc_prefix_ids.as_slice()
+            } else {
+                &[]
+            };
             eyre::ensure!(
-                lineage.unresolved_vpc_prefix_count() == 0,
+                lineage.is_safe_for_startup(require_parent_for_every_vpc_prefix),
                 "VpcPrefix SitePrefix lineage preflight failed: missing VpcPrefix IDs: {:?}; ambiguous VpcPrefixes: {:?}",
-                lineage.missing_vpc_prefix_ids,
+                blocking_missing_vpc_prefix_ids,
                 lineage.ambiguous,
             );
         }
@@ -392,9 +402,15 @@ pub(crate) async fn start_runtime(
 
         // Idempotently seed the dedicated site-wide lockdown IKM (v0) from the
         // site-wide BMC root, so existing sites converge onto the decoupled
-        // lockdown key without operator action. No-op once seeded or if the BMC
-        // root is not yet configured.
-        crate::dpa::lockdown::ensure_lockdown_ikm_seeded(&*credential_manager).await?;
+        // lockdown key without operator action. No-op once seeded; if the BMC
+        // root is not yet configured, retry in the background until it appears.
+        if !crate::dpa::lockdown::ensure_lockdown_ikm_seeded(&*credential_manager).await? {
+            crate::dpa::lockdown::start_lockdown_ikm_seed_retry(
+                join_set,
+                credential_manager.clone(),
+                cancel_token.clone(),
+            )?;
+        }
 
         // Initial credential-rotation bookkeeping is backfilled by the
         // `*_credential_rotation_backfill` data migration (see its header for the
@@ -402,11 +418,17 @@ pub(crate) async fn start_runtime(
     };
 
     // A listen-only replica trusts another instance to reconcile configuration,
-    // but it still must not serve a configured-root site with unresolved
-    // VpcPrefix lineage.
-    if carbide_config.listen_only && !carbide_config.site_fabric_prefixes.is_empty() {
-        let unassigned =
-            db::site_prefix::find_unassigned_vpc_prefix_site_prefix_ids(&db_pool).await?;
+    // but it must reject every unassigned row that the corresponding
+    // authoritative startup would require to be repaired.
+    if carbide_config.listen_only {
+        let unassigned = if carbide_config.site_fabric_prefixes.is_empty() {
+            db::site_prefix::find_unassigned_vpc_prefix_ids_with_operator_parent_candidates(
+                &db_pool,
+            )
+            .await?
+        } else {
+            db::site_prefix::find_unassigned_vpc_prefix_site_prefix_ids(&db_pool).await?
+        };
         eyre::ensure!(
             unassigned.is_empty(),
             "VpcPrefix SitePrefix lineage preflight failed: unassigned VpcPrefix IDs: {:?}",
@@ -524,6 +546,10 @@ pub(crate) async fn start_runtime(
     // Validate unconditionally; when explicitly enabled, missing prerequisites
     // fail rather than silently degrading.
     carbide_config.node_auth.validate()?;
+    carbide_config
+        .machine_validation_config
+        .validate()
+        .map_err(|error| eyre::eyre!("machine_validation_config.{error}"))?;
     let node_jwt_validator = if carbide_config.node_auth.enabled {
         // Bearer tokens must never be accepted over plaintext, and the
         // validator trusts the same roots the TLS listener uses for client
@@ -969,8 +995,14 @@ async fn initialize_dpf_sdk(
     }
 
     // Build every validated configuration before SDK construction writes the shared BMC Secret.
-    let provider = CarbideBmcPasswordProvider::new(credential_manager, db_pool.clone());
-    let sdk = carbide_dpf::DpfSdkBuilder::new(repo, carbide_dpf::NAMESPACE, provider)
+    let provider = CarbideBmcPasswordProvider::new(
+        credential_manager,
+        db_pool.clone(),
+        carbide_config
+            .credentials
+            .uses_authoritative_local_bmc_site_wide_root(),
+    );
+    let sdk = carbide_dpf::DpfSdkBuilder::new(repo.clone(), carbide_dpf::NAMESPACE, provider)
         .with_labeler(
             CarbideDPFLabeler::new(carbide_config.dpf.deployments.bf3.node_label_key.clone())
                 .with_deployment_type_labels(deployment_type_labels),
@@ -1904,7 +1936,7 @@ async fn initialize_and_start_controllers<'a>(
                 nmx_cluster_switch_mtls_services: carbide_config
                     .rack_state_controller
                     .effective_nmx_cluster_switch_mtls_services_as_i32(),
-                firmware_object_fetcher: Arc::new(firmware_object_fetcher),
+                firmware_object_fetcher: Arc::new(firmware_object_fetcher.clone()),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
             .into(),
@@ -2059,7 +2091,7 @@ async fn initialize_and_start_controllers<'a>(
     )
     .start(join_set, cancel_token.clone())?;
 
-    PreingestionManager::new(
+    let preingestion_manager = PreingestionManager::new(
         db_pool.clone(),
         carbide_config.preingestion_manager(),
         shared_redfish_pool.clone(),
@@ -2069,8 +2101,23 @@ async fn initialize_and_start_controllers<'a>(
         Some(api_service.credential_manager.clone()),
         work_lock_manager_handle.clone(),
         carbide_config.ntp_servers.clone(),
-    )
-    .start(join_set, cancel_token.clone())?;
+    );
+
+    let preingestion_manager = match component_manager.as_ref() {
+        Some(manager)
+            if manager.compute_tray.backend()
+                == component_manager::compute_tray_manager::Backend::Rms =>
+        {
+            preingestion_manager.with_rack_firmware(
+                carbide_config.rack_profiles.clone(),
+                manager.compute_tray.clone(),
+                Arc::new(firmware_object_fetcher),
+            )
+        }
+        _ => preingestion_manager,
+    };
+
+    preingestion_manager.start(join_set, cancel_token.clone())?;
 
     MeasuredBootMetricsCollector::new(
         db_pool.clone(),

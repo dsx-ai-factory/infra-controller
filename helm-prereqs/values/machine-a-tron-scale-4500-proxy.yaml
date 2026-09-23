@@ -49,12 +49,13 @@ hwMacAddressRanges:
 # The entire point of this file: no per-BMC ClusterIP Services.
 mat-k8s-controller:
   enabled: false
-# The chart ships a startupProbe with failureThreshold 20 (10 minutes). This
-# pod registers 13,500 machines before it binds the redfish port, which takes
-# far longer than that, and the startupProbe gates the generous liveness window
-# below -- so the chart default silently re-imposes a 10-minute bring-up limit
-# on a fleet sized for hours. The equivalent override exists in
-# machine-a-tron-scale.yaml, but THIS is the file the 4,500-host runs load.
+# The chart ships a startupProbe with failureThreshold 120 (60 minutes). This
+# file defines hosts only (no racks, switches or power shelves) and DPUs are
+# not registered, so the pod registers 4,500 records before it binds the
+# redfish port: about 2.5h at the ~2s per record from the chart values.yaml
+# sizing rule. The startupProbe gates the generous liveness window below, so
+# the chart default would re-impose a 60-minute bring-up limit. 1200 x 30s =
+# 10h keeps headroom.
 startupProbe:
   tcpSocket:
     port: redfish

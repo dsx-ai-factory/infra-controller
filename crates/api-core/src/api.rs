@@ -35,6 +35,7 @@ use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_secrets::SecretsError;
 use carbide_secrets::certificates::CertificateProvider;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, CredentialType, Credentials,
@@ -122,7 +123,7 @@ impl Forge for Api {
         &self,
         request: Request<rpc::VersionRequest>,
     ) -> Result<Response<rpc::BuildInfo>, Status> {
-        crate::handlers::api::version(self, request)
+        crate::handlers::api::version(self, request).await
     }
 
     async fn create_domain(
@@ -656,6 +657,13 @@ impl Forge for Api {
         request: Request<rpc::DpuAgentInventoryReport>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::dpu::update_agent_reported_inventory(self, request).await
+    }
+
+    async fn report_lldp_neighbors(
+        &self,
+        request: Request<rpc::LldpNeighborReport>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::lldp::report_lldp_neighbors(self, request).await
     }
 
     async fn record_dpu_network_status(
@@ -1471,6 +1479,21 @@ impl Forge for Api {
         crate::handlers::host_reprovisioning::trigger_host_reprovisioning(self, request).await
     }
 
+    async fn trigger_managed_host_reset(
+        &self,
+        request: Request<rpc::ManagedHostResetRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::managed_host_reset::trigger_managed_host_reset(self, request).await
+    }
+
+    async fn list_managed_hosts_waiting_for_reset(
+        &self,
+        request: Request<rpc::ManagedHostResetListRequest>,
+    ) -> Result<Response<rpc::ManagedHostResetListResponse>, Status> {
+        crate::handlers::managed_host_reset::list_managed_hosts_waiting_for_reset(self, request)
+            .await
+    }
+
     async fn trigger_bmc_credential_rotation(
         &self,
         request: Request<rpc::BmcCredentialRotationRequest>,
@@ -1778,6 +1801,13 @@ impl Forge for Api {
         crate::handlers::expected_machine::update(self, request).await
     }
 
+    async fn patch_expected_machine(
+        &self,
+        request: Request<rpc::PatchExpectedMachineRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_machine::patch_expected_machine(self, request).await
+    }
+
     async fn replace_all_expected_machines(
         &self,
         request: Request<rpc::ExpectedMachineList>,
@@ -1827,6 +1857,13 @@ impl Forge for Api {
         crate::handlers::expected_machine::update_expected_machines(self, request).await
     }
 
+    async fn patch_expected_machines(
+        &self,
+        request: Request<rpc::PatchExpectedMachinesRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_machine::patch_expected_machines(self, request).await
+    }
+
     async fn get_expected_power_shelf(
         &self,
         request: Request<rpc::ExpectedPowerShelfRequest>,
@@ -1853,6 +1890,13 @@ impl Forge for Api {
         request: Request<rpc::ExpectedPowerShelf>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::expected_power_shelf::update_expected_power_shelf(self, request).await
+    }
+
+    async fn patch_expected_power_shelf(
+        &self,
+        request: Request<rpc::PatchExpectedPowerShelfRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_power_shelf::patch_expected_power_shelf(self, request).await
     }
 
     async fn replace_all_expected_power_shelves(
@@ -1912,6 +1956,13 @@ impl Forge for Api {
         request: Request<rpc::ExpectedSwitch>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::expected_switch::update_expected_switch(self, request).await
+    }
+
+    async fn patch_expected_switch(
+        &self,
+        request: Request<rpc::PatchExpectedSwitchRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_switch::patch_expected_switch(self, request).await
     }
 
     async fn replace_all_expected_switches(
@@ -1989,6 +2040,62 @@ impl Forge for Api {
         request: Request<()>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::expected_rack::delete_all_expected_racks(self, request).await
+    }
+
+    async fn add_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroup>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::add_expected_rack_group(self, request).await
+    }
+
+    async fn delete_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroupRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::delete_expected_rack_group(self, request).await
+    }
+
+    async fn update_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroup>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::update_expected_rack_group(self, request).await
+    }
+
+    async fn get_expected_rack_group(
+        &self,
+        request: Request<rpc::ExpectedRackGroupRequest>,
+    ) -> Result<Response<rpc::ExpectedRackGroup>, Status> {
+        crate::handlers::expected_rack_group::get_expected_rack_group(self, request).await
+    }
+
+    async fn find_expected_rack_group_ids(
+        &self,
+        request: Request<rpc::ExpectedRackGroupSearchFilter>,
+    ) -> Result<Response<rpc::ExpectedRackGroupIdList>, Status> {
+        crate::handlers::expected_rack_group::find_ids(self, request).await
+    }
+
+    async fn find_expected_rack_groups_by_ids(
+        &self,
+        request: Request<rpc::ExpectedRackGroupsByIdsRequest>,
+    ) -> Result<Response<rpc::ExpectedRackGroupList>, Status> {
+        crate::handlers::expected_rack_group::find_by_ids(self, request).await
+    }
+
+    async fn replace_all_expected_rack_groups(
+        &self,
+        request: Request<rpc::ExpectedRackGroupList>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::replace_all_expected_rack_groups(self, request).await
+    }
+
+    async fn delete_all_expected_rack_groups(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_rack_group::delete_all_expected_rack_groups(self, request).await
     }
 
     async fn find_connected_devices_by_dpu_machine_ids(
@@ -2518,6 +2625,22 @@ impl Forge for Api {
         request: Request<rpc::MachineValidationAttemptGetRequest>,
     ) -> Result<Response<rpc::MachineValidationAttempt>, Status> {
         crate::handlers::machine_validation::get_machine_validation_attempt(self, request).await
+    }
+
+    async fn append_machine_validation_attempt_log(
+        &self,
+        request: Request<rpc::MachineValidationAttemptLogAppendRequest>,
+    ) -> Result<Response<rpc::MachineValidationAttemptLogAppendResponse>, Status> {
+        crate::handlers::machine_validation::append_machine_validation_attempt_log(self, request)
+            .await
+    }
+
+    async fn get_machine_validation_attempt_logs(
+        &self,
+        request: Request<rpc::MachineValidationAttemptLogGetRequest>,
+    ) -> Result<Response<rpc::MachineValidationAttemptLogList>, Status> {
+        crate::handlers::machine_validation::get_machine_validation_attempt_logs(self, request)
+            .await
     }
 
     async fn heartbeat_machine_validation_run(
@@ -3839,6 +3962,8 @@ impl Api {
     /// credential counts as configured only when a non-empty password is stored.
     /// Secrets-backend errors are logged and treated as configured, so a
     /// transient Vault outage does not surface a misleading "not set" warning.
+    /// An authoritative local BMC root that is absent is a known missing
+    /// credential rather than a backend error, so it remains in the result.
     ///
     /// This performs up to three credential-store lookups and is invoked per
     /// admin-UI page render; that cost is acceptable for the low-traffic admin
@@ -3857,6 +3982,12 @@ impl Api {
                     _display_name: default_credential_display_name(&key),
                     _key: key.to_key_str().into_owned(),
                 }),
+                Err(SecretsError::BmcSiteWideRootV0CredentialReadBlocked) => {
+                    missing.push(DefaultCredential {
+                        _display_name: default_credential_display_name(&key),
+                        _key: key.to_key_str().into_owned(),
+                    });
+                }
                 Err(err) => {
                     // A backend error is distinct from a genuinely-unset credential;
                     // don't raise the "not set" warning on a transient secrets failure.

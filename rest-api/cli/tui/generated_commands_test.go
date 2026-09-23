@@ -640,6 +640,10 @@ func TestCanonicalGeneratedResourceType_NormalizesSelectorKeys(t *testing.T) {
 			command: "nvlink-logical-partition delete", parameter: "nvLinkLogicalPartitionId",
 			want: "nvlink-logical-partition",
 		},
+		"spectrumx acronym": {
+			command: "spectrumx-partition get", parameter: "spectrumXPartitionId",
+			want: "spectrumx-partition",
+		},
 		"numbered vpc": {
 			command: "vpc-peering create", parameter: "vpc1Id", want: "vpc",
 		},
@@ -711,6 +715,16 @@ func TestResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 			listPath:     "/v2/org/acme/nico/machine/machine-1/health-report",
 			listResponse: `[{"source":"overrides.sre","mode":"Replace"}]`,
 			want:         []string{"machine-1", "overrides.sre"},
+		},
+		{
+			name: "machine label key", command: "machine label-values list",
+			listPath: "/v2/org/acme/nico/machine/label/key", listResponse: `["Failure-Domain"]`,
+			want: []string{"Failure-Domain"},
+		},
+		{
+			name: "expected machine label key", command: "expected-machine label-values list",
+			listPath: "/v2/org/acme/nico/expected-machine/label/key", listResponse: `["Rack"]`,
+			want: []string{"Rack"},
 		},
 		{
 			name:    "instance type machine association",

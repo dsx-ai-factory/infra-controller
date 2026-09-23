@@ -214,10 +214,9 @@ async fn resolve_rotate_lockdown_key(api: &Api, machine_id: HostMachineId) -> Ca
 /// The two branches resolve their fallback differently on purpose. The site-wide
 /// `lockdown_ikm` target row is seeded for every site by the backfill migration
 /// (and by `set_initial_target_version` on the first `RotateCredential`), so a
-/// missing target is a corrupted invariant we surface rather than paper over --
-/// mirroring `record_device_converged`. A per-card row, by contrast, is created
-/// lazily on first lock and only backfilled for already-locked cards, so a card
-/// with no row / no tracked version legitimately falls back to the seed version.
+/// missing target returns `MissingSitewideRotationTarget`. A per-card row is
+/// created lazily on first lock and only backfilled for already-locked cards,
+/// so a card with no row / no tracked version falls back to the seed version.
 async fn resolve_lock_ikm_version(
     api: &Api,
     mac: MacAddress,

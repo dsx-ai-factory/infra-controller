@@ -36,6 +36,7 @@ use carbide_machine_controller::config::{
     BomValidationConfig, FirmwareGlobal, MachineStateControllerConfig,
     MachineStateHandlerSiteConfig, MachineValidationConfig, PowerManagerOptions, TimePeriod,
 };
+use carbide_network::ip::prefix::{IpNet, aggregate};
 use carbide_nvlink_manager::config::NvLinkConfig;
 use carbide_preingestion_manager::PreingestionManagerConfig;
 use carbide_rack_controller::config::{RackValidationConfig, RmsConfig};
@@ -76,6 +77,7 @@ use crate::CarbideError;
 
 pub(crate) const DEFAULT_DPU_NUM_OF_VFS: u32 = carbide_dpf::DEFAULT_DPU_NUM_OF_VFS;
 pub(crate) const MAX_DPU_NUM_OF_VFS: u32 = 126;
+const MAX_SITE_PREFIX_ISOLATION_RULES: u32 = 64;
 
 // Deployment selectors must never reuse labels whose values NICo supplies independently.
 // The shared marker would make every deployment select every DPUNode, while the contextual
@@ -238,10 +240,31 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub deny_prefixes: Vec<IpNetwork>,
 
-    /// List of IP prefixes (in CIDR notation) that are assigned for tenant
-    /// use within this site. Supports both IPv4 and IPv6 prefixes.
+    /// List of IP prefixes (in CIDR notation) assigned for tenant use within this site.
+    ///
+    /// The legacy DPU input combines these prefixes with retained tenant-managed SitePrefixes.
+    /// With mutual isolation, ETV enforces the IPv4 prefixes with an isolation ACL only when the
+    /// rendered DPU configuration has no NSG; an NSG replaces that ACL. Open isolation does not
+    /// install that ACL.
     #[serde(default)]
     pub site_fabric_prefixes: Vec<IpNetwork>,
+
+    /// FNN prefixes installed as floating blackhole routes in every VPC VRF.
+    ///
+    /// When omitted, this inherits `site_fabric_prefixes`, includes every retained tenant root,
+    /// and retains removed operator-managed roots until their VpcPrefixes and VPC-attached direct
+    /// NetworkPrefixes are hard-deleted. An explicit list is authoritative. Under mutual isolation,
+    /// each new tenant root requires an equal or broader explicit route. Startup and FNN DPU
+    /// responses check the same coverage, including unused and Deleting tenant roots. Version
+    /// output does not add tenant roots or check their coverage.
+    /// An empty list disables these routes and cannot support tenant roots under mutual isolation.
+    /// Inherited roots are reduced to their minimal exact union, while an explicit list preserves
+    /// each distinct prefix boundary. Routes use administrative distance 250. An effective `/0`
+    /// must not be combined with default-route leakage for the same address family because the
+    /// imported default wins the equal-prefix distance comparison. Open isolation does not install
+    /// the routes or require tenant coverage.
+    #[serde(default)]
+    pub site_fabric_null_routes: Option<Vec<IpNetwork>>,
 
     /// Opts this site into exact tenant VpcPrefix reuse checks.
     ///
@@ -256,6 +279,21 @@ pub struct CarbideConfig {
     /// and keep their CIDR reserved.
     #[serde(default = "default_max_site_prefixes_per_tenant")]
     pub max_site_prefixes_per_tenant: u32,
+
+    /// Maximum compacted `site_fabric_prefixes` plus retained tenant prefixes
+    /// permitted when creating a tenant SitePrefix. This bounds the legacy DPU
+    /// input, not the FNN null-route count or hardware capacity. Retiring operator
+    /// roots and explicit null-route overrides do not enter this count.
+    /// Defaults to 64; accepts 0 through 64.
+    /// Zero blocks creation under mutual isolation; open isolation does not enforce this limit.
+    /// Lowering the limit never removes protection.
+    /// Changes require a restart. Raising the supported ceiling requires the
+    /// qualification tracked by https://github.com/dsx-ai-factory/infra-controller/issues/3902.
+    #[serde(
+        default = "default_max_site_prefix_isolation_rules",
+        deserialize_with = "deserialize_site_prefix_isolation_limit"
+    )]
+    pub max_site_prefix_isolation_rules: u32,
 
     /// List of aggregate IPv4 prefixes (in CIDR notation) that contain prefixes assigned
     /// to tenants so that they themselves can announce to the DPU.  E.g., BYOIP
@@ -437,10 +475,17 @@ pub struct CarbideConfig {
     pub deprecated_force_dpu_nic_mode: Option<bool>,
 
     /// The policy to decide whether two VPCs are allowed to peer with each other based on their
-    /// network virtualization type during creation
+    /// network virtualization type during creation.
+    ///
+    /// `mixed` is deprecated; it behaves as `exclusive`.
     pub vpc_peering_policy: Option<VpcPeeringPolicy>,
 
-    /// The policy to decide whether a VPC peering should be active
+    /// The policy to decide whether a VPC peering should be active.
+    ///
+    /// `none` disables both prefix and VNI imports from stored peerings. When omitted, this falls
+    /// back to `vpc_peering_policy`.
+    ///
+    /// `mixed` is deprecated; it behaves as `exclusive`.
     pub vpc_peering_policy_on_existing: Option<VpcPeeringPolicy>,
 
     /// Controls whether or not machine attestion is required before a machine
@@ -768,8 +813,8 @@ pub struct CarbideConfig {
 
     /// Due to limitations in Cumulus Linux route-leaking,
     /// some sites may require all VRFs to use the same VNI.
-    /// Isolation is still possible via ACLs, and route-imports
-    /// will still use the dynamically allocated VNI for deriving
+    /// FNN isolation still uses per-VRF site-fabric null routes, and
+    /// route-imports still use the dynamically allocated VNI for deriving
     /// route-targets.
     /// This will limit the number of VRFs supported on the
     /// DPU to a single VRF.
@@ -921,9 +966,10 @@ pub struct CarbideConfig {
     /// Operator-managed static credential sources. These settings contain
     /// only source locations and reload policy; credential values stay in the
     /// referenced file or process environment. When a file is configured, the
-    /// local environment/file chain is read first for non-UFM credentials.
-    /// `credentials.ufm_source` exclusively selects local or persistent
-    /// backend ownership for all UFM credentials.
+    /// local environment/file chain is read first by default.
+    /// `credentials.ufm_source` selects ownership for all UFM credentials, and
+    /// `credentials.bmc_site_wide_root_source` selects ownership for the
+    /// unversioned (version 0) site-wide BMC root.
     #[serde(default)]
     pub credentials: CredentialsConfig,
 
@@ -1075,8 +1121,9 @@ pub struct CertificatesConfig {
 ///
 /// The file source is optional. When present, it takes precedence over the
 /// legacy environment-selected file source and is read before credential
-/// backends such as Vault or Postgres. `ufm_source` controls whether UFM reads
-/// preserve that local-first order or use one authoritative source.
+/// backends such as Vault or Postgres. The source-policy fields control whether
+/// selected credentials preserve that local-first order or use one
+/// authoritative source.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialsConfig {
@@ -1084,6 +1131,11 @@ pub struct CredentialsConfig {
     /// Defaults to local-first reads with persistent-backend fallback.
     #[serde(default)]
     pub ufm_source: UfmCredentialSource,
+
+    /// Selects the read precedence and mutation policy for version 0 of the
+    /// site-wide BMC root. Versioned BMC roots always use persistent backends.
+    #[serde(default)]
+    pub bmc_site_wide_root_source: BmcSiteWideRootSource,
 
     /// A watched file containing static credentials. Its contents are never
     /// embedded in `CarbideConfig`.
@@ -1126,6 +1178,29 @@ pub enum UfmCredentialSource {
     Local,
 }
 
+/// Read precedence and mutation policy for version 0 of the site-wide BMC root.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BmcSiteWideRootSource {
+    /// Preserve the existing local-first behavior: read the environment, then
+    /// the file entry, before the persistent backend and mutate the backend.
+    #[default]
+    LocalFirst,
+    /// Read and mutate version 0 in the configured persistent backend. Ignore
+    /// the local environment and file entries.
+    Backend,
+    /// Read version 0 from the environment and then the file source, without
+    /// persistent-backend fallback, and reject persistent-backend mutation. A
+    /// missing entry does not normally fail startup. When v0 is current, an
+    /// existing DPF site with shared-only DPUDevices requires the local value
+    /// before activating this mode, and Core startup fails until it is
+    /// supplied. The local value is a bootstrap/ingestion input; after devices
+    /// use it, coordinated rotation advances to a backend-managed version.
+    /// DPF's shared BMC Secret is not safe during mixed-version convergence; see
+    /// <https://github.com/NVIDIA/infra-controller/issues/6147>.
+    Local,
+}
+
 impl CredentialFileSourceConfig {
     /// Returns the polling interval used when `poll_interval` is omitted.
     pub const fn default_poll_interval() -> std::time::Duration {
@@ -1137,6 +1212,12 @@ impl CredentialsConfig {
     /// Returns whether local sources authoritatively own UFM credentials.
     pub fn uses_authoritative_local_ufm_credentials(&self) -> bool {
         self.ufm_source == UfmCredentialSource::Local
+    }
+
+    /// Returns whether local sources authoritatively own version 0 of the
+    /// site-wide BMC root.
+    pub fn uses_authoritative_local_bmc_site_wide_root(&self) -> bool {
+        self.bmc_site_wide_root_source == BmcSiteWideRootSource::Local
     }
 }
 
@@ -1254,6 +1335,60 @@ impl Default for TracingConfig {
 }
 
 impl CarbideConfig {
+    /// Returns the configured FNN site-fabric null routes, including the legacy fallback.
+    pub fn effective_site_fabric_null_routes(&self) -> &[IpNetwork] {
+        self.site_fabric_null_routes
+            .as_deref()
+            .unwrap_or(&self.site_fabric_prefixes)
+    }
+
+    /// `resolved_site_fabric_null_routes` combines configured roots with the
+    /// supplied tenant and retiring operator roots when no override is set.
+    ///
+    /// Inherited roots are reduced to their minimal exact union so a
+    /// redundant child route cannot mask an authorized parent import. An
+    /// explicit `site_fabric_null_routes` value remains authoritative: CIDRs
+    /// use their network address and are exactly deduplicated without aggregating
+    /// distinct prefix boundaries. An explicit empty list remains empty.
+    /// Admission callers supply their participant tenant roots and no retiring
+    /// operator roots; retained-state callers supply the retained inventory.
+    /// Version supplies no tenant roots because its output permits anonymous callers.
+    pub fn resolved_site_fabric_null_routes(
+        &self,
+        retained_operator_roots: &[IpNetwork],
+        tenant_roots: &[IpNetwork],
+    ) -> Vec<IpNetwork> {
+        let mut prefixes: Vec<IpNetwork> = match self.site_fabric_null_routes.as_ref() {
+            Some(configured) => configured
+                .iter()
+                .map(|prefix| {
+                    IpNetwork::new(prefix.network(), prefix.prefix())
+                        .expect("IpNetwork guarantees a valid address-family prefix length")
+                })
+                .collect(),
+            None => aggregate(
+                self.site_fabric_prefixes
+                    .iter()
+                    .chain(retained_operator_roots)
+                    .chain(tenant_roots)
+                    .map(|prefix| {
+                        IpNet::new(prefix.network(), prefix.prefix())
+                            .expect("IpNetwork guarantees a valid address-family prefix length")
+                    }),
+            )
+            .into_iter()
+            .map(|prefix| {
+                let prefix: IpNet = prefix.into();
+                IpNetwork::new(prefix.network(), prefix.prefix_len())
+                    .expect("IpNet guarantees a valid address-family prefix length")
+            })
+            .collect(),
+        };
+        prefixes.sort_by_cached_key(ToString::to_string);
+        prefixes.dedup();
+        prefixes
+    }
+
     pub fn machine_state_handler_site_config(&self) -> MachineStateHandlerSiteConfig {
         MachineStateHandlerSiteConfig {
             pxe_public_base_url: self.pxe_public_base_url.clone(),
@@ -1481,11 +1616,12 @@ pub struct SecretsConfig {
 
     /// The credential *backend* read order, highest priority first (first match
     /// wins). Enabled local-override readers (env, file) are normally tried
-    /// ahead of these; `credentials.ufm_source` can suppress local UFM entries
-    /// or make them authoritative. This list only orders the persistent
-    /// backends. Order is the operator's choice -- list the backends you want,
-    /// in the priority you want. Defaults to `["vault"]` -- with the local
-    /// overrides, that is the env -> file -> vault chain.
+    /// ahead of these; the source-policy fields under `[credentials]` can
+    /// suppress selected local entries or make them authoritative. This list
+    /// only orders the persistent backends. Order is the operator's choice --
+    /// list the backends you want, in the priority you want. Defaults to
+    /// `["vault"]` -- with the local overrides, that is the env -> file ->
+    /// vault chain.
     ///
     /// For example, to roll Postgres in gradually, walk this list:
     ///
@@ -1510,8 +1646,9 @@ pub struct SecretsConfig {
     /// fresh site with nothing to import; unsupported values fail config
     /// parsing rather than silently skipping the import. Independent of
     /// `backends`/`writer` -- importing from vault is orthogonal to where
-    /// reads and writes flow. When `credentials.ufm_source = "local"`, UFM
-    /// paths are excluded so the import preserves local ownership.
+    /// reads and writes flow. Locally owned UFM paths and the locally owned
+    /// unversioned site-wide BMC root are excluded so the import preserves
+    /// their ownership.
     pub import_from: Option<ImportSource>,
 
     /// How to treat secrets that already exist in Postgres during import.
@@ -2861,8 +2998,11 @@ pub struct FnnRoutingProfileConfig {
     #[serde(default)]
     pub tenant_prefix_overlap_eligible: bool,
 
-    /// Should DPUs leak the default route from the
-    /// underlay into the tenant VRF?
+    /// Should DPUs leak the default route from the underlay into the tenant VRF?
+    ///
+    /// This must not be enabled for an address family whose effective
+    /// `site_fabric_null_routes` contains `/0`: the imported default has a
+    /// better administrative distance than the equal-prefix blackhole.
     #[serde(default)]
     pub leak_default_route_from_underlay: Option<bool>,
 
@@ -4143,6 +4283,23 @@ pub fn default_max_site_prefixes_per_tenant() -> u32 {
     8
 }
 
+pub(crate) fn default_max_site_prefix_isolation_rules() -> u32 {
+    MAX_SITE_PREFIX_ISOLATION_RULES
+}
+
+fn deserialize_site_prefix_isolation_limit<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let limit = u32::deserialize(deserializer)?;
+    if limit > MAX_SITE_PREFIX_ISOLATION_RULES {
+        return Err(serde::de::Error::custom(format!(
+            "max_site_prefix_isolation_rules must be between 0 and {MAX_SITE_PREFIX_ISOLATION_RULES}"
+        )));
+    }
+    Ok(limit)
+}
+
 pub fn default_max_network_security_group_size() -> u32 {
     200
 }
@@ -4259,6 +4416,14 @@ impl From<VpcIsolationBehaviorType> for rpc::forge::VpcIsolationBehaviorType {
 #[allow(deprecated)] // nvue_enabled proto field is deprecated but still set for backwards compat
 impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
     fn from(value: CarbideConfig) -> Self {
+        let site_fabric_null_routes = Some(rpc::common::StringList {
+            items: value
+                .effective_site_fabric_null_routes()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        });
+
         Self {
             listen: value.listen.to_string(),
             metrics_endpoint: value
@@ -4290,6 +4455,7 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
                 .into_iter()
                 .map(|x| x.to_string())
                 .collect(),
+            site_fabric_null_routes,
             max_site_prefixes_per_tenant: value.max_site_prefixes_per_tenant,
             vpc_isolation_behavior: value.vpc_isolation_behavior.to_string(),
             networks: value
@@ -4596,10 +4762,10 @@ pub struct AutoMachineRepairPluginConfig {
 #[derive(Debug, Copy, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VpcPeeringPolicy {
-    /// Only VPCs with the same network virtualization type can peer.
+    /// Only VPCs with compatible network virtualization capabilities can peer.
     Exclusive,
 
-    /// VPCs with any network virtualization type can peer with each other.
+    /// Deprecated compatibility value. Behaves as `exclusive`.
     Mixed,
 
     /// VPC peering is not allowed.
@@ -4744,12 +4910,14 @@ mod tests {
             "valid file source" {
                 r#"
 ufm_source = "local"
+bmc_site_wide_root_source = "local"
 
 [file]
 path = "/var/run/secrets/nico/ufm/credentials.yaml"
 poll_interval = "17s"
 "# => Yields(CredentialsConfig {
                     ufm_source: UfmCredentialSource::Local,
+                    bmc_site_wide_root_source: BmcSiteWideRootSource::Local,
                     file: Some(CredentialFileSourceConfig {
                         path: PathBuf::from("/var/run/secrets/nico/ufm/credentials.yaml"),
                         poll_interval: std::time::Duration::from_secs(17),
@@ -4763,6 +4931,7 @@ poll_interval = "17s"
 path = "credentials.yaml"
 "# => Yields(CredentialsConfig {
                     ufm_source: UfmCredentialSource::LocalFirst,
+                    bmc_site_wide_root_source: BmcSiteWideRootSource::LocalFirst,
                     file: Some(CredentialFileSourceConfig {
                         path: PathBuf::from("credentials.yaml"),
                         poll_interval: std::time::Duration::from_secs(60),
@@ -4781,6 +4950,10 @@ path = "credentials.yaml"
             "unknown UFM source" {
                 "ufm_source = \"fallback\"" => Fails,
             }
+
+            "unknown BMC site-wide root source" {
+                "bmc_site_wide_root_source = \"fallback\"" => Fails,
+            }
         );
     }
 
@@ -4789,12 +4962,27 @@ path = "credentials.yaml"
         value_scenarios!(
             run = |ufm_source| CredentialsConfig {
                 ufm_source,
-                file: None,
+                ..CredentialsConfig::default()
             }.uses_authoritative_local_ufm_credentials();
             "credential source modes" {
                 UfmCredentialSource::LocalFirst => false,
                 UfmCredentialSource::Backend => false,
                 UfmCredentialSource::Local => true,
+            }
+        );
+    }
+
+    #[test]
+    fn bmc_site_wide_root_source_contract() {
+        value_scenarios!(
+            run = |bmc_site_wide_root_source| CredentialsConfig {
+                bmc_site_wide_root_source,
+                ..CredentialsConfig::default()
+            }.uses_authoritative_local_bmc_site_wide_root();
+            "credential source modes" {
+                BmcSiteWideRootSource::LocalFirst => false,
+                BmcSiteWideRootSource::Backend => false,
+                BmcSiteWideRootSource::Local => true,
             }
         );
     }
@@ -5007,6 +5195,27 @@ path = "credentials.yaml"
                 "" => false,
                 "tenant_prefix_overlap_enabled = false" => false,
                 "tenant_prefix_overlap_enabled = true" => true,
+            }
+        );
+    }
+
+    #[test]
+    fn site_prefix_isolation_limit_defaults_and_bounds() {
+        scenarios!(
+            run = |patch| Figment::new()
+                .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                .merge(Toml::string(patch))
+                .extract::<CarbideConfig>()
+                .map(|config| config.max_site_prefix_isolation_rules)
+                .map_err(Box::new);
+            "accepted limits" {
+                "" => Yields(64),
+                "max_site_prefix_isolation_rules = 0" => Yields(0),
+                "max_site_prefix_isolation_rules = 64" => Yields(64),
+            }
+            "outside the initial supported range" {
+                "max_site_prefix_isolation_rules = 65" => Fails,
+                "max_site_prefix_isolation_rules = -1" => Fails,
             }
         );
     }
@@ -6102,6 +6311,10 @@ path = "credentials.yaml"
                 r#""local_first""#,
             ),
             (
+                "{{ .Values.credentials.bmcSiteWideRootSource | quote }}",
+                r#""local_first""#,
+            ),
+            (
                 "{{ range $i, $cn := .Values.auth.additionalIssuerCns }}{{ if $i }}, {{ end }}{{ $cn | quote }}{{ end }}",
                 "",
             ),
@@ -6263,6 +6476,7 @@ path = "credentials.yaml"
                 config.credentials,
                 CredentialsConfig {
                     ufm_source: UfmCredentialSource::Backend,
+                    bmc_site_wide_root_source: BmcSiteWideRootSource::Local,
                     file: Some(CredentialFileSourceConfig {
                         path: PathBuf::from("/var/run/secrets/nico/ufm/credentials.yaml"),
                         poll_interval: std::time::Duration::from_secs(17),
@@ -6467,6 +6681,61 @@ path = "credentials.yaml"
 
         let runtime_config: rpc::forge::RuntimeConfig = config.into();
         assert!(runtime_config.restart_ovs_on_use_admin_network_change);
+    }
+
+    /// The inherited SitePrefix set is structural inventory, so redundant
+    /// children collapse. Explicit null routes are operator policy: a child
+    /// route must remain available as a stronger deny beneath an importable
+    /// parent route.
+    #[test]
+    fn resolved_null_routes_preserve_explicit_prefix_boundaries() {
+        // Use a retired root outside the configured parent to make retention observable.
+        let parent = "10.0.0.0/8".parse().unwrap();
+        let equivalent_noncanonical_parent = "10.1.2.3/8".parse().unwrap();
+        let child = "10.2.0.0/24".parse().unwrap();
+        let retained = "192.0.2.0/24".parse().unwrap();
+        let tenant = "172.16.0.0/24".parse().unwrap();
+
+        value_scenarios!(
+            run = |configured| {
+                let mut config = crate::test_support::default_config::get();
+                config.site_fabric_prefixes = vec![parent, child];
+                config.site_fabric_null_routes = configured;
+                config.resolved_site_fabric_null_routes(&[retained], &[tenant])
+            };
+            "resolved null-route boundaries" {
+                // Inherited inventory collapses redundant children and retains retiring space.
+                None => vec![parent, tenant, retained],
+                // Explicit policy preserves distinct boundaries and excludes inherited space.
+                Some(vec![parent, equivalent_noncanonical_parent, child, child]) => vec![parent, child],
+                // Explicit emptiness disables both configured and retained coverage.
+                Some(vec![]) => vec![],
+            }
+        );
+    }
+
+    /// Exposes the effective list with presence even when it is empty, so the CLI
+    /// can distinguish disabled null routes from an older Core lacking the field.
+    #[test]
+    fn runtime_config_reports_effective_site_fabric_null_routes() {
+        value_scenarios!(
+            run = |configured| {
+                // Convert through the runtime RPC representation used by Version.
+                let mut config = crate::test_support::default_config::get();
+                config.site_fabric_prefixes = vec!["10.0.0.0/8".parse().unwrap()];
+                config.site_fabric_null_routes = configured;
+                let runtime_config: rpc::forge::RuntimeConfig = config.into();
+                runtime_config.site_fabric_null_routes.map(|prefixes| prefixes.items)
+            };
+            "runtime null-route presence" {
+                // Omission reports the inherited route instead of an unsupported field.
+                None => Some(vec!["10.0.0.0/8".to_string()]),
+                // An empty override stays present, distinguishing disabled from unsupported.
+                Some(vec![]) => Some(vec![]),
+                // A configured override replaces the legacy list in operator output.
+                Some(vec!["192.0.2.0/24".parse().unwrap()]) => Some(vec!["192.0.2.0/24".to_string()]),
+            }
+        );
     }
 
     /// Real-world site TOMLs may still carry the now-removed

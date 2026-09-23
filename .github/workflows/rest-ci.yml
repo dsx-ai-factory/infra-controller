@@ -54,6 +54,7 @@ jobs:
               - '.github/ci/rest-command-*'
               - '.github/ci/rest_command_bundle.py'
               - '.github/ci/test_rest_command_bundle.py'
+              - '.github/ci/prepare-rest-umbrella-chart.sh'
               - '.github/workflows/rest-*.yml'
               - 'helm/rest/**'
             core_proto:

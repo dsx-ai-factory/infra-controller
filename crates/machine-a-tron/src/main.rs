@@ -21,6 +21,7 @@ mod rms_mock;
 mod ufm_mock;
 
 use std::error::Error;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -205,7 +206,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .map(Path::to_path_buf)
         });
     let mut server_handle: CombinedServer = {
-        let server_config = bmc_mock::tls::server_config(certs_dir.clone())?;
         let bmc_router = bmc_mock::combined_router(app_context.bmc_registry.clone());
         let bmc_router = match ufm_router.clone() {
             Some(ufm_router) => ufm_router.merge(bmc_router),
@@ -218,14 +218,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // put gRPC behind a handler that rebuilds the request and resets it to
         // HTTP/1.1, which fails without an obvious cause.
         let router = router.merge(hosted_rms.router());
-        bmc_mock::CombinedServer::run_router(
-            "bmc-mock",
-            router,
-            Some(ListenerOrAddress::Address(
-                format!("0.0.0.0:{bmc_mock_port}").parse().unwrap(),
-            )),
-            server_config,
-        )
+        start_bmc_server(router, bmc_mock_port, certs_dir).await?
     };
 
     let (stop_tx, stop_rx) = mpsc::channel(1);
@@ -254,4 +247,76 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     mat_result?;
     Ok(())
+}
+
+async fn start_bmc_server(
+    router: axum::Router,
+    port: u16,
+    certs_dir: Option<PathBuf>,
+) -> Result<CombinedServer, Box<dyn Error>> {
+    let server_config = bmc_mock::tls::server_config(certs_dir)?;
+    // IPv6 pod probes and IPv4 clients must reach the same Redfish/control listener.
+    let listener =
+        metrics_endpoint::bind_tcp_listener(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))
+            .await?;
+    Ok(CombinedServer::run_router(
+        "bmc-mock",
+        router,
+        Some(ListenerOrAddress::Listener(listener.into_std()?)),
+        server_config,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use machine_a_tron::SimulatorRegistry;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn bmc_listener_serves_control_requests_on_both_families() {
+        let ipv6_available = match std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)) {
+            Ok(_) => true,
+            Err(error) => {
+                let _listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                    .expect("IPv4 loopback must be available before skipping IPv6 assertions");
+                eprintln!("IPv6 loopback unavailable; checking IPv4 only: {error}");
+                false
+            }
+        };
+        let control_state = ControlState::new(
+            SimulatorRegistry::try_from_handles(Vec::new()).expect("empty simulator registry"),
+            DeviceStatusConfig::new(0),
+            "mat-listener-test".into(),
+        );
+        let mut server = start_bmc_server(append_control_routes(None, control_state), 0, None)
+            .await
+            .expect("start MAT control server");
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("HTTPS client");
+        for address in [
+            Some(SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                server.address.port(),
+            ))),
+            ipv6_available.then(|| SocketAddr::from((Ipv6Addr::LOCALHOST, server.address.port()))),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let response = client
+                .get(format!("https://{address}/machines/status"))
+                .send()
+                .await
+                .expect("MAT control request");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+        server.stop().await.expect("stop MAT control server");
+    }
 }

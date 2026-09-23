@@ -1,0 +1,27 @@
+{{- if and .Values.enabled .Values.gateway.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mat-k8s-controller.gateway.fullname" . }}-config
+  namespace: {{ include "mat-k8s-controller.namespace" . }}
+  labels:
+    {{- include "mat-k8s-controller.labels" . | nindent 4 }}
+data:
+  gateway.toml: |
+    # mat-protocol-gateway configuration rendered by Helm. Keys are documented
+    # in crates/mat-protocol-gateway/README.md. The controller source list URL
+    # is the binary default, which matches the controller's default listener.
+    listen_address = "0.0.0.0:{{ .Values.gateway.port }}"
+
+    [tls]
+    cert_path = "/var/run/secrets/spiffe.io/tls.crt"
+    key_path = "/var/run/secrets/spiffe.io/tls.key"
+
+    # Inventory requests to the discovered machine-a-tron instances, whose
+    # certificates come from the same issuer as the gateway's own.
+    [sources]
+    {{- if not .Values.config.insecureSkipVerify }}
+    ca_cert_path = "/var/run/secrets/spiffe.io/ca.crt"
+    {{- end }}
+    insecure_skip_verify = {{ .Values.config.insecureSkipVerify }}
+{{- end }}

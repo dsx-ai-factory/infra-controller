@@ -159,6 +159,7 @@ enum ReportLoop {
     ConfigFetch,
     FmdsPush,
     NetworkStatus,
+    Lldp,
 }
 
 pub(crate) enum InventoryReport {
@@ -186,6 +187,11 @@ pub(crate) enum NetworkStatus {
     Succeeded,
     ConnectionFailed { forge_api: String, error: String },
     RpcFailed { error: String },
+}
+
+pub(crate) enum LldpCollection {
+    Succeeded,
+    Failed { error: String },
 }
 
 /// The one metric the Events below record.
@@ -362,6 +368,40 @@ struct NetworkStatusRpcFailed {
     error: String,
 }
 
+/// Counted with no log line: LLDP is collected once per main-loop iteration,
+/// so a successful collection every 10-30s is a rate to trend, not a record to
+/// read. The report it produces travels on `RecordDpuNetworkStatus`, whose own
+/// Events cover the send.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "dpu_agent_lldp_collection_succeeded",
+    metric_family = DpuAgentReport,
+    log = off,
+    message = "Collected LLDP neighbors"
+)]
+struct LldpCollectionSucceeded {
+    #[label]
+    report_loop: ReportLoop,
+    #[label]
+    outcome: Outcome,
+}
+
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "dpu_agent_lldp_collection_failed",
+    metric_family = DpuAgentReport,
+    log = error,
+    message = "Could not collect LLDP neighbors"
+)]
+struct LldpCollectionFailed {
+    #[label]
+    report_loop: ReportLoop,
+    #[label]
+    outcome: Outcome,
+    #[context]
+    error: String,
+}
+
 impl InventoryReport {
     pub(crate) fn emit(self) {
         match self {
@@ -439,6 +479,22 @@ impl NetworkStatus {
             }
             Self::RpcFailed { error } => carbide_instrument::emit(NetworkStatusRpcFailed {
                 report_loop: ReportLoop::NetworkStatus,
+                outcome: Outcome::Error,
+                error,
+            }),
+        }
+    }
+}
+
+impl LldpCollection {
+    pub(crate) fn emit(self) {
+        match self {
+            Self::Succeeded => carbide_instrument::emit(LldpCollectionSucceeded {
+                report_loop: ReportLoop::Lldp,
+                outcome: Outcome::Ok,
+            }),
+            Self::Failed { error } => carbide_instrument::emit(LldpCollectionFailed {
+                report_loop: ReportLoop::Lldp,
                 outcome: Outcome::Error,
                 error,
             }),

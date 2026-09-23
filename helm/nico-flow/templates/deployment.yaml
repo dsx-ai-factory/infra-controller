@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flow
+  namespace: {{ include "nico-flow.namespace" . }}
+  labels:
+    {{- include "nico-flow.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "nico-flow.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-flow.labels" . | nindent 8 }}
+        app: flow
+      annotations:
+        kubectl.kubernetes.io/default-container: flow
+        checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        ## -------------------------------------------------------------
+        ## flow — task, policy, and automation service (gRPC 50051)
+        ## -------------------------------------------------------------
+        - name: flow
+          image: {{ include "nico-flow.image" (dict "component" "flow" "Values" .Values) | quote }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          env:
+            ## flow's GetDeploymentEnv (carbide-rest/flow/internal/service/config.go)
+            ## requires FLOW_ENV ∈ {development, staging, production}; empty/unset
+            ## causes the pod to fail startup validation with
+            ## "FLOW_ENV is required". No implicit default in code, so set one here.
+            - name: FLOW_ENV
+              value: {{ .Values.flowEnv | quote }}
+            - name: DB_NAME
+              value: {{ .Values.database.flow.name | quote }}
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.flow.credentialsSecret }}
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.flow.credentialsSecret }}
+                  key: password
+            - name: DB_HOST
+              value: {{ .Values.database.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.database.port | quote }}
+            - name: DB_CERT_PATH
+              value: {{ .Values.database.certPath | quote }}
+            - name: NICO_CORE_API_URL
+              value: {{ .Values.nicoCoreApi.url | quote }}
+            - name: TEMPORAL_NAMESPACE
+              value: {{ .Values.temporal.namespace | quote }}
+            - name: TEMPORAL_HOST
+              value: {{ .Values.temporal.host | quote }}
+            - name: TEMPORAL_PORT
+              value: {{ .Values.temporal.port | quote }}
+            - name: TEMPORAL_CERT_PATH
+              value: {{ .Values.temporal.certPath | quote }}
+            - name: TEMPORAL_ENABLE_TLS
+              value: {{ .Values.temporal.enableTls | quote }}
+            - name: TEMPORAL_SERVER_NAME
+              value: {{ .Values.temporal.serverName | quote }}
+            - name: FLOW_DATA_ENCRYPTION_KEY_PATH
+              value: /var/run/secrets/flow-data-encryption/encryption-key
+            {{- with .Values.extraEnv.flow }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.ports.flow }}
+          resources:
+            {{- toYaml .Values.resources.flow | nindent 12 }}
+          volumeMounts:
+            - name: spiffe
+              mountPath: /var/run/secrets/spiffe.io
+              readOnly: true
+            - name: flow-config-files
+              mountPath: /etc/flow
+              readOnly: true
+            - name: temporal-client-certs
+              mountPath: {{ .Values.temporal.certPath }}
+              readOnly: true
+            - name: data-encryption-key
+              mountPath: /var/run/secrets/flow-data-encryption
+              readOnly: true
+      volumes:
+        - name: spiffe
+          secret:
+            secretName: {{ .Values.certificate.name }}
+        - name: flow-config-files
+          configMap:
+            name: flow-config-files
+        - name: temporal-client-certs
+          secret:
+            secretName: {{ .Values.temporalCert.secretName }}
+        - name: data-encryption-key
+          secret:
+            secretName: {{ default "flow-data-encryption-key" (include "nico-flow.dataEncryptionExistingSecret" .) | quote }}
+            items:
+              - key: flow-data-encryption-key
+                path: encryption-key
