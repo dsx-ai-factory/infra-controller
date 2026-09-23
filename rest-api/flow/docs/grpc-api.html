@@ -6144,6 +6144,15 @@ set together with an explicit operation target_spec. </p></td>
                   <td><p>Update BMCs (matched by MAC address; create if new) </p></td>
                 </tr>
 
+                <tr>
+                  <td>update_mask</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.FieldMask</a></td>
+                  <td></td>
+                  <td><p>Optional for backward compatibility. When omitted, position replaces all
+three coordinates. When set, supported paths are position.slot_id,
+position.tray_idx, and position.host_id; only those coordinates change. </p></td>
+                </tr>
+
             </tbody>
           </table>
 

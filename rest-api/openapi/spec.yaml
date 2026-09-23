@@ -182,6 +182,10 @@ tags:
       Expected Rack identifies a Rack that is expected to be discovered at a Site. Infrastructure Providers can pre-register Expected Racks with an operator-supplied
       rack identifier and a Rack Profile reference to help with Rack discovery and ingestion. Chassis identity and physical location information are conveyed via
       well-known label keys (`chassis.manufacturer`, `chassis.serial-number`, `chassis.model`, `location.region`, `location.datacenter`, `location.room`, `location.position`).
+  - name: Expected Rack Group
+    description: |-
+      Expected Rack Group declares an external topology identifier, racks, and device members for an NVLink domain.
+      Manufacturer and physical location are conveyed through the same well-known `chassis.*` and `location.*` labels used by Expected Racks.
   - name: Expected Switch
     description: |-
       Expected Switch identifies an NVLink Switch that is expected to be discovered at a Site. Infrastructure Providers can pre-register Expected Switches using BMC, NVOS credentials
@@ -5558,6 +5562,359 @@ paths:
           $ref: '#/components/responses/NotFoundError'
       tags:
         - Expected Rack
+  '/v2/org/{org}/nico/expected-rack-group':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    post:
+      summary: Create Expected Rack Group
+      operationId: create-expected-rack-group
+      description: |-
+        Create an Expected Rack Group to declare racks and devices at a Site. The `rackGroupId` is an opaque operator-supplied string identifier (UUID syntax is not required) that uniquely identifies the group within the Site.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also create Expected Rack Groups if they have an account with the Site's Infrastructure Provider.
+
+        Chassis identity and physical location information are conveyed via well-known label keys in `labels`:
+        - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model`
+        - `location.region`, `location.datacenter`, `location.room`, `location.position`
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedRackGroupCreateRequest'
+            examples:
+              example-1:
+                value:
+                  siteId: f97df110-f4de-492e-8849-4a6af68026b0
+                  rackGroupId: nvl5-gp1-jhb01
+                  topology: gb200_nvl72r1_c2g4
+                  racks: [{rackId: rack-01, members: [{type: NVSwitch, manufacturer: NVIDIA, id: switch-01}]}, {rackId: rack-02, members: []}]
+                  name: NVL rack group 1
+                  description: Production NVL rack group in row A
+                  labels:
+                    chassis.manufacturer: NVIDIA
+                    chassis.serial-number: NVRK0001001
+                    chassis.model: GB200-NVL72
+                    location.region: us-west-2
+                    location.datacenter: phx-dc01
+                    location.room: room-1
+                    location.position: A1
+        description: Expected Rack Group creation request
+        required: true
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpectedRackGroup'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Rack Group
+    get:
+      summary: Retrieve all Expected Rack Groups
+      operationId: get-all-expected-rack-group
+      description: |-
+        Retrieve all Expected Rack Groups.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Rack Groups if they have an account with the Site's Infrastructure Provider (siteId query parameter is required for Tenants).
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          description: ID of the Site to filter Expected Rack Groups by
+        - schema:
+            type: string
+            enum:
+              - Site
+          in: query
+          name: includeRelation
+          description: Related entity to expand
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            example: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            example: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            default: CREATED_ASC
+            enum:
+              - RACK_GROUP_ID_ASC
+              - RACK_GROUP_ID_DESC
+              - ID_ASC
+              - ID_DESC
+              - SITE_ID_ASC
+              - SITE_ID_DESC
+              - NAME_ASC
+              - NAME_DESC
+              - TOPOLOGY_ASC
+              - TOPOLOGY_DESC
+              - CREATED_ASC
+              - CREATED_DESC
+              - UPDATED_ASC
+              - UPDATED_DESC
+          in: query
+          name: orderBy
+          description: Ordering for pagination query. Defaults to `CREATED_ASC`, with ID ascending as the tie-breaker.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedRackGroup'
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_ASC"}'
+              description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Rack Group
+    put:
+      summary: Replace all Expected Rack Groups
+      operationId: replace-all-expected-rack-group
+      description: |-
+        Replace the full set of Expected Rack Groups for a Site with the provided list. All existing rows for the Site are deleted and the supplied replacement set is created atomically, so response UUIDs may differ from earlier rows even when `rackGroupId` is unchanged.
+
+        Every entry in `expectedRackGroups` must reference the same `siteId` as the top-level `siteId`. The `rackGroupId` values must be unique within the request. The `expectedRackGroups` array may be empty to clear all Expected Rack Groups for the Site.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Rack Groups if they have an account with the Site's Infrastructure Provider.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedRackGroupList'
+            examples:
+              example-1:
+                value:
+                  siteId: f97df110-f4de-492e-8849-4a6af68026b0
+                  expectedRackGroups:
+                    - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+                      rackGroupId: nvl5-gp1-jhb01
+                      topology: gb200_nvl72r1_c2g4
+                      racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}]
+                      name: NVL rack group 1
+                      description: Production NVL rack group in row A
+                      labels:
+                        chassis.manufacturer: NVIDIA
+                        chassis.serial-number: NVRK0001001
+                        chassis.model: GB200-NVL72
+                        location.datacenter: phx-dc01
+                        location.position: A1
+                    - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+                      rackGroupId: nvl5-gp2-jhb01
+                      topology: gb200_nvl72r1_c2g4
+                      racks: [{rackId: rack-03, members: []}, {rackId: rack-04, members: []}]
+                      name: NVL rack group 2
+                      description: Production NVL rack group in row A
+                      labels:
+                        chassis.manufacturer: NVIDIA
+                        chassis.serial-number: NVRK0001002
+                        chassis.model: GB200-NVL72
+                        location.datacenter: phx-dc01
+                        location.position: A2
+        description: Replace-all Expected Rack Groups request
+        required: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedRackGroup'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Rack Group
+  '/v2/org/{org}/nico/expected-rack-group/all':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    delete:
+      summary: Delete all Expected Rack Groups
+      operationId: delete-all-expected-rack-group
+      description: |-
+        Delete all Expected Rack Groups for a Site.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Infrastructure Provider must own the Expected Rack Groups.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Rack Groups if they have an account with the Site's Infrastructure Provider.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site whose Expected Rack Groups should be deleted
+      responses:
+        '204':
+          description: All Expected Rack Groups deleted successfully
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Rack Group
+  '/v2/org/{org}/nico/expected-rack-group/{id}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          format: uuid
+        name: id
+        in: path
+        required: true
+        description: ID of the Expected Rack Group
+    get:
+      summary: Retrieve Expected Rack Group
+      operationId: get-expected-rack-group
+      description: |-
+        Retrieve a specific Expected Rack Group by its `id`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Rack Groups if they have an account with the Site's Infrastructure Provider.
+      parameters:
+        - schema:
+            type: string
+            enum:
+              - Site
+          in: query
+          name: includeRelation
+          description: Related entity to expand
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpectedRackGroup'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+      tags:
+        - Expected Rack Group
+    patch:
+      summary: Update Expected Rack Group
+      operationId: update-expected-rack-group
+      description: |-
+        Update an existing Expected Rack Group identified by its `id`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Infrastructure Provider must own the Expected Rack Group.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also update Expected Rack Groups if they have an account with the Site's Infrastructure Provider.
+
+        `rackGroupId` is immutable: an update that changes it is rejected with `400` before any database mutation.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedRackGroupUpdateRequest'
+            examples:
+              example-1:
+                value:
+                  topology: gb300_nvl72r1_c2g4
+                  racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}, {rackId: rack-03, members: []}]
+                  name: NVL rack group 1 (updated)
+                  description: Production NVL rack group in row A, expanded membership
+                  labels:
+                    chassis.manufacturer: NVIDIA
+                    chassis.serial-number: NVRK0001001
+                    chassis.model: GB200-NVL72
+                    location.datacenter: phx-dc01
+                    location.position: A1
+        description: Expected Rack Group update request
+        required: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpectedRackGroup'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+      tags:
+        - Expected Rack Group
+    delete:
+      summary: Delete Expected Rack Group
+      operationId: delete-expected-rack-group
+      description: |-
+        Delete an existing Expected Rack Group identified by its `id`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Infrastructure Provider must own the Expected Rack Group.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Rack Groups if they have an account with the Site's Infrastructure Provider.
+      responses:
+        '204':
+          description: Expected Rack Group deleted successfully
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+      tags:
+        - Expected Rack Group
   '/v2/org/{org}/nico/expected-switch':
     parameters:
       - schema:
@@ -28614,6 +28971,332 @@ components:
           $ref: '#/components/schemas/Labels'
           description: |-
             User-defined key-value pairs for organizing and categorizing Expected Racks. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location.
+    ExpectedRackGroup:
+      title: ExpectedRackGroup
+      type: object
+      description: |-
+        An Expected Rack Group declares a group-level NVLink topology, racks, and expected device members. The `rackGroupId` is an operator-supplied string identifier (UUID syntax is not required) that uniquely identifies the group within the Site. Topology is supplied by the external inventory system.
+
+        Chassis identity and physical location information are conveyed via well-known label keys in `labels`:
+        - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model`
+        - `location.region`, `location.datacenter`, `location.room`, `location.position`
+      examples:
+        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          rackGroupId: nvl5-gp1-jhb01
+          siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          topology: gb200_nvl72r1_c2g4
+          racks:
+            - rackId: rack-01
+              members:
+                - type: NVSwitch
+                  manufacturer: NVIDIA
+                  id: switch-01
+            - rackId: rack-02
+              members: []
+          name: NVL rack group 1
+          description: Production NVL rack group in row A
+          labels:
+            chassis.manufacturer: NVIDIA
+            chassis.serial-number: NVRK0001001
+            chassis.model: GB200-NVL72
+            location.region: us-west-2
+            location.datacenter: phx-dc01
+            location.room: room-1
+            location.position: A1
+          created: '2019-08-24T14:15:22Z'
+          updated: '2019-08-24T14:15:22Z'
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier (UUID) for the Expected Rack Group
+          readOnly: true
+        rackGroupId:
+          type: string
+          description: Operator-supplied identifier for the rack group (opaque string; UUID syntax is not required). Unique within a Site.
+          readOnly: true
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site the Expected Rack Group belongs to
+          readOnly: true
+        site:
+          oneOf:
+            - $ref: '#/components/schemas/Site'
+            - type: 'null'
+          description: Site details when requested through includeRelation; otherwise null.
+        topology:
+          type: string
+          description: External group-level NVLink topology identifier.
+        racks:
+          type: array
+          description: Ordered racks and their devices. Arrays are always present, including empty lists. Rack IDs and device identity tuples are unique across the group, with case-sensitive comparison.
+          items:
+            $ref: '#/components/schemas/ExpectedRackGroupRack'
+        name:
+          type: string
+          description: Human-readable name of the Expected Rack Group
+        description:
+          type: string
+          description: Human-readable description of the Expected Rack Group
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: |-
+            User-defined key-value pairs for organizing and categorizing Expected Rack Groups. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location.
+        created:
+          type: string
+          format: date-time
+          description: ISO 8601 datetime when the Expected Rack Group was created
+          readOnly: true
+        updated:
+          type: string
+          format: date-time
+          description: ISO 8601 datetime when the Expected Rack Group was last updated
+          readOnly: true
+    ExpectedRackGroupCreateRequest:
+      title: ExpectedRackGroupCreateRequest
+      type: object
+      additionalProperties: false
+      description: |-
+        Request data to create a new Expected Rack Group.
+
+        The `rackGroupId` is an operator-supplied string identifier (UUID syntax is not required) that must be unique within the Site. Chassis identity and physical location information are conveyed via well-known label keys in `labels`:
+        - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model`
+        - `location.region`, `location.datacenter`, `location.room`, `location.position`
+      examples:
+        - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          rackGroupId: nvl5-gp1-jhb01
+          topology: gb200_nvl72r1_c2g4
+          racks:
+            - rackId: rack-01
+              members:
+                - type: NVSwitch
+                  manufacturer: NVIDIA
+                  id: switch-01
+            - rackId: rack-02
+              members: []
+          name: NVL rack group 1
+          description: Production NVL rack group in row A
+          labels:
+            chassis.manufacturer: NVIDIA
+            chassis.serial-number: NVRK0001001
+            chassis.model: GB200-NVL72
+            location.region: us-west-2
+            location.datacenter: phx-dc01
+            location.room: room-1
+            location.position: A1
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site the Expected Rack Group belongs to
+        rackGroupId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Operator-supplied identifier for the rack group (opaque string; UUID syntax is not required). Must be non-empty and unique within the Site.
+        topology:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: External group-level NVLink topology identifier, non-blank and at most 128 characters.
+        racks:
+          type:
+            - array
+            - 'null'
+          description: Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
+          items:
+            $ref: '#/components/schemas/ExpectedRackGroupRack'
+        name:
+          type:
+            - string
+            - 'null'
+          maxLength: 256
+          pattern: '^[\x00-\x7F]*$'
+          description: ASCII human-readable name, at most 256 characters. An empty string is allowed.
+        description:
+          type:
+            - string
+            - 'null'
+          maxLength: 1024
+          description: Human-readable description, at most 1024 UTF-8 bytes. An empty string is allowed.
+        labels:
+          $ref: '#/components/schemas/Labels'
+          propertyNames:
+            pattern: '^[\x00-\x7F]+$'
+          description: |-
+            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location.
+      required:
+        - siteId
+        - rackGroupId
+        - topology
+    ExpectedRackGroupList:
+      title: ExpectedRackGroupList
+      type: object
+      description: |-
+        Replace-all request body for Expected Rack Groups. The `expectedRackGroups` array contains the full desired set of Expected Rack Groups for the Site identified by `siteId`. All entries must reference the same `siteId` as the top-level field, and `rackGroupId` values must be unique within the request. The array is required and must not be null; use an explicit empty array to clear all Expected Rack Groups for the Site.
+      examples:
+        - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          expectedRackGroups:
+            - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+              rackGroupId: nvl5-gp1-jhb01
+              topology: gb200_nvl72r1_c2g4
+              racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}]
+              name: NVL rack group 1
+              description: Production NVL rack group in row A
+              labels:
+                chassis.manufacturer: NVIDIA
+                chassis.serial-number: NVRK0001001
+                chassis.model: GB200-NVL72
+                location.datacenter: phx-dc01
+                location.position: A1
+            - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+              rackGroupId: nvl5-gp2-jhb01
+              topology: gb200_nvl72r1_c2g4
+              racks: [{rackId: rack-03, members: []}, {rackId: rack-04, members: []}]
+              name: NVL rack group 2
+              description: Production NVL rack group in row A
+              labels:
+                chassis.manufacturer: NVIDIA
+                chassis.serial-number: NVRK0001002
+                chassis.model: GB200-NVL72
+                location.datacenter: phx-dc01
+                location.position: A2
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site whose Expected Rack Groups should be replaced
+        expectedRackGroups:
+          type: array
+          description: |-
+            The full desired set of Expected Rack Groups for the Site. Every entry must reference the same `siteId` as the top-level field, and `rackGroupId` values must be unique within the request. Required and non-null. Use an explicit empty array to clear all Expected Rack Groups for the Site.
+          items:
+            $ref: '#/components/schemas/ExpectedRackGroupCreateRequest'
+      required:
+        - siteId
+        - expectedRackGroups
+    ExpectedRackGroupUpdateRequest:
+      title: ExpectedRackGroupUpdateRequest
+      type: object
+      additionalProperties: false
+      description: |-
+        Request data to update an existing Expected Rack Group.
+
+        For single updates (PATCH /expected-rack-group/{id}), the `id` field is optional in the body and must match the path ID when provided.
+
+        The `rackGroupId` field is immutable on update — omit it or provide the existing value.
+
+        Chassis identity and physical location information are conveyed via well-known label keys in `labels`:
+        - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model`
+        - `location.region`, `location.datacenter`, `location.room`, `location.position`
+      examples:
+        - topology: gb300_nvl72r1_c2g4
+          racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}, {rackId: rack-03, members: []}]
+          name: NVL rack group 1 (updated)
+          description: Production NVL rack group in row A, expanded membership
+          labels:
+            chassis.manufacturer: NVIDIA
+            chassis.serial-number: NVRK0001001
+            chassis.model: GB200-NVL72
+            location.datacenter: phx-dc01
+            location.position: A1
+      properties:
+        id:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: |-
+            Unique identifier (UUID) of the Expected Rack Group to update. Optional for single Expected Rack Group update (must be empty or match the id from the URL path).
+        rackGroupId:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 128
+          description: |-
+            Operator-supplied rack group identifier. Immutable on update: omit this field, send `null`, or provide the existing value as a compatibility no-op. A changed value is rejected because Core uses rackGroupId as the identity key.
+        topology:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 128
+          description: Optional replacement topology identifier, non-blank and at most 128 characters.
+        racks:
+          type:
+            - array
+            - 'null'
+          description: Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
+          items:
+            $ref: '#/components/schemas/ExpectedRackGroupRack'
+        name:
+          type:
+            - string
+            - 'null'
+          maxLength: 256
+          pattern: '^[\x00-\x7F]*$'
+          description: ASCII human-readable name, at most 256 characters. An empty string is allowed.
+        description:
+          type:
+            - string
+            - 'null'
+          maxLength: 1024
+          description: Human-readable description, at most 1024 UTF-8 bytes. An empty string is allowed.
+        labels:
+          $ref: '#/components/schemas/Labels'
+          propertyNames:
+            pattern: '^[\x00-\x7F]+$'
+          description: |-
+            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location.
+    ExpectedRackGroupRack:
+      type: object
+      additionalProperties: false
+      description: One expected rack and its devices. Declaration may precede rack ingestion. Members omitted or null are treated as []; responses always return arrays.
+      required: [rackId]
+      examples:
+        - rackId: rack-01
+          members:
+            - type: NVSwitch
+              manufacturer: NVIDIA
+              id: switch-01
+      properties:
+        rackId:
+          type: string
+          minLength: 1
+          pattern: '\S'
+          description: Non-blank, case-sensitive external rack identifier, unique within the group.
+        members:
+          type:
+            - array
+            - 'null'
+          description: Ordered devices in this rack. Device identities are unique across all racks in the group.
+          items:
+            $ref: '#/components/schemas/ExpectedRackGroupMember'
+    ExpectedRackGroupMember:
+      type: object
+      additionalProperties: false
+      examples:
+        - type: NVSwitch
+          manufacturer: NVIDIA
+          id: switch-01
+      description: External device identity; the case-sensitive tuple (type, manufacturer, id) is unique within a group.
+      required: [type, manufacturer, id]
+      properties:
+        type:
+          type: string
+          minLength: 1
+          enum: [Compute, NVSwitch, PowerShelf]
+          description: Case-sensitive REST rack component type. NVSwitch maps to Switch in Core.
+        manufacturer:
+          type: string
+          minLength: 1
+          description: Non-blank manufacturer name.
+        id:
+          type: string
+          minLength: 1
+          description: Non-blank opaque external device inventory identifier.
     ExpectedSwitch:
       title: ExpectedSwitch
       type: object

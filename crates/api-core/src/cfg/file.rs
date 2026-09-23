@@ -2421,6 +2421,10 @@ pub struct DpfDeploymentConfig {
     /// DPUs.
     #[serde(default)]
     pub extra_bfcfg_parameters: Vec<String>,
+    /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
+    /// Defaults to `false` when omitted; setting it to `true` enables the delay.
+    #[serde(default)]
+    pub enable_delay_host_init: bool,
 }
 
 impl Default for DpfDeploymentConfig {
@@ -2434,6 +2438,7 @@ impl Default for DpfDeploymentConfig {
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
+            enable_delay_host_init: false,
         }
     }
 }
@@ -4780,7 +4785,16 @@ pub struct VmaasConfig {
     #[serde(default = "default_to_true")]
     pub allow_instance_vf: bool,
 
-    /// Select which representors from the configured VF population HBN is expected to use.
+    /// Comma-separated representors HBN is expected to use during DPU provisioning.
+    /// When `allow_instance_vf` is true, non-DPF instance admission recognizes individual
+    /// `pf0vfN` entries and inclusive `pf0vfN-pf0vfM` ranges; other representors do not select
+    /// tenant VFs. Requested VF IDs are limited to VF0 through VF15 and must also be lower than
+    /// `dpu_config.num_of_vfs`. An explicit value replaces the fallback; when omitted or empty,
+    /// VF0 through VF13 are selected and still capped by `num_of_vfs`. Malformed PF0 VF selectors,
+    /// whitespace, and empty list entries cause non-DPF instance creation and network updates to
+    /// fail. DPF-managed hosts ignore this field for instance admission: BF4 Astra hosts use the
+    /// static VF0 through VF13 inventory provisioned for Astra, while other DPF hosts use the
+    /// configured intercept topology or retain topology-free compatibility behavior.
     pub hbn_reps: Option<String>,
 
     /// Provisioning-time topology for bridges inserted between host representors and HBN.
@@ -8175,7 +8189,23 @@ helm_repo_url = "oci://registry.example.test/doca"
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
+            enable_delay_host_init: false,
         }
+    }
+
+    #[test]
+    fn dpf_deployment_delay_host_init_defaults_to_false_and_accepts_true() {
+        let base = r#"
+            flavor_name = "flavor"
+            deployment_name = "deployment"
+            node_label_key = "example.com/dpu"
+        "#;
+        let defaulted: DpfDeploymentConfig = toml::from_str(base).unwrap();
+        let enabled: DpfDeploymentConfig =
+            toml::from_str(&format!("{base}\nenable_delay_host_init = true")).unwrap();
+
+        assert!(!defaulted.enable_delay_host_init);
+        assert!(enabled.enable_delay_host_init);
     }
 
     /// Verifies deployment selectors remain distinct from each other and NICo-owned labels.

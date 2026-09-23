@@ -628,6 +628,42 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteExpectedRackHandler(dbSession, scp, cfg),
 		},
+		// ExpectedRackGroup endpoints
+		{
+			Path:    apiPathPrefix + "/expected-rack-group",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCreateExpectedRackGroupHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllExpectedRackGroupHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewReplaceAllExpectedRackGroupsHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group/all",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteAllExpectedRackGroupsHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group/:id",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetExpectedRackGroupHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group/:id",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateExpectedRackGroupHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-rack-group/:id",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteExpectedRackGroupHandler(dbSession, scp, cfg),
+		},
 		// ExpectedSwitch endpoints
 		{
 			Path:    apiPathPrefix + "/expected-switch",

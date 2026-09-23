@@ -8,7 +8,7 @@ configuration guides linked below.
 
 | Fabric | Operator-facing primitive | Isolation enforced by |
 |---|---|---|
-| Ethernet | VPC + VpcPrefix (+ optional Network Security Group) | DPU VRF per VPC (HBN / NVUE) over a pure type-5 EVPN overlay |
+| Ethernet | VPC + VpcPrefix (+ optional Network Security Group) | DPU VRF per VPC (HBN / NVUE) over a pure type-5 EVPN overlay with null-routes to isolated tenant VPCs |
 | InfiniBand | InfiniBand partition | UFM P_Key partition membership; `IbFabricMonitor` reconciler |
 | NVLink | NVLink logical partition | NMX-C partition lifecycle; `NvlPartitionMonitor` reconciler |
 

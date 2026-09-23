@@ -122,6 +122,8 @@ navigation:
       contents:
         - page: IP and Network Configuration
           path: provisioning/ip-and-network-configuration.md
+        - page: Deploy DHCPv6
+          path: provisioning/dhcpv6-deployment.md
         - page: Ingesting Hosts
           path: provisioning/ingesting-hosts.md
         - page: Ingesting Hosts (REST API)

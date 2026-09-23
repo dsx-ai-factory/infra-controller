@@ -47,7 +47,9 @@ network security group - will COMPLETELY overwrite any existing labels
 
 `-s, --stateful-egress <STATEFUL_EGRESS>`
 
-Optional, whether egress rules are stateful
+Set whether egress rules are stateful. Omitted: unchanged. Changing
+false to true is rejected when site-level stateful ACL support is
+disabled
 
 *Possible values:*
 

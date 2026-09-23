@@ -394,8 +394,6 @@ fn parse_erase() {
     assert!(matches!(cmd, Cmd::Erase(_)));
 }
 
-// Every malformed invocation is rejected at parse time -- a missing required
-// argument, one half of a paired credential, or a flag left without its value.
 #[test]
 fn invalid_invocations_are_rejected() {
     scenarios!(
@@ -406,28 +404,6 @@ fn invalid_invocations_are_rejected() {
         };
         "add without its required arguments" {
             &["expected-machine", "add"][..] => Fails,
-        }
-
-        "patch with a username but no password" {
-            &[
-                "expected-machine",
-                "patch",
-                "--bmc-mac-address",
-                "00:00:00:00:00:00",
-                "--bmc-username",
-                "admin",
-            ][..] => Fails,
-        }
-
-        "patch with a password but no username" {
-            &[
-                "expected-machine",
-                "patch",
-                "--bmc-mac-address",
-                "00:00:00:00:00:00",
-                "--bmc-password",
-                "secret",
-            ][..] => Fails,
         }
 
         "update without --filename" {

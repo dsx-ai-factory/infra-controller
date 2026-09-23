@@ -21,7 +21,8 @@ metrics port for each component:
 | nico-api (per-object) | 9091 | Per-object state progress (disabled by default, high cardinality) |
 | nico-hardware-health | 9009 | Hardware telemetry, sensor readings |
 | nico-bmc-proxy | 1080 | BMC connection stats |
-| nico-dhcp | 1089 | Lease counts, request handling |
+| nico-dhcp | 1089 | IPv4 lease counts, request handling |
+| nico-dhcp6 (opt-in) | 1089 | IPv6 request, drop, and reply counts |
 | nico-dns | 8053 | Query rates, resolution latency |
 | nico-pxe | 8080 | Boot request counts |
 | nico-ssh-console-rs | 9009 | Console sessions, BMC connections |
@@ -30,6 +31,58 @@ All NICo metrics use the `carbide_` prefix. Metric types are indicated by the `#
 comment in Prometheus exposition format. Note that NICo uses `_count` as a suffix for
 some gauges (e.g., `carbide_hosts_usable_count`, `carbide_dpus_healthy_count`) - check
 the `# TYPE` metadata to determine the actual metric type.
+
+### Metrics Services and IPv6
+
+Metrics-only Services use `ipFamilyPolicy: PreferDualStack`, which requests both Service address families when the cluster supports them and permits single-stack clusters. This includes the separate DHCPv4 and opt-in DHCPv6 targets, API metrics, hardware-health metrics and telemetry, DSX, BMC proxy, PXE, SSH console, and the telemetry collector. ServiceMonitor discovery still depends on reachable pod endpoints. A dual-stack Service does not configure IPv6 on the pods.
+
+The combined `nico-unbound` Service preserves DNS on UDP/TCP 53 and exporter metrics on TCP 9167. It defaults to IPv4. `unbound.ipv6.enabled` optionally requests dual-stack exposure after you configure and verify the selected images. The Unbound ServiceMonitor selects its metrics label and named exporter port. [Unbound IPv6 Transport](../configuration/dns.md#unbound-ipv6-transport) describes the image/configuration contract and enablement checks.
+
+The BlueField `nico-otelcol` chart defaults the Boolean `prometheusRemoteAccess` to `false`, binding its Prometheus exporter to `127.0.0.1:<prometheusPort>`. The `prometheusPort` chart value defaults to 9999 and accepts integers from 1 through 65535. For direct Service scraping over IPv4 or IPv6, explicitly set `prometheusRemoteAccess: true` in the chart values. The exporter then binds `:<prometheusPort>`, matching the Service's target port. DOCA Platform Framework (DPF) deployments accept this chart value through `dpf.services.otel.extra_helm_values`.
+
+The collector uses `hostNetwork: true`, so enabling remote access exposes unauthenticated metrics on DPU host interfaces. Inbound routing and firewall rules determine reachability. Its existing OpenTelemetry Protocol (OTLP) export to the site gateway remains enabled and does not require `prometheusRemoteAccess`. The separate gateway scrape procedure uses this OTLP path.
+
+The DSX and hardware-health binaries default to `[::]:9009`, and PXE defaults to `[::]:8080`. These defaults live in the binaries, so chart-only upgrades with `--reuse-values` retain an older pinned image's IPv4 defaults. Explicit `CARBIDE_DSX_CONSUMER__METRICS__ENDPOINT`, `CARBIDE_HEALTH__METRICS__ENDPOINT`, and `PXE_BIND_ADDRESS` entries in `env` take precedence. For DSX and hardware-health, environment settings override the optional TOML file, which overrides binary defaults. PXE uses its bind address for both HTTP boot traffic and metrics. `PXE_BIND_PORT` overrides port 8080.
+
+The shared TCP listener explicitly enables IPv4-mapped connections for an IPv6 wildcard, including on nodes with `net.ipv6.bindv6only=1`. If IPv6 socket creation or dual-stack configuration fails, it logs the cause and binds the IPv4 wildcard on the same port. Explicit addresses retain their family. Bind and listen errors propagate. Refer to [Deploy DHCPv6](../provisioning/dhcpv6-deployment.md) for the opt-in workload and metrics port contract.
+
+### Opt-in IPv6 Scrape Discovery
+
+Legacy Kubernetes `Endpoints` discovery exposes only a Service's primary address family. To discover IPv6 pod targets from dual-stack Services, use `EndpointSlice` discovery as well as reachable IPv6 pod addresses. `PreferDualStack` alone does not change the discovered targets.
+
+For the bundled kube-prometheus-stack 59.1.0 installation, apply the optional [IPv6 scrape overlay](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/values-nico-ipv6-scraping.yaml). It uses Prometheus 2.52's `additionalScrapeConfigs` and grants its service account read access to EndpointSlices. The pinned Operator 0.74.0 and existing custom resource definitions (CRDs) do not need an upgrade.
+
+Upgrade the NICo chart first: its primary ServiceMonitors must carry `app.kubernetes.io/metrics`. The overlay excludes those labeled monitors from this Prometheus and replaces them with one IPv6-only primary-metrics job. Other collectors can continue selecting the same monitor objects. Optional hardware-health `/telemetry` and API per-object monitors retain their existing discovery. This recipe does not migrate those optional paths to IPv6.
+
+If the optional DPU gateway is installed (`WITH_DPU=true`), first configure its wildcard metrics listener and apply the [metrics-only Service](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/otel-collector-gateway-metrics.yaml). The [bundled gateway values](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/values-otel-collector-gateway.yaml) bind the exporter on all pod interfaces using `ports.prometheus.containerPort` (bundled default 9999). Existing installations that bind only the primary pod address need an endpoint update. The gateway pod must have a reachable IPv6 address in addition to its primary IPv4 address. The separate Service requests `PreferDualStack`, exposes TCP 9999, and targets the named `prometheus` pod port. The existing OTLP LoadBalancer and receiver retain their configuration.
+
+For an existing gateway, update only the exporter endpoint and then apply the metrics Service:
+
+```bash
+helm upgrade otel-collector-gateway open-telemetry/opentelemetry-collector \
+    --version 0.106.0 -n otel --reuse-values \
+    --set-string 'config.exporters.prometheus/site.endpoint=:{{ .Values.ports.prometheus.containerPort }}' \
+    --wait --timeout 300s
+kubectl apply -f helm-prereqs/observability/otel-collector-gateway-metrics.yaml
+```
+
+The quoted `--set-string` value follows the installed `ports.prometheus.containerPort` override. `--reuse-values` retains the installed image, certificates, site label, ports, and LoadBalancer settings. If you use the upstream chart's `alternateConfig`, apply the same endpoint change there because it replaces `config` entirely. If you use a custom gateway release, namespace, or `nameOverride`, also adjust the metrics Service selector and scrape discovery. The IPv6 scrape overlay replaces the gateway's static DNS target with IPv6 EndpointSlices from this metrics-only Service. It discovers no gateway targets until that Service has IPv6 endpoints.
+
+Before switching Prometheus, verify that every selected pod has a reachable IPv6 address and that its `/metrics` endpoint responds through that address from the collector's network. Upgrade or configure DSX, hardware-health, and PXE to accept IPv6 metrics connections. A chart-only upgrade preserves an older pinned image's IPv4 listener defaults. Unbound additionally requires `unbound.ipv6.enabled=true`. Keep the existing collection until these checks pass.
+
+After verifying the NICo endpoints and configuring any installed gateway, switch Prometheus:
+
+```bash
+helm upgrade obs prometheus-community/kube-prometheus-stack \
+    --version 59.1.0 -n monitoring --reuse-values \
+    -f helm-prereqs/observability/values-nico-ipv6-scraping.yaml
+```
+
+Unbound's exporter remains on `nico-unbound:9167`, while the scrape job excludes DNS ports. The job discovers both independent DHCP metrics targets and selects only IPv6 EndpointSlices, preventing duplicate IPv4/IPv6 scrapes.
+
+The overlay covers built-in component names. Custom `nameOverride` values require corresponding changes to both Service selection and ServiceMonitor exclusions. Preserve site-specific scrape jobs, role-based access control (RBAC) rules, and selector expressions when merging the overlay: Helm replaces lists. Retain the wildcard exporter endpoint on subsequent gateway upgrades, and reapply the Prometheus overlay after rerunning the observability installer.
+
+For an existing hand-written Prometheus or OpenTelemetry (OTel) scrape job, replace its legacy NICo job with the overlay's `nico-ipv6` job and grant that collector's service account the same EndpointSlice permissions. If it also scrapes the DPU gateway, configure the gateway as above and replace its gateway job with the overlay's `otel-collector-gateway` job. Keep the EndpointSlice metadata names in the relabel rules. The old `__meta_kubernetes_endpoint_port_name` label is unavailable with this discovery role.
 
 ## 2. What the metrics tell you
 

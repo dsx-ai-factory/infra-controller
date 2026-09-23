@@ -67,7 +67,6 @@ pub(crate) struct Args {
         short = 'u',
         long,
         group = "group",
-        requires("bmc_password"),
         help = "BMC username of the expected switch"
     )]
     bmc_username: Option<String>,
@@ -75,7 +74,6 @@ pub(crate) struct Args {
         short = 'p',
         long,
         group = "group",
-        requires("bmc_username"),
         help = "BMC password of the expected switch"
     )]
     bmc_password: Option<String>,
@@ -139,7 +137,8 @@ pub(crate) struct Args {
     #[clap(
         long = "nvos-ip-address",
         value_name = "NVOS_IP_ADDRESS",
-        help = "Static IP for the single wired NVOS port. Requires exactly one --nvos-mac-address"
+        help = "Static IP for the single wired NVOS port. The updated switch must have exactly one NVOS MAC address",
+        long_help = "Static IP for the single wired NVOS port. The updated switch must have exactly one NVOS MAC address. When Core supports PATCH or masked updates, omit --nvos-mac-address only if the stored list already contains exactly one MAC; otherwise, supply exactly one --nvos-mac-address to replace the list. Older servers that support NVOS IPs but replace the full record require exactly one --nvos-mac-address in this command; omitted fields can be cleared. Servers without NVOS IP support ignore this field"
     )]
     nvos_ip_address: Option<IpAddr>,
 
@@ -241,6 +240,8 @@ mod tests {
 
         scenarios!(parse_update:
             "standalone update fields" {
+                ["--bmc-username", "replacement"].as_slice() => Yields(vec![Field::BmcUsername]),
+                ["--bmc-password", "replacement"].as_slice() => Yields(vec![Field::BmcPassword]),
                 ["--bmc-ip-address", "192.0.2.10"].as_slice() => Yields(vec![Field::BmcIpAddress]),
                 ["--nvos-ip-address", "192.0.2.20"].as_slice() => Yields(vec![Field::NvosIpAddress]),
                 ["--rack_id", "12345678-1234-5678-90ab-cdef01234567"].as_slice() => Yields(vec![Field::RackId]),

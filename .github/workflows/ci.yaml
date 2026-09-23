@@ -2163,6 +2163,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends python3-yaml busybox
           /usr/bin/python3 -B bluefield/charts/nico-fmds/tests/test_listener_command.py
 
+      - name: Test optional DPU OTEL Pod configuration
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml
+          /usr/bin/python3 -B bluefield/otel/site-controller/otel-agent/test_render_pod.py
+
   build-push-bluefield-helm-charts:
     needs:
       - prepare

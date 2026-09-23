@@ -221,6 +221,21 @@ async fn patch_expected_machine_preserves_unselected_fields(pool: PgPool) {
         .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
             expected_machine: Some(forge::ExpectedMachine {
                 id: rpc_id(id),
+                bmc_username: "corrected-user".to_string(),
+                bmc_password: "unselected-password".to_string(),
+                ..Default::default()
+            }),
+            update_mask: mask(&["bmc_username"]),
+        }))
+        .await
+        .unwrap();
+    expected["bmc_username"] = json!("corrected-user");
+    assert_eq!(machine_row(&env.pool, id).await, expected);
+
+    env.api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
                 is_dpf_enabled: Some(false),
                 default_pause_ingestion_and_poweron: Some(false),
                 bmc_retain_credentials: Some(false),
@@ -613,10 +628,47 @@ async fn patch_expected_power_shelf_preserves_unselected_fields(pool: PgPool) {
         .unwrap();
     expected["bmc_retain_credentials"] = json!(false);
     assert_eq!(power_shelf_row(&env.pool, id).await, expected);
+
+    for (path, patch, updated) in [
+        (
+            "bmc_username",
+            forge::ExpectedPowerShelf {
+                bmc_username: "corrected-user".to_string(),
+                ..Default::default()
+            },
+            "corrected-user",
+        ),
+        (
+            "bmc_password",
+            forge::ExpectedPowerShelf {
+                bmc_username: "unselected-user".to_string(),
+                bmc_password: "corrected-password".to_string(),
+                ..Default::default()
+            },
+            "corrected-password",
+        ),
+    ] {
+        env.api
+            .patch_expected_power_shelf(Request::new(forge::PatchExpectedPowerShelfRequest {
+                expected_power_shelf: Some(forge::ExpectedPowerShelf {
+                    expected_power_shelf_id: rpc_id(id),
+                    ..patch
+                }),
+                update_mask: mask(&[path]),
+            }))
+            .await
+            .unwrap();
+        expected[path] = json!(updated);
+        assert_eq!(
+            power_shelf_row(&env.pool, id).await,
+            expected,
+            "selected field: {path}"
+        );
+    }
 }
 
 #[crate::sqlx_test]
-async fn patch_expected_switch_preserves_unselected_pairs(pool: PgPool) {
+async fn patch_expected_switch_preserves_unselected_fields(pool: PgPool) {
     struct Case {
         paths: Vec<&'static str>,
         patch: forge::ExpectedSwitch,
@@ -682,6 +734,39 @@ async fn patch_expected_switch_preserves_unselected_pairs(pool: PgPool) {
             ],
         },
         Case {
+            paths: vec!["bmc_username"],
+            patch: forge::ExpectedSwitch {
+                bmc_username: "fixed-bmc-user".to_string(),
+                ..Default::default()
+            },
+            changed_columns: vec![("bmc_username", json!("fixed-bmc-user"))],
+        },
+        Case {
+            paths: vec!["bmc_password"],
+            patch: forge::ExpectedSwitch {
+                bmc_password: "fixed-bmc-pass".to_string(),
+                ..Default::default()
+            },
+            changed_columns: vec![("bmc_password", json!("fixed-bmc-pass"))],
+        },
+        Case {
+            paths: vec!["nvos_username"],
+            patch: forge::ExpectedSwitch {
+                nvos_username: Some("fixed-nvos-user".to_string()),
+                nvos_password: Some("unselected-password".to_string()),
+                ..Default::default()
+            },
+            changed_columns: vec![("nvos_username", json!("fixed-nvos-user"))],
+        },
+        Case {
+            paths: vec!["nvos_password"],
+            patch: forge::ExpectedSwitch {
+                nvos_password: Some("corrected-nvos-password".to_string()),
+                ..Default::default()
+            },
+            changed_columns: vec![("nvos_password", json!("corrected-nvos-password"))],
+        },
+        Case {
             paths: vec!["bmc_retain_credentials"],
             patch: forge::ExpectedSwitch {
                 bmc_retain_credentials: Some(false),
@@ -709,6 +794,62 @@ async fn patch_expected_switch_preserves_unselected_pairs(pool: PgPool) {
             "selected fields: {paths:?}"
         );
     }
+}
+
+#[crate::sqlx_test]
+async fn patch_expected_switch_requires_complete_initial_nvos_credentials(pool: PgPool) {
+    let env = create_test_env(pool).await;
+    let id = Uuid::new_v4();
+    env.api
+        .add_expected_switch(Request::new(forge::ExpectedSwitch {
+            expected_switch_id: rpc_id(id),
+            bmc_mac_address: "02:00:00:00:59:04".to_string(),
+            bmc_username: "bmc-user".to_string(),
+            bmc_password: "bmc-password".to_string(),
+            switch_serial_number: "SWITCH-004".to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    let mut expected = switch_row(&env.pool, id).await;
+    let patch = forge::ExpectedSwitch {
+        expected_switch_id: rpc_id(id),
+        bmc_password: "new-bmc-password".to_string(),
+        nvos_username: Some("new-nvos-user".to_string()),
+        ..Default::default()
+    };
+
+    let error = env
+        .api
+        .patch_expected_switch(Request::new(forge::PatchExpectedSwitchRequest {
+            expected_switch: Some(patch.clone()),
+            update_mask: mask(&["bmc_password", "nvos_username"]),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
+    assert!(
+        error
+            .message()
+            .contains("nvos_username and nvos_password must be set together"),
+        "{error}"
+    );
+    assert_eq!(switch_row(&env.pool, id).await, expected);
+
+    env.api
+        .patch_expected_switch(Request::new(forge::PatchExpectedSwitchRequest {
+            expected_switch: Some(forge::ExpectedSwitch {
+                nvos_password: Some("new-nvos-password".to_string()),
+                ..patch
+            }),
+            update_mask: mask(&["bmc_password", "nvos_username", "nvos_password"]),
+        }))
+        .await
+        .unwrap();
+    expected["bmc_password"] = json!("new-bmc-password");
+    expected["nvos_username"] = json!("new-nvos-user");
+    expected["nvos_password"] = json!("new-nvos-password");
+    assert_eq!(switch_row(&env.pool, id).await, expected);
 }
 
 #[crate::sqlx_test]
@@ -866,13 +1007,20 @@ async fn patch_expected_machines_preserves_distinct_credentials_and_rolls_back(p
             patches: ids
                 .into_iter()
                 .rev()
-                .map(|id| patch_name(id, "batch updated"))
+                .map(|id| forge::PatchExpectedMachineRequest {
+                    expected_machine: Some(forge::ExpectedMachine {
+                        id: rpc_id(id),
+                        bmc_password: "batch-password".to_string(),
+                        ..Default::default()
+                    }),
+                    update_mask: mask(&["bmc_password"]),
+                })
                 .collect(),
         }))
         .await
         .unwrap();
     for (id, expected) in ids.into_iter().zip(&mut expected) {
-        expected["metadata_name"] = json!("batch updated");
+        expected["bmc_password"] = json!("batch-password");
         assert_eq!(machine_row(&env.pool, id).await, *expected);
     }
 
@@ -903,13 +1051,12 @@ async fn patch_expected_machines_preserves_distinct_credentials_and_rolls_back(p
 
     for (case, patches) in [
         (
-            "incomplete credential pair",
+            "empty selected credential",
             vec![
                 patch_name(ids[0], "must not change"),
                 forge::PatchExpectedMachineRequest {
                     expected_machine: Some(forge::ExpectedMachine {
                         id: rpc_id(ids[1]),
-                        bmc_username: "only-username".to_string(),
                         ..Default::default()
                     }),
                     update_mask: mask(&["bmc_username"]),
@@ -969,13 +1116,14 @@ async fn patch_expected_machine_merges_after_a_concurrent_writer_commits(
         api.patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
             expected_machine: Some(forge::ExpectedMachine {
                 id: rpc_id(id),
+                bmc_password: "corrected-password".to_string(),
                 metadata: Some(forge::Metadata {
                     name: "after lock".to_string(),
                     ..Default::default()
                 }),
                 ..Default::default()
             }),
-            update_mask: mask(&["metadata.name"]),
+            update_mask: mask(&["bmc_password", "metadata.name"]),
         }))
         .await
     });
@@ -984,7 +1132,7 @@ async fn patch_expected_machine_merges_after_a_concurrent_writer_commits(
     tokio::time::timeout(std::time::Duration::from_secs(10), patch_task).await???;
 
     expected["bmc_username"] = json!("concurrent-user");
-    expected["bmc_password"] = json!("concurrent-password");
+    expected["bmc_password"] = json!("corrected-password");
     expected["metadata_name"] = json!("after lock");
     assert_eq!(machine_row(&env.pool, id).await, expected);
     Ok(())

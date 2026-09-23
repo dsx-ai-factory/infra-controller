@@ -409,3 +409,17 @@ message SitePrefixInventory {
   // Page information, including every SitePrefix ID in a successful run
   InventoryPage inventory_page = 5;
 }
+
+// ExpectedRackGroupInventory - inventory info of all Expected Rack Groups on Site
+message ExpectedRackGroupInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of Expected Rack Group inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of Expected Rack Groups
+  repeated forge.ExpectedRackGroup expected_rack_groups = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}

@@ -15,7 +15,9 @@
  * limitations under the License.
  */
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 
+use itertools::Itertools;
 use model::redfish::{ActionRequest, BMCResponse};
 use sqlx::PgConnection;
 use sqlx::types::Json;
@@ -93,21 +95,31 @@ pub async fn fetch_request(
     Ok(action_request)
 }
 
+/// `find_serials` maps each distinct BMC address to its chassis serial using
+/// the database's address text. Equivalent inputs identify one BMC; any missing
+/// or invalid input returns `NotFoundError` with the requested address text.
 pub async fn find_serials(
     ips: &[String],
     txn: &mut PgConnection,
 ) -> Result<HashMap<String, String>, DatabaseError> {
-    let pairs = crate::machine_topology::find_machine_bmc_pairs(&mut *txn, ips.to_vec()).await?;
-    if pairs.len() != ips.len() {
-        let requested_ips: HashSet<_> = ips.iter().cloned().collect();
-        let found_ips: HashSet<_> = pairs.into_iter().map(|p| p.1).collect();
+    let pairs = crate::machine_topology::find_machine_bmc_pairs(&mut *txn, ips).await?;
+    let found_ips = pairs
+        .iter()
+        .map(|(_, ip)| ip.parse())
+        .collect::<Result<HashSet<IpAddr>, _>>()?;
+    let missing_ips: Vec<_> = ips
+        .iter()
+        .filter(|requested| match requested.parse::<IpAddr>() {
+            Ok(address) => !found_ips.contains(&address),
+            Err(_) => true,
+        })
+        .map(String::as_str)
+        .unique()
+        .collect();
+    if !missing_ips.is_empty() {
         return Err(DatabaseError::NotFoundError {
             kind: "machine topologies",
-            id: requested_ips
-                .difference(&found_ips)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", "),
+            id: missing_ips.join(", "),
         });
     }
     let topologies = crate::machine_topology::find_by_machine_ids(

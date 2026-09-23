@@ -366,7 +366,7 @@ The isolated configuration is only applied when the site controller is unaware o
   "instance_id": {
     "value": "b4c38910-9319-4bee-ac04-10cabb569a4c"
   },
-  "network_virtualization_type": 2,
+  "network_virtualization_type": 5,
   "vpc_vni": 42,
   "route_servers": [
     "192.168.126.5",
@@ -386,6 +386,14 @@ The isolated configuration is only applied when the site controller is unaware o
     "192.168.98.0/24",
     "172.16.205.0/24"
   ],
+  "site_fabric_null_routes": {
+      "items": [
+        "172.16.205.0/24",
+        "192.168.4.128/26",
+        "192.168.98.0/24"
+      ]
+  },
+  "vpc_peer_vnis_authoritative": true,
   "vpc_isolation_behavior": 2,
   "stateful_acls_enabled": false,
   "enable_dhcp": true,
