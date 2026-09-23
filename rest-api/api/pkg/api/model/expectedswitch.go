@@ -137,7 +137,8 @@ func (escr *APIExpectedSwitchCreateRequest) Validate() error {
 
 // APIExpectedSwitchUpdateRequest is the data structure to capture user request to update an ExpectedSwitch
 type APIExpectedSwitchUpdateRequest struct {
-	// ID is required for batch updates (must be empty or match path value for single update)
+	// ID can be omitted or null for PATCH. A supplied string must match the
+	// path UUID in lowercase hyphenated form; an empty string is invalid.
 	ID *string `json:"id"`
 	// BmcMacAddress is the MAC address of the expected switch's BMC
 	BmcMacAddress *string `json:"bmcMacAddress"`

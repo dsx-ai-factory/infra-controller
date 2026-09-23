@@ -66,7 +66,8 @@ func (ercr *APIExpectedRackCreateRequest) Validate() error {
 
 // APIExpectedRackUpdateRequest is the data structure to capture user request to update an ExpectedRack
 type APIExpectedRackUpdateRequest struct {
-	// ID is required for batch updates (must be empty or match path value for single update).
+	// ID can be omitted or null for PATCH. A supplied string must match the
+	// path UUID in lowercase hyphenated form; an empty string is invalid.
 	ID *string `json:"id"`
 	// RackID is the operator-supplied rack identifier. It is immutable on
 	// update: it may be omitted or set to the existing value, but a changed

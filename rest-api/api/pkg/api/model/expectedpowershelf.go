@@ -97,7 +97,8 @@ func (epcr *APIExpectedPowerShelfCreateRequest) Validate() error {
 
 // APIExpectedPowerShelfUpdateRequest is the data structure to capture user request to update an ExpectedPowerShelf
 type APIExpectedPowerShelfUpdateRequest struct {
-	// ID is required for batch updates (must be empty or match path value for single update)
+	// ID can be omitted or null for PATCH. A supplied string must match the
+	// path UUID in lowercase hyphenated form; an empty string is invalid.
 	ID *string `json:"id"`
 	// BmcMacAddress is the MAC address of the expected power shelf's BMC
 	BmcMacAddress *string `json:"bmcMacAddress"`
