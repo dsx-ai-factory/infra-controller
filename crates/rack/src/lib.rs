@@ -21,10 +21,14 @@ use state_controller::state_handler::{ExternalServiceError, StateHandlerError};
 #[cfg(feature = "test-support")]
 mod rms_sim;
 
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    pub use crate::rms_sim::{MockRmsClient, RmsSim};
+}
+
 pub mod bms_client;
 pub mod firmware_object;
 pub mod firmware_update;
-pub mod rms_client;
 pub mod rms_node_type;
 
 pub fn rack_manager_error(operation: &'static str, error: RackManagerError) -> StateHandlerError {

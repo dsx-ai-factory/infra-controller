@@ -27,8 +27,7 @@ Start the mock BMC in one terminal:
 cargo run -p bmc-mock
 ```
 
-Wait for the mock BMC to report that it is listening on `0.0.0.0:1266`. Access the mock BMC's logs with the following command:
-
+Wait for the mock BMC to report that it is listening on port `1266`.
 
 In a second terminal, start hardware health with the local-test
 configuration:

@@ -17,9 +17,9 @@
 
 //! Delta Energy Systems power shelf.
 //!
-//! Modeled on the real Delta scrape under
-//! `libredfish/tests/mockups/delta_powershelf/`. Two traits distinguish it
-//! from the Lite-On shelf and drive the site-explorer Delta code path:
+//! Modeled on a live Delta 810 shelf's Redfish responses, observed during
+//! development. Two traits distinguish it from the Lite-On shelf and drive
+//! the site-explorer Delta code path:
 //!
 //! * There is **no `/redfish/v1/Systems` collection** — the service root does
 //!   not advertise `Systems` and the collection endpoint 404s (see
@@ -33,7 +33,7 @@ use std::borrow::Cow;
 
 use mac_address::MacAddress;
 
-use crate::redfish;
+use crate::{Callbacks, redfish};
 
 /// Chassis id reported by a Delta power shelf (matches the scrape).
 const CHASSIS_ID: &str = "chassis";
@@ -51,6 +51,10 @@ pub(crate) struct DeltaPowerShelf<'a> {
 }
 
 impl DeltaPowerShelf<'_> {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         redfish::manager::Config {
             managers: vec![redfish::manager::SingleConfig {
@@ -74,7 +78,7 @@ impl DeltaPowerShelf<'_> {
     /// Delta power shelves expose no `ComputerSystem`; the collection is empty
     /// and (via the `exposes_computer_systems` gate) is not advertised or
     /// served. Site-explorer synthesizes a system from the chassis instead.
-    pub(crate) fn system_config(&self) -> redfish::computer_system::Config {
+    pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
         redfish::computer_system::Config { systems: vec![] }
     }
 
@@ -100,6 +104,8 @@ impl DeltaPowerShelf<'_> {
                                 &format!("PowerSupplyUnit {}", idx + 1),
                             ))
                             .oem_delta_power_state(on)
+                            .oem_delta_fan_speed_target(0)
+                            .power_capacity_watts(5500.0)
                             .status(redfish::resource::Status::Ok)
                             .build()
                         })

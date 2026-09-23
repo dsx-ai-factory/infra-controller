@@ -25,7 +25,7 @@
 
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId, StableHostMachineId};
 use clap::{CommandFactory, Parser};
 
 use super::*;
@@ -139,7 +139,7 @@ fn parse_quarantine_routes_to_quarantine() {
             let matches = parse_leaf::<Cmd>(argv, &["quarantine", action]).map_err(drop)?;
             Ok::<_, ()>((
                 matches
-                    .get_one::<MachineId>("host")
+                    .get_one::<HostMachineId>("host")
                     .copied()
                     .expect("host is required"),
                 if action == "on" {
@@ -158,7 +158,7 @@ fn parse_quarantine_routes_to_quarantine() {
                 TEST_MACHINE_ID,
                 "--reason",
                 "Security issue",
-            ][..] => Yields((TEST_MACHINE_ID.parse::<MachineId>().unwrap(), "Security issue".to_string())),
+            ][..] => Yields((TEST_MACHINE_ID.parse::<HostMachineId>().unwrap(), "Security issue".to_string())),
         }
 
         "off with host" {
@@ -168,7 +168,7 @@ fn parse_quarantine_routes_to_quarantine() {
                 "off",
                 "--host",
                 TEST_MACHINE_ID,
-            ][..] => Yields((TEST_MACHINE_ID.parse::<MachineId>().unwrap(), String::new())),
+            ][..] => Yields((TEST_MACHINE_ID.parse::<HostMachineId>().unwrap(), String::new())),
         }
     );
 }
@@ -187,8 +187,61 @@ fn parse_reset_host_reprovisioning() {
         .expect("should parse reset-host-reprovisioning");
 
     assert_eq!(
-        matches.get_one::<MachineId>("machine"),
-        Some(&TEST_MACHINE_ID.parse::<MachineId>().unwrap())
+        matches.get_one::<StableHostMachineId>("machine"),
+        Some(&TEST_MACHINE_ID.parse().unwrap())
+    );
+}
+
+// reset routes to the Reset variant across its subcommands: set with only a
+// machine, set acknowledging a live instance with an update message, and clear.
+// Each row yields (machine, allow_reset_with_instance, update_message).
+#[test]
+fn parse_reset_routes_to_reset() {
+    scenarios!(
+        run = |argv| {
+            let action = argv[2];
+            let matches = parse_leaf::<Cmd>(argv, &["reset", action]).map_err(drop)?;
+            let machine = matches
+                .get_one::<MachineId>("machine")
+                .copied()
+                .expect("machine is required");
+            // clear declares neither flag, so only read them for set.
+            let (allow_instance, update_message) = if action == "set" {
+                (
+                    matches.get_flag("allow_reset_with_instance"),
+                    raw_value(&matches, "update_message").unwrap_or_default(),
+                )
+            } else {
+                (false, String::new())
+            };
+            Ok::<_, ()>((machine, allow_instance, update_message))
+        };
+        "set with machine only" {
+            &["managed-host", "reset", "set", "--machine", TEST_MACHINE_ID][..]
+                => Yields((TEST_MACHINE_ID.parse::<MachineId>().unwrap(), false, String::new())),
+        }
+
+        "set acknowledging a live instance, with an update message" {
+            &[
+                "managed-host",
+                "reset",
+                "set",
+                "--machine",
+                TEST_MACHINE_ID,
+                "--allow-reset-with-instance",
+                "--update-message",
+                "forced recovery",
+            ][..] => Yields((
+                TEST_MACHINE_ID.parse::<MachineId>().unwrap(),
+                true,
+                "forced recovery".to_string(),
+            )),
+        }
+
+        "clear with machine" {
+            &["managed-host", "reset", "clear", "--machine", TEST_MACHINE_ID][..]
+                => Yields((TEST_MACHINE_ID.parse::<MachineId>().unwrap(), false, String::new())),
+        }
     );
 }
 
@@ -241,7 +294,7 @@ fn parse_power_options_routes_to_power_options() {
                 "--desired-power-state",
                 "on",
             ][..] => Yields((
-                Some(TEST_MACHINE_ID.parse::<MachineId>().unwrap()),
+                Some(TEST_MACHINE_ID.parse::<HostMachineId>().unwrap()),
                 Some(rpc::forge::PowerState::On as i32),
             )),
         }

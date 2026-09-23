@@ -16,6 +16,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/location"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
 // Rack represents a hardware rack with various properties and components
@@ -29,9 +30,13 @@ import (
 // Always verify the context in which a Rack object is used.
 type Rack struct {
 	Info        deviceinfo.DeviceInfo `json:"info"`
+	ExternalID  string                `json:"external_id,omitempty"`
 	Loc         location.Location     `json:"loc"`
 	Components  []component.Component `json:"components"`
 	NVLDomainID uuid.UUID             `json:"nvl_domain_id"`
+	// OperationStatus is derived from supported active components in the rack.
+	// It is an operability summary, not the Core rack controller lifecycle state.
+	OperationStatus types.Phase `json:"operation_status"`
 
 	serialToCompIndex map[deviceinfo.SerialInfo]int
 	sealed            bool

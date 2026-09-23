@@ -965,7 +965,11 @@ func (x *SiteExplorerLastRun) GetLastFailedFinishedAt() string {
 }
 
 type ExploredEndpointSearchFilter struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Match only endpoints whose exploration report has this machine ID.
+	// Omission returns all endpoints, including reports without a machine ID.
+	// Empty or malformed IDs return INVALID_ARGUMENT.
+	MachineId     *string `protobuf:"bytes,1,opt,name=machine_id,json=machineId,proto3,oneof" json:"machine_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -998,6 +1002,13 @@ func (x *ExploredEndpointSearchFilter) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ExploredEndpointSearchFilter.ProtoReflect.Descriptor instead.
 func (*ExploredEndpointSearchFilter) Descriptor() ([]byte, []int) {
 	return file_site_explorer_nico_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ExploredEndpointSearchFilter) GetMachineId() string {
+	if x != nil && x.MachineId != nil {
+		return *x.MachineId
+	}
+	return ""
 }
 
 type ExploredEndpointIdList struct {
@@ -2915,8 +2926,11 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\x06_errorB\x13\n" +
 	"\x11_failure_categoryB\x1e\n" +
 	"\x1c_last_successful_finished_atB\x1a\n" +
-	"\x18_last_failed_finished_at\"\x1e\n" +
-	"\x1cExploredEndpointSearchFilter\";\n" +
+	"\x18_last_failed_finished_at\"Q\n" +
+	"\x1cExploredEndpointSearchFilter\x12\"\n" +
+	"\n" +
+	"machine_id\x18\x01 \x01(\tH\x00R\tmachineId\x88\x01\x01B\r\n" +
+	"\v_machine_id\";\n" +
 	"\x16ExploredEndpointIdList\x12!\n" +
 	"\fendpoint_ids\x18\x01 \x03(\tR\vendpointIds\"B\n" +
 	"\x1dExploredEndpointsByIdsRequest\x12!\n" +
@@ -3238,6 +3252,7 @@ func file_site_explorer_nico_proto_init() {
 	file_site_explorer_nico_proto_msgTypes[5].OneofWrappers = []any{}
 	file_site_explorer_nico_proto_msgTypes[6].OneofWrappers = []any{}
 	file_site_explorer_nico_proto_msgTypes[7].OneofWrappers = []any{}
+	file_site_explorer_nico_proto_msgTypes[8].OneofWrappers = []any{}
 	file_site_explorer_nico_proto_msgTypes[16].OneofWrappers = []any{}
 	file_site_explorer_nico_proto_msgTypes[21].OneofWrappers = []any{}
 	file_site_explorer_nico_proto_msgTypes[22].OneofWrappers = []any{}

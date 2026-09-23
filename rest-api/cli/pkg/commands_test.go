@@ -447,6 +447,43 @@ func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
 	}
 }
 
+func TestNewApp_VpcRoutingProfileCommands(t *testing.T) {
+	tests := []struct {
+		action string
+		flags  []string
+	}{
+		{action: "get"},
+		{action: "update", flags: []string{"--routing-profile", "--vni"}},
+		{action: "release-inactive-vni", flags: []string{"--if-version-match", "--expected-inactive-vni"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			vpc := app.Command("vpc")
+			require.NotNil(t, vpc)
+			routingProfile := vpc.Command("routing-profile")
+			require.NotNil(t, routingProfile)
+			command := routingProfile.Command(tt.action)
+			require.NotNil(t, command)
+			require.NotNil(t, command.Action)
+
+			var output bytes.Buffer
+			app.Writer = &output
+			app.ErrWriter = &output
+			err = app.Run([]string{"nicocli", "vpc", "routing-profile", tt.action, "--help"})
+			require.NoError(t, err)
+			assert.Contains(t, output.String(), "nicocli vpc routing-profile "+tt.action)
+			for _, name := range tt.flags {
+				assert.Contains(t, output.String(), name)
+			}
+			if tt.action == "update" {
+				assert.NotContains(t, output.String(), "--if-version-match")
+			}
+		})
+	}
+}
+
 // TestBuildActionCommand_BodyPropertyFlags verifies body-property flag naming
 // for reserved names and scalar-compatible, single-item arrays.
 func TestBuildActionCommand_BodyPropertyFlags(t *testing.T) {
@@ -1030,31 +1067,41 @@ func TestNewApp_UEFICredentialCreateCommand(t *testing.T) {
 	require.NotNil(t, create, "UEFI credential must expose a create command")
 }
 
-// TestBuildCommands_CurrentSingletonsAreRunnable asserts that every
-// get-current-<resource> singleton in the embedded spec is reachable from the
-// non-interactive CLI under the `current` action that the interactive TUI
-// prints (NVBug 6100988). Driven off the spec so it stays honest as singletons
-// are added or removed.
-func TestBuildCommands_CurrentSingletonsAreRunnable(t *testing.T) {
+// TestBuildCommands_RunnablePaths asserts that reviewed generated command paths
+// reach executable leaves in the non-interactive CLI.
+func TestBuildCommands_RunnablePaths(t *testing.T) {
 	spec, err := ParseSpec(openapi.Spec)
 	require.NoError(t, err)
 	cmds := BuildCommands(spec)
 
-	cmdByName := func(list []*cli.Command, name string) *cli.Command {
-		for _, c := range list {
-			if c.HasName(name) {
-				return c
-			}
-		}
-		return nil
+	tests := []struct {
+		name string
+		path []string
+	}{
+		{name: "tenant current", path: []string{"tenant", "current"}},
+		{name: "infrastructure provider current", path: []string{"infrastructure-provider", "current"}},
+		{name: "service account current", path: []string{"service-account", "current"}},
+		{name: "machine health report delete", path: []string{"machine", "health-report", "delete"}},
+		{name: "machine health report list", path: []string{"machine", "health-report", "list"}},
+		{name: "machine health report update", path: []string{"machine", "health-report", "update"}},
 	}
 
-	for _, tag := range []string{"tenant", "infrastructure-provider", "service-account"} {
-		t.Run(tag, func(t *testing.T) {
-			parent := cmdByName(cmds, tag)
-			require.NotNilf(t, parent, "tag %q must be a top-level command", tag)
-			assert.NotNilf(t, cmdByName(parent.Subcommands, "current"),
-				"tag %q must expose a `current` command runnable from the CLI", tag)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			children := cmds
+			var command *cli.Command
+			for _, component := range test.path {
+				command = nil
+				for _, candidate := range children {
+					if candidate.HasName(component) {
+						command = candidate
+						break
+					}
+				}
+				require.NotNilf(t, command, "command path %q is missing component %q", strings.Join(test.path, " "), component)
+				children = command.Subcommands
+			}
+			require.NotNilf(t, command.Action, "command path %q must be executable", strings.Join(test.path, " "))
 		})
 	}
 }

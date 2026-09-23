@@ -20,6 +20,7 @@ use std::str::FromStr;
 use carbide_network::ip::IpAddressFamily;
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
+use model::allocation_type::AllocationType;
 use model::dns::{Domain, NewDomain};
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
@@ -347,6 +348,7 @@ async fn test_ipv6_allocation_skips_address_owned_outside_managed_segment(
         interface.id,
         &managed_segment,
         IpAddressFamily::Ipv6,
+        AllocationType::Dhcp,
     )
     .await?;
     assert_eq!(recovered, vec![next_available_address]);
@@ -536,6 +538,7 @@ async fn test_machine_interface_ipv6_allocation_shift_widths(
             interface.id,
             &network_segment,
             IpAddressFamily::Ipv6,
+            AllocationType::Dhcp,
         )
         .await?;
         assert_eq!(allocated.len(), 1);
@@ -698,6 +701,7 @@ async fn test_allocate_address_for_family_dual_stack_round_trip(
         interface.id,
         &network_segment,
         IpAddressFamily::Ipv4,
+        AllocationType::Dhcp,
     )
     .await?;
     let allocated_v6 = db::machine_interface::allocate_address_for_family(
@@ -705,6 +709,7 @@ async fn test_allocate_address_for_family_dual_stack_round_trip(
         interface.id,
         &network_segment,
         IpAddressFamily::Ipv6,
+        AllocationType::Dhcp,
     )
     .await?;
 

@@ -46,8 +46,8 @@
 use carbide_credential_rotation::{
     BmcEndpoint, BmcRotationTick, RotateOutcome, rotate_bmc, rotate_dpu_bmc_service,
 };
-use carbide_uuid::machine::MachineId;
-use model::machine::{Machine, ManagedHostStateSnapshot};
+use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait};
+use model::machine::ManagedHostStateSnapshot;
 use sqlx::PgConnection;
 use state_controller::state_handler::StateHandlerError;
 
@@ -64,9 +64,13 @@ use crate::context::MachineStateHandlerServices;
 pub(crate) fn managed_host_bmc_endpoints(
     mh: &ManagedHostStateSnapshot,
 ) -> impl Iterator<Item = BmcEndpoint> + '_ {
-    std::iter::once(&mh.host_snapshot)
-        .chain(mh.dpu_snapshots.iter())
-        .filter_map(BmcEndpoint::from_machine)
+    BmcEndpoint::from_machine(&mh.host_snapshot)
+        .into_iter()
+        .chain(
+            mh.dpu_snapshots
+                .iter()
+                .filter_map(BmcEndpoint::from_machine),
+        )
 }
 
 /// `true` when the host BMC or any DPU BMC is behind the staged site-wide target
@@ -147,16 +151,25 @@ pub(crate) async fn rotate_managed_host_bmcs(
     let is_sitewide_bmc_rotation_enabled = services.site_config.bmc_rotation_enabled;
     let mut tick = BmcRotationTick::Settled;
     // Host first (BMC root only), then each DPU (BMC root *and* the BF4-only
-    // `service` account). The bool tags a DPU so the extra service rotation runs
-    // only for DPU BMCs.
-    let machines = std::iter::once((&mh.host_snapshot, false))
-        .chain(mh.dpu_snapshots.iter().map(|machine| (machine, true)));
-    for (machine, is_dpu) in machines {
-        let force = machine.bmc_credential_rotation_requested;
+    // `service` account).
+    let host = std::iter::once((
+        mh.host_snapshot.id.to_machine_id(),
+        mh.host_snapshot.bmc_credential_rotation_requested,
+        BmcEndpoint::from_machine(&mh.host_snapshot),
+    ));
+    let dpus = mh.dpu_snapshots.iter().map(|machine| {
+        (
+            machine.id.to_machine_id(),
+            machine.bmc_credential_rotation_requested,
+            BmcEndpoint::from_machine(machine),
+        )
+    });
+    for (machine_id, force, endpoint) in host.chain(dpus) {
+        let is_dpu = machine_id.is_dpu();
         if !force && !is_sitewide_bmc_rotation_enabled {
             continue;
         }
-        match BmcEndpoint::from_machine(machine) {
+        match endpoint {
             Some(endpoint) => {
                 // Fold each device outcome in, strongest wins: a store-reconcile
                 // hold or a transient retry from any one BMC carries the whole
@@ -176,7 +189,7 @@ pub(crate) async fn rotate_managed_host_bmcs(
             // still clears; a passive sweep silently skips an unaddressable
             // device, exactly as `managed_host_bmc_endpoints` does.
             None if force => tracing::warn!(
-                machine_id = %machine.id,
+                machine_id = %machine_id,
                 "force-converge request on a machine with no addressable BMC; clearing the request without action"
             ),
             None => {}
@@ -189,23 +202,30 @@ pub(crate) async fn rotate_managed_host_bmcs(
 /// that carry a pending operator force-converge request. Each such machine owns
 /// exactly one BMC, so the flag's location names the target device -- no MAC is
 /// needed in the request payload.
-fn forced_bmc_machines(mh: &ManagedHostStateSnapshot) -> impl Iterator<Item = &Machine> {
-    std::iter::once(&mh.host_snapshot)
-        .chain(mh.dpu_snapshots.iter())
-        .filter(|m| m.bmc_credential_rotation_requested)
-}
-
 /// `true` when an operator has recorded a force-converge request against the host
 /// machine or any of its DPU machines. Presence alone drives entry into
 /// `RotatingBmc`.
 pub(crate) fn bmc_rotation_force_requested(mh: &ManagedHostStateSnapshot) -> bool {
-    forced_bmc_machines(mh).next().is_some()
+    mh.host_snapshot.bmc_credential_rotation_requested
+        || mh
+            .dpu_snapshots
+            .iter()
+            .any(|machine| machine.bmc_credential_rotation_requested)
 }
 
 /// The machine ids carrying a pending force-converge request, so the controller
 /// can clear exactly those rows once the forced tick settles.
 fn forced_bmc_machine_ids(mh: &ManagedHostStateSnapshot) -> impl Iterator<Item = MachineId> + '_ {
-    forced_bmc_machines(mh).map(|m| m.id)
+    mh.host_snapshot
+        .bmc_credential_rotation_requested
+        .then(|| mh.host_snapshot.id.into())
+        .into_iter()
+        .chain(
+            mh.dpu_snapshots
+                .iter()
+                .filter(|machine| machine.bmc_credential_rotation_requested)
+                .map(|machine| machine.id.into()),
+        )
 }
 
 /// Clear the one-shot force-converge flag on exactly the machines that carried a
@@ -222,7 +242,7 @@ pub(crate) async fn clear_forced_bmc_requests(
     mh: &ManagedHostStateSnapshot,
 ) -> Result<(), StateHandlerError> {
     for machine_id in forced_bmc_machine_ids(mh) {
-        db::machine::clear_bmc_credential_rotation_requested(&mut *txn, machine_id).await?;
+        db::machine::clear_bmc_credential_rotation_requested(&mut *txn, &machine_id).await?;
     }
     Ok(())
 }

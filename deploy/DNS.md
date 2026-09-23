@@ -4,7 +4,17 @@
 
 NICo (ncx-infrastructure-controller) depends on a set of well-known hostnames in the `.nico` DNS zone. These names are resolved by DPU agents, host PXE loaders, and other in-band management components at runtime. Several of these hostnames are **compiled into binaries or embedded shell scripts** and cannot be changed without rebuilding the software.
 
-Before deploying NICo, you must configure DNS A records that resolve each `.nico` hostname to the appropriate service virtual IP (VIP) on your out-of-band (OOB) management network. A site-local recursive resolver (Unbound or equivalent) running on your site controller is the recommended approach.
+Before deploying NICo, you must configure DNS A records that resolve each
+`.nico` hostname to the appropriate service virtual IP (VIP) on your
+out-of-band (OOB) management network. Configure AAAA records for services that
+must be discovered over IPv6; in particular, DHCPv6 option 56 requires an AAAA
+record for the NTP hostname. A site-local recursive resolver (Unbound or
+equivalent) running on your site controller is the recommended approach.
+
+Stock DPU-agent images query `carbide-ntp.forge`. The rebranded
+`nico-ntp.nico` name applies only to images built to use that name. These are
+distinct hostnames, not suffix substitutions; configure the exact name queried
+by the deployed agent, or serve both aliases during a mixed-image transition.
 
 ---
 
@@ -15,7 +25,7 @@ Before deploying NICo, you must configure DNS A records that resolve each `.nico
 | `nico-api.nico` | 443 | gRPC / TLS | DPU agents, admin CLI, PXE service, DHCP plugin, FMDS, health probe | `nico-api` pod | NICo gRPC API |
 | `nico-pxe.nico` | 80 | HTTP | DPU agents, iPXE clients | `nico-pxe` pod | iPXE scripts, cloud-init payloads, boot artifacts, internal APT |
 | `nico-static-pxe.nico` | 80 | HTTP | Host PXE loader (scout) | `nico-static-pxe` pod | Static boot files: `scout.squashfs`, `scout.efi`, BFB images |
-| `nico-ntp.nico` | 123 | UDP (NTP) | DPU agents, managed hosts (DHCP option 42) | `nico-ntp` pods | NTP time synchronisation |
+| `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | UDP (NTP) | DPU agents, managed hosts (DHCP options 42 and 56) | `nico-ntp` pods or operator NTP service | NTP time synchronisation |
 | `unbound.nico` | 53 | UDP / TCP (DNS) | DPU agents, managed hosts (DHCP option 6) | `nico-unbound` pod | Site-local recursive DNS resolver |
 | `otel-receiver.nico` | 443 | gRPC / TLS (OTLP) | DPU otel-collector sidecars | otel-receiver service | OpenTelemetry ingestion endpoint |
 | `socks.nico` | 1888 | SOCKS5 | DPU agent extension service pods | SOCKS5 proxy service | Outbound HTTP/HTTPS proxy for DPU-hosted workloads |
@@ -79,22 +89,34 @@ Serves pre-built, version-controlled boot assets used during host bring-up. Unli
 
 ---
 
-### `nico-ntp.nico` — NTP Service
+### `carbide-ntp.forge` / `nico-ntp.nico` — NTP Service
 
 **Port:** 123 (UDP)  
 **Protocol:** NTP  
 **In-cluster addresses:** `nico-ntp-1.nico-ntp.nico-system.svc.cluster.local`, `nico-ntp-2.nico-ntp.nico-system.svc.cluster.local`, `nico-ntp-3.nico-ntp.nico-system.svc.cluster.local`
 
-Provides NTP time synchronisation for DPU agents and managed hosts. The service is backed by three pods for redundancy; configure multiple DNS A records for `nico-ntp.nico` pointing to each pod's VIP.
+Provides NTP time synchronisation for DPU agents and managed hosts. The bundled
+service is backed by three pods for redundancy. Configure multiple DNS A
+records pointing to its IPv4 VIPs. To advertise the service through DHCPv6
+option 56, also configure one or more AAAA records pointing to reachable IPv6
+NTP endpoints.
 
 **Consumers:**
-- `nico-agent` (DPU agent) — resolves `nico-ntp.nico` at startup to discover NTP server addresses; the resolved addresses are also pushed to managed hosts via DHCP option 42
+- `nico-agent` (DPU agent) — stock images resolve `carbide-ntp.forge` at startup to discover NTP server addresses; images rebuilt with the rebranded name resolve `nico-ntp.nico`. IPv4 and IPv6 results are advertised to managed hosts through DHCP options 42 and 56, respectively
 
-**Configurability:** The DPU agent resolves `nico-ntp.nico` directly via DNS (`crates/agent/src/main_loop.rs`). **This lookup is not overridable via config in the compiled agent.**
+**Configurability:** The stock DPU agent resolves `carbide-ntp.forge` directly
+via DNS (`crates/agent/src/util.rs`). **This lookup is not overridable via
+config in the compiled agent.** Using `nico-ntp.nico` requires an image rebuilt
+with that hostname.
 
-> **Warning:** `nico-ntp.nico` is hardcoded in the compiled `nico-agent` binary (`crates/agent/src/main_loop.rs`). This DNS record must exist and resolve correctly on the OOB network. Changing this hostname requires rebuilding the DPU agent.
+> **Warning:** `carbide-ntp.forge` is hardcoded in the stock `nico-agent`
+> binary. That exact DNS record must resolve correctly on the OOB network.
+> Changing the hostname requires rebuilding the DPU agent.
 
-**Multiple A records (recommended):** Configure one A record per NTP pod instance to provide redundancy. Clients will receive all addresses and select among them.
+**Multiple records (recommended):** Configure one A record per IPv4 NTP pod
+instance to provide redundancy. Configure one or more AAAA records when using
+the DHCPv6 option-56 fallback. Clients receive every address from the matching
+family and select among them.
 
 ---
 
@@ -173,7 +195,7 @@ What it resolves:
 
 | Query | How it's answered |
 |---|---|
-| `nico-api.nico`, `nico-pxe.nico`, `nico-static-pxe.nico`, `nico-ntp.nico`, `socks.nico`, `otel-receiver.nico` | Served locally by Unbound from `local_data.conf` |
+| `nico-api.nico`, `nico-pxe.nico`, `nico-static-pxe.nico`, the deployed agent's exact NTP hostname, `socks.nico`, `otel-receiver.nico` | Served locally by Unbound from `local_data.conf` |
 | Names in the site domain (e.g., a `<machine-id>` record under `initial_domain_name`) | Reaches `nico-dns` via upstream delegation of the site zone to the `nico-dns` VIPs, or via an explicit forward zone in Unbound |
 | External names (package mirrors, public NTP fallbacks, etc.) | Unbound forwards or recurses to the upstream resolver configured in `forwarders.conf` |
 
@@ -189,7 +211,7 @@ A managed host that has been ingested but not yet allocated to a tenant remains 
 
 What it resolves:
 
-- The same set of `.nico` service names as DPU agents — for example, `nico-pxe.nico` for cloud-init userdata and the internal APT repository, `nico-ntp.nico` for time synchronisation, `nico-api.nico` for any in-band tooling that targets the NICo API.
+- The same service endpoints as DPU agents — for example, `nico-pxe.nico` for cloud-init userdata and the internal APT repository, the NTP hostname compiled into the deployed agent for time synchronisation, and `nico-api.nico` for any in-band tooling that targets the NICo API.
 - The host's own hostname and other site-zone records, through the same delegation or forward-zone path that DPU agents use.
 - External names, through Unbound's upstream forwarder.
 
@@ -212,7 +234,7 @@ For both client types:
 | `nico-api.nico` | Default value only (`crates/host-support/src/agent_config.rs`, config defaults across services) | **Yes** — override via `NICO_API_URL` env var or config file |
 | `nico-pxe.nico` | Compiled into `nico-agent` (`crates/agent/src/main_loop.rs`) | **No** — requires rebuilding `nico-agent` |
 | `nico-static-pxe.nico` | Embedded in host boot scripts (`pxe/common_files/scout-loader-rclocal`, `pxe/common_files/check-scout-updates.sh`) | **No** — requires rebuilding host boot images |
-| `nico-ntp.nico` | Compiled into `nico-agent` (`crates/agent/src/main_loop.rs`) | **No** — requires rebuilding `nico-agent` |
+| `carbide-ntp.forge` (stock) / `nico-ntp.nico` (rebranded image) | Compiled into `nico-agent` (`crates/agent/src/util.rs`) | **No** — requires rebuilding `nico-agent` |
 | `unbound.nico` | Not compiled into binaries; distributed via DHCP option 6 | **Yes** — update DHCP server configuration |
 | `otel-receiver.nico` | otel-collector config YAML (`bluefield/charts/nico-otelcol/files/otel_config.yaml`, etc.) | **Yes** — update otel-collector config files and redeploy |
 | `socks.nico` | Compiled into `nico-agent` (`crates/agent/src/extension_services/k8s_pod_handler.rs`) | **No** — requires rebuilding `nico-agent` |
@@ -223,13 +245,26 @@ For both client types:
 
 ### Using Unbound (`local_data.conf`)
 
-Populate `deploy/files/unbound/local_data.conf` with the site controller VIP for each service and apply the changes to your cluster. Each entry in that file includes a comment describing the service, its port, and any hardcoded-hostname warnings. The Unbound pod will restart automatically once the updated ConfigMap is live.
+For Helm deployments, populate `unbound.localData` with each service VIP. The
+chart renders IPv4 literals as A records and IPv6 literals as AAAA records. For
+the legacy Kustomize deployment, populate
+`deploy/files/unbound/local_data.conf`; its checked-in placeholders cover the
+IPv4 service VIPs and both NTP hostname aliases, so add a site-specific AAAA
+entry for `carbide-ntp.forge` when stock agents use the DHCPv6 option-56
+fallback. Add the corresponding `nico-ntp.nico` record only for rebranded
+images. The Unbound pod restarts automatically once the generated ConfigMap
+changes.
 
 ### Using Other DNS Providers
 
-Any DNS server that can serve authoritative responses for the `.nico` zone on your OOB management network is supported. Create A records for each hostname listed above pointing to the appropriate VIP.
+Any DNS server that can serve authoritative responses for the required `.nico`
+and `.forge` names on your OOB management network is supported. Create A
+records for each applicable hostname and an AAAA record for the exact NTP
+hostname queried by the deployed agent when DHCPv6 option 56 is required.
 
-> **Note:** `.nico` is not a publicly registered TLD. It is used exclusively on the isolated OOB management network and should not be forwarded to upstream public resolvers. Configure your DNS server to treat `.nico` as a locally authoritative zone with no upstream forwarding.
+> **Note:** `.nico` and `.forge` are private service zones in this deployment.
+> They should not be forwarded to public resolvers. Configure your DNS server
+> to answer the required names locally with no upstream forwarding.
 
 ---
 
@@ -239,10 +274,17 @@ After configuring DNS, verify that all records resolve correctly from a host or 
 
 ```bash
 for name in nico-api.nico nico-pxe.nico nico-static-pxe.nico \
-            nico-ntp.nico unbound.nico otel-receiver.nico socks.nico; do
+            unbound.nico otel-receiver.nico socks.nico; do
     printf "%-30s -> %s\n" "$name" "$(dig +short "$name" @<UNBOUND_VIP> || echo 'FAILED')"
 done
+
+# Stock agent: both results are required for dual-stack NTP fallback.
+dig +short A carbide-ntp.forge @<UNBOUND_VIP>
+dig +short AAAA carbide-ntp.forge @<UNBOUND_VIP>
 ```
+
+For an image rebuilt to query `nico-ntp.nico`, replace the complete
+`carbide-ntp.forge` hostname in both commands. Do not replace only its TLD.
 
 Verify reachability on expected ports:
 
@@ -257,7 +299,7 @@ curl -sf --max-time 5 http://nico-pxe.nico/ -o /dev/null && echo "nico-pxe OK" |
 curl -sf --max-time 5 http://nico-static-pxe.nico/ -o /dev/null && echo "nico-static-pxe OK" || echo "nico-static-pxe FAILED"
 
 # NTP
-ntpdate -q nico-ntp.nico
+ntpdate -q carbide-ntp.forge
 
 # DNS resolver (should return a result for an external name)
 dig +short +timeout=3 example.com @unbound.nico

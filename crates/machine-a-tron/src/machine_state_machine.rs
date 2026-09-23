@@ -18,16 +18,16 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::net::Ipv4Addr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::{
-    BmcCommand, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
-    SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
+    ActionError, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, MockPowerState,
+    ResourceResetType,
 };
 use carbide_network::virtualization::build_dual_stack_list;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, InvalidMachineType, MachineId, MachineInterfaceId};
 use rpc::forge::{MachineArchitecture, MachineDiscoveryResult, ManagedHostNetworkConfigResponse};
 use rpc::forge_agent_control_response::Action;
 use serde::{Deserialize, Serialize};
@@ -36,7 +36,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::api_client::{ClientApiError, DpuNetworkStatusArgs, MockDiscoveryData};
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{MachineATronContext, MachineConfig};
 use crate::dhcp_wrapper::{
     DhcpRelayError, DhcpRelayResult, DhcpRequestInfo, DhcpRequester, DhcpResponseInfo,
@@ -49,7 +49,7 @@ use crate::machine_utils::{
     PxeBootTarget, PxeError, PxeResponse, forge_agent_control, get_validation_id,
     send_pxe_boot_request,
 };
-use crate::{Guid, InfinibandPortState, PersistedDevice, PersistedDpuMachine};
+use crate::{Guid, InfinibandPortState, PersistedDevice, PersistedDpuMachine, scout_stream};
 
 type DpuDhcpRelayHandle = oneshot::Sender<()>;
 
@@ -65,11 +65,16 @@ fn abandon_machine_actions_on_power_change(
     preserve_dhcp_retry: bool,
 ) {
     actions.retain(|action| match action {
-        FsmAction::SetupBmc | FsmAction::Dhcp(DhcpType::Bmc) | FsmAction::CleanupOnPowerOff => true,
+        FsmAction::SetupBmc
+        | FsmAction::ConsoleOutputStop
+        | FsmAction::Dhcp(DhcpType::Bmc)
+        | FsmAction::CleanupOnPowerOff => true,
         FsmAction::ScheduleDhcpRetry { .. } | FsmAction::CancelDhcpRetry => preserve_dhcp_retry,
         FsmAction::SetTimer(
             Timer::PowerCycle
             | Timer::MachineOn
+            | Timer::OsReady
+            | Timer::PowerOffGraceful
             | Timer::ScoutAgentControlPoll
             | Timer::DpuAgentControlPoll,
         )
@@ -78,6 +83,7 @@ fn abandon_machine_actions_on_power_change(
         | FsmAction::InitialDiscoveryRequest(_)
         | FsmAction::AgentControlRequest(_)
         | FsmAction::DpuAgentNetworkObservation
+        | FsmAction::ConsoleOutputStart
         | FsmAction::BmcEvent(BmcEvent::PowerOn | BmcEvent::BootCompleted) => false,
     });
 }
@@ -110,6 +116,16 @@ fn resolve_pxe_boot(
     }
 }
 
+/// Installed OS a machine starts with. A DPF-managed DPU without a recorded OS gets the
+/// DPU agent image: DPF writes the BFB before NICo first answers its PXE request with
+/// EXIT, so the simulated disk must already be bootable.
+fn initial_installed_os(is_dpu: bool, dpf_enabled: bool, recorded: OsImage) -> OsImage {
+    match recorded {
+        OsImage::None if is_dpu && dpf_enabled => OsImage::DpuAgent,
+        recorded => recorded,
+    }
+}
+
 /// MachineStateMachine (yo dawg) models the state machine of a machine endpoint
 ///
 /// This code is in common between DPUs and Hosts.(ie. anything that has a BMC, boots via DHCP, can
@@ -121,10 +137,14 @@ pub(super) struct MachineStateMachine {
 
     fsm: MachineFsm,
     bmc_mock: Option<Arc<BmcMockWrapperHandle>>,
-    bmc_state: Option<BmcState>,
+    bmc_state: Option<BmcState<LiveStateCallbacks>>,
     bmc_injection: Arc<InjectionStore>,
     power_cycle_deadline: Option<Instant>,
     machine_on_deadline: Option<Instant>,
+    /// `Timer::OsReady`: the booting host asks for DHCP when this passes.
+    os_ready_deadline: Option<Instant>,
+    /// `Timer::PowerOffGraceful`: a graceful shutdown completes when this passes.
+    power_off_deadline: Option<Instant>,
     agent_polling_deadline: Option<(Instant, Timer)>,
     bmc_dhcp_info: Option<DhcpResponseInfo>,
     machine_dhcp_info: Option<DhcpResponseInfo>,
@@ -140,16 +160,17 @@ pub(super) struct MachineStateMachine {
     app_context: Arc<MachineATronContext>,
     dpu_dhcp_relay: Option<DpuDhcpRelay>,
     dpu_dhcp_relay_handle: Option<DpuDhcpRelayHandle>,
+    scout_stream: Option<scout_stream::Handle>,
 }
 
 #[derive(Debug, Clone)]
-struct LiveStateCallbacks {
+pub(super) struct LiveStateCallbacks {
     state: Arc<RwLock<LiveState>>,
     command_channel: mpsc::UnboundedSender<BmcCommand>,
 }
 
 impl LiveStateCallbacks {
-    fn new(
+    pub(super) fn new(
         state: Arc<RwLock<LiveState>>,
         command_channel: mpsc::UnboundedSender<BmcCommand>,
     ) -> Self {
@@ -158,6 +179,16 @@ impl LiveStateCallbacks {
             command_channel,
         }
     }
+
+    pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        self.get_power_state().validate_reset_type(reset_type)?;
+        self.command_channel
+            .send(BmcCommand::SetSystemPower {
+                request: reset_type,
+                reply: None,
+            })
+            .map_err(|err| ActionError::Internal(err.into()))
+    }
 }
 
 impl Callbacks for LiveStateCallbacks {
@@ -165,16 +196,11 @@ impl Callbacks for LiveStateCallbacks {
         self.state.read().unwrap().power_state
     }
 
-    fn send_power_command(
+    async fn computer_system_reset(
         &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
-        self.command_channel
-            .send(BmcCommand::SetSystemPower {
-                request: reset_type,
-                reply: None,
-            })
-            .map_err(|err| SetSystemPowerError::CommandSendError(err.to_string()))
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.set_power_state(reset_type)
     }
 
     fn state_refresh_indication(&self) {
@@ -225,6 +251,25 @@ pub(super) struct LiveState {
     /// firmware is applied.  Used by `persisted()` so restarts resume from the
     /// last observed versions rather than the operator-configured starting point.
     pub(super) active_host_firmware: Option<bmc_mock::HostFirmwareVersions>,
+    /// BMC account passwords restored from the previous snapshot at startup,
+    /// used to re-apply rotated passwords onto a freshly built BMC mock so they
+    /// survive a machine-a-tron restart (issue #5966).
+    pub(super) bmc_credentials: Option<Vec<bmc_mock::BmcAccountCredential>>,
+    /// Live BMC account service, so `persisted()` can export the current
+    /// passwords at shutdown rather than a stale mirror (issue #5966).
+    pub(super) bmc_account_service: Option<Weak<bmc_mock::AccountServiceState>>,
+}
+
+impl LiveState {
+    /// Credentials to write into the next device snapshot: the current live BMC
+    /// passwords when the mock is running, else the passwords restored at
+    /// startup so they aren't dropped for a machine whose BMC never came up.
+    pub(super) fn bmc_accounts_for_snapshot(&self) -> Option<Vec<bmc_mock::BmcAccountCredential>> {
+        match self.bmc_account_service.as_ref().and_then(Weak::upgrade) {
+            Some(account_service) => Some(account_service.export_credentials()),
+            None => self.bmc_credentials.clone(),
+        }
+    }
 }
 
 impl Default for LiveState {
@@ -247,6 +292,8 @@ impl Default for LiveState {
             infiniband_port_states: HashMap::new(),
             dpu_flipped_to_nic_mode: false,
             active_host_firmware: None,
+            bmc_credentials: None,
+            bmc_account_service: None,
         }
     }
 }
@@ -317,6 +364,7 @@ impl MachineStateMachine {
             has_overrides = overrides_for_role.is_some(),
             reboot = ?resolved.reboot,
             power_on_os_ready = ?resolved.power_on_os_ready,
+            power_off_graceful = ?resolved.power_off_graceful,
             power_off_force = ?resolved.power_off_force,
             bmc_reset = ?resolved.bmc_reset,
             "Resolved lifecycle timings"
@@ -333,12 +381,20 @@ impl MachineStateMachine {
         dpu_dhcp_relay: Option<DpuDhcpRelay>,
         mat_host_id: Uuid,
     ) -> MachineStateMachine {
-        let (initial_os_image, tpm_ek_certificate) = match persisted_machine {
-            PersistedMachine::Host(h) => (h.installed_os, h.tpm_ek_certificate),
-            PersistedMachine::Dpu(d) => (d.installed_os, None),
+        let (initial_os_image, tpm_ek_certificate, bmc_credentials) = match persisted_machine {
+            PersistedMachine::Host(h) => (h.installed_os, h.tpm_ek_certificate, h.bmc_accounts),
+            PersistedMachine::Dpu(d) => (d.installed_os, None, d.bmc_accounts),
         };
         let (fsm, actions) = MachineFsm::init(true, Self::is_bmc_only(&machine_info, &config));
         let resolved_timings = Self::resolve_timings(&machine_info, &config);
+        let installed_os = initial_installed_os(
+            matches!(machine_info, MachineInfo::Dpu(_)),
+            config.dpf_enabled,
+            initial_os_image,
+        );
+        let mut live_state =
+            LiveState::for_machine(&machine_info, MockPowerState::On, tpm_ek_certificate);
+        live_state.bmc_credentials = bmc_credentials;
         MachineStateMachine {
             fsm,
             actions: actions.into_iter().collect(),
@@ -347,18 +403,16 @@ impl MachineStateMachine {
             bmc_injection: Arc::new(InjectionStore::new()),
             power_cycle_deadline: None,
             machine_on_deadline: None,
+            os_ready_deadline: None,
+            power_off_deadline: None,
             agent_polling_deadline: None,
             bmc_dhcp_info: None,
             machine_dhcp_info: None,
             machine_interface_id: None,
             dhcp_retry_deadline: None,
             machine_discovery_result: None,
-            installed_os: initial_os_image,
-            live_state: Arc::new(RwLock::new(LiveState::for_machine(
-                &machine_info,
-                MockPowerState::On,
-                tpm_ek_certificate,
-            ))),
+            installed_os,
+            live_state: Arc::new(RwLock::new(live_state)),
             machine_info,
             bmc_command_channel,
             config,
@@ -366,6 +420,7 @@ impl MachineStateMachine {
             app_context,
             dpu_dhcp_relay,
             dpu_dhcp_relay_handle: None,
+            scout_stream: None,
             mat_host_id,
         }
     }
@@ -381,6 +436,11 @@ impl MachineStateMachine {
     ) -> MachineStateMachine {
         let (fsm, actions) = MachineFsm::init(false, Self::is_bmc_only(&machine_info, &config));
         let resolved_timings = Self::resolve_timings(&machine_info, &config);
+        let installed_os = initial_installed_os(
+            matches!(machine_info, MachineInfo::Dpu(_)),
+            config.dpf_enabled,
+            OsImage::default(),
+        );
         MachineStateMachine {
             live_state: Arc::new(RwLock::new(LiveState::for_machine(
                 &machine_info,
@@ -398,9 +458,11 @@ impl MachineStateMachine {
             dhcp_retry_deadline: None,
             machine_discovery_result: None,
             machine_on_deadline: None,
+            os_ready_deadline: None,
+            power_off_deadline: None,
             agent_polling_deadline: None,
             power_cycle_deadline: None,
-            installed_os: OsImage::default(),
+            installed_os,
             machine_info,
             bmc_command_channel,
             config,
@@ -408,6 +470,7 @@ impl MachineStateMachine {
             app_context,
             dpu_dhcp_relay,
             dpu_dhcp_relay_handle: None,
+            scout_stream: None,
             mat_host_id,
         }
     }
@@ -429,6 +492,18 @@ impl MachineStateMachine {
                 self.machine_on_deadline = None;
                 self.fsm_event(Event::TimerAlert(Timer::MachineOn));
             }
+            if let Some(os_ready_deadline) = self.os_ready_deadline
+                && now > os_ready_deadline
+            {
+                self.os_ready_deadline = None;
+                self.fsm_event(Event::TimerAlert(Timer::OsReady));
+            }
+            if let Some(power_off_deadline) = self.power_off_deadline
+                && now > power_off_deadline
+            {
+                self.power_off_deadline = None;
+                self.fsm_event(Event::TimerAlert(Timer::PowerOffGraceful));
+            }
             if let Some((agent_polling_deadline, timer)) = self.agent_polling_deadline
                 && now > agent_polling_deadline
             {
@@ -447,6 +522,8 @@ impl MachineStateMachine {
             } else {
                 [
                     self.machine_on_deadline,
+                    self.os_ready_deadline,
+                    self.power_off_deadline,
                     self.power_cycle_deadline,
                     self.agent_polling_deadline.map(|v| v.0),
                     self.dhcp_retry_deadline,
@@ -472,6 +549,18 @@ impl MachineStateMachine {
                     }
                     Err(_) => return Some(self.config.run_interval_working),
                 },
+                FsmAction::ConsoleOutputStart => {
+                    if let Some(bmc_mock) = &self.bmc_mock {
+                        bmc_mock.console_output_start();
+                    }
+                    self.actions.pop_front();
+                }
+                FsmAction::ConsoleOutputStop => {
+                    if let Some(bmc_mock) = &self.bmc_mock {
+                        bmc_mock.console_output_stop();
+                    }
+                    self.actions.pop_front();
+                }
                 FsmAction::SetTimer(Timer::PowerCycle) => {
                     tracing::info!(
                         duration = ?self.resolved_timings.power_off_force,
@@ -487,6 +576,24 @@ impl MachineStateMachine {
                         "Timer armed: MachineOn (reboot)"
                     );
                     self.machine_on_deadline = Some(Instant::now() + self.resolved_timings.reboot);
+                    self.actions.pop_front();
+                }
+                FsmAction::SetTimer(Timer::OsReady) => {
+                    tracing::info!(
+                        duration = ?self.resolved_timings.power_on_os_ready,
+                        "Timer armed: OsReady (power_on_os_ready)"
+                    );
+                    self.os_ready_deadline =
+                        Some(Instant::now() + self.resolved_timings.power_on_os_ready);
+                    self.actions.pop_front();
+                }
+                FsmAction::SetTimer(Timer::PowerOffGraceful) => {
+                    tracing::info!(
+                        duration = ?self.resolved_timings.power_off_graceful,
+                        "Timer armed: PowerOffGraceful (power_off_graceful)"
+                    );
+                    self.power_off_deadline =
+                        Some(Instant::now() + self.resolved_timings.power_off_graceful);
                     self.actions.pop_front();
                 }
                 FsmAction::SetTimer(Timer::ScoutAgentControlPoll) => {
@@ -584,6 +691,8 @@ impl MachineStateMachine {
                         // after the FSM converges to the dormant BMC-only track.
                         self.actions.clear();
                         self.machine_on_deadline = None;
+                        self.os_ready_deadline = None;
+                        self.power_off_deadline = None;
                         self.power_cycle_deadline = None;
                         self.agent_polling_deadline = None;
                         // Let the FSM own the transition: it is returned by `event()`,
@@ -609,11 +718,25 @@ impl MachineStateMachine {
                 FsmAction::AgentControlRequest(os_image) => {
                     match self.agent_control_request(*os_image).await {
                         Ok(_) => {
+                            if *os_image == OsImage::Scout && self.scout_stream.is_none() {
+                                let machine_id = self
+                                    .machine_discovery_result
+                                    .as_ref()
+                                    .and_then(|result| result.machine_id)
+                                    .expect("successful Scout control requires a machine ID");
+                                self.scout_stream = Some(scout_stream::Handle::start(
+                                    machine_id,
+                                    self.app_context.app_config.carbide_api_url.clone(),
+                                    self.app_context.forge_client_config.clone(),
+                                    self.app_context.app_config.scout_stream_reconnect_interval,
+                                ));
+                            }
                             self.actions.pop_front();
                             self.fsm_event(Event::AgentControlCompleted)
                         }
                         Err(MachineStateError::MachineNotFound(machine_id)) => {
                             tracing::warn!(%machine_id, "Machine not found during agent control, likely force deleted");
+                            self.scout_stream = None;
                             self.actions.pop_front();
                             self.fsm_event(Event::MachineNotFound)
                         }
@@ -642,6 +765,7 @@ impl MachineStateMachine {
                     self.machine_interface_id = None;
                     self.machine_discovery_result = None;
                     self.dpu_dhcp_relay_handle = None;
+                    self.scout_stream = None;
                 }
             }
         }
@@ -650,13 +774,18 @@ impl MachineStateMachine {
     }
 
     fn fsm_event(&mut self, event: Event) {
-        if matches!(event, Event::PowerCycle | Event::PowerOff) {
+        if matches!(
+            event,
+            Event::PowerCycle | Event::PowerOff | Event::PowerOffGraceful
+        ) {
             abandon_machine_actions_on_power_change(
                 &mut self.actions,
                 self.fsm.is_bmc_initializing(),
             );
 
             self.machine_on_deadline = None;
+            self.os_ready_deadline = None;
+            self.power_off_deadline = None;
             self.power_cycle_deadline = None;
             self.agent_polling_deadline = None;
         }
@@ -672,7 +801,13 @@ impl MachineStateMachine {
 
     async fn setup_bmc(
         &self,
-    ) -> Result<(Option<Arc<BmcMockWrapperHandle>>, BmcState), MachineStateError> {
+    ) -> Result<
+        (
+            Option<Arc<BmcMockWrapperHandle>>,
+            BmcState<LiveStateCallbacks>,
+        ),
+        MachineStateError,
+    > {
         let Some(dhcp_info) = &self.bmc_dhcp_info else {
             return Err(MachineStateError::NoBmcDhcpInfo);
         };
@@ -936,11 +1071,10 @@ impl MachineStateMachine {
             .as_ref()
             .and_then(|result| result.machine_id)
             .ok_or(MissingMachineId)?;
-
         let network_config = match self
             .app_context
             .forge_api_client
-            .get_managed_host_network_config(machine_id)
+            .get_managed_host_network_config(DpuMachineId::try_from(machine_id)?)
             .await
         {
             Ok(config) => config,
@@ -1038,6 +1172,31 @@ impl MachineStateMachine {
             Some(bmc_mock::HostFirmwareVersions { bmc, uefi })
         } else {
             None
+        }
+    }
+
+    /// Apply refreshed desired host firmware targets: update the retained
+    /// `machine_info` and re-stage a running BMC mock's pending upgrades.
+    pub(super) fn set_desired_host_firmware(
+        &mut self,
+        desired: Option<bmc_mock::HostFirmwareVersions>,
+    ) {
+        if let MachineInfo::Host(host) = &mut self.machine_info {
+            host.desired_host_firmware = desired.clone();
+        }
+        let Some(bmc_state) = self.bmc_state.as_ref() else {
+            return;
+        };
+        let update_service = &bmc_state.update_service_state;
+        let (bmc_target, uefi_target) = match &desired {
+            Some(fw) => (fw.bmc.as_deref(), fw.uefi.as_deref()),
+            None => (None, None),
+        };
+        if let Some(id) = update_service.host_bmc_inventory_id.as_deref() {
+            update_service.retarget_pending_upgrade(id, bmc_target);
+        }
+        if let Some(id) = update_service.host_uefi_inventory_id.as_deref() {
+            update_service.retarget_pending_upgrade(id, uefi_target);
         }
     }
 
@@ -1180,7 +1339,7 @@ impl MachineStateMachine {
         self.app_context
             .api_client()
             .record_dpu_network_status(DpuNetworkStatusArgs {
-                dpu_machine_id: machine_id,
+                dpu_machine_id: DpuMachineId::try_from(machine_id)?,
                 network_config_version: network_config.managed_host_config_version.clone(),
                 instance_network_config_version,
                 instance_config_version,
@@ -1192,16 +1351,25 @@ impl MachineStateMachine {
         Ok(())
     }
 
-    pub(super) fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
-        use SystemPowerControl::*;
+    pub(super) fn set_system_power(
+        &mut self,
+        request: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        use ResourceResetType::*;
         match request {
             On | ForceOn => self.fsm_event(Event::PowerOn),
-            GracefulRestart | ForceRestart | PowerCycle => self.fsm_event(Event::PowerCycle),
-            GracefulShutdown | ForceOff => self.fsm_event(Event::PowerOff),
-            PushPowerButton | Nmi | Suspend | Pause | Resume => {
-                let msg = format!("Machine-a-tron mock: unsupported power request {request:?}",);
+            GracefulRestart | ForceRestart | PowerCycle | FullPowerCycle => {
+                self.fsm_event(Event::PowerCycle)
+            }
+            GracefulShutdown => self.fsm_event(Event::PowerOffGraceful),
+            ForceOff => self.fsm_event(Event::PowerOff),
+            PushPowerButton | Nmi | Suspend | Pause | Resume | Sleep | Hibernate
+            | UnsupportedValue => {
                 tracing::warn!(?request, "unsupported machine-a-tron mock power request",);
-                return Err(SetSystemPowerError::BadRequest(msg));
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "machine-a-tron mock: unsupported power request {:?}",
+                    request
+                )));
             }
         };
         self.update_live_state();
@@ -1233,7 +1401,13 @@ impl MachineStateMachine {
     async fn run_bmc_mock(
         &self,
         ip_address: Ipv4Addr,
-    ) -> Result<(Option<Arc<BmcMockWrapperHandle>>, BmcState), MachineStateError> {
+    ) -> Result<
+        (
+            Option<Arc<BmcMockWrapperHandle>>,
+            BmcState<LiveStateCallbacks>,
+        ),
+        MachineStateError,
+    > {
         let bmc_mock = BmcMockWrapper::new(
             &self.machine_info,
             self.app_context.clone(),
@@ -1258,6 +1432,20 @@ impl MachineStateMachine {
                 .account_service_state
                 .change_factory_default_password(pw);
         }
+
+        // Restore the passwords saved in the device snapshot so a rotated BMC
+        // password survives a machine-a-tron restart instead of resetting to
+        // the factory default (issue #5966). Applied after the password
+        // override above so the restored (most recent) credentials win.
+        let saved_credentials = self.live_state.read().unwrap().bmc_credentials.clone();
+        if let Some(saved_credentials) = saved_credentials {
+            bmc_mock
+                .state()
+                .account_service_state
+                .restore_credentials(&saved_credentials);
+        }
+        self.live_state.write().unwrap().bmc_account_service =
+            Some(Arc::downgrade(&bmc_mock.state().account_service_state));
 
         let maybe_bmc_mock_handle = {
             self.app_context
@@ -1350,6 +1538,8 @@ pub(super) enum MachineStateError {
         "invalid machine state: missing machine_id for this machine in machine discovery results"
     )]
     MissingMachineId,
+    #[error("invalid machine ID subtype: {0}")]
+    InvalidMachineIdSubtype(#[from] InvalidMachineType),
     #[error("no mac addresses specified for machine")]
     NoMachineMacAddress,
     #[error("no DHCP info for BMC. this is bug")]
@@ -1503,6 +1693,40 @@ mod tests {
     }
 
     #[test]
+    fn dpf_managed_dpus_start_with_installed_dpu_agent() {
+        check_values(
+            [
+                Check {
+                    scenario: "new DPU of a DPF-enabled host",
+                    input: (true, true, OsImage::None),
+                    expect: OsImage::DpuAgent,
+                },
+                Check {
+                    scenario: "new DPU of a host without DPF",
+                    input: (true, false, OsImage::None),
+                    expect: OsImage::None,
+                },
+                Check {
+                    scenario: "new host under DPF",
+                    input: (false, true, OsImage::None),
+                    expect: OsImage::None,
+                },
+                Check {
+                    scenario: "restored DPF DPU keeps a recorded Scout",
+                    input: (true, true, OsImage::Scout),
+                    expect: OsImage::Scout,
+                },
+                Check {
+                    scenario: "restored host keeps a recorded Scout",
+                    input: (false, true, OsImage::Scout),
+                    expect: OsImage::Scout,
+                },
+            ],
+            |(is_dpu, dpf_enabled, recorded)| initial_installed_os(is_dpu, dpf_enabled, recorded),
+        );
+    }
+
+    #[test]
     fn power_change_abandons_queued_machine_actions() {
         let queued = |actions: &[FsmAction]| VecDeque::from(actions.to_vec());
 
@@ -1518,9 +1742,12 @@ mod tests {
                     input: (
                         queued(&[
                             FsmAction::SetupBmc,
+                            FsmAction::ConsoleOutputStart,
                             FsmAction::Dhcp(DhcpType::Machine),
                             FsmAction::SetTimer(Timer::PowerCycle),
                             FsmAction::SetTimer(Timer::MachineOn),
+                            FsmAction::SetTimer(Timer::OsReady),
+                            FsmAction::SetTimer(Timer::PowerOffGraceful),
                             FsmAction::SetTimer(Timer::ScoutAgentControlPoll),
                             FsmAction::SetTimer(Timer::DpuAgentControlPoll),
                             FsmAction::PxeBootRequest,
@@ -1529,12 +1756,14 @@ mod tests {
                             FsmAction::DpuAgentNetworkObservation,
                             FsmAction::BmcEvent(BmcEvent::PowerOn),
                             FsmAction::BmcEvent(BmcEvent::BootCompleted),
+                            FsmAction::ConsoleOutputStop,
                             FsmAction::CleanupOnPowerOff,
                         ]),
                         false,
                     ),
                     expect: vec![
                         format!("{:?}", FsmAction::SetupBmc),
+                        format!("{:?}", FsmAction::ConsoleOutputStop),
                         format!("{:?}", FsmAction::CleanupOnPowerOff),
                     ],
                 },

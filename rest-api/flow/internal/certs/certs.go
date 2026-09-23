@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
+	dynamictls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
 	pkgcerts "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/certs"
 )
 
@@ -32,7 +33,7 @@ var ErrNotPresent = errors.New("certificates are not present")
 
 // IsTLSAvailable reports whether TLS certificates can be resolved. It checks,
 // in order: explicit paths in c, the CERTDIR env var, and the k8s SPIFFE
-// default directory. This mirrors the resolution order used by ResolveServer
+// default directory. This mirrors the resolution order used by ResolveDynamicServer
 // without loading any files.
 func IsTLSAvailable(c pkgcerts.Config) bool {
 	if c.IsSet() {
@@ -58,58 +59,47 @@ func IsTLSAvailable(c pkgcerts.Config) bool {
 	return true
 }
 
-// ResolveServer returns a server-side TLS config and source description. If c
-// has explicit paths set, uses them via pkg/certs.ServerTLSConfig; otherwise
-// falls back to the CERTDIR env var / k8s default via ServerTLSConfig.
-func ResolveServer(c pkgcerts.Config) (*tls.Config, string, error) {
+// ResolveDynamicServer returns a periodically refreshed server-side TLS config,
+// its source description, and the refresh lifecycle owned by the caller.
+func ResolveDynamicServer(
+	c pkgcerts.Config,
+) (*tls.Config, string, *dynamictls.DynTLSCfg, error) {
 	if err := c.Validate(); err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 
 	if c.IsSet() {
-		tlsConfig, err := c.ServerTLSConfig()
-		return tlsConfig, c.CACert, err
+		tlsConfig, dynamicConfig, err := c.DynamicServerTLSConfig()
+		return tlsConfig, c.CACert, dynamicConfig, err
 	}
 
-	return ServerTLSConfig()
-}
-
-// TLSConfig resolves cert paths from the CERTDIR environment variable, falling
-// back to the k8s default /var/run/secrets/spiffe.io, and returns a client-side
-// tls.Config. Returns ErrNotPresent if no cert files are found.
-func TLSConfig() (*tls.Config, string, error) {
-	return tlsConfigFromDir(
-		func(c pkgcerts.Config) (*tls.Config, error) {
-			// Pass empty server name: gRPC derives it from the dial URL's hostname.
-			return c.TLSConfig("")
+	return dynamicTLSConfigFromDir(
+		func(c pkgcerts.Config) (*tls.Config, *dynamictls.DynTLSCfg, error) {
+			return c.DynamicServerTLSConfig()
 		},
 	)
 }
 
-// ServerTLSConfig resolves cert paths from the CERTDIR environment variable,
-// falling back to the k8s default /var/run/secrets/spiffe.io, and returns a
-// server-side tls.Config. Returns ErrNotPresent if no cert files are found.
-func ServerTLSConfig() (*tls.Config, string, error) {
-	return tlsConfigFromDir(
-		func(c pkgcerts.Config) (*tls.Config, error) {
-			return c.ServerTLSConfig()
+// DynamicTLSConfig resolves the deployment certificate paths and returns a
+// periodically refreshed client-side TLS config. The caller owns the returned
+// refresh lifecycle.
+func DynamicTLSConfig() (*tls.Config, string, *dynamictls.DynTLSCfg, error) {
+	return dynamicTLSConfigFromDir(
+		func(c pkgcerts.Config) (*tls.Config, *dynamictls.DynTLSCfg, error) {
+			return c.DynamicTLSConfig("")
 		},
 	)
 }
 
-// tlsConfigFromDir resolves the cert directory from CERTDIR (falling back to
-// defaultCertDir), builds a pkgcerts.Config with the standard file names, and
-// calls build to produce the tls.Config. Returns ErrNotPresent if any cert
-// file is missing, or a wrapped error for other load failures.
-func tlsConfigFromDir(
-	build func(pkgcerts.Config) (*tls.Config, error),
-) (*tls.Config, string, error) {
+func dynamicTLSConfigFromDir(
+	build func(pkgcerts.Config) (*tls.Config, *dynamictls.DynTLSCfg, error),
+) (*tls.Config, string, *dynamictls.DynTLSCfg, error) {
 	certDir := os.Getenv("CERTDIR")
 	if certDir == "" {
 		certDir = defaultCertDir
 	}
 
-	tlsConfig, err := build(
+	tlsConfig, dynamicConfig, err := build(
 		pkgcerts.Config{
 			CACert:  filepath.Join(certDir, defaultCACert),
 			TLSCert: filepath.Join(certDir, defaultCertFile),
@@ -118,10 +108,10 @@ func tlsConfigFromDir(
 	)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, certDir, ErrNotPresent
+			return nil, certDir, nil, ErrNotPresent
 		}
-		return nil, certDir, fmt.Errorf("loading certs from %q: %w", certDir, err)
+		return nil, certDir, nil, fmt.Errorf("loading certs from %q: %w", certDir, err)
 	}
 
-	return tlsConfig, certDir, nil
+	return tlsConfig, certDir, dynamicConfig, nil
 }

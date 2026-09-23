@@ -84,7 +84,7 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         action: libredfish::SystemPowerControl,
     ) -> Result<(), EndpointExplorationError>;
 
-    /// Reset a Redfish Chassis (e.g. a GPU baseboard) out-of-band via the BMC at
+    /// Reset a Redfish Chassis (e.g. an HGX baseboard) out-of-band via the BMC at
     /// `address`, resolving credentials from `interface`. `chassis_id` is the
     /// Redfish Chassis id (e.g. "HGX_Chassis_0"). Errors if credentials cannot be
     /// loaded or the Redfish request fails.

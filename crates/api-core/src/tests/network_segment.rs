@@ -15,8 +15,6 @@
  * limitations under the License.
  */
 
-#![allow(deprecated)]
-
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::str::FromStr;
@@ -34,6 +32,8 @@ use common::network_segment::{
 use db::ObjectColumnFilter;
 use db::network_segment::VpcColumn;
 use db::vpc::IdColumn;
+use figment::Figment;
+use figment::providers::{Format, Toml};
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::network_prefix::NewNetworkPrefix;
@@ -43,17 +43,21 @@ use model::network_segment::{
     NetworkSegmentType, NewNetworkSegment,
 };
 use model::resource_pool::common::VLANID;
-use model::resource_pool::{ResourcePool, ResourcePoolError, ResourcePoolStats, ValueType};
+use model::resource_pool::{
+    ResourcePool, ResourcePoolEntryState, ResourcePoolError, ResourcePoolStats, ValueType,
+};
 use model::vpc::{NewVpc, UpdateVpcVirtualization, VpcDefinition, VpcStatus};
 use prometheus_text_parser::ParsedPrometheusMetrics;
 use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
 use tonic::Request;
 
+use crate::cfg::file::InitialObjectsConfig;
 use crate::db_init;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::network_segment::FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS;
+use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
 use crate::tests::common::api_fixtures::{
     TEST_SITE_PREFIXES, TestEnvOverrides, create_test_env, create_test_env_with_overrides,
     get_vpc_fixture_id,
@@ -343,6 +347,10 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
 
     // Value is allocated
     let mut txn = db_pool.begin().await?;
+    let vni: i32 = sqlx::query_scalar("SELECT vni_id FROM network_segments WHERE id = $1")
+        .bind(segment.id)
+        .fetch_one(&mut *txn)
+        .await?;
     assert_eq!(
         db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
         ResourcePoolStats {
@@ -375,6 +383,12 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
 
     // Value is free
     let mut txn = db_pool.begin().await?;
+    let vni_entry = db::resource_pool::find_value(&mut *txn, &vni.to_string())
+        .await?
+        .into_iter()
+        .find(|entry| entry.pool_name == env.common_pools.ethernet.pool_vni.name())
+        .expect("segment VNI must remain in its pool");
+    assert_eq!(vni_entry.state.0, ResourcePoolEntryState::Free);
     assert_eq!(
         db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
         ResourcePoolStats {
@@ -424,7 +438,7 @@ fn initial_underlay_definition(prefix: &str, gateway: &str) -> NetworkDefinition
         segment_type: NetworkDefinitionSegmentType::Underlay,
         prefix: prefix.parse().unwrap(),
         prefix_v6: None,
-        gateway: gateway.parse().unwrap(),
+        gateway: Some(gateway.parse().unwrap()),
         dhcpv6_link_address: None,
         mtu: 1500,
         reserve_first: 5,
@@ -455,6 +469,88 @@ async fn persist_initial_network_without_reverse_zone(
     db::network_segment::insert_network_def(txn.as_mut(), name, segment.id, definition).await?;
     txn.commit().await?;
     Ok(segment)
+}
+
+#[crate::sqlx_test]
+async fn test_initial_network_toml_persists_ipv4_dual_stack_and_ipv6_only(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let config: InitialObjectsConfig = Figment::new()
+        .merge(Toml::string(
+            r#"
+                [networks.ipv4]
+                type = "underlay"
+                prefix = "192.0.2.0/24"
+                gateway = "192.0.2.1"
+                mtu = 1500
+                reserve_first = 5
+
+                [networks.dual-stack]
+                type = "underlay"
+                prefix = "198.51.100.0/24"
+                prefix_v6 = "2001:db8:1::/64"
+                gateway = "198.51.100.1"
+                dhcpv6_link_address = "2001:db8:ffff::1"
+                mtu = 1500
+                reserve_first = 5
+
+                [networks.ipv6-only]
+                type = "underlay"
+                prefix = "2001:db8:2::/64"
+                dhcpv6_link_address = "2001:db8:ffff::2"
+                mtu = 1500
+                reserve_first = 5
+            "#,
+        ))
+        .extract()?;
+    let networks = config.networks.expect("configured networks");
+    assert_eq!(networks["ipv6-only"].gateway, None);
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
+
+    let mut txn = env.pool.begin().await?;
+    assert_eq!(
+        db::network_segment::all_stored_defs(txn.as_mut()).await?,
+        networks,
+    );
+
+    for (name, expected_prefixes) in [
+        ("ipv4", vec![("192.0.2.0/24", Some("192.0.2.1"), None)]),
+        (
+            "dual-stack",
+            vec![
+                ("198.51.100.0/24", Some("198.51.100.1"), None),
+                ("2001:db8:1::/64", None, Some("2001:db8:ffff::1")),
+            ],
+        ),
+        (
+            "ipv6-only",
+            vec![("2001:db8:2::/64", None, Some("2001:db8:ffff::2"))],
+        ),
+    ] {
+        let segment = db::network_segment::find_by_name(&mut txn, name).await?;
+        assert_eq!(segment.prefixes.len(), expected_prefixes.len(), "{name}");
+        for (prefix, gateway, dhcpv6_link_address) in expected_prefixes {
+            let prefix = prefix.parse::<ipnetwork::IpNetwork>()?;
+            let stored = segment
+                .prefixes
+                .iter()
+                .find(|stored| stored.prefix == prefix)
+                .expect("configured prefix must be persisted");
+            assert_eq!(
+                stored.gateway,
+                gateway.map(str::parse).transpose()?,
+                "{name}"
+            );
+            assert_eq!(
+                stored.dhcpv6_link_address,
+                dhcpv6_link_address.map(str::parse).transpose()?,
+                "{name}",
+            );
+        }
+    }
+    txn.commit().await?;
+    Ok(())
 }
 
 #[crate::sqlx_test]
@@ -577,7 +673,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
             segment_type: NetworkDefinitionSegmentType::HostInband,
             prefix: "10.217.18.192/30".parse().unwrap(),
             prefix_v6: None,
-            gateway: "10.217.18.193".parse().unwrap(),
+            gateway: Some("10.217.18.193".parse().unwrap()),
             dhcpv6_link_address: None,
             mtu: 1500,
             reserve_first: 1,
@@ -848,7 +944,7 @@ pub(in crate::tests) async fn test_create_initial_network_fails_for_missing_vpc_
             segment_type: NetworkDefinitionSegmentType::HostInband,
             prefix: "10.217.18.192/30".parse().unwrap(),
             prefix_v6: None,
-            gateway: "10.217.18.193".parse().unwrap(),
+            gateway: Some("10.217.18.193".parse().unwrap()),
             dhcpv6_link_address: None,
             mtu: 1500,
             reserve_first: 1,
@@ -1003,7 +1099,11 @@ async fn test_segment_prefix_in_unconfigured_address_space(
             }
         }
         Ok(segment) => {
-            let prefixes = segment.prefixes.iter().map(|p| p.prefix.as_str());
+            let config = segment
+                .config
+                .as_ref()
+                .expect("created network segment should include config");
+            let prefixes = config.prefixes.iter().map(|p| p.prefix.as_str());
             let prefixes = itertools::join(prefixes, ", ");
             Err(eyre::format_err!(
                 "the API did not reject our request to create a segment using \
@@ -1251,6 +1351,45 @@ async fn test_network_segment_metrics_tor(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     test_network_segment_metrics(pool, MetricsTestType::Tor).await
+}
+
+#[crate::sqlx_test]
+async fn test_network_segment_metrics_ipv6_total_capacity(pool: sqlx::PgPool) {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let cases = [
+        ("IPV6_SMALL", "2001:db8:1::/126", 4usize),
+        ("IPV6_LARGE", "2001:db8:2::/64", usize::MAX),
+    ];
+
+    for (name, prefix, _) in cases {
+        env.api
+            .create_network_segment(Request::new(rpc::forge::NetworkSegmentCreationRequest {
+                name: name.to_string(),
+                mtu: Some(1500),
+                prefixes: vec![rpc::forge::NetworkPrefix {
+                    prefix: prefix.to_string(),
+                    ..Default::default()
+                }],
+                segment_type: rpc::forge::NetworkSegmentType::Admin as i32,
+                ..Default::default()
+            }))
+            .await
+            .expect("create IPv6-only Admin segment");
+    }
+
+    env.run_network_segment_controller_iteration().await;
+
+    let mut expected = cases.map(|(name, prefix, count)| {
+        format!(
+            "{{fresh=\"true\",name=\"{name}\",prefix=\"{prefix}\",type=\"admin\"}} {}",
+            count as f64
+        )
+    });
+    expected.sort();
+    assert_eq!(
+        env.test_meter.formatted_metrics("carbide_total_ips_count"),
+        expected
+    );
 }
 
 #[crate::sqlx_test]
@@ -1524,7 +1663,7 @@ async fn test_update_svi_ip_admin_segment(
     let env = create_test_env(pool).await;
 
     // This should create VPC for admin segment
-    db_init::create_admin_vpc(&env.pool, Some(10600)).await?;
+    db_init::create_admin_vpc(&env.api, Some(10600)).await?;
 
     let mut txn = env.pool.begin().await?;
     let admin_segments = db::network_segment::admin(&mut txn).await?;
@@ -1670,16 +1809,19 @@ async fn test_create_network_segment_with_ipv6_prefix(
         .await?
         .into_inner();
 
-    assert_eq!(response.name, "IPV6_SEGMENT");
-    assert_eq!(response.prefixes.len(), 1);
-    assert_eq!(response.prefixes[0].prefix, "2001:db8::/64");
-    assert!(response.prefixes[0].gateway.is_none());
-    assert!(
-        response
-            .config
-            .as_ref()
-            .is_some_and(|config| config.infer_slaac_eui64_addresses)
-    );
+    let metadata = response
+        .metadata
+        .as_ref()
+        .expect("created network segment should include metadata");
+    let config = response
+        .config
+        .as_ref()
+        .expect("created network segment should include config");
+    assert_eq!(metadata.name, "IPV6_SEGMENT");
+    assert_eq!(config.prefixes.len(), 1);
+    assert_eq!(config.prefixes[0].prefix, "2001:db8::/64");
+    assert!(config.prefixes[0].gateway.is_none());
+    assert!(config.infer_slaac_eui64_addresses);
 
     Ok(())
 }
@@ -1698,9 +1840,13 @@ async fn test_create_dual_stack_tenant_segment(pool: sqlx::PgPool) -> Result<(),
             create_network_segments: Some(false),
             site_prefixes: Some(site_prefixes),
             ..Default::default()
-        },
+        }
+        .with_fnn_config(None),
     )
     .await;
+
+    // Register the tenant required by the FNN VPC before exercising dual-stack segments.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
 
     let vpc = env
         .api
@@ -1754,15 +1900,19 @@ async fn test_create_dual_stack_tenant_segment(pool: sqlx::PgPool) -> Result<(),
         .await?
         .into_inner();
 
-    assert_eq!(response.name, "DUAL_STACK_SEGMENT");
-    assert_eq!(response.prefixes.len(), 2);
+    let metadata = response
+        .metadata
+        .as_ref()
+        .expect("created network segment should include metadata");
+    let config = response
+        .config
+        .as_ref()
+        .expect("created network segment should include config");
+    assert_eq!(metadata.name, "DUAL_STACK_SEGMENT");
+    assert_eq!(config.prefixes.len(), 2);
 
     // Verify both prefixes are present (order may vary)
-    let prefix_strs: Vec<&str> = response
-        .prefixes
-        .iter()
-        .map(|p| p.prefix.as_str())
-        .collect();
+    let prefix_strs: Vec<&str> = config.prefixes.iter().map(|p| p.prefix.as_str()).collect();
     assert!(prefix_strs.contains(&"192.0.2.0/24"), "IPv4 prefix missing");
     assert!(
         prefix_strs.contains(&"2001:db8::/64"),
@@ -1788,9 +1938,13 @@ async fn test_ipv6_tenant_prefix_rejected_when_not_in_site_fabric(
             create_network_segments: Some(false),
             site_prefixes: Some(site_prefixes),
             ..Default::default()
-        },
+        }
+        .with_fnn_config(None),
     )
     .await;
+
+    // Register the tenant required by the FNN VPC before exercising prefix containment.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
 
     let vpc = env
         .api
@@ -2011,9 +2165,12 @@ async fn flat_vpc_accepts_host_inband_segment(
 
     // Accepting the request is only half of it -- check the segment came back attached to
     // the flat VPC, with the type we asked for.
-    assert_eq!(created.vpc_id, vpc.id);
+    let config = created
+        .config
+        .expect("created network segment should include config");
+    assert_eq!(config.vpc_id, vpc.id);
     assert_eq!(
-        created.segment_type,
+        config.segment_type,
         rpc::forge::NetworkSegmentType::HostInband as i32
     );
 
@@ -2176,8 +2333,24 @@ async fn attach_host_inband_segment_to_same_vpc_is_idempotent(
         .await?
         .into_inner();
 
-    assert_eq!(second.config.unwrap().vpc_id, Some(vpc_id));
-    assert_eq!(second.version, first.version);
+    assert_eq!(second.config.as_ref().unwrap().vpc_id, Some(vpc_id));
+    let second_status = second
+        .status
+        .as_ref()
+        .expect("second status should be present");
+    let second_lifecycle = second_status
+        .lifecycle
+        .as_ref()
+        .expect("second lifecycle should be present");
+    let first_status = first
+        .status
+        .as_ref()
+        .expect("first status should be present");
+    let first_lifecycle = first_status
+        .lifecycle
+        .as_ref()
+        .expect("first lifecycle should be present");
+    assert_eq!(second_lifecycle.version, first_lifecycle.version);
 
     Ok(())
 }

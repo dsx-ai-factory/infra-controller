@@ -5,7 +5,9 @@ package client
 
 import (
 	"errors"
-	"fmt"
+	"net"
+	"strconv"
+	"strings"
 
 	pkgcerts "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/certs"
 )
@@ -37,6 +39,11 @@ func (c *Config) Validate() error {
 }
 
 // Target builds the target string for connecting to Flow gRPC server.
+// IPv6 hosts may be supplied with or without brackets.
 func (c *Config) Target() string {
-	return fmt.Sprintf("%s:%v", c.Host, c.Port)
+	host := c.Host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	return net.JoinHostPort(host, strconv.Itoa(c.Port))
 }

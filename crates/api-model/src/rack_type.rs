@@ -284,11 +284,20 @@ impl fmt::Display for RackHardwareClass {
 /* ********************************** */
 
 /// RackCapabilityType represents a category of rack component capability.
+/// String parsing uses the same case-sensitive names as Serde serialization.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum RackCapabilityType {
     Compute,
     Switch,
     PowerShelf,
+}
+
+impl FromStr for RackCapabilityType {
+    type Err = serde::de::value::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::deserialize(serde::de::value::StrDeserializer::<Self::Err>::new(value))
+    }
 }
 
 impl fmt::Display for RackCapabilityType {
@@ -421,14 +430,28 @@ pub struct RackCapabilitiesSet {
 
 /// Optional source for a rack-wide SOT firmware-object document.
 ///
-/// When present on a [`RackProfile`], rack ingestion fetches this document and
-/// uses it as the default firmware request for the profile's compute and switch
-/// inventory.
+/// When present on a [`RackProfile`], NICo uses this document for compute-tray
+/// preingestion and fetches it separately for the rack maintenance firmware and
+/// switch NVOS image phases. RMS selects the matching artifacts from the
+/// document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RackFirmwareObjectConfig {
-    /// URL from which rack ingestion fetches the SOT JSON document.
+    /// URL from which NICo fetches the SOT JSON document.
     pub url: url::Url,
+
+    /// Named credential containing the artifact access token sent to RMS during
+    /// compute-tray preingestion.
+    ///
+    /// The credential is read when the operation starts, so rack profiles do
+    /// not contain secret material. When omitted, RMS receives its no-auth
+    /// sentinel.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_credential_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub access_token_credential: Option<String>,
 
     /// Maximum duration for the complete HTTP request.
     ///
@@ -447,6 +470,21 @@ impl RackFirmwareObjectConfig {
     }
 }
 
+fn deserialize_optional_credential_name<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let name = Option::<String>::deserialize(deserializer)?;
+
+    if name.as_deref() == Some("") {
+        return Err(D::Error::custom(
+            "firmware artifact access-token credential name must not be empty",
+        ));
+    }
+
+    Ok(name)
+}
+
 /// RackProfile describes the hardware identity and expected device
 /// capabilities for a class of rack. The profile is referenced by name
 /// (the map key in the config file) from expected racks and rack configs.
@@ -457,10 +495,15 @@ pub struct RackProfile {
     #[serde(default)]
     pub product_family: Option<RackProductFamily>,
 
-    /// Default firmware-object source for ingestion.
+    /// Default firmware-object source for compute-tray preingestion and
+    /// automatic rack maintenance.
     ///
-    /// When absent, ingestion skips the automatic firmware update unless an
-    /// explicit maintenance request supplies a firmware object.
+    /// When absent, compute-tray preingestion skips its automatic update, and
+    /// rack maintenance skips automatic firmware and NVOS updates unless an
+    /// explicit maintenance request supplies a firmware object. If no firmware
+    /// object is available while a switch in the maintenance scope is already
+    /// waiting for an NVOS update, maintenance enters `Error` instead of
+    /// skipping the NVOS phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware_object: Option<RackFirmwareObjectConfig>,
 
@@ -804,10 +847,12 @@ count = 0
 [Rack.firmware_object]
 url = "https://firmware.example.invalid/sot/rack.json"
 fetch_timeout = "45s"
+access_token_credential = "rack-artifacts"
 "#,
                 Some((
                     "https://firmware.example.invalid/sot/rack.json",
                     std::time::Duration::from_secs(45),
+                    Some("rack-artifacts"),
                 )),
             ),
             (
@@ -819,6 +864,7 @@ url = "https://firmware.example.invalid/sot/rack.json"
                 Some((
                     "https://firmware.example.invalid/sot/rack.json",
                     std::time::Duration::from_secs(30),
+                    None,
                 )),
             ),
             ("not configured", "[Rack]\n", None),
@@ -835,11 +881,39 @@ url = "https://firmware.example.invalid/sot/rack.json"
                     .firmware_object
                     .as_ref()
                     .map(|firmware_object| {
-                        (firmware_object.url.as_str(), firmware_object.fetch_timeout)
+                        (
+                            firmware_object.url.as_str(),
+                            firmware_object.fetch_timeout,
+                            firmware_object.access_token_credential.as_deref(),
+                        )
                     });
 
             assert_eq!(actual, expected, "{name}");
         }
+    }
+
+    #[test]
+    fn rack_profile_rejects_empty_firmware_access_token_credential_name() {
+        let input = r#"
+[Rack.firmware_object]
+url = "https://firmware.example.invalid/sot/rack.json"
+access_token_credential = ""
+
+[Rack.rack_capabilities.compute]
+count = 0
+[Rack.rack_capabilities.switch]
+count = 0
+[Rack.rack_capabilities.power_shelf]
+count = 0
+"#;
+
+        let error = toml::from_str::<RackProfileConfig>(input).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("firmware artifact access-token credential name must not be empty")
+        );
     }
 
     #[test]
@@ -1273,6 +1347,27 @@ count = 2
 
             "power shelf" {
                 RackCapabilityType::PowerShelf => "PowerShelf".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_rack_capability_type_from_str() {
+        scenarios!(
+            run = |input: &str| input.parse::<RackCapabilityType>().inspect(|value| {
+                assert_eq!(serde_json::to_value(value).unwrap(), input);
+            }).map_err(drop);
+            "canonical Serde names" {
+                "Compute" => Yields(RackCapabilityType::Compute),
+                "Switch" => Yields(RackCapabilityType::Switch),
+                "PowerShelf" => Yields(RackCapabilityType::PowerShelf),
+            }
+
+            "non-canonical names rejected" {
+                "switch" => Fails,
+                "NVSwitch" => Fails,
+                " Switch " => Fails,
+                "" => Fails,
             }
         );
     }

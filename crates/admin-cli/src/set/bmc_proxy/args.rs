@@ -29,7 +29,13 @@ Disable the BMC proxy:
 
 ")]
 pub(crate) struct Args {
-    #[clap(long, action = clap::ArgAction::Set, help = "Enable site-explorer bmc_proxy")]
+    #[clap(
+        long,
+        action = clap::ArgAction::Set,
+        help = "Enable the dynamic site_explorer.bmc_proxy redirect for development and \
+                integration environments. This setting is independent of static \
+                [bmc_proxy] routing through nico-bmc-proxy."
+    )]
     pub(super) enabled: bool,
     #[clap(long, action = clap::ArgAction::Set, help = "host:port string use as a proxy for talking to BMC's")]
     pub(super) proxy: Option<String>,

@@ -20,6 +20,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -266,6 +267,7 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 					DpuExtensionServices: []*corev1.DpuExtensionService{
 						{
 							ServiceId:  dpuExtensionService1.ID.String(),
+							DpuTarget:  cutil.GetPtr(corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL),
 							VersionCtr: 2,
 							LatestVersionInfo: &corev1.DpuExtensionServiceVersionInfo{
 								Version:       "V1-T1761856992374052",
@@ -409,6 +411,7 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 					DpuExtensionServices: []*corev1.DpuExtensionService{
 						{
 							ServiceId: dpfUpdating.ID.String(),
+							DpuTarget: cutil.GetPtr(corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL),
 							LatestVersionInfo: &corev1.DpuExtensionServiceVersionInfo{
 								Version:       "V2",
 								Data:          "updated-test-data",
@@ -593,6 +596,14 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 
 				for _, controllerDes := range tt.args.dpuExtensionServiceInventory.DpuExtensionServices {
 					if controllerDes.ServiceId == updatedDpuExtService.ID.String() {
+						if controllerDes.DpuTarget != nil {
+							if dpuExtService.ServiceType == cdbm.DpuExtensionServiceServiceTypeDpfHelmChart {
+								require.NotNil(t, updatedDpuExtService.DpuTarget)
+								assert.Equal(t, cdbm.DpuExtensionServiceDpuTargetAll, *updatedDpuExtService.DpuTarget)
+							} else {
+								assert.Nil(t, updatedDpuExtService.DpuTarget)
+							}
+						}
 						if updatedDpuExtService.Version != nil {
 							assert.Equal(t, controllerDes.LatestVersionInfo.Version, *updatedDpuExtService.Version)
 						}

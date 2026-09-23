@@ -17,7 +17,7 @@
 
 use ::rpc::admin_cli::OutputFormat;
 use carbide_uuid::dpu_remediations::RemediationId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use prettytable::{Table, row};
 use rpc::forge::{
     AppliedRemediationIdList, AppliedRemediationList, FindAppliedRemediationIdsRequest,
@@ -81,7 +81,7 @@ pub(super) async fn handle_list_applied(
 
 async fn show_applied_remediation_details(
     remediation_id: RemediationId,
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
     output_format: OutputFormat,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     api_client: &ApiClient,
@@ -149,7 +149,7 @@ async fn show_machines_for_applied_remediation(
 }
 
 async fn show_applied_remediations_for_machine(
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
     output_format: OutputFormat,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     api_client: &ApiClient,

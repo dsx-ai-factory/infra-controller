@@ -6,9 +6,11 @@ package db
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
 )
@@ -67,17 +69,23 @@ func ConfigFromEnv() (Config, error) {
 }
 
 // BuildDSN builds the Data Source Name (DSN) string for connecting to
-// the database.
+// the database. IPv6 hosts may be supplied with or without brackets.
 func (c *Config) BuildDSN() string {
+	host := c.Host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+
 	dsn := fmt.Sprintf(
-		"postgres://%v:%v@%v:%v/%v?sslmode=",
+		"postgres://%v:%v@%v/%v?sslmode=",
 		url.PathEscape(c.Credential.User),
 		url.PathEscape(c.Credential.Password.Value),
-		c.Host,
-		c.Port,
+		net.JoinHostPort(host, strconv.Itoa(c.Port)),
 		c.DBName,
 	)
 
+	// `sslmode=disable` broke hostssl-only servers in v1.3.1. Keep `prefer`
+	// explicit so a missing CA path still allows TLS negotiation.
 	if len(c.CACertificatePath) > 0 {
 		dsn += fmt.Sprintf("prefer&sslrootcert=%v", c.CACertificatePath)
 	} else {

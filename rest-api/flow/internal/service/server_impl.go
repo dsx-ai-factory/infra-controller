@@ -124,12 +124,16 @@ func (rs *FlowServerImpl) CreateExpectedRack(
 	ctx context.Context,
 	req *pb.CreateExpectedRackRequest,
 ) (*pb.CreateExpectedRackResponse, error) {
-	id, err := rs.inventoryManager.CreateExpectedRack(ctx, protobuf.RackFrom(req.GetRack()))
+	r, err := protobuf.RackFrom(req.GetRack())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid rack: %v", err)
+	}
+	id, err := rs.inventoryManager.CreateExpectedRack(ctx, r)
 
 	return &pb.CreateExpectedRackResponse{Id: protobuf.UUIDTo(id)}, err
 }
 
-// GetRackInfoByID retrieves rack information by its unique identifier.
+// GetRackInfoByID retrieves rack information by external rack ID.
 // Optionally includes component information if requested.
 //
 // Parameters:
@@ -143,20 +147,25 @@ func (rs *FlowServerImpl) GetRackInfoByID(
 	ctx context.Context,
 	req *pb.GetRackInfoByIDRequest,
 ) (*pb.GetRackInfoResponse, error) {
-	r, err := rs.inventoryManager.GetRackByID(
-		ctx,
-		protobuf.UUIDFrom(req.GetId()),
-		req.GetWithComponents(),
-	)
+	rawID := req.GetId().GetId()
+	if rawID == "" {
+		return nil, status.Error(codes.InvalidArgument, "rack identifier is required")
+	}
+
+	r, err := rs.inventoryManager.GetRackByIdentifier(ctx, externalRackIdentifier(rawID), req.GetWithComponents())
 	if err != nil {
 		return nil, err
 	}
 
 	result := protobuf.RackTo(r)
-	if err := rs.populateTaskStats(ctx, []*pb.Rack{result}, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, []*pb.Rack{result}, nil); err != nil {
 		return nil, err
 	}
 	return &pb.GetRackInfoResponse{Rack: result}, nil
+}
+
+func externalRackIdentifier(rawID string) identifier.Identifier {
+	return identifier.Identifier{ExternalID: rawID}
 }
 
 // GetRackInfoBySerial retrieves rack information by its manufacturer and serial number.
@@ -185,7 +194,7 @@ func (rs *FlowServerImpl) GetRackInfoBySerial(
 	}
 
 	result := protobuf.RackTo(r)
-	if err := rs.populateTaskStats(ctx, []*pb.Rack{result}, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, []*pb.Rack{result}, nil); err != nil {
 		return nil, err
 	}
 	return &pb.GetRackInfoResponse{Rack: result}, nil
@@ -207,7 +216,10 @@ func (rs *FlowServerImpl) PatchRack(
 	ctx context.Context,
 	req *pb.PatchRackRequest,
 ) (*pb.PatchRackResponse, error) {
-	r := protobuf.RackFrom(req.GetRack())
+	r, err := protobuf.RackFrom(req.GetRack())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid rack: %v", err)
+	}
 
 	report, err := rs.inventoryManager.PatchRack(ctx, r)
 
@@ -231,12 +243,22 @@ func (rs *FlowServerImpl) AddComponent(
 
 	// Convert proto component to internal; rack_id comes from the component
 	// itself and is optional.
-	comp := protobuf.ComponentFrom(pbComp)
-	comp.RackID = protobuf.UUIDFrom(pbComp.GetRackId())
+	comp, err := protobuf.ComponentFrom(pbComp)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid component: %v", err)
+	}
+	rackID, err := protobuf.OptionalUUIDFrom(pbComp.GetRackId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "component.rack_id %v", err)
+	}
+	if rackID != nil {
+		comp.RackID = *rackID
+	}
 
 	// Verify the rack exists only when one has been specified.
 	if comp.RackID != uuid.Nil {
-		if _, err := rs.inventoryManager.GetRackByID(ctx, comp.RackID, false); err != nil {
+		_, err = rs.inventoryManager.GetRackByID(ctx, comp.RackID, false)
+		if err != nil {
 			return nil, fmt.Errorf("rack not found: %w", err)
 		}
 	}
@@ -344,6 +366,15 @@ func (rs *FlowServerImpl) PatchComponent(
 	if compID == uuid.Nil {
 		return nil, errors.New("component id is required")
 	}
+	positionPaths, err := patchComponentPositionPaths(req)
+	if err != nil {
+		return nil, err
+	}
+
+	rackID, err := protobuf.OptionalUUIDFrom(req.RackId)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rack_id %v", err)
+	}
 
 	// Get the existing component
 	existing, err := rs.inventoryManager.GetComponentByID(ctx, compID)
@@ -357,23 +388,27 @@ func (rs *FlowServerImpl) PatchComponent(
 	}
 
 	if req.Position != nil {
-		existing.Position.SlotID = int(req.Position.SlotId)
-		existing.Position.TrayIndex = int(req.Position.TrayIdx)
-		existing.Position.HostID = int(req.Position.HostId)
+		if positionPaths == nil || positionPaths["position.slot_id"] {
+			existing.Position.SlotID = int(req.Position.SlotId)
+		}
+		if positionPaths == nil || positionPaths["position.tray_idx"] {
+			existing.Position.TrayIndex = int(req.Position.TrayIdx)
+		}
+		if positionPaths == nil || positionPaths["position.host_id"] {
+			existing.Position.HostID = int(req.Position.HostId)
+		}
 	}
 
 	if req.Description != nil {
 		existing.Info.Description = *req.Description
 	}
 
-	if req.RackId != nil {
-		rackID := protobuf.UUIDFrom(req.RackId)
-		if rackID != uuid.Nil {
-			if _, err := rs.inventoryManager.GetRackByID(ctx, rackID, false); err != nil {
-				return nil, fmt.Errorf("rack not found: %w", err)
-			}
-			existing.RackID = rackID
+	if rackID != nil {
+		_, err = rs.inventoryManager.GetRackByID(ctx, *rackID, false)
+		if err != nil {
+			return nil, fmt.Errorf("rack not found: %w", err)
 		}
+		existing.RackID = *rackID
 	}
 
 	if len(req.GetBmcs()) > 0 {
@@ -396,7 +431,31 @@ func (rs *FlowServerImpl) PatchComponent(
 	}, nil
 }
 
-// GetComponentInfoByID retrieves component information by its unique identifier.
+func patchComponentPositionPaths(req *pb.PatchComponentRequest) (map[string]bool, error) {
+	if req.UpdateMask == nil {
+		return nil, nil
+	}
+	if req.Position == nil {
+		return nil, status.Error(codes.InvalidArgument, "position is required when update_mask contains position fields")
+	}
+
+	paths := make(map[string]bool, len(req.UpdateMask.Paths))
+	for _, path := range req.UpdateMask.Paths {
+		switch path {
+		case "position.slot_id", "position.tray_idx", "position.host_id":
+			paths[path] = true
+		default:
+			return nil, status.Errorf(codes.InvalidArgument, "unsupported PatchComponent update_mask path %q", path)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "update_mask paths are required")
+	}
+	return paths, nil
+}
+
+// GetComponentInfoByID retrieves component information by external component ID
+// or BMC MAC address.
 // Optionally includes the parent rack information if requested. This method
 // performs a two-step lookup: first retrieving the component and its rack ID,
 // then fetching rack details if requested.
@@ -412,13 +471,12 @@ func (rs *FlowServerImpl) GetComponentInfoByID(
 	ctx context.Context,
 	req *pb.GetComponentInfoByIDRequest,
 ) (*pb.GetComponentInfoResponse, error) {
-	c, err := rs.inventoryManager.GetComponentByID(
-		ctx,
-		protobuf.UUIDFrom(req.GetId()),
-	)
-
+	c, err := rs.resolveComponentIdentifier(ctx, req.GetId().GetId())
 	if err != nil {
 		return nil, err
+	}
+	if c.ComponentID == "" {
+		return nil, status.Errorf(codes.FailedPrecondition, "component %q has no external ID", req.GetId().GetId())
 	}
 
 	var r *rack.Rack
@@ -433,13 +491,27 @@ func (rs *FlowServerImpl) GetComponentInfoByID(
 	}
 
 	result := protobuf.ComponentTo(c)
-	if err := rs.populateTaskStats(ctx, nil, []*pb.Component{result}); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, []*pb.Component{result}); err != nil {
 		return nil, err
 	}
 	return &pb.GetComponentInfoResponse{
 		Component: result,
 		Rack:      protobuf.RackTo(r),
 	}, nil
+}
+
+// resolveComponentIdentifier resolves an external component ID or BMC MAC
+// address. The identifier must select exactly one component.
+func (rs *FlowServerImpl) resolveComponentIdentifier(
+	ctx context.Context,
+	componentIdentifier string,
+) (*component.Component, error) {
+	return inventoryresolver.ResolveComponentIdentifier(
+		ctx,
+		rs.inventoryManager,
+		componentIdentifier,
+		devicetypes.ComponentTypeUnknown,
+	)
 }
 
 // GetComponentInfoBySerial retrieves component information by its manufacturer and serial number.
@@ -481,7 +553,7 @@ func (rs *FlowServerImpl) GetComponentInfoBySerial(
 	}
 
 	result := protobuf.ComponentTo(c)
-	if err := rs.populateTaskStats(ctx, nil, []*pb.Component{result}); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, []*pb.Component{result}); err != nil {
 		return nil, err
 	}
 	return &pb.GetComponentInfoResponse{
@@ -560,7 +632,7 @@ func (rs *FlowServerImpl) GetListOfRacks(
 	for _, r := range racks {
 		results = append(results, protobuf.RackTo(r))
 	}
-	if err := rs.populateTaskStats(ctx, results, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, results, nil); err != nil {
 		return nil, err
 	}
 
@@ -759,10 +831,16 @@ func (rs *FlowServerImpl) BringUpRack(
 			"target_spec is required",
 		)
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
 	info := &operations.BringUpTaskInfo{
-		RuleID:                 protobuf.UUIDStringFrom(req.GetRuleId()),
 		OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+	}
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
 	}
 	opReq, err := rs.convertTargetSpecToOperationRequest(
 		targetSpec, req.GetDescription(), info,
@@ -771,7 +849,7 @@ func (rs *FlowServerImpl) BringUpRack(
 		return nil, err
 	}
 
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -805,9 +883,14 @@ func (rs *FlowServerImpl) IngestRack(
 	if targetSpec == nil {
 		return nil, errors.New("target_spec is required")
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
-	info := &operations.BringUpTaskInfo{
-		RuleID: protobuf.UUIDStringFrom(req.GetRuleId()),
+	info := &operations.BringUpTaskInfo{}
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
 	}
 
 	opReq, err := rs.convertTargetSpecToOperationRequest(
@@ -820,7 +903,7 @@ func (rs *FlowServerImpl) IngestRack(
 	// Override the operation code so the rule resolver picks the
 	// ingestion-only rule instead of the full bring-up rule.
 	opReq.Operation.Code = taskcommon.OpCodeIngest
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -877,9 +960,14 @@ func (rs *FlowServerImpl) decommissionRackImpl(
 			"decommission requires rack targets; component targets are not supported",
 		)
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
-	info := &operations.DecommissionTaskInfo{
-		RuleID: protobuf.UUIDStringFrom(req.GetRuleId()),
+	info := &operations.DecommissionTaskInfo{}
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
 	}
 	opReq, err := rs.convertTargetSpecToOperationRequest(
 		targetSpec, req.GetDescription(), info,
@@ -889,7 +977,7 @@ func (rs *FlowServerImpl) decommissionRackImpl(
 	}
 
 	opReq.ConflictStrategy, opReq.QueueTimeout = protobuf.QueueOptionsFrom(req.GetQueueOptions())
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -922,8 +1010,14 @@ func (rs *FlowServerImpl) handlePowerControlTask(
 	if targetSpec == nil {
 		return nil, errors.New("target_spec is required")
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(pbRuleID)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
-	info.RuleID = protobuf.UUIDStringFrom(pbRuleID)
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
+	}
 
 	// Convert pb.OperationTargetSpec to internal operation.Request
 	req, err := rs.convertTargetSpecToOperationRequest(targetSpec, description, info)
@@ -932,7 +1026,7 @@ func (rs *FlowServerImpl) handlePowerControlTask(
 	}
 
 	req.ConflictStrategy, req.QueueTimeout = protobuf.QueueOptionsFrom(queueOptions)
-	req.RuleID = protobuf.OptionalUUIDFrom(pbRuleID)
+	req.RuleID = ruleID
 
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, req)
@@ -979,10 +1073,26 @@ func (rs *FlowServerImpl) ListTasks(
 	ctx context.Context,
 	req *pb.ListTasksRequest,
 ) (*pb.ListTasksResponse, error) {
+	var rackID uuid.UUID
+	if rawID := req.GetRackId().GetId(); rawID != "" {
+		resolved, err := rs.inventoryManager.GetRackByIdentifier(ctx, externalRackIdentifier(rawID), false)
+		if err != nil {
+			return nil, err
+		}
+		rackID = resolved.Info.ID
+	}
+	var componentID uuid.UUID
+	if rawID := req.GetComponentId().GetId(); rawID != "" {
+		resolved, err := rs.resolveComponentIdentifier(ctx, rawID)
+		if err != nil {
+			return nil, err
+		}
+		componentID = resolved.Info.ID
+	}
 	options := &taskcommon.TaskListOptions{
 		TaskType:    taskcommon.TaskTypeUnknown,
-		RackID:      protobuf.UUIDFrom(req.GetRackId()),
-		ComponentID: protobuf.UUIDFrom(req.GetComponentId()),
+		RackID:      rackID,
+		ComponentID: componentID,
 		ActiveOnly:  req.GetActiveOnly(),
 	}
 
@@ -1025,9 +1135,9 @@ func (rs *FlowServerImpl) GetTasksByIDs(
 	ctx context.Context,
 	req *pb.GetTasksByIDsRequest,
 ) (*pb.GetTasksByIDsResponse, error) {
-	taskIDs := make([]uuid.UUID, 0, len(req.GetTaskIds()))
-	for _, tid := range req.GetTaskIds() {
-		taskIDs = append(taskIDs, protobuf.UUIDFrom(tid))
+	taskIDs, err := protobuf.RequiredUUIDsFrom(req.GetTaskIds())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "task_ids %v", err)
 	}
 
 	tasks, err := rs.taskStore.GetTasks(ctx, taskIDs)
@@ -1057,6 +1167,9 @@ func (rs *FlowServerImpl) CancelTask(
 	}
 
 	if err := rs.taskManager.CancelTask(ctx, taskID); err != nil {
+		if errors.Is(err, taskmanager.ErrTaskNotCancellable) {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
 		return nil, err
 	}
 
@@ -1365,16 +1478,23 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 	if targetSpec == nil {
 		return nil, errors.New("target_spec is required")
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
 	// Build FirmwareControlTaskInfo
 	info := &operations.FirmwareControlTaskInfo{
 		Operation:              operations.FirmwareOperationUpgrade,
 		TargetVersion:          req.GetTargetVersion(),
-		RuleID:                 protobuf.UUIDStringFrom(req.GetRuleId()),
 		SubTargets:             req.GetSubTargets(),
 		OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+		OverrideVersionCheck:   req.GetOverrideVersionCheck(),
 	}
-	err := rs.encryptFirmwareAuthenticationData(info, req.GetAuthenticationData())
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
+	}
+	err = rs.encryptFirmwareAuthenticationData(info, req.GetAuthenticationData())
 	if err != nil {
 		return nil, firmwareAuthenticationStatusError(err)
 	}
@@ -1396,7 +1516,7 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 	opReq.ConflictStrategy, opReq.QueueTimeout = protobuf.QueueOptionsFrom(
 		req.GetQueueOptions(),
 	)
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
@@ -1571,7 +1691,7 @@ func (rs *FlowServerImpl) GetComponents(
 	for _, c := range components {
 		results = append(results, protobuf.ComponentTo(c))
 	}
-	if err := rs.populateTaskStats(ctx, nil, results); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, results); err != nil {
 		return nil, err
 	}
 
@@ -1720,10 +1840,20 @@ func (rs *FlowServerImpl) ValidateComponents(
 			})
 			unexpectedCount++
 		case "missing_in_actual":
+			if sd.ComponentID == nil {
+				return nil, status.Error(codes.FailedPrecondition, "missing component has no inventory reference")
+			}
+			expected, lookupErr := rs.inventoryManager.GetComponentByID(ctx, *sd.ComponentID)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			macAddress := componentBMCMAC(expected)
+			if macAddress == "" {
+				return nil, status.Error(codes.FailedPrecondition, "missing component has no BMC MAC address")
+			}
 			diffs = append(diffs, &pb.ComponentDiff{
-				Type:        pb.DiffType_DIFF_TYPE_MISSING,
-				Id:          compUUID,
-				ComponentId: componentID,
+				Type:                pb.DiffType_DIFF_TYPE_MISSING,
+				ComponentMacAddress: macAddress,
 			})
 			missingCount++
 		case "mismatch":
@@ -1773,6 +1903,25 @@ func (rs *FlowServerImpl) ValidateComponents(
 		MismatchCount:   mismatchCount,
 		MatchCount:      matchCount,
 	}, nil
+}
+
+func componentBMCMAC(comp *component.Component) string {
+	if comp == nil {
+		return ""
+	}
+	macAddresses := make([]string, 0)
+	for _, bmcType := range devicetypes.BMCTypes() {
+		for _, controller := range comp.BmcsByType[bmcType] {
+			if macAddress := controller.MAC.String(); macAddress != "" {
+				macAddresses = append(macAddresses, macAddress)
+			}
+		}
+	}
+	if len(macAddresses) == 0 {
+		return ""
+	}
+	sort.Strings(macAddresses)
+	return macAddresses[0]
 }
 
 // applyComponentFilters applies filters to a list of components in memory.
@@ -2043,14 +2192,7 @@ func (rs *FlowServerImpl) resolveRackTarget(
 	ctx context.Context,
 	rt operation.RackTarget,
 ) ([]*component.Component, error) {
-	var r *rack.Rack
-	var err error
-
-	if rt.Identifier.ID != uuid.Nil {
-		r, err = rs.inventoryManager.GetRackByID(ctx, rt.Identifier.ID, true)
-	} else {
-		r, err = rs.inventoryManager.GetRackByIdentifier(ctx, rt.Identifier, true)
-	}
+	r, err := rs.inventoryManager.GetRackByIdentifier(ctx, rt.Identifier, true)
 	if err != nil {
 		return nil, err
 	}
@@ -2059,8 +2201,7 @@ func (rs *FlowServerImpl) resolveRackTarget(
 }
 
 // fetchComponentTarget fetches a single component from inventory by its
-// internal UUID or by external ID + type. The type in ct.External is
-// guaranteed non-unknown by protobuf.ComponentTargetFrom.
+// internal UUID, external ID, or BMC MAC address, with an optional type filter.
 func (rs *FlowServerImpl) fetchComponentTarget(
 	ctx context.Context,
 	ct operation.ComponentTarget,
@@ -2073,19 +2214,14 @@ func (rs *FlowServerImpl) fetchComponentTarget(
 		return []*component.Component{comp}, nil
 	}
 
-	// External ref: ID and Type are both validated non-empty by ComponentTargetFrom.
-	comps, err := rs.inventoryManager.GetComponentsByExternalIDs(ctx, []string{ct.External.ID})
+	resolved, err := inventoryresolver.ResolveComponentIdentifier(
+		ctx,
+		rs.inventoryManager,
+		ct.External.ID,
+		ct.External.Type,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get component by external id %s: %w", ct.External.ID, err)
+		return nil, err
 	}
-	if len(comps) == 0 {
-		return nil, fmt.Errorf("component with external id %s not found", ct.External.ID)
-	}
-	for _, comp := range comps {
-		if comp.Type == ct.External.Type {
-			return []*component.Component{comp}, nil
-		}
-	}
-	return nil, fmt.Errorf("component with external id %s and type %s not found",
-		ct.External.ID, devicetypes.ComponentTypeToString(ct.External.Type))
+	return []*component.Component{resolved}, nil
 }

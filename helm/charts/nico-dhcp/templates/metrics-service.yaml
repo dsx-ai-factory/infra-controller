@@ -8,6 +8,7 @@ metadata:
     app: {{ include "nico-dhcp.name" . }}
     app.kubernetes.io/metrics: {{ include "nico-dhcp.name" . }}
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "nico-dhcp.selectorLabels" . | nindent 4 }}
   ports:

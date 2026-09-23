@@ -146,6 +146,7 @@ pub(super) async fn lookup(
             .ok_or_else(|| LookupError::CouldNotFindInstance { instance_id })?
             .machine_id
             .ok_or_else(|| LookupError::InstanceHasNoMachineId { instance_id })?
+            .into()
     } else {
         return Err(LookupError::CouldNotParseId {
             machine_or_instance_id: machine_or_instance_id.to_owned(),

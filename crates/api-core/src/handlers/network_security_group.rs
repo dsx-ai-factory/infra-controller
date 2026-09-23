@@ -317,12 +317,9 @@ pub(crate) async fn update(
     // Start a new transaction for a db write.
     let mut txn = api.txn_begin().await?;
 
-    // Look up the NetworkSecurityGroup.  We'll need to check the current
-    // version. We could probably do everything with a single query
-    // with a few subqueries, but we'd only be able to send back a
-    // NotFound, leaving the caller with no way to know if it was
-    // because their NetworkSecurityGroup wasn't found or because the version
-    // didn't match.
+    // Lock the row through validation and update so the version and policy we
+    // validate are the values we replace. NSG permits cannot override FNN null
+    // routes, so this write does not need the routing-overlap lock.
     let current_network_security_group = network_security_group::find_by_ids(
         &mut txn,
         std::slice::from_ref(&id),
@@ -360,16 +357,8 @@ pub(crate) async fn update(
         }
     };
 
-    validate_stateful_egress_enablement(
-        Some(current_network_security_group.stateful_egress),
-        stateful_egress,
-        api.runtime_config
-            .network_security_group
-            .stateful_acls_enabled,
-    )?;
-
     // Prepare the version match if present.
-    if let Some(if_version_match) = req.if_version_match {
+    if let Some(if_version_match) = req.if_version_match.as_ref() {
         let target_version = if_version_match
             .parse::<ConfigVersion>()
             .map_err(CarbideError::from)?;
@@ -382,6 +371,14 @@ pub(crate) async fn update(
             .into());
         }
     };
+
+    validate_stateful_egress_enablement(
+        Some(current_network_security_group.stateful_egress),
+        stateful_egress,
+        api.runtime_config
+            .network_security_group
+            .stateful_acls_enabled,
+    )?;
 
     // Update record in the DB and get back
     // our new NetworkSecurityGroup state.

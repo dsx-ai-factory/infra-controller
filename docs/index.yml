@@ -62,12 +62,21 @@ navigation:
               slug: dpf-setup
             - page: Day 0 Machine Identity
               path: getting-started/installation-options/day0-machine-identity.md
+            - page: Day 0 Credential Store
+              path: getting-started/installation-options/day0-credential-store.md
           slug: installation-options
 
     - section: Architecture
       contents:
         - page: Overview and Components
           path: architecture/overview.md
+        - page: NICo Flow
+          path: architecture/flow.md
+          slug: flow
+        - section: Backends
+          contents:
+            - page: RMS
+              path: architecture/backends/rms.md
         - section: Redfish
           contents:
             - page: Redfish Workflow
@@ -117,6 +126,8 @@ navigation:
           path: provisioning/ingesting-hosts.md
         - page: Ingesting Hosts (REST API)
           path: provisioning/ingesting-hosts-rest-api.md
+        - page: Discovery OS cloud-init (Scout)
+          path: provisioning/discovery-os-cloud-init.md
         - page: Configure Expected Machine Interfaces
           path: provisioning/expected-machine-interfaces.md
         - page: Site Setup API Parity
@@ -142,6 +153,8 @@ navigation:
               path: manuals/networking/infiniband_partitioning.md
         - page: Tenant Management
           path: configuration/tenant_management.md
+        - page: Tenant Management with Keycloak
+          path: configuration/tenant-management-keycloak.md
         - page: Image-Based Operating Systems
           path: configuration/image-based-operating-systems.md
         - page: Organization & Permissions
@@ -150,12 +163,17 @@ navigation:
           path: configuration/machine_identity.md
         - page: Secrets Storage
           path: configuration/secrets-storage.md
+        - page: Credential Sources
+          path: configuration/credential-sources.md
         - page: Host Naming
           path: configuration/host-naming.md
         - page: DNS
           path: configuration/dns.md
-        - page: Component Manager RMS Backends
-          path: configuration/component-manager-rms.md
+        - page: Flow Component Managers
+          path: configuration/flow-component-manager.md
+          slug: flow-component-managers
+        - page: RMS Configuration
+          path: configuration/rms.md
 
     - section: Operations (Day 2)
       contents:
@@ -172,6 +190,21 @@ navigation:
               path: manuals/dpu_extension_service.md
             - page: BlueField DPU Operations
               path: dpu-management/dpu-operations.md
+        - section: Flow Operations
+          slug: flow-operations
+          contents:
+            - page: Overview
+              path: operations/flow/overview.md
+              slug: overview
+            - page: Operation Rules
+              path: operations/flow/operation-rules.md
+              slug: operation-rules
+            - page: Task Schedules
+              path: operations/flow/task-schedules.md
+              slug: task-schedules
+            - page: Operation Runs
+              path: operations/flow/operation-runs.md
+              slug: operation-runs
         - section: Firmware Updates
           contents:
             - page: Overview
@@ -186,8 +219,6 @@ navigation:
               path: operations/firmware-updates/dpu-firmware.md
             - page: Rack and Tray Firmware Updates
               path: operations/firmware-updates/rack-component-firmware.md
-            - page: Flow Operation Rules
-              path: ../rest-api/flow/docs/operation-rules-guide.md
         - page: NVOS Password Rotation
           path: operations/nvos-password-rotation.md
         - page: Monitoring and Health
@@ -208,6 +239,8 @@ navigation:
           path: manuals/machine_identity_signing_key_rotation.md
         - page: NVLink Partitioning
           path: manuals/nvlink_partitioning.md
+        - page: NMX-C Certificate Monitoring and Rotation
+          path: operations/nvlink-certificate-rotation.md
         - page: Rack-Level Administration
           path: manuals/rack_level_admin.md
         - page: Leak Detection & Handling
@@ -216,6 +249,8 @@ navigation:
           contents:
             - page: VPC Routing Profiles
               path: manuals/vpc/vpc_routing_profiles.md
+            - page: Changing a VPC Routing Profile
+              path: manuals/vpc/changing_vpc_routing_profiles.md
             - page: VPC Peering
               path: manuals/vpc/vpc_peering_management.md
             - page: VPC Network Virtualization
@@ -317,6 +352,14 @@ navigation:
               path: bootable_artifacts.md
             - page: Local Development
               path: development.md
+            - section: Flow
+              contents:
+                - page: Implementation Overview
+                  path: development/flow/flow-internals.md
+                - page: Operation Rule Execution
+                  path: development/flow/operation-rule-execution.md
+                - page: Task Schedule Implementation
+                  path: development/flow/task-schedule-internals.md
             - page: Instrumentation
               path: observability/instrumentation.md
             - page: Running a PXE Client in a VM
@@ -339,6 +382,8 @@ navigation:
               path: development/build-guide.md
             - page: Machine-a-tron Deployment
               path: development/machine-a-tron-deployment.md
+            - page: Machine-a-tron RMS Mock
+              path: development/machine-a-tron-rms-mock.md
         - page: Glossary
           path: glossary.md
 

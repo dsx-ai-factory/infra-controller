@@ -42,6 +42,10 @@ pub(super) async fn update(
         .tenant
         .ok_or(CarbideCliError::TenantNotFound(id.clone()))?;
 
+    // Core treats the profile as a replacement, so an omitted CLI flag must preserve it.
+    // Match the fetched version to avoid restoring stale tenant state after a concurrent update.
+    let if_version_match = args.version.or(Some(tenant.version));
+    let routing_profile_type = args.routing_profile_type.or(tenant.routing_profile_type);
     let mut metadata = tenant.metadata.unwrap_or_default();
 
     if let Some(n) = args.name {
@@ -53,8 +57,8 @@ pub(super) async fn update(
         .update_tenant(UpdateTenantRequest {
             organization_id: id.clone(),
             metadata: Some(metadata),
-            if_version_match: args.version,
-            routing_profile_type: args.routing_profile_type,
+            if_version_match,
+            routing_profile_type,
         })
         .await?
         .tenant

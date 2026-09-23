@@ -34,6 +34,7 @@ type recordingForgeClient struct {
 	shelfIDDelay      time.Duration
 	shelfDelay        time.Duration
 	versionRequests   []*corev1.VersionRequest
+	machineSearches   []*corev1.MachineSearchConfig
 	machineIDs        []string
 	switchIDs         []string
 	shelfIDs          []string
@@ -76,12 +77,16 @@ func (c *recordingForgeClient) Version(
 
 func (c *recordingForgeClient) FindMachineIds(
 	ctx context.Context,
-	_ *corev1.MachineSearchConfig,
+	request *corev1.MachineSearchConfig,
 	_ ...grpc.CallOption,
 ) (*corev1.MachineIdList, error) {
-	if c.machineIDDelay > 0 {
+	c.mu.Lock()
+	c.machineSearches = append(c.machineSearches, request)
+	delay := c.machineIDDelay
+	c.mu.Unlock()
+	if delay > 0 {
 		select {
-		case <-time.After(c.machineIDDelay):
+		case <-time.After(delay):
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -253,24 +258,82 @@ func stringsToPowerShelfIds(ids []string) []*corev1.PowerShelfId {
 	return result
 }
 
+func TestGrpcClient_GetMachines(t *testing.T) {
+	ids := []string{"a", "b", "c", "d"}
+	tests := []struct {
+		name        string
+		fake        *recordingForgeClient
+		grpcTimeout time.Duration
+		check       func(*testing.T, *recordingForgeClient, []MachineDetail, error)
+	}{
+		{
+			name: "includes DPUs in ID search",
+			fake: &recordingForgeClient{},
+			check: func(t *testing.T, fake *recordingForgeClient, _ []MachineDetail, err error) {
+				require.NoError(t, err)
+				require.Len(t, fake.machineSearches, 1)
+				assert.True(t, fake.machineSearches[0].GetIncludeDpus())
+			},
+		},
+		{
+			name: "gives ID and detail RPCs independent timeouts",
+			fake: &recordingForgeClient{
+				machineIDs:     []string{"machine-1"},
+				machineIDDelay: 120 * time.Millisecond,
+				machineDelay:   120 * time.Millisecond,
+			},
+			grpcTimeout: 200 * time.Millisecond,
+			check: func(t *testing.T, _ *recordingForgeClient, machines []MachineDetail, err error) {
+				require.NoError(t, err)
+				assert.Len(t, machines, 1)
+			},
+		},
+		{
+			name: "rejects a partial projected snapshot",
+			fake: &recordingForgeClient{
+				runtimeConfig: &corev1.RuntimeConfig{MaxFindByIds: 2},
+				machineIDs:    ids,
+				failCall:      2,
+			},
+			check: func(t *testing.T, _ *recordingForgeClient, machines []MachineDetail, err error) {
+				require.Error(t, err)
+				assert.Nil(t, machines)
+			},
+		},
+		{
+			name: "honors the Core batch limit",
+			fake: &recordingForgeClient{
+				runtimeConfig: &corev1.RuntimeConfig{MaxFindByIds: 2},
+				machineIDs:    []string{"a", "b", "c", "d", "e"},
+			},
+			check: func(t *testing.T, fake *recordingForgeClient, machines []MachineDetail, err error) {
+				require.NoError(t, err)
+				assert.Len(t, machines, 5)
+				assert.Equal(t, [][]string{{"a", "b"}, {"c", "d"}, {"e"}}, fake.machineBatches)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newRecordingGRPCClient(test.fake)
+			if test.grpcTimeout != 0 {
+				client.grpcTimeout = test.grpcTimeout
+			}
+
+			machines, err := client.GetMachines(context.Background())
+
+			test.check(t, test.fake, machines, err)
+		})
+	}
+}
+
 func TestGrpcClient_ActualInventoryRPCsHaveIndependentTimeouts(t *testing.T) {
 	testCases := []struct {
 		name   string
 		fake   *recordingForgeClient
 		invoke func(context.Context, *grpcClient) (int, error)
 	}{
-		{
-			name: "machines",
-			fake: &recordingForgeClient{
-				machineIDs:     []string{"machine-1"},
-				machineIDDelay: 120 * time.Millisecond,
-				machineDelay:   120 * time.Millisecond,
-			},
-			invoke: func(ctx context.Context, client *grpcClient) (int, error) {
-				machines, err := client.GetMachines(ctx)
-				return len(machines), err
-			},
-		},
 		{
 			name: "switches",
 			fake: &recordingForgeClient{
@@ -355,14 +418,6 @@ func TestGrpcClient_ByIDLookupsHonorCoreBatchLimit(t *testing.T) {
 		invoke     func(context.Context, *grpcClient, []string) (int, error)
 		batchCalls func(*recordingForgeClient) [][]string
 	}{
-		{
-			name: "listed machines",
-			invoke: func(ctx context.Context, client *grpcClient, _ []string) (int, error) {
-				machines, err := client.GetMachines(ctx)
-				return len(machines), err
-			},
-			batchCalls: func(fake *recordingForgeClient) [][]string { return fake.machineBatches },
-		},
 		{
 			name: "machines by IDs",
 			invoke: func(ctx context.Context, client *grpcClient, ids []string) (int, error) {
@@ -773,17 +828,6 @@ func TestGrpcClient_ActualInventoryRejectsPartialProjectedSnapshots(t *testing.T
 		fake   *recordingForgeClient
 		invoke func(context.Context, *grpcClient) (any, error)
 	}{
-		{
-			name: "machines",
-			fake: &recordingForgeClient{
-				runtimeConfig: &corev1.RuntimeConfig{MaxFindByIds: 2},
-				machineIDs:    ids,
-				failCall:      2,
-			},
-			invoke: func(ctx context.Context, client *grpcClient) (any, error) {
-				return client.GetMachines(ctx)
-			},
-		},
 		{
 			name: "switches",
 			fake: &recordingForgeClient{

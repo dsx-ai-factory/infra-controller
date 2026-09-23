@@ -277,7 +277,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse::<IpAddr>().unwrap(),
                 port: Some(443),
-                mac: MacAddress::from_str("00:00:00:00:00:01").unwrap(),
+                mac: Some(MacAddress::from_str("00:00:00:00:00:01").unwrap()),
             },
             collector_type: "test",
             labels: Default::default(),
@@ -300,6 +300,7 @@ mod tests {
             target: Some(HealthReportTarget::Machine),
             observed_at: None,
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("fan0".to_string()),
             }],
@@ -314,6 +315,7 @@ mod tests {
             observed_at: None,
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("fan0".to_string()),
                 message: "Fan speed critical".to_string(),
@@ -455,6 +457,7 @@ mod tests {
             target: Some(HealthReportTarget::Machine),
             observed_at: None,
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("fan1".to_string()),
             }],

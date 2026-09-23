@@ -19,6 +19,8 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/proto"
@@ -67,6 +69,14 @@ const (
 type grpcClient struct {
 	gclient     *batchingForgeClient
 	grpcTimeout time.Duration
+	conn        *grpc.ClientConn
+	closeTLS    func()
+}
+
+// Close releases the Core connection and its certificate watcher.
+func (c *grpcClient) Close() error {
+	defer c.closeTLS()
+	return c.conn.Close()
 }
 
 // batchingForgeClient keeps limit handling below the Flow client methods so
@@ -180,6 +190,7 @@ func coreGRPCDialOptions(transportCredentials credentials.TransportCredentials) 
 	return []grpc.DialOption{
 		grpc.WithTransportCredentials(transportCredentials),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(coreGRPCMaxRecvMsgSize)),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))),
 		grpc.WithChainUnaryInterceptor(grpclog.UnaryClientInterceptor("nico-core-api")),
 	}
 }
@@ -199,7 +210,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 		return nil, errors.New("NICO_CORE_API_URL not set, cannot make connections to NICo Core")
 	}
 
-	tlsConfig, _, err := certs.TLSConfig()
+	tlsConfig, _, dynamicConfig, err := certs.DynamicTLSConfig()
 	if err != nil {
 		if err == certs.ErrNotPresent {
 			return nil, errors.New("Certificates not present, unable to authenticate with nico-core-api")
@@ -209,10 +220,13 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 
 	conn, err := grpc.NewClient(nicoURL, coreGRPCDialOptions(credentials.NewTLS(tlsConfig))...)
 	if err != nil {
+		dynamicConfig.Close()
 		return nil, fmt.Errorf("Unable to connect to nico-core-api: %w", err)
 	}
 
 	return &grpcClient{
+		conn:        conn,
+		closeTLS:    dynamicConfig.Close,
 		gclient:     newBatchingForgeClient(corev1.NewForgeClient(conn)),
 		grpcTimeout: grpcTimeout,
 	}, nil
@@ -222,7 +236,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 // (FindMachineIds + FindMachinesByIds).
 func (c *grpcClient) GetMachines(ctx context.Context) ([]MachineDetail, error) {
 	idsCtx, idsCancel := context.WithTimeout(ctx, c.grpcTimeout)
-	machineIDs, err := c.gclient.FindMachineIds(idsCtx, &corev1.MachineSearchConfig{})
+	machineIDs, err := c.gclient.FindMachineIds(idsCtx, &corev1.MachineSearchConfig{IncludeDpus: true})
 	idsCancel()
 	if err != nil {
 		return nil, err

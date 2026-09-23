@@ -244,6 +244,12 @@ func doServe() {
 	if err != nil {
 		log.Fatal().Msgf("failed to initialize provider registry: %v", err)
 	}
+	defer func() {
+		closeErr := providerRegistry.Close()
+		if closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close providers")
+		}
+	}()
 
 	// Open a DB session for the readiness gate. The gate consults the
 	// persisted ComponentOperationStatus inventorysync writes to the component
@@ -294,6 +300,12 @@ func doServe() {
 			if err != nil {
 				log.Fatal().Msgf("Unable to create GRPC client: %v", err)
 			}
+			defer func() {
+				closeErr := client.Close()
+				if closeErr != nil {
+					log.Error().Err(closeErr).Msg("Failed to close version probe client")
+				}
+			}()
 			for {
 				time.Sleep(time.Second * 10)
 				if version, err := client.Version(ctx); err != nil {
@@ -346,15 +358,21 @@ func doServe() {
 	log.Info().Msgf("Temporal config: %+v", temporalManagerConf.ClientConf)
 
 	sigs := make(chan os.Signal, 1)
+	stopped := make(chan struct{})
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigs)
 	go func() {
 		<-sigs // Block execution until signal from terminal gets triggered here.
 		service.Stop(ctx)
+		close(stopped)
 	}()
 
 	if err := service.Start(ctx); err != nil {
 		log.Fatal().Msgf("failed to start the service: %v\n", err)
 	}
+	// Serve can return before Stop finishes draining the component managers.
+	// Keep their Core clients alive until that shutdown has completed.
+	<-stopped
 }
 
 func loadDataCipherFromEnv() (*secret.Cipher, error) {

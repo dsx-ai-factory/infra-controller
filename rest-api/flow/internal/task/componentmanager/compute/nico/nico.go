@@ -153,12 +153,31 @@ func machineIDsProto(ids []string) *corev1.MachineIdList {
 // When overrideReadinessCheck is true the gate is short-circuited and
 // the operation runs unconditionally; the bypass is logged so it remains
 // auditable from the worker log alone.
+// ensureTargetOperable keeps readiness resolution separate from API targeting.
+func (m *Manager) ensureTargetOperable(ctx context.Context, target common.Target, op types.OperationType, override bool) error {
+	if !target.UsesMACAddresses() {
+		return m.ensureMachinesOperable(ctx, target.Identifiers, op, override)
+	}
+	if m.readiness == nil {
+		return nil
+	}
+	if override {
+		log.Warn().Strs("management_macs", target.Identifiers).Str("operation", string(op)).Msg("Readiness check bypassed by override_readiness_check")
+		return nil
+	}
+	return m.readiness.WaitForManagementMACsReady(ctx, target.Type, target.Identifiers, op)
+}
+
 func (m *Manager) ensureMachinesOperable(
 	ctx context.Context,
 	machineIDs []string,
 	op types.OperationType,
 	overrideReadinessCheck bool,
 ) error {
+	if len(machineIDs) == 0 {
+		return nil
+	}
+
 	// A nil gate is the documented permissive mode: skip rather than
 	// dispatch on a nil interface.
 	if m.readiness == nil {
@@ -222,7 +241,7 @@ func (m *Manager) PowerControl(
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	if err := m.ensureMachinesOperable(ctx, target.ComponentIDs, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureTargetOperable(ctx, target, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
@@ -245,11 +264,17 @@ func (m *Manager) PowerControl(
 	}
 
 	req := &corev1.ComponentPowerControlRequest{
-		Target: &corev1.ComponentPowerControlRequest_MachineIds{
-			MachineIds: machineIDsProto(target.ComponentIDs),
-		},
 		Action:                action,
 		BypassStateController: info.OverrideReadinessCheck,
+	}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.ComponentPowerControlRequest_ComputeBmcMacs{
+			ComputeBmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.ComponentPowerControlRequest_MachineIds{
+			MachineIds: machineIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.ComponentPowerControl(ctx, req)
@@ -259,7 +284,7 @@ func (m *Manager) PowerControl(
 
 	for _, r := range resp.GetResults() {
 		if r.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
-			return fmt.Errorf("power control failed for %s: %s", r.GetComponentId(), r.GetError())
+			return fmt.Errorf("power control failed for %s: %s", nicoprovider.ResultIdentifier(r, target.UsesMACAddresses()), r.GetError())
 		}
 	}
 
@@ -278,10 +303,15 @@ func (m *Manager) GetPowerStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	req := &corev1.GetComponentInventoryRequest{
-		Target: &corev1.GetComponentInventoryRequest_MachineIds{
-			MachineIds: machineIDsProto(target.ComponentIDs),
-		},
+	req := &corev1.GetComponentInventoryRequest{}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.GetComponentInventoryRequest_ComputeBmcMacs{
+			ComputeBmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.GetComponentInventoryRequest_MachineIds{
+			MachineIds: machineIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.GetComponentInventory(ctx, req)
@@ -289,16 +319,13 @@ func (m *Manager) GetPowerStatus(
 		return nil, fmt.Errorf("GetComponentInventory failed: %w", err)
 	}
 
-	result := make(map[string]operations.PowerStatus, len(target.ComponentIDs))
-	for _, id := range target.ComponentIDs {
-		result[id] = operations.PowerStatusUnknown
-	}
-
+	result := make(map[string]operations.PowerStatus, target.Len())
 	for _, entry := range resp.GetEntries() {
-		compID := entry.GetResult().GetComponentId()
-		if ps := nicoprovider.ExtractPowerState(entry.GetReport()); ps != operations.PowerStatusUnknown {
-			result[compID] = ps
+		if entry.GetResult() == nil || entry.GetResult().GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+			continue
 		}
+		compID := nicoprovider.ResultIdentifier(entry.GetResult(), target.UsesMACAddresses())
+		result[compID] = nicoprovider.ExtractPowerState(entry.GetReport())
 	}
 
 	return result, nil
@@ -347,7 +374,7 @@ func (m *Manager) FirmwareControl(
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	if err := m.ensureMachinesOperable(ctx, target.ComponentIDs, types.OperationTypeFirmwareControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureTargetOperable(ctx, target, types.OperationTypeFirmwareControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
@@ -359,6 +386,9 @@ func (m *Manager) FirmwareControl(
 	}
 
 	computeTraySubs, hasDpu := firmwarecomponents.SplitNICoComputeTraySubTargets(info.SubTargets)
+	if hasDpu && target.UsesMACAddresses() {
+		return fmt.Errorf("DPU firmware reprovisioning requires ingested machine IDs")
+	}
 
 	// Run the compute-tray-internal update unless the request was
 	// scoped to "dpu" only. We treat (info.SubTargets non-empty AND
@@ -381,6 +411,7 @@ func (m *Manager) FirmwareControl(
 			info.TargetVersion,
 			computeTraySubs,
 			info.AccessToken,
+			info.OverrideVersionCheck,
 			info.OverrideReadinessCheck,
 		); err != nil {
 			return err
@@ -411,6 +442,7 @@ func (m *Manager) firmwareControlComputeTrays(
 	targetVersion string,
 	computeTraySubs []string,
 	accessToken string,
+	overrideVersionCheck bool,
 	bypassStateController bool,
 ) error {
 	subComponents, err := firmwarecomponents.ParseNICoComputeTray(computeTraySubs)
@@ -418,14 +450,16 @@ func (m *Manager) firmwareControlComputeTrays(
 		return err
 	}
 
+	computeTarget := &corev1.UpdateComputeTrayFirmwareTarget{Components: subComponents}
+	if target.UsesMACAddresses() {
+		computeTarget.BmcMacs = &corev1.MacAddressList{MacAddresses: target.Identifiers}
+	} else {
+		computeTarget.MachineIds = machineIDsProto(target.Identifiers)
+	}
 	req := &corev1.UpdateComponentFirmwareRequest{
-		Target: &corev1.UpdateComponentFirmwareRequest_ComputeTrays{
-			ComputeTrays: &corev1.UpdateComputeTrayFirmwareTarget{
-				MachineIds: machineIDsProto(target.ComponentIDs),
-				Components: subComponents,
-			},
-		},
+		Target:                &corev1.UpdateComponentFirmwareRequest_ComputeTrays{ComputeTrays: computeTarget},
 		TargetVersion:         targetVersion,
+		ForceUpdate:           overrideVersionCheck,
 		BypassStateController: bypassStateController,
 	}
 	if accessToken != "" {
@@ -439,7 +473,7 @@ func (m *Manager) firmwareControlComputeTrays(
 
 	for _, r := range resp.GetResults() {
 		if r.GetStatus() != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
-			return fmt.Errorf("firmware update failed for %s: %s", r.GetComponentId(), r.GetError())
+			return fmt.Errorf("firmware update failed for %s: %s", nicoprovider.ResultIdentifier(r, target.UsesMACAddresses()), r.GetError())
 		}
 	}
 	return nil
@@ -456,7 +490,7 @@ func (m *Manager) firmwareControlDpus(
 	target common.Target,
 ) error {
 	return dpureprov.ReprovisionHosts(
-		ctx, m.nicoClient, target.ComponentIDs,
+		ctx, m.nicoClient, target.Identifiers,
 		true, // update_firmware: tenant-driven DPU reprov always rolls firmware
 		m.dpuReprovOpts,
 	)
@@ -479,10 +513,15 @@ func (m *Manager) GetFirmwareStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	req := &corev1.GetComponentFirmwareStatusRequest{
-		Target: &corev1.GetComponentFirmwareStatusRequest_MachineIds{
-			MachineIds: machineIDsProto(target.ComponentIDs),
-		},
+	req := &corev1.GetComponentFirmwareStatusRequest{}
+	if target.UsesMACAddresses() {
+		req.Target = &corev1.GetComponentFirmwareStatusRequest_ComputeBmcMacs{
+			ComputeBmcMacs: &corev1.MacAddressList{MacAddresses: target.Identifiers},
+		}
+	} else {
+		req.Target = &corev1.GetComponentFirmwareStatusRequest_MachineIds{
+			MachineIds: machineIDsProto(target.Identifiers),
+		}
 	}
 
 	resp, err := m.nicoClient.GetComponentFirmwareStatus(ctx, req)
@@ -492,12 +531,12 @@ func (m *Manager) GetFirmwareStatus(
 
 	grouped := make(map[string][]*corev1.FirmwareUpdateStatus)
 	for _, s := range resp.GetStatuses() {
-		compID := s.GetResult().GetComponentId()
+		compID := nicoprovider.ResultIdentifier(s.GetResult(), target.UsesMACAddresses())
 		grouped[compID] = append(grouped[compID], s)
 	}
 
-	result := make(map[string]operations.FirmwareUpdateStatus, len(target.ComponentIDs))
-	for _, compID := range target.ComponentIDs {
+	result := make(map[string]operations.FirmwareUpdateStatus, target.Len())
+	for _, compID := range target.Identifiers {
 		result[compID] = aggregateNICoStatuses(compID, grouped[compID])
 	}
 
@@ -584,11 +623,11 @@ func (m *Manager) BringUpControl(
 
 	// BringUpControl can trigger a power-on, so we gate on the same
 	// readiness signal that PowerControl would consult.
-	if err := m.ensureMachinesOperable(ctx, target.ComponentIDs, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
+	if err := m.ensureMachinesOperable(ctx, target.Identifiers, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
 		return fmt.Errorf("refused: %w", err)
 	}
 
-	for _, componentID := range target.ComponentIDs {
+	for _, componentID := range target.Identifiers {
 		if err := m.nicoClient.AllowIngestionAndPowerOn(ctx, componentID, ""); err != nil {
 			return fmt.Errorf("BringUpControl failed for %s: %w", componentID, err)
 		}
@@ -619,8 +658,8 @@ func (m *Manager) GetBringUpStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	result := make(map[string]operations.MachineBringUpState, len(target.ComponentIDs))
-	for _, componentID := range target.ComponentIDs {
+	result := make(map[string]operations.MachineBringUpState, len(target.Identifiers))
+	for _, componentID := range target.Identifiers {
 		state, err := m.nicoClient.DetermineMachineIngestionState(ctx, componentID, "")
 		if err != nil {
 			return nil, fmt.Errorf("GetBringUpStatus failed for %s: %w", componentID, err)
@@ -654,14 +693,14 @@ func (m *Manager) Decommission(
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	for _, machineID := range target.ComponentIDs {
+	for _, machineID := range target.Identifiers {
 		if err := m.nicoClient.DecommissionMachine(ctx, machineID); err != nil {
 			return fmt.Errorf("DecommissionMachine failed for %s: %w", machineID, err)
 		}
 	}
 
 	log.Info().
-		Strs("machine_ids", target.ComponentIDs).
+		Strs("machine_ids", target.Identifiers).
 		Msg("Decommission initiated for compute components")
 	return nil
 }
@@ -676,14 +715,14 @@ func (m *Manager) GetDecommissionStatus(
 		return nil, fmt.Errorf("target is invalid: %w", err)
 	}
 
-	states, err := m.nicoClient.FindMachineControllerStates(ctx, target.ComponentIDs)
+	states, err := m.nicoClient.FindMachineControllerStates(ctx, target.Identifiers)
 	if err != nil {
 		return nil, fmt.Errorf("FindMachineControllerStates: %w", err)
 	}
 
 	// Ensure every requested component is present in the result.
-	result := make(map[string]string, len(target.ComponentIDs))
-	for _, id := range target.ComponentIDs {
+	result := make(map[string]string, len(target.Identifiers))
+	for _, id := range target.Identifiers {
 		if s, ok := states[id]; ok {
 			result[id] = normalizeDecommissionState(s)
 		} else {

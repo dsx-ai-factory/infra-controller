@@ -25,11 +25,14 @@ use ::rpc::forge::{
 };
 use carbide_instrument::testing::MetricsCapture;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
-use carbide_uuid::machine::DpuMachineId;
+use carbide_uuid::machine::{AsMachineId, DpuMachineId};
 use common::api_fixtures::network_segment::{
     FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, create_tenant_network_segment,
 };
 use common::api_fixtures::{self, create_managed_host, dpu, network_configured_with_health};
+use config_version::ConfigVersion;
+use db::ConditionalWrite;
+use db::machine::AdminNetworkChangeNotPending;
 use model::machine::network::ManagedHostQuarantineMode;
 use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
@@ -78,9 +81,12 @@ async fn bump_dpu_network_config_version(
         .unwrap();
     let version = dpu.network_config.version;
     let value = dpu.network_config.value;
-    db::machine::try_update_network_config(txn.deref_mut(), &dpu_machine_id, version, &value)
-        .await
-        .unwrap();
+    assert_eq!(
+        db::machine::try_update_network_config(txn.deref_mut(), &dpu_machine_id, version, &value)
+            .await
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
     txn.commit().await.unwrap();
 }
 
@@ -91,7 +97,7 @@ async fn record_dpu_network_status(
 ) {
     env.api
         .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
             dpu_agent_version: Some(dpu::TEST_DPU_AGENT_VERSION.to_string()),
             observed_at: Some(SystemTime::now().into()),
             dpu_health: Some(rpc::health::HealthReport {
@@ -113,13 +119,14 @@ async fn record_dpu_network_status(
             dpu_extension_service_version: None,
             dpu_extension_services: vec![],
             astra_config_status: None,
+            lldp: None,
         }))
         .await
         .unwrap();
 }
 
 #[crate::sqlx_test]
-async fn test_clear_use_admin_network_changed_keeps_newer_version_flag(pool: sqlx::PgPool) {
+async fn test_clear_use_admin_network_changed_requires_pending_version(pool: sqlx::PgPool) {
     let env = api_fixtures::create_test_env(pool).await;
     let mh = create_managed_host(&env).await;
     let dpu_machine_id = mh.dpu().id;
@@ -136,21 +143,68 @@ async fn test_clear_use_admin_network_changed_keeps_newer_version_flag(pool: sql
 
     bump_dpu_network_config_version(&env, dpu_machine_id).await;
 
-    let mut txn = env.db_txn().await;
-    let cleared = db::machine::clear_use_admin_network_changed_if_version_matches(
-        txn.deref_mut(),
-        &dpu_machine_id,
-        &stale_version,
-    )
-    .await
-    .unwrap();
-    txn.commit().await.unwrap();
+    let current_version =
+        db::machine::find_one(&mut env.db_reader(), &dpu_machine_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap()
+            .network_config
+            .version;
 
-    assert!(!cleared);
-    assert_eq!(
-        use_admin_network_changed(&env, dpu_machine_id).await,
-        Some(true)
-    );
+    struct Case {
+        scenario: &'static str,
+        acknowledged_version: ConfigVersion,
+        expected: ConditionalWrite<(), AdminNetworkChangeNotPending>,
+        flag_after: bool,
+    }
+    // Each step uses the previous step's committed flag.
+    for case in [
+        Case {
+            scenario: "stale acknowledgment keeps the newer flag",
+            acknowledged_version: stale_version,
+            expected: ConditionalWrite::NotApplied(AdminNetworkChangeNotPending),
+            flag_after: true,
+        },
+        Case {
+            scenario: "matching acknowledgment clears the flag",
+            acknowledged_version: current_version,
+            expected: ConditionalWrite::Applied(()),
+            flag_after: false,
+        },
+        Case {
+            scenario: "repeated acknowledgment has nothing to clear",
+            acknowledged_version: current_version,
+            expected: ConditionalWrite::NotApplied(AdminNetworkChangeNotPending),
+            flag_after: false,
+        },
+    ] {
+        let mut txn = env.db_txn().await;
+        let result = db::machine::clear_use_admin_network_changed_if_version_matches(
+            txn.deref_mut(),
+            &dpu_machine_id,
+            &case.acknowledged_version,
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+        assert_eq!(result, case.expected, "{}", case.scenario);
+
+        let dpu = db::machine::find_one(&mut env.db_reader(), &dpu_machine_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            dpu.network_config.value.use_admin_network_changed,
+            Some(case.flag_after),
+            "{}",
+            case.scenario
+        );
+        assert_eq!(
+            dpu.network_config.version, current_version,
+            "{}",
+            case.scenario
+        );
+    }
 }
 
 #[crate::sqlx_test]
@@ -167,7 +221,7 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -211,7 +265,7 @@ async fn test_managed_host_network_config_does_not_clear_use_admin_network_chang
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -236,7 +290,7 @@ async fn test_record_dpu_network_status_clears_use_admin_network_changed_for_mat
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -253,6 +307,61 @@ async fn test_record_dpu_network_status_clears_use_admin_network_changed_for_mat
         use_admin_network_changed(&env, dpu_machine_id).await,
         Some(false)
     );
+}
+
+#[crate::sqlx_test]
+async fn test_rejected_network_observation_does_not_acknowledge_admin_network_change(
+    pool: sqlx::PgPool,
+) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+    let dpu_machine_id = mh.dpu().id;
+    record_dpu_network_status(&env, dpu_machine_id, None).await;
+    set_use_admin_network_changed(&env, dpu_machine_id, true).await;
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT network_status_observation FROM machines WHERE id = $1")
+            .bind(dpu_machine_id)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+
+    // The configuration version matches, but this report is older than the
+    // persisted observation. It must not acknowledge the network change.
+    let error = env
+        .api
+        .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
+            dpu_machine_id: Some(dpu_machine_id),
+            network_config_version: Some(response.managed_host_config_version),
+            observed_at: Some(SystemTime::UNIX_EPOCH.into()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert!(
+        error
+            .message()
+            .contains("update machine status observation")
+    );
+    assert_eq!(
+        use_admin_network_changed(&env, dpu_machine_id).await,
+        Some(true)
+    );
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT network_status_observation FROM machines WHERE id = $1")
+            .bind(dpu_machine_id)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+    assert_eq!(after, before);
 }
 
 #[crate::sqlx_test]
@@ -337,7 +446,7 @@ async fn test_managed_host_network_config_with_sitewide_bgp_password(pool: sqlx:
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -452,7 +561,7 @@ async fn test_managed_host_network_config_narrows_interface_anycast_prefixes(poo
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(mh.dpu().id.into()),
+            dpu_machine_id: Some(mh.dpu().id),
         }))
         .await
         .unwrap()
@@ -629,7 +738,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(mh.dpu().id.into()),
+            dpu_machine_id: Some(mh.dpu().id),
         }))
         .await
         .unwrap()
@@ -733,7 +842,7 @@ async fn test_managed_host_network_config_omits_fnn_vrf_loopback_by_default(pool
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -812,7 +921,7 @@ async fn test_managed_host_network_config_includes_fnn_vrf_loopback_when_enabled
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -867,7 +976,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     let env = api_fixtures::create_test_env_with_overrides(pool, overrides).await;
 
     // Attach the FNN admin VPC because test env setup does not run production setup hooks.
-    crate::db_init::create_admin_vpc(&env.pool, Some(10000))
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
         .await
         .unwrap();
     crate::db_init::update_network_segments_svi_ip(&env.pool)
@@ -882,7 +991,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -966,7 +1075,7 @@ async fn test_managed_host_network_config_errors_when_sitewide_bgp_password_miss
     let err = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .expect_err("missing site-wide BGP password should fail");
@@ -984,7 +1093,7 @@ async fn test_managed_host_network_config_multi_dpu_fnn_ipv6_loopbacks(pool: sql
         routing_profile: FnnRoutingProfileConfig::default(),
     });
     let env = api_fixtures::create_test_env_with_overrides(pool, overrides).await;
-    crate::db_init::create_admin_vpc(&env.pool, Some(10000))
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
         .await
         .unwrap();
     crate::db_init::update_network_segments_svi_ip(&env.pool)
@@ -1132,7 +1241,7 @@ async fn test_managed_host_network_status(pool: sqlx::PgPool) {
     // Now fetch the instance and check that knows its configs have synced
     let response = env
         .api
-        .find_instance_by_machine_id(tonic::Request::new(mh.id.into()))
+        .find_instance_by_machine_id(tonic::Request::new(mh.id.to_machine_id()))
         .await
         .unwrap()
         .into_inner();
@@ -1203,6 +1312,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
     let extension_service1 = env
         .api
         .create_dpu_extension_service(tonic::Request::new(CreateDpuExtensionServiceRequest {
+            dpu_target: None,
             service_id: None,
             service_name: "test1".to_string(),
             service_type: DpuExtensionServiceType::KubernetesPod as i32,
@@ -1225,6 +1335,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
     let extension_service2 = env
         .api
         .create_dpu_extension_service(tonic::Request::new(CreateDpuExtensionServiceRequest {
+            dpu_target: None,
             service_id: None,
             service_name: "test2".to_string(),
             service_type: DpuExtensionServiceType::KubernetesPod as i32,
@@ -1267,7 +1378,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_1_id.into()),
+            dpu_machine_id: Some(dpu_1_id),
         }))
         .await
         .unwrap()
@@ -1321,7 +1432,7 @@ async fn test_dpu_health_is_required(pool: sqlx::PgPool) {
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -1333,7 +1444,7 @@ async fn test_dpu_health_is_required(pool: sqlx::PgPool) {
     let err = env
         .api
         .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
             dpu_agent_version: Some(dpu::TEST_DPU_AGENT_VERSION.to_string()),
             observed_at: Some(SystemTime::now().into()),
             dpu_health: None,
@@ -1358,6 +1469,7 @@ async fn test_dpu_health_is_required(pool: sqlx::PgPool) {
             dpu_extension_service_version: Some("V1-T1".to_string()),
             dpu_extension_services: vec![],
             astra_config_status: None,
+            lldp: None,
         }))
         .await
         .expect_err("Should fail");
@@ -1447,6 +1559,107 @@ async fn test_retain_in_alert_since(pool: sqlx::PgPool) {
     assert_eq!(reported_alert.in_alert_since.unwrap(), in_alert_since);
     reported_alert.in_alert_since = None;
     assert_eq!(reported_alert, dpu_health.alerts[0].clone());
+}
+
+#[crate::sqlx_test]
+async fn rejected_quarantine_write_keeps_health_report(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+    let host_id = mh.host().id;
+    env.api
+        .set_managed_host_quarantine_state(tonic::Request::new(
+            rpc::forge::SetManagedHostQuarantineStateRequest {
+                machine_id: Some(host_id.into()),
+                quarantine_state: Some(rpc::forge::ManagedHostQuarantineState {
+                    mode: rpc::forge::ManagedHostQuarantineMode::BlockAllTraffic.into(),
+                    reason: Some("retained quarantine".to_string()),
+                }),
+            },
+        ))
+        .await
+        .unwrap();
+
+    for (scenario, clear) in [("set quarantine", false), ("clear quarantine", true)] {
+        let mut writer = env.db_txn().await;
+        let writer_pid: i32 =
+            sqlx::query_scalar("SELECT pg_backend_pid() FROM machines WHERE id = $1 FOR UPDATE")
+                .bind(host_id)
+                .fetch_one(&mut *writer)
+                .await
+                .unwrap();
+        let before = mh.host().db_machine(&mut writer).await;
+
+        let request = async {
+            if clear {
+                env.api
+                    .clear_managed_host_quarantine_state(tonic::Request::new(
+                        rpc::forge::ClearManagedHostQuarantineStateRequest {
+                            machine_id: Some(host_id.into()),
+                        },
+                    ))
+                    .await
+                    .map(|_| ())
+            } else {
+                env.api
+                    .set_managed_host_quarantine_state(tonic::Request::new(
+                        rpc::forge::SetManagedHostQuarantineStateRequest {
+                            machine_id: Some(host_id.into()),
+                            quarantine_state: Some(rpc::forge::ManagedHostQuarantineState {
+                                mode: rpc::forge::ManagedHostQuarantineMode::BlockAllTraffic.into(),
+                                reason: Some("rejected replacement".to_string()),
+                            }),
+                        },
+                    ))
+                    .await
+                    .map(|_| ())
+            }
+        };
+        let competing_write = async {
+            // The request has read its network version and is now waiting to
+            // update it. Commit a different version before releasing the row.
+            common::postgres::wait_for_blocked_query(
+                &env.pool,
+                writer_pid,
+                "UPDATE machines SET network_config_version",
+            )
+            .await;
+            assert_eq!(
+                db::machine::try_update_network_config(
+                    &mut writer,
+                    &host_id,
+                    before.network_config.version,
+                    &before.network_config.value,
+                )
+                .await
+                .unwrap(),
+                db::ConditionalWrite::Applied(())
+            );
+            let version = db::machine::get_network_config(&mut *writer, &host_id)
+                .await
+                .unwrap()
+                .version;
+            writer.commit().await.unwrap();
+            version
+        };
+        let (result, winning_version) =
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                tokio::join!(request, competing_write)
+            })
+            .await
+            .expect(scenario);
+        let status = result.expect_err("a rejected quarantine write must fail the API request");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{scenario}");
+
+        let mut txn = env.db_txn().await;
+        let after = mh.host().db_machine(&mut txn).await;
+        assert_eq!(
+            after.network_config.value, before.network_config.value,
+            "{scenario}"
+        );
+        assert_eq!(after.network_config.version, winning_version, "{scenario}");
+        assert_eq!(after.health_reports, before.health_reports, "{scenario}");
+        txn.commit().await.unwrap();
+    }
 }
 
 #[crate::sqlx_test]

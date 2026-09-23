@@ -45,6 +45,7 @@ thiserror = { workspace = true }
 tonic-prost.workspace = true
 
 [dev-dependencies]
+carbide-test-support = { path = "../test-support" }
 clap = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }

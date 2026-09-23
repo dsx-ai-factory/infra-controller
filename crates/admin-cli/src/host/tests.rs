@@ -25,7 +25,7 @@
 
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::StableHostMachineId;
 use clap::{CommandFactory, Parser};
 use rpc::forge::HostReprovisioningRequest;
 use rpc::forge::host_reprovisioning_request::Mode;
@@ -179,7 +179,7 @@ fn reprovision_mark_manual_upgrade_complete_parses_fields() {
                         Cmd::Reprovision(reprovision::Args::MarkManualUpgradeComplete(_))
                     ));
                     matches
-                        .get_one::<MachineId>("id")
+                        .get_one::<StableHostMachineId>("id")
                         .expect("machine ID is required")
                         .to_string()
                 })

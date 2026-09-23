@@ -268,6 +268,14 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 				// Allocate a child prefix in ipam
 				childPrefix, serr := ipam.CreateChildIpamEntryForIPBlock(ctx, tx, cah.dbSession, ipamStorage, ipb, ac.ConstraintValue)
 				if serr != nil {
+					if errors.Is(serr, ipam.ErrParentIPBlockReload) {
+						if errors.Is(serr, cdb.ErrDoesNotExist) {
+							logger.Warn().Err(serr).Msg("parent IP Block disappeared while creating Allocation")
+							return cutil.NewAPIError(http.StatusBadRequest, "The IP Block in the Allocation Constraint no longer exists", nil)
+						}
+						logger.Error().Err(serr).Msg("unable to reload parent IP Block for Allocation")
+						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Allocation due to DB error", nil)
+					}
 					// printing parent prefix usage to debug the child prefix failure
 					parentPrefix, sserr := ipamStorage.ReadPrefix(ctx, ipb.Prefix, ipam.GetIpamNamespaceForIPBlock(ctx, ipb.RoutingType, ipb.InfrastructureProviderID.String(), ipb.SiteID.String()))
 					if sserr == nil {

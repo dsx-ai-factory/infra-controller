@@ -74,6 +74,7 @@ opentelemetry-prometheus = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 http-body-util = { workspace = true }
 size = { features = ["serde"], workspace = true }
+surge-ping = { workspace = true }
 
 [dev-dependencies]
 bmc-mock = { path = "../bmc-mock" }

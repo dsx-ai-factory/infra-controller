@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use mac_address::MacAddress;
 
-use crate::{hw, redfish};
+use crate::{Callbacks, hw, redfish};
 
 pub(crate) struct LiteOnPowerShelf<'a> {
     pub(crate) bmc_mac_address: MacAddress,
@@ -35,6 +35,10 @@ impl LiteOnPowerShelf<'_> {
             current: 12,
             voltage: 0,
         }
+    }
+
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
     }
 
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
@@ -63,7 +67,7 @@ impl LiteOnPowerShelf<'_> {
         }
     }
 
-    pub(crate) fn system_config(&self) -> redfish::computer_system::Config {
+    pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
         let system_id = "system";
 
         redfish::computer_system::Config {
@@ -116,6 +120,7 @@ impl LiteOnPowerShelf<'_> {
                                 &idx.to_string(),
                             ))
                             .oem_liteon_power_state(true)
+                            .oem_liteon_capacity_watts("5500")
                             // libredfish requires status to be
                             // here...
                             .status(redfish::resource::Status::Ok)

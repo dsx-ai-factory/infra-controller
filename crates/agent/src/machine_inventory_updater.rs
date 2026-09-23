@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use ::rpc::forge as rpc;
 use ::rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 
 use crate::command_line::AgentPlatformType;
 use crate::containerd::container;
@@ -31,7 +31,7 @@ pub(super) struct MachineInventoryUpdaterConfig {
     pub(super) dpu_agent_version: String,
     /// How often to update the inventory
     pub(super) update_inventory_interval: Duration,
-    pub(super) machine_id: MachineId,
+    pub(super) machine_id: DpuMachineId,
     pub(super) forge_api: String,
     pub(super) forge_client_config: Arc<ForgeClientConfig>,
     pub(super) agent_platform_type: AgentPlatformType,

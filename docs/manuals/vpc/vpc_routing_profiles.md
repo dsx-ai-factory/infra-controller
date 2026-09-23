@@ -4,6 +4,8 @@ This page describes how to create VPCs based on the routing profile configuratio
 
 This page is intended for engineers who are responsible for configuring or operating a production API server.
 
+To change the profile of an existing VPC, follow [Changing a VPC Routing Profile](changing_vpc_routing_profiles.md). That procedure covers VNI allocation, conditional reversal, and verification before releasing the previous VNI. Changing a VPC's profile does not change its tenant's profile.
+
 ## Core Concepts
 
 ### VPC
@@ -27,9 +29,9 @@ Routing profile names are free-form strings, not a fixed enumeration. The names 
 
 The API validates all supplied profile names against the configured profiles. Supplying an unknown name returns a `NOT_FOUND` error.
 
-The resolved `routing_profile_type` is returned on the `Vpc` resource in API responses, reflecting the profile selected at creation time, whether supplied explicitly in the creation request or inherited from the tenant.
+The stored `routing_profile_type` is returned on the `Vpc` resource in API responses. At creation, it reflects the explicitly selected or inherited profile. A successful VPC routing-profile change replaces that stored name.
 
-> **REST API note**: The REST API reserves three profile names for VPC creation: `external`, `internal`, and `privileged-internal`. These are the only values the REST API accepts for the `routingProfile` field; any other value is rejected. They are translated to their uppercase equivalents (`EXTERNAL`, `INTERNAL`, `PRIVILEGED_INTERNAL`) before being forwarded to the API server. Sites that serve REST API clients must define all three reserved names in `fnn.routing_profiles`. Additional profiles may be defined and used through the gRPC interface.
+> **REST API note**: REST translates the aliases `external`, `internal`, and `privileged-internal` to `EXTERNAL`, `INTERNAL`, and `PRIVILEGED_INTERNAL`. Other configured names pass through unchanged. VPC creation accepts names of 3 to 64 characters, starting with an ASCII letter and containing only ASCII letters, numbers, or dashes. The provider routing-profile update endpoint accepts names of 1 to 64 characters, as described in [Changing a VPC Routing Profile](changing_vpc_routing_profiles.md). Core validates the selected profile against the site's configuration and the tenant's permitted access tier.
 
 ### API Server Routing Profiles
 
@@ -169,17 +171,17 @@ For deployments where this is insufficient, the gRPC admin-cli supports tenant p
 
 The tenant organization ID is required as a positional argument:
 
-```
-admin-cli tenant update <tenant-org> -p <profile>
+```bash
+nico-admin-cli tenant update <tenant-org> -p <profile>
 ```
 
 **Examples**
 
-```
-admin-cli tenant update example-org -p EXTERNAL
-admin-cli tenant update example-org -p INTERNAL
-admin-cli tenant update example-org -p PRIVILEGED_INTERNAL
-admin-cli tenant update example-org -p MAINTENANCE
+```bash
+nico-admin-cli tenant update example-org -p EXTERNAL
+nico-admin-cli tenant update example-org -p INTERNAL
+nico-admin-cli tenant update example-org -p PRIVILEGED_INTERNAL
+nico-admin-cli tenant update example-org -p MAINTENANCE
 ```
 
 The `-p` flag accepts any string. The supplied value must exactly match a key defined in `fnn.routing_profiles` in the API server configuration. The API validates the name and returns `NOT_FOUND` if the profile does not exist in the configuration.
@@ -188,20 +190,20 @@ This is the recommended workflow for changing a tenant's routing profile using t
 
 1. Review the current tenant record:
 
-   `admin-cli tenant show <tenant-org>`
+   `nico-admin-cli tenant show <tenant-org>`
 
 2. Confirm that the tenant has no active VPCs.
 
 3. Apply the update:
 
-   ```
-   admin-cli tenant update <tenant-org> -p INTERNAL
+   ```bash
+   nico-admin-cli tenant update <tenant-org> -p INTERNAL
    ```
 
 The CLI also supports an optional version-match flag:
 
-```
-admin-cli tenant update <tenant-org> -p INTERNAL -v <current-version>
+```bash
+nico-admin-cli tenant update <tenant-org> -p INTERNAL -v <current-version>
 ```
 
 This flag is optional. It is not a verbosity setting, but is used for optimistic concurrency checking and causes the update to be rejected if the tenant record has changed since it was last reviewed.
@@ -216,7 +218,7 @@ This means the tenant routing profile should be treated as a planning decision r
 
 Consider the following example error returned during VPC creation:
 
-```
+```text
 RoutingProfile not found: EXTERNAL
 ```
 
@@ -288,15 +290,15 @@ Instances reach destinations outside the overlay by following a default route pr
 
 There are several common causes, and distinguishing between them requires comparing the routing profile against the expected network deployment:
 
-* **The routing profile does not import the correct route-target.**
+- **The routing profile does not import the correct route-target.**
 
   The VPC’s routing profile may not include a `route_target_imports` entry that causes a default route to be imported into the overlay. Without such an import, the VPC has no default route regardless of what the network advertises.
 
-* **The routing profile is correct, but the network injection is not occurring.**
+- **The routing profile is correct, but the network injection is not occurring.**
 
   Some deployment models intentionally omit a default-route route-target import from the profile and instead rely on the network to inject a default route by advertising a route that matches the VPC’s native route-target (`<ASN>:<VNI_OF_VPC>`). In this case the profile is configured as intended, but the expected network-side advertisement is absent or misconfigured.
 
-* **The network device VRF is not importing the VPC’s route-targets.**
+- **The network device VRF is not importing the VPC’s route-targets.**
 
   Even when the VPC has a default route and can forward traffic outbound, the network device’s VRF may not be configured to import the route-targets present on VPC routes. If the VRF does not import those route-targets, the network has no visibility into VPC prefixes and cannot return traffic to instances. This produces the same symptom—no external connectivity—despite the overlay routing table appearing correct from the VPC side.
 

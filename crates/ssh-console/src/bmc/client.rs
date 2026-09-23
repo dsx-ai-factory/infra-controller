@@ -308,9 +308,12 @@ impl BmcClient {
     }
 }
 
-/// Wait for an address to be "up". For SSH consoles, do a a TCP half-open connection request. For
-/// IPMI machines, just ping it. For each probe, wait for 2 seconds for a reply, and retry every 5
-/// seconds until we get a connection.
+/// Wait for an address to be "up". For SSH consoles, do a TCP half-open connection request. For
+/// IPMI machines, race ICMP ping against ASF Presence Ping - first to succeed wins.
+///
+/// ASF Presence Ping works with most hardware vendors BMC and machine-a-tron simulations,
+/// but some BMCs (eg, NVIDIA DGX GB200) ignore it. Running both ICMP and UDP ASF pings in parallel
+/// provides fast detection in all environments.
 async fn wait_until_host_is_up(
     addr: SocketAddr,
     kind: connection::Kind,
@@ -330,7 +333,7 @@ async fn wait_until_host_is_up(
                         }
                     }
                     connection::Kind::Ipmi => {
-                        if check_ipmi_reachable(addr, Duration::from_secs(2)).await {
+                        if check_ipmi_reachable_racing(addr, Duration::from_secs(2)).await {
                             break Ok(());
                         }
                     }
@@ -562,35 +565,100 @@ impl Drop for BmcConnectionSubscription {
 }
 
 /// Send an ASF Presence Ping (RMCP) to check if an IPMI endpoint is reachable.
-async fn check_ipmi_reachable(addr: SocketAddr, timeout: Duration) -> bool {
+async fn check_asf_reachable(addr: SocketAddr, timeout: Duration) -> bool {
     // Reference: IPMI v2.0 spec, section 13.2.3
     const ASF_PRESENCE_PING: [u8; 12] = [
         0x06, 0x00, 0xff, 0x06, 0x00, 0x00, 0x11, 0xbe, 0x80, 0x00, 0x00, 0x00,
     ];
 
-    let Ok(socket) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
-        tracing::debug!(%addr, "failed to bind UDP socket for IPMI reachability check");
-        return false;
+    let probe = async {
+        let bind_addr = if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let socket = tokio::net::UdpSocket::bind(bind_addr).await?;
+        socket.send_to(&ASF_PRESENCE_PING, addr).await?;
+        let mut recv_buf = [0u8; 32];
+        socket.recv_from(&mut recv_buf).await
     };
 
-    if let Err(e) = socket.send_to(&ASF_PRESENCE_PING, addr).await {
-        tracing::debug!(%addr, error = %e, "failed to send ASF Presence Ping");
-        return false;
-    }
-
-    let mut recv_buf = [0u8; 32];
-    match tokio::time::timeout(timeout, socket.recv_from(&mut recv_buf)).await {
+    match tokio::time::timeout(timeout, probe).await {
         Ok(Ok((len, _))) => {
             tracing::debug!(%addr, response_len = len, "IPMI endpoint responded to ASF Presence Ping");
             true
         }
         Ok(Err(e)) => {
-            tracing::debug!(%addr, error = %e, "error receiving ASF Presence Pong");
+            tracing::debug!(%addr, error = %e, "ASF Presence Ping failed");
             false
         }
         Err(_) => {
-            tracing::debug!(%addr, timeout_secs = ?timeout, "ASF Presence Ping timed out");
+            tracing::debug!(%addr, ?timeout, "ASF Presence Ping timed out");
             false
+        }
+    }
+}
+
+/// Send an ICMP Echo Request to check if an IPMI endpoint is reachable.
+async fn check_icmp_reachable(addr: SocketAddr, timeout: Duration) -> bool {
+    use surge_ping::{Client, PingIdentifier, PingSequence};
+
+    let config = icmp_config(addr);
+
+    let client = match Client::new(&config) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::debug!(%addr, error = %e, "failed to create ICMP client");
+            return false;
+        }
+    };
+
+    let mut pinger = client
+        .pinger(addr.ip(), PingIdentifier(rand::random()))
+        .await;
+    pinger.timeout(timeout);
+
+    match pinger.ping(PingSequence(0), &[]).await {
+        Ok((_reply, rtt)) => {
+            tracing::debug!(%addr, ?rtt, "ICMP ping succeeded");
+            true
+        }
+        Err(e) => {
+            tracing::debug!(%addr, error = %e, "ICMP ping failed");
+            false
+        }
+    }
+}
+
+fn icmp_config(addr: SocketAddr) -> surge_ping::Config {
+    let kind = if addr.is_ipv4() {
+        surge_ping::ICMP::V4
+    } else {
+        surge_ping::ICMP::V6
+    };
+    surge_ping::Config::builder().kind(kind).build()
+}
+
+/// Race ASF Presence Ping and ICMP ping to check IPMI endpoint reachability.
+async fn check_ipmi_reachable_racing(addr: SocketAddr, timeout: Duration) -> bool {
+    use std::pin::pin;
+
+    use futures::future::{Either, select};
+
+    let mut asf_fut = pin!(check_asf_reachable(addr, timeout));
+    let mut icmp_fut = pin!(check_icmp_reachable(addr, timeout));
+
+    // Wait for the first check to complete
+    match select(asf_fut.as_mut(), icmp_fut.as_mut()).await {
+        Either::Left((true, _)) => true,  // ASF succeeded
+        Either::Right((true, _)) => true, // ICMP succeeded
+        Either::Left((false, icmp_remaining)) => {
+            // ASF failed, wait for ICMP
+            icmp_remaining.await
+        }
+        Either::Right((false, asf_remaining)) => {
+            // ICMP failed, wait for ASF
+            asf_remaining.await
         }
     }
 }
@@ -601,6 +669,46 @@ mod tests {
 
     use super::*;
     use crate::bmc::connection_impl::ipmi;
+
+    #[tokio::test]
+    async fn asf_probe_reaches_both_address_families() {
+        for bind_addr in ["127.0.0.1:0", "[::1]:0"] {
+            let socket = tokio::net::UdpSocket::bind(bind_addr).await.unwrap();
+            let addr = socket.local_addr().unwrap();
+            let responder = async {
+                let mut buf = [0; 32];
+                let (len, peer) = socket.recv_from(&mut buf).await.unwrap();
+                socket.send_to(&buf[..len], peer).await.unwrap();
+            };
+            let (reachable, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(check_asf_reachable(addr, Duration::from_secs(2)), responder)
+            })
+            .await
+            .unwrap_or_else(|_| panic!("ASF responder timed out for {addr}"));
+            assert!(reachable, "{addr}");
+        }
+    }
+
+    #[tokio::test]
+    async fn asf_probe_requires_a_response() {
+        let socket = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+        assert!(
+            !check_asf_reachable(socket.local_addr().unwrap(), Duration::from_millis(10)).await
+        );
+    }
+
+    #[test]
+    fn icmp_config_matches_destination_family() {
+        carbide_test_support::value_scenarios!(
+            run = |addr| matches!(icmp_config(addr).kind, surge_ping::ICMP::V6);
+            "IPv4 keeps ICMPv4" {
+                "192.0.2.1:623".parse().unwrap() => false,
+            }
+            "IPv6 uses ICMPv6" {
+                "[2001:db8::1]:623".parse().unwrap() => true,
+            }
+        );
+    }
 
     #[test]
     fn retry_backoff_resets_only_after_healthy_connection_or_successful_sol_recovery() {

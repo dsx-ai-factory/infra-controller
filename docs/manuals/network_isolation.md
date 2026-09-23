@@ -28,8 +28,7 @@ then use the operations matrix in each guide.
   wrapper).
 - Use **`nico-admin-cli`** (which speaks the gRPC API directly) only for
   operations the REST API does not expose — for example, NMX-C endpoint
-  registration, the NVLink GPU-mapping populate step, or break-glass fabric
-  cleanup.
+  registration or break-glass fabric cleanup.
 
 **Tenant**
 

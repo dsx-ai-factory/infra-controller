@@ -83,27 +83,24 @@ pub(super) fn tar_router(
                 }
             };
 
-            let entries = tar::Archive::new(gz_decoder)
-                .entries()
-                .unwrap()
-                .map(Result::unwrap)
-                .filter_map(|mut entry| {
-                    let name = entry
-                        .path()
-                        .unwrap()
-                        .display()
-                        .to_string()
-                        .replace("/index.json", "");
-                    if name.ends_with('/') {
-                        // ignore directories
-                        None
-                    } else {
-                        let mut s = String::with_capacity(entry.size() as usize);
-                        let _ = entry.read_to_string(&mut s).unwrap();
-                        Some((name, s))
-                    }
-                })
-                .collect::<HashMap<_, _>>();
+            let mut entries = HashMap::new();
+            for entry in tar::Archive::new(gz_decoder).entries()? {
+                let mut entry = entry?;
+                let name = entry
+                    .path()?
+                    .display()
+                    .to_string()
+                    .replace("/index.json", "");
+                if name.ends_with('/') {
+                    // ignore directories
+                    continue;
+                }
+                let mut s = String::with_capacity(entry.size() as usize);
+                entry
+                    .read_to_string(&mut s)
+                    .wrap_err_with(|| format!("cannot read archive entry {name:?}"))?;
+                entries.insert(name, s);
+            }
             let entries = Arc::new(Mutex::new(entries));
 
             // cache what we just built
@@ -117,10 +114,12 @@ pub(super) fn tar_router(
 
     let cache = TarRouterCache { entries };
 
+    // Archive mocks answer errors in the same Redfish envelope as generated ones.
     Ok(Router::new()
         .route("/{*path}", get(get_from_tar))
         .fallback(not_found_handler)
-        .with_state(cache))
+        .with_state(cache)
+        .layer(axum::middleware::from_fn(super::redfish_error_envelope)))
 }
 
 lazy_static::lazy_static! {

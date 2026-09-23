@@ -30,7 +30,7 @@ use serde_json::json;
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
 use crate::redfish::Builder;
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
 pub(super) fn collection() -> redfish::Collection<'static> {
     redfish::Collection {
@@ -180,43 +180,43 @@ impl ManagerBuilder {
     }
 }
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     const MGR_ID: &str = "{manager_id}";
     const ETH_ID: &str = "{ethernet_id}";
     const HOST_IF_ID: &str = "{hostif_id}";
-    r.route(&collection().odata_id, get(get_manager_collection))
+    r.route(&collection().odata_id, get(get_manager_collection::<C>))
         .route(
             &resource(MGR_ID).odata_id,
-            get(get_manager).patch(patch_manager),
+            get(get_manager::<C>).patch(patch_manager::<C>),
         )
         .route(
             &redfish::ethernet_interface::manager_collection(MGR_ID).odata_id,
-            get(get_ethernet_interface_collection),
+            get(get_ethernet_interface_collection::<C>),
         )
         .route(
             &redfish::ethernet_interface::manager_resource(MGR_ID, ETH_ID).odata_id,
-            get(get_ethernet_interface),
+            get(get_ethernet_interface::<C>),
         )
         .route(
             &redfish::host_interface::manager_collection(MGR_ID).odata_id,
-            get(get_host_interface_collection),
+            get(get_host_interface_collection::<C>),
         )
         .route(
             &redfish::host_interface::manager_resource(MGR_ID, HOST_IF_ID).odata_id,
-            get(get_host_interface).patch(patch_host_interface),
+            get(get_host_interface::<C>).patch(patch_host_interface::<C>),
         )
         .route(
             &redfish::serial_interface::manager_collection(MGR_ID).odata_id,
-            get(get_serial_interface_collection),
+            get(get_serial_interface_collection::<C>),
         )
         .route(
             &redfish::serial_interface::manager_resource(MGR_ID, HOST_IF_ID).odata_id,
-            get(get_serial_interface),
+            get(get_serial_interface::<C>),
         )
-        .route(&reset_target(MGR_ID), post(post_reset_manager))
+        .route(&reset_target(MGR_ID), post(post_reset_manager::<C>))
         .route(
             &redfish::manager_network_protocol::manager_resource(MGR_ID).odata_id,
-            get(get_network_protocol).patch(patch_network_protocol),
+            get(get_network_protocol::<C>).patch(patch_network_protocol::<C>),
         )
         .route(
             &redfish::log_service::manager_collection(MGR_ID).odata_id,
@@ -264,6 +264,13 @@ impl ManagerState {
                 .map(SingleManagerState::new)
                 .collect(),
         }
+    }
+
+    /// `@odata.id` of the BMC's own manager resource, the first configured one.
+    pub(crate) fn primary_odata_id(&self) -> Option<String> {
+        self.managers
+            .first()
+            .map(|manager| resource(manager.id).odata_id.into_owned())
     }
 
     pub(crate) fn find(&self, manager_id: &str) -> Option<&SingleManagerState> {
@@ -411,7 +418,7 @@ impl SingleManagerState {
     }
 }
 
-async fn get_manager_collection(State(state): State<BmcState>) -> Response {
+async fn get_manager_collection<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     collection()
         .with_members(
             &state
@@ -424,7 +431,10 @@ async fn get_manager_collection(State(state): State<BmcState>) -> Response {
         .into_ok_response()
 }
 
-async fn get_manager(State(state): State<BmcState>, Path(manager_id): Path<String>) -> Response {
+async fn get_manager<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(manager_id): Path<String>,
+) -> Response {
     let Some(this) = state.manager.find(&manager_id) else {
         return http::not_found();
     };
@@ -473,8 +483,8 @@ async fn get_manager(State(state): State<BmcState>, Path(manager_id): Path<Strin
         .into_ok_response()
 }
 
-async fn patch_manager(
-    State(state): State<BmcState>,
+async fn patch_manager<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
     Json(patch_request): Json<serde_json::Value>,
 ) -> Response {
@@ -486,8 +496,8 @@ async fn patch_manager(
     http::ok_no_content()
 }
 
-async fn get_ethernet_interface_collection(
-    State(state): State<BmcState>,
+async fn get_ethernet_interface_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
 ) -> Response {
     state
@@ -508,8 +518,8 @@ async fn get_ethernet_interface_collection(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_ethernet_interface(
-    State(state): State<BmcState>,
+async fn get_ethernet_interface<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((manager_id, eth_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -525,8 +535,8 @@ async fn get_ethernet_interface(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_host_interface_collection(
-    State(state): State<BmcState>,
+async fn get_host_interface_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
 ) -> Response {
     state
@@ -547,8 +557,8 @@ async fn get_host_interface_collection(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_host_interface(
-    State(state): State<BmcState>,
+async fn get_host_interface<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((manager_id, iface_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -559,8 +569,8 @@ async fn get_host_interface(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_serial_interface_collection(
-    State(state): State<BmcState>,
+async fn get_serial_interface_collection<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
 ) -> Response {
     state
@@ -582,8 +592,8 @@ async fn get_serial_interface_collection(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_serial_interface(
-    State(state): State<BmcState>,
+async fn get_serial_interface<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((manager_id, interface_id)): Path<(String, String)>,
 ) -> Response {
     state
@@ -599,8 +609,8 @@ async fn get_serial_interface(
         .unwrap_or_else(http::not_found)
 }
 
-async fn patch_host_interface(
-    State(state): State<BmcState>,
+async fn patch_host_interface<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path((manager_id, iface_id)): Path<(String, String)>,
     Json(patch_request): Json<serde_json::Value>,
 ) -> Response {
@@ -612,8 +622,8 @@ async fn patch_host_interface(
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_network_protocol(
-    State(state): State<BmcState>,
+async fn get_network_protocol<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
 ) -> Response {
     let Some(this) = state.manager.find(&manager_id) else {
@@ -622,8 +632,8 @@ async fn get_network_protocol(
     this.network_protocol().into_ok_response()
 }
 
-async fn patch_network_protocol(
-    State(state): State<BmcState>,
+async fn patch_network_protocol<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
     Json(json): Json<serde_json::Value>,
 ) -> Response {
@@ -634,8 +644,8 @@ async fn patch_network_protocol(
     http::ok_no_content()
 }
 
-async fn post_reset_manager(
-    State(state): State<BmcState>,
+async fn post_reset_manager<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(manager_id): Path<String>,
 ) -> Response {
     if state.manager.find(&manager_id).is_none() {
@@ -645,14 +655,19 @@ async fn post_reset_manager(
     // bmc_reset window (the middleware answers 503 until it expires).
     // The SERVER's power state is deliberately untouched — a BMC reset
     // interrupts management visibility, not the machine.
-    if let Some(availability) = state.availability.as_ref() {
-        let window = availability.begin_reset();
-        tracing::info!(
-            manager_id,
-            offline_for = ?window,
-            "BMC self-reset: going offline"
-        );
-    }
+    // Logged, not announced: the reset closes every stream before a
+    // subscriber could observe an Event, as when a real BMC goes dark.
+    state.record_log(redfish::log_service::LogEntryDraft::manager_resetting(
+        &resource(&manager_id).odata_id,
+        "Manager.Reset",
+    ));
+    let offline_for = state.reset();
+    tracing::info!(
+        manager_id,
+        ?offline_for,
+        event_service = state.event_service.is_some(),
+        "BMC self-reset"
+    );
     json!({}).into_ok_response()
 }
 
@@ -661,5 +676,5 @@ async fn get_log_services() -> Response {
 }
 
 fn not_implemented() -> Response {
-    json!("").into_response(StatusCode::NOT_IMPLEMENTED)
+    http::redfish_error(StatusCode::NOT_IMPLEMENTED, "not implemented")
 }

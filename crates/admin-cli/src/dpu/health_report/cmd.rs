@@ -49,7 +49,7 @@ pub(super) async fn handle_health_report(
 
             api_client
                 .machine_insert_health_report_override(
-                    options.dpu_id,
+                    &options.dpu_id,
                     report.into(),
                     options.replace,
                 )

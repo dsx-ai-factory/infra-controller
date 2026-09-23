@@ -1,0 +1,60 @@
+# A chart upgrade must preserve the image's listener defaults and explicit site binds.
+suite: Listener defaults with pinned images
+templates:
+  - charts/nico-dsx-exchange-consumer/templates/deployment.yaml
+  - charts/nico-hardware-health/templates/deployment.yaml
+  - charts/nico-pxe/templates/deployment.yaml
+set:
+  global.image.repository: example.invalid/core
+  global.image.tag: pre-ipv6
+tests:
+  # Older images can remain pinned during a chart upgrade; their default binds stay authoritative.
+  - it: does not inject IPv6 listener overrides into pinned images
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: example.invalid/core:pre-ipv6
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_DSX_CONSUMER__METRICS__ENDPOINT
+          any: true
+        template: charts/nico-dsx-exchange-consumer/templates/deployment.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_HEALTH__METRICS__ENDPOINT
+          any: true
+        template: charts/nico-hardware-health/templates/deployment.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PXE_BIND_ADDRESS
+          any: true
+        template: charts/nico-pxe/templates/deployment.yaml
+
+  # Explicit operator binds must still override the binary's default with either image generation.
+  - it: preserves explicitly configured listener addresses
+    set:
+      nico-dsx-exchange-consumer.env.CARBIDE_DSX_CONSUMER__METRICS__ENDPOINT: "127.0.0.1:9009"
+      nico-hardware-health.env.CARBIDE_HEALTH__METRICS__ENDPOINT: "127.0.0.1:9009"
+      nico-pxe.env.PXE_BIND_ADDRESS: "127.0.0.1"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_DSX_CONSUMER__METRICS__ENDPOINT
+            value: "127.0.0.1:9009"
+        template: charts/nico-dsx-exchange-consumer/templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_HEALTH__METRICS__ENDPOINT
+            value: "127.0.0.1:9009"
+        template: charts/nico-hardware-health/templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PXE_BIND_ADDRESS
+            value: "127.0.0.1"
+        template: charts/nico-pxe/templates/deployment.yaml

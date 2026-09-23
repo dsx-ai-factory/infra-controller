@@ -48,8 +48,8 @@ type Task struct {
 	StartedAt     *time.Time                `bun:"started_at"`
 	FinishedAt    *time.Time                `bun:"finished_at"`
 
-	// QueueExpiresAt is set only for waiting tasks. After this time, the
-	// Promoter will discard the task instead of promoting it.
+	// QueueExpiresAt is set for pre-execution waits. After this time, the
+	// Promoter or task manager terminates the task instead of executing it.
 	QueueExpiresAt *time.Time `bun:"queue_expires_at"`
 
 	IdempotencyKey string     `bun:"idempotency_key,nullzero"`
@@ -124,23 +124,36 @@ func (t *Task) UpdateScheduledTask(
 
 	t.UpdatedAt = time.Now().UTC()
 
-	_, err := idb.NewUpdate().
+	result, err := idb.NewUpdate().
 		Model(t).
-		Column("execution_id", "executor_type", "updated_at").
+		Column("execution_id", "executor_type", "applied_rule_id", "updated_at").
 		Where("id = ?", t.ID).
 		Exec(ctx)
+	if err != nil {
+		return err
+	}
 
-	return err
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("update scheduled task %s affected %d rows", t.ID, rowsAffected)
+	}
+
+	return nil
 }
 
-// UpdateTaskStatus updates the status of the task.
-// report, when non-nil, replaces the stored report column.
+// UpdateTaskStatus updates the status of the task. Non-nil report and
+// queueExpiresAt values replace their corresponding stored columns. Finished
+// statuses clear queueExpiresAt because the deadline applies only while waiting.
 func (t *Task) UpdateTaskStatus(
 	ctx context.Context,
 	idb bun.IDB,
 	status taskcommon.TaskStatus,
 	message string,
 	report json.RawMessage,
+	queueExpiresAt *time.Time,
 ) error {
 	t.Status = status
 	t.Message = message
@@ -151,15 +164,20 @@ func (t *Task) UpdateTaskStatus(
 		t.Report = report
 		columns = append(columns, "report")
 	}
-
 	if status == taskcommon.TaskStatusRunning && t.StartedAt == nil {
 		t.StartedAt = &t.UpdatedAt
 		columns = append(columns, "started_at")
 	}
 	if status.IsFinished() {
 		t.FinishedAt = &t.UpdatedAt
+		t.QueueExpiresAt = nil
+		columns = append(columns, "queue_expires_at")
 	} else {
 		t.FinishedAt = nil
+		if queueExpiresAt != nil {
+			t.QueueExpiresAt = queueExpiresAt
+			columns = append(columns, "queue_expires_at")
+		}
 	}
 
 	_, err := idb.NewUpdate().

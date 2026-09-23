@@ -8,7 +8,7 @@ PXE/HTTP boot, DPU agent, BGP/HBN, or API reachability.
 | Path | Why it matters | First check |
 |---|---|---|
 | Operator to `nico-api` | CLI and incident response. | `nico-admin-cli version` |
-| `nico-api` to Vault | BMC and platform credentials. | Vault metrics and `nico-api` logs. |
+| `nico-api` to Vault | Certificate issuance, and BMC and platform credentials when Vault is the credential store or KEK provider. | Vault metrics and `nico-api` logs. |
 | `nico-api` to BMC | Redfish power, inventory, firmware, and discovery. | Site Explorer and `redfish browse`. |
 | Host or DPU to `nico-dhcp` | discovery, install, admin and OOB leases. | DHCP logs and IP pool metrics. |
 | Host or DPU to `nico-pxe` | discovery image, iPXE, BFB or HTTP boot content. | PXE logs and boot console. |
@@ -31,7 +31,7 @@ Common causes:
 
 - BMC is powered off or on the wrong network.
 - OOB route or VLAN is missing.
-- Vault credential lookup failed.
+- Credential lookup failed in the credential store (Vault or Postgres).
 - BMC certificate or TLS settings changed.
 - Redfish endpoint is slow or rate-limited.
 

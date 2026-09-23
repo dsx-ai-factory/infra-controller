@@ -5,7 +5,9 @@
 # Namespaced Role/RoleBinding on purpose: the manager cache and reconciler are
 # scoped to one namespace, so the grants are too — the simulator must not be
 # able to touch DPF resources anywhere else (e.g. a real DPF install elsewhere
-# on the cluster). No `delete` verb: DPU cleanup rides the ownerRef GC.
+# on the cluster). DPU cleanup rides the ownerRef GC; `delete` on dpus exists
+# only to recreate a DPU whose immutable flavor drifted from the deployment
+# selecting its node.
 #
 # IMPORTANT: every `namespace:` below AND the Deployment namespace
 # (config/manager/manager.yaml) must equal the value passed to
@@ -35,7 +37,17 @@ rules:
     verbs: ["get", "list", "watch", "create"]
   - apiGroups: ["provisioning.dpu.nvidia.com"]
     resources: ["dpus"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    # delete: a DPU whose immutable flavor no longer matches the deployment
+    # selecting its node is deleted and recreated, as the DPF DPUSet controller does.
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["svc.dpu.nvidia.com"]
+    resources: ["dpudeployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["svc.dpu.nvidia.com"]
+    # The real DPUDeployment controller reports DPUSetsReconciled; NICo will not
+    # look at a deployment's DPUs until that condition is True.
+    resources: ["dpudeployments/status"]
+    verbs: ["get", "update", "patch"]
   - apiGroups: ["provisioning.dpu.nvidia.com"]
     resources: ["dpus/status"]
     verbs: ["get", "update", "patch"]

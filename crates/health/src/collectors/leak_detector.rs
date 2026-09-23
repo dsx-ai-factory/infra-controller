@@ -254,6 +254,7 @@ fn build_health_report(
 
         match detector.detector_state.flatten() {
             Some(DetectorState::Ok) => successes.push(HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: Some(target),
             }),
@@ -279,6 +280,7 @@ fn build_health_report(
     // leak classification, which would otherwise see only a shorter batch.
     for detector_id in unreadable {
         alerts.push(HealthReportAlert {
+            attribution: None,
             probe_id: Probe::LeakDetection,
             target: Some(detector_id.to_string()),
             message: format!("Leak detector '{detector_id}' could not be read"),
@@ -306,6 +308,7 @@ fn detector_target(detector: &LeakDetector) -> String {
 fn leak_alert(detector: &LeakDetector, target: String) -> HealthReportAlert {
     let state = detector.detector_state.flatten();
     HealthReportAlert {
+        attribution: None,
         probe_id: Probe::LeakDetection,
         target: Some(target.clone()),
         message: format!(
@@ -421,7 +424,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "leak_detector_collector",
             metadata: Some(EndpointMetadata::Machine(MachineData {

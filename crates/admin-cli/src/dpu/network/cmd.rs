@@ -18,11 +18,11 @@ use std::collections::HashMap;
 
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge::ManagedHostNetworkConfigResponse;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use prettytable::{Table, format, row};
 
 use crate::async_write;
-use crate::errors::{CarbideCliError, CarbideCliResult};
+use crate::errors::CarbideCliResult;
 use crate::machine::network::Args as NetworkCommand;
 use crate::rpc::ApiClient;
 
@@ -55,14 +55,9 @@ fn deny_prefix(config: &ManagedHostNetworkConfigResponse) -> String {
 async fn show_dpu_network_config(
     api_client: &ApiClient,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
-    dpu_id: MachineId,
+    dpu_id: DpuMachineId,
     output_format: OutputFormat,
 ) -> CarbideCliResult<()> {
-    if !dpu_id.machine_type().is_dpu() {
-        return Err(CarbideCliError::GenericError(
-            "Only DPU id is allowed.".to_string(),
-        ));
-    }
     let config = api_client.0.get_managed_host_network_config(dpu_id).await?;
     match output_format {
         OutputFormat::Json => {
@@ -211,7 +206,7 @@ pub(crate) async fn show_dpu_status(
     if all_status.is_empty() {
         println!("No reported network status");
     } else {
-        let all_ids: Vec<MachineId> = all_status
+        let all_ids: Vec<DpuMachineId> = all_status
             .iter()
             .filter_map(|status| status.dpu_machine_id)
             .collect();
@@ -243,7 +238,7 @@ pub(crate) async fn show_dpu_status(
             let Some(dpu_id) = st.dpu_machine_id else {
                 continue;
             };
-            let Some(dpu) = dpus_by_id.get(&dpu_id) else {
+            let Some(dpu) = dpus_by_id.get(&MachineId::from(dpu_id)) else {
                 continue;
             };
             let observed_at = st

@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package carbide.proto.compiler.fixture.incompatible_rust_type_override;
+
+import "codegen/v1/rust_type.proto";
+import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
+
+message PublicMachineId {
+  string id = 1;
+}
+
+message IncompatibleId {
+  int64 id = 1;
+}
+
+message Target {
+  PublicMachineId id = 1 [(carbide.codegen.v1.field_rust_type) = ".carbide.proto.compiler.fixture.incompatible_rust_type_override.IncompatibleId"];
+}

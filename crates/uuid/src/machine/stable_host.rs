@@ -20,8 +20,8 @@ use std::ops::Deref;
 use std::str::FromStr;
 
 use super::{
-    HostMachineId, InvalidMachineType, MachineId, MachineIdSubtype, MachineIdSubtypeTrait,
-    MachineType,
+    HostMachineId, HostMachineIdSubtype, HostMachineIdSubtypeTrait, InvalidMachineType, MachineId,
+    MachineIdSubtype, MachineIdSubtypeTrait, MachineType,
 };
 
 /// A stable machine ID that identifies an ingested host (not a predicted host).
@@ -62,6 +62,18 @@ impl StableHostMachineId {
 impl Deref for StableHostMachineId {
     type Target = HostMachineId;
     fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<MachineId> for StableHostMachineId {
+    fn as_ref(&self) -> &MachineId {
+        &self.0.0
+    }
+}
+
+impl AsRef<HostMachineId> for StableHostMachineId {
+    fn as_ref(&self) -> &HostMachineId {
         &self.0
     }
 }
@@ -156,6 +168,16 @@ impl<'de> serde::Deserialize<'de> for StableHostMachineId {
     {
         let id = <MachineId as serde::Deserialize>::deserialize(deserializer)?;
         Self::try_from(id).map_err(serde::de::Error::custom)
+    }
+}
+
+impl HostMachineIdSubtypeTrait for StableHostMachineId {
+    fn host_machine_id_subtype(&self) -> HostMachineIdSubtype {
+        HostMachineIdSubtype::Stable(*self)
+    }
+
+    fn as_host_machine_id(&self) -> &HostMachineId {
+        &self.0
     }
 }
 

@@ -36,14 +36,13 @@ mod proto {
     tonic::include_proto!("dhcp_server_control");
 }
 
+use carbide_dhcp_server::errors::DhcpError;
+use carbide_dhcp_server::metrics::DhcpTimestampFileFailed;
 use proto::dhcp_server_control_server::{DhcpServerControl, DhcpServerControlServer};
 use proto::{
     GetDhcpTimestampsRequest, GetDhcpTimestampsResponse, StopServerRequest, StopServerResponse,
     UpdateAndReloadConfigRequest, UpdateAndReloadConfigResponse,
 };
-
-use crate::errors::DhcpError;
-use crate::metrics::DhcpTimestampFileFailed;
 
 // ── Control channel types ────────────────────────────────────────────────────
 

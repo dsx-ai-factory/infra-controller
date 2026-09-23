@@ -49,7 +49,28 @@ func TestConfig_Validate(t *testing.T) {
 }
 
 func TestConfig_Target(t *testing.T) {
-	config := Config{Host: "localhost", Port: 8080}
-	expectedTarget := "localhost:8080"
-	assert.Equal(t, expectedTarget, config.Target())
+	testCases := map[string]struct {
+		host string
+		want string
+	}{
+		"hostname": {
+			host: "localhost",
+			want: "localhost:8080",
+		},
+		"IPv6": {
+			host: "2001:db8::1",
+			want: "[2001:db8::1]:8080",
+		},
+		"bracketed IPv6": {
+			host: "[2001:db8::1]",
+			want: "[2001:db8::1]:8080",
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			config := Config{Host: testCase.host, Port: 8080}
+			assert.Equal(t, testCase.want, config.Target())
+		})
+	}
 }

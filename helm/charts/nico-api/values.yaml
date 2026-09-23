@@ -117,6 +117,11 @@ resources:
     cpu: 1500m
     memory: 8Gi
 
+## Soft open-file limit applied before startup. Clamped to the runtime hard
+## limit when it exceeds it. null falls back to 65536; non-null values must be
+## a positive integer (validated at render).
+fileDescriptorLimit: 65536
+
 ## Optional init containers (general-purpose pass-through)
 initContainers: []
 
@@ -242,23 +247,21 @@ migrationJob:
 ## with additional time for queue finalization.
 terminationGracePeriodSeconds: 240
 
-## Container command (override to customise startup).
+## Script body executed after setting the file descriptor limit. The template
+## prepends /bin/sh -c and the ulimit wrapper; this value is the script body.
 ## Picks /opt/nico/nico-api if present (renamed image), else /opt/carbide/carbide-api
 ## (current image). Configmaps are mounted at both /etc/nico and /etc/forge paths
 ## so the binary finds its expected config regardless of which it picks.
-command:
-  - /bin/sh
-  - -c
-  - |
-    if [ -x /opt/nico/nico-api ]; then
-      exec /opt/nico/nico-api run \
-        --config-path /etc/nico/nico-api/nico-api-config.toml \
-        --site-config-path /etc/nico/nico-api/site/nico-api-site-config.toml
-    else
-      exec /opt/carbide/carbide-api run \
-        --config-path /etc/forge/carbide-api/carbide-api-config.toml \
-        --site-config-path /etc/forge/carbide-api/site/carbide-api-site-config.toml
-    fi
+command: |
+  if [ -x /opt/nico/nico-api ]; then
+    exec /opt/nico/nico-api run \
+      --config-path /etc/nico/nico-api/nico-api-config.toml \
+      --site-config-path /etc/nico/nico-api/site/nico-api-site-config.toml
+  else
+    exec /opt/carbide/carbide-api run \
+      --config-path /etc/forge/carbide-api/carbide-api-config.toml \
+      --site-config-path /etc/forge/carbide-api/site/carbide-api-site-config.toml
+  fi
 
 ## Environment variables for nico-api
 env:
@@ -277,14 +280,31 @@ env:
 ##     username: ignored-for-token-or-certificate-auth
 ##     password: bearer-token-or-empty
 ##
-## In the default local_first mode, these entries override matching persistent
-## backend credentials. Set ufmSource to local to require local entries for
-## every configured fabric and disable persistent-backend UFM access.
+## bmc_site_wide_root:
+##   username: root
+##   password: existing-version-0-password
+##
+## In the default local_first modes, these entries override matching persistent
+## backend credentials. Set a source to local to make its local entries
+## authoritative and disable persistent-backend mutation for that credential.
 credentials:
   # local_first preserves environment/file overrides with persistent-backend
   # fallback. backend ignores local UFM entries. local requires every configured
   # fabric in the environment/file sources and rejects backend mutations.
   ufmSource: local_first
+  # Controls only the unversioned (version 0) site-wide BMC root. local_first
+  # reads environment, then file, then falls back to the backend. backend ignores
+  # the local v0 entry. local reads environment, then file, with no backend
+  # fallback and rejects backend v0 mutations. Treat local v0 as
+  # bootstrap/ingestion input; after a device uses it, coordinated rotation
+  # advances to a backend-managed version. With DPF enabled, local mode requires
+  # v0 before Core starts when v0 is current or the target cannot be resolved.
+  # local_first and backend may start empty, but new DPU registration waits for
+  # the shared Secret to be published. The default pinned DPF v26.4.0 does not
+  # support credential rotation; do not rotate while DPF manages a DPU
+  # (NVIDIA/infra-controller#6147).
+  # Versioned roots always use persistent backends.
+  bmcSiteWideRootSource: local_first
   file:
     existingSecret:
       name: ""
@@ -411,6 +431,21 @@ perObjectStateMetricsServiceMonitor:
   enabled: false
   interval: 60s
   scrapeTimeout: 25s
+
+## Route nico-api's own BMC Redfish traffic through nico-bmc-proxy,
+## including credentialed exploration of endpoints with established
+## credentials. Credential setup and rotation, BMC session minting,
+## exploration's anonymous vendor probes, and component-manager compute-tray
+## power control always talk to BMCs directly regardless of this setting.
+bmcProxy:
+  enabled: false
+  ## Proxy address as host:port. Empty derives the in-cluster address of
+  ## the nico-bmc-proxy chart's Service, which is named "nico-bmc-proxy"
+  ## regardless of release name: nico-bmc-proxy.<namespace>.svc.cluster.local:1079,
+  ## using this chart's namespace. Set explicitly when that chart uses
+  ## nameOverride, or when namespaceOverride (on either chart) puts the proxy
+  ## in a different namespace.
+  address: ""
 
 auth:
   ## Namespace component accepted in service (/<ns>/sa/) and machine

@@ -34,6 +34,7 @@ RUN go mod download
 # Copy source files
 COPY site-manager/ ./site-manager/
 COPY cert-manager/ ./cert-manager/
+COPY common/ ./common/
 
 # Build the site manager
 WORKDIR /workspace/site-manager

@@ -13,7 +13,7 @@ instances:
 title: NVIDIA Infra Controller
 
 announcement:
-  message: "🔔 Infra Controller's GitHub repository is moving on September 4, 2026. Refer to the [front page](https://docs.nvidia.com/infra-controller) for more information."
+  message: "🔔 Infra Controller's GitHub repository has moved to [dsx-ai-factory/infra-controller](https://github.com/dsx-ai-factory/infra-controller). Existing links redirect; update integrations that reference NVIDIA/infra-controller."
 
 metadata:
   canonical-host: "docs.nvidia.com/infra-controller"
@@ -24,7 +24,7 @@ check:
 
 navbar-links:
   - type: github
-    value: https://github.com/NVIDIA/infra-controller
+    value: https://github.com/dsx-ai-factory/infra-controller
 
 products:
   - display-name: NVIDIA Infra Controller
@@ -35,12 +35,16 @@ products:
     #     path: ../docs/index.yml
 
 redirects:
+  - source: "/infra-controller/documentation/operations-day-2/firmware-updates/flow-operation-rules"
+    destination: "/infra-controller/documentation/operations-day-2/flow-operations/operation-rules"
   - source: "/infra-controller/index.html"
     destination: "/infra-controller/"
   - source: "/infra-controller/dev/index.html"
     destination: "/infra-controller/dev/"
   - source: "/infra-controller/documentation/architecture/state-machines/rack-state-machine"
     destination: "/infra-controller/documentation/architecture/state-machines/on-demand-rack-maintenance"
+  - source: "/infra-controller/documentation/configuration-day-1/component-manager-rms-backends"
+    destination: "/infra-controller/documentation/configuration-day-1/rms-configuration"
   - source: "/infra-controller/documentation/getting-started/building-ni-co-containers"
     destination: "/infra-controller/documentation/getting-started/building-nico-containers"
   - source: "/infra-controller/documentation/getting-started/site-setup"

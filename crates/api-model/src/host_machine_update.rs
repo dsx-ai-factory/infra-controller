@@ -14,10 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use sqlx::FromRow;
 
 #[derive(Debug, FromRow)]
 pub struct HostMachineUpdate {
-    pub id: MachineId,
+    pub id: HostMachineId,
 }

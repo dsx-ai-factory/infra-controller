@@ -22,14 +22,15 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use carbide_instrument::red;
 use carbide_secrets::credentials::{CredentialReader, Credentials};
 use carbide_utils::HostPortPair;
-use carbide_utils::redfish::format_forwarded_host_parameter;
+use carbide_utils::redfish::{
+    format_forwarded_host_parameter, redfish_basic_authorization_context,
+};
 use libredfish::model::service_root::RedfishVendor;
 use libredfish::{Endpoint, Redfish};
 
-use crate::libredfish::instrumented::{InstrumentedRedfish, REDFISH_BACKEND};
+use crate::libredfish::instrumented::{InstrumentedRedfish, instrumented_redfish_initialization};
 use crate::libredfish::{RedfishAuth, RedfishClientCreationError, RedfishClientPool};
 
 /// Formats a host for the URL authority that `libredfish` constructs internally.
@@ -111,6 +112,20 @@ impl RedfishClientPool for RedfishClientPoolImpl {
                 (username, password)
             }
         };
+        // Keep every secret representation libredfish places on the wire as
+        // redaction context for initialization and later operation failures.
+        let authentication_sensitive_values = if let Some(username) = username.as_deref() {
+            let (_, sensitive_values) =
+                redfish_basic_authorization_context(username, password.as_deref());
+            sensitive_values
+        } else {
+            password
+                .as_deref()
+                .filter(|password| !password.is_empty())
+                .map(str::to_string)
+                .into_iter()
+                .collect()
+        };
 
         let endpoint = Endpoint {
             host: libredfish_endpoint_host(host).into_owned(),
@@ -138,9 +153,9 @@ impl RedfishClientPool for RedfishClientPoolImpl {
         // are metered like any other Redfish operation.
         let client = match vendor {
             // Auto-detect vendor from the service root.
-            None => red::instrumented(
-                REDFISH_BACKEND,
+            None => instrumented_redfish_initialization(
                 "create_client",
+                authentication_sensitive_values.iter().map(String::as_str),
                 self.pool
                     .create_client_with_custom_headers(endpoint, custom_headers),
             )
@@ -159,9 +174,9 @@ impl RedfishClientPool for RedfishClientPoolImpl {
                 .map_err(RedfishClientCreationError::RedfishError)
                 .map(|c| c as Box<dyn Redfish>)?,
             // Use the provided vendor directly.
-            Some(vendor) => red::instrumented(
-                REDFISH_BACKEND,
+            Some(vendor) => instrumented_redfish_initialization(
                 "create_client",
+                authentication_sensitive_values.iter().map(String::as_str),
                 self.pool
                     .create_client_with_vendor(endpoint, vendor, custom_headers),
             )
@@ -171,7 +186,10 @@ impl RedfishClientPool for RedfishClientPoolImpl {
 
         // Every client the pool creates goes out decorated, so each Redfish
         // call records the per-operation RED triad no matter the call site.
-        Ok(Box::new(InstrumentedRedfish::new(client)))
+        Ok(Box::new(InstrumentedRedfish::new(
+            client,
+            authentication_sensitive_values,
+        )))
     }
 
     fn credential_reader(&self) -> &dyn CredentialReader {
@@ -184,11 +202,219 @@ impl super::sealed::Sealed for RedfishClientPoolImpl {}
 #[async_trait]
 impl super::BmcCredentialOps for RedfishClientPoolImpl {}
 
+/// A [`RedfishClientPool`] whose every client targets nico-bmc-proxy instead
+/// of the BMC itself.
+///
+/// The proxy resolves the BMC from the RFC 7239 `Forwarded` header, fetches
+/// credentials from nico-api, and authenticates upstream -- so clients from
+/// this pool carry no BMC credentials at all. [`RedfishAuth::Key`] is
+/// accepted and ignored (the key names credentials the proxy will resolve
+/// itself), while [`RedfishAuth::Direct`] is rejected: explicit credentials
+/// mean the caller is doing credential-subject work, which must never route
+/// through the proxy, whose header stripping would silently discard them.
+///
+/// This pool deliberately implements only [`RedfishClientPool`], never
+/// [`super::BmcCredentialOps`] (which is sealed): handing it
+/// credential-lifecycle work is a compile error, so the `Direct` rejection
+/// above is the only credential path left to guard at runtime.
+pub(super) struct ProxiedRedfishClientPoolImpl {
+    pool: libredfish::RedfishClientPool,
+    credential_reader: Arc<dyn CredentialReader>,
+    proxy: HostPortPair,
+}
+
+impl ProxiedRedfishClientPoolImpl {
+    pub(super) fn new(
+        credential_reader: Arc<dyn CredentialReader>,
+        pool: libredfish::RedfishClientPool,
+        proxy: HostPortPair,
+    ) -> Self {
+        ProxiedRedfishClientPoolImpl {
+            credential_reader,
+            pool,
+            proxy,
+        }
+    }
+}
+
+#[async_trait]
+impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
+    async fn create_client(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        if matches!(auth, RedfishAuth::Direct(..)) {
+            return Err(RedfishClientCreationError::Unsupported(
+                "explicit credentials cannot be forwarded through bmc-proxy; \
+                 credential-subject operations must use the direct pool"
+                    .to_string(),
+            ));
+        }
+
+        // The Forwarded header carries only the BMC's host; bmc-proxy dials
+        // it at the https default. Silently dropping a recorded non-443
+        // Redfish port would strand that BMC, so fail loudly instead.
+        if let Some(port) = port
+            && port != 443
+        {
+            return Err(RedfishClientCreationError::Unsupported(format!(
+                "BMC {host} uses Redfish port {port}, which bmc-proxy cannot \
+                 address; route it via the direct pool or standard port 443"
+            )));
+        }
+
+        let endpoint = Endpoint {
+            host: self
+                .proxy
+                .url_host()
+                .map(Cow::into_owned)
+                .unwrap_or_else(|| host.to_string()),
+            port: self.proxy.port().or(port),
+            // An empty username keeps the client off libredfish's anonymous
+            // path (which changes vendor detection) while sending a
+            // credential the proxy strips anyway.
+            user: Some(String::new()),
+            password: None,
+        };
+
+        let custom_headers = vec![(
+            http::HeaderName::from_str("forwarded")
+                .map_err(|err| RedfishClientCreationError::InvalidHeader(err.to_string()))?,
+            format_forwarded_host_parameter(host),
+        )];
+
+        let client = match vendor {
+            None => instrumented_redfish_initialization(
+                "create_client",
+                [],
+                self.pool
+                    .create_client_with_custom_headers(endpoint, custom_headers),
+            )
+            .await
+            .map_err(RedfishClientCreationError::RedfishError)?,
+            Some(RedfishVendor::Unknown) => self
+                .pool
+                .create_standard_client_with_custom_headers(endpoint, custom_headers)
+                .map_err(RedfishClientCreationError::RedfishError)
+                .map(|c| c as Box<dyn Redfish>)?,
+            Some(vendor) => instrumented_redfish_initialization(
+                "create_client",
+                [],
+                self.pool
+                    .create_client_with_vendor(endpoint, vendor, custom_headers),
+            )
+            .await
+            .map_err(RedfishClientCreationError::RedfishError)?,
+        };
+
+        Ok(Box::new(InstrumentedRedfish::new(client, Vec::new())))
+    }
+
+    fn credential_reader(&self) -> &dyn CredentialReader {
+        &*self.credential_reader
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::value_scenarios;
+    use std::sync::Arc;
 
-    use super::libredfish_endpoint_host;
+    use carbide_secrets::test_support::credentials::TestCredentialManager;
+    use carbide_test_support::value_scenarios;
+    use carbide_utils::HostPortPair;
+
+    use super::super::RedfishAuth;
+    use super::{ProxiedRedfishClientPoolImpl, libredfish_endpoint_host};
+    use crate::libredfish::{RedfishClientPool as _, RedfishVendor};
+
+    fn proxied_pool() -> ProxiedRedfishClientPoolImpl {
+        ProxiedRedfishClientPoolImpl::new(
+            Arc::new(TestCredentialManager::default()),
+            libredfish::RedfishClientPool::builder()
+                .build()
+                .expect("test pool builds"),
+            HostPortPair::HostAndPort("bmc-proxy.example".to_string(), 1079),
+        )
+    }
+
+    // The safety invariant of the proxied/direct pool split: explicit
+    // credentials mean credential-subject work, which must never route
+    // through the proxy -- its header stripping would silently discard them.
+    #[tokio::test]
+    async fn proxied_pool_rejects_explicit_credentials() {
+        let result = proxied_pool()
+            .create_client(
+                "192.0.2.10",
+                None,
+                RedfishAuth::Direct("root".to_string(), "password".to_string()),
+                Some(RedfishVendor::Unknown),
+            )
+            .await;
+
+        // `Box<dyn Redfish>` has no `Debug`, so unwrap the error by hand.
+        let Err(err) = result else {
+            panic!("Direct credentials must not be forwardable");
+        };
+        assert!(
+            err.to_string().contains("bmc-proxy"),
+            "error should name the misrouting: {err}"
+        );
+    }
+
+    // bmc-proxy dials the BMC at the https default -- a recorded non-443
+    // Redfish port would be silently dropped, so it must fail loudly.
+    #[tokio::test]
+    async fn proxied_pool_rejects_non_standard_bmc_ports() {
+        let result = proxied_pool()
+            .create_client(
+                "192.0.2.10",
+                Some(8443),
+                RedfishAuth::Anonymous,
+                Some(RedfishVendor::Unknown),
+            )
+            .await;
+
+        let Err(err) = result else {
+            panic!("a non-443 BMC port must not be silently dropped");
+        };
+        assert!(
+            err.to_string().contains("8443"),
+            "error should name the unaddressable port: {err}"
+        );
+    }
+
+    // A `Key` names credentials the proxy resolves itself; the client must
+    // target the proxy, not the BMC, and stay off libredfish's anonymous
+    // path (which changes vendor detection).
+    #[tokio::test]
+    async fn proxied_pool_targets_the_proxy_without_bmc_credentials() {
+        let client = proxied_pool()
+            .create_client(
+                "192.0.2.10",
+                Some(443),
+                RedfishAuth::Key(
+                    carbide_secrets::credentials::CredentialKey::BmcCredentials {
+                        credential_type: carbide_secrets::credentials::BmcCredentialType::BmcRoot {
+                            bmc_mac_address: mac_address::MacAddress::new([2, 0, 0, 0, 0, 1]),
+                        },
+                    },
+                ),
+                // `Unknown` builds a standard client without any HTTP calls.
+                Some(RedfishVendor::Unknown),
+            )
+            .await
+            .expect("client builds without resolving credentials");
+
+        let http = &client.std_redfish().client;
+        assert_eq!(http.host(), "bmc-proxy.example");
+        assert!(
+            !http.is_anonymous(),
+            "an anonymous endpoint changes libredfish's vendor-detection path"
+        );
+    }
 
     #[test]
     fn endpoint_host_brackets_only_bare_ipv6_literals() {

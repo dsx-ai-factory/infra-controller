@@ -50,14 +50,11 @@ spec:
           spec:
             description: BlueFieldSpec defines the desired state of BlueFieldSoftware.
             properties:
-              forceFwUpdate:
-                default: false
-                description: ForceFwUpdate points to the force firmware update flag.
-                type: boolean
               nicFw:
                 description: |-
                   NicFw points to the NIC firmware binary used for E/W NIC firmware updates.
-                  Use this when a specific NIC firmware binary is required and is not included in the platform PLDM firmware bundle.
+                  Use this when a specific NIC firmware binary is required and is not included in the
+                  platform PLDM firmware bundle.
                   In production, prefer using PlatformPldmFwBundle.
                 minLength: 1
                 type: string
@@ -67,15 +64,24 @@ spec:
                 minLength: 1
                 type: string
               platformPldmFwBundle:
-                description: PlatformPldmFwBundle points to the Vera Rubin PLDM firmware
-                  bundle used for NIC firmware updates.
+                description: |-
+                  PlatformPldmFwBundle points to the platform PLDM firmware bundle used for E/W NIC
+                  firmware updates.
                 minLength: 1
                 type: string
               pldmFwBundle:
-                description: PldmFwBundle points to the BluefieldPLDM firmware bundle
-                  for baseline firmware updates.
-                minLength: 1
-                type: string
+                additionalProperties:
+                  type: string
+                description: |-
+                  PldmFwBundle maps each PSID to the PLDM firmware bundle URL used for that DPU model's
+                  baseline firmware updates. Each PSID's bundle is a complete PLDM package for that device.
+                  Keys are matched case-insensitively against the BMC-reported DPUDevice status PSID.
+                minProperties: 1
+                type: object
+                x-kubernetes-validations:
+                - message: pldmFwBundle entries must have non-empty PSID keys and
+                    non-empty bundle URLs
+                  rule: self.all(k, size(k) > 0 && size(self[k]) > 0)
             required:
             - osIso
             type: object
@@ -153,13 +159,24 @@ spec:
                   successfully downloaded
                 properties:
                   nicFw:
+                    description: |-
+                      NicFw is the local path of the E/W NIC firmware binary, either downloaded from
+                      spec.nicFw or unpacked from the platform PLDM firmware bundle.
                     type: string
                   osIso:
+                    description: OsIso is the local path of the downloaded OS ISO.
                     type: string
                   platformPldmFwBundle:
+                    description: PlatformPldmFwBundle is the local path of the downloaded
+                      platform PLDM firmware bundle.
                     type: string
                   pldmFwBundle:
-                    type: string
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      PldmFwBundle maps each PSID to the local path of its downloaded PLDM firmware bundle.
+                      Keys are matched case-insensitively against the BMC-reported DPUDevice PSID.
+                    type: object
                 type: object
               observedGeneration:
                 description: ObservedGeneration records the Generation observed on
@@ -180,25 +197,48 @@ spec:
               versions:
                 description: Versions tracks the versions of the components
                 properties:
-                  bfNicFwVersion:
-                    type: string
-                  bmcErotVersion:
-                    type: string
-                  bmcVersion:
-                    type: string
+                  bluefieldSoftwareVersions:
+                    additionalProperties:
+                      description: BluefieldDeviceVersions holds firmware versions
+                        extracted from a single PSID's PLDM bundle.
+                      properties:
+                        bfNicFwVersion:
+                          description: BFNicFwVersion is the BlueField NIC firmware
+                            version shipped in the bundle.
+                          minLength: 1
+                          type: string
+                        bmcErotVersion:
+                          description: BMCErotVersion is the BMC ERoT (External Root
+                            of Trust) firmware version shipped in the bundle.
+                          minLength: 1
+                          type: string
+                        bmcVersion:
+                          description: BMCVersion is the DPU BMC firmware version
+                            shipped in the bundle.
+                          minLength: 1
+                          type: string
+                        sbiosVersion:
+                          description: SBIOSVersion is the DPU SBIOS firmware version
+                            shipped in the bundle.
+                          minLength: 1
+                          type: string
+                      type: object
+                    description: |-
+                      BluefieldSoftwareVersions maps each PSID to the firmware versions from that device's
+                      PLDM bundle. Keys are matched case-insensitively against the BMC-reported DPUDevice PSID.
+                    type: object
                   doca:
                     description: DOCA is the formatted, user-facing DOCA version derived
                       from the OS ISO.
                     type: string
                   ewNicFwVersion:
-                    type: string
-                  fwBundleVersion:
+                    description: |-
+                      EWNicFwVersion is the E/W NIC firmware version taken from the platform PLDM bundle.
+                      It is not keyed by PSID because a BlueFieldSoftware carries a single platform bundle.
                     type: string
                   osISOVersion:
                     description: OSISOVersion is the raw DOCA version for the OS ISO,
                       taken from the ISO filename
-                    type: string
-                  sbiosVersion:
                     type: string
                 type: object
             required:

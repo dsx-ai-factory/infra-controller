@@ -99,4 +99,30 @@ pub enum Error {
         /// Fully qualified protobuf type name.
         protobuf_type: String,
     },
+
+    /// A Rust-only type override references an unknown protobuf message.
+    #[error("rust type override on `{target}` references unknown protobuf message `{replacement}`")]
+    UnknownRustTypeOverride {
+        /// Fully qualified field or method name carrying the annotation.
+        target: String,
+        /// Requested replacement protobuf message.
+        replacement: String,
+    },
+
+    /// A Rust-only type override is not wire-compatible with the public type.
+    #[error(
+        "rust type override on `{target}` changes wire shape from `{original}` to `{replacement}`"
+    )]
+    IncompatibleRustTypeOverride {
+        /// Fully qualified field or method name carrying the annotation.
+        target: String,
+        /// Public protobuf message type.
+        original: String,
+        /// Requested replacement protobuf message.
+        replacement: String,
+    },
+
+    /// An annotated descriptor could not be found in the structural descriptor set.
+    #[error("annotated protobuf descriptor `{0}` is missing from the structural descriptor set")]
+    MissingRustTypeOverrideTarget(String),
 }

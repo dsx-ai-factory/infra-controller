@@ -4,7 +4,7 @@ Use this workflow to rotate the NVOS admin password across managed NVLink switch
 
 Related guidance:
 
-- [Component Manager RMS Backends](../configuration/component-manager-rms.md)
+- [RMS Configuration](../configuration/rms.md)
 - [NICo Admin CLI](../manuals/nico-admin-cli.md)
 
 ## Workflow Boundaries
@@ -19,20 +19,17 @@ NVOS password rotation is a site-wide, asynchronous operation. NICo publishes on
 ## Prerequisites
 
 - Configure `nico-admin-cli` with the NICo Core API URL and an identity authorized for Forge Admin CLI operations. Refer to [Connecting to nico-api](../manuals/nico-admin-cli.md#connecting-to-nico-api).
-- Configure RMS connectivity, rack profiles, and switch vendor data as described in [Component Manager RMS Backends](../configuration/component-manager-rms.md).
+- Configure RMS connectivity, rack profiles, and switch vendor data as described in [RMS Configuration](../configuration/rms.md).
 - Ensure each managed switch has a BMC MAC address.
 - Ensure each managed switch has an NVOS credential that authenticates to the switch. The credential must be available from the expected-switch record or the NICo credential store.
 - Set expected-switch NVOS username and password fields together. Both values must be non-empty, or both fields must be unset.
 
-Enable the RMS switch backend and password-rotation gate in the `nico-api` site configuration. The gate defaults to `false`.
+Enable the RMS switch backend in the `nico-api` site configuration.
 
 ```toml
 [component_manager]
 nv_switch_backend = "rms"
-nvos_password_rotation_enabled = true
 ```
-
-The gate is a deployment assertion, not a runtime capability negotiation. Enable it only through a coordinated NICo and RMS rollout that qualifies every reachable RMS instance, including every replica behind a load balancer.
 
 RPC availability alone does not establish compatibility. Each RMS instance must meet these requirements:
 
@@ -41,7 +38,7 @@ RPC availability alone does not establish compatibility. Each RMS instance must 
 - Safely repeat the same active-to-target transition.
 - Recognize that a switch already using the target password is converged.
 
-When the gate is `false`, an NVOS rotation request returns `FailedPrecondition`.
+`nvos_password_rotation_enabled` remains in the configuration schema for compatibility with existing site configurations. The optional boolean accepts `true` or `false` and defaults to `false` when omitted. NICo serializes the setting, but the configured value does not control RMS password-rotation support.
 
 ## Configure Switch Credentials
 
@@ -117,7 +114,7 @@ Device status also includes the confirmed version, staged version, attempt count
 
 | Symptom | Action |
 | ------- | ------ |
-| Rotation request returns `FailedPrecondition` | Follow the error details: enable the gate, use a supported backend, or supply valid credentials for the listed switches. |
+| Rotation request returns `FailedPrecondition` | Follow the error details: use a supported backend or supply valid credentials for the listed switches. |
 | Site status shows pending switches | Query each switch with `--mac-address` and inspect its staged version, attempt count, and redacted error. |
 | Component-manager reports a non-retryable rejection | Correct the backend, endpoint, or credential issue, then issue another rotation request. |
 | Reconciliation remains unresolved | Verify RMS reachability and job handling. Inspect NICo and RMS logs without removing versioned credentials. |

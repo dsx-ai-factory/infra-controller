@@ -9,7 +9,8 @@
 #   KUBECONFIG=/path/to/kubeconfig ./health-check.sh
 #
 # All namespaces are auto-detected from cluster resources. Override via env:
-#   NICO_NS, VAULT_NS, POSTGRES_NS, CERT_MANAGER_NS, ESO_NS, METALLB_NS
+#   NICO_NS, VAULT_NS, POSTGRES_NS, CERT_MANAGER_NS, ESO_NS, METALLB_NS,
+#   CONTOUR_NS
 # =============================================================================
 set -uo pipefail
 
@@ -65,9 +66,19 @@ pass "kubectl: cluster reachable"
 # --------------------------------------------------------------------------
 section "Namespace Detection"
 
+# Two-label names may be `service.namespace`; longer names must include `.svc`.
+_service_namespace() {
+  local address="${1#*://}"
+  address="$(printf '%s' "${address}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${address}" =~ ^[a-z0-9-]+\.([a-z0-9-]+)(\.svc(\.[a-z0-9.-]+)?)?(:[0-9]+)?(/.*)?$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
 # NICo namespace: find the namespace containing vault-cluster-info
 if [[ -z "${NICO_NS:-}" ]]; then
-  NICO_NS=$(kubectl get configmap vault-cluster-info -A \
+  NICO_NS=$(kubectl get configmap -A \
+    --field-selector metadata.name=vault-cluster-info \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || true)
   NICO_NS="${NICO_NS:-nico-system}"
 fi
@@ -77,7 +88,7 @@ fi
 if [[ -z "${VAULT_NS:-}" ]]; then
   _VAULT_SVC=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
     -o jsonpath='{.data.VAULT_SERVICE}' || true)
-  VAULT_NS=$(printf '%s' "${_VAULT_SVC}" | sed 's|https\?://||' | cut -d: -f1 | cut -d. -f2)
+  VAULT_NS=$(_service_namespace "${_VAULT_SVC}")
   VAULT_NS="${VAULT_NS:-vault}"
 fi
 VAULT_ADDR=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
@@ -89,22 +100,30 @@ VAULT_ADDR=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
 if [[ -z "${POSTGRES_NS:-}" ]]; then
   _DB_HOST=$(kc get configmap -n "${NICO_NS}" nico-system-nico-database-config \
     -o jsonpath='{.data.DB_HOST}' || true)
-  POSTGRES_NS=$(printf '%s' "${_DB_HOST}" | cut -d. -f2)
+  POSTGRES_NS=$(_service_namespace "${_DB_HOST}")
   POSTGRES_NS="${POSTGRES_NS:-postgres}"
 fi
 
 # cert-manager, ESO, MetalLB: discover by known deployment names
 if [[ -z "${CERT_MANAGER_NS:-}" ]]; then
-  CERT_MANAGER_NS=$(kubectl get deployment cert-manager -A \
+  CERT_MANAGER_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=cert-manager \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || printf 'cert-manager')
 fi
 if [[ -z "${ESO_NS:-}" ]]; then
-  ESO_NS=$(kubectl get deployment external-secrets -A \
+  ESO_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=external-secrets \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || printf 'external-secrets')
 fi
 if [[ -z "${METALLB_NS:-}" ]]; then
-  METALLB_NS=$(kubectl get deployment metallb-controller -A \
+  METALLB_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=metallb-controller \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || printf 'metallb-system')
+fi
+if [[ -z "${CONTOUR_NS:-}" ]]; then
+  CONTOUR_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=contour-contour \
+    -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || true)
 fi
 
 printf "  %-26s %s\n" "NICo namespace:"     "${NICO_NS}"
@@ -114,6 +133,7 @@ printf "  %-26s %s\n" "postgres namespace:"    "${POSTGRES_NS}"
 printf "  %-26s %s\n" "cert-manager ns:"       "${CERT_MANAGER_NS}"
 printf "  %-26s %s\n" "external-secrets ns:"   "${ESO_NS}"
 printf "  %-26s %s\n" "metallb ns:"            "${METALLB_NS}"
+printf "  %-26s %s\n" "Contour/Envoy ns:"      "${CONTOUR_NS:-not installed}"
 
 # --------------------------------------------------------------------------
 # Test helpers
@@ -239,6 +259,36 @@ if [[ "${_desired}" -gt 0 && "${_ready}" -ge "${_desired}" ]]; then
   pass "daemonset/metallb-speaker: ${_ready}/${_desired} ready"
 else
   fail "daemonset/metallb-speaker: ${_ready:-0}/${_desired} ready"
+fi
+
+section "Contour/Envoy"
+if [[ -n "${CONTOUR_NS:-}" ]]; then
+  _check_deployment "${CONTOUR_NS}" contour-contour
+  _desired=$(kc get daemonset -n "${CONTOUR_NS}" contour-envoy \
+    -o jsonpath='{.status.desiredNumberScheduled}' || printf '0')
+  _ready=$(kc get daemonset -n "${CONTOUR_NS}" contour-envoy \
+    -o jsonpath='{.status.numberReady}' || printf '0')
+  _desired="${_desired:-0}"; _ready="${_ready:-0}"
+  if [[ "${_desired}" -gt 0 && "${_ready}" -ge "${_desired}" ]]; then
+    pass "daemonset/contour-envoy: ${_ready}/${_desired} ready"
+  else
+    fail "daemonset/contour-envoy: ${_ready}/${_desired} ready"
+  fi
+  _ENVOY_ADDRESS=$(kc get service -n "${CONTOUR_NS}" contour-envoy \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
+  if [[ -z "${_ENVOY_ADDRESS}" ]]; then
+    _ENVOY_ADDRESS=$(kc get service -n "${CONTOUR_NS}" contour-envoy \
+      -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || true)
+  fi
+  if [[ -n "${_ENVOY_ADDRESS}" ]]; then
+    pass "service/contour-envoy: LoadBalancer address ${_ENVOY_ADDRESS}"
+    printf "    %s point the nico-rest-api ingress host at %s%s\n" \
+      "${_DIM}" "${_ENVOY_ADDRESS}" "${_RESET}"
+  else
+    fail "service/contour-envoy: LoadBalancer address pending"
+  fi
+else
+  skip "not installed"
 fi
 
 # --------------------------------------------------------------------------
@@ -377,12 +427,15 @@ fi
 # --------------------------------------------------------------------------
 section "NICo Pods"
 _check_deployment  "${NICO_NS}" nico-api
+_check_deployment  "${NICO_NS}" nico-bmc-proxy
 _check_deployment  "${NICO_NS}" nico-dhcp
 _check_statefulset "${NICO_NS}" nico-dns
+_check_deployment  "${NICO_NS}" nico-hardware-health
 _check_deployment  "${NICO_NS}" nico-pxe
+_check_deployment  "${NICO_NS}" nico-ssh-console-rs
 
 # Optional pods: warn if the deployment doesn't exist, fail if it exists but isn't ready
-for _OPT_DEP in nico-hardware-health nico-ssh-console-rs nico-dsx-exchange-consumer; do
+for _OPT_DEP in nico-dsx-exchange-consumer; do
   if kc get deployment -n "${NICO_NS}" "${_OPT_DEP}" &>/dev/null; then
     _check_deployment "${NICO_NS}" "${_OPT_DEP}"
   else
@@ -392,14 +445,18 @@ done
 
 section "NICo Flow"
 FLOW_NS="${FLOW_NS:-flow}"
+REST_NS="${REST_NS:-nico-rest}"
 if kc get ns "${FLOW_NS}" &>/dev/null; then
   _check_deployment "${FLOW_NS}" flow
   for _S in flow.nico.nico-pg-cluster.credentials \
             flow-certificate temporal-client-certs nico-roots; do
     _check_secret_exists "${FLOW_NS}" "${_S}"
   done
+# Key "REST installed" on its deployment: setup.sh 7a pre-creates the namespace.
+elif kc get deployment -n "${REST_NS}" nico-rest-api &>/dev/null; then
+  fail "flow namespace not present - NICo REST is installed but Flow is missing (setup.sh phase 7h installs it with REST)"
 else
-  skip "flow namespace not present — flow disabled or not yet deployed"
+  skip "flow namespace not present - NICo REST not installed (--skip-rest was used); Flow installs together with REST"
 fi
 
 section "RMS (Rack Manager Service)"

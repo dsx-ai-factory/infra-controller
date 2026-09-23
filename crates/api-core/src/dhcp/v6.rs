@@ -83,14 +83,10 @@ pub(super) async fn infer_slaac_eui64_address(
         return Ok(());
     };
 
-    // TODO(chet): Serialize same-interface IPv6 selection and replacement
-    // across SLAAC observation, static assignment, and stateful DHCPv6. The
-    // `unique_address_family_on_interface` index keeps us from storing two IPv6
-    // rows for one interface, but it does not decide which concurrent writer
-    // should win. The losing writer currently returns a database error and
-    // aborts its DHCP transaction.
-    //
-    // A stateful/static IPv6 address already owns this interface family.
+    // Read the family after taking the interface row lock: a DHCPv6 or
+    // static assignment may commit while inference waits for this interface.
+    let current_segment_id =
+        db::machine_interface::lock_for_address_assignment(&mut *txn, interface_id).await?;
     if db::machine_interface_address::has_address_for_family(
         &mut *txn,
         interface_id,
@@ -99,6 +95,12 @@ pub(super) async fn infer_slaac_eui64_address(
     .await?
     {
         return Ok(());
+    }
+
+    if current_segment_id != segment.id {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "network segment changed for interface {interface_id} during SLAAC inference"
+        )));
     }
 
     // Persist the inferred address and refresh DNS naming from the new state.

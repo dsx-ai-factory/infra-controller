@@ -49,8 +49,12 @@ type DpuExtensionServiceDeploymentRequest struct {
 
 // InstanceFilter encapsulates instance list filter parameters
 type InstanceFilter struct {
-	Name  *string
-	VpcID *string
+	Name      *string
+	Query     *string
+	VpcID     *string
+	IPAddress *string
+	// AllVPCs prevents the client's default VPC from narrowing the query when VpcID is nil.
+	AllVPCs bool
 }
 
 // InstanceUpdateRequest represents a simplified request to update an Instance
@@ -247,12 +251,20 @@ func (im InstanceManager) GetInstances(ctx context.Context, instanceFilter *Inst
 		if instanceFilter.Name != nil {
 			gir = gir.Name(*instanceFilter.Name)
 		}
+		if instanceFilter.Query != nil {
+			gir = gir.Query(*instanceFilter.Query)
+		}
 		if instanceFilter.VpcID != nil {
 			gir = gir.VpcId(*instanceFilter.VpcID)
 		}
+		if instanceFilter.IPAddress != nil {
+			gir = gir.IpAddress(*instanceFilter.IPAddress)
+		}
 	}
-	// If no explicit VPC filter was provided, fall back to the client's default VPC (if set).
-	if (instanceFilter == nil || instanceFilter.VpcID == nil) && im.client.apiMetadata.VpcID != "" {
+	// If no explicit VPC filter was provided, fall back to the client's default VPC (if set),
+	// unless the caller requested a search across all VPCs.
+	useDefaultVPC := instanceFilter == nil || (instanceFilter.VpcID == nil && !instanceFilter.AllVPCs)
+	if useDefaultVPC && im.client.apiMetadata.VpcID != "" {
 		gir = gir.VpcId(im.client.apiMetadata.VpcID)
 	}
 	if paginationFilter != nil {

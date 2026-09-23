@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use carbide_authn::middleware::ConnectionAttributes;
-use carbide_uuid::machine::{HostMachineId, MachineInterfaceId, StableHostMachineId};
+use carbide_uuid::machine::{MachineInterfaceId, StableHostMachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use common::api_fixtures::dpu::create_dpu_machine;
 use common::api_fixtures::host::{host_discover_dhcp, host_discover_machine_with_reporter};
@@ -115,7 +115,7 @@ struct ScoutPciSelectionState {
 /// Loads only the primary, address, network, state, queue, and desired boot interface selection fields.
 async fn load_scout_pci_selection_state(
     pool: &sqlx::PgPool,
-    host_machine_id: HostMachineId,
+    host_machine_id: StableHostMachineId,
 ) -> Result<ScoutPciSelectionState, Box<dyn std::error::Error>> {
     let state = sqlx::query_as::<_, ScoutPciSelectionState>(
         "SELECT (
@@ -164,7 +164,7 @@ struct ScoutPciInterfaces {
 
 async fn load_scout_pci_interfaces(
     pool: &sqlx::PgPool,
-    host_machine_id: HostMachineId,
+    host_machine_id: StableHostMachineId,
 ) -> Result<ScoutPciInterfaces, Box<dyn std::error::Error>> {
     let machine = db::machine::find_one(pool, &host_machine_id, MachineSearchConfig::default())
         .await?
@@ -232,7 +232,7 @@ fn scout_pci_report(host_config: &ManagedHostConfig, winning_mac: MacAddress) ->
 
 async fn set_scout_test_source(
     pool: &sqlx::PgPool,
-    host_machine_id: HostMachineId,
+    host_machine_id: StableHostMachineId,
     source: BootInterfaceSelectionSource,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -250,7 +250,7 @@ async fn set_scout_test_source(
 
 async fn clear_scout_test_queue(
     pool: &sqlx::PgPool,
-    host_machine_id: HostMachineId,
+    host_machine_id: StableHostMachineId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
         .bind(host_machine_id.to_string())
@@ -262,7 +262,8 @@ async fn clear_scout_test_queue(
 async fn create_scout_test_host(
     env: &common::api_fixtures::TestEnv,
     source: BootInterfaceSelectionSource,
-) -> Result<(ManagedHostConfig, HostMachineId, ScoutPciInterfaces), Box<dyn std::error::Error>> {
+) -> Result<(ManagedHostConfig, StableHostMachineId, ScoutPciInterfaces), Box<dyn std::error::Error>>
+{
     let host_config = env.managed_host_config().with_dpu_count(2);
     let host = create_managed_host_with_config(env, host_config.clone()).await;
     let host_machine_id = host.host().id;
@@ -274,7 +275,7 @@ async fn create_scout_test_host(
 
 async fn submit_scout_pci_report(
     api: &crate::api::Api,
-    host_machine_id: HostMachineId,
+    host_machine_id: StableHostMachineId,
     caller_interface_id: MachineInterfaceId,
     hardware_info: HardwareInfo,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
@@ -304,7 +305,7 @@ async fn submit_scout_pci_report(
 
 fn scout_pci_comparisons(
     logs: &[carbide_instrument::testing::CapturedLog],
-    host_machine_id: HostMachineId,
+    host_machine_id: StableHostMachineId,
 ) -> Vec<String> {
     let host_machine_id = host_machine_id.to_string();
     logs.iter()
@@ -326,10 +327,9 @@ fn scout_pci_comparisons(
 
 async fn run_scout_pci_reconciliation(
     api: &crate::api::Api,
-    host_machine_id: HostMachineId,
+    host_machine_id: StableHostMachineId,
     hardware_info: &HardwareInfo,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let host_machine_id = StableHostMachineId::try_from(host_machine_id)?;
     Ok(
         crate::handlers::update_primary_interface_from_scout_for_test(
             api,
@@ -341,12 +341,12 @@ async fn run_scout_pci_reconciliation(
 }
 
 fn scout_test_allocation_request(
-    host_machine_id: HostMachineId,
+    host_machine_id: StableHostMachineId,
     segment_id: NetworkSegmentId,
 ) -> rpc::InstanceAllocationRequest {
     rpc::InstanceAllocationRequest {
         instance_id: None,
-        machine_id: Some(host_machine_id.into()),
+        machine_id: Some(host_machine_id),
         instance_type_id: None,
         config: Some(rpc::InstanceConfig {
             tenant: Some(default_tenant_config()),

@@ -12,6 +12,8 @@ import (
 	"strconv"
 
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
@@ -270,7 +272,8 @@ func (s *Service) Start(ctx context.Context) (retErr error) {
 		s.session.Close()
 	}()
 
-	certOpt, secure := s.certOption()
+	certOpt, secure, closeTLS := s.certOption()
+	defer closeTLS()
 	authorizer, err := s.newAuthorizer(secure)
 	if err != nil {
 		return err
@@ -363,8 +366,12 @@ func (s *Service) Start(ctx context.Context) (retErr error) {
 	// same completion log as accepted calls. Recovery runs on both sides of
 	// authorization: the outer layer catches authorization panics, while the
 	// inner layer can enrich downstream panic logs with the resolved identity.
+	// The stats handler extracts the caller's traceparent before any
+	// interceptor runs, so access logs and authorization decisions are
+	// recorded under the caller's trace rather than a fresh root.
 	s.grpcServer = grpc.NewServer(
 		certOpt,
+		grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))),
 		grpc.ChainUnaryInterceptor(unaryServerInterceptors(authorizer)...),
 		grpc.ChainStreamInterceptor(streamServerInterceptors(authorizer)...),
 	)
@@ -469,13 +476,13 @@ func (s *Service) Stop(ctx context.Context) {
 // If explicit certificate paths are set in the config they take precedence;
 // otherwise CERTDIR / the k8s SPIFFE default is used. The service refuses to
 // start without certificates unless ALLOW_INSECURE_GRPC=true is set.
-func (s *Service) certOption() (grpc.ServerOption, bool) {
-	tlsConfig, source, err := certs.ResolveServer(s.conf.CertConfig)
+func (s *Service) certOption() (grpc.ServerOption, bool, func()) {
+	tlsConfig, source, dynamicConfig, err := certs.ResolveDynamicServer(s.conf.CertConfig)
 	if err != nil {
 		if errors.Is(err, certs.ErrNotPresent) {
 			if os.Getenv("ALLOW_INSECURE_GRPC") == "true" {
 				log.Warn().Msg("TLS certs not present, running without mTLS")
-				return grpc.EmptyServerOption{}, false
+				return grpc.EmptyServerOption{}, false, func() {}
 			}
 			log.Fatal().Msg("TLS certificates required but not found; set ALLOW_INSECURE_GRPC=true for local development")
 		}
@@ -483,7 +490,7 @@ func (s *Service) certOption() (grpc.ServerOption, bool) {
 	}
 
 	log.Info().Msgf("Using certificates from %s", source)
-	return grpc.Creds(credentials.NewTLS(tlsConfig)), true
+	return grpc.Creds(credentials.NewTLS(tlsConfig)), true, dynamicConfig.Close
 }
 
 func (s *Service) newAuthorizer(secure bool) (*authz.Authorizer, error) {

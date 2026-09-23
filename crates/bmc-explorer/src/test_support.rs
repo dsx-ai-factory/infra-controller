@@ -26,7 +26,7 @@ use bmc_mock::test_support::axum_http_client::Error as TestBmcError;
 use bmc_mock::{DpuMachineInfo, DpuSettings, HardwareType, HostMachineInfo, MachineInfo};
 use model::site_explorer::EndpointExplorationReport;
 use nv_redfish::core::ODataId;
-use nv_redfish::{Bmc, Resource, ServiceRoot};
+use nv_redfish::{Bmc, ServiceRoot};
 
 use crate::chassis::ExploredChassisCollection;
 use crate::computer_system::{self, ExploredComputerSystem};
@@ -76,7 +76,7 @@ pub async fn detect_hw_type<B: Bmc>(
     let other_system_with_bios = systems_iter.find(|system| system.raw().bios.is_some());
     let system = other_system_with_bios.unwrap_or(first_system);
 
-    let is_bluefield_system = is_bluefield_system_id(system.id());
+    let is_bluefield_system = is_bluefield_system_id(&system.raw().id);
     let system_explore_config = computer_system::Config {
         need_oem_nvidia_bluefield: is_bluefield_system,
         ignore_500_on_bios_fetch: is_bluefield_system,

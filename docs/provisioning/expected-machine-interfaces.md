@@ -49,13 +49,18 @@ For host boot selection and DPU management policy, see
 
 ## IP Allocation Policies
 
+NICo uses the current Expected Machine configuration for each family's first
+successful DHCP or Static allocation. IPv4 and IPv6 initialize independently.
+The allocation behavior below requires the
+[ExpectedMachine allocation implementation](https://github.com/dsx-ai-factory/infra-controller/pull/6012).
+
 Choose one policy for each declared interface:
 
 | Policy | Behavior |
 |---|---|
 | `dynamic` | NICo allocates an address from the segment selected by the DHCP relay or DHCPv6 link address. |
-| `fixed` | NICo reserves `fixed_ip` before it processes DHCP for the interface. An explicit Fixed policy requires the address to belong to a configured managed prefix. |
-| `retained` | NICo allocates an address through DHCP, then keeps that address static for the lifetime of the machine-interface record. |
+| `fixed` | NICo reserves `fixed_ip` as Static before serving DHCP for that address family. An explicit Fixed policy requires the address to belong to a configured managed prefix. |
+| `retained` | NICo selects an address through DHCP and immediately stores it as Static. It remains reserved until explicit removal or deletion of the machine-interface record. |
 
 `dynamic` and `retained` entries cannot include `fixed_ip`. A `fixed` entry
 must include it.
@@ -71,19 +76,50 @@ NICo uses these defaults when `ip_allocation` is omitted:
 The `fixed_ip` inference preserves manifests created before explicit allocation
 policies were available.
 
-### Retained Address Lifetime
+For repeated MAC entries, DHCP prefers a Fixed declaration for the requested
+family, then an addressless Dynamic or Retained declaration. Equally applicable
+declarations keep their list order. A Fixed declaration for only the other
+family supplies interface metadata, but the requested family uses ordinary
+DHCP; it does not inherit a Fixed reservation or retention.
 
-A retained address remains static only while its machine-interface record
-exists. Deleting the interface record removes the retained address. A later
-ingestion can receive a different address.
+### Address Allocation Lifetime
 
-Expected Machine configuration is an ingestion baseline. NICo can replace an
-existing DHCP or SLAAC address with a Fixed reservation, and it can retain an
-existing DHCP address. It does not automatically reverse an existing Static
-address to Dynamic or replace one Fixed Static address with another.
+After a family has a DHCP or Static allocation, Expected Machine edits leave
+its address and allocation type unchanged, even before machine association.
+The first allocation of the other family still uses the current configuration.
 
-For a policy change that NICo cannot reconcile automatically, update the
-Expected Machine configuration first, then use the targeted interface command:
+Creating or associating an interface without allocating an address does not
+select its allocation policy. A failed allocation also leaves the family free
+to use corrected configuration on its next attempt.
+
+An inferred SLAAC address does not prevent a first DHCP or Static allocation,
+which can replace it. DHCPv6 `INFO_REQUEST` observation alone does not select
+an allocation policy. However, NICo can create a Fixed reservation during that
+request. The reservation counts as the family's first Static allocation even
+though the response contains no address.
+
+After lease expiry or explicit Static-address removal, NICo uses ordinary
+DHCP for subsequent pool allocation while the machine-interface record remains.
+It does not reapply Fixed or Retained configuration. Reserved segments still
+reject clients without reservations.
+
+A retained address is not written back to the Expected Machine configuration.
+Deleting the interface record removes its addresses and per-family allocation
+history. A recreated interface uses the current configuration, so later
+ingestion can select a different Retained address.
+
+Existing DHCP allocations keep their stored type during upgrade, including
+allocations awaiting conversion to Static under the earlier Retained behavior.
+Removal history begins when the updated address-removal code runs. NICo cannot
+reconstruct earlier removals. If older code removed a family's allocation,
+NICo can treat its next allocation as the first and apply the current
+Expected Machine configuration.
+
+To change an existing allocation, update the Expected Machine configuration
+first, then explicitly assign or remove the address. The `assign-address`
+command can replace a DHCP, SLAAC, or Static address. The `remove-address`
+command removes a Static address; it does not cause NICo to reapply the
+Expected Machine allocation policy:
 
 ```bash
 # Find the interface ID and its current addresses.

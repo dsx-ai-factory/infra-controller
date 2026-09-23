@@ -29,10 +29,11 @@ use ::rpc::forge::ManagedHostNetworkConfigResponse;
 use ::rpc::forge_tls_client::ForgeClientConfig;
 use ::rpc::{forge as rpc, forge_tls_client};
 use carbide_host_support::agent_config::AgentConfig;
+use carbide_host_support::lldp_snapshot_cache::LldpSnapshotCache;
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_rpc_utils::dhcp::{DhcpTimestamps, DhcpTimestampsFilePath};
 use carbide_systemd::systemd;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use eyre::WrapErr;
 use forge_certs::cert_renewal::ClientCertRenewer;
 use forge_dpu_remediation::remediation::{MachineInfo, RemediationExecutor};
@@ -41,7 +42,8 @@ use mac_address::MacAddress;
 use prost::Message as _;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 use version_compare::Version;
 
@@ -57,7 +59,8 @@ use crate::fmds_client::{FmdsUpdater, register_external_connection_metric};
 use crate::health::HealthCheckParams;
 use crate::host_machine_id::get_host_machine_id_retry;
 use crate::instrumentation::{
-    NetworkStatus, OvsRestart, create_metrics, get_dpu_agent_meter, get_prometheus_registry,
+    LldpCollection, NetworkStatus, OvsRestart, create_metrics, get_dpu_agent_meter,
+    get_prometheus_registry,
 };
 use crate::machine_inventory_updater::MachineInventoryUpdaterConfig;
 use crate::network_monitor::{self, NetworkPingerType};
@@ -78,7 +81,7 @@ use crate::{
 // metadata service use the information fetched be the periodic fetcher by reading
 // the information stored by the periodic config fetcher.
 pub(super) async fn setup_and_run(
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
     factory_mac_address: MacAddress,
     forge_client_config: Arc<ForgeClientConfig>,
     agent_config: AgentConfig,
@@ -389,6 +392,39 @@ pub(super) async fn setup_and_run(
         .as_ref()
         .map(|prefix| InterfaceTranslationMode::Prepend(prefix.clone()));
 
+    // Spawn any further background task into this set and give it a clone of
+    // this token, so one cancel and one join below shut them all down.
+    let mut background_tasks = JoinSet::new();
+    let cancel_token = CancellationToken::new();
+
+    let lldp_platform_type = options.agent_platform_type.clone();
+    let latest_lldp = carbide_host_support::lldp_collector_task::start_lldp_collector(
+        move || {
+            // The clone must happen here, outside the future, so the future
+            // owns it. An `async move ||` closure would borrow it from the
+            // closure instead, and a lending future implements only
+            // `AsyncFnMut`, whose future cannot be bounded `Send` on stable.
+            let platform_type = lldp_platform_type.clone();
+            async move {
+                let collected = crate::collect_lldp_neighbors(&platform_type).await;
+                // Emitted here rather than where the collection is reported, so
+                // the metric keeps counting collection attempts rather than the
+                // status loop's reads of them.
+                match &collected {
+                    Ok(_) => LldpCollection::Succeeded.emit(),
+                    Err(error) => LldpCollection::Failed {
+                        error: error.to_string(),
+                    }
+                    .emit(),
+                }
+                collected
+            }
+        },
+        LLDP_COLLECTION_INTERVAL,
+        &mut background_tasks,
+        cancel_token.clone(),
+    );
+
     let mut main_loop = MainLoop {
         forge_client_config,
         build_version,
@@ -406,6 +442,8 @@ pub(super) async fn setup_and_run(
         ca_republish_time: std::time::Instant::now(),
         started_at: std::time::Instant::now(),
         inventory_updater_config,
+        lldp_cache: LldpSnapshotCache::new(),
+        latest_lldp,
         options,
         agent_config,
         forge_api_server,
@@ -423,12 +461,15 @@ pub(super) async fn setup_and_run(
         ovs_restart_retry_backoff: None,
     };
 
-    main_loop.run().await
+    let outcome = main_loop.run().await;
+    cancel_token.cancel();
+    background_tasks.join_all().await;
+    outcome
 }
 
 struct MainLoop {
     forge_client_config: Arc<ForgeClientConfig>,
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
     factory_mac_address: MacAddress,
     build_version: String,
     periodic_config_reader: Box<periodic_config_fetcher::PeriodicConfigFetcherReader>,
@@ -444,6 +485,8 @@ struct MainLoop {
     inventory_updater_time: std::time::Instant,
     ca_republish_time: std::time::Instant,
     inventory_updater_config: MachineInventoryUpdaterConfig,
+    lldp_cache: LldpSnapshotCache,
+    latest_lldp: carbide_host_support::lldp_collector_task::LatestLldpCollection,
     options: command_line::RunOptions,
     agent_config: AgentConfig,
     forge_api_server: String,
@@ -623,6 +666,9 @@ impl CurrentNetworkVersion {
         config.route_servers.sort_unstable();
         config.deny_prefixes.sort_unstable();
         config.site_fabric_prefixes.sort_unstable();
+        if let Some(site_fabric_null_routes) = &mut config.site_fabric_null_routes {
+            site_fabric_null_routes.items.sort_unstable();
+        }
         config.anycast_site_prefixes.sort_unstable();
         config
             .additional_route_target_imports
@@ -903,6 +949,7 @@ impl MainLoop {
             dpu_extension_service_version: None,
             dpu_extension_services: vec![],
             astra_config_status: None,
+            lldp: None,
         };
 
         // `read` does not block
@@ -1076,9 +1123,10 @@ impl MainLoop {
                         .await
                     };
 
-                    let astra_config_status =
-                        astra_weave::update_weave_ew_vpc_astra_config(conf.astra_config.as_ref())
-                            .await;
+                    let astra_config_status = astra_weave::build_notify_weave_ew_vpc_astra_config(
+                        conf.astra_config.as_ref(),
+                    )
+                    .await;
 
                     let joined_result = match (update_result, dhcp_result, astra_config_status) {
                         (Ok(hbn_changed), Ok(dhcp_changed), Ok(spx_net_status)) => {
@@ -1260,12 +1308,27 @@ impl MainLoop {
                 current_extension_service_version =
                     status_out.dpu_extension_service_version.clone();
 
-                record_network_status(
+                // Absent until the collector task finishes its first attempt.
+                // The status push still happens; it just carries no LLDP, which
+                // is a legal wire state and is what an unobserved topology is.
+                let lldp = self
+                    .latest_lldp
+                    .latest()
+                    .map(|collected| self.lldp_cache.classify(collected));
+                status_out.lldp = lldp.clone();
+
+                if record_network_status(
                     status_out,
                     &self.forge_api_server,
                     &self.forge_client_config,
                 )
-                .await;
+                .await
+                .is_ok()
+                    && let Some(lldp) = lldp
+                {
+                    // The cache advances only once nico-api has the report
+                    self.lldp_cache.confirm_reported(lldp);
+                }
                 self.seen_blank = false;
             }
             None => {
@@ -1576,11 +1639,13 @@ async fn plan_fmds_armos_routing(
         Ok(None)
     }
 }
+
+/// Push the DPU's network status to nico-api.
 async fn record_network_status(
     status: rpc::DpuNetworkStatus,
     forge_api: &str,
     forge_client_config: &forge_tls_client::ForgeClientConfig,
-) {
+) -> Result<(), eyre::Report> {
     let mut client = match forge_tls_client::ForgeTlsClient::new(forge_client_config)
         .build(forge_api)
         .await
@@ -1592,17 +1657,22 @@ async fn record_network_status(
                 error: format!("{err:#}"),
             }
             .emit();
-            return;
+            return Err(err.into());
         }
     };
     let request = tonic::Request::new(status);
-    let result = client.record_dpu_network_status(request).await;
-    match &result {
-        Ok(_) => NetworkStatus::Succeeded.emit(),
-        Err(err) => NetworkStatus::RpcFailed {
-            error: format!("{err:#}"),
+    match client.record_dpu_network_status(request).await {
+        Ok(_) => {
+            NetworkStatus::Succeeded.emit();
+            Ok(())
         }
-        .emit(),
+        Err(err) => {
+            NetworkStatus::RpcFailed {
+                error: format!("{err:#}"),
+            }
+            .emit();
+            Err(err.into())
+        }
     }
 }
 
@@ -1668,6 +1738,7 @@ async fn get_fabric_interfaces_data()
     Ok(fabric_interface_data)
 }
 
+const LLDP_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
 const ONE_SECOND: Duration = Duration::from_secs(1);
 const OVS_RESTART_RETRY_BACKOFF: Duration = Duration::from_secs(60);
 

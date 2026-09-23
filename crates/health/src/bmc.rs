@@ -22,13 +22,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use carbide_utils::redfish::format_forwarded_host_parameter;
+use carbide_utils::redfish::{
+    format_forwarded_host_parameter, log_redfish_http_error, redact_redfish_response_body,
+    redfish_basic_authorization_context,
+};
 use carbide_uuid::rack::RackId;
 use futures::TryStreamExt;
 use http::HeaderMap;
 use http::header::{self, InvalidHeaderValue};
 use nv_redfish::bmc_http::reqwest::{BmcError, Client as ReqwestClient};
-use nv_redfish::bmc_http::{CacheSettings, ConcurrencyLimitedBmc, HttpBmc, HttpClient};
+use nv_redfish::bmc_http::{
+    BmcCredentials as NvBmcCredentials, CacheSettings, ConcurrencyLimitedBmc, HttpBmc, HttpClient,
+};
 use nv_redfish::core::query::{ExpandQuery, FilterQuery};
 use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
@@ -64,6 +69,17 @@ const CIRCUIT_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 /// costs one refresh rather than one per resource, short enough that
 /// credentials repaired out of band are picked up within a couple of intervals.
 const KNOWN_BAD_CREDENTIAL_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// How long a credential fetch the provider failed is remembered before another
+/// caller may drive the provider again for this endpoint.
+///
+/// Nothing else damps a provider failure: no request reaches the BMC, so the
+/// connection circuit never trips, and the known-bad record only covers
+/// credentials that were fetched and then refused. The value matches
+/// [`KNOWN_BAD_CREDENTIAL_COOLDOWN`] for the same reason it has: a sweep against
+/// an endpoint whose credentials cannot be issued costs one provider call, and a
+/// provider that recovers is noticed within a couple of collection intervals.
+const CREDENTIAL_FETCH_FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Per-endpoint connection circuit breaker state.
 ///
@@ -114,6 +130,40 @@ pub enum CollectorSweep {
 struct KnownBadCredentials {
     generation: u64,
     proven_at: Instant,
+}
+
+/// The most recent credential fetch the provider failed for this endpoint.
+///
+/// Both paths that drive the provider retry on every read unless something
+/// remembers the failure: a failed initial fetch leaves the init cell empty, and
+/// a failed refresh leaves the generation unchanged. Every collector sharing the
+/// client then pays a provider call per resource, so one endpoint whose
+/// credentials Core refuses to issue turns each sweep into hundreds of failed
+/// `GetBmcCredentials` RPCs, each a database lookup and an error span on the
+/// Core side. Remembering the failure fast-fails those callers locally and
+/// admits one per cooldown to try the provider again.
+#[derive(Debug)]
+struct CredentialFetchFailure {
+    failed_at: Instant,
+    /// The provider's error, rendered, so the fast-fail error still says why
+    /// credentials are unavailable and not only that a fetch was skipped.
+    error: String,
+}
+
+/// Whether `cooldown` has elapsed since `since`, admitting the caller that
+/// observes it and restarting the window for everyone else.
+///
+/// Restarting rather than clearing matters under the collectors' concurrent
+/// fan-out: clearing would let every caller queued behind the owning lock
+/// through at once, turning the single revalidation back into the flood the
+/// cooldown exists to prevent. The admitted caller either moves past the record
+/// or records a fresh verdict.
+fn admit_one_after_cooldown(since: &mut Instant, cooldown: Duration) -> bool {
+    if since.elapsed() < cooldown {
+        return false;
+    }
+    *since = Instant::now();
+    true
 }
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
@@ -219,6 +269,10 @@ pub struct BmcClient {
     /// [`KnownBadCredentials`]. Only touched on the auth-failure path, so the
     /// healthy request path never takes this lock.
     known_bad_credentials: StdMutex<Option<KnownBadCredentials>>,
+    /// Set while the provider's last fetch for this endpoint failed; see
+    /// [`CredentialFetchFailure`]. Only touched around a fetch attempt, so the
+    /// healthy request path never takes this lock.
+    credential_fetch_failure: StdMutex<Option<CredentialFetchFailure>>,
     bmc_identity: Arc<StdMutex<BmcIdentity>>,
 }
 
@@ -268,6 +322,7 @@ impl BmcClient {
             circuit: StdMutex::new(CircuitState::Closed),
             circuit_tripped: AtomicBool::new(false),
             known_bad_credentials: StdMutex::new(None),
+            credential_fetch_failure: StdMutex::new(None),
             bmc_identity,
         })
     }
@@ -302,20 +357,31 @@ impl BmcClient {
         }
     }
 
+    fn finish<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, HealthError>,
+    ) -> Result<T, HealthError> {
+        if let Err(error) = &result
+            && let Some(error) = bmc_source_error(error)
+        {
+            log_bmc_error(operation, error);
+        }
+        result
+    }
+
     pub async fn ensure_credentials(&self) -> Result<(), HealthError> {
         self.init
             .get_or_try_init(|| async {
-                let credentials = tokio::time::timeout(
-                    CREDENTIAL_REFRESH_TIMEOUT,
-                    self.provider.fetch_credentials(&self.addr),
-                )
-                .await
-                .map_err(|_elapsed| {
+                // The cell runs one initializer at a time, so a fan-out that
+                // arrives while the provider is failing queues here, and each
+                // queued caller then observes the recorded failure instead of
+                // driving the provider again.
+                let credentials = self.fetch_credentials().await.map_err(|error| {
                     HealthError::GenericError(format!(
-                        "Timed out after {}s fetching initial BMC credentials",
-                        CREDENTIAL_REFRESH_TIMEOUT.as_secs(),
+                        "failed to fetch initial BMC credentials: {error}"
                     ))
-                })??;
+                })?;
                 self.inner.set_credentials(credentials.into());
                 self.credential_generation.fetch_add(1, Ordering::AcqRel);
                 Ok::<_, HealthError>(())
@@ -350,25 +416,70 @@ impl BmcClient {
             "Authentication failed, refreshing BMC credentials"
         );
 
-        let credentials = tokio::time::timeout(
-            CREDENTIAL_REFRESH_TIMEOUT,
-            self.provider.fetch_credentials(&self.addr),
-        )
-        .await
-        .map_err(|_elapsed| {
+        let credentials = self.fetch_credentials().await.map_err(|refresh_error| {
             HealthError::GenericError(format!(
-                "Timed out after {}s refreshing BMC credentials following auth error {error}",
-                CREDENTIAL_REFRESH_TIMEOUT.as_secs(),
-            ))
-        })?
-        .map_err(|refresh_error| {
-            HealthError::GenericError(format!(
-                "Failed to refresh credentials after auth error {error}: {refresh_error}"
+                "failed to refresh BMC credentials after auth error {error}: {refresh_error}"
             ))
         })?;
         self.inner.set_credentials(credentials.into());
         self.credential_generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
+    }
+
+    /// Drive the provider for this endpoint, bounded by
+    /// [`CREDENTIAL_REFRESH_TIMEOUT`] and damped by the fetch-failure cooldown.
+    ///
+    /// Callers hold whichever lock serialises their path, the init cell or
+    /// `refresh_lock`, so the cooldown check and the fetch it admits cannot
+    /// interleave with another caller's fetch through this client.
+    async fn fetch_credentials(&self) -> Result<BmcCredentials, HealthError> {
+        self.check_credential_fetch_cooldown()?;
+        let result = match tokio::time::timeout(
+            CREDENTIAL_REFRESH_TIMEOUT,
+            self.provider.fetch_credentials(&self.addr),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(HealthError::GenericError(format!(
+                "timed out after {}s fetching BMC credentials",
+                CREDENTIAL_REFRESH_TIMEOUT.as_secs(),
+            ))),
+        };
+        // A success clears the record rather than leaving the restarted window
+        // behind: the admitted retry can be followed at once by a 401 on the
+        // credentials it just fetched, and that refresh has to be allowed to run.
+        *self
+            .credential_fetch_failure
+            .lock()
+            .expect("credential fetch failure mutex poisoned") =
+            result.as_ref().err().map(|error| CredentialFetchFailure {
+                failed_at: Instant::now(),
+                error: error.to_string(),
+            });
+        result
+    }
+
+    /// Fail fast while the provider's last failure for this endpoint is inside
+    /// the cooldown. Once it elapses, exactly one caller is admitted to retry.
+    fn check_credential_fetch_cooldown(&self) -> Result<(), HealthError> {
+        let mut failure = self
+            .credential_fetch_failure
+            .lock()
+            .expect("credential fetch failure mutex poisoned");
+        let Some(failure) = failure.as_mut() else {
+            return Ok(());
+        };
+        let elapsed = failure.failed_at.elapsed();
+        if admit_one_after_cooldown(&mut failure.failed_at, CREDENTIAL_FETCH_FAILURE_COOLDOWN) {
+            return Ok(());
+        }
+        Err(HealthError::GenericError(format!(
+            "BMC credential fetch skipped: the provider failed {}s ago and is retried after {}s: {}",
+            elapsed.as_secs(),
+            CREDENTIAL_FETCH_FAILURE_COOLDOWN.as_secs(),
+            failure.error,
+        )))
     }
 
     /// Run an idempotent read through the circuit breaker, retrying it once if it
@@ -492,18 +603,9 @@ impl BmcClient {
         if bad.generation != generation {
             return false;
         }
-        if bad.proven_at.elapsed() < KNOWN_BAD_CREDENTIAL_COOLDOWN {
-            return true;
-        }
-
-        // Cooldown elapsed: admit one caller to revalidate. Restart the window
-        // rather than clearing the record — clearing would let every caller
-        // blocked behind this mutex during a concurrent sweep through at once,
-        // turning the single revalidation back into the fan-out this exists to
-        // prevent. The admitted caller either refreshes past this generation or
-        // records a fresh verdict.
-        bad.proven_at = Instant::now();
-        false
+        // The admitted caller either refreshes past this generation or records
+        // a fresh verdict.
+        !admit_one_after_cooldown(&mut bad.proven_at, KNOWN_BAD_CREDENTIAL_COOLDOWN)
     }
 
     /// Record that a replay running at `generation` was refused, so subsequent
@@ -709,6 +811,16 @@ impl BmcClient {
             .lock()
             .expect("known-bad credential mutex poisoned") = record;
     }
+
+    /// Backdate (or clear) the fetch-failure record, for the same reason as
+    /// [`Self::set_known_bad_credentials_for_test`].
+    #[cfg(test)]
+    fn set_credential_fetch_failure_for_test(&self, record: Option<CredentialFetchFailure>) {
+        *self
+            .credential_fetch_failure
+            .lock()
+            .expect("credential fetch failure mutex poisoned") = record;
+    }
 }
 
 #[derive(Clone)]
@@ -795,6 +907,99 @@ impl InstrumentedHttpClient {
     }
 }
 
+/// Redacts an HTTP error with the credentials used by this exact request.
+///
+/// `HttpBmc` snapshots credentials before sending a request, while the health
+/// client may refresh its shared credentials concurrently. Sanitizing at this
+/// boundary avoids consulting a newer credential after an older request has
+/// completed.
+fn redact_request_credential<T>(
+    result: Result<T, BmcError>,
+    credentials: &NvBmcCredentials,
+) -> Result<T, BmcError> {
+    // Retain every directly reusable Basic representation generated inside
+    // nv-redfish; tokens are already sent verbatim.
+    let sensitive_values = match credentials {
+        NvBmcCredentials::UsernamePassword { username, password } => {
+            let (_, sensitive_values) =
+                redfish_basic_authorization_context(username, password.as_deref());
+            sensitive_values
+        }
+        NvBmcCredentials::Token { token } if !token.is_empty() => {
+            vec![token.clone()]
+        }
+        NvBmcCredentials::Token { .. } => Vec::new(),
+    };
+
+    if sensitive_values.is_empty() {
+        return result;
+    }
+
+    // Sanitize only response-bearing failures; transport errors contain no BMC body.
+    result.map_err(|error| match error {
+        BmcError::InvalidResponse { url, status, text } => BmcError::InvalidResponse {
+            url,
+            status,
+            text: redact_redfish_response_body(&text, sensitive_values.iter().map(String::as_str)),
+        },
+        error => error,
+    })
+}
+
+/// Redacts values carried in a session-creation body from an HTTP error.
+///
+/// Session creation is the one `HttpClient` operation that sends credentials
+/// in its JSON body instead of receiving a `BmcCredentials` argument. Treat
+/// every non-empty string in that small credential document as sensitive so a
+/// BMC cannot echo a username, password, or token into a returned or logged
+/// error.
+fn redact_session_request_values<T, B>(result: Result<T, BmcError>, body: &B) -> Result<T, BmcError>
+where
+    B: Serialize,
+{
+    let (url, status, text) = match result {
+        Err(BmcError::InvalidResponse { url, status, text }) => (url, status, text),
+        result => return result,
+    };
+    let Ok(body) = serde_json::to_value(body) else {
+        return Err(BmcError::InvalidResponse { url, status, text });
+    };
+    let mut sensitive_values = Vec::new();
+    collect_nonempty_json_strings(&body, &mut sensitive_values);
+    sensitive_values.sort_unstable();
+    sensitive_values.dedup();
+
+    if sensitive_values.is_empty() {
+        return Err(BmcError::InvalidResponse { url, status, text });
+    }
+
+    Err(BmcError::InvalidResponse {
+        url,
+        status,
+        text: redact_redfish_response_body(&text, sensitive_values.iter().copied()),
+    })
+}
+
+fn collect_nonempty_json_strings<'a>(value: &'a serde_json::Value, strings: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::String(value) if !value.is_empty() => strings.push(value),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_nonempty_json_strings(value, strings);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_nonempty_json_strings(value, strings);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
 impl HttpClient for InstrumentedHttpClient {
     type Error = BmcError;
 
@@ -808,13 +1013,18 @@ impl HttpClient for InstrumentedHttpClient {
     where
         T: DeserializeOwned + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
         let result = self
             .inner
             .get::<T>(url, credentials, etag, custom_headers)
             .await;
-        self.observe_result("GET", &request_url, &result, "200", started.elapsed());
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
+        self.observe_result("GET", &request_url, &result, "200", external_duration);
         result
     }
 
@@ -829,19 +1039,24 @@ impl HttpClient for InstrumentedHttpClient {
         B: Serialize + Send + Sync,
         T: DeserializeOwned + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
         let entity_status_code = post_entity_status_code(&request_url);
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
         let result = self
             .inner
             .post::<B, T>(url, body, credentials, custom_headers)
             .await;
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
         self.observe_modification_result(
             "POST",
             &request_url,
             &result,
             entity_status_code,
-            started.elapsed(),
+            external_duration,
         );
         result
     }
@@ -856,13 +1071,18 @@ impl HttpClient for InstrumentedHttpClient {
         B: Serialize + Send + Sync,
         T: DeserializeOwned + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
         let result = self
             .inner
             .post_session::<B, T>(url, body, custom_headers)
             .await;
-        self.observe_result("POST", &request_url, &result, "201", started.elapsed());
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_session_request_values(result, body);
+        self.observe_result("POST", &request_url, &result, "201", external_duration);
         result
     }
 
@@ -878,13 +1098,18 @@ impl HttpClient for InstrumentedHttpClient {
         T: DeserializeOwned + Send + Sync,
         V: Serialize + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
         let result = self
             .inner
             .post_multipart_update::<U, V, T>(url, request, credentials, custom_headers)
             .await;
-        self.observe_modification_result("POST", &request_url, &result, "200", started.elapsed());
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
+        self.observe_modification_result("POST", &request_url, &result, "200", external_duration);
         result
     }
 
@@ -900,13 +1125,18 @@ impl HttpClient for InstrumentedHttpClient {
         B: Serialize + Send + Sync,
         T: DeserializeOwned + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
         let result = self
             .inner
             .patch::<B, T>(url, etag, body, credentials, custom_headers)
             .await;
-        self.observe_modification_result("PATCH", &request_url, &result, "200", started.elapsed());
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
+        self.observe_modification_result("PATCH", &request_url, &result, "200", external_duration);
         result
     }
 
@@ -919,13 +1149,18 @@ impl HttpClient for InstrumentedHttpClient {
     where
         T: DeserializeOwned + Send + Sync,
     {
-        let started = Instant::now();
         let request_url = url.clone();
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
         let result = self
             .inner
             .delete::<T>(url, credentials, custom_headers)
             .await;
-        self.observe_modification_result("DELETE", &request_url, &result, "200", started.elapsed());
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
+        self.observe_modification_result("DELETE", &request_url, &result, "200", external_duration);
         result
     }
 
@@ -935,10 +1170,15 @@ impl HttpClient for InstrumentedHttpClient {
         credentials: &nv_redfish::bmc_http::BmcCredentials,
         custom_headers: &HeaderMap,
     ) -> Result<BoxTryStream<T, Self::Error>, Self::Error> {
-        let started = Instant::now();
         let request_url = url.clone();
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
         let result = self.inner.sse::<T>(url, credentials, custom_headers).await;
-        self.observe_result("GET", &request_url, &result, "200", started.elapsed());
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
+        self.observe_result("GET", &request_url, &result, "200", external_duration);
         result
     }
 }
@@ -1044,27 +1284,31 @@ impl Bmc for BmcClient {
         id: &ODataId,
         query: ExpandQuery,
     ) -> Result<Arc<T>, Self::Error> {
-        self.read_with_auth_retry(|| async {
-            self.inner
-                .expand(id, query.clone())
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .read_with_auth_retry(|| async {
+                self.inner
+                    .expand(id, query.clone())
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("expand", result)
     }
 
     async fn get<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
         &self,
         id: &ODataId,
     ) -> Result<Arc<T>, Self::Error> {
-        self.read_with_auth_retry(|| async move {
-            let result = self.inner.get::<T>(id).await.map_err(HealthError::from);
-            if let Ok(value) = &result {
-                self.note_bmc_identity_from(value.as_ref());
-            }
-            result
-        })
-        .await
+        let result = self
+            .read_with_auth_retry(|| async move {
+                let result = self.inner.get::<T>(id).await.map_err(HealthError::from);
+                if let Ok(value) = &result {
+                    self.note_bmc_identity_from(value.as_ref());
+                }
+                result
+            })
+            .await;
+        self.finish("get", result)
     }
 
     async fn filter<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
@@ -1072,13 +1316,15 @@ impl Bmc for BmcClient {
         id: &ODataId,
         query: FilterQuery,
     ) -> Result<Arc<T>, Self::Error> {
-        self.read_with_auth_retry(|| async {
-            self.inner
-                .filter(id, query.clone())
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .read_with_auth_retry(|| async {
+                self.inner
+                    .filter(id, query.clone())
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("filter", result)
     }
 
     async fn create<V: Send + Sync + Serialize, R: Send + Sync + for<'de> Deserialize<'de>>(
@@ -1087,13 +1333,15 @@ impl Bmc for BmcClient {
         query: &V,
     ) -> Result<ModificationResponse<R>, Self::Error> {
         self.ensure_credentials().await?;
-        self.guarded(async {
-            self.inner
-                .create(id, query)
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .guarded(async {
+                self.inner
+                    .create(id, query)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("create", result)
     }
 
     async fn update<
@@ -1106,13 +1354,15 @@ impl Bmc for BmcClient {
         update: &V,
     ) -> Result<ModificationResponse<R>, Self::Error> {
         self.ensure_credentials().await?;
-        self.guarded(async {
-            self.inner
-                .update(id, etag, update)
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .guarded(async {
+                self.inner
+                    .update(id, etag, update)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("update", result)
     }
 
     async fn multipart_update<U, V, R>(
@@ -1126,13 +1376,15 @@ impl Bmc for BmcClient {
         V: Send + Sync + Serialize,
     {
         self.ensure_credentials().await?;
-        self.guarded(async {
-            self.inner
-                .multipart_update(uri, request)
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .guarded(async {
+                self.inner
+                    .multipart_update(uri, request)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("multipart_update", result)
     }
 
     async fn delete<R: EntityTypeRef + for<'de> Deserialize<'de>>(
@@ -1140,8 +1392,10 @@ impl Bmc for BmcClient {
         id: &ODataId,
     ) -> Result<ModificationResponse<R>, Self::Error> {
         self.ensure_credentials().await?;
-        self.guarded(async { self.inner.delete(id).await.map_err(HealthError::from) })
-            .await
+        let result = self
+            .guarded(async { self.inner.delete(id).await.map_err(HealthError::from) })
+            .await;
+        self.finish("delete", result)
     }
 
     async fn action<
@@ -1153,13 +1407,15 @@ impl Bmc for BmcClient {
         params: &T,
     ) -> Result<ModificationResponse<R>, Self::Error> {
         self.ensure_credentials().await?;
-        self.guarded(async {
-            self.inner
-                .action(action, params)
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .guarded(async {
+                self.inner
+                    .action(action, params)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("action", result)
     }
 
     async fn stream<T: Sized + for<'de> Deserialize<'de> + Send + 'static>(
@@ -1174,11 +1430,12 @@ impl Bmc for BmcClient {
         // flood — many short requests against a dead endpoint — not a single
         // long-lived connection. Routing item errors here would also couple
         // log-stream health to sensor/discovery collection.
-        let stream = self
+        let result = self
             .read_with_auth_retry(|| async {
                 self.inner.stream(uri).await.map_err(HealthError::from)
             })
-            .await?;
+            .await;
+        let stream = self.finish("stream", result)?;
         Ok(Box::pin(stream.map_err(HealthError::from)))
     }
 
@@ -1191,13 +1448,40 @@ impl Bmc for BmcClient {
         query: &V,
     ) -> Result<SessionCreateResponse<R>, Self::Error> {
         self.ensure_credentials().await?;
-        self.guarded(async {
-            self.inner
-                .create_session(id, query)
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .guarded(async {
+                self.inner
+                    .create_session(id, query)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("create_session", result)
+    }
+}
+
+fn bmc_source_error(error: &HealthError) -> Option<&BmcError> {
+    let HealthError::BmcError(source) = error else {
+        return None;
+    };
+
+    source.downcast_ref::<BmcError>().or_else(|| {
+        source
+            .downcast_ref::<HealthError>()
+            .and_then(bmc_source_error)
+    })
+}
+
+fn log_bmc_error(operation: &str, error: &BmcError) {
+    if let BmcError::InvalidResponse { url, status, text } = error {
+        log_redfish_http_error(
+            "nv-redfish",
+            operation,
+            url.as_str(),
+            status.as_u16(),
+            text,
+            std::iter::empty(),
+        );
     }
 }
 
@@ -1287,6 +1571,7 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
+    use carbide_instrument::testing::{CapturedFieldKind, capture_logs};
     use carbide_test_support::value_scenarios;
     use mac_address::MacAddress;
     use nv_redfish::bmc_http::reqwest::ClientParams as ReqwestClientParams;
@@ -1336,11 +1621,66 @@ mod tests {
         }
     }
 
+    /// Fails the first fetch and succeeds every fetch after it.
+    struct FlakyProvider {
+        attempts: AtomicUsize,
+    }
+
+    impl CredentialProvider for FlakyProvider {
+        fn fetch_credentials<'a>(
+            &'a self,
+            _endpoint: &'a BmcAddr,
+        ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
+            let attempt = self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+            Box::pin(async move {
+                if attempt == 0 {
+                    Err(HealthError::GenericError("transient".to_string()))
+                } else {
+                    Ok(BmcCredentials::SessionToken {
+                        token: "t".to_string(),
+                    })
+                }
+            })
+        }
+    }
+
+    /// Succeeds the first fetch (the initial load) and fails every fetch after
+    /// it, standing in for a provider that can no longer issue credentials.
+    struct InitOnceThenFailingProvider {
+        calls: AtomicUsize,
+    }
+
+    impl CredentialProvider for InitOnceThenFailingProvider {
+        fn fetch_credentials<'a>(
+            &'a self,
+            _endpoint: &'a BmcAddr,
+        ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
+            let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Box::pin(async move {
+                if call == 0 {
+                    Ok(BmcCredentials::SessionToken {
+                        token: "t".to_string(),
+                    })
+                } else {
+                    Err(HealthError::GenericError("vault down".to_string()))
+                }
+            })
+        }
+    }
+
+    /// A fetch-failure record old enough that the next check admits a retry.
+    fn expired_fetch_failure() -> Option<CredentialFetchFailure> {
+        Some(CredentialFetchFailure {
+            failed_at: Instant::now() - CREDENTIAL_FETCH_FAILURE_COOLDOWN - Duration::from_secs(1),
+            error: "expired".to_string(),
+        })
+    }
+
     fn test_addr() -> BmcAddr {
         BmcAddr {
             ip: "10.0.0.1".parse().unwrap(),
             port: Some(443),
-            mac: MacAddress::from_str("00:11:22:33:44:55").unwrap(),
+            mac: Some(MacAddress::from_str("00:11:22:33:44:55").unwrap()),
         }
     }
 
@@ -1350,7 +1690,7 @@ mod tests {
             let addr = BmcAddr {
                 ip: ip.parse().unwrap(),
                 port: Some(443),
-                mac: MacAddress::from_str("00:11:22:33:44:55").unwrap(),
+                mac: Some(MacAddress::from_str("00:11:22:33:44:55").unwrap()),
             };
             let proxy_url = Url::parse("https://proxy.example.com").unwrap();
 
@@ -1410,6 +1750,101 @@ mod tests {
         }
     }
 
+    /// Verifies the health client's final diagnostic removes plaintext, full
+    /// Basic header, and bare payload forms before reaching shared logging.
+    #[test]
+    fn final_http_failure_logs_request_redacted_context() {
+        // Build a representative error that echoes the reusable credential
+        // forms derived for one exact nv-redfish request.
+        let client = test_client();
+        let (basic_authorization, sensitive_values) =
+            redfish_basic_authorization_context("root", Some("secret"));
+        let basic_payload = &sensitive_values[1];
+        let credentials = NvBmcCredentials::new("root".to_string(), "secret".to_string());
+        let error = redact_request_credential::<()>(
+            Err(BmcError::InvalidResponse {
+                url: Url::parse("https://127.0.0.1/redfish/v1/Systems/1").expect("valid test URL"),
+                status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                text: format!(
+                    r#"{{
+                    "error": {{
+                        "@Message.ExtendedInfo": [{{
+                            "Message": "s\u0065cret or {basic_authorization} or basic {basic_payload} rejected"
+                        }}]
+                    }}
+                }}"#,
+                ),
+            }),
+            &credentials,
+        )
+        .expect_err("HTTP failure remains an error after request-boundary redaction");
+        let error = HealthError::from(error);
+
+        // Run the ordinary finalization path that emits the operator diagnostic.
+        let (result, logs) = {
+            let mut result = None;
+            let logs = capture_logs(|| {
+                result = Some(client.finish::<()>("get", Err(error)));
+            });
+            (result.expect("captured result"), logs)
+        };
+
+        // The operation still fails, but its log contains no reusable credential form.
+        assert!(result.is_err(), "the original failure must still propagate");
+        let log = logs.first().expect("one final Redfish failure log");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(log.field("backend"), Some("nv-redfish"));
+        assert_eq!(log.field("operation"), Some("get"));
+        assert_eq!(
+            log.field("url"),
+            Some("https://127.0.0.1/redfish/v1/Systems/1")
+        );
+        assert_eq!(log.field("http_status"), Some("500"));
+        assert_eq!(log.field_kind("http_status"), Some(CapturedFieldKind::U64));
+        assert_eq!(
+            log.field("error"),
+            Some("REDACTED or REDACTED or basic REDACTED rejected")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_failure_redacts_request_body_values_before_returning() {
+        let response_body = r#"{
+            "error": {
+                "@Message.ExtendedInfo": [{"Message": "credential s\u0065cret rejected"}]
+            }
+        }"#;
+        let (base_url, requests, server) = spawn_scripted_http_server(vec![(500, response_body)]);
+        let client = InstrumentedHttpClient::new(
+            reqwest(),
+            None,
+            "127.0.0.1".to_string(),
+            "http".to_string(),
+            Arc::new(StdMutex::new(BmcIdentity::default())),
+        );
+        let url = base_url
+            .join("/redfish/v1/SessionService/Sessions")
+            .expect("session URL joins");
+        let body = serde_json::json!({
+            "UserName": "root",
+            "Password": "secret",
+        });
+
+        let error = client
+            .post_session::<_, serde_json::Value>(url, &body, &HeaderMap::new())
+            .await
+            .expect_err("HTTP 500 remains an error after redaction");
+
+        let BmcError::InvalidResponse { text, .. } = error else {
+            panic!("expected an HTTP response error");
+        };
+        assert_eq!(requests.load(AtomicOrdering::SeqCst), 1);
+        assert!(!text.contains("secret"));
+        assert!(!text.contains(r"s\u0065cret"));
+        assert!(text.contains("credential REDACTED rejected"));
+        server.join().expect("test server thread");
+    }
+
     fn test_client() -> BmcClient {
         let (provider, _) = CountingProvider::new(
             BmcCredentials::SessionToken {
@@ -1462,7 +1897,7 @@ mod tests {
         let addr = BmcAddr {
             ip: "127.0.0.1".parse().expect("loopback ip"),
             port: Some(port),
-            mac: MacAddress::from_str("00:11:22:33:44:55").expect("mac"),
+            mac: Some(MacAddress::from_str("00:11:22:33:44:55").expect("mac")),
         };
         let client =
             Arc::new(test_bmc(reqwest(), addr, provider, None, 10, None).expect("constructor ok"));
@@ -1800,40 +2235,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_credentials_retries_after_failed_fetch() {
-        struct FlakyProvider {
-            attempts: AtomicUsize,
-        }
+    async fn failed_initial_fetch_is_not_retried_until_the_cooldown_elapses() {
+        // A failed `get_or_try_init` leaves the cell empty, so without the
+        // cooldown every collector read re-drives the provider: one endpoint
+        // whose credentials Core refused to issue cost hundreds of failed
+        // GetBmcCredentials RPCs per minute.
+        let provider = Arc::new(FlakyProvider {
+            attempts: AtomicUsize::new(0),
+        });
+        let client = Arc::new(
+            test_bmc(reqwest(), test_addr(), provider.clone(), None, 10, None)
+                .expect("constructor succeeds"),
+        );
 
-        impl CredentialProvider for FlakyProvider {
-            fn fetch_credentials<'a>(
-                &'a self,
-                _endpoint: &'a BmcAddr,
-            ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
-                let attempt = self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
-                Box::pin(async move {
-                    if attempt == 0 {
-                        Err(HealthError::GenericError("transient".to_string()))
-                    } else {
-                        Ok(BmcCredentials::SessionToken {
-                            token: "t".to_string(),
-                        })
-                    }
-                })
-            }
+        // A concurrent fan-out arriving while the provider fails costs one call.
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let client = client.clone();
+            handles.push(tokio::spawn(
+                async move { client.ensure_credentials().await },
+            ));
         }
+        for handle in handles {
+            handle
+                .await
+                .expect("task")
+                .expect_err("the provider failure surfaces to every caller");
+        }
+        assert_eq!(provider.attempts.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(client.credential_generation.load(Ordering::Acquire), 0);
 
+        // A later read inside the cooldown fast-fails and still names the cause.
+        let error = client
+            .ensure_credentials()
+            .await
+            .expect_err("still inside the cooldown");
+        assert!(
+            error.to_string().contains("transient"),
+            "the fast-fail error must carry the provider's error: {error}"
+        );
+        assert_eq!(provider.attempts.load(AtomicOrdering::SeqCst), 1);
+
+        // Once the cooldown elapses one caller gets to try the provider again.
+        client.set_credential_fetch_failure_for_test(expired_fetch_failure());
+        client
+            .ensure_credentials()
+            .await
+            .expect("the retry after the cooldown succeeds");
+        assert_eq!(provider.attempts.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(client.credential_generation.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_fetch_clears_the_failure_record() {
+        // The admitted retry restarts the window before it runs. If its success
+        // left the record in place, a 401 on the freshly fetched credentials
+        // would find the refresh suppressed and go unreplayed.
         let provider = Arc::new(FlakyProvider {
             attempts: AtomicUsize::new(0),
         });
         let client = test_bmc(reqwest(), test_addr(), provider.clone(), None, 10, None)
             .expect("constructor succeeds");
+        client
+            .ensure_credentials()
+            .await
+            .expect_err("the first fetch fails");
+        client.set_credential_fetch_failure_for_test(expired_fetch_failure());
 
-        assert!(client.ensure_credentials().await.is_err());
-        assert_eq!(client.credential_generation.load(Ordering::Acquire), 0);
-        assert!(client.ensure_credentials().await.is_ok());
-        assert_eq!(client.credential_generation.load(Ordering::Acquire), 1);
-        assert_eq!(provider.attempts.load(AtomicOrdering::SeqCst), 2);
+        let (op, attempts) = scripted_op(vec![Err(auth_error()), Ok("body")]);
+        let value = client
+            .read_with_auth_retry(op)
+            .await
+            .expect("a refresh right after a recovered fetch must run");
+
+        assert_eq!(value, "body");
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(
+            provider.attempts.load(AtomicOrdering::SeqCst),
+            3,
+            "failed fetch, recovered fetch, refresh"
+        );
     }
 
     #[tokio::test]
@@ -1996,7 +2477,7 @@ mod tests {
         let error = result.expect_err("hanging provider must surface as timeout");
         match error {
             HealthError::GenericError(msg) => assert!(
-                msg.contains("Timed out") && msg.contains("initial BMC credentials"),
+                msg.contains("timed out") && msg.contains("initial BMC credentials"),
                 "expected timeout message, got: {msg}"
             ),
             other => panic!("unexpected error variant: {other:?}"),
@@ -2130,28 +2611,6 @@ mod tests {
 
     #[tokio::test]
     async fn read_surfaces_original_error_when_refresh_fails() {
-        struct InitOnceThenFailingProvider {
-            calls: AtomicUsize,
-        }
-
-        impl CredentialProvider for InitOnceThenFailingProvider {
-            fn fetch_credentials<'a>(
-                &'a self,
-                _endpoint: &'a BmcAddr,
-            ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
-                let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-                Box::pin(async move {
-                    if call == 0 {
-                        Ok(BmcCredentials::SessionToken {
-                            token: "t".to_string(),
-                        })
-                    } else {
-                        Err(HealthError::GenericError("vault down".to_string()))
-                    }
-                })
-            }
-        }
-
         let provider = Arc::new(InitOnceThenFailingProvider {
             calls: AtomicUsize::new(0),
         });
@@ -2171,6 +2630,52 @@ mod tests {
             attempts.load(AtomicOrdering::SeqCst),
             1,
             "no retry when the refresh could not produce new credentials"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_is_not_retried_until_the_cooldown_elapses() {
+        // A failed refresh leaves the generation unchanged, so without the
+        // cooldown every 401 pays a provider call: the same fan-out as the
+        // initial fetch once an endpoint's credentials stop being issuable.
+        let provider = Arc::new(InitOnceThenFailingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let client =
+            test_bmc(reqwest(), test_addr(), provider.clone(), None, 10, None).expect("ok");
+
+        for read in 0..3 {
+            let (op, attempts) = scripted_op(vec![Err(auth_error())]);
+            let error = client
+                .read_with_auth_retry(op)
+                .await
+                .expect_err("the refresh cannot produce credentials");
+            assert!(
+                is_auth_error(&error),
+                "read {read} surfaces the original 401: {error:?}"
+            );
+            assert_eq!(
+                attempts.load(AtomicOrdering::SeqCst),
+                1,
+                "read {read} must not be replayed"
+            );
+        }
+        assert_eq!(
+            provider.calls.load(AtomicOrdering::SeqCst),
+            2,
+            "the initial fetch plus the one refresh that failed"
+        );
+
+        client.set_credential_fetch_failure_for_test(expired_fetch_failure());
+        let (op, _) = scripted_op(vec![Err(auth_error())]);
+        client
+            .read_with_auth_retry(op)
+            .await
+            .expect_err("the provider is still failing");
+        assert_eq!(
+            provider.calls.load(AtomicOrdering::SeqCst),
+            3,
+            "the elapsed cooldown admits one refresh"
         );
     }
 
@@ -2632,6 +3137,7 @@ mod tests {
                 let reason = match status {
                     200 => "OK",
                     401 => "Unauthorized",
+                    500 => "Internal Server Error",
                     503 => "Service Unavailable",
                     _ => panic!("unsupported test response status {status}"),
                 };

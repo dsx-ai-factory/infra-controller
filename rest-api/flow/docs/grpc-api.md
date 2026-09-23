@@ -210,6 +210,7 @@
     - [EventRuleSeverity](#v1-EventRuleSeverity)
     - [EventRuleTargetStrategy](#v1-EventRuleTargetStrategy)
     - [FirmwareControlOperation](#v1-FirmwareControlOperation)
+    - [LeakHandlingStatus](#v1-LeakHandlingStatus)
     - [LeakStatus](#v1-LeakStatus)
     - [OperationRunPhysicalLocationOrdering.Strategy](#v1-OperationRunPhysicalLocationOrdering-Strategy)
     - [OperationRunSafetyGateScope](#v1-OperationRunSafetyGateScope)
@@ -524,6 +525,8 @@ An empty list means no conflicts were detected.
 | leak_status | [LeakStatus](#v1-LeakStatus) |  | Coolant leak detection status (set by the leak-detection loop) |
 | nvl_domain_id | [UUID](#v1-UUID) |  | NVLink Domain containing this component&#39;s rack; omitted when unassigned |
 | task_stats | [TaskStats](#v1-TaskStats) |  | Active Tasks that explicitly target this component. |
+| rack_external_id | [string](#string) |  |  |
+| leak_handling_status | [LeakHandlingStatus](#v1-LeakHandlingStatus) |  | Flow&#39;s leakage-handling status for this component. |
 
 
 
@@ -544,6 +547,7 @@ An empty list means no conflicts were detected.
 | actual | [Component](#v1-Component) |  |  |
 | field_diffs | [FieldDiff](#v1-FieldDiff) | repeated | Populated when type is MISMATCH |
 | id | [UUID](#v1-UUID) |  | Flow internal component UUID |
+| component_mac_address | [string](#string) |  | BMC MAC address identifying a missing expected component |
 
 
 
@@ -570,14 +574,13 @@ selection criteria, not the concrete components selected after planning.
 <a name="v1-ComponentOperationStatus"></a>
 
 ### ComponentOperationStatus
-ComponentOperationStatus is Flow&#39;s view of a component&#39;s operability. The
-inventory loop computes it on every sync from core&#39;s controller_state.
+ComponentOperationStatus is Flow&#39;s view of a component&#39;s operability.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | phase | [Phase](#v1-Phase) |  |  |
-| reason | [string](#string) |  | Human-readable detail (typically the raw core state string). |
+| reason | [string](#string) |  | Human-readable source status detail. |
 | blocked_operations | [OperationType](#v1-OperationType) | repeated | Operations Flow will reject while the component is in this status. Empty when phase is READY. |
 
 
@@ -594,7 +597,7 @@ ComponentTarget identifies a specific component
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  | Component UUID |
-| external | [ExternalRef](#v1-ExternalRef) |  | External system reference |
+| external | [ExternalRef](#v1-ExternalRef) |  |  |
 
 
 
@@ -1279,16 +1282,13 @@ scope entries. In-flight tasks are not cancelled.
 <a name="v1-ExternalRef"></a>
 
 ### ExternalRef
-ExternalRef identifies a component by its external system ID.
-All component types are routed through Core (NICo); the ID is the
-identifier expected by NICo for that component type (e.g. machine_id
-for compute, PMC MAC for power shelf).
+ExternalRef identifies a component by its external identifier and optional type.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| type | [ComponentType](#v1-ComponentType) |  | Component type determines the source system |
-| id | [string](#string) |  | ID expected by NICo for this component type |
+| type | [ComponentType](#v1-ComponentType) |  | UNKNOWN requires an unambiguous ID. |
+| id | [string](#string) |  |  |
 
 
 
@@ -1360,6 +1360,7 @@ or values scoped to supported firmware tray types.
 | end_time | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
 | sub_targets | [string](#string) | repeated | Optional firmware sub-parts within each selected component. Empty means every firmware sub-part supported by that component. |
 | override_readiness_check | [bool](#bool) |  | Bypasses the component readiness gate when the task executes. |
+| override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when the selected component backend applies the update. |
 
 
 
@@ -2037,10 +2038,10 @@ every Task is returned subject to pagination.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| rack_id | [UUID](#v1-UUID) | optional | Restrict to Tasks created against this rack. |
+| rack_id | [UUID](#v1-UUID) | optional | Restrict by rack identifier. |
 | active_only | [bool](#bool) |  | Restrict to non-terminal Tasks (Waiting, Pending, Running). |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
-| component_id | [UUID](#v1-UUID) | optional | Restrict to Tasks that target this component UUID, regardless of component type. A rack_id &#43; component_id combination that references a component not on the given rack is not an error; it yields an empty result. |
+| component_id | [UUID](#v1-UUID) | optional | Restrict to Tasks that target this component identifier, regardless of component type. A rack_id plus component_id combination that references a component not on the given rack is not an error; it yields an empty result. |
 | with_report | [bool](#bool) |  | When true, populate Task.report on each returned task. Defaults to false because report bodies can be several KB and would otherwise be persisted in every Temporal activity / workflow result payload along the caller&#39;s path even when the caller never reads them. GetTasksByIDs and CancelTask always return the report and do not accept this flag. |
 
 
@@ -2586,6 +2587,7 @@ target-derived phase stats; callers can use GetOperationRun for those details.
 | components_by_type | [ComponentsByType](#v1-ComponentsByType) |  |  |
 | created_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 | updated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
+| rack_external_id | [string](#string) |  |  |
 
 
 
@@ -2693,6 +2695,7 @@ PatchComponent - update a single component&#39;s fields
 | description | [string](#string) | optional | Update description (JSON string) |
 | rack_id | [UUID](#v1-UUID) | optional | Re-assign to a different rack |
 | bmcs | [BMCInfo](#v1-BMCInfo) | repeated | Update BMCs (matched by MAC address; create if new) |
+| update_mask | [google.protobuf.FieldMask](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Optional for backward compatibility. When omitted, position replaces all three coordinates. When set, supported paths are position.slot_id, position.tray_idx, and position.host_id; only those coordinates change. |
 
 
 
@@ -2980,6 +2983,8 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | components | [Component](#v1-Component) | repeated |  |
 | nvl_domain_ids | [UUID](#v1-UUID) | repeated | NVLink Domains containing this rack; empty when unassigned |
 | task_stats | [TaskStats](#v1-TaskStats) |  | All active Tasks on this rack, including component-scoped Tasks. |
+| external_id | [string](#string) |  |  |
+| operation_status | [Phase](#v1-Phase) |  | Operability phase aggregated from component phases. |
 
 
 
@@ -3032,8 +3037,9 @@ To target specific components, use the component-level APIs instead.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| id | [UUID](#v1-UUID) |  | Rack UUID |
+| id | [UUID](#v1-UUID) |  | Flow rack UUID |
 | name | [string](#string) |  | Rack name |
+| external_id | [string](#string) |  |  |
 | component_types | [ComponentType](#v1-ComponentType) | repeated | Optional: filter by component type. Omit (or send empty list) to include all components in the rack. |
 
 
@@ -3478,6 +3484,7 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | sub_targets | [string](#string) | repeated | Optional subset of firmware sub-parts to update within each tray selected by target_spec, e.g. [&#34;bmc&#34;, &#34;nvos&#34;] for switch trays or [&#34;psu&#34;] for powershelf trays. Named &#34;sub_targets&#34; (not &#34;components&#34;) to avoid colliding with OperationTargetSpec.components, which selects tray INSTANCES rather than sub-parts of a tray. Names are lowercase. Empty or omitted means update everything in the bundle (current default behavior). Unknown names are rejected by the downstream component manager. |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the firmware update even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. The flag is intended for operator-supervised maintenance windows where the tenant impact has been acknowledged out-of-band; setting it bypasses the readiness gate that would otherwise block disruptive operations against tenanted hardware. The bypass is recorded in the server log. |
 | authentication_data | [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData) |  | Optional, write-only authentication data for firmware downloads. It is not supported for DPU-only updates or by the legacy NICo compute firmware controller. |
+| override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when deciding whether to apply the update. This allows same-version reapplication and downgrade when the selected component backend supports those operations. It does not bypass readiness checks or state-controller routing. |
 
 
 
@@ -3691,6 +3698,23 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 
 
 
+<a name="v1-LeakHandlingStatus"></a>
+
+### LeakHandlingStatus
+LeakHandlingStatus describes Flow&#39;s handling of a leakage event for a
+component. It describes handling progress, not the component&#39;s current leak
+or power state.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| LEAK_HANDLING_STATUS_UNKNOWN | 0 | Flow could not determine the status. |
+| LEAK_HANDLING_STATUS_NONE | 1 | No supported leakage-handling Task targets this component. |
+| LEAK_HANDLING_STATUS_SHUTTING_DOWN | 2 | A forced-shutdown Task is waiting, pending, or running. |
+| LEAK_HANDLING_STATUS_DOWN | 3 | A forced-shutdown Task completed. This is not current power state. |
+| LEAK_HANDLING_STATUS_FAILED | 4 | The latest supported leakage-handling Task failed or was terminated. |
+
+
+
 <a name="v1-LeakStatus"></a>
 
 ### LeakStatus
@@ -3830,9 +3854,9 @@ execution for the same scope is still active.
 <a name="v1-Phase"></a>
 
 ### Phase
-Phase is the coarse lifecycle bucket a component is in, derived from
-core&#39;s per-component state machine. Shared across compute, nvswitch,
-and power shelf.
+Phase is Flow&#39;s coarse operability bucket. Component phases are derived from
+Core&#39;s type-specific state machines; Rack.operation_status aggregates those
+component phases.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |

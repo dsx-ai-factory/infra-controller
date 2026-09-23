@@ -1,6 +1,13 @@
 
 # Kustomization inputs
 
+**Deprecated in NICo 2.3, removed in NICo 2.4.** The Kustomize deployment under
+`deploy/` is superseded by the Helm charts under `helm/`, which
+`helm-prereqs/setup.sh` installs; see the
+[quick start](../docs/getting-started/quick-start.md). Existing Kustomize
+deployments keep working in 2.3 but receive no new configuration; move to the
+Helm charts before upgrading to 2.4, when this directory is deleted.
+
 The `deploy/kustomization.yaml` file drives the top‑level deployment. Populate the placeholders below before applying any overlays.
 
 ## Table of contents
@@ -31,6 +38,8 @@ The `deploy/kustomization.yaml` file drives the top‑level deployment. Populate
 | `yourdockerregistry.com/path/to/nvmetal-scout-burn-in` | Registry URL for the `machine_validation` image. |
 | `MACHINE_VALIDATION_TAG` | Version tag for the `machine_validation` component. |
 | `NICO_DHCP_EXTERNAL_IP` | IP address used by the NICo DHCP service. |
+| `NICO_DHCPV6_EXTERNAL_IP` | IPv6 relay VIP in `deploy/components/dhcp6/service.yaml`, required only when the optional DHCPv6 component is enabled. |
+| `NICO_DHCPV6_SERVER_IDENTIFIER` | Site-unique, stable server identifier in `deploy/files/kea-dhcp6-carbide.conf`, required before enabling DHCPv6. Use exactly 12 hexadecimal digits without separators. |
 | `NICO_DNS_INSTANCE_0_IP` | First IP address for NICo DNS; allocate contiguous pair. |
 | `NICO_DNS_INSTANCE_1_IP` | Second IP address for NICo DNS; allocate contiguous pair. |
 | `NICO_PXE_IP` | IP address for the NICo PXE service. |
@@ -50,16 +59,19 @@ The `deploy/kustomization.yaml` file drives the top‑level deployment. Populate
 The templates in `deploy/files/` are mounted into services and must be filled with your site‑specific values. Use your IP plan, DNS domain, and certificate authority to derive the values; avoid copying any sample values.
 
 - `deploy/files/nico-api/admin_root_cert_pem` – place the PEM‑encoded root CA chain used to authenticate NICo admins (matches the CA trusted by the admin CLI). Generate this from your CA and keep private keys elsewhere.
-- `deploy/files/nico-api/nico-api-site-config.toml` – set site identifiers (`ENVIRONMENT_NAME`, `SITE_DOMAIN_NAME`), admin network pool and gateway, service VIPs (API, DHCP, DNS, PXE, SSH console, NGINX/proxy, Unbound), tenant overlay prefixes, and IPMI pools/names for controllers and managed hosts. Ensure service VIPs come from your chosen /27 (or equivalent) VIP pool and that IPMI pools each have a gateway and unique network name.
+- `deploy/files/nico-api/nico-api-site-config.toml` – set site identifiers (`ENVIRONMENT_NAME`, `SITE_DOMAIN_NAME`), admin network prefixes, service VIPs (API, DHCP, DNS, PXE, SSH console, NGINX/proxy, Unbound), tenant overlay prefixes, and IPMI pools/names for controllers and managed hosts. Ensure service VIPs come from your chosen /27 (or equivalent) VIP pool and that IPMI networks have unique names. For networks created from configuration at startup, an IPv4 prefix requires a gateway; refer to [Initial Network Configuration](../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration) for IPv6 fields and gateway omission rules.
 - `deploy/files/unbound/forwarders.conf` – list upstream recursive DNS endpoints reachable from the cluster. Use IPs for resolvers allowed to recurse for your site.
-- `deploy/files/unbound/local_data.conf` – defines static DNS A records for NICo services, including all `.nico` service endpoints (API, PXE, static PXE, NTP, Unbound, otel-receiver, and SOCKS proxy) and any additional site-specific names (e.g., `api-<ENVIRONMENT_NAME>.<SITE_DOMAIN_NAME>`). Map each hostname to the corresponding service VIP you selected above. Several `.nico` hostnames are hardcoded in compiled binaries and must resolve correctly before DPU agents can start. See [`.nico` DNS Zone — Service Endpoint Reference](DNS.md) for the full list of hostnames, required ports, and which entries are hardcoded.
+- `deploy/files/unbound/local_data.conf` – defines static DNS A and AAAA records for NICo services, including the `.nico` service endpoints, the stock agent's `carbide-ntp.forge` name, and any additional site-specific names (e.g., `api-<ENVIRONMENT_NAME>.<SITE_DOMAIN_NAME>`). Map each hostname to the corresponding service VIP you selected. Add an AAAA record for the exact NTP hostname queried by the deployed agent when DHCPv6 option 56 should advertise an IPv6 NTP fallback. Several hostnames are hardcoded in compiled binaries and must resolve correctly before DPU agents can start. See [`.nico` DNS Zone — Service Endpoint Reference](DNS.md) for the full list of hostnames, required ports, and which entries are hardcoded.
 - `deploy/files/kea_config.json` – provide the Kea DHCPv4 configuration tailored to your admin/tenant networks, including option definitions, subnets, pools, and relay settings. Reference the same service IPs used elsewhere and ensure leases align with the admin network pool.
+- `deploy/files/kea-dhcp6-carbide.conf` – supplies the root's `nico-dhcp6-config` ConfigMap. Before enabling DHCPv6, replace `{{ NICO_DHCPV6_SERVER_IDENTIFIER }}` and configure the IPv6 hook settings described in [Deploy DHCPv6](../docs/provisioning/dhcpv6-deployment.md#kustomize). The generated ConfigMap remains unused while the optional component is disabled.
 - `deploy/files/vtysh.conf` – FRRouting vtysh shell configuration. Align hostname and service addresses here with the FRR service IPs chosen from your service VIP pool.
 
-After populating `deploy/kustomization.yaml` and all files under `deploy/files/`, deploy everything with:
+Rendering the complete root also requires standalone `kustomize` and `ksops` on `PATH`, with credentials to decrypt the SOPS-encrypted `deploy/nico-base/ssh-console-rs/secrets/ssh_host_key.enc.yaml`. That file must contain the `ssh-host-key` Secret with `ssh_host_ed25519_key` and `ssh_host_ed25519_key_pub` keys. Supply `deploy/nico-unbound-base/local.conf.d/patchme.conf` with the base Unbound forwarders; the base generator reads it before the root replaces `forwarders.conf` with `deploy/files/unbound/forwarders.conf`.
+
+After populating these inputs, `deploy/kustomization.yaml`, and all files under `deploy/files/`, deploy everything from the repository root with:
 
 ```bash
-kustomize build . --enable-helm --enable-alpha-plugins --enable-exec | kubectl apply -f -
+kustomize build deploy --enable-alpha-plugins --enable-exec | kubectl apply -f -
 ```
 
 ## NICo Core services (bare‑metal provisioning)
@@ -149,6 +161,8 @@ Path: `deploy/nico-base/api/`
 
 **What it deploys**
 
+For opt-in DHCPv6, see [Deploy DHCPv6](../docs/provisioning/dhcpv6-deployment.md). The top-level Kustomize root generates both DHCP ConfigMaps in `nico-system`; add `components/dhcp6` there only after supplying the stable server identifier, separate IPv6 VIP, and routable pod IPv6 address.
+
 Path: `deploy/nico-base/dhcp/`
 
 - Deployment `nico-dhcp`
@@ -223,14 +237,14 @@ Path: `deploy/nico-base/dns/`
 ### NICo Hardware Health
 
 **Role**  
-`nico-hardware-health` continuously polls host and DPU BMCs for health information (fans, temperatures, leak sensors, etc.), exposes those metrics via Prometheus, and notifies nico‑api when it detects problems so operators get alerts on failing hardware.
+`nico-hardware-health` continuously polls host and DPU BMCs for fan, temperature, and leak-sensor health. It exposes service metrics and per-sensor measurements in Prometheus format. It also reports problems to `nico-api` so operators can investigate failing hardware.
 
 **What it deploys**
 
 Path: `deploy/nico-base/hardware-health/`
 
 - Deployment `nico-hardware-health`
-- Service `nico-hardware-health` – HTTP metrics on TCP **9009**
+- Service `nico-hardware-health` – HTTP Prometheus endpoints on TCP **9009**
 - TLS
   - `Certificate/nico-hardware-health-certificate` → `Secret/nico-hardware-health-certificate`
 - RBAC
@@ -240,12 +254,13 @@ Path: `deploy/nico-base/hardware-health/`
 The pod:
 
 - Uses SPIFFE certs from `/var/run/secrets/spiffe.io` to talk back to nico‑api.
-- Exposes Prometheus metrics at `:9009/metrics`.
+- Exposes service-level Prometheus metrics at `:9009/metrics`.
+- Exposes per-sensor Prometheus measurements at `:9009/telemetry`.
 
 **External inputs you must provide**
 
 - A reachable nico‑api endpoint.
-- A Prometheus instance (or other metrics system) scraping the `nico-hardware-health` Service.
+- A Prometheus instance (or other metrics system) with separate scrape jobs for the `nico-hardware-health` Service's `/metrics` and `/telemetry` paths.
 - A cert‑manager `ClusterIssuer` for the hardware‑health certificate.
 
 **Quick start**
@@ -257,7 +272,9 @@ The pod:
    kubectl apply -k deploy/nico-base/hardware-health -n <NICO_NAMESPACE>
    ```
 
-3. Point Prometheus at `nico-hardware-health:9009` to ingest metrics.
+3. Configure separate Prometheus scrape jobs against `nico-hardware-health:9009`:
+   - Scrape `/metrics` for service-level operational metrics.
+   - Scrape `/telemetry` for per-sensor measurements. This endpoint is high-cardinality, so ensure the metrics backend has sufficient scrape and retention capacity.
 
 ---
 
@@ -289,7 +306,8 @@ The container runs `dockurr/chrony` and reads `NTP_SERVERS` / `NTP_DIRECTIVES` f
    kubectl apply -k deploy/nico-base/ntp -n <NICO_NAMESPACE>
    ```
 
-3. Hand out the `nico-ntp` pod hostnames via DHCP option 42 or node configs.
+3. Hand out the `nico-ntp` pod addresses via DHCP option 42 for IPv4, DHCP
+   option 56 for IPv6, or node configs.
 
 ---
 
@@ -370,7 +388,7 @@ Key settings live in `config-files/config.toml` (nico‑api URL, SPIFFE cert pat
 3. Deploy SSH console:
 
    ```bash
-   kubectl apply -k deploy/nico-base/ssh-console-rs -n <NICO_NAMESPACE>
+   kustomize build deploy/nico-base/ssh-console-rs --enable-alpha-plugins --enable-exec | kubectl apply -f - -n <NICO_NAMESPACE>
    ```
 
 ---
@@ -397,7 +415,7 @@ Key settings live in `config-files/config.toml` (nico‑api URL, SPIFFE cert pat
 - Apply the full base (optionally with your overlay):
 
    ```bash
-   kubectl apply -k deploy/nico-base -n <NICO_NAMESPACE>
+   kustomize build deploy/nico-base --enable-alpha-plugins --enable-exec | kubectl apply -f - -n <NICO_NAMESPACE>
    ```
 
 ---
@@ -412,7 +430,7 @@ Key settings live in `config-files/config.toml` (nico‑api URL, SPIFFE cert pat
 Path: `deploy/nico-unbound-base/`
 
 - Deployment `nico-unbound` with the Unbound server and `unbound_exporter` sidecar (config reload via Stakater reloader annotations).
-- Service `nico-unbound` – DNS on UDP/TCP **53**, metrics on TCP **9167**.
+- Service `nico-unbound` – DNS on UDP/TCP **53**, metrics on TCP **9167**. It defaults to IPv4; see [Unbound IPv6 transport](../docs/configuration/dns.md#unbound-ipv6-transport) for optional dual-stack exposure and the operator-supplied image/configuration requirements.
 - ConfigMaps
   - `unbound-envvars` from `unbound.env` (sets `LOCAL_CONFIG_DIR`, `BROKEN_DNSSEC`, `UNBOUND_CONTROL_DIR`).
   - `unbound-local-config` from `local.conf.d/*.conf`, including access controls, verbosity, extended statistics, and an `unknowndomain` blocklist plus a placeholder `forwarders.conf` you should replace with your upstream resolvers.
@@ -443,13 +461,14 @@ Path: `deploy/nico-unbound-base/`
 ### Components
 
 **Role**  
-Reusable Kustomize components that layer registry credentials and boot artifact sidecars onto NICo workloads.
+Reusable Kustomize components that add registry credentials, boot artifact sidecars, and an optional DHCPv6 workload.
 
 **What it includes**
 
 Path: `deploy/components/`
 
 - Component `boot-artifacts-containers` – JSON6902 patch that adds an EmptyDir volume plus sidecar containers to `nico-pxe` and `nico-api` Deployments. The sidecars copy `x86_64`, `aarch64`, `apt`, `firmware`, and machine-validation artifacts into `/nico-boot-artifacts/blobs/internal`, including a legacy x86_64 image for backward compatibility.
+- Component `dhcp6` – adds the separate `nico-dhcp6` Deployment and its data, metrics, and external Services. It is disabled by default. Add `components/dhcp6` to the top-level `deploy/kustomization.yaml` only after preparing the inputs and network described in [Deploy DHCPv6](../docs/provisioning/dhcpv6-deployment.md#kustomize).
 - Component `imagepullsecret` – JSON6902 patch that injects an `imagepullsecret` reference into all Deployments, Jobs, and StatefulSets.
 
 **External inputs you must provide**
@@ -459,7 +478,7 @@ Path: `deploy/components/`
 
 **Quick start**
 
-1. Add the components to your overlay:
+1. Add the registry and boot artifact components to your overlay:
 
    ```yaml
    components:
@@ -468,7 +487,7 @@ Path: `deploy/components/`
    ```
 
 2. Ensure the boot artifact images are available and the `imagepullsecret` exists.
-3. Components are used in `nico-system` kustomization
+3. These two components are used in the `nico-system` kustomization.
 
 ---
 
@@ -501,7 +520,7 @@ Path: `deploy/nico-system/`
 2. Apply the overlay:
 
    ```bash
-   kubectl apply -k deploy/nico-system
+   kustomize build deploy/nico-system --enable-alpha-plugins --enable-exec | kubectl apply -f -
    ```
 
 3. Confirm LoadBalancer IPs are assigned and cert-manager issues the NICo certificates.

@@ -19,23 +19,36 @@ use std::sync::Arc;
 
 use axum::Router;
 use bmc_mock::injection::InjectionStore;
-use bmc_mock::ipmi_sim::{IpmiSimConfig, IpmiSimHandle};
-use bmc_mock::{BmcState, Callbacks, CombinedServer, HardwareType, HostnameQuerying, MachineInfo};
+use bmc_mock::ipmi_sim::{ConsoleOutputStreamFactory, IpmiSimConfig, IpmiSimHandle};
+use bmc_mock::{
+    ActionError, BmcState, Callbacks, CombinedServer, HardwareType, HostnameQuerying, MachineInfo,
+    ResourceResetType,
+};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::config::MachineATronContext;
+use crate::console_output::ConsoleOutputController;
 use crate::machine_state_machine::MachineStateError;
 use crate::mock_ssh_server;
 use crate::mock_ssh_server::{MockSshServerHandle, PromptBehavior};
 
+#[derive(Debug)]
+pub(crate) enum BmcCommand {
+    SetSystemPower {
+        request: ResourceResetType,
+        reply: Option<tokio::sync::oneshot::Sender<Result<(), ActionError>>>,
+    },
+    StateRefreshIndication,
+}
+
 /// BmcMockWrapper launches a single instance of bmc-mock, configured to mock a single BMC for
 /// either a DPU or a Host. It will rewrite certain responses to customize them for the machines
 /// machine-a-tron is mocking.
-pub(super) struct BmcMockWrapper {
+pub(super) struct BmcMockWrapper<C: Callbacks> {
     app_context: Arc<MachineATronContext>,
     bmc_mock_router: Router,
-    bmc_mock_state: BmcState,
+    bmc_mock_state: BmcState<C>,
     hostname: Arc<dyn HostnameQuerying>,
     needs_ipmi_console: bool,
     requires_ssh_console: bool,
@@ -43,11 +56,11 @@ pub(super) struct BmcMockWrapper {
     ssh_prompt_behavior: PromptBehavior,
 }
 
-impl BmcMockWrapper {
+impl<C: Callbacks> BmcMockWrapper<C> {
     pub(super) fn new(
         machine_info: &MachineInfo,
         app_context: Arc<MachineATronContext>,
-        callbacks: Arc<dyn Callbacks>,
+        callbacks: Arc<C>,
         hostname: Arc<dyn HostnameQuerying>,
         host_id: Uuid,
         injection: Arc<InjectionStore>,
@@ -92,19 +105,26 @@ impl BmcMockWrapper {
     /// Starts per-machine console simulators when Redfish is served by a combined BMC mock.
     /// Returns `None` when no simulator is enabled for the hardware profile.
     pub(super) async fn start(&self) -> Result<Option<BmcMockWrapperHandle>, MachineStateError> {
+        let console_output = ConsoleOutputController::new(self.stable_id.clone());
         let ssh_handle = if self.app_context.app_config.mock_bmc_ssh_server
             && (self.requires_ssh_console || self.bmc_mock_state.has_enabled_ssh_serial_console())
         {
             Some(
-                mock_ssh_server::spawn(None, self.hostname.clone(), None, self.ssh_prompt_behavior)
-                    .await
-                    .map_err(|error| MachineStateError::MockSshServer(error.to_string()))?,
+                mock_ssh_server::spawn(
+                    None,
+                    self.hostname.clone(),
+                    None,
+                    self.ssh_prompt_behavior,
+                    Some(console_output.clone()),
+                )
+                .await
+                .map_err(|error| MachineStateError::MockSshServer(error.to_string()))?,
             )
         } else {
             None
         };
         let ipmi_sim_handle = if self.need_ipmi_sim() {
-            Some(self.start_ipmi_sim().await?)
+            Some(self.start_ipmi_sim(&console_output).await?)
         } else {
             None
         };
@@ -122,18 +142,25 @@ impl BmcMockWrapper {
                 ssh_handle,
                 ssh_endpoint_port,
                 _ipmi_sim_handle: ipmi_sim_handle,
+                console_output,
             }),
         )
     }
 
-    async fn start_ipmi_sim(&self) -> Result<IpmiSimHandle, MachineStateError> {
+    async fn start_ipmi_sim(
+        &self,
+        console_output: &ConsoleOutputController,
+    ) -> Result<IpmiSimHandle, MachineStateError> {
         let console_prompt = format!("root@{} # ", self.hostname.get_hostname());
+        let console_output = console_output.clone();
+        let console_output: ConsoleOutputStreamFactory = Box::new(move || console_output.stream());
         bmc_mock::ipmi_sim::start(
             &self.bmc_mock_state,
             IpmiSimConfig {
                 stable_id: self.stable_id.clone(),
                 console_prompt,
             },
+            Some(console_output),
         )
         .await
         .map_err(MachineStateError::IpmiSim)
@@ -143,7 +170,7 @@ impl BmcMockWrapper {
         &self.bmc_mock_router
     }
 
-    pub(super) fn state(&self) -> &BmcState {
+    pub(super) fn state(&self) -> &BmcState<C> {
         &self.bmc_mock_state
     }
 
@@ -158,6 +185,7 @@ pub(super) struct BmcMockWrapperHandle {
     pub(super) ssh_handle: Option<MockSshServerHandle>,
     ssh_endpoint_port: Option<u16>,
     _ipmi_sim_handle: Option<IpmiSimHandle>,
+    console_output: ConsoleOutputController,
 }
 
 impl BmcMockWrapperHandle {
@@ -167,6 +195,14 @@ impl BmcMockWrapperHandle {
 
     pub(super) fn ssh_endpoint_port(&self) -> Option<u16> {
         self.ssh_endpoint_port
+    }
+
+    pub(super) fn console_output_start(&self) {
+        self.console_output.start();
+    }
+
+    pub(super) fn console_output_stop(&self) {
+        self.console_output.stop();
     }
 }
 

@@ -21,7 +21,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use diff::Result as DiffResult;
 use eyre::{OptionExt, WrapErr};
 use forge_http_connector::resolver::{ForgeResolver, ForgeResolverOpts};
@@ -302,7 +302,7 @@ pub async fn get_periodic_dpu_config(
     dpu_machine_id: &MachineId,
 ) -> Result<rpc::forge::ManagedHostNetworkConfigResponse, eyre::Error> {
     let request = tonic::Request::new(ManagedHostNetworkConfigRequest {
-        dpu_machine_id: Some(*dpu_machine_id),
+        dpu_machine_id: Some(DpuMachineId::try_from(*dpu_machine_id)?),
     });
 
     let resp = match client.get_managed_host_network_config(request).await {

@@ -17,9 +17,11 @@
 #![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 mod logging;
+mod rms_mock;
 mod ufm_mock;
 
 use std::error::Error;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -47,6 +49,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::logging::init_logging;
+use crate::rms_mock::HostedRmsMock;
 use crate::ufm_mock::HostedUfmMock;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 32)]
@@ -139,6 +142,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let bmc_mock_certs_dir = app_config.bmc_mock_certs_dir.clone();
+    let rms_mock_config = app_config.rms_mock.clone();
 
     let app_context = Arc::new(MachineATronContext {
         app_config,
@@ -146,11 +150,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         bmc_mock_certs_dir,
         bmc_registry,
         api_throttler,
-        desired_firmware_versions,
+        desired_firmware_versions: std::sync::RwLock::new(desired_firmware_versions),
         forge_api_client,
         dhcp_client,
         mac_address_pool: Mutex::new(mac_address_pool).into(),
     });
+
+    machine_a_tron::spawn_desired_firmware_refresher(app_context.clone());
 
     let info = app_context.forge_api_client.version(false).await?;
     tracing::info!(
@@ -163,7 +169,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Machines are created paused here. While paused, their actors do not advance the FSM, so
     // BMC DHCP and shared-router registration cannot run before the combined BMC mock listener is
     // started below.
-    let simulators = mat.make_devices(true).await?;
+    let (simulators, expected_inventory) = mat.make_devices(true).await?;
 
     // Persist them once in case of unclean shutdown
     app_context.app_config.write_persisted_devices(
@@ -182,11 +188,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         simulators.clone(),
         DeviceStatusConfig::new(bmc_mock_port),
         inventory_id.into(),
-    );
+    )
+    .with_expected_inventory(expected_inventory);
     // Hosted mode mounts the shared UFM mock router on machine-a-tron's control server. Its
     // ControlState can be injected as an in-process inventory provider; the standalone binary
     // initializes the same mock without this provider and relies on configured HTTP sources.
     let hosted_ufm = HostedUfmMock::start(ufm_config, &control_state)?;
+    let hosted_rms = HostedRmsMock::start(rms_mock_config, &control_state);
     let ufm_router = hosted_ufm.as_ref().map(HostedUfmMock::router);
     let certs_dir = app_context
         .bmc_mock_certs_dir
@@ -198,21 +206,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .map(Path::to_path_buf)
         });
     let mut server_handle: CombinedServer = {
-        let server_config = bmc_mock::tls::server_config(certs_dir.clone())?;
         let bmc_router = bmc_mock::combined_router(app_context.bmc_registry.clone());
         let bmc_router = match ufm_router.clone() {
             Some(ufm_router) => ufm_router.merge(bmc_router),
             None => bmc_router,
         };
         let router = append_control_routes(Some(bmc_router), control_state.clone());
-        bmc_mock::CombinedServer::run_router(
-            "bmc-mock",
-            router,
-            Some(ListenerOrAddress::Address(
-                format!("0.0.0.0:{bmc_mock_port}").parse().unwrap(),
-            )),
-            server_config,
-        )
+        // Merged onto the outermost router, and deliberately after the control
+        // routes. Those add a `/{*all}` catch-all, but axum matches the RMS
+        // services' static first segment ahead of it. Merging any lower would
+        // put gRPC behind a handler that rebuilds the request and resets it to
+        // HTTP/1.1, which fails without an obvious cause.
+        let router = router.merge(hosted_rms.router());
+        start_bmc_server(router, bmc_mock_port, certs_dir).await?
     };
 
     let (stop_tx, stop_rx) = mpsc::channel(1);
@@ -241,4 +247,76 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     mat_result?;
     Ok(())
+}
+
+async fn start_bmc_server(
+    router: axum::Router,
+    port: u16,
+    certs_dir: Option<PathBuf>,
+) -> Result<CombinedServer, Box<dyn Error>> {
+    let server_config = bmc_mock::tls::server_config(certs_dir)?;
+    // IPv6 pod probes and IPv4 clients must reach the same Redfish/control listener.
+    let listener =
+        metrics_endpoint::bind_tcp_listener(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))
+            .await?;
+    Ok(CombinedServer::run_router(
+        "bmc-mock",
+        router,
+        Some(ListenerOrAddress::Listener(listener.into_std()?)),
+        server_config,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use machine_a_tron::SimulatorRegistry;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn bmc_listener_serves_control_requests_on_both_families() {
+        let ipv6_available = match std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)) {
+            Ok(_) => true,
+            Err(error) => {
+                let _listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                    .expect("IPv4 loopback must be available before skipping IPv6 assertions");
+                eprintln!("IPv6 loopback unavailable; checking IPv4 only: {error}");
+                false
+            }
+        };
+        let control_state = ControlState::new(
+            SimulatorRegistry::try_from_handles(Vec::new()).expect("empty simulator registry"),
+            DeviceStatusConfig::new(0),
+            "mat-listener-test".into(),
+        );
+        let mut server = start_bmc_server(append_control_routes(None, control_state), 0, None)
+            .await
+            .expect("start MAT control server");
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("HTTPS client");
+        for address in [
+            Some(SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                server.address.port(),
+            ))),
+            ipv6_available.then(|| SocketAddr::from((Ipv6Addr::LOCALHOST, server.address.port()))),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let response = client
+                .get(format!("https://{address}/machines/status"))
+                .send()
+                .await
+                .expect("MAT control request");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+        server.stop().await.expect("stop MAT control server");
+    }
 }

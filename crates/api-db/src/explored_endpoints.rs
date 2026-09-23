@@ -30,7 +30,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Row};
 
 use crate::db_read::DbReader;
-use crate::{BIND_LIMIT, DatabaseError};
+use crate::{BIND_LIMIT, ConditionalWrite, DatabaseError};
 
 #[derive(Debug)]
 struct DbExploredEndpoint {
@@ -121,15 +121,20 @@ impl From<DbExploredEndpoint> for ExploredEndpoint {
     }
 }
 
+/// Returns endpoint IPs whose exploration reports match `filter`.
 pub async fn find_ips(
     txn: impl DbReader<'_>,
-    // filter is currently is empty, so it is a placeholder for the future
-    _filter: model::site_explorer::ExploredEndpointSearchFilter,
+    filter: model::site_explorer::ExploredEndpointSearchFilter,
 ) -> Result<Vec<IpAddr>, DatabaseError> {
     #[derive(Debug, Clone, Copy, FromRow)]
     struct ExploredEndpointIp(IpAddr);
     // grab list of IPs
     let mut builder = sqlx::QueryBuilder::new("SELECT address FROM explored_endpoints");
+    if let Some(machine_id) = filter.machine_id {
+        builder
+            .push(" WHERE exploration_report->>'MachineId' = ")
+            .push_bind(machine_id);
+    }
     let query = builder.build_query_as();
     let ids: Vec<ExploredEndpointIp> = query
         .fetch_all(txn)
@@ -356,17 +361,19 @@ pub async fn lookup_bmc_metadata_by_ip(
     ))
 }
 
-/// Updates the explored information about a node
+/// Replaces an endpoint's report if its version still matches.
 ///
-/// This operation will return `Ok(false)` if the entry had been deleted in
-/// the meantime or otherwise modified. It will not fail.
+/// An applied write advances the report version, stores the supplied
+/// `waiting_for_explorer_refresh`, and clears `exploration_requested` in the
+/// caller's transaction. A missing endpoint or changed report version returns
+/// `NotApplied(EndpointReportNotCurrent)`; database failures remain errors.
 pub async fn try_update(
     address: IpAddr,
     old_version: ConfigVersion,
     exploration_report: &EndpointExplorationReport,
     waiting_for_explorer_refresh: bool,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
     let query = "
 UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false
@@ -381,21 +388,33 @@ WHERE address=$4 AND version=$5";
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(query_result.rows_affected() > 0)
+    Ok(if query_result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent)
+    })
 }
 
-/// Updates only the last exploration error and latency in an endpoint's report.
+/// `EndpointReportNotCurrent` means the endpoint is missing or its report version
+/// no longer matches the version supplied by the caller. The write does not
+/// distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndpointReportNotCurrent;
+
+/// `try_update_last_exploration_error` records a failure and its latency without
+/// replacing the last successful exploration report.
 ///
-/// This preserves the rest of the last successful exploration report while recording
-/// an exploration failure. Returns `Ok(false)` if the entry had been deleted in the
-/// meantime or otherwise modified. It will not fail for version mismatches.
+/// An applied write advances the report version, sets `waiting_for_explorer_refresh`,
+/// and clears `exploration_requested` in the caller's transaction. A missing
+/// endpoint or changed report version returns `NotApplied(EndpointReportNotCurrent)`;
+/// database failures remain errors.
 pub async fn try_update_last_exploration_error(
     address: IpAddr,
     old_version: ConfigVersion,
     error: &model::site_explorer::EndpointExplorationError,
     latency: std::time::Duration,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
     let query = "UPDATE explored_endpoints
 SET version=$1,
@@ -416,7 +435,11 @@ WHERE address=$4 AND version=$5";
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(query_result.rows_affected() > 0)
+    Ok(if query_result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent)
+    })
 }
 
 /// Clears the last known error in `explored_endpoints` for the BMC identified by IP.
@@ -440,25 +463,30 @@ pub async fn clear_last_known_error(
 
     let mut report = row.report;
     report.last_exploration_error = None;
-    if !try_update(address, row.report_version, &report, true, txn).await? {
-        return Err(DatabaseError::ConcurrentModificationError(
-            "ExploredEndpoint",
-            row.report_version.version_string(),
-        ));
+    match try_update(address, row.report_version, &report, true, txn).await? {
+        ConditionalWrite::Applied(()) => {}
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+            return Err(DatabaseError::ConcurrentModificationError(
+                "ExploredEndpoint",
+                row.report_version.version_string(),
+            ));
+        }
     }
 
     Ok(())
 }
 
-/// Sets the `exploration_requested` flag on an explored_endpoint
+/// `re_explore_if_version_matches` requests exploration without advancing the
+/// report version, so an in-flight report can still be published.
 ///
-/// Returns Ok(`true`) if the endpoint record is updated and Ok(`false`) if no
-/// record with the given version exists.
+/// Returns `Applied(())` when `exploration_requested` is set, including when it
+/// was already set. A missing endpoint or changed report version returns
+/// `NotApplied(EndpointReportNotCurrent)`; database failures remain errors.
 pub async fn re_explore_if_version_matches(
     address: IpAddr,
     version: ConfigVersion,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let query = "UPDATE explored_endpoints SET exploration_requested = true WHERE address = $1 AND version = $2 RETURNING address";
     let query_result: Result<(IpAddr,), _> = sqlx::query_as(query)
         .bind(address)
@@ -467,9 +495,9 @@ pub async fn re_explore_if_version_matches(
         .await;
 
     match query_result {
-        Ok((_address,)) => Ok(true),
+        Ok((_address,)) => Ok(ConditionalWrite::Applied(())),
         Err(e) => match e {
-            sqlx::Error::RowNotFound => Ok(false),
+            sqlx::Error::RowNotFound => Ok(ConditionalWrite::NotApplied(EndpointReportNotCurrent)),
             e => Err(DatabaseError::query(query, e)),
         },
     }
@@ -522,6 +550,31 @@ async fn set_preingestion(
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
+}
+
+/// Set one preingestion state on every explored address for a physical BMC.
+///
+/// A BMC can have IPv4 and IPv6 endpoint rows. Rack firmware workflow state is
+/// device-scoped, so callers update all known aliases together.
+pub async fn set_preingestion_for_addresses(
+    addresses: &[IpAddr],
+    state: PreingestionState,
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError> {
+    if addresses.is_empty() {
+        return Ok(());
+    }
+
+    let query = "UPDATE explored_endpoints SET preingestion_state = $1 WHERE address = ANY($2)";
+
+    sqlx::query(query)
+        .bind(sqlx::types::Json(&state))
+        .bind(addresses)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
     Ok(())
 }
 
@@ -731,14 +784,19 @@ pub async fn set_preingestion_failed(
     set_preingestion(address, state, txn).await
 }
 
-/// If the endpoint's preingestion is in the terminal `Failed` state, reset it
-/// back to `Initial` so preingestion runs again from the top. States other than
-/// `Failed` are left untouched, so this is safe to call unconditionally when an
-/// operator clears an error. Returns true if a `Failed` state was actually reset.
+/// `PreingestionResetNotApplicable` means the endpoint is missing or its
+/// preingestion state is not `Failed`. The reset does not distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreingestionResetNotApplicable;
+
+/// `reset_failed_preingestion` resets `Failed` to `Initial` so preingestion can
+/// run again when an operator clears an error. Other states remain untouched.
+/// A missing or non-failed endpoint returns
+/// `NotApplied(PreingestionResetNotApplicable)`; database failures remain errors.
 pub async fn reset_failed_preingestion(
     address: IpAddr,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), PreingestionResetNotApplicable>, DatabaseError> {
     let query = "
 UPDATE explored_endpoints
 SET preingestion_state = '{\"state\":\"initial\"}'
@@ -748,7 +806,11 @@ WHERE address = $1 AND preingestion_state->>'state' = 'failed'";
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
-    Ok(result.rows_affected() > 0)
+    Ok(if result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(PreingestionResetNotApplicable)
+    })
 }
 
 pub async fn insert(
@@ -771,6 +833,23 @@ pub async fn insert(
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(())
+}
+
+/// `lock_by_address` locks an existing endpoint until the caller's transaction
+/// completes. The connection must be in a transaction. It returns whether the
+/// row was locked; `false` does not prevent a later insert. Query failures
+/// propagate to the caller.
+pub async fn lock_by_address(
+    txn: &mut PgConnection,
+    address: IpAddr,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT address FROM explored_endpoints WHERE address = $1 FOR UPDATE";
+    let address: Option<IpAddr> = sqlx::query_scalar(query)
+        .bind(address)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(address.is_some())
 }
 
 pub async fn delete(txn: &mut PgConnection, address: IpAddr) -> Result<(), DatabaseError> {
@@ -828,74 +907,6 @@ pub async fn find_by_mac_address(
         .await
         .map(|endpoints| endpoints.into_iter().map(Into::into).collect())
         .map_err(|e| DatabaseError::new("explored_endpoints find_freetext_in_report", e))
-}
-
-/// Persist the backend firmware-object job ID for a pre-ingestion compute tray,
-/// keyed by BMC IP. Mirrors [`machine::save_backend_firmware_object_job_id`] for
-/// trays that have no `machines` row yet, so `get_firmware_status` can recover
-/// the job after a nico-api restart loses the in-memory job map.
-pub async fn save_backend_firmware_object_job_id_by_ip(
-    db: &sqlx::PgPool,
-    address: IpAddr,
-    job_id: &str,
-) -> Result<(), DatabaseError> {
-    let sql =
-        "UPDATE explored_endpoints SET backend_firmware_object_job_id = $1 WHERE address = $2";
-    let result = sqlx::query(sql)
-        .bind(job_id)
-        .bind(address)
-        .execute(db)
-        .await
-        .map_err(|e| DatabaseError::new(sql, e))?;
-    // No explored_endpoints row for this BMC IP means the job id was not
-    // persisted; report it rather than silently succeeding, or the job becomes
-    // untrackable after a nico-api restart drops the in-memory job map.
-    if result.rows_affected() == 0 {
-        return Err(DatabaseError::NotFoundError {
-            kind: "ExploredEndpoint",
-            id: address.to_string(),
-        });
-    }
-    Ok(())
-}
-
-/// Fetch the persisted backend firmware-object job ID for a pre-ingestion
-/// compute tray by BMC IP, if any.
-pub async fn get_backend_firmware_object_job_id_by_ip(
-    db: &sqlx::PgPool,
-    address: IpAddr,
-) -> Result<Option<String>, DatabaseError> {
-    let sql = "SELECT backend_firmware_object_job_id FROM explored_endpoints WHERE address = $1";
-    let row: Option<(Option<String>,)> = sqlx::query_as(sql)
-        .bind(address)
-        .fetch_optional(db)
-        .await
-        .map_err(|e| DatabaseError::new(sql, e))?;
-    Ok(row.and_then(|(job_id,)| job_id))
-}
-
-/// Return the subset of `addresses` whose `explored_endpoints` row has a
-/// persisted backend firmware-object job ID.
-///
-/// Firmware-status routing uses this to detect a job dispatched before ingestion
-/// (persisted here, keyed by BMC IP) even after a `machines` row exists, so the
-/// request still polls the live backend instead of the DB-only fallback. Runs as
-/// a single query over the whole candidate set.
-pub async fn find_ips_with_backend_firmware_object_job_id(
-    db: &sqlx::PgPool,
-    addresses: &[IpAddr],
-) -> Result<std::collections::HashSet<IpAddr>, DatabaseError> {
-    if addresses.is_empty() {
-        return Ok(std::collections::HashSet::new());
-    }
-    let sql = "SELECT address FROM explored_endpoints \
-               WHERE address = ANY($1) AND backend_firmware_object_job_id IS NOT NULL";
-    let rows: Vec<(IpAddr,)> = sqlx::query_as(sql)
-        .bind(addresses)
-        .fetch_all(db)
-        .await
-        .map_err(|e| DatabaseError::new(sql, e))?;
-    Ok(rows.into_iter().map(|(address,)| address).collect())
 }
 
 pub async fn set_last_redfish_bmc_reset(
@@ -1002,6 +1013,113 @@ mod tests {
     use model::site_explorer::{Chassis, NetworkAdapter};
 
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn reset_failed_preingestion_reports_applied_or_not_applicable(pool: sqlx::PgPool) {
+        struct Case {
+            scenario: &'static str,
+            state: Option<PreingestionState>,
+            expected: ConditionalWrite<(), PreingestionResetNotApplicable>,
+            expected_state: Option<PreingestionState>,
+        }
+
+        let cases = [
+            Case {
+                scenario: "failed preingestion resets",
+                state: Some(PreingestionState::Failed {
+                    reason: "firmware installation failed".to_string(),
+                }),
+                expected: ConditionalWrite::Applied(()),
+                expected_state: Some(PreingestionState::Initial),
+            },
+            Case {
+                scenario: "firmware installation stays in progress",
+                state: Some(installing_state()),
+                expected: ConditionalWrite::NotApplied(PreingestionResetNotApplicable),
+                expected_state: Some(installing_state()),
+            },
+            Case {
+                scenario: "missing endpoint is not created",
+                state: None,
+                expected: ConditionalWrite::NotApplied(PreingestionResetNotApplicable),
+                expected_state: None,
+            },
+        ];
+
+        for case in cases {
+            let mut txn = pool.begin().await.unwrap();
+            let address = "10.0.4.1".parse().unwrap();
+            if let Some(state) = case.state {
+                seed_endpoint(&mut txn, "10.0.4.1", state).await;
+            }
+
+            assert_eq!(
+                reset_failed_preingestion(address, &mut txn).await.unwrap(),
+                case.expected,
+                "{}",
+                case.scenario,
+            );
+            let endpoints = find_all_by_ip(address, &mut txn).await.unwrap();
+            assert_eq!(
+                endpoints.first().map(|ep| &ep.preingestion_state),
+                case.expected_state.as_ref(),
+                "{}",
+                case.scenario,
+            );
+            txn.rollback().await.unwrap();
+        }
+    }
+
+    #[crate::sqlx_test]
+    async fn reset_failed_preingestion_propagates_database_errors(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *txn)
+            .await
+            .unwrap();
+
+        let error = reset_failed_preingestion("10.0.4.1".parse().unwrap(), &mut txn)
+            .await
+            .unwrap_err();
+        let DatabaseError::Sqlx(query_error) = error else {
+            panic!("expected a database error, got {error:?}");
+        };
+        let code = query_error.source.as_database_error().unwrap().code();
+        assert_eq!(code.as_deref(), Some("25006"));
+        txn.rollback().await.unwrap();
+    }
+
+    #[crate::sqlx_test]
+    async fn re_exploration_request_preserves_report_version(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        let address = "10.0.3.1".parse().unwrap();
+        assert_eq!(
+            re_explore_if_version_matches(address, ConfigVersion::initial(), &mut txn)
+                .await
+                .unwrap(),
+            ConditionalWrite::NotApplied(EndpointReportNotCurrent)
+        );
+        insert(
+            address,
+            &EndpointExplorationReport::default(),
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap();
+        let endpoint = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
+
+        assert_eq!(
+            re_explore_if_version_matches(address, endpoint.report_version, &mut txn)
+                .await
+                .unwrap(),
+            ConditionalWrite::Applied(())
+        );
+
+        let requested = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
+        assert!(requested.exploration_requested);
+        assert_eq!(requested.report_version, endpoint.report_version);
+    }
 
     /// An `UpgradeFirmwareWait` state — the one the "installing" predicate keys
     /// on. Built from the real enum so the row-returning path can deserialize it.
