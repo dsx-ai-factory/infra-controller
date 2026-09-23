@@ -29555,6 +29555,19 @@ components:
       title: ExpectedRackGroupUpdateRequest
       type: object
       additionalProperties: false
+      # Reject a request when every update field is omitted or null.
+      # Use a conditional to preserve generated SDK models and rendered field types.
+      if:
+        not:
+          properties:
+            rackGroupId: {type: 'null'}
+            topology: {type: 'null'}
+            racks: {type: 'null'}
+            name: {type: 'null'}
+            description: {type: 'null'}
+            labels: {type: 'null'}
+      else:
+        not: {}
       description: |-
         Request data to update an existing Expected Rack Group.
 
@@ -29620,11 +29633,13 @@ components:
           maxLength: 1024
           description: Human-readable description, at most 1024 UTF-8 bytes. An empty string is allowed.
         labels:
-          $ref: '#/components/schemas/Labels'
+          oneOf:
+            - $ref: '#/components/schemas/Labels'
+            - type: 'null'
           propertyNames:
             pattern: '^[\x00-\x7F]+$'
           description: |-
-            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location.
+            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, or `description`.
     ExpectedRackGroupRack:
       type: object
       additionalProperties: false

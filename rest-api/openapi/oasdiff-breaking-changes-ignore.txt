@@ -295,3 +295,7 @@ API GET /v2/org/{org}/nico/audit the `items/body` response's property `type` cha
 API GET /v2/org/{org}/nico/audit the `items/queryParams` response's property `type` changed from `string` to `object` for status `200`
 API GET /v2/org/{org}/nico/audit/{auditEntryId} the `body` response's property `type` changed from `string` to `object` for status `200`
 API GET /v2/org/{org}/nico/audit/{auditEntryId} the `queryParams` response's property `type` changed from `string` to `object` for status `200`
+
+# Expected Rack Group PATCH already rejects requests with no non-null update fields.
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} added 'if' subschema to the request body
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} added 'else' subschema to the request body

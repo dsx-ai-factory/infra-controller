@@ -72,10 +72,19 @@ func TestCreateExpectedRackGroupHandler_Handle(t *testing.T) {
 
 func TestUpdateExpectedRackGroupHandler_Handle(t *testing.T) {
 	testRackGroupMutation(t, "UpdateExpectedRackGroup")
-	ctx, rec := rackGroupValidationContext(http.MethodPatch, `{"description":"`+strings.Repeat("d", 1025)+`"}`)
-	require.NoError(t, NewUpdateExpectedRackGroupHandler(nil, nil, nil).Handle(ctx))
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.Contains(t, rec.Body.String(), "description")
+	for _, tc := range []struct {
+		name, body, field string
+	}{
+		{"description too long", `{"description":"` + strings.Repeat("d", 1025) + `"}`, "description"},
+		{"null labels alone", `{"labels":null}`, "body"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, rec := rackGroupValidationContext(http.MethodPatch, tc.body)
+			require.NoError(t, NewUpdateExpectedRackGroupHandler(nil, nil, nil).Handle(ctx))
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			require.Contains(t, rec.Body.String(), tc.field)
+		})
+	}
 }
 
 func TestDeleteExpectedRackGroupHandler_Handle(t *testing.T) {
@@ -104,7 +113,11 @@ func (*rackGroupConcurrentInsertHook) AfterQuery(context.Context, *bun.QueryEven
 // Exercise each public mutation through its DB transaction and Temporal boundary.
 func testRackGroupMutation(t *testing.T, workflowName string) {
 	t.Helper()
-	for _, scenario := range []string{"success", "workflow failure", "request canceled", "deadline", "workflow timeout", "foreign site", "commit conflict"} {
+	scenarios := []string{"success", "workflow failure", "request canceled", "deadline", "workflow timeout", "foreign site", "commit conflict"}
+	if workflowName == "UpdateExpectedRackGroup" {
+		scenarios = append(scenarios, "null labels")
+	}
+	for _, scenario := range scenarios {
 		if scenario == "commit conflict" && workflowName != "CreateExpectedRackGroup" {
 			continue
 		}
@@ -187,7 +200,13 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 						require.Equal(t, "old", wire.Topology, "omitted topology must survive PATCH")
 						require.Empty(t, wire.Metadata.Name)
 						require.Empty(t, wire.Racks)
-						require.Empty(t, wire.Metadata.Labels)
+						if scenario == "null labels" {
+							require.Len(t, wire.Metadata.Labels, 1)
+							require.Equal(t, "key", wire.Metadata.Labels[0].GetKey())
+							require.Equal(t, "value", wire.Metadata.Labels[0].GetValue())
+						} else {
+							require.Empty(t, wire.Metadata.Labels)
+						}
 					}
 					if workflowName == "DeleteExpectedRackGroup" {
 						wire := &corev1.ExpectedRackGroupRequest{}
@@ -213,6 +232,9 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 				handle = NewCreateExpectedRackGroupHandler(session, pool, cfg).Handle
 			case "UpdateExpectedRackGroup":
 				method, body, status = http.MethodPatch, `{"name":"","racks":[],"labels":{}}`, http.StatusOK
+				if scenario == "null labels" {
+					body = `{"name":"","racks":[],"labels":null}`
+				}
 				handle = NewUpdateExpectedRackGroupHandler(session, pool, cfg).Handle
 			case "DeleteExpectedRackGroup":
 				method, body, status = http.MethodDelete, "", http.StatusNoContent
@@ -246,7 +268,7 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 				require.NoError(t, readErr)
 				require.Equal(t, 1, count)
 				require.Equal(t, "concurrent", rows[0].Topology)
-			} else if scenario != "success" {
+			} else if scenario != "success" && scenario != "null labels" {
 				wantStatus := http.StatusInternalServerError
 				if scenario == "request canceled" || scenario == "workflow timeout" {
 					wantStatus = http.StatusGatewayTimeout
@@ -311,8 +333,13 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 						require.Equal(t, "old", response.Topology)
 						require.Empty(t, response.Name)
 						require.Empty(t, response.Racks)
-						require.Empty(t, response.Labels)
-						require.Empty(t, stored.Labels)
+						if scenario == "null labels" {
+							require.Equal(t, apim.APILabels(original.Labels), response.Labels)
+							require.Equal(t, original.Labels, stored.Labels)
+						} else {
+							require.Empty(t, response.Labels)
+							require.Empty(t, stored.Labels)
+						}
 					}
 				default:
 					require.Empty(t, rows)

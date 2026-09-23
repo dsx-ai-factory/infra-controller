@@ -145,7 +145,6 @@ func (o *ExpectedRackGroupCreateRequest) GetRacks() []ExpectedRackGroupRack {
 
 // GetRacksOk returns a tuple with the Racks field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedRackGroupCreateRequest) GetRacksOk() ([]ExpectedRackGroupRack, bool) {
 	if o == nil || IsNil(o.Racks) {
 		return nil, false

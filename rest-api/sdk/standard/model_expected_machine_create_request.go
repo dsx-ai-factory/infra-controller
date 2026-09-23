@@ -255,7 +255,6 @@ func (o *ExpectedMachineCreateRequest) GetFallbackDPUSerialNumbers() []string {
 
 // GetFallbackDPUSerialNumbersOk returns a tuple with the FallbackDPUSerialNumbers field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineCreateRequest) GetFallbackDPUSerialNumbersOk() ([]string, bool) {
 	if o == nil || IsNil(o.FallbackDPUSerialNumbers) {
 		return nil, false

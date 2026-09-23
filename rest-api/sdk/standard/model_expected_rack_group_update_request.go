@@ -34,7 +34,7 @@ type ExpectedRackGroupUpdateRequest struct {
 	Name NullableString `json:"name,omitempty" validate:"regexp=^[\\x00-\\x7F]*$"`
 	// Human-readable description, at most 1024 UTF-8 bytes. An empty string is allowed.
 	Description NullableString `json:"description,omitempty"`
-	// User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location.
+	// User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, or `description`.
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
@@ -195,7 +195,6 @@ func (o *ExpectedRackGroupUpdateRequest) GetRacks() []ExpectedRackGroupRack {
 
 // GetRacksOk returns a tuple with the Racks field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedRackGroupUpdateRequest) GetRacksOk() ([]ExpectedRackGroupRack, bool) {
 	if o == nil || IsNil(o.Racks) {
 		return nil, false
@@ -303,9 +302,9 @@ func (o *ExpectedRackGroupUpdateRequest) UnsetDescription() {
 	o.Description.Unset()
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// GetLabels returns the Labels field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExpectedRackGroupUpdateRequest) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
@@ -363,7 +362,7 @@ func (o ExpectedRackGroupUpdateRequest) ToMap() (map[string]interface{}, error) 
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
-	if !IsNil(o.Labels) {
+	if o.Labels != nil {
 		toSerialize["labels"] = o.Labels
 	}
 	return toSerialize, nil

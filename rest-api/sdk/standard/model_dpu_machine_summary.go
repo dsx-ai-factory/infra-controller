@@ -276,7 +276,6 @@ func (o *DpuMachineSummary) GetInterfaces() []DpuMachineInterface {
 
 // GetInterfacesOk returns a tuple with the Interfaces field value
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuMachineSummary) GetInterfacesOk() ([]DpuMachineInterface, bool) {
 	if o == nil || IsNil(o.Interfaces) {
 		return nil, false
@@ -302,7 +301,6 @@ func (o *DpuMachineSummary) GetSoftwareComponents() []DpuMachineSoftwareComponen
 
 // GetSoftwareComponentsOk returns a tuple with the SoftwareComponents field value
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuMachineSummary) GetSoftwareComponentsOk() ([]DpuMachineSoftwareComponent, bool) {
 	if o == nil || IsNil(o.SoftwareComponents) {
 		return nil, false

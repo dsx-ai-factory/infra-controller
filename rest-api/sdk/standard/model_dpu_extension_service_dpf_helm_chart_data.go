@@ -167,7 +167,6 @@ func (o *DpuExtensionServiceDpfHelmChartData) GetValues() map[string]interface{}
 
 // GetValuesOk returns a tuple with the Values field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceDpfHelmChartData) GetValuesOk() (map[string]interface{}, bool) {
 	if o == nil || IsNil(o.Values) {
 		return map[string]interface{}{}, false
