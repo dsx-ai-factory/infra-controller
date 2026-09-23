@@ -693,8 +693,9 @@ impl ManagedHostStateSnapshot {
     /// A deleted Instance is not proof that forwarding stopped. Hosts remain
     /// included until every expected DPU acknowledges the return to Admin, or
     /// decommissioning finishes replacing the managed DPU configuration.
-    /// `WaitingForNetworkReconfig` keeps a host `Assigned` until Admin is
-    /// acknowledged, so idle Admin hosts need no further wait.
+    /// `WaitingForNetworkReconfig` and `Failed` hosts need no further update
+    /// once every DPU acknowledges their current Admin configuration. A later
+    /// transition to Tenant requests a new network version before forwarding.
     pub fn needs_site_prefix_isolation(&self) -> bool {
         if self.host_snapshot.associated_dpu_machine_ids().is_empty()
             || matches!(
@@ -711,7 +712,8 @@ impl ManagedHostStateSnapshot {
             && matches!(
                 self.managed_state,
                 ManagedHostState::Assigned {
-                    instance_state: InstanceState::WaitingForNetworkReconfig,
+                    instance_state: InstanceState::WaitingForNetworkReconfig
+                        | InstanceState::Failed { .. },
                 }
             )
         {
@@ -3959,6 +3961,9 @@ mod tests {
             TenantModeWithoutDpus,
             ReturningToAdminWithMissingSnapshots,
             AdminAppliedWithInstance,
+            FailedAfterAdminApplied,
+            FailedBeforeAdminApplied,
+            FailedWithTenantApplied,
             ForceDeletionWithMissingSnapshots,
             ForceDeletionAfterAdminApplied,
             DecommissioningWithInstance,
@@ -4039,6 +4044,32 @@ mod tests {
                         host.dpu_snapshots.clear();
                     }
                 }
+                Scenario::FailedAfterAdminApplied
+                | Scenario::FailedBeforeAdminApplied
+                | Scenario::FailedWithTenantApplied => {
+                    host.instance = Some(instance.clone());
+                    host.managed_state = ManagedHostState::Assigned {
+                        instance_state: InstanceState::Failed {
+                            details: FailureDetails {
+                                cause: FailureCause::NVMECleanFailed {
+                                    err: "cleanup failed".to_string(),
+                                },
+                                failed_at: DateTime::<Utc>::UNIX_EPOCH,
+                                source: FailureSource::Scout,
+                            },
+                            machine_id: host.host_snapshot.id.into(),
+                        },
+                    };
+                    match scenario {
+                        Scenario::FailedBeforeAdminApplied => {
+                            host.dpu_snapshots[0].network_status_observation = None;
+                        }
+                        Scenario::FailedWithTenantApplied => {
+                            host.host_snapshot.network_config.use_admin_network = Some(false);
+                        }
+                        _ => {}
+                    }
+                }
                 Scenario::ForceDeletionWithMissingSnapshots | Scenario::ForceDeletionAfterAdminApplied => {
                     host.managed_state = ManagedHostState::ForceDeletion;
                     if matches!(scenario, Scenario::ForceDeletionWithMissingSnapshots) {
@@ -4065,6 +4096,9 @@ mod tests {
                 Scenario::TenantModeWithoutDpus => false,
                 Scenario::ReturningToAdminWithMissingSnapshots => true,
                 Scenario::AdminAppliedWithInstance => false,
+                Scenario::FailedAfterAdminApplied => false,
+                Scenario::FailedBeforeAdminApplied => true,
+                Scenario::FailedWithTenantApplied => true,
                 Scenario::ForceDeletionWithMissingSnapshots => true,
                 Scenario::ForceDeletionAfterAdminApplied => false,
                 Scenario::DecommissioningWithInstance => true,

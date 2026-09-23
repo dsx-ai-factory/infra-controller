@@ -1003,9 +1003,8 @@ pub async fn find_by_ids(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
-/// `find_isolation_hosts` includes assigned or tenant-serving hosts, retaining
-/// hosts waiting for their DPUs to stop tenant forwarding. Idle inventory and
-/// hosts without managed DPU topology do not need an acknowledgement.
+/// `find_isolation_hosts` selects hosts using
+/// [`ManagedHostStateSnapshot::needs_site_prefix_isolation`].
 /// When the caller's site policy does not require isolation, no hosts are selected.
 pub async fn find_isolation_hosts(
     txn: &mut PgConnection,
