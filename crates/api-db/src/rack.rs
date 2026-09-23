@@ -111,6 +111,12 @@ pub async fn find_ids(
         }
     }
 
+    match filter.deleted {
+        model::DeletedFilter::Exclude => builder.push(" AND deleted IS NULL"),
+        model::DeletedFilter::Only => builder.push(" AND deleted IS NOT NULL"),
+        model::DeletedFilter::Include => &mut builder,
+    };
+
     let query = builder.build_query_as();
     query
         .fetch_all(txn)

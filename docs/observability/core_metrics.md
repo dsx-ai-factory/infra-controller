@@ -115,6 +115,11 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_gpus_in_use_count</td><td>gauge</td><td>Number of GPUs actively used by tenants in instances in the NICo deployment</td></tr>
 <tr><td>carbide_gpus_total_count</td><td>gauge</td><td>Number of GPUs in the NICo deployment</td></tr>
 <tr><td>carbide_gpus_usable_count</td><td>gauge</td><td>Number of remaining GPUs in the NICo deployment available for immediate instance creation</td></tr>
+<tr><td>carbide_hardware_health_component_inventory_info</td><td>gauge</td><td>Authoritative NICo component inventory for the current rack-ingestion session</td></tr>
+<tr><td>carbide_hardware_health_inventory_last_success_time_seconds</td><td>gauge</td><td>Unix timestamp of the last successful NICo inventory reconciliation</td></tr>
+<tr><td>carbide_hardware_health_inventory_refresh_failures_total</td><td>counter</td><td>Number of authoritative hardware inventory refreshes that failed.</td></tr>
+<tr><td>carbide_hardware_health_rack_nvlink_domain_info</td><td>gauge</td><td>Authoritative NICo rack-to-NVLink-domain assignments for current rack-ingestion sessions</td></tr>
+<tr><td>carbide_hardware_health_rack_session_start_time_seconds</td><td>gauge</td><td>NICo rack creation time in Unix seconds, labeled by its ingestion session</td></tr>
 <tr><td>carbide_health_otlp_export_failures_total</td><td>counter</td><td>Number of OTLP export batches dropped after a send failure, by signal and gRPC status code.</td></tr>
 <tr><td>carbide_health_otlp_queue_depth</td><td>gauge</td><td>Number of entries waiting in an OTLP queue, by target and signal.</td></tr>
 <tr><td>carbide_health_otlp_queue_dropped_total</td><td>counter</td><td>Number of OTLP queue entries dropped because a per-target queue reached capacity, by target and signal.</td></tr>
