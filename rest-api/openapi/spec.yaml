@@ -4805,7 +4805,7 @@ paths:
         description: |-
           Expected Machine update request.
 
-          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
+          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -4959,7 +4959,7 @@ paths:
         description: |-
           Array of Expected Machine update requests.
 
-          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Every item must use the same field set except bmcIpAddress; values may differ between items.
+          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress; values may differ between items.
         required: true
       responses:
         '200':
@@ -5180,7 +5180,7 @@ paths:
         description: |-
           Expected Power Shelf update request.
 
-          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
+          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -6121,7 +6121,7 @@ paths:
         description: |-
           Expected Switch update request.
 
-          Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings. To change NVOS credentials, provide both nvOsUsername and nvOsPassword as non-empty strings. Each pair can be updated independently in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
+          Provide the username, the password, or both to update BMC or NVOS credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. BMC and NVOS credentials can be changed independently in the same request. When setting NVOS credentials for the first time, provide both nvOsUsername and nvOsPassword; a missing stored partner is rejected with HTTP 400. Credential removal is not supported.
         required: true
       responses:
         '200':
@@ -28306,7 +28306,7 @@ components:
       description: |-
         Request data to update an existing Expected Machine.
 
-        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
+        Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Credentials are never returned in responses.
 
         For single updates (`PATCH /expected-machine/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
 
@@ -28348,7 +28348,7 @@ components:
             - 'null'
           minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
+          description: Username for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
           type:
             - string
@@ -28356,7 +28356,7 @@ components:
           minLength: 1
           writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
+          description: Password for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         chassisSerialNumber:
           type:
             - string
@@ -28644,7 +28644,7 @@ components:
       description: |-
         Request data to update an existing Expected Power Shelf.
 
-        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
+        Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Credentials are never returned in responses.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -28679,7 +28679,7 @@ components:
             - 'null'
           minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Power Shelf's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
+          description: Username for accessing the Expected Power Shelf's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
           type:
             - string
@@ -28687,7 +28687,7 @@ components:
           minLength: 1
           writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Power Shelf's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
+          description: Password for accessing the Expected Power Shelf's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         shelfSerialNumber:
           type:
             - string
@@ -29534,7 +29534,7 @@ components:
       description: |-
         Request data to update an existing Expected Switch.
 
-        Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings. To change NVOS credentials, provide both nvOsUsername and nvOsPassword as non-empty strings. Each pair can be updated independently in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
+        Provide the username, the password, or both to update BMC or NVOS credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. BMC and NVOS credentials can be changed independently in the same request. When setting NVOS credentials for the first time, provide both nvOsUsername and nvOsPassword; a missing stored partner is rejected with HTTP 400. Credential removal is not supported. Credentials are never returned in responses.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -29573,7 +29573,7 @@ components:
             - 'null'
           minLength: 1
           maxLength: 16
-          description: Username for accessing the Expected Switch's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
+          description: Username for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
           type:
             - string
@@ -29581,7 +29581,7 @@ components:
           minLength: 1
           writeOnly: true
           maxLength: 20
-          description: Password for accessing the Expected Switch's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
+          description: Password for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         switchSerialNumber:
           type:
             - string
@@ -29594,14 +29594,14 @@ components:
             - string
             - 'null'
           minLength: 1
-          description: NvOS username for the Expected Switch. Omission or null preserves the value; a non-empty value requires nvOsPassword in the same request.
+          description: NvOS username for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsPassword. Provide both fields when setting NVOS credentials for the first time.
         nvOsPassword:
           type:
             - string
             - 'null'
           minLength: 1
           writeOnly: true
-          description: NvOS password for the Expected Switch. Omission or null preserves the value; a non-empty value requires nvOsUsername in the same request.
+          description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
         nvosMacAddresses:
           type: array
           uniqueItems: true

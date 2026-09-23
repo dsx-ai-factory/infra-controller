@@ -177,15 +177,6 @@ type APIExpectedSwitchUpdateRequest struct {
 
 // Validate ensure the values passed in request are acceptable
 func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
-	credentialErr := util.ValidateExpectedComponentCredentialPair(esur.DefaultBmcUsername, esur.DefaultBmcPassword, "defaultBmcUsername", "defaultBmcPassword")
-	if credentialErr != nil {
-		return credentialErr
-	}
-	credentialErr = util.ValidateExpectedComponentCredentialPair(esur.NvOsUsername, esur.NvOsPassword, "nvOsUsername", "nvOsPassword")
-	if credentialErr != nil {
-		return credentialErr
-	}
-
 	if esur.ID != nil {
 		if *esur.ID == "" {
 			return validation.Errors{

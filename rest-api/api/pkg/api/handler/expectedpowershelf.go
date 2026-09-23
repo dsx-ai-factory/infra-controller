@@ -618,7 +618,7 @@ func (uepsh UpdateExpectedPowerShelfHandler) Handle(c echo.Context) error {
 
 		patchExpectedPowerShelfRequest := apiRequest.ToProto(eps)
 		var secretFields []string
-		if apiRequest.DefaultBmcPassword != nil {
+		if apiRequest.DefaultBmcUsername != nil || apiRequest.DefaultBmcPassword != nil {
 			secretFields = []string{"expectedPowerShelf"}
 		}
 

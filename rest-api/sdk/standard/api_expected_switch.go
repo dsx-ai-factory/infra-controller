@@ -645,7 +645,7 @@ type ApiUpdateExpectedSwitchRequest struct {
 	expectedSwitchUpdateRequest *ExpectedSwitchUpdateRequest
 }
 
-// Expected Switch update request.  Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings. To change NVOS credentials, provide both nvOsUsername and nvOsPassword as non-empty strings. Each pair can be updated independently in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported.
+// Expected Switch update request.  Provide the username, the password, or both to update BMC or NVOS credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. BMC and NVOS credentials can be changed independently in the same request. When setting NVOS credentials for the first time, provide both nvOsUsername and nvOsPassword; a missing stored partner is rejected with HTTP 400. Credential removal is not supported.
 func (r ApiUpdateExpectedSwitchRequest) ExpectedSwitchUpdateRequest(expectedSwitchUpdateRequest ExpectedSwitchUpdateRequest) ApiUpdateExpectedSwitchRequest {
 	r.expectedSwitchUpdateRequest = &expectedSwitchUpdateRequest
 	return r

@@ -131,11 +131,6 @@ type APIExpectedPowerShelfUpdateRequest struct {
 
 // Validate ensure the values passed in request are acceptable
 func (epur *APIExpectedPowerShelfUpdateRequest) Validate() error {
-	credentialErr := util.ValidateExpectedComponentCredentialPair(epur.DefaultBmcUsername, epur.DefaultBmcPassword, "defaultBmcUsername", "defaultBmcPassword")
-	if credentialErr != nil {
-		return credentialErr
-	}
-
 	if epur.ID != nil {
 		if *epur.ID == "" {
 			return validation.Errors{

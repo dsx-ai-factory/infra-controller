@@ -83,17 +83,6 @@ func ValidateDiskImagePath(value interface{}) error {
 	return nil
 }
 
-// ValidateExpectedComponentCredentialPair requires both fields when either is supplied.
-func ValidateExpectedComponentCredentialPair(username, password *string, usernameField, passwordField string) error {
-	if username != nil && password == nil {
-		return validation.Errors{passwordField: fmt.Errorf("must be provided together with %s", usernameField)}
-	}
-	if username == nil && password != nil {
-		return validation.Errors{usernameField: fmt.Errorf("must be provided together with %s", passwordField)}
-	}
-	return nil
-}
-
 // ValidateEffectiveUserData checks the byte length of the user data a request
 // sends to the Site. Request-field validation runs before Operating System
 // defaults are inherited and before phone-home insertion enlarges the YAML,

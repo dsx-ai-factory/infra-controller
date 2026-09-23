@@ -20,16 +20,16 @@ import (
 // checks if the ExpectedMachineUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &ExpectedMachineUpdateRequest{}
 
-// ExpectedMachineUpdateRequest Request data to update an existing Expected Machine.  Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.  For single updates (`PATCH /expected-machine/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.  For batch updates (`PATCH /expected-machine/batch`), each item must include a non-null `id` to identify which Expected Machine to update.
+// ExpectedMachineUpdateRequest Request data to update an existing Expected Machine.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Credentials are never returned in responses.  For single updates (`PATCH /expected-machine/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.  For batch updates (`PATCH /expected-machine/batch`), each item must include a non-null `id` to identify which Expected Machine to update.
 type ExpectedMachineUpdateRequest struct {
 	// ID of the Expected Machine to update.  For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.  Required and non-null in every batch update item.
 	Id NullableString `json:"id,omitempty"`
 	// The Expected Machine's BMC MAC address is immutable after creation. Omit this field, or provide another case/separator spelling of the current MAC as a compatibility no-op.
 	// Deprecated
 	BmcMacAddress NullableString `json:"bmcMacAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
-	// Username for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
+	// Username for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
 	DefaultBmcUsername NullableString `json:"defaultBmcUsername,omitempty"`
-	// Password for accessing the Expected Machine's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
+	// Password for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
 	DefaultBmcPassword NullableString `json:"defaultBmcPassword,omitempty"`
 	// Serial number of the Expected Machine's chassis
 	ChassisSerialNumber NullableString `json:"chassisSerialNumber,omitempty"`

@@ -20,22 +20,22 @@ import (
 // checks if the ExpectedSwitchUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &ExpectedSwitchUpdateRequest{}
 
-// ExpectedSwitchUpdateRequest Request data to update an existing Expected Switch.  Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings. To change NVOS credentials, provide both nvOsUsername and nvOsPassword as non-empty strings. Each pair can be updated independently in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
+// ExpectedSwitchUpdateRequest Request data to update an existing Expected Switch.  Provide the username, the password, or both to update BMC or NVOS credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. BMC and NVOS credentials can be changed independently in the same request. When setting NVOS credentials for the first time, provide both nvOsUsername and nvOsPassword; a missing stored partner is rejected with HTTP 400. Credential removal is not supported. Credentials are never returned in responses.
 type ExpectedSwitchUpdateRequest struct {
 	// ID of the Expected Switch to update (ignored for single update, used for identification in batch operations).
 	Id NullableString `json:"id,omitempty"`
 	// Immutable MAC address of the Expected Switch's BMC (Baseboard Management Controller). Omit this field when updating. A formatting-equivalent value is accepted for compatibility and preserves the originally stored spelling, but changing the physical MAC address is rejected with HTTP 400.
 	// Deprecated
 	BmcMacAddress NullableString `json:"bmcMacAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
-	// Username for accessing the Expected Switch's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
+	// Username for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
 	DefaultBmcUsername NullableString `json:"defaultBmcUsername,omitempty"`
-	// Password for accessing the Expected Switch's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
+	// Password for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
 	DefaultBmcPassword NullableString `json:"defaultBmcPassword,omitempty"`
 	// Serial number of the Expected Switch
 	SwitchSerialNumber NullableString `json:"switchSerialNumber,omitempty"`
-	// NvOS username for the Expected Switch. Omission or null preserves the value; a non-empty value requires nvOsPassword in the same request.
+	// NvOS username for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsPassword. Provide both fields when setting NVOS credentials for the first time.
 	NvOsUsername NullableString `json:"nvOsUsername,omitempty"`
-	// NvOS password for the Expected Switch. Omission or null preserves the value; a non-empty value requires nvOsUsername in the same request.
+	// NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
 	NvOsPassword NullableString `json:"nvOsPassword,omitempty"`
 	// MAC addresses of the Expected Switch's NvOS management interfaces
 	NvosMacAddresses []string `json:"nvosMacAddresses,omitempty"`

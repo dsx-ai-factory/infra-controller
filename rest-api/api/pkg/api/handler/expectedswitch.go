@@ -672,7 +672,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 
 		patchExpectedSwitchRequest := apiRequest.ToProto(es)
 		var secretFields []string
-		if apiRequest.DefaultBmcPassword != nil || apiRequest.NvOsPassword != nil {
+		if apiRequest.DefaultBmcUsername != nil || apiRequest.DefaultBmcPassword != nil || apiRequest.NvOsUsername != nil || apiRequest.NvOsPassword != nil {
 			secretFields = []string{"expectedSwitch"}
 		}
 

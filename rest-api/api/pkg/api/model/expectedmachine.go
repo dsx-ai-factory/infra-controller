@@ -194,11 +194,6 @@ type APIExpectedMachineUpdateRequest struct {
 
 // Validate ensure the values passed in request are acceptable
 func (emur *APIExpectedMachineUpdateRequest) Validate() error {
-	credentialErr := util.ValidateExpectedComponentCredentialPair(emur.DefaultBmcUsername, emur.DefaultBmcPassword, "defaultBmcUsername", "defaultBmcPassword")
-	if credentialErr != nil {
-		return credentialErr
-	}
-
 	if emur.ID != nil {
 		if *emur.ID == "" {
 			return validation.Errors{

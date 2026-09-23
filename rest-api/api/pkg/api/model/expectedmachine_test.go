@@ -543,16 +543,6 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 		expectErr bool
 	}{
 		{
-			desc:      "error when only DefaultBmcUsername is provided",
-			obj:       APIExpectedMachineUpdateRequest{DefaultBmcUsername: cutil.GetPtr("partial-pair")},
-			expectErr: true,
-		},
-		{
-			desc:      "error when only DefaultBmcPassword is provided",
-			obj:       APIExpectedMachineUpdateRequest{DefaultBmcPassword: cutil.GetPtr("partial-pair")},
-			expectErr: true,
-		},
-		{
 			desc: "ok when all fields are provided",
 			obj: APIExpectedMachineUpdateRequest{
 				ChassisSerialNumber:      &validChassisSerial,
@@ -1369,6 +1359,8 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{},"fallbackDPUSerialNumbers":[],"isDpfEnabled":false,"hostLifecycleProfile":{"disableLockdown":false},"bmcIpAddress":""}`, wantPaths: []string{"bmc_ip_address", "metadata.labels", "fallback_dpu_serial_numbers", "is_dpf_enabled", "host_lifecycle_profile.disable_lockdown"}},
 		{name: "BMC address selects automatic allocation", body: `{"bmcIpAddress":"192.0.2.31"}`, wantPaths: []string{"bmc_ip_address", "bmc_ip_allocation"}},
 		{name: "slot ID alone selects derived labels", body: `{"slotId":0}`, wantPaths: []string{"metadata.labels"}},
+		{name: "BMC username leaves the password unselected", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":null}`, wantPaths: []string{"bmc_username"}},
+		{name: "BMC password leaves the username unselected", body: `{"defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_password"}},
 		{name: "BMC pair is selected together", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_username", "bmc_password"}},
 		{name: "empty lifecycle profile preserves policy", body: `{"hostLifecycleProfile":{}}`},
 	}
@@ -1390,8 +1382,10 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 				assert.Equal(t, "slot_id", labels[0].GetKey())
 				assert.Equal(t, "0", labels[0].GetValue())
 			}
-			if request.DefaultBmcPassword != nil {
+			if request.DefaultBmcUsername != nil {
 				assert.Equal(t, *request.DefaultBmcUsername, decoded.GetExpectedMachine().GetBmcUsername())
+			}
+			if request.DefaultBmcPassword != nil {
 				assert.Equal(t, *request.DefaultBmcPassword, decoded.GetExpectedMachine().GetBmcPassword())
 			}
 			assert.Equal(t, request.BmcIpAddress, decoded.GetExpectedMachine().BmcIpAddress)
