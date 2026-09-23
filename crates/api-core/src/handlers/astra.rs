@@ -17,7 +17,10 @@
 
 use std::str::FromStr;
 
-use ::rpc::forge::{AstraAttachment, AstraConfig, AstraConfigStatus, AstraPhase};
+use ::rpc::forge::{
+    AstraAttachment, AstraAttachmentOvs, AstraAttachmentVf, AstraConfig, AstraConfigStatus,
+    AstraPhase,
+};
 use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::spx::NULL_SPX_PARTITION_ID;
 use config_version::ConfigVersion;
@@ -160,10 +163,20 @@ pub(super) async fn get_astra_config(
                 vni: dpa_vni as u32,
                 subnet_ipv4: subnet_ip.to_string(),
                 subnet_mask,
-                attachment_type: Some(SpxAttachmentType::Physical as i32),
-                virtual_function_id: None, // TODO: Add virtual function id if supported
-                network_name: None,        // TODO: Add network name when VMAAS support is added
+                attachment_type: Some(spx_attachment.attachment_type.clone() as i32),
                 revision: instance.spx_config_version.to_string(),
+                attachment_vf: spx_attachment
+                    .attachment_vf
+                    .as_ref()
+                    .map(|vf| AstraAttachmentVf {
+                        vf_index: vf.vf_index,
+                    }),
+                attachment_ovs: spx_attachment.attachment_ovs.as_ref().map(|ovs| {
+                    AstraAttachmentOvs {
+                        bridge_name: ovs.bridge_name.clone(),
+                        network_name: ovs.ovn_network_name.clone(),
+                    }
+                }),
             };
 
             astra_attachments.push(astra_attachment);
@@ -174,9 +187,9 @@ pub(super) async fn get_astra_config(
                 subnet_ipv4: subnet_ip.to_string(),
                 subnet_mask,
                 attachment_type: None,
-                virtual_function_id: None,
-                network_name: None,
                 revision: dpa_interface.network_config.version.to_string(),
+                attachment_vf: None,
+                attachment_ovs: None,
             };
 
             astra_attachments.push(astra_attachment);

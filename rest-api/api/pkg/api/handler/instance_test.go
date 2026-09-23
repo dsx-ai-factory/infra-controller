@@ -5008,7 +5008,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqUser:                              tnu1,
 				respCode:                             http.StatusOK,
 				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(1),
-				expectedSiteSpectrumXAttachmentType:  cutil.GetPtr(corev1.SpxAttachmentType_Ovn),
+				expectedSiteSpectrumXAttachmentType:  cutil.GetPtr(corev1.SpxAttachmentType_OVS),
 			},
 			verifySiteControllerRequest: true,
 		},

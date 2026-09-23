@@ -3378,7 +3378,18 @@ message InstanceSpxConfig {
 enum SpxAttachmentType {
   Physical = 0;
   Virtual = 1;
-  Ovn = 2; // This is WIP. Specification for this not yet finalized in Astra Spec
+  reserved 2; // was: Ovn = 2
+  reserved "Ovn";
+  OVS = 3;
+}
+
+message SpxAttachmentVf {
+  uint32 vf_index = 1;
+}
+
+message SpxAttachmentOvs {
+  string bridge_name = 1;
+  optional string ovn_network_name = 2;
 }
 
 message InstanceSpxAttachment {
@@ -3386,7 +3397,10 @@ message InstanceSpxAttachment {
   uint32 device_instance = 2;
   common.SpxPartitionId spx_partition_id = 3;
   SpxAttachmentType attachment_type = 4;
-  optional uint32 virtual_function_id = 5; // Needed only if AttachmentType is Virtual
+  reserved 5;
+  reserved "virtual_function_id";
+  optional SpxAttachmentVf attachment_vf = 6;  // If attachment type is Virtual, this is required
+  optional SpxAttachmentOvs attachment_ovs = 7;  // If attachment type is OVS, this is required
 }
 
 // New configuration for the instances network interfaces
@@ -8660,15 +8674,32 @@ message AstraConfig {
   repeated AstraAttachment astra_attachments = 1;
 }
 
+// Used if attachment_type is Virtual
+message AstraAttachmentVf {
+  uint32 vf_index = 1;
+}
+
+// Used if attachment_type is OVS
+message AstraAttachmentOvs {
+  string bridge_name = 1;
+  optional string network_name = 2;
+}
+
 message AstraAttachment {
   string mac_address = 1;
   uint32 vni = 2;
   string subnet_ipv4 = 3;
   int32 subnet_mask = 4;
   optional SpxAttachmentType attachment_type = 5;
-  optional int32 virtual_function_id = 6;
-  optional string network_name = 7; // Set if attachment_type is OVN
+  reserved 6;
+  reserved "virtual_function_id";
+  reserved 7;
+  reserved "network_name";
   string revision = 8; // This is either spx_config_version from instance of network_config_version from dpa_interface
+  reserved 9;
+  reserved "bridge_name";
+  optional AstraAttachmentVf attachment_vf = 10;
+  optional AstraAttachmentOvs attachment_ovs = 11;
 }
 
 message AstraConfigStatus {
@@ -8681,10 +8712,14 @@ message AstraAttachmentStatus {
   string subnet_ipv4 = 3;
   int32 subnet_mask = 4;
   optional SpxAttachmentType attachment_type = 5;
-  optional int32 virtual_function_id = 6;
-  optional string network_name = 7; // Set if attachment_type is OVN
+  reserved 6;
+  reserved "virtual_function_id";
+  reserved 7;
+  reserved "network_name";
   string revision = 8; // This is either spx_config_version from instance of network_config_version from dpa_interface
   AstraStatus status = 9;
+  optional AstraAttachmentVf attachment_vf = 10;
+  optional AstraAttachmentOvs attachment_ovs = 11;
 }
 
 enum AstraPhase {

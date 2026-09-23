@@ -80,5 +80,17 @@ pub struct InstanceSpxAttachment {
     pub mac_address: Option<String>,
     pub spx_partition_id: SpxPartitionId,
     pub attachment_type: SpxAttachmentType,
-    pub virtual_function_id: Option<u32>,
+    pub attachment_vf: Option<SpxAttachmentVf>,
+    pub attachment_ovs: Option<SpxAttachmentOvs>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpxAttachmentVf {
+    pub vf_index: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpxAttachmentOvs {
+    pub bridge_name: String,
+    pub ovn_network_name: Option<String>,
 }
