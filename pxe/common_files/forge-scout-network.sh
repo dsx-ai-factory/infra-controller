@@ -24,8 +24,61 @@ ip_command=${SCOUT_IP_COMMAND:-ip}
 networkctl_command=${SCOUT_NETWORKCTL_COMMAND:-networkctl}
 networkd_runtime_dir=${SCOUT_NETWORKD_RUNTIME_DIR:-/run/systemd/network}
 networkd_dhcp_file=${SCOUT_NETWORKD_DHCP_FILE:-/etc/systemd/network/dhcp.network}
-network_wait_seconds=${SCOUT_NETWORK_WAIT_SECONDS:-60}
+network_wait_seconds=${SCOUT_NETWORK_WAIT_SECONDS:-120}
 network_poll_interval=${SCOUT_NETWORK_POLL_INTERVAL:-1}
+
+uptime_seconds() {
+	uptime_value=
+	if read -r uptime_value _ < /proc/uptime; then
+		printf '%s\n' "${uptime_value%%.*}"
+	else
+		printf '0\n'
+	fi
+}
+
+sleep_before_deadline() {
+	deadline_seconds=$1
+	current_seconds=$(uptime_seconds)
+	remaining_seconds=$((deadline_seconds - current_seconds))
+
+	if [ "$remaining_seconds" -le 0 ]; then
+		return 1
+	fi
+
+	sleep_seconds=$network_poll_interval
+	if [ "$sleep_seconds" -gt "$remaining_seconds" ]; then
+		sleep_seconds=$remaining_seconds
+	fi
+	sleep "$sleep_seconds"
+}
+
+script_result=failed
+script_exit_reason=unexpected_exit
+script_start_seconds=$(uptime_seconds)
+
+report_exit() {
+	exit_status=$?
+	current_seconds=$(uptime_seconds)
+	duration_seconds=unknown
+
+	if [ "$current_seconds" -ge "$script_start_seconds" ]; then
+		duration_seconds=$((current_seconds - script_start_seconds))
+	fi
+
+	printf '%s\n' \
+		"Scout network configuration finished: result=$script_result reason=$script_exit_reason exit_status=$exit_status duration_seconds=$duration_seconds"
+
+	trap - 0
+	exit "$exit_status"
+}
+
+finish() {
+	script_result=$1
+	script_exit_reason=$2
+	exit "$3"
+}
+
+trap report_exit 0
 
 validate_positive_integer() {
 	value=$1
@@ -34,7 +87,7 @@ validate_positive_integer() {
 	case "$value" in
 		''|*[!0-9]*|0|0*)
 			echo "Invalid Scout network timing value: variable=$name value=$value reason=positive_integer_required" >&2
-			exit 1
+			finish failed invalid_timing_value 1
 			;;
 	esac
 }
@@ -44,7 +97,7 @@ validate_positive_integer "$network_poll_interval" SCOUT_NETWORK_POLL_INTERVAL
 
 if ! cmdline=$(cat "$cmdline_file"); then
 	echo "Skipping Scout network configuration: reason=cmdline_unreadable" >&2
-	exit 0
+	finish skipped cmdline_unreadable 0
 fi
 
 preferred_mac=
@@ -62,7 +115,7 @@ set +f
 
 if [ "$mac_parameter_count" -ne 1 ]; then
 	echo "Skipping Scout network configuration: reason=mac_parameter_count count=$mac_parameter_count" >&2
-	exit 0
+	finish skipped mac_parameter_count 0
 fi
 
 case "$preferred_mac" in
@@ -70,14 +123,13 @@ case "$preferred_mac" in
 		;;
 	*)
 		echo "Skipping Scout network configuration: reason=invalid_mac_parameter" >&2
-		exit 0
+		finish skipped invalid_mac_parameter 0
 		;;
 esac
 preferred_mac=$(printf '%s\n' "$preferred_mac" | tr '[:upper:]' '[:lower:]')
 
-probe_attempts=0
-probe_max_attempts=$((network_wait_seconds / network_poll_interval))
-[ "$probe_max_attempts" -lt 1 ] && probe_max_attempts=1
+probe_start_seconds=$(uptime_seconds)
+probe_deadline_seconds=$((probe_start_seconds + network_wait_seconds))
 
 preferred_interface=
 while :
@@ -101,7 +153,7 @@ do
 	# a timing issue. Waiting cannot resolve it, so give up immediately.
 	if [ "$preferred_interface_count" -gt 1 ]; then
 		echo "Skipping Scout network configuration: reason=preferred_interface_count count=$preferred_interface_count" >&2
-		exit 0
+		finish skipped preferred_interface_count 0
 	fi
 
 	not_ready=
@@ -122,12 +174,10 @@ do
 
 	[ -z "$not_ready" ] && break
 
-	probe_attempts=$((probe_attempts + 1))
-	if [ "$probe_attempts" -ge "$probe_max_attempts" ]; then
+	if ! sleep_before_deadline "$probe_deadline_seconds"; then
 		echo "Scout network configuration timed out: interface=${preferred_interface:-<none>} mac=$preferred_mac reason=$not_ready waited=${network_wait_seconds}s" >&2
-		exit 1
+		finish failed preferred_interface_timeout 1
 	fi
-	sleep "$network_poll_interval"
 done
 
 runtime_network_file="$networkd_runtime_dir/00-forge-scout-nonpreferred.network"
@@ -150,7 +200,7 @@ do
 		[ -e "$net_path" ] || continue
 
 		echo "Skipping Scout network configuration: interface=$interface reason=network_status_inspection_failed" >&2
-		exit 0
+		finish skipped network_status_inspection_failed 0
 	fi
 
 	case "$network_status" in
@@ -162,12 +212,12 @@ done
 
 if ! mkdir -p "$networkd_runtime_dir"; then
 	echo "Failed to create networkd runtime directory: directory=$networkd_runtime_dir" >&2
-	exit 1
+	finish failed runtime_directory_create_failed 1
 fi
 
 if ! temporary_network_file=$(mktemp "$networkd_runtime_dir/.forge-scout-network.XXXXXX"); then
 	echo "Failed to create temporary networkd configuration: directory=$networkd_runtime_dir" >&2
-	exit 1
+	finish failed temporary_file_create_failed 1
 fi
 
 if ! {
@@ -176,6 +226,9 @@ if ! {
 		'Name=enx* enp* enP*' \
 		"Property=!INTERFACE=$preferred_interface" \
 		'' \
+		'[Link]' \
+		'RequiredForOnline=no' \
+		'' \
 		'[Network]' \
 		'DHCP=no' \
 		'IPv6AcceptRA=no' \
@@ -183,31 +236,34 @@ if ! {
 } >"$temporary_network_file"; then
 	echo "Failed to write networkd configuration: path=$temporary_network_file" >&2
 	rm -f "$temporary_network_file"
-	exit 1
+	finish failed network_configuration_write_failed 1
 fi
 
 if ! chmod 0644 "$temporary_network_file" ||
 	! mv -f "$temporary_network_file" "$runtime_network_file"; then
 	echo "Failed to install networkd configuration: path=$runtime_network_file" >&2
 	rm -f "$temporary_network_file"
-	exit 1
+	finish failed network_configuration_install_failed 1
 fi
 
 if ! "$networkctl_command" reload; then
 	echo "Failed to reload networkd configuration" >&2
-	exit 1
+	finish failed networkd_reload_failed 1
 fi
 
 echo "Selected preferred network interface: interface=$preferred_interface mac=$preferred_mac"
 failed=false
+failure_reason=unknown_failure
 
-wait_attempts=31
+reconfiguration_start_seconds=$(uptime_seconds)
+reconfiguration_deadline_seconds=$((reconfiguration_start_seconds + network_wait_seconds))
 wait_complete=false
 wait_failed=false
-while [ "$#" -gt 0 ] && [ "$wait_attempts" -gt 0 ]
+while [ "$#" -gt 0 ]
 do
 	all_interfaces_complete=true
 	incomplete_interfaces=
+	incomplete_report=
 	for interface
 	do
 		# A removed interface is safe; if it reappears, networkd will apply the
@@ -237,6 +293,7 @@ do
 					*'"AdministrativeState":"failed"'*)
 						echo "Network interface reconfiguration failed: interface=$interface network_status=$network_status" >&2
 						failed=true
+						failure_reason=interface_reconfiguration_failed
 						wait_failed=true
 						break
 						;;
@@ -281,8 +338,12 @@ do
 
 		all_interfaces_complete=false
 		incomplete_interfaces="${incomplete_interfaces}${incomplete_interfaces:+ }$interface"
-		if [ "$wait_attempts" -eq 1 ]; then
-			echo "Network interface still incomplete: interface=$interface reason=$incomplete_reason${incomplete_detail:+ $incomplete_detail}" >&2
+		incomplete_message="Network interface still incomplete: interface=$interface reason=$incomplete_reason${incomplete_detail:+ $incomplete_detail}"
+		if [ -n "$incomplete_report" ]; then
+			incomplete_report="$incomplete_report
+$incomplete_message"
+		else
+			incomplete_report=$incomplete_message
 		fi
 	done
 
@@ -294,15 +355,20 @@ do
 		break
 	fi
 
-	wait_attempts=$((wait_attempts - 1))
-	if [ "$wait_attempts" -gt 0 ]; then
-		sleep 1
+	if ! sleep_before_deadline "$reconfiguration_deadline_seconds"; then
+		[ -z "$incomplete_report" ] || printf '%s\n' "$incomplete_report" >&2
+		break
 	fi
 done
 
 if [ "$#" -gt 0 ] && [ "$wait_complete" = false ] && [ "$wait_failed" = false ]; then
-	echo "Timed out waiting for network interface reconfiguration: interfaces=${incomplete_interfaces:-unknown}" >&2
+	echo "Timed out waiting for network interface reconfiguration: interfaces=${incomplete_interfaces:-unknown} waited=${network_wait_seconds}s" >&2
 	failed=true
+	failure_reason=interface_reconfiguration_timeout
 fi
 
-[ "$failed" = false ]
+if [ "$failed" = true ]; then
+	finish failed "$failure_reason" 1
+fi
+
+finish success completed 0
