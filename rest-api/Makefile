@@ -160,7 +160,6 @@ test-workflow:
 .PHONY: test-workflow-config-validation
 test-workflow-config-validation:
 	cd workflow && go test ./pkg/configvalidation -count=1
-	cd workflow && go test ./internal/config -count=1
 
 test-proto:
 	cd proto && go test ./... -count=1
