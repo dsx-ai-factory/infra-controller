@@ -6,7 +6,6 @@ package model
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net/netip"
 	"regexp"
 	"slices"
@@ -349,9 +348,9 @@ func (ascr APIVpcCreateRequest) Validate() error {
 		}
 	}
 
-	if ascr.Vni != nil && (*ascr.Vni < 0 || *ascr.Vni > math.MaxUint16) {
+	if ascr.Vni != nil && (*ascr.Vni < 0 || *ascr.Vni > maxVpcRoutingVni) {
 		return validation.Errors{
-			"vni": fmt.Errorf("VNI must be an integer between 0 and %d", math.MaxUint16),
+			"vni": fmt.Errorf("VNI must be an integer between 0 and %d", maxVpcRoutingVni),
 		}
 	}
 
@@ -373,7 +372,7 @@ func (ascr APIVpcCreateRequest) Validate() error {
 // that the handler has performed any cross-context checks Validate
 // cannot see (e.g. resolved network-virtualization against site
 // config). Specifically, the VNI cast is safe because Validate
-// bounds `Vni` to `[0, MaxUint16]`.
+// bounds `Vni` to `[0, maxVpcRoutingVni]`.
 func (ascr APIVpcCreateRequest) ToProto(vpc *cdbm.Vpc) *corev1.VpcCreationRequest {
 	var vni *uint32
 	if ascr.Vni != nil {

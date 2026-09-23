@@ -195,14 +195,34 @@ func TestAPIVpcCreateRequest_Validate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		// The first VNI above the old 16-bit cap must pass validation.
 		{
-			name: "test invalid VPC create request - invalid VNI",
+			name: "accepts first VNI above 65535",
 			fields: fields{
 				Name:   "test-name",
 				SiteID: uuid.NewString(),
-				Vni:    cutil.GetPtr(70000),
+				Vni:    cutil.GetPtr(65536),
 			},
-			wantErr: true,
+		},
+		// The highest 24-bit VNI must remain valid.
+		{
+			name: "accepts maximum VNI",
+			fields: fields{
+				Name:   "test-name",
+				SiteID: uuid.NewString(),
+				Vni:    cutil.GetPtr(maxVpcRoutingVni),
+			},
+		},
+		// A VNI outside the 24-bit range must fail before the uint32 conversion.
+		{
+			name: "rejects VNI above maximum",
+			fields: fields{
+				Name:   "test-name",
+				SiteID: uuid.NewString(),
+				Vni:    cutil.GetPtr(maxVpcRoutingVni + 1),
+			},
+			wantErr:         true,
+			wantErrContains: "VNI must be an integer between 0 and 16777215",
 		},
 		{
 			name: "test valid VPC create request - invalid labels are specified key is empty",

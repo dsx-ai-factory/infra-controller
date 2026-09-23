@@ -20752,7 +20752,7 @@ components:
             - integer
             - 'null'
           minimum: 1
-          maximum: 65535
+          maximum: 16777215
           readOnly: true
           description: Explicitly requested VNI for the VPC if one was requested at creation time
         vni:
@@ -21012,7 +21012,7 @@ components:
             - integer
             - 'null'
           minimum: 1
-          maximum: 65535
+          maximum: 16777215
           description: Explicitly requested VNI for the VPC
         nvLinkLogicalPartitionId:
           type:
