@@ -922,7 +922,7 @@ type ApiUpdateExpectedRackRequest struct {
 	expectedRackUpdateRequest *ExpectedRackUpdateRequest
 }
 
-// Expected Rack update request
+// Expected Rack update request.  Provide a non-null value for at least one of rackId, rackProfileId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
 func (r ApiUpdateExpectedRackRequest) ExpectedRackUpdateRequest(expectedRackUpdateRequest ExpectedRackUpdateRequest) ApiUpdateExpectedRackRequest {
 	r.expectedRackUpdateRequest = &expectedRackUpdateRequest
 	return r
