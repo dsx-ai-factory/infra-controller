@@ -31,7 +31,7 @@ type Machine struct {
 	SiteId *string `json:"siteId,omitempty"`
 	// ID of the Instance Type, if assigned
 	InstanceTypeId NullableString `json:"instanceTypeId,omitempty"`
-	// ID of the Instance if this Machine is assigned to one
+	// ID of the associated Instance, or `null` when no Instance is associated. After release, this field can remain populated while `status` is `Ready` because machine readiness and Instance deletion are reconciled independently. Before targeting a released Machine for Instance creation, check both `status == Ready` and `instanceId == null`. This is a precheck, not a reservation or a guarantee that creation will succeed.
 	InstanceId NullableString `json:"instanceId,omitempty"`
 	// ID of the Tenant that owns the Instance if the Machine is assigned to one
 	TenantId NullableString `json:"tenantId,omitempty"`
