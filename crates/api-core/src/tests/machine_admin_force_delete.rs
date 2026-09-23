@@ -767,6 +767,7 @@ async fn test_admin_force_delete_preserves_reassigned_resources(pool: sqlx::PgPo
                 .machine_interface_id
                 .unwrap(),
             &mut replacement_txn,
+            false,
         )
         .await
         .unwrap();

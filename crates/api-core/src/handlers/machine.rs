@@ -327,6 +327,7 @@ async fn force_delete_bmc_records(
     machine_id: &MachineId,
     bmc_info: &BmcInfo,
     delete_bmc_interface: bool,
+    release_reserved_addresses: bool,
     locked_explored_host: Option<IpAddr>,
     locked_explored_endpoints: &HashSet<IpAddr>,
 ) -> Result<bool, CarbideError> {
@@ -354,7 +355,7 @@ async fn force_delete_bmc_records(
         db::explored_endpoints::delete(txn, address).await?;
     }
     if delete_bmc_interface {
-        db::machine_interface::delete(&interface.id, txn).await?;
+        db::machine_interface::delete(&interface.id, txn, release_reserved_addresses).await?;
     }
     Ok(delete_bmc_interface)
 }
@@ -486,6 +487,7 @@ async fn force_delete_cleanup_txn(
             &machine.id,
             &machine.status.bmc_info,
             request.delete_bmc_interfaces,
+            request.release_preserved_addresses,
             locked_explored_host,
             &locked_explored_endpoints,
         )
@@ -604,6 +606,7 @@ async fn force_delete_cleanup_txn(
             &dpu_machine.id,
             &dpu_machine.status.bmc_info,
             request.delete_bmc_interfaces,
+            request.release_preserved_addresses,
             None,
             &locked_explored_endpoints,
         )
@@ -637,7 +640,12 @@ async fn force_delete_cleanup_txn(
                     .iter()
                     .any(|captured| captured.id == interface.id)
             }) {
-                db::machine_interface::delete(&interface.id, &mut txn).await?;
+                db::machine_interface::delete(
+                    &interface.id,
+                    &mut txn,
+                    request.release_preserved_addresses,
+                )
+                .await?;
             }
             response.dpu_interfaces_deleted = true;
         }
