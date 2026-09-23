@@ -1791,6 +1791,10 @@ jobs:
       - name: Check Core VIP preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
 
+      # Uses python3-yaml installed by the configuration check above.
+      - name: Test DevSpace PostgreSQL connection manifests
+        run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
+
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
