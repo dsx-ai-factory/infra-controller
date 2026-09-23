@@ -40,7 +40,9 @@ use itertools::Itertools as _;
 use model::ConfigValidationError;
 use model::dpa_interface::DpaSearchConfig;
 use model::instance::config::InstanceConfig;
-use model::instance::config::extension_services::InstanceExtensionServicesConfig;
+use model::instance::config::extension_services::{
+    InstanceExtensionServicesConfig, RequestedInstanceExtensionServicesConfig,
+};
 use model::instance::config::infiniband::InstanceInfinibandConfig;
 use model::instance::config::network::InstanceNetworkConfig;
 use model::instance::config::nvlink::InstanceNvLinkConfig;
@@ -313,8 +315,7 @@ pub(crate) async fn find_by_machine_id(
         Err(e) => return Err(CarbideError::from(e).into()),
     };
 
-    let maybe_instance =
-        Option::<rpc::Instance>::rpc_try_from(mh_snapshot).map_err(CarbideError::from)?;
+    let maybe_instance = snapshot_to_optional_instance(mh_snapshot)?;
 
     let instances = if let Some(instance) = maybe_instance {
         vec![instance]
@@ -1331,10 +1332,19 @@ pub(crate) async fn update_instance_config(
         .as_ref()
         .is_some_and(requests_implicit_vf_allocation);
 
-    let mut config: InstanceConfig = match request.config {
+    let mut rpc_config = match request.config {
         None => return Err(CarbideError::MissingArgument("config").into()),
-        Some(config) => config.try_into().map_err(CarbideError::from)?,
+        Some(config) => config,
     };
+    let requested_extension_services = rpc_config
+        .dpu_extension_services
+        .take()
+        .map(RequestedInstanceExtensionServicesConfig::try_from)
+        .transpose()
+        .map_err(CarbideError::from)?
+        .unwrap_or_default();
+    let mut config: InstanceConfig = rpc_config.try_into().map_err(CarbideError::from)?;
+    config.extension_services = requested_extension_services.clone().into_new_attachments();
 
     tracing::info!(
         spx_config = ?config.spxconfig,
@@ -1563,6 +1573,7 @@ pub(crate) async fn update_instance_config(
         &mh_snapshot,
         initial_instance,
         &config.extension_services,
+        &requested_extension_services,
         &mut txn,
     )
     .await?;
@@ -1785,6 +1796,12 @@ async fn update_instance_network_config(
     if instance.deleted.is_some() {
         return Err(ConfigValidationError::InstanceDeletionIsRequested.into());
     }
+
+    // Service endpoints are owned by Core and are absent from public requests.
+    // Keep them unchanged while applying the caller's tenant-network definition.
+    network
+        .service_interfaces
+        .clone_from(&instance.config.network.service_interfaces);
 
     // Preserve caller intent long enough to enforce prefix family and VPC allocation policy.
     // Resource reuse below deliberately restores stored requested addresses for matching explicit
@@ -2054,9 +2071,50 @@ async fn update_instance_extension_services_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     extension_services: &InstanceExtensionServicesConfig,
+    requested_extension_services: &RequestedInstanceExtensionServicesConfig,
     txn: &mut db::Transaction<'_>,
 ) -> Result<(), CarbideError> {
     let current = &instance.config.extension_services;
+
+    // A client may repeat the current VPC selection, but cannot add or replace
+    // endpoint ownership until activation is implemented.
+    for requested in &requested_extension_services.service_configs {
+        if requested.service_vpc_ids.is_empty() {
+            continue;
+        }
+        let Some(attachment) = current.active_services().into_iter().find(|attachment| {
+            attachment.service_id == requested.service_id && attachment.version == requested.version
+        }) else {
+            return Err(CarbideError::FailedPrecondition(
+                "service VPC attachment is unavailable until network resource reconciliation is implemented"
+                    .to_string(),
+            ));
+        };
+        let mut selected_vpcs = instance
+            .config
+            .network
+            .service_interfaces
+            .iter()
+            .filter(|endpoint| Some(endpoint.attachment_id) == attachment.id)
+            .map(|endpoint| (endpoint.interface_ordinal, endpoint.vpc_id))
+            .collect_vec();
+        selected_vpcs.sort_unstable();
+        selected_vpcs.dedup();
+        if selected_vpcs.len() != requested.service_vpc_ids.len()
+            || selected_vpcs
+                .iter()
+                .zip(&requested.service_vpc_ids)
+                .enumerate()
+                .any(|(ordinal, ((stored_ordinal, stored_vpc), requested_vpc))| {
+                    *stored_ordinal as usize != ordinal || stored_vpc != requested_vpc
+                })
+        {
+            return Err(CarbideError::FailedPrecondition(
+                "the VPC selection of an existing extension-service attachment cannot be changed"
+                    .to_string(),
+            ));
+        }
+    }
 
     if !current.is_extension_services_config_update_requested(extension_services) {
         return Ok(());
@@ -2075,8 +2133,8 @@ async fn update_instance_extension_services_config(
         return Err(ConfigValidationError::InstanceDeletionIsRequested.into());
     }
 
-    // A service being detached remains durably represented with `removed:
-    // true`, so the merged config references every service the instance is
+    // A service being detached remains durably represented with a removal
+    // timestamp, so the merged config references every service the instance is
     // attached to before and after this update.
     let mut new_extension_services_config =
         current.calculate_new_extension_services_config(extension_services);
@@ -2141,19 +2199,31 @@ async fn update_instance_extension_services_config(
 /// Extracts the RPC representation of Instances from a ManagedHost snapshot
 ///
 /// This method expects that the snapshot must contain an instance definition.
-/// If this is not required, then `Option::<rpc::Instance>::try_from(mh_snapshot)`
-/// can be utilized.
+/// If this is not required, use `snapshot_to_optional_instance`.
 fn snapshot_to_instance(
     mh_snapshot: ManagedHostStateSnapshot,
 ) -> Result<rpc::Instance, CarbideError> {
     let machine_id = mh_snapshot.host_snapshot.id;
-    Option::<rpc::Instance>::rpc_try_from(mh_snapshot)
-        .map_err(CarbideError::from)?
-        .ok_or_else(|| {
-            CarbideError::internal(format!(
-                "instance on machine {machine_id} can be converted from snapshot"
-            ))
-        })
+    snapshot_to_optional_instance(mh_snapshot)?.ok_or_else(|| {
+        CarbideError::internal(format!(
+            "instance on machine {machine_id} can be converted from snapshot"
+        ))
+    })
+}
+
+/// Converts stored managed-host state into an optional caller-visible instance.
+///
+/// Conversion failures come from server-owned state, so they are internal
+/// errors rather than invalid client input.
+pub(super) fn snapshot_to_optional_instance(
+    snapshot: ManagedHostStateSnapshot,
+) -> Result<Option<rpc::Instance>, CarbideError> {
+    let machine_id = snapshot.host_snapshot.id;
+    Option::<rpc::Instance>::rpc_try_from(snapshot).map_err(|error| {
+        CarbideError::internal(format!(
+            "failed to convert managed-host snapshot for machine {machine_id} to an instance response: {error}"
+        ))
+    })
 }
 
 /// Records every exact IB membership available from the current `Instance`

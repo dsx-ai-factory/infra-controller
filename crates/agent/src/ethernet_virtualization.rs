@@ -3331,6 +3331,8 @@ esac
             quarantine_state: None,
         };
         rpc::ManagedHostNetworkConfigResponse {
+            service_interfaces: vec![],
+            service_vpc_slot_inventory: None,
             asn: 4259912557,
             datacenter_asn: 11414,
             site_global_vpc_vni,
@@ -4038,6 +4040,8 @@ esac
         };
 
         let mut network_config = rpc::ManagedHostNetworkConfigResponse {
+            service_interfaces: vec![],
+            service_vpc_slot_inventory: None,
             bgp_leaf_session_password: None,
             site_global_vpc_vni: None,
             asn: 4259912557,
@@ -4283,6 +4287,8 @@ esac
             quarantine_state: None,
         };
         let network_config = rpc::ManagedHostNetworkConfigResponse {
+            service_interfaces: vec![],
+            service_vpc_slot_inventory: None,
             bgp_leaf_session_password: None,
             site_global_vpc_vni: None,
             asn: 4259912557,
@@ -4461,6 +4467,8 @@ esac
                 ..Default::default()
             };
             let network_config = rpc::ManagedHostNetworkConfigResponse {
+                service_interfaces: vec![],
+                service_vpc_slot_inventory: None,
                 use_admin_network,
                 admin_interface: use_admin_network.then_some(iface.clone()),
                 tenant_interfaces: (!use_admin_network)

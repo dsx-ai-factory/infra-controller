@@ -52,7 +52,9 @@ use model::ib::{DEFAULT_IB_FABRIC_NAME, IbMembership};
 use model::ib_partition::PartitionKey;
 use model::instance::NewInstance;
 use model::instance::config::InstanceConfig;
-use model::instance::config::extension_services::InstanceExtensionServicesConfig;
+use model::instance::config::extension_services::{
+    InstanceExtensionServicesConfig, RequestedInstanceExtensionServicesConfig,
+};
 use model::instance::config::infiniband::InstanceInfinibandConfig;
 use model::instance::config::network::{
     InstanceInterfaceIpFamilyMode, InstanceNetworkConfig, InterfaceFunctionId, Ipv6InterfaceConfig,
@@ -502,12 +504,26 @@ impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
                 CarbideError::from(RpcDataConversionError::InvalidInstanceTypeId(e.value()))
             })?;
 
-        let config = request
+        let mut rpc_config = request
             .config
             .ok_or(RpcDataConversionError::MissingArgument("config"))?;
 
-        let implicit_vf_allocation = requests_implicit_vf_allocation(&config);
-        let mut config = InstanceConfig::try_from(config)?;
+        let implicit_vf_allocation = requests_implicit_vf_allocation(&rpc_config);
+        let requested_extension_services = rpc_config
+            .dpu_extension_services
+            .take()
+            .map(RequestedInstanceExtensionServicesConfig::try_from)
+            .transpose()?
+            .unwrap_or_default();
+        if requested_extension_services.has_service_vpc_selections() {
+            return Err(CarbideError::FailedPrecondition(
+                "service VPC attachment is unavailable until network resource reconciliation is implemented"
+                    .to_string(),
+            ));
+        }
+
+        let mut config = InstanceConfig::try_from(rpc_config)?;
+        config.extension_services = requested_extension_services.into_new_attachments();
         // Empty power-policy values are clear sentinels only on update. During
         // creation there is no association to clear, so persist them as unset.
         config.power_profile = normalize_created_power_profile(config.power_profile);
@@ -1833,6 +1849,19 @@ pub(crate) fn validate_instance_extension_services(
             ))
         })?;
 
+        // Until endpoint reconciliation lands, an existing attachment may be
+        // retained or removed but a networked service cannot be newly attached.
+        // Networked definitions cannot create another native version, so the
+        // existing service ID is sufficient at this interim guard.
+        if !service.service_vpc_interfaces.is_empty()
+            && !existing_active_service_ids.contains(&config.service_id)
+        {
+            return Err(CarbideError::FailedPrecondition(
+                "service VPC attachment is unavailable until network resource reconciliation is implemented"
+                    .to_string(),
+            ));
+        }
+
         // A service type can only be attached to the host model able to
         // reconcile it. DPF Helm services use DPUDevice labels and never reach
         // the DPU agent; Kubernetes Pod services are agent-only. The host flag
@@ -2959,6 +2988,37 @@ mod tests {
     use model::instance::config::infiniband::InstanceIbInterfaceConfig;
 
     use super::*;
+
+    /// Verifies explicit service-VPC activation is rejected during request
+    /// conversion, before allocation can open a transaction or persist identity.
+    #[test]
+    fn service_vpc_activation_is_unavailable_before_persistence() {
+        // Build an otherwise valid allocation that requests a service VPC.
+        let request = rpc::InstanceAllocationRequest {
+            machine_id: Some(
+                "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
+                    .parse()
+                    .expect("valid host machine ID"),
+            ),
+            config: Some(rpc::InstanceConfig {
+                dpu_extension_services: Some(rpc::InstanceDpuExtensionServicesConfig {
+                    service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
+                        service_id: ExtensionServiceId::new().to_string(),
+                        version: ConfigVersion::initial().to_string(),
+                        service_vpc_ids: vec![VpcId::new()],
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Request conversion is the earliest boundary and must reject activation.
+        assert!(matches!(
+            InstanceAllocationRequest::try_from(request),
+            Err(CarbideError::FailedPrecondition(_))
+        ));
+    }
 
     /// Test-specific helper that builds one allocated physical IB interface.
     fn ib_interface(partition_id: IBPartitionId, guid: Option<&str>) -> InstanceIbInterfaceConfig {

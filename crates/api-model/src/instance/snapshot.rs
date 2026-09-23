@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::instance_type::InstanceTypeId;
@@ -36,6 +36,61 @@ use crate::instance::status::InstanceStatusObservations;
 use crate::metadata::Metadata;
 use crate::os::{InlineIpxe, OperatingSystem, OperatingSystemVariant};
 use crate::tenant::TenantOrganizationId;
+
+/// Validates stored attachment identities and the endpoints that reference them.
+fn validate_extension_service_identities(
+    config: &InstanceExtensionServicesConfig,
+    network_config: &InstanceNetworkConfig,
+) -> Result<(), sqlx::Error> {
+    let mut attachment_ids = HashSet::new();
+    if config
+        .service_configs
+        .iter()
+        .filter_map(|service| service.id)
+        .any(|attachment_id| attachment_id.is_nil() || !attachment_ids.insert(attachment_id))
+    {
+        return Err(invalid_extension_service_identity(
+            "present extension-service attachment IDs must be non-nil and unique within an instance",
+        ));
+    }
+
+    let mut endpoint_ids = HashSet::new();
+    let mut endpoint_keys = HashSet::new();
+    for endpoint in &network_config.service_interfaces {
+        // Each endpoint needs one valid owner, one stable identity, and one
+        // entry for its attachment, interface position, and DPU.
+        if endpoint.attachment_id.is_nil()
+            || !attachment_ids.contains(&endpoint.attachment_id)
+            || endpoint.internal_uuid.is_nil()
+            || !endpoint_ids.insert(endpoint.internal_uuid)
+            || !endpoint_keys.insert((
+                endpoint.attachment_id,
+                endpoint.interface_ordinal,
+                endpoint.dpu_id,
+            ))
+        {
+            return Err(invalid_extension_service_identity(
+                "service endpoint contains a nil, duplicate, or dangling identity",
+            ));
+        }
+        endpoint
+            .validate()
+            .map_err(|error| invalid_extension_service_identity(error.to_string()))?;
+    }
+
+    Ok(())
+}
+
+/// Reports an invalid stored service identity as a decoding error for the snapshot column.
+fn invalid_extension_service_identity(message: impl Into<String>) -> sqlx::Error {
+    sqlx::Error::ColumnDecode {
+        index: "extension_services_config".to_string(),
+        source: Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message.into(),
+        )),
+    }
+}
 
 /// Represents a snapshot view of an `Instance`
 ///
@@ -161,6 +216,7 @@ pub fn from_pg_json_and_os(
     value: InstanceSnapshotPgJson,
     os: OperatingSystem,
 ) -> Result<InstanceSnapshot, sqlx::Error> {
+    validate_extension_service_identities(&value.extension_services_config, &value.network_config)?;
     let metadata = Metadata {
         name: value.name,
         description: value.description,
@@ -258,6 +314,10 @@ impl TryFrom<InstanceSnapshotPgJson> for InstanceSnapshot {
     type Error = sqlx::Error;
 
     fn try_from(value: InstanceSnapshotPgJson) -> Result<Self, Self::Error> {
+        validate_extension_service_identities(
+            &value.extension_services_config,
+            &value.network_config,
+        )?;
         let metadata = Metadata {
             name: value.name,
             description: value.description,
@@ -387,10 +447,34 @@ mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::scenarios;
     use chrono::Utc;
+    use mac_address::MacAddress;
     use uuid::Uuid;
 
     use super::*;
+    use crate::instance::config::extension_services::InstanceExtensionServiceConfig;
     use crate::os::{InlineIpxe, OperatingSystemVariant};
+
+    /// Builds the smallest valid endpoint so these tests can focus on attachment
+    /// identity rather than point-to-point prefix validation.
+    fn service_endpoint(
+        attachment_id: Uuid,
+    ) -> crate::instance::config::network::InstanceServiceInterfaceConfig {
+        crate::instance::config::network::InstanceServiceInterfaceConfig {
+            attachment_id,
+            interface_ordinal: 0,
+            dpu_id: "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid DPU machine ID"),
+            slot_index: 0,
+            vpc_id: carbide_uuid::vpc::VpcId::new(),
+            vpc_prefix_id: carbide_uuid::vpc::VpcPrefixId::new(),
+            network_segment_id: carbide_uuid::network::NetworkSegmentId::new(),
+            network_prefix_id: carbide_uuid::network::NetworkPrefixId::new(),
+            link_prefix: "192.0.2.0/31".parse().expect("valid service prefix"),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+            internal_uuid: Uuid::new_v4(),
+        }
+    }
 
     fn minimal_pg_json() -> InstanceSnapshotPgJson {
         let version = ConfigVersion::initial().version_string();
@@ -436,6 +520,94 @@ mod tests {
             deleted: None,
             update_network_config_request: None,
         }
+    }
+
+    /// Verifies snapshots written before service endpoints existed remain
+    /// readable, because an omitted field means no stored service endpoints.
+    #[test]
+    fn missing_service_interfaces_defaults_to_empty() {
+        // Remove the additive field to model JSON stored by an older binary.
+        let mut persisted = serde_json::to_value(minimal_pg_json()).expect("serialize snapshot");
+        persisted["network_config"]
+            .as_object_mut()
+            .expect("network config is an object")
+            .remove("service_interfaces")
+            .expect("current network config includes service interfaces");
+
+        // Decode through the production snapshot shape and preserve its legacy meaning.
+        let decoded = serde_json::from_value::<InstanceSnapshotPgJson>(persisted)
+            .expect("deserialize predecessor snapshot");
+        assert!(decoded.network_config.service_interfaces.is_empty());
+    }
+
+    /// Verifies an attachment written before IDs existed remains readable and
+    /// rewritable without inventing an identity during snapshot decoding.
+    #[test]
+    fn missing_extension_service_attachment_id_defaults_to_none() {
+        // Recreate JSON from before the field was added and decode it as a snapshot.
+        let mut persisted = serde_json::to_value(minimal_pg_json()).expect("serialize snapshot");
+        persisted["extension_services_config"] = serde_json::json!({
+            "service_configs": [{
+                "service_id": carbide_uuid::extension_service::ExtensionServiceId::new(),
+                "version": ConfigVersion::initial(),
+                "removed": null
+            }]
+        });
+
+        // Decoding preserves absence, and a current writer keeps the field omitted.
+        let decoded = serde_json::from_value::<InstanceSnapshotPgJson>(persisted)
+            .expect("deserialize predecessor attachment");
+        assert!(
+            decoded.extension_services_config.service_configs[0]
+                .id
+                .is_none()
+        );
+        let rewritten = serde_json::to_value(decoded.extension_services_config)
+            .expect("serialize predecessor attachment");
+        assert!(rewritten["service_configs"][0].get("id").is_none());
+    }
+
+    /// Verifies stored identities uniquely identify an attachment and that
+    /// endpoints cannot silently acquire a different owner.
+    #[test]
+    fn networked_extension_service_identity_is_validated() {
+        let attachment_id = Uuid::new_v4();
+        let service_id = carbide_uuid::extension_service::ExtensionServiceId::new();
+        let version = ConfigVersion::initial();
+
+        scenarios!(
+            run = |(ids, endpoint_owner): (Vec<Option<Uuid>>, Option<Uuid>)| {
+                let config = InstanceExtensionServicesConfig {
+                    service_configs: ids.into_iter().map(|id| InstanceExtensionServiceConfig {
+                        id,
+                        dpu_target: None,
+                        service_id,
+                        version,
+                        removed: None,
+                    }).collect(),
+                };
+                let network = InstanceNetworkConfig {
+                    service_interfaces: endpoint_owner.into_iter().map(service_endpoint).collect(),
+                    ..Default::default()
+                };
+                validate_extension_service_identities(&config, &network).map_err(drop)
+            };
+            "stored ownership" {
+                // Multiple legacy attachments may lack IDs because they cannot own endpoints.
+                (vec![None, None], None) => Yields(()),
+                // A stored owner remains valid without replacing or rebuilding its ID.
+                (vec![Some(attachment_id)], Some(attachment_id)) => Yields(()),
+                // Nil is valid UUID syntax but cannot identify an attachment,
+                // even when there are no endpoints.
+                (vec![Some(Uuid::nil())], None) => Fails,
+                // Duplicate present owners make endpoint correlation ambiguous.
+                (vec![Some(attachment_id), Some(attachment_id)], Some(attachment_id)) => Fails,
+                // An ID-less legacy attachment cannot own a service endpoint.
+                (vec![None], Some(attachment_id)) => Fails,
+                // A valid endpoint UUID still needs a matching attachment in this instance.
+                (vec![Some(attachment_id)], Some(Uuid::new_v4())) => Fails,
+            }
+        );
     }
 
     #[test]

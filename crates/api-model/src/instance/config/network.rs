@@ -28,6 +28,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::ConfigValidationError;
+use crate::extension_service::ServiceVpcAddressFamily;
 
 // Specifies whether a network interface is physical network function (PF)
 // or a virtual network function
@@ -125,6 +126,94 @@ pub struct InstanceNetworkConfig {
     /// The resolved per-interface details (IP, MAC, gateway, prefix) appear in
     /// `Instance.status.network.interfaces` like usual.
     pub auto_config: Option<InstanceNetworkAutoConfig>,
+
+    /// Server-owned service-facing endpoints that never appear as tenant OS interfaces.
+    #[serde(default)]
+    pub service_interfaces: Vec<InstanceServiceInterfaceConfig>,
+}
+
+/// Stored endpoint connecting one service attachment to one fixed slot on a DPU.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceServiceInterfaceConfig {
+    /// Attachment that owns this endpoint.
+    pub attachment_id: uuid::Uuid,
+    /// Zero-based position in the service's interface requirements.
+    pub interface_ordinal: u32,
+    /// DPU on which this endpoint is configured.
+    pub dpu_id: DpuMachineId,
+    /// Fixed service slot used on that DPU.
+    pub slot_index: u32,
+    /// VPC connected to this service interface.
+    pub vpc_id: VpcId,
+    /// VPC prefix from which the endpoint network was allocated.
+    pub vpc_prefix_id: VpcPrefixId,
+    /// Network segment created for this endpoint.
+    pub network_segment_id: NetworkSegmentId,
+    /// Network prefix created for this endpoint.
+    pub network_prefix_id: NetworkPrefixId,
+    /// Canonical IPv4 /31 or IPv6 /127 shared by HBN and the service.
+    pub link_prefix: IpNetwork,
+    /// Service-scoped MAC reused for this interface on every DPU.
+    pub mac_address: MacAddress,
+    /// Stable ID used to correlate this endpoint across reconciliation.
+    pub internal_uuid: uuid::Uuid,
+}
+
+impl InstanceServiceInterfaceConfig {
+    /// Returns the address family encoded by the point-to-point link prefix.
+    pub fn address_family(&self) -> ServiceVpcAddressFamily {
+        if self.link_prefix.is_ipv4() {
+            ServiceVpcAddressFamily::Ipv4
+        } else {
+            ServiceVpcAddressFamily::Ipv6
+        }
+    }
+
+    /// Returns the first address in the link prefix, assigned to HBN.
+    pub fn hbn_address(&self) -> IpAddr {
+        self.link_prefix.network()
+    }
+
+    /// Returns the second address in the link prefix, assigned to the service.
+    ///
+    /// Returns an error if the stored prefix does not contain a second address.
+    pub fn service_address(&self) -> Result<IpAddr, ConfigValidationError> {
+        self.link_prefix.iter().nth(1).ok_or_else(|| {
+            ConfigValidationError::InvalidValue(format!(
+                "service link prefix {} does not contain a service address",
+                self.link_prefix
+            ))
+        })
+    }
+
+    /// Validates that the link prefix is a canonical IPv4 /31 or IPv6 /127.
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        let expected_prefix = if self.link_prefix.is_ipv4() { 31 } else { 127 };
+        if self.link_prefix.prefix() != expected_prefix
+            || self.link_prefix.ip() != self.link_prefix.network()
+        {
+            return Err(ConfigValidationError::InvalidValue(format!(
+                "service link prefix {} must be a canonical IPv4 /31 or IPv6 /127",
+                self.link_prefix
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validates point-to-point shape and agreement with the registered address family.
+    pub fn validate_for_family(
+        &self,
+        address_family: ServiceVpcAddressFamily,
+    ) -> Result<(), ConfigValidationError> {
+        self.validate()?;
+        if self.address_family() != address_family {
+            return Err(ConfigValidationError::InvalidValue(format!(
+                "service link prefix {} does not match registered {:?} family",
+                self.link_prefix, address_family
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +267,7 @@ impl InstanceNetworkConfig {
                     vpc_id: vpc_ids.first().copied(),
                 }],
                 auto_config: None,
+                service_interfaces: vec![],
             }
         } else {
             Self {
@@ -204,6 +294,7 @@ impl InstanceNetworkConfig {
                     })
                     .collect(),
                 auto_config: None,
+                service_interfaces: vec![],
             }
         }
     }
@@ -228,6 +319,7 @@ impl InstanceNetworkConfig {
                 vpc_id,
             }],
             auto_config: None,
+            service_interfaces: vec![],
         }
     }
 
@@ -235,20 +327,24 @@ impl InstanceNetworkConfig {
     /// configs, the resolved interfaces are stripped so external callers see
     /// just their request (`{ auto: true, interfaces: [] }`). The fully-
     /// resolved interfaces still drive `InstanceNetworkStatus` population
-    /// from the internal model. For non-auto configs, returns `self`
-    /// unchanged.
+    /// from the internal model. For non-auto configs, caller-owned interfaces
+    /// remain unchanged.
     ///
     /// This exists to keep the input config from the user represented
     /// back to them as they sent it, and mask any internal interface
     /// resolution that happened as a result of `auto`.
+    ///
+    /// Service-owned endpoints are always stripped because they must not appear
+    /// in the tenant OS network configuration.
     pub fn into_external_view(self) -> Self {
-        if self.auto_config.is_some() {
-            Self {
-                interfaces: vec![],
-                auto_config: self.auto_config,
-            }
-        } else {
-            self
+        Self {
+            interfaces: if self.auto_config.is_some() {
+                vec![]
+            } else {
+                self.interfaces
+            },
+            auto_config: self.auto_config,
+            service_interfaces: vec![],
         }
     }
 
@@ -416,6 +512,8 @@ impl InstanceNetworkConfig {
         // Remove all service-generated properties before validating the config
         let mut current = self.clone();
         let mut new_config = new_config.clone();
+        current.service_interfaces.clear();
+        new_config.service_interfaces.clear();
         for iface in &mut current.interfaces {
             iface.ip_addrs.clear();
             iface.interface_prefixes.clear();
@@ -994,6 +1092,65 @@ mod tests {
 
     use super::*;
 
+    /// Verifies service endpoints accept only canonical point-to-point prefixes and
+    /// derive both peer addresses instead of storing copies that could disagree.
+    #[test]
+    fn service_vpc_endpoint_validates_and_derives_peer_addresses() {
+        let endpoint = |link_prefix: &str| InstanceServiceInterfaceConfig {
+            attachment_id: uuid::Uuid::new_v4(),
+            interface_ordinal: 0,
+            dpu_id: "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid DPU machine ID"),
+            slot_index: 0,
+            vpc_id: VpcId::new(),
+            vpc_prefix_id: VpcPrefixId::new(),
+            network_segment_id: NetworkSegmentId::new(),
+            network_prefix_id: NetworkPrefixId::new(),
+            link_prefix: link_prefix.parse().expect("valid test prefix"),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        };
+
+        // IPv4 reserves the base address for HBN and the next address for the service.
+        let ipv4 = endpoint("192.0.2.0/31");
+        ipv4.validate_for_family(ServiceVpcAddressFamily::Ipv4)
+            .expect("canonical IPv4 service prefix");
+        assert_eq!(ipv4.hbn_address(), "192.0.2.0".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            ipv4.service_address().unwrap(),
+            "192.0.2.1".parse::<IpAddr>().unwrap()
+        );
+
+        // IPv6 uses the same address ordering within its canonical /127.
+        let ipv6 = endpoint("2001:db8::/127");
+        ipv6.validate_for_family(ServiceVpcAddressFamily::Ipv6)
+            .expect("canonical IPv6 service prefix");
+        assert_eq!(ipv6.hbn_address(), "2001:db8::".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            ipv6.service_address().unwrap(),
+            "2001:db8::1".parse::<IpAddr>().unwrap()
+        );
+
+        // Both family forms must survive the JSONB representation unchanged.
+        for endpoint in [&ipv4, &ipv6] {
+            let decoded: InstanceServiceInterfaceConfig = serde_json::from_value(
+                serde_json::to_value(endpoint).expect("serialize service endpoint"),
+            )
+            .expect("deserialize service endpoint");
+            assert_eq!(&decoded, endpoint);
+        }
+
+        // A wider prefix, non-base address, or family mismatch would make the
+        // endpoint ambiguous or inconsistent and must fail before use.
+        assert!(endpoint("192.0.2.0/30").validate().is_err());
+        assert!(endpoint("192.0.2.1/31").validate().is_err());
+        assert!(
+            ipv6.validate_for_family(ServiceVpcAddressFamily::Ipv4)
+                .is_err()
+        );
+    }
+
     #[test]
     fn iterate_function_ids() {
         let func_ids: Vec<InterfaceFunctionId> = InterfaceFunctionId::iter_all().collect();
@@ -1114,6 +1271,7 @@ mod tests {
         InstanceNetworkConfig {
             interfaces,
             auto_config: None,
+            service_interfaces: vec![],
         }
     }
 
@@ -1728,6 +1886,7 @@ mod tests {
             auto_config: Some(InstanceNetworkAutoConfig {
                 vpc_id: VpcId::new(),
             }),
+            service_interfaces: vec![],
         }
     }
 

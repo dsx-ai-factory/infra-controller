@@ -111,6 +111,7 @@ impl InstanceExtensionServicesStatus {
             let Some(service_type) = service_types.get(&service.service_id) else {
                 is_configs_synced = false;
                 extension_services.push(InstanceExtensionServiceStatus {
+                    attachment_id: service.id,
                     service_id: service.service_id,
                     version: service.version,
                     overall_status: ExtensionServiceDeploymentStatus::Unknown,
@@ -148,6 +149,7 @@ impl InstanceExtensionServicesStatus {
                     is_configs_synced = false;
                 }
                 extension_services.push(InstanceExtensionServiceStatus {
+                    attachment_id: service.id,
                     service_id: service.service_id,
                     version: service.version,
                     overall_status: if can_terminate_without_dpu_observation {
@@ -214,6 +216,7 @@ impl InstanceExtensionServicesStatus {
             let overall_status = Self::calculate_overall_status(&dpu_statuses);
 
             extension_services.push(InstanceExtensionServiceStatus {
+                attachment_id: service.id,
                 service_id: service.service_id,
                 version: service.version,
                 overall_status,
@@ -358,6 +361,10 @@ pub struct MachineExtensionServiceStatus {
 /// Aggregated status of a single extension service across all DPUs
 #[derive(Clone, Debug)]
 pub struct InstanceExtensionServiceStatus {
+    /// Server-owned identity shared with service-interface endpoints.
+    ///
+    /// Attachments written before IDs were supported have no value.
+    pub attachment_id: Option<uuid::Uuid>,
     /// The unique identifier of the extension service
     pub service_id: ExtensionServiceId,
     /// The version of the extension service configuration
@@ -780,6 +787,7 @@ mod tests {
     fn create_service_config(version: ConfigVersion) -> InstanceExtensionServicesConfig {
         InstanceExtensionServicesConfig {
             service_configs: vec![InstanceExtensionServiceConfig {
+                id: Some(uuid::Uuid::new_v4()),
                 dpu_target: None,
                 service_id: get_test_service_id(),
                 version,
@@ -983,12 +991,14 @@ mod tests {
         let config = InstanceExtensionServicesConfig {
             service_configs: vec![
                 InstanceExtensionServiceConfig {
+                    id: Some(uuid::Uuid::new_v4()),
                     dpu_target: None,
                     service_id: kubernetes_pod_service,
                     version: config_version,
                     removed: None,
                 },
                 InstanceExtensionServiceConfig {
+                    id: Some(uuid::Uuid::new_v4()),
                     dpu_target: Some(crate::extension_service::DpuTarget::All),
                     service_id: dpf_helm_chart_service,
                     version: config_version,
@@ -1340,12 +1350,14 @@ mod tests {
                     config: InstanceExtensionServicesConfig {
                         service_configs: vec![
                             InstanceExtensionServiceConfig {
+                                id: Some(uuid::Uuid::new_v4()),
                                 dpu_target: None,
                                 service_id: get_test_service_id(),
                                 version: second_service_version,
                                 removed: None,
                             },
                             InstanceExtensionServiceConfig {
+                                id: Some(uuid::Uuid::new_v4()),
                                 dpu_target: None,
                                 service_id: get_test_service_id(),
                                 version: service_version,
@@ -1565,6 +1577,7 @@ mod tests {
             extension_services: services
                 .into_iter()
                 .map(|(removed, overall_status)| InstanceExtensionServiceStatus {
+                    attachment_id: Some(uuid::Uuid::new_v4()),
                     service_id: get_test_service_id(),
                     version: ConfigVersion::initial(),
                     overall_status,
@@ -1838,6 +1851,7 @@ mod tests {
         dpu_statuses: Vec<MachineExtensionServiceStatus>,
     ) -> InstanceExtensionServiceStatus {
         InstanceExtensionServiceStatus {
+            attachment_id: Some(uuid::Uuid::new_v4()),
             service_id: get_test_service_id(),
             version,
             overall_status,
@@ -1855,12 +1869,14 @@ mod tests {
         let config = InstanceExtensionServicesConfig {
             service_configs: vec![
                 InstanceExtensionServiceConfig {
+                    id: Some(uuid::Uuid::new_v4()),
                     dpu_target: None,
                     service_id: get_test_service_id(),
                     version: second_version,
                     removed: None,
                 },
                 InstanceExtensionServiceConfig {
+                    id: Some(uuid::Uuid::new_v4()),
                     dpu_target: None,
                     service_id: get_test_service_id(),
                     version: init_version,

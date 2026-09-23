@@ -26,6 +26,7 @@ use futures_util::FutureExt;
 use model::extension_service::{
     DpfHelmChartServiceData, ExtensionService, ExtensionServiceLifecycleState,
     ExtensionServiceObservability, ExtensionServiceType, ExtensionServiceVersionInfo,
+    ServiceVpcInterfaceRequirement,
 };
 use model::tenant::TenantOrganizationId;
 use tonic::{Request, Response, Status};
@@ -99,6 +100,35 @@ enum ExtensionServiceCredentialCleanupFailed {
     },
 }
 
+/// Validates and converts the complete service-facing interface definition.
+fn service_vpc_interfaces_from_rpc(
+    service_type: &ExtensionServiceType,
+    requirements: &[rpc::ServiceVpcInterfaceRequirement],
+) -> Result<Vec<ServiceVpcInterfaceRequirement>, CarbideError> {
+    // The MVP maps at most one registered interface to one VPC selection.
+    if requirements.len() > 1 {
+        return Err(CarbideError::InvalidArgument(
+            "at most one service VPC interface is supported".to_string(),
+        ));
+    }
+    let requirements = requirements
+        .iter()
+        .copied()
+        .map(ServiceVpcInterfaceRequirement::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(CarbideError::from)?;
+
+    // Only a DPF-managed workload can run inside the DPU-local service VRF.
+    if !requirements.is_empty() && service_type != &ExtensionServiceType::DpfHelmChart {
+        return Err(CarbideError::InvalidArgument(
+            "service VPC interfaces are supported only for DPF helm chart extension services"
+                .to_string(),
+        ));
+    }
+
+    Ok(requirements)
+}
+
 /// Creates a new extension service with an initial version.
 pub(crate) async fn create(
     api: &Api,
@@ -135,6 +165,8 @@ pub(crate) async fn create(
             .map_err(|_| CarbideError::InvalidArgument("invalid service_type".to_string()))?
             .into();
 
+    let service_vpc_interfaces =
+        service_vpc_interfaces_from_rpc(&service_type, &req.service_vpc_interfaces)?;
     let dpu_target = match (&service_type, req.dpu_target) {
         (ExtensionServiceType::KubernetesPod, None) => None,
         (ExtensionServiceType::DpfHelmChart, Some(value)) => Some(
@@ -227,6 +259,7 @@ pub(crate) async fn create(
                     &req.service_name,
                     &tenant_organization_id,
                     req.description.as_deref(),
+                    &service_vpc_interfaces,
                     &data,
                     observability,
                     req.credential.is_some(),
@@ -281,6 +314,11 @@ pub(crate) async fn create(
         created: service.created.to_string(),
         updated: service.updated.to_string(),
         lifecycle_status: Some(lifecycle_status),
+        service_vpc_interfaces: service
+            .service_vpc_interfaces
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     };
 
     Ok(Response::new(response))
@@ -291,6 +329,7 @@ pub(crate) async fn create(
 /// Metadata-only updates do not create a version. DPF Helm chart updates mutate
 /// the stable V1 definition for asynchronous controller reconciliation, whereas
 /// Kubernetes Pod updates create a new version and may update Vault credentials.
+/// Interface requirements are replaced only when no durable attachment exists.
 pub(crate) async fn update(
     api: &Api,
     request: Request<rpc::UpdateDpuExtensionServiceRequest>,
@@ -312,13 +351,6 @@ pub(crate) async fn update(
             CarbideError::InvalidArgument("service_name cannot be empty".to_string()).into(),
         );
     }
-
-    // Determine if the update is a metadata-only update
-    let metadata_only = req.data.is_empty()
-        && req.credential.is_none()
-        && req.observability.is_none()
-        && (req.service_name.as_deref().is_some_and(|s| !s.is_empty())
-            || req.description.is_some());
 
     let mut txn = api.txn_begin().await?;
 
@@ -353,6 +385,50 @@ pub(crate) async fn update(
         .into());
     }
 
+    let service_vpc_interfaces = match req.service_vpc_interfaces.as_ref() {
+        // A present wrapper is the complete desired definition (including an
+        // explicitly empty definition that removes all requirements).
+        Some(requirements) => service_vpc_interfaces_from_rpc(
+            &current_service.service_type,
+            &requirements.interfaces,
+        )?,
+        // Pre-feature clients omit this field. When nothing is stored, that
+        // omission and an explicitly empty definition mean the same thing.
+        None if current_service.service_vpc_interfaces.is_empty() => Vec::new(),
+        // Reusing the stored list here would turn a whole-definition update
+        // into a patch and could hide a caller that omitted required input.
+        None => {
+            return Err(CarbideError::InvalidArgument(
+                "service_vpc_interfaces must be provided when updating an extension service with registered interface requirements"
+                    .to_string(),
+            )
+            .into());
+        }
+    };
+    let service_vpc_interfaces_changed =
+        service_vpc_interfaces != current_service.service_vpc_interfaces;
+
+    // Requirements describe every attachment of the service, including entries
+    // still terminating on deleted instances. The service row lock serializes
+    // this check with attachment creation, whose validation takes the same lock.
+    if service_vpc_interfaces_changed
+        && extension_service::is_service_in_use(&mut txn, service_id, &[], true).await?
+    {
+        return Err(CarbideError::FailedPrecondition(
+            "service VPC interface requirements cannot be changed while the extension service has active or terminating attachments"
+                .to_string(),
+        )
+        .into());
+    }
+
+    // Metadata-only updates preserve the complete registered definition.
+    let metadata_only = !service_vpc_interfaces_changed
+        && req.data.is_empty()
+        && req.credential.is_none()
+        && req.observability.is_none()
+        && (req.service_name.as_deref().is_some_and(|s| !s.is_empty())
+            || req.description.is_some());
+
     let (updated_service, latest_version_row) = if metadata_only {
         // The name and description are updated in the database if provided, but no new version is
         // created.
@@ -372,8 +448,14 @@ pub(crate) async fn update(
     } else {
         match &current_service.service_type {
             ExtensionServiceType::DpfHelmChart => {
-                let result =
-                    update_dpf_helm_chart(&mut txn, service_id, current_service, &req).await?;
+                let result = update_dpf_helm_chart(
+                    &mut txn,
+                    service_id,
+                    current_service,
+                    &service_vpc_interfaces,
+                    &req,
+                )
+                .await?;
                 txn.commit().await?;
                 result
             }
@@ -392,6 +474,7 @@ async fn update_dpf_helm_chart(
     txn: &mut db::Transaction<'_>,
     service_id: ExtensionServiceId,
     current_service: &ExtensionService,
+    service_vpc_interfaces: &[ServiceVpcInterfaceRequirement],
     req: &rpc::UpdateDpuExtensionServiceRequest,
 ) -> Result<(ExtensionService, ExtensionServiceVersionInfo), Status> {
     if req.credential.is_some() {
@@ -420,9 +503,12 @@ async fn update_dpf_helm_chart(
     let existing_v1 =
         extension_service::find_version_info_of_known_service(txn, service_id, None).await?;
     let parsed_existing = parse_dpf_helm_chart_data(&existing_v1.data)?;
-    if parsed_data == parsed_existing {
+    if parsed_data == parsed_existing
+        && service_vpc_interfaces == current_service.service_vpc_interfaces
+    {
         return Err(CarbideError::InvalidArgument(
-            "no changes to data from the current DPF helm chart definition".to_string(),
+            "no changes to data or service VPC interfaces from the current DPF helm chart definition"
+                .to_string(),
         )
         .into());
     }
@@ -437,6 +523,7 @@ async fn update_dpf_helm_chart(
         service_id,
         req.service_name.as_deref(),
         req.description.as_deref(),
+        service_vpc_interfaces,
         &parsed_data,
         existing_v1.version,
         current_service.version_ctr,
@@ -539,6 +626,7 @@ async fn update_kubernetes_pod(
                 service_id,
                 req.service_name.as_deref(),
                 req.description.as_deref(),
+                &[],
                 &req.data,
                 observability,
                 req.credential.is_some(),
@@ -598,6 +686,11 @@ async fn updated_extension_service_response(
         created: updated_service.created.to_string(),
         updated: updated_service.updated.to_string(),
         lifecycle_status: Some(lifecycle_status),
+        service_vpc_interfaces: updated_service
+            .service_vpc_interfaces
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     };
 
     Ok(Response::new(response))
