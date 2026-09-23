@@ -119,6 +119,18 @@ NICo monitors the discovered and ingested trays and racks. It reports the actual
 
 NICo provides power control for racks as well as arbitrary groupings of trays in racks, following predefined or customized power operation sequences.
 
+The `acpowercycle` state removes and restores AC power. With the default
+operation rule, it applies only to compute trays; NVSwitch and power-shelf
+trays are not AC-cycled. Viking systems (DGX H100) do not support this
+operation.
+
+Rack and tray power requests are asynchronous. A successful request returns
+task IDs, not the result of the hardware operation. Poll
+[GET /v2/org/{org}/nico/task/{id}](api:GET/v2/org/:org/nico/task/:id) for each
+task. NICo Core owns platform support validation. If Core rejects an AC power
+cycle, including for a Viking target, the task ends with status `Failed`; the
+failure is exposed in `message` and, when available, `report.error`.
+
 **Sample Rack Power On Sequence:**
 
 1. Power on power shelves.
@@ -164,8 +176,8 @@ Currently, NICo only supports GB200 NVL72 racks, where a rack and a NVL domain o
 - [GET /v2/org/{org}/nico/rack/{id}](api:GET/v2/org/:org/nico/rack/:id): Retrieve a rack with the specified ID.
 - [GET /v2/org/{org}/nico/rack/validation](api:GET/v2/org/:org/nico/rack/validation): Validate components of all racks in the specified site by comparing the expected inventory data to the actual inventory data.
 - [GET /v2/org/{org}/nico/rack/{id}/validation](api:GET/v2/org/:org/nico/rack/:id/validation): Validate components of the specified rack by comparing the expected inventory data to the actual inventory data.
-- [PATCH /v2/org/{org}/nico/rack/power](api:PATCH/v2/org/:org/nico/rack/power): Control power of all or selected racks in the site. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
-- [PATCH /v2/org/{org}/nico/rack/{id}/power](api:PATCH/v2/org/:org/nico/rack/:id/power): Control power of the specified rack. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+- [PATCH /v2/org/{org}/nico/rack/power](api:PATCH/v2/org/:org/nico/rack/power): Control power of all or selected racks in the site. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`, and `acpowercycle`.
+- [PATCH /v2/org/{org}/nico/rack/{id}/power](api:PATCH/v2/org/:org/nico/rack/:id/power): Control power of the specified rack. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`, and `acpowercycle`.
 - [PATCH /v2/org/{org}/nico/rack/firmware](api:PATCH/v2/org/:org/nico/rack/firmware): Update firmware on all or selected racks in the site.
 - [PATCH /v2/org/{org}/nico/rack/{id}/firmware](api:PATCH/v2/org/:org/nico/rack/:id/firmware): Update firmware on the specified rack.
 - [POST /v2/org/{org}/nico/rack/bringup](api:POST/v2/org/:org/nico/rack/bringup): Bring up all or selected racks in the site.
@@ -180,7 +192,7 @@ Currently, NICo only supports GB200 NVL72 racks, where a rack and a NVL domain o
 - [GET /v2/org/{org}/nico/tray/{id}](api:GET/v2/org/:org/nico/tray/:id): Retrieve a tray with the specified id.
 - [GET /v2/org/{org}/nico/tray/validation](api:GET/v2/org/:org/nico/tray/validation): Validate all or selected trays in the site by comparing the expected inventory data to the actual inventory data.
 - [GET /v2/org/{org}/nico/tray/{id}/validation](api:GET/v2/org/:org/nico/tray/:id/validation): Validate the specified tray by comparing the expected inventory data to the actual inventory data.
-- [PATCH /v2/org/{org}/nico/tray/power](api:PATCH/v2/org/:org/nico/tray/power): Control the power of all or selected trays in the site. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
-- [PATCH /v2/org/{org}/nico/tray/{id}/power](api:PATCH/v2/org/:org/nico/tray/:id/power): Control the power of the specified tray. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+- [PATCH /v2/org/{org}/nico/tray/power](api:PATCH/v2/org/:org/nico/tray/power): Control the power of all or selected trays in the site. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`, and `acpowercycle`.
+- [PATCH /v2/org/{org}/nico/tray/{id}/power](api:PATCH/v2/org/:org/nico/tray/:id/power): Control the power of the specified tray. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`, and `acpowercycle`.
 - [PATCH /v2/org/{org}/nico/tray/firmware](api:PATCH/v2/org/:org/nico/tray/firmware): Update the firmware on all or selected trays in the site.
 - [PATCH /v2/org/{org}/nico/tray/{id}/firmware](api:PATCH/v2/org/:org/nico/tray/:id/firmware): Update the firmware on the specified tray.
