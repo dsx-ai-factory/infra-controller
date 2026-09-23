@@ -67,6 +67,11 @@ legacyAlias:
       createNamespace: false
 
 replicas: 1
+# Kubernetes Deployment update strategy. Set `type: Recreate` when the API
+# must be stopped before a replacement pod is started, or configure
+# `rollingUpdate` when using the default `RollingUpdate` strategy.
+strategy:
+  type: RollingUpdate
 automountServiceAccountToken: true
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-api.name" . }}-config-files,{{ include "nico-api.name" . }}-site-config-files'
