@@ -7513,9 +7513,10 @@ type AttestationCoverageEntry struct {
 	Mode *AttesterSelectionMode `protobuf:"varint,4,opt,name=mode,proto3,enum=forge.AttesterSelectionMode,oneof" json:"mode,omitempty"`
 	// The distinct sets of SPDM-capable attesters recorded for this class, one
 	// entry per digest, ordered by digest. Empty until an exploration records
-	// one. More than one means the class spans hardware carrying different
-	// attestable components, which a profile's patterns cannot show on their
-	// own.
+	// one. More than one means the class has reported different attestable
+	// components, which a profile's patterns cannot show on their own; a set
+	// keeps its entry after the endpoints reporting it are gone, so read
+	// `reporting_endpoints` for which of them the class carries now.
 	AttesterSets  []*AttesterSet `protobuf:"bytes,5,rep,name=attester_sets,json=attesterSets,proto3" json:"attester_sets,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

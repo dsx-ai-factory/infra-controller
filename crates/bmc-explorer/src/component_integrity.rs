@@ -27,7 +27,12 @@ use serde::Deserialize;
 struct Collection {
     #[serde(rename = "@odata.id")]
     odata_id: ODataId,
-    #[serde(default, rename = "Members")]
+    /// Required rather than defaulted: a collection resource always carries
+    /// `Members`, empty included, so a response without it is one this could
+    /// not read. Defaulting would report it as a BMC with nothing to attest,
+    /// which is a set in its own right and would record a variant the hardware
+    /// never had.
+    #[serde(rename = "Members")]
     members: Vec<Member>,
 }
 
@@ -104,5 +109,34 @@ pub(crate) async fn explore<B: Bmc>(bmc: &B, root: &nv_redfish::ServiceRoot<B>) 
                 unavailable: true,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// A collection with no members and a response that never carried them
+    /// are different answers. Reading the second as the first would record a
+    /// BMC reporting nothing to attest, which is a set the hardware never had
+    /// and one that outlives the endpoint that produced it.
+    #[test]
+    fn a_response_without_members_is_not_an_empty_collection() {
+        let empty = r#"{"@odata.id": "/redfish/v1/ComponentIntegrity", "Members": []}"#;
+        assert!(
+            serde_json::from_str::<Collection>(empty)
+                .expect("a collection listing no members reads")
+                .members
+                .is_empty()
+        );
+
+        assert!(
+            serde_json::from_str::<Collection>(
+                r#"{"@odata.id": "/redfish/v1/ComponentIntegrity"}"#
+            )
+            .is_err(),
+            "a response omitting Members is unreadable, so exploration reports it \
+             unavailable rather than as a collection holding nothing"
+        );
     }
 }
