@@ -83,7 +83,7 @@ use crate::crds::dpuservicenads_generated::{
 };
 use crate::crds::dpuservices_generated::{
     DPUService, DpuServiceHelmChart, DpuServiceHelmChartSource, DpuServiceSecurity,
-    DpuServiceServiceDaemonSet, DpuServiceServiceDaemonSetNodeSelector,
+    DpuServiceSecuritySpiffe, DpuServiceServiceDaemonSet, DpuServiceServiceDaemonSetNodeSelector,
     DpuServiceServiceDaemonSetNodeSelectorNodeSelectorTerms,
     DpuServiceServiceDaemonSetNodeSelectorNodeSelectorTermsMatchExpressions,
     DpuServiceServiceDaemonSetUpdateStrategy,
@@ -109,10 +109,10 @@ use crate::types::{
     DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuMismatch, DpuNodeInfo, DpuNodeSummary,
     DpuPhase, DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation,
     DpuServiceInterfacePatch, DpuServiceInterfaceTemplateDefinition,
-    DpuServiceInterfaceTemplateType, DpuServiceObservation, DpuServiceVersion, DpuSummary,
-    FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig, MAX_BLUEFIELD_VFS_PER_PF,
-    OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE, ServiceConfigPortProtocol,
-    ServiceDefinition, ServiceNADResourceType, ServiceTemplateVersion,
+    DpuServiceInterfaceTemplateType, DpuServiceObservation, DpuServiceSecurityObservation,
+    DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig,
+    MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE,
+    ServiceConfigPortProtocol, ServiceDefinition, ServiceNADResourceType, ServiceTemplateVersion,
 };
 #[cfg(test)]
 use crate::types::{DEFAULT_PF_TOTAL_SF_RESERVED, InitDpfResourcesConfigBuilder};
@@ -2440,8 +2440,8 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
             interfaces: None,
             paused: None,
             security: Some(DpuServiceSecurity {
-                privileged: Some(service.security_privileged),
-                spiffe: None,
+                privileged: Some(service.security.privileged),
+                spiffe: service.security.spiffe.then_some(DpuServiceSecuritySpiffe {}),
             }),
             service_daemon_set: service.service_daemon_set.as_ref().map(|daemon_set| {
                 DpuServiceServiceDaemonSet {
@@ -2512,10 +2512,13 @@ fn dpu_service_from_resource(service: DPUService) -> Result<DpuServiceObservatio
         dpu_cluster_selector_present: service.spec.dpu_cluster_selector.is_some(),
         interfaces_present: service.spec.interfaces.is_some(),
         paused: service.spec.paused,
-        security_privileged: service
+        security: service
             .spec
             .security
-            .and_then(|security| security.privileged),
+            .map(|security| DpuServiceSecurityObservation {
+                privileged: security.privileged,
+                spiffe: security.spiffe.is_some(),
+            }),
         service_daemon_set,
         service_id: service.spec.service_id,
         config_ports_present: service.spec.config_ports.is_some(),
@@ -4081,8 +4084,8 @@ mod tests {
         DpuRepository, DpuServiceRepository,
     };
     use crate::types::{
-        DetachedHelmChart, DpfInterceptBridge, DpfInterceptBridging, DpfInterfaceIdentity,
-        DpfProxyDetails, DpuDeviceInfo, DpuNodeInfo,
+        DetachedDpuServiceSecurity, DetachedHelmChart, DpfInterceptBridge, DpfInterceptBridging,
+        DpfInterfaceIdentity, DpfProxyDetails, DpuDeviceInfo, DpuNodeInfo,
     };
 
     #[derive(Clone)]
@@ -6867,7 +6870,10 @@ mod tests {
                 values: Some(BTreeMap::from([("replicas".to_owned(), json!(1))])),
             },
             deploy_in_cluster: false,
-            security_privileged: false,
+            security: DetachedDpuServiceSecurity {
+                privileged: false,
+                spiffe: true,
+            },
             service_daemon_set: Some(crate::types::DetachedServiceDaemonSet {
                 node_selector_labels: Some(BTreeMap::from([(
                     "nico/extension-service".to_owned(),
@@ -6908,10 +6914,13 @@ mod tests {
 
         // Convert through the checked CR type to exercise the SDK boundary.
         let observed = dpu_service_from_resource(dpu_service_to_resource(&service)).unwrap();
+        let observed_security = observed.security.as_ref().unwrap();
         let observed_daemon_set = observed.service_daemon_set.unwrap();
         let expected_daemon_set = service.service_daemon_set.unwrap();
 
-        // All caller-supplied fields, including placement, must remain present.
+        // All caller-supplied security and DaemonSet fields must remain present.
+        assert_eq!(observed_security.privileged, Some(false));
+        assert!(observed_security.spiffe);
         assert_eq!(
             observed_daemon_set.annotations,
             expected_daemon_set.annotations
@@ -6968,7 +6977,7 @@ mod tests {
                         },
                         "values": {"replicas": 1},
                     },
-                    "security": {"privileged": false},
+                    "security": {"privileged": false, "spiffe": {}},
                     "serviceDaemonSet": {
                         "nodeSelector": {
                             "nodeSelectorTerms": [{
