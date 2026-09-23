@@ -272,7 +272,7 @@ type Candidate<'a> = (IpAddr, &'a MachineInterfaceSnapshot, &'a ExploredEndpoint
 struct ExplorationPlan<'a> {
     /// `exploration_requested` endpoints, by address.
     priority: Vec<Candidate<'a>>,
-    /// Interfaces with no report yet, by address.
+    /// Interfaces with no report yet, oldest interface first.
     unexplored: Vec<(IpAddr, &'a MachineInterfaceSnapshot)>,
     /// Endpoints preingestion parked with `waiting_for_explorer_refresh`, oldest report first.
     refresh_waits: Vec<Candidate<'a>>,
@@ -304,11 +304,22 @@ impl ExplorationPlan<'_> {
     }
 }
 
-/// Sorts the candidates into tiers and spends `budget` on them in order:
-/// unexplored endpoints, then refresh waits, then routine updates. Refresh
-/// waits get at least half of what unexplored endpoints leave and all of it
-/// when routine cannot use the rest, so a wave of parked BMCs cannot stop the
-/// routine refresh and routine cannot starve parked BMCs.
+/// Shares of the `explorations_per_run` budget for the three tiers inside it:
+/// unexplored endpoints, preingestion refresh waits, routine refreshes.
+const EXPLORATION_SHARES_PERCENT: [usize; 3] = [70, 20, 10];
+const _: () = assert!(
+    EXPLORATION_SHARES_PERCENT[0] + EXPLORATION_SHARES_PERCENT[1] + EXPLORATION_SHARES_PERCENT[2]
+        == 100
+);
+
+/// Sorts the candidates into tiers and spends `budget` on them. Each tier gets
+/// its share of the budget ([`EXPLORATION_SHARES_PERCENT`]) oldest first:
+/// unexplored endpoints by interface creation, the other two by report time.
+/// Slots a tier cannot fill go to the other tiers in the same order, unexplored
+/// first, so no slot stays unused while any tier has candidates. From a budget
+/// of ten up every tier holds its share, so bring-up cannot starve parked BMCs
+/// and parked BMCs cannot starve the routine refresh. Below that the smaller
+/// shares round to zero and those tiers live on what the earlier tiers leave.
 fn plan_explorations<'a>(
     candidates: Vec<Candidate<'a>>,
     mut unexplored: Vec<(IpAddr, &'a MachineInterfaceSnapshot)>,
@@ -329,26 +340,27 @@ fn plan_explorations<'a>(
             routine.push(candidate);
         }
     }
-    let oldest_first =
+    let oldest_report_first =
         |(address, _, endpoint): &Candidate<'a>| (endpoint.report_version.timestamp(), *address);
     priority.sort_by_key(|(address, _, _)| *address);
-    unexplored.sort_by_key(|(address, _)| *address);
-    refresh_waits.sort_by_key(oldest_first);
-    routine.sort_by_key(oldest_first);
+    unexplored.sort_by_key(|(address, iface)| (iface.created, *address));
+    refresh_waits.sort_by_key(oldest_report_first);
+    routine.sort_by_key(oldest_report_first);
 
     let unexplored_candidates = unexplored.len();
     let refresh_wait_candidates = refresh_waits.len();
     let routine_candidates = routine.len();
-    let budget = budget.min(unexplored_candidates + refresh_wait_candidates + routine_candidates);
-    unexplored.truncate(budget);
-    let remaining = budget - unexplored.len();
-    let refresh_take = refresh_waits.len().min(
-        remaining
-            .div_ceil(2)
-            .max(remaining.saturating_sub(routine.len())),
+    let [take_unexplored, take_refresh_waits, take_routine] = allocate(
+        budget,
+        [
+            unexplored_candidates,
+            refresh_wait_candidates,
+            routine_candidates,
+        ],
     );
-    refresh_waits.truncate(refresh_take);
-    routine.truncate(remaining - refresh_take);
+    unexplored.truncate(take_unexplored);
+    refresh_waits.truncate(take_refresh_waits);
+    routine.truncate(take_routine);
     ExplorationPlan {
         priority,
         unexplored,
@@ -358,6 +370,26 @@ fn plan_explorations<'a>(
         refresh_wait_candidates,
         routine_candidates,
     }
+}
+
+/// How many of `budget` each tier gets: its share, capped by its candidates,
+/// then the unused rest tier by tier in order. Rounding leftovers go to the
+/// first tier, so a budget below ten still reaches the tiers in order.
+fn allocate(budget: usize, candidates: [usize; 3]) -> [usize; 3] {
+    let budget = budget.min(candidates.iter().sum());
+    let mut quotas = EXPLORATION_SHARES_PERCENT.map(|share| budget * share / 100);
+    quotas[0] += budget - quotas.iter().sum::<usize>();
+    let mut take = [0; 3];
+    for tier in 0..3 {
+        take[tier] = quotas[tier].min(candidates[tier]);
+    }
+    let mut spare = budget - take.iter().sum::<usize>();
+    for tier in 0..3 {
+        let more = (candidates[tier] - take[tier]).min(spare);
+        take[tier] += more;
+        spare -= more;
+    }
+    take
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2780,10 +2812,6 @@ impl SiteExplorer {
                 true
             })
             .collect::<Vec<_>>();
-        metrics.record_update_explored_endpoints_count(
-            "unexplored_candidates",
-            unexplored_endpoints.len(),
-        );
         let plan = plan_explorations(
             candidates,
             unexplored_endpoints,
@@ -5625,6 +5653,41 @@ mod tests {
     }
 
     #[test]
+    fn allocate_gives_each_tier_its_share_and_passes_unused_slots_on() {
+        // input: (budget, candidates per tier); expect: slots per tier
+        check_values(
+            [
+                Check {
+                    scenario: "every tier full: 70/20/10",
+                    input: (10, [20, 20, 20]),
+                    expect: [7, 2, 1],
+                },
+                Check {
+                    scenario: "no unexplored: its share flows to refresh waits, then routine",
+                    input: (10, [0, 5, 20]),
+                    expect: [0, 5, 5],
+                },
+                Check {
+                    scenario: "no candidates for the later tiers: unexplored takes everything",
+                    input: (10, [20, 0, 0]),
+                    expect: [10, 0, 0],
+                },
+                Check {
+                    scenario: "the rounding leftover of a small budget goes to unexplored",
+                    input: (1, [1, 1, 1]),
+                    expect: [1, 0, 0],
+                },
+                Check {
+                    scenario: "fewer candidates than budget: all of them",
+                    input: (10, [1, 1, 1]),
+                    expect: [1, 1, 1],
+                },
+            ],
+            |(budget, candidates)| allocate(budget, candidates),
+        );
+    }
+
+    #[test]
     fn plan_explorations_spends_the_budget_by_tier() {
         let parked = || PreingestionState::InitialBMCReset {
             phase: InitialBmcResetPhase::WaitForExplorerRefresh,
@@ -5633,7 +5696,8 @@ mod tests {
             name: &'static str,
             // (address, state, waiting, requested, report timestamp in micros)
             explored: Vec<(&'static str, PreingestionState, bool, bool, i64)>,
-            unexplored: Vec<&'static str>,
+            // (address, interface creation time in seconds)
+            unexplored: Vec<(&'static str, i64)>,
             budget: usize,
             priority: Vec<&'static str>,
             selected_unexplored: Vec<&'static str>,
@@ -5655,17 +5719,52 @@ mod tests {
                 routine: vec![],
             },
             Case {
-                name: "unexplored endpoints take the budget before refresh waits",
-                explored: vec![("10.0.0.1", parked(), true, false, 10)],
-                unexplored: vec!["10.0.1.2", "10.0.1.1"],
-                budget: 2,
+                name: "during bring-up unexplored endpoints get 70 percent, oldest interface first, and the other tiers keep theirs",
+                explored: vec![
+                    ("10.0.0.1", parked(), true, false, 10),
+                    ("10.0.0.2", parked(), true, false, 11),
+                    ("10.0.0.3", parked(), true, false, 12),
+                    ("10.0.0.4", PreingestionState::Complete, false, false, 13),
+                    ("10.0.0.5", PreingestionState::Complete, false, false, 14),
+                ],
+                unexplored: vec![
+                    ("10.0.1.1", 300),
+                    ("10.0.1.2", 100),
+                    ("10.0.1.3", 200),
+                    ("10.0.1.4", 400),
+                    ("10.0.1.5", 500),
+                    ("10.0.1.6", 600),
+                    ("10.0.1.7", 700),
+                    ("10.0.1.8", 800),
+                    ("10.0.1.9", 900),
+                ],
+                budget: 10,
                 priority: vec![],
-                selected_unexplored: vec!["10.0.1.1", "10.0.1.2"],
-                refresh_waits: vec![],
-                routine: vec![],
+                selected_unexplored: vec![
+                    "10.0.1.2", "10.0.1.3", "10.0.1.1", "10.0.1.4", "10.0.1.5", "10.0.1.6",
+                    "10.0.1.7",
+                ],
+                refresh_waits: vec!["10.0.0.1", "10.0.0.2"],
+                routine: vec!["10.0.0.4"],
             },
             Case {
-                name: "a refresh wait is served before an older routine report",
+                name: "slots unexplored endpoints cannot use flow to refresh waits, then routine",
+                explored: vec![
+                    ("10.0.0.1", parked(), true, false, 10),
+                    ("10.0.0.2", parked(), true, false, 11),
+                    ("10.0.0.3", parked(), true, false, 12),
+                    ("10.0.0.4", PreingestionState::Complete, false, false, 13),
+                    ("10.0.0.5", PreingestionState::Complete, false, false, 14),
+                ],
+                unexplored: vec![("10.0.1.1", 100)],
+                budget: 5,
+                priority: vec![],
+                selected_unexplored: vec!["10.0.1.1"],
+                refresh_waits: vec!["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+                routine: vec!["10.0.0.4"],
+            },
+            Case {
+                name: "a refresh wait is served before an older routine report when the budget is one",
                 explored: vec![
                     ("10.0.0.1", PreingestionState::Complete, false, false, 10),
                     ("10.0.0.2", parked(), true, false, 20),
@@ -5692,56 +5791,88 @@ mod tests {
                 routine: vec![],
             },
             Case {
-                name: "refresh waits get half of the remaining budget when routine has work",
+                name: "a wave of parked BMCs leaves the routine refresh its 10 percent",
                 explored: vec![
                     ("10.0.0.1", parked(), true, false, 10),
                     ("10.0.0.2", parked(), true, false, 11),
                     ("10.0.0.3", parked(), true, false, 12),
-                    ("10.0.0.4", PreingestionState::Complete, false, false, 13),
-                    ("10.0.0.5", PreingestionState::Complete, false, false, 14),
+                    ("10.0.0.4", parked(), true, false, 13),
+                    ("10.0.0.5", parked(), true, false, 14),
+                    ("10.0.0.6", parked(), true, false, 15),
+                    ("10.0.0.7", parked(), true, false, 16),
+                    ("10.0.0.8", parked(), true, false, 17),
+                    ("10.0.0.9", parked(), true, false, 18),
+                    ("10.0.0.10", parked(), true, false, 19),
+                    ("10.0.0.11", PreingestionState::Complete, false, false, 20),
+                    ("10.0.0.12", PreingestionState::Complete, false, false, 21),
                 ],
                 unexplored: vec![],
-                budget: 3,
+                budget: 10,
                 priority: vec![],
                 selected_unexplored: vec![],
-                refresh_waits: vec!["10.0.0.1", "10.0.0.2"],
-                routine: vec!["10.0.0.4"],
-            },
-            Case {
-                name: "refresh waits get the whole remaining budget when routine has nothing",
-                explored: vec![
-                    ("10.0.0.1", parked(), true, false, 10),
-                    ("10.0.0.2", parked(), true, false, 11),
-                    ("10.0.0.3", parked(), true, false, 12),
+                refresh_waits: vec![
+                    "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6",
+                    "10.0.0.7", "10.0.0.8", "10.0.0.9",
                 ],
-                unexplored: vec![],
-                budget: 3,
-                priority: vec![],
-                selected_unexplored: vec![],
-                refresh_waits: vec!["10.0.0.1", "10.0.0.2", "10.0.0.3"],
-                routine: vec![],
+                routine: vec!["10.0.0.11"],
             },
             Case {
-                name: "waits in initial, complete and failed are routine refreshes",
+                name: "only the states that read the next report are refresh waits",
                 explored: vec![
-                    ("10.0.0.1", PreingestionState::Initial, true, false, 10),
-                    ("10.0.0.2", PreingestionState::Complete, true, false, 11),
+                    (
+                        "10.0.0.1",
+                        PreingestionState::RecheckVersions,
+                        true,
+                        false,
+                        10,
+                    ),
+                    (
+                        "10.0.0.2",
+                        PreingestionState::NewFirmwareReportedWait {
+                            final_version: "1.0".to_string(),
+                            upgrade_type: FirmwareComponentType::Bmc,
+                            previous_reset_time: None,
+                        },
+                        true,
+                        false,
+                        11,
+                    ),
                     (
                         "10.0.0.3",
-                        PreingestionState::Failed {
-                            reason: "bmc never answered".to_string(),
+                        PreingestionState::RecheckVersionsAfterFailure {
+                            reason: "job failed".to_string(),
                         },
                         true,
                         false,
                         12,
                     ),
+                    (
+                        "10.0.0.4",
+                        PreingestionState::InitialBMCReset {
+                            phase: InitialBmcResetPhase::WaitForBmc,
+                        },
+                        true,
+                        false,
+                        13,
+                    ),
+                    ("10.0.0.5", PreingestionState::Initial, true, false, 14),
+                    ("10.0.0.6", PreingestionState::Complete, true, false, 15),
+                    (
+                        "10.0.0.7",
+                        PreingestionState::Failed {
+                            reason: "bmc never answered".to_string(),
+                        },
+                        true,
+                        false,
+                        16,
+                    ),
                 ],
                 unexplored: vec![],
-                budget: 3,
+                budget: 7,
                 priority: vec![],
                 selected_unexplored: vec![],
-                refresh_waits: vec![],
-                routine: vec!["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+                refresh_waits: vec!["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+                routine: vec!["10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.7"],
             },
         ];
         for case in cases {
@@ -5761,13 +5892,12 @@ mod tests {
             let unexplored_ifaces: Vec<(IpAddr, MachineInterfaceSnapshot)> = case
                 .unexplored
                 .iter()
-                .map(|address| {
-                    (
-                        address.parse().unwrap(),
-                        MachineInterfaceSnapshot::mock_with_mac(MacAddress::new([
-                            2, 0, 0, 0, 0, 2,
-                        ])),
-                    )
+                .map(|(address, created)| {
+                    let mut iface = MachineInterfaceSnapshot::mock_with_mac(MacAddress::new([
+                        2, 0, 0, 0, 0, 2,
+                    ]));
+                    iface.created = chrono::DateTime::from_timestamp(*created, 0).unwrap();
+                    (address.parse().unwrap(), iface)
                 })
                 .collect();
             let plan = plan_explorations(

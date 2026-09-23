@@ -517,27 +517,38 @@ pub enum PreingestionState {
 
 impl PreingestionState {
     /// Whether a `waiting_for_explorer_refresh` set in this state is a
-    /// preingestion park that only a fresh exploration report can end. An
-    /// `Initial` wait is a failed probe on an endpoint preingestion has not
-    /// started, and `Complete` and `Failed` waits have no preingestion consumer.
+    /// preingestion park that only a fresh exploration report can end. These
+    /// are the states whose next step reads the report: the post-reset
+    /// inventory, the version check, and the two rechecks. Preingestion never
+    /// sets the flag in `Initial` or the other in-progress states; a flag there
+    /// came from a failed probe or an operator error clear, and the next
+    /// successful exploration lifts it. `Complete` and `Failed` waits have no
+    /// preingestion consumer.
     pub fn parks_for_explorer_refresh(&self) -> bool {
         match self {
-            Self::Initial | Self::Complete | Self::Failed { .. } => false,
-            Self::RecheckVersions
+            Self::InitialBMCReset {
+                phase: InitialBmcResetPhase::WaitForExplorerRefresh,
+            }
+            | Self::RecheckVersions
+            | Self::NewFirmwareReportedWait { .. }
+            | Self::RecheckVersionsAfterFailure { .. } => true,
+            Self::Initial
             | Self::ScriptRunning
             | Self::BfbRecoveryNeeded { .. }
             | Self::BfbPlatformPowercycle { .. }
             | Self::BfbCopyInProgress { .. }
             | Self::BfbInstallationWait { .. }
             | Self::InitialReset { .. }
-            | Self::InitialBMCReset { .. }
+            | Self::InitialBMCReset {
+                phase: InitialBmcResetPhase::Start { .. } | InitialBmcResetPhase::WaitForBmc,
+            }
             | Self::SetNtpServers { .. }
             | Self::TimeSyncReset { .. }
             | Self::RackFirmwareUpdateWait { .. }
             | Self::UpgradeFirmwareWait { .. }
             | Self::ResetForNewFirmware { .. }
-            | Self::NewFirmwareReportedWait { .. }
-            | Self::RecheckVersionsAfterFailure { .. } => true,
+            | Self::Failed { .. }
+            | Self::Complete => false,
         }
     }
 }
