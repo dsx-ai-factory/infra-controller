@@ -50,9 +50,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_log::AsLog as _;
 
-// Currently WorkLockManager needs a dedicated, reserved connection so that we can release locks
-// properly even if the main pool is full.
-static RESERVED_CONNECTION_COUNT: usize = 1;
+// Two connections are reserved outside the shared pool: one for WorkLockManager, so we can
+// release locks properly even if the main pool is full, and one for the database readiness probe
+// (`crate::readiness::dedicated_probe_pool`), so a busy shared pool cannot delay or fail /ready.
+static RESERVED_CONNECTION_COUNT: usize = 2;
 
 pub(crate) struct RuntimeResources {
     pub credential_manager: Arc<dyn CredentialManager>,

@@ -110,11 +110,18 @@ pub async fn run(
     // while propagating any panics to the current task.
     let mut join_set = JoinSet::new();
     crate::shutdown_handler::start(&mut join_set, cancel_token.clone());
+
+    // Not ready until the readiness probe below confirms PostgreSQL is
+    // reachable, so `/ready` never reports success before that is known.
+    let health_controller = metrics_endpoint::HealthController::new();
+    health_controller.set_ready(false);
+
     let metrics_address = start_metrics_endpoint(
         &mut join_set,
         &carbide_config,
         registry,
         cancel_token.clone(),
+        health_controller.clone(),
     )
     .await?;
     let per_object_metrics =
@@ -136,6 +143,17 @@ pub async fn run(
         &cancel_token,
     )
     .await?;
+
+    // `setup_resources` already verified PostgreSQL connectivity while
+    // building `db_pool`, so it is known good now; the periodic probe takes
+    // over from here and flips `health_controller` if that ever changes.
+    health_controller.set_ready(true);
+    crate::readiness::spawn_database_readiness_probe(
+        &mut join_set,
+        &db_pool,
+        health_controller,
+        cancel_token.clone(),
+    )?;
 
     let listen_address = start_runtime(RuntimeInputs {
         carbide_config,
@@ -177,6 +195,7 @@ async fn start_metrics_endpoint(
     carbide_config: &carbide_api_core::cfg::file::CarbideConfig,
     registry: prometheus::Registry,
     cancel_token: CancellationToken,
+    health_controller: metrics_endpoint::HealthController,
 ) -> eyre::Result<Option<SocketAddr>> {
     let Some(metrics_address) = carbide_config.metrics_endpoint else {
         return Ok(None);
@@ -209,7 +228,7 @@ async fn start_metrics_endpoint(
                 &metrics_endpoint::MetricsEndpointConfig {
                     address: metrics_address,
                     registry,
-                    health_controller: None,
+                    health_controller: Some(health_controller),
                     additional_prefix,
                 },
                 cancel_token,

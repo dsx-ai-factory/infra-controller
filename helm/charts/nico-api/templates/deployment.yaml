@@ -259,6 +259,8 @@ spec:
               containerPort: {{ .Values.service.profiler.port }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
           volumeMounts:
             # Mount config + secrets at both legacy /etc/forge,/var/run/secrets/forge-roots,/opt/carbide
             # and renamed /etc/nico,/var/run/secrets/nico-roots,/opt/nico paths so the chart works

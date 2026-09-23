@@ -6,14 +6,14 @@ tests:
     asserts:
       - equal:
           path: spec.template.metadata.annotations["checksum/config"]
-          value: 75f3b8075bbef837daa95f4118d11d973907a38449833e96150d80fdd21eb415
+          value: 3a2b26a10130b8b5b10a71fb7ceef16b93203347d743e5109f8fef660c09457b
   - it: changes the checksum when the BMC credential source changes
     set:
       credentials.bmcSiteWideRootSource: local
     asserts:
       - notEqual:
           path: spec.template.metadata.annotations["checksum/config"]
-          value: 75f3b8075bbef837daa95f4118d11d973907a38449833e96150d80fdd21eb415
+          value: 3a2b26a10130b8b5b10a71fb7ceef16b93203347d743e5109f8fef660c09457b
       - matchRegex:
           path: spec.template.metadata.annotations["checksum/config"]
           pattern: '^[a-f0-9]{64}$'
