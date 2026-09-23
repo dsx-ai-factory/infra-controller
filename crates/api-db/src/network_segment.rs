@@ -17,7 +17,8 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_instrument::emit;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
@@ -31,12 +32,14 @@ use model::network_segment::{
 };
 use sqlx::{PgConnection, PgTransaction};
 
+use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
 use crate::db_read::DbReader;
 use crate::instance_address::UsedOverlayNetworkIpResolver;
 use crate::ip_allocator::{IpAllocator, UsedIpResolver};
 use crate::machine_interface::UsedAdminNetworkIpResolver;
 use crate::{
-    ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
+    ColumnInfo, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult,
+    FilterableQueryBuilder, ObjectColumnFilter,
 };
 
 #[derive(Copy, Clone)]
@@ -530,12 +533,13 @@ pub async fn reconcile_network_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed; warn and leave both in place.
             (Some(stored_def), true) => {
-                tracing::warn!(
-                    network_name = name,
-                    stored = ?stored_def,
-                    declared = ?def,
-                    "NetworkDefinition has changed since it was seeded; not re-applying"
-                );
+                emit(ConfigDefinitionDrifted {
+                    resource_kind: ConfigResourceKind::NetworkDefinition,
+                    drift_kind: ConfigDriftKind::Changed,
+                    name: name.clone(),
+                    stored: Some(format!("{stored_def:?}")),
+                    declared: Some(format!("{def:?}")),
+                });
             }
             // Network segment exists, but has no snapshot yet.
             // Pre-migration deployment or a network was re-added after a
@@ -582,10 +586,13 @@ pub async fn reconcile_network_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            tracing::warn!(
-                network_name = name,
-                "Network segment exists in database but is no longer declared in any config file"
-            );
+            emit(ConfigDefinitionDrifted {
+                resource_kind: ConfigResourceKind::NetworkDefinition,
+                drift_kind: ConfigDriftKind::Dropped,
+                name: name.clone(),
+                stored: None,
+                declared: None,
+            });
         }
     }
 
@@ -651,7 +658,7 @@ where
 /// Find network segments attached to a machine through machine_interfaces, optionally of a certain type
 pub async fn find_ids_by_machine_id(
     txn: &mut PgConnection,
-    machine_id: &::carbide_uuid::machine::MachineId,
+    machine_id: &HostMachineId,
     network_segment_type: Option<NetworkSegmentType>,
 ) -> Result<Vec<NetworkSegmentId>, DatabaseError> {
     let result = batch_find_ids_by_machine_ids(txn, &[*machine_id], network_segment_type).await?;
@@ -663,9 +670,9 @@ pub async fn find_ids_by_machine_id(
 /// Returns a HashMap mapping each machine ID to its list of segment IDs.
 pub async fn batch_find_ids_by_machine_ids(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
     network_segment_type: Option<NetworkSegmentType>,
-) -> Result<HashMap<MachineId, Vec<NetworkSegmentId>>, DatabaseError> {
+) -> Result<HashMap<HostMachineId, Vec<NetworkSegmentId>>, DatabaseError> {
     if machine_ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -698,9 +705,9 @@ pub async fn batch_find_ids_by_machine_ids(
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
-    let mut result: HashMap<MachineId, Vec<NetworkSegmentId>> = HashMap::new();
+    let mut result: HashMap<HostMachineId, Vec<NetworkSegmentId>> = HashMap::new();
     for (machine_id_str, segment_id) in rows {
-        if let Ok(machine_id) = machine_id_str.parse::<MachineId>() {
+        if let Ok(machine_id) = machine_id_str.parse::<HostMachineId>() {
             result.entry(machine_id).or_default().push(segment_id);
         }
     }
@@ -782,18 +789,20 @@ where
     Ok(())
 }
 
-/// Updates the network segment state that is owned by the state controller
-/// under the premise that the current controller state version didn't change.
+/// `try_update_controller_state` writes the network segment state and `new_version`
+/// when the version matches `expected_version`.
 ///
-/// Returns `true` if the state could be updated, and `false` if the object
-/// either doesn't exist anymore or is at a different version.
+/// A missing segment or changed version returns
+/// `NotApplied(ControllerStateNotCurrent)`.
+/// `Applied(())` leaves the write in the caller's transaction; database failures
+/// remain errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     segment_id: NetworkSegmentId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &NetworkSegmentControllerState,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     let query = "UPDATE network_segments SET controller_state_version=$1, controller_state=$2::json where id=$3::uuid AND controller_state_version=$4 returning id";
     let result = sqlx::query_as::<_, NetworkSegmentId>(query)
         .bind(new_version)
@@ -804,7 +813,10 @@ pub async fn try_update_controller_state(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.is_some())
+    Ok(match result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 pub async fn update_controller_state_outcome(
@@ -1310,7 +1322,7 @@ mod tests {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix: "192.168.1.0/24".parse().unwrap(),
             prefix_v6: None,
-            gateway: "192.168.1.1".parse().unwrap(),
+            gateway: Some("192.168.1.1".parse().unwrap()),
             dhcpv6_link_address: None,
             mtu: 1500,
             reserve_first: 5,
@@ -1357,7 +1369,7 @@ mod tests {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix: prefix.parse().unwrap(),
             prefix_v6: None,
-            gateway: gateway.parse().unwrap(),
+            gateway: Some(gateway.parse().unwrap()),
             dhcpv6_link_address: None,
             mtu: 1500,
             reserve_first: 3,

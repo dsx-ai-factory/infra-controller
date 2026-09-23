@@ -474,6 +474,7 @@ func (h UpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		identity.SiteID,
 		identity.RuleID,
 		request.OverrideReadinessCheck,
+		request.OverrideVersionCheck,
 		identity.firmwareWorkflowID(request.Version, request.OverrideReadinessCheck),
 		"NVLink Domain",
 	)
@@ -606,6 +607,7 @@ func (h BatchUpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 		identity.SiteID,
 		identity.RuleID,
 		request.OverrideReadinessCheck,
+		request.OverrideVersionCheck,
 		identity.firmwareWorkflowID(request.Version, request.OverrideReadinessCheck),
 		"NVLink Domains",
 	)

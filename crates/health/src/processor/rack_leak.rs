@@ -72,6 +72,7 @@ impl RackLeakProcessor {
                 observed_at: Some(chrono::Utc::now()),
                 successes: vec![],
                 alerts: vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                     message: format!(
@@ -87,6 +88,7 @@ impl RackLeakProcessor {
                 target: Some(HealthReportTarget::Rack),
                 observed_at: Some(chrono::Utc::now()),
                 successes: vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                 }],
@@ -178,7 +180,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str(mac).expect("valid mac"),
+                mac: Some(MacAddress::from_str(mac).expect("valid mac")),
             },
             collector_type: "sensor_collector",
             metadata: None,
@@ -193,7 +195,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str(mac).expect("valid mac"),
+                mac: Some(MacAddress::from_str(mac).expect("valid mac")),
             },
             collector_type: "sensor_collector",
             metadata: None,
@@ -210,6 +212,7 @@ mod tests {
                 observed_at: Some(chrono::Utc::now()),
                 successes: vec![],
                 alerts: vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                     message: "tray leaking".to_string(),
@@ -222,6 +225,7 @@ mod tests {
                 target: Some(HealthReportTarget::Machine),
                 observed_at: Some(chrono::Utc::now()),
                 successes: vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                 }],
@@ -283,6 +287,7 @@ mod tests {
             observed_at: Some(chrono::Utc::now()),
             successes: vec![],
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: None,
                 message: "switch leaking".to_string(),

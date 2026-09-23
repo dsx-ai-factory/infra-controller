@@ -184,6 +184,11 @@ func TestAPIOperatingSystemCreateRequest_Validate(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			desc:      "ok when ImageDisk is a virtio disk",
+			obj:       APIOperatingSystemCreateRequest{Name: "abc", TenantID: cutil.GetPtr(uuid.New().String()), ImageURL: cutil.GetPtr("http://iso.net/iso"), SiteIDs: []string{uuid.NewString()}, ImageSHA: cutil.GetPtr("a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980"), ImageDisk: cutil.GetPtr("/dev/vda"), RootFsLabel: cutil.GetPtr("root")},
+			expectErr: false,
+		},
+		{
 			desc:      "ok when ImageDisk is a by-id path",
 			obj:       APIOperatingSystemCreateRequest{Name: "abc", TenantID: cutil.GetPtr(uuid.New().String()), ImageURL: cutil.GetPtr("http://iso.net/iso"), SiteIDs: []string{uuid.NewString()}, ImageSHA: cutil.GetPtr("a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980"), ImageDisk: cutil.GetPtr("/dev/disk/by-id/nvme-Dell_DC_NVMe_CD7_U.2_960GB_Z3W0A01DTXBH-extra-long"), RootFsID: cutil.GetPtr("666c2eee-193d-42db-a490-4c444342bd4e")},
 			expectErr: false,
@@ -357,6 +362,16 @@ func TestAPIOperatingSystemUpdateRequest_Validate(t *testing.T) {
 			desc:      "ok when all valid image fields provided",
 			obj:       APIOperatingSystemUpdateRequest{Name: cutil.GetPtr("ab"), ImageURL: cutil.GetPtr("https://oldimagepath.iso"), ImageSHA: cutil.GetPtr("a1efca12ea51069abb123bf9c77889fcc2a31cc5483fc14d115e44fdf07c7980"), RootFsID: cutil.GetPtr("666c2eee-193d-42db-a490-4c444342bd4e")},
 			expectErr: false,
+		},
+		{
+			desc:      "ok when ImageDisk is a virtio disk",
+			obj:       APIOperatingSystemUpdateRequest{ImageDisk: cutil.GetPtr("/dev/vda")},
+			expectErr: false,
+		},
+		{
+			desc:      "error when ImageDisk is a virtio partition",
+			obj:       APIOperatingSystemUpdateRequest{ImageDisk: cutil.GetPtr("/dev/vda1")},
+			expectErr: true,
 		},
 		{
 			desc:      "ok when ImageDisk selects the smallest disk",

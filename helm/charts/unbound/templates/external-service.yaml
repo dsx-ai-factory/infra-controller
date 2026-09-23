@@ -19,6 +19,8 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv4]
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
   {{- with .Values.externalService.externalTrafficPolicy }}
   externalTrafficPolicy: {{ . }}
@@ -44,6 +46,8 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv4]
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
   {{- with .Values.externalService.externalTrafficPolicy }}
   externalTrafficPolicy: {{ . }}

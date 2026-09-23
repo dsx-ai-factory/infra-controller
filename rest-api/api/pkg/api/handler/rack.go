@@ -160,13 +160,13 @@ func (grh GetRackHandler) Handle(c echo.Context) error {
 	// Execute workflow
 	var flowResponse flowv1.GetRackInfoResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_GetRackInfoByID_FullMethodName,
 		flowRequest, &flowResponse,
 		fmt.Sprintf("rack-get-%s", rackStrID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -346,13 +346,13 @@ func (garh GetAllRackHandler) Handle(c echo.Context) error {
 	// Execute workflow
 	var flowResponse flowv1.GetListOfRacksResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_GetListOfRacks_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -510,13 +510,13 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 	// Execute workflow
 	var flowResponse flowv1.ValidateComponentsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ValidateComponents_FullMethodName,
 		flowRequest, &flowResponse,
 		fmt.Sprintf("rack-validate-%s", rackStrID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -655,13 +655,13 @@ func (vrsh ValidateRacksHandler) Handle(c echo.Context) error {
 	// Execute workflow
 	var flowResponse flowv1.ValidateComponentsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ValidateComponents_FullMethodName,
 		flowRequest, &flowResponse,
 		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -1048,7 +1048,8 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 
 	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, apiRequest.Version,
 		nil, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID, apiRequest.RuleID,
-		apiRequest.OverrideReadinessCheck, fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack")
+		apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
+		fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack")
 	if err != nil {
 		return err
 	}
@@ -1167,7 +1168,8 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 
 	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, request.Version,
 		nil, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
-		request.OverrideReadinessCheck, fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack")
+		request.OverrideReadinessCheck, request.OverrideVersionCheck,
+		fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack")
 	if err != nil {
 		return err
 	}

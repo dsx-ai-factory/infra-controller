@@ -84,6 +84,13 @@ pub(crate) struct Options {
     )]
     pub(crate) client_key: String,
 
+    #[clap(
+        long,
+        help = "Absolute, normalized container-visible base directory for Machine Validation plugin input and output files ('.' and '..' are not allowed)",
+        default_value = machine_validation::DEFAULT_PLUGIN_CONTRACT_DIR
+    )]
+    pub(crate) machine_validation_plugin_contract_dir: String,
+
     // Combined with discovery_retries_max, the default of 60
     // seconds worth of discovery_retry_secs provides for 1
     // week worth of minutely retries.

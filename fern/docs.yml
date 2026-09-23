@@ -35,12 +35,16 @@ products:
     #     path: ../docs/index.yml
 
 redirects:
+  - source: "/infra-controller/documentation/operations-day-2/firmware-updates/flow-operation-rules"
+    destination: "/infra-controller/documentation/operations-day-2/flow-operations/operation-rules"
   - source: "/infra-controller/index.html"
     destination: "/infra-controller/"
   - source: "/infra-controller/dev/index.html"
     destination: "/infra-controller/dev/"
   - source: "/infra-controller/documentation/architecture/state-machines/rack-state-machine"
     destination: "/infra-controller/documentation/architecture/state-machines/on-demand-rack-maintenance"
+  - source: "/infra-controller/documentation/configuration-day-1/component-manager-rms-backends"
+    destination: "/infra-controller/documentation/configuration-day-1/rms-configuration"
   - source: "/infra-controller/documentation/getting-started/building-ni-co-containers"
     destination: "/infra-controller/documentation/getting-started/building-nico-containers"
   - source: "/infra-controller/documentation/getting-started/site-setup"

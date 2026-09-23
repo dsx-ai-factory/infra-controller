@@ -141,8 +141,9 @@ pub struct SoaRecord {
     /// The expiration time (in seconds) for the zone data on a secondary server.
     /// If no refresh occurs within this time, the zone is considered expired.
     pub expire: Seconds,
-    /// The minimum TTL (time-to-live) value for all records in the zone, indicating
-    /// how long resolvers should cache records in the absence of specific TTL settings.
+    /// How long (in seconds) resolvers may cache a negative answer for a name
+    /// in this zone (RFC 2308 §4). Despite the name, it no longer sets a
+    /// default TTL for positive records.
     pub minimum: Seconds,
     /// The default TTL (time-to-live) for the SOA record itself.
     pub ttl: Seconds,
@@ -186,6 +187,12 @@ impl SoaRecord {
         serial
     }
 
+    /// The SOA a new zone starts with.
+    ///
+    /// `minimum` is the negative-caching TTL (RFC 2308 §4), so it is kept
+    /// short: names in these zones appear when hardware boots and instances
+    /// are allocated, and a resolver that cached NXDOMAIN for a name a minute
+    /// before it was published should not keep denying it for an hour.
     pub fn new(domain_name: &str) -> SoaRecord {
         SoaRecord {
             primary_ns: format!("ns1.{domain_name}"),
@@ -194,7 +201,7 @@ impl SoaRecord {
             refresh: Seconds(3600),
             retry: Seconds(3600),
             expire: Seconds(604800),
-            minimum: Seconds(3600),
+            minimum: Seconds(120),
             ttl: Seconds(3600),
         }
     }
@@ -532,7 +539,7 @@ mod tests {
         assert_eq!(soa.refresh, Seconds(3600));
         assert_eq!(soa.retry, Seconds(3600));
         assert_eq!(soa.expire, Seconds(604800));
-        assert_eq!(soa.minimum, Seconds(3600));
+        assert_eq!(soa.minimum, Seconds(120));
         assert_eq!(soa.ttl, Seconds(3600));
     }
 

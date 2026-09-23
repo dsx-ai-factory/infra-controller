@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::collections::BTreeMap;
+
 use carbide_uuid::extension_service::ExtensionServiceId;
 use chrono::prelude::*;
 use config_version::{ConfigVersion, Versioned};
@@ -66,10 +68,70 @@ impl std::str::FromStr for ExtensionServiceType {
     }
 }
 
+/// Immutable placement policy for a Helm registration.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum DpuTarget {
+    /// The authoritative primary physical DPU attached to the host.
+    Primary,
+    /// DPUs used by the instance network configuration, including legacy fallbacks.
+    AllActive,
+    /// Every physical attached DPU, irrespective of networking and health.
+    All,
+}
+
+impl DpuTarget {
+    /// Resolves a deterministic target set, rejecting incomplete primary inventory.
+    pub fn resolve(
+        self,
+        attached: &[carbide_uuid::machine::DpuMachineId],
+        primary: Option<carbide_uuid::machine::DpuMachineId>,
+        used: &[carbide_uuid::machine::DpuMachineId],
+    ) -> Result<Vec<carbide_uuid::machine::DpuMachineId>, &'static str> {
+        let mut targets = match self {
+            Self::All => attached.to_vec(),
+            Self::AllActive => {
+                if used.iter().any(|id| !attached.contains(id)) {
+                    return Err("used DPU is absent from attached inventory");
+                }
+                used.to_vec()
+            }
+            Self::Primary => vec![
+                primary
+                    .filter(|id| attached.contains(id))
+                    .ok_or("primary DPU is missing or absent from attached inventory")?,
+            ],
+        };
+        targets.sort_unstable();
+        targets.dedup();
+        if targets.is_empty() {
+            return Err("active Helm service has no resolved DPU targets");
+        }
+        Ok(targets)
+    }
+}
+
+fn read_dpu_target(
+    row: &PgRow,
+    service_type: &ExtensionServiceType,
+) -> Result<Option<DpuTarget>, sqlx::Error> {
+    let target = row.try_get("dpu_target")?;
+    match (service_type, target) {
+        (ExtensionServiceType::DpfHelmChart, Some(_))
+        | (ExtensionServiceType::KubernetesPod, None) => Ok(target),
+        _ => Err(sqlx::Error::Protocol(
+            "inconsistent extension service DPU target; resolve registration migration".into(),
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionService {
     pub id: ExtensionServiceId,
     pub service_type: ExtensionServiceType,
+    /// Immutable Helm placement policy; absent only for Kubernetes Pod services.
+    pub dpu_target: Option<DpuTarget>,
     pub name: String,
     pub tenant_organization_id: TenantOrganizationId,
     pub description: String,
@@ -121,9 +183,12 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionService {
         let controller_state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
             row.try_get("controller_state_outcome")?;
 
+        let dpu_target = read_dpu_target(row, &service_type)?;
+
         Ok(ExtensionService {
             id: row.try_get("id")?,
             service_type,
+            dpu_target,
             name: row.try_get("name")?,
             tenant_organization_id: tenant_organization_id
                 .parse::<TenantOrganizationId>()
@@ -177,6 +242,8 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionServiceVersionInfo {
 pub struct ExtensionServiceSnapshot {
     pub service_id: ExtensionServiceId,
     pub service_type: ExtensionServiceType,
+    /// Immutable Helm placement policy; absent only for Kubernetes Pod services.
+    pub dpu_target: Option<DpuTarget>,
     pub service_name: String,
     pub tenant_organization_id: TenantOrganizationId,
     pub version_ctr: i32,
@@ -255,9 +322,12 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
             .map(|state| state.0)
             .ok_or_else(|| sqlx::Error::ColumnNotFound("controller_state".to_string()))?;
 
+        let dpu_target = read_dpu_target(row, &service_type)?;
+
         Ok(ExtensionServiceSnapshot {
             service_id,
             service_type,
+            dpu_target,
             service_name,
             tenant_organization_id,
             version_ctr,
@@ -333,6 +403,9 @@ impl DpfHelmChartIdentity {
 /// This is intentionally the NICo API contract rather than a representation of
 /// the DPUService CR.  NICo owns the remaining DPUService fields, including
 /// the release name and placement selector.
+///
+/// @TODO(Felicity): check whether add deny_unknown_fields to DpfHelmChartData
+/// for backward compatibility concerns
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DpfHelmChartServiceData {
@@ -348,6 +421,63 @@ pub struct DpfHelmChartServiceData {
     /// field is sent to DPF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub values: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "serviceDaemonSet"
+    )]
+    pub service_daemon_set: Option<DpfHelmChartServiceDaemonSet>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DpfHelmChartServiceDaemonSet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<BTreeMap<String, DpfHelmChartIntOrString>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "updateStrategy"
+    )]
+    pub update_strategy: Option<DpfHelmChartDaemonSetUpdateStrategy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DpfHelmChartDaemonSetUpdateStrategy {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "type")]
+    pub strategy_type: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "rollingUpdate"
+    )]
+    pub rolling_update: Option<DpfHelmChartDaemonSetRollingUpdate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DpfHelmChartDaemonSetRollingUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxSurge")]
+    pub max_surge: Option<DpfHelmChartIntOrString>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "maxUnavailable"
+    )]
+    pub max_unavailable: Option<DpfHelmChartIntOrString>,
+}
+
+/// Preserves the integer-or-string wire representation used by DPF fields
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum DpfHelmChartIntOrString {
+    Int(i32),
+    String(String),
 }
 
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
@@ -512,6 +642,47 @@ mod tests {
                 &required.replace("%VALUES%", r#"{"serviceDaemonSet":{"nodeSelector":{}}}"#)
             ),
             Err(DpfHelmChartServiceDataError::ReservedNodeSelector)
+        );
+    }
+
+    #[test]
+    fn dpf_helm_chart_data_validates_and_round_trips_service_daemon_set() {
+        let input = r#"{
+            "repoURL":"https://charts.example.com",
+            "chartName":"tenant-service",
+            "chartVersion":"1.2.3",
+            "security.privileged":true,
+            "values":{"serviceDaemonSet":{"labels":{"chart-path":"preserved"}}},
+            "serviceDaemonSet":{
+                "labels":{"app.kubernetes.io/name":"storage-client","svc.dpu.nvidia.com/custom-flows":"enabled"},
+                "annotations":{"example.com/owner":"storage"},
+                "resources":{"nvidia.com/bf_sf":1,"memory":"500Mi"},
+                "updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}
+            }
+        }"#;
+
+        let parsed = DpfHelmChartServiceData::parse(input).unwrap();
+        let daemon_set = parsed.service_daemon_set.as_ref().unwrap();
+        assert_eq!(
+            daemon_set.resources.as_ref().unwrap()["nvidia.com/bf_sf"],
+            DpfHelmChartIntOrString::Int(1)
+        );
+        assert_eq!(
+            daemon_set.resources.as_ref().unwrap()["memory"],
+            DpfHelmChartIntOrString::String("500Mi".to_owned())
+        );
+        assert_eq!(
+            daemon_set
+                .update_strategy
+                .as_ref()
+                .unwrap()
+                .strategy_type
+                .as_deref(),
+            Some("RollingUpdate")
+        );
+        assert_eq!(
+            DpfHelmChartServiceData::parse(&parsed.normalized_json().unwrap()).unwrap(),
+            parsed
         );
     }
 

@@ -610,7 +610,11 @@ async fn fetch_machine_health_snapshot(
             .health
             .as_ref()
             .map(|health| health_report_from_rpc_convert_invalid(health.clone())),
-        associated_dpu_machine_ids: machine.associated_dpu_machine_ids,
+        associated_dpu_machine_ids: machine
+            .associated_dpu_machine_ids
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     })
 }
 

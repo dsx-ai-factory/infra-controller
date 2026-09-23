@@ -97,6 +97,8 @@ pub async fn run(
         .wrap_err("setup_telemetry")?
     };
 
+    carbide_api_core::cfg::load::log_vpc_peering_policy_deprecations(&carbide_config);
+
     let Metrics {
         registry,
         meter,

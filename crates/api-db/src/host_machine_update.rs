@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::{MachineId, MachineType};
+use carbide_uuid::machine::{HostMachineId, MachineId, MachineType};
 use model::host_machine_update::HostMachineUpdate;
 use model::machine::HostReprovisionRequest;
 use sqlx::PgConnection;
@@ -74,11 +74,11 @@ pub async fn find_upgrade_in_progress(
 
 pub async fn find_completed_updates(
     txn: &mut PgConnection,
-) -> Result<Vec<MachineId>, DatabaseError> {
+) -> Result<Vec<HostMachineId>, DatabaseError> {
     let query = r#"SELECT id FROM machines
                     WHERE host_reprovisioning_requested IS NULL
                             AND coalesce(health_reports, '{"merges": {}}'::jsonb)->'merges' ? 'host-fw-update' = TRUE"#;
-    sqlx::query_as::<_, MachineId>(query)
+    sqlx::query_as::<_, HostMachineId>(query)
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
@@ -87,7 +87,7 @@ pub async fn find_completed_updates(
 pub async fn trigger_host_reprovisioning_request(
     txn: &mut PgConnection,
     initiator: &str,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
 ) -> Result<(), DatabaseError> {
     let req = HostReprovisionRequest {
         requested_at: chrono::Utc::now(),
@@ -99,7 +99,7 @@ pub async fn trigger_host_reprovisioning_request(
 
     // The WHERE on controller state means that we'll update it in the case where we were in ready, but not when assigned.
     let query = r#"UPDATE machines SET host_reprovisioning_requested=$2, update_complete = false WHERE id=$1 RETURNING id"#;
-    let _id = sqlx::query_as::<_, MachineId>(query)
+    let _id = sqlx::query_as::<_, HostMachineId>(query)
         .bind(machine_id)
         .bind(sqlx::types::Json(req))
         .fetch_one(&mut *txn)
@@ -111,7 +111,7 @@ pub async fn trigger_host_reprovisioning_request(
 
 pub async fn clear_host_reprovisioning_request(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
 ) -> Result<(), DatabaseError> {
     let query = "UPDATE machines SET host_reprovisioning_requested = NULL WHERE id=$1 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
@@ -130,7 +130,7 @@ pub async fn clear_host_reprovisioning_request(
 /// unwind it.
 pub async fn clear_ready_host_reprovisioning_request(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     initiator: &str,
 ) -> Result<bool, DatabaseError> {
     let query = r#"UPDATE machines
@@ -151,7 +151,7 @@ pub async fn clear_ready_host_reprovisioning_request(
 
 pub async fn reset_host_reprovisioning_request(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     clear_reset: bool,
 ) -> Result<(), DatabaseError> {
     // The WHERE on controller state means that we'll update it in the case where we were in ready, but not when assigned.

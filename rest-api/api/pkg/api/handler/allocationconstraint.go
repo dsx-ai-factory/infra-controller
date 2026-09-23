@@ -376,6 +376,23 @@ func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
 					return nil, cutil.NewAPIError(http.StatusBadRequest, "VPC Prefixes exist for Allocation Constraint, cannot update constraint value", nil)
 				}
 
+				// Lock the REST parent row before changing its IPAM tree. The child
+				// allocation helper uses the same order, so concurrent allocation and
+				// constraint updates cannot reverse the locks on the REST row and IPAM tree.
+				derr = ipam.LockAndValidateParentIPBlockForAllocation(ctx, tx, uach.dbSession, dbParentIPBlock)
+				if derr != nil {
+					if errors.Is(derr, ipam.ErrParentIPBlockReload) {
+						if errors.Is(derr, cdb.ErrDoesNotExist) {
+							logger.Warn().Err(derr).Msg("parent IP Block disappeared while updating Allocation Constraint")
+							return nil, cutil.NewAPIError(http.StatusBadRequest, "The parent IP Block for the Allocation Constraint no longer exists", nil)
+						}
+						logger.Error().Err(derr).Msg("unable to reload parent IP Block for Allocation Constraint update")
+						return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Allocation Constraint due to DB error", nil)
+					}
+					logger.Warn().Err(derr).Msg("parent IP Block rejected for Allocation Constraint update")
+					return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to update Allocation Constraint's parent IP Block. Details: %s", derr.Error()), nil)
+				}
+
 				// We must delete or cleanup the existing child prefix IPAM entry when we successfully update the constraint value by creating new child prefix entry in IPAM
 				existingChildCidr := ipam.GetCidrForIPBlock(ctx, existingChildIPBlock.Prefix, existingChildIPBlock.PrefixLength)
 				derr = ipam.DeleteChildIpamEntryFromCidr(ctx, tx, uach.dbSession, ipamStorage, dbParentIPBlock, existingChildCidr)
@@ -389,6 +406,10 @@ func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
 				// Allocate a child prefix in IPAM for updated constraint value
 				newChildPrefix, derr := ipam.CreateChildIpamEntryForIPBlock(ctx, tx, uach.dbSession, ipamStorage, dbParentIPBlock, apiRequest.ConstraintValue)
 				if derr != nil {
+					if errors.Is(derr, ipam.ErrParentIPBlockReload) {
+						logger.Error().Err(derr).Msg("unable to reload parent IP Block for Allocation Constraint update")
+						return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Allocation Constraint due to DB error", nil)
+					}
 					// printing parent prefix usage to debug the child prefix failure
 					parentPrefix, sserr := ipamStorage.ReadPrefix(ctx, dbParentIPBlock.Prefix, ipam.GetIpamNamespaceForIPBlock(ctx, dbParentIPBlock.RoutingType, dbParentIPBlock.InfrastructureProviderID.String(), dbParentIPBlock.SiteID.String()))
 					if sserr == nil {

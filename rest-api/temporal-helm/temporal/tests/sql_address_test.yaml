@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: SQL connection addresses
+templates:
+  - server-configmap.yaml
+  - server-job.yaml
+tests:
+  - it: brackets IPv6 hosts in the server configuration and schema jobs
+    set:
+      server.config.persistence.default.sql.host: "2001:db8::1"
+      server.config.persistence.default.sql.port: 6432
+      server.config.persistence.visibility.sql.host: "2001:db8::2"
+      server.config.persistence.visibility.sql.port: 7432
+    asserts:
+      - matchRegex:
+          path: data["config_template.yaml"]
+          pattern: '(?m)^    default:\n(?:      .*\n)*        connectAddr: "\[2001:db8::1\]:6432"$'
+        template: server-configmap.yaml
+      - matchRegex:
+          path: data["config_template.yaml"]
+          pattern: '(?m)^    visibility:\n(?:      .*\n)*        connectAddr: "\[2001:db8::2\]:7432"$'
+        template: server-configmap.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SQL_HOST
+            value: "[2001:db8::1]"
+        template: server-job.yaml
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: SQL_HOST
+            value: "[2001:db8::1]"
+        template: server-job.yaml
+        documentIndex: 0
+
+  - it: preserves hostname and IPv4 addresses
+    template: server-configmap.yaml
+    set:
+      server.config.persistence.default.sql.host: postgres.example.test
+      server.config.persistence.visibility.sql.host: "192.0.2.1"
+    asserts:
+      - matchRegex:
+          path: data["config_template.yaml"]
+          pattern: '(?m)^    default:\n(?:      .*\n)*        connectAddr: "postgres\.example\.test:5432"$'
+      - matchRegex:
+          path: data["config_template.yaml"]
+          pattern: '(?m)^    visibility:\n(?:      .*\n)*        connectAddr: "192\.0\.2\.1:5432"$'
+
+  - it: keeps already bracketed IPv6 addresses unchanged
+    template: server-configmap.yaml
+    set:
+      server.config.persistence.default.sql.host: "[2001:db8::1]"
+    asserts:
+      - matchRegex:
+          path: data["config_template.yaml"]
+          pattern: '(?m)^    default:\n(?:      .*\n)*        connectAddr: "\[2001:db8::1\]:5432"$'

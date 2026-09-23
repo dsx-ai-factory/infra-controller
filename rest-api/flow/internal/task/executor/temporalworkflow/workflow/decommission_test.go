@@ -50,8 +50,8 @@ func registerDecommissionActivities(env *testsuite.TestWorkflowEnvironment) {
 
 func decommissionTestTarget() common.Target {
 	return common.Target{
-		Type:         devicetypes.ComponentTypeCompute,
-		ComponentIDs: []string{"comp-1", "comp-2"},
+		Type:        devicetypes.ComponentTypeCompute,
+		Identifiers: []string{"comp-1", "comp-2"},
 	}
 }
 

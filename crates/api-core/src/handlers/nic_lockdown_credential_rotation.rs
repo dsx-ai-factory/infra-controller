@@ -16,7 +16,7 @@
  */
 use ::rpc::forge as rpc;
 use ::rpc::forge::nic_lockdown_credential_rotation_request::Mode;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -40,18 +40,10 @@ pub(crate) async fn trigger_nic_lockdown_credential_rotation(
     let req = request.into_inner();
     let mode = req.mode();
 
-    let machine_id: MachineId = req
+    let machine_id: HostMachineId = req
         .machine_id
         .ok_or_else(|| CarbideError::InvalidArgument("machine_id must be provided".to_string()))?;
     log_machine_id(&machine_id);
-
-    if !machine_id.machine_type().is_host() {
-        return Err(CarbideError::InvalidArgument(format!(
-            "machine_id must name a host machine; got {}",
-            machine_id.machine_type()
-        ))
-        .into());
-    }
 
     let mut txn = api.txn_begin().await?;
 

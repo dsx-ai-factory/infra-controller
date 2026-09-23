@@ -67,6 +67,13 @@ func TestSameOrigin(t *testing.T) {
 		{name: "different_scheme", a: "http://example.com/a", b: "https://example.com/b", want: false},
 		{name: "different_host", a: "https://one.example.com/a", b: "https://two.example.com/b", want: false},
 		{name: "different_effective_port", a: "https://example.com/a", b: "https://example.com:8443/b", want: false},
+		{name: "equivalent_ipv6_literals", a: "http://[2001:0DB8:0:0:0:0:0:1]:19080/a", b: "http://[2001:db8::1]:19080/b", want: true},
+		{name: "equivalent_ipv6_literals_with_zone", a: "http://[fe80:0:0:0:0:0:0:1%25eth0]/a", b: "http://[fe80::1%25eth0]/b", want: true},
+		{name: "different_ipv6_literals", a: "http://[2001:db8::1]/a", b: "http://[2001:db8::2]/b", want: false},
+		{name: "equivalent_ipv6_literals_different_scheme", a: "http://[2001:db8::1]:19080/a", b: "https://[2001:db8::1]:19080/b", want: false},
+		{name: "equivalent_ipv6_literals_different_port", a: "http://[2001:db8::1]:19080/a", b: "http://[2001:db8::1]:19081/b", want: false},
+		{name: "ipv6_zone_is_case_sensitive", a: "http://[fe80::1%25eth0]/a", b: "http://[fe80::1%25ETH0]/b", want: false},
+		{name: "ipv4_mapped_ipv6_is_distinct_from_ipv4", a: "http://[::ffff:192.0.2.1]/a", b: "http://192.0.2.1/b", want: false},
 	}
 
 	for _, tt := range tests {
@@ -76,6 +83,65 @@ func TestSameOrigin(t *testing.T) {
 			b, err := url.Parse(tt.b)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, sameOrigin(a, b))
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestSameOriginRedirectPolicy(t *testing.T) {
+	const literalSource = "http://[2001:0DB8:0:0:0:0:0:1]:19080/source"
+	tests := []struct {
+		name          string
+		source        string
+		destination   string
+		authorization string
+		wantError     bool
+	}{
+		{name: "equivalent_literal_preserves_bearer", source: literalSource, destination: "http://[2001:db8::1]:19080/destination", authorization: "Bearer caller-token"},
+		{name: "equivalent_literal_without_bearer", source: literalSource, destination: "http://[2001:db8::1]:19080/destination"},
+		{name: "different_literal_receives_no_request", source: literalSource, destination: "http://[2001:db8::2]:19080/destination", authorization: "Bearer caller-token", wantError: true},
+		{name: "dns_case_preserves_bearer", source: "https://NICo.example.com/source", destination: "https://nico.example.com/destination", authorization: "Bearer caller-token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requestURLs, authorizations []string
+			client := &http.Client{
+				CheckRedirect: sameOriginRedirectPolicy,
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					requestURLs = append(requestURLs, req.URL.String())
+					authorizations = append(authorizations, req.Header.Get("Authorization"))
+					if len(requestURLs) == 1 {
+						return &http.Response{
+							StatusCode: http.StatusTemporaryRedirect,
+							Header:     http.Header{"Location": []string{tt.destination}},
+							Body:       http.NoBody,
+						}, nil
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+				}),
+			}
+			req, err := http.NewRequest(http.MethodGet, tt.source, nil)
+			require.NoError(t, err)
+			if tt.authorization != "" {
+				req.Header.Set("Authorization", tt.authorization)
+			}
+			resp, err := client.Do(req)
+			if tt.wantError {
+				require.ErrorContains(t, err, "refusing cross-origin redirect")
+				require.Equal(t, []string{tt.source}, requestURLs)
+				require.Equal(t, []string{tt.authorization}, authorizations)
+				return
+			}
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Equal(t, []string{tt.source, tt.destination}, requestURLs)
+			require.Equal(t, []string{tt.authorization, tt.authorization}, authorizations)
 		})
 	}
 }

@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
@@ -70,9 +71,22 @@ var (
 	}
 )
 
-// IPBlock contains information about an IPv4/v6 address pool owned
-// by the InfrastructureProvider and assigned as an overlay network
-// for a particular site
+// SiteFabricIPBlockLockID returns the advisory lock shared by Site Config
+// prefix import and DatacenterOnly IP Block creation for one Site. Later
+// SitePrefix inventory reconciliation can use the same lock when linking these
+// records.
+func SiteFabricIPBlockLockID(infrastructureProviderID, siteID uuid.UUID) uint64 {
+	return db.GetAdvisoryLockIDFromString(fmt.Sprintf(
+		"site-fabric-ip-blocks:%s:%s:%s",
+		infrastructureProviderID.String(),
+		siteID.String(),
+		IPBlockRoutingTypeDatacenterOnly,
+	))
+}
+
+// IPBlock is REST's local record for an IPv4 or IPv6 address pool associated
+// with a Site. SitePrefixID optionally links the record to its corresponding
+// Core SitePrefix.
 type IPBlock struct {
 	bun.BaseModel `bun:"table:ip_block,alias:ipb"`
 
@@ -119,9 +133,10 @@ type IPBlockCreateInput struct {
 	SiteID                   uuid.UUID
 	InfrastructureProviderID uuid.UUID
 	TenantID                 *uuid.UUID
-	// SitePrefixID identifies the backing Core SitePrefix. Together with
-	// TenantID, it identifies a private Tenant SitePrefix; a Site fabric root
-	// may also carry this ID when linked to Core.
+	// SitePrefixID identifies the related Core SitePrefix. When TenantID is also
+	// set, the pair identifies a private IP Block linked to a TenantManaged
+	// SitePrefix. Without TenantID, SitePrefixID identifies a Site fabric root
+	// linked to an OperatorManaged SitePrefix.
 	SitePrefixID    *uuid.UUID
 	RoutingType     string
 	Prefix          string
@@ -170,7 +185,9 @@ type IPBlockFilterInput struct {
 	Statuses                  []string
 	ExcludeDerived            bool
 	ExcludeTenantSitePrefixes bool
-	SearchQuery               *string
+	// CoreLinkedOnly limits the result to IP Blocks linked to a Core SitePrefix.
+	CoreLinkedOnly bool
+	SearchQuery    *string
 	// IncludeDeleted returns soft-deleted rows in addition to active ones.
 	IncludeDeleted bool
 }
@@ -223,6 +240,8 @@ type IPBlockDAO interface {
 	Create(ctx context.Context, tx *db.Tx, input IPBlockCreateInput) (*IPBlock, error)
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*IPBlock, error)
+	// GetByIDForUpdate returns and locks one active IP Block for the transaction.
+	GetByIDForUpdate(ctx context.Context, tx *db.Tx, id uuid.UUID) (*IPBlock, error)
 	//
 	GetOne(ctx context.Context, tx *db.Tx, id uuid.UUID, filter IPBlockFilterInput, includeRelations []string) (*IPBlock, error)
 	//
@@ -231,6 +250,9 @@ type IPBlockDAO interface {
 	GetAll(ctx context.Context, tx *db.Tx, filter IPBlockFilterInput, page paginator.PageInput, includeRelations []string) ([]IPBlock, int, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input IPBlockUpdateInput) (*IPBlock, error)
+	// LinkSitePrefix attaches a Core SitePrefix ID, treats the same link as a
+	// no-op, and does not allow reassignment.
+	LinkSitePrefix(ctx context.Context, tx *db.Tx, id uuid.UUID, sitePrefixID uuid.UUID) (*IPBlock, error)
 	//
 	Clear(ctx context.Context, tx *db.Tx, input IPBlockClearInput) (*IPBlock, error)
 	//
@@ -322,6 +344,35 @@ func (ipbsd IPBlockSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID,
 	}
 
 	return ipb, nil
+}
+
+// GetByIDForUpdate returns an active IP Block and keeps its row locked until
+// the required transaction commits or rolls back.
+func (ipbsd IPBlockSQLDAO) GetByIDForUpdate(ctx context.Context, tx *db.Tx, id uuid.UUID) (*IPBlock, error) {
+	if tx == nil {
+		return nil, db.ErrInvalidParams
+	}
+
+	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.GetByIDForUpdate")
+	if ipblockDAOSpan != nil {
+		defer ipblockDAOSpan.End()
+		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "id", id.String())
+	}
+
+	ipBlock := &IPBlock{}
+	err := db.GetIDB(tx, ipbsd.dbSession).
+		NewSelect().
+		Model(ipBlock).
+		Where("ipb.id = ?", id).
+		For("UPDATE").
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, db.ErrDoesNotExist
+	}
+	if err != nil {
+		return nil, err
+	}
+	return ipBlock, nil
 }
 
 // GetOne returns the IPBlock with the given ID when it also matches the filter.
@@ -441,9 +492,14 @@ func (ipbsd IPBlockSQLDAO) setQueryWithFilter(query *bun.SelectQuery, filter IPB
 		ipbsd.tracerSpan.SetAttribute(span, "exclude_derived", filter.ExcludeDerived)
 	}
 	if filter.ExcludeTenantSitePrefixes {
-		// A SitePrefix managed by the operator may have SitePrefixID without
-		// TenantID. Only both fields identify a private Tenant SitePrefix.
+		// An OperatorManaged SitePrefix may have SitePrefixID without TenantID.
+		// Only both fields identify a private IP Block linked to a
+		// TenantManaged SitePrefix.
 		query = query.Where("(ipb.tenant_id IS NULL OR ipb.site_prefix_id IS NULL)")
+	}
+	if filter.CoreLinkedOnly {
+		query = query.Where("ipb.site_prefix_id IS NOT NULL")
+		ipbsd.tracerSpan.SetAttribute(span, "core_linked_only", true)
 	}
 	if filter.Prefixes != nil {
 		query = query.Where("ipb.prefix IN (?)", bun.In(filter.Prefixes))
@@ -621,6 +677,37 @@ func (ipbsd IPBlockSQLDAO) Update(ctx context.Context, tx *db.Tx, input IPBlockU
 		return nil, err
 	}
 	return nv, nil
+}
+
+// LinkSitePrefix attaches a Core SitePrefix ID to an active IP Block. Repeating
+// the same link is a no-op, and an existing link cannot be reassigned.
+func (ipbsd IPBlockSQLDAO) LinkSitePrefix(ctx context.Context, tx *db.Tx, id uuid.UUID, sitePrefixID uuid.UUID) (*IPBlock, error) {
+	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.LinkSitePrefix")
+	if ipblockDAOSpan != nil {
+		defer ipblockDAOSpan.End()
+		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "id", id.String())
+		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "site_prefix_id", sitePrefixID.String())
+	}
+
+	ipb := &IPBlock{}
+	err := db.GetIDB(tx, ipbsd.dbSession).
+		NewUpdate().
+		Model(ipb).
+		Set("site_prefix_id = ?", sitePrefixID).
+		Set("updated = CASE WHEN site_prefix_id IS NULL THEN ? ELSE updated END", db.GetCurTime()).
+		Where("id = ?", id).
+		Where("deleted IS NULL").
+		Where("(site_prefix_id IS NULL OR site_prefix_id = ?)", sitePrefixID).
+		Returning("ipb.*").
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: IP Block is deleted or linked to another SitePrefix", db.ErrInvalidValue)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return ipb, nil
 }
 
 // ClearFromParams sets parameters of an existing IPBlock to null values in db

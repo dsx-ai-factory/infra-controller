@@ -96,7 +96,7 @@ spec:
               mountPath: /var/log/auth.log
               readOnly: true
             - name: nico-certs
-              mountPath: {{ .Values.certsDir | default "/opt/nico" }}
+              mountPath: {{ .Values.certsDir | default "/opt/forge" }}
               readOnly: true
             - name: machine-id
               mountPath: /run/otelcol-contrib
@@ -190,7 +190,7 @@ spec:
             type: FileOrCreate
         - name: nico-certs
           hostPath:
-            path: {{ .Values.certsDir | default "/opt/nico" }}
+            path: {{ .Values.certsDir | default "/opt/forge" }}
             type: DirectoryOrCreate
         - name: machine-id
           hostPath:

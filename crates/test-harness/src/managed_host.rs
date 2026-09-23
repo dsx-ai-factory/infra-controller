@@ -21,7 +21,7 @@ use std::sync::Arc;
 use carbide_api_core::test_support::Api;
 use carbide_api_core::test_support::fixture_config::FixtureDefault as _;
 use carbide_site_explorer::test_support::TestSiteExplorer;
-use carbide_uuid::machine::HostMachineId;
+use carbide_uuid::machine::PredictedHostMachineId;
 use chrono::Utc;
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
@@ -111,7 +111,7 @@ impl TestManagedHost {
             .as_ref()
             .expect("test host should have a desired boot interface")
             .version;
-        assert!(
+        assert_eq!(
             db::machine_desired_boot_interface::mark_verified(
                 txn.as_mut(),
                 &self.host.id,
@@ -120,6 +120,7 @@ impl TestManagedHost {
             )
             .await
             .expect("boot-interface verification should be recorded"),
+            db::ConditionalWrite::Applied(()),
             "test host's desired boot interface should still be current"
         );
         machine
@@ -290,7 +291,11 @@ impl<'a> TestManagedHostBuilder<'a> {
             })
             .collect();
         let managed_host = TestManagedHost {
-            host: TestHostMachine::new(host_machine_id(&config), api.clone(), &config),
+            host: TestHostMachine::new(
+                predicted_host_machine_id(&config).into(),
+                api.clone(),
+                &config,
+            ),
             dpus,
             api,
         };
@@ -308,12 +313,12 @@ impl<'a> TestManagedHostBuilder<'a> {
     }
 }
 
-fn host_machine_id(config: &ManagedHostConfig) -> HostMachineId {
+fn predicted_host_machine_id(config: &ManagedHostConfig) -> PredictedHostMachineId {
     if let Some(dpu) = config.dpus.first() {
         return host_id_from_dpu_hardware_info(&HardwareInfo::from(dpu))
             .expect("host machine id should be derived from DPU hardware info")
             .try_into()
-            .expect("host exploration report machine ID should be a host machine");
+            .expect("host exploration report machine ID should be a predicted host machine");
     }
 
     let mut report: EndpointExplorationReport = config.clone().into();
@@ -322,7 +327,7 @@ fn host_machine_id(config: &ManagedHostConfig) -> HostMachineId {
         .expect("host exploration report should generate a machine id")
         .expect("host exploration report should include a generated machine id"))
     .try_into()
-    .expect("host exploration report machine ID should be a host machine")
+    .expect("host exploration report machine ID should be a predicted host machine")
 }
 
 async fn register_expected_machine(test_harness: &TestHarness, managed_host: &ManagedHostConfig) {

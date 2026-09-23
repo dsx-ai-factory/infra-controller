@@ -151,7 +151,7 @@ type APIInfiniBandPartition struct {
 	// EnableSharp indicates if sharp enable on the IB partition or not
 	EnableSharp *bool `json:"enableSharp"`
 	// Labels is the labels of the InfiniBand Partition
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// Status is the status o the InfiniBand Partition
 	Status cdbm.InfiniBandPartitionStatus `json:"status"`
 	// StatusHistory is the status detail records for the InfiniBand Partition over time
@@ -175,7 +175,7 @@ func NewAPIInfiniBandPartition(dibp *cdbm.InfiniBandPartition, dbsds []cdbm.Stat
 		ServiceLevel:  dibp.ServiceLevel,
 		RateLimit:     dibp.RateLimit,
 		Mtu:           dibp.Mtu,
-		Labels:        dibp.Labels,
+		Labels:        APILabels(dibp.Labels),
 		EnableSharp:   dibp.EnableSharp,
 		Status:        dibp.Status,
 		Created:       dibp.Created,

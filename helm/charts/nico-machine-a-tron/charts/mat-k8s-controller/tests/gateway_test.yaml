@@ -1,0 +1,278 @@
+suite: gateway tests
+templates:
+  - templates/deployment.yaml
+  - templates/gateway-configmap.yaml
+  - templates/gateway-service.yaml
+  - templates/gateway-certificate.yaml
+set:
+  global:
+    certificate:
+      duration: 720h0m0s
+      renewBefore: 360h0m0s
+      privateKey:
+        algorithm: ECDSA
+        size: 384
+      issuerRef:
+        kind: ClusterIssuer
+        name: vault-nico-issuer
+        group: cert-manager.io
+    spiffe:
+      trustDomain: nico.local
+tests:
+  - it: should render a single-container pod and no gateway resources by default
+    set:
+      enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/gateway-configmap.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/gateway-service.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/gateway-certificate.yaml
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+        template: templates/deployment.yaml
+      - isNull:
+          path: spec.template.spec.volumes
+        template: templates/deployment.yaml
+      - isNull:
+          path: spec.template.spec.automountServiceAccountToken
+        template: templates/deployment.yaml
+      - isNull:
+          path: spec.strategy
+        template: templates/deployment.yaml
+
+  - it: should render no gateway resources when the controller is disabled
+    set:
+      enabled: false
+      gateway:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should run the gateway from the controller image with its config, token and probes
+    set:
+      enabled: true
+      gateway:
+        enabled: true
+      config:
+        logLevel: debug
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.strategy
+          value:
+            type: Recreate
+            rollingUpdate: null
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 2
+      - equal:
+          path: spec.template.spec.containers[1].name
+          value: gateway
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: mat-k8s-controller:0.1.0
+      - equal:
+          path: spec.template.spec.containers[1].command
+          value: [/mat-protocol-gateway]
+      - equal:
+          path: spec.template.spec.containers[1].args
+          value: [/etc/mat-protocol-gateway/gateway.toml]
+      - equal:
+          path: spec.template.spec.containers[1].env
+          value:
+            - name: RUST_LOG
+              value: debug
+            - name: UFM_MOCK_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nico-machine-a-tron-ufm-mock-auth
+                  key: token
+      - equal:
+          path: spec.template.spec.containers[1].ports
+          value:
+            - name: ufm
+              containerPort: 8443
+              protocol: TCP
+      - equal:
+          path: spec.template.spec.containers[1].livenessProbe.httpGet
+          value:
+            path: /livez
+            port: ufm
+            scheme: HTTPS
+      - equal:
+          path: spec.template.spec.containers[1].readinessProbe.httpGet
+          value:
+            path: /readyz
+            port: ufm
+            scheme: HTTPS
+      - equal:
+          path: spec.template.spec.containers[1].volumeMounts
+          value:
+            - name: gateway-config
+              mountPath: /etc/mat-protocol-gateway
+              readOnly: true
+            - name: gateway-tls
+              mountPath: /var/run/secrets/spiffe.io
+              readOnly: true
+      - equal:
+          path: spec.template.spec.volumes[1]
+          value:
+            name: gateway-config
+            configMap:
+              name: RELEASE-NAME-mat-k8s-controller-gateway-config
+      - equal:
+          path: spec.template.spec.volumes[2]
+          value:
+            name: gateway-tls
+            secret:
+              secretName: RELEASE-NAME-mat-k8s-controller-gateway-tls
+
+  - it: should give Kubernetes API credentials to the controller container only
+    set:
+      enabled: true
+      gateway:
+        enabled: true
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts
+          value:
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      - equal:
+          path: spec.template.spec.volumes[0].name
+          value: kube-api-access
+      - equal:
+          path: spec.template.spec.volumes[0].projected.sources[0].serviceAccountToken.path
+          value: token
+      - notContains:
+          path: spec.template.spec.containers[1].volumeMounts
+          content:
+            name: kube-api-access
+          any: true
+
+  - it: should read the UFM token from the configured Secret
+    set:
+      enabled: true
+      gateway:
+        enabled: true
+        existingAuthSecret: shared-ufm-auth
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].env[1].valueFrom.secretKeyRef.name
+          value: shared-ufm-auth
+
+  - it: should render the gateway TOML with the listener, TLS files and inventory CA
+    set:
+      enabled: true
+      gateway:
+        enabled: true
+        port: 9443
+    template: templates/gateway-configmap.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-mat-k8s-controller-gateway-config
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: '(^|\n)listen_address = "0\.0\.0\.0:9443"\n'
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: '\[tls\]\ncert_path = "/var/run/secrets/spiffe.io/tls.crt"\nkey_path = "/var/run/secrets/spiffe.io/tls.key"\n'
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: '\[sources\]\nca_cert_path = "/var/run/secrets/spiffe.io/ca.crt"\ninsecure_skip_verify = false\n'
+
+  - it: should skip inventory verification with the controller when configured
+    set:
+      enabled: true
+      gateway:
+        enabled: true
+      config:
+        insecureSkipVerify: true
+    template: templates/gateway-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: '\[sources\]\ninsecure_skip_verify = true\n'
+      - notMatchRegex:
+          path: data["gateway.toml"]
+          pattern: ca_cert_path
+
+  - it: should expose the gateway through a Helm-managed ClusterIP Service on the ufm port
+    set:
+      enabled: true
+      gateway:
+        enabled: true
+    template: templates/gateway-service.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-mat-k8s-controller-gateway
+      # Not selected by the controller's stale-Service cleanup, which matches
+      # app.kubernetes.io/managed-by=mat-k8s-controller.
+      - equal:
+          path: metadata.labels["app.kubernetes.io/managed-by"]
+          value: Helm
+      - equal:
+          path: spec.type
+          value: ClusterIP
+      - equal:
+          path: spec.selector
+          value:
+            app.kubernetes.io/name: mat-k8s-controller
+            app.kubernetes.io/instance: RELEASE-NAME
+      - equal:
+          path: spec.ports
+          value:
+            - name: ufm
+              port: 8443
+              targetPort: ufm
+              protocol: TCP
+
+  - it: should issue the gateway certificate for the Service names into the mounted Secret
+    set:
+      enabled: true
+      gateway:
+        enabled: true
+      global:
+        namespaceOverride: nico-system
+    template: templates/gateway-certificate.yaml
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: nico-system
+      - equal:
+          path: spec.commonName
+          value: RELEASE-NAME-mat-k8s-controller-gateway
+      - equal:
+          path: spec.dnsNames
+          value:
+            - RELEASE-NAME-mat-k8s-controller-gateway.nico-system.svc.cluster.local
+            - RELEASE-NAME-mat-k8s-controller-gateway.nico-system.svc
+            - RELEASE-NAME-mat-k8s-controller-gateway.nico-system
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/RELEASE-NAME-mat-k8s-controller
+      - equal:
+          path: spec.issuerRef
+          value:
+            kind: ClusterIssuer
+            name: vault-nico-issuer
+            group: cert-manager.io
+      - equal:
+          path: spec.secretName
+          value: RELEASE-NAME-mat-k8s-controller-gateway-tls

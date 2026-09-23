@@ -17,6 +17,8 @@
 use std::path::PathBuf;
 use std::{fs, io};
 
+use carbide_proto_compiler::{CompilerConfig, compile};
+
 // RPC methods mocked by ssh-console-mock-api-server. We don't implement all of forge.proto because
 // we would need an unreasonably large number of stub functions.
 static KEEP_RPCS: &[&str] = &[
@@ -37,29 +39,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     copy_protos_from_rpc_crate()?;
     println!("cargo:rerun-if-changed=../rpc/proto");
 
+    let schema = compile(&CompilerConfig {
+        proto_files: vec![
+            PathBuf::from("codegen/v1/machine_id_types.proto"),
+            PathBuf::from("proto/common.proto"),
+            PathBuf::from("proto/scout_firmware_upgrade.proto"),
+            PathBuf::from("proto/dns.proto"),
+            PathBuf::from("proto/forge.proto"),
+            PathBuf::from("proto/machine_discovery.proto"),
+            PathBuf::from("proto/site_explorer.proto"),
+        ],
+        include_paths: vec![PathBuf::from("proto"), PathBuf::from(RPC_PROTO_DIR)],
+        protoc_args: Vec::new(),
+    })?;
+    let codegen = schema.collect_codegen()?;
+    let rust_descriptor_set = codegen.rust_file_descriptor_set(&schema.file_descriptor_set)?;
+
     // Then codegen them.
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(false) // we're using ForgeApiClient from rpc crate
         .extern_path(".common.MachineId", "::carbide_uuid::machine::MachineId")
+        .extern_path(
+            ".common.DpuMachineId",
+            "::carbide_uuid::machine::DpuMachineId",
+        )
+        .extern_path(
+            ".common.HostMachineId",
+            "::carbide_uuid::machine::HostMachineId",
+        )
+        .extern_path(
+            ".common.StableHostMachineId",
+            "::carbide_uuid::machine::StableHostMachineId",
+        )
+        .extern_path(
+            ".common.PredictedHostMachineId",
+            "::carbide_uuid::machine::PredictedHostMachineId",
+        )
         .extern_path(".common.RackId", "::carbide_uuid::rack::RackId")
         .extern_path(
             ".common.RackProfileId",
             "::carbide_uuid::rack::RackProfileId",
         )
-        .protoc_arg("--experimental_allow_proto3_optional")
         .out_dir("src/generated")
-        .compile_protos(
-            &[
-                "proto/common.proto",
-                "proto/scout_firmware_upgrade.proto",
-                "proto/dns.proto",
-                "proto/forge.proto",
-                "proto/machine_discovery.proto",
-                "proto/site_explorer.proto",
-            ],
-            &["proto", RPC_PROTO_DIR],
-        )?;
+        .compile_fds(rust_descriptor_set)?;
 
     Ok(())
 }
@@ -73,31 +96,7 @@ fn copy_protos_from_rpc_crate() -> io::Result<()> {
     for source_proto in fs::read_dir(rpc_crate_path.join("proto"))? {
         let source_proto = source_proto?;
         let source = match source_proto.file_name().to_str() {
-            Some("forge.proto") => {
-                let mut in_rpc_section = false;
-                fs::read_to_string(source_proto.path())?
-                    .lines()
-                    .filter(|line| match in_rpc_section {
-                        false => {
-                            if line.contains("service Forge {") {
-                                in_rpc_section = true;
-                            }
-                            true
-                        }
-                        true => {
-                            if *line == "}" {
-                                in_rpc_section = false;
-                                true
-                            } else {
-                                KEEP_RPCS
-                                    .iter()
-                                    .any(|keep_rpc| line.contains(&format!("rpc {keep_rpc}(")))
-                            }
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
+            Some("forge.proto") => filter_forge_rpcs(&fs::read_to_string(source_proto.path())?),
             Some(fname) if fname.ends_with(".proto") => fs::read_to_string(source_proto.path())?,
             _ => continue,
         };
@@ -115,4 +114,59 @@ fn copy_protos_from_rpc_crate() -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn filter_forge_rpcs(source: &str) -> String {
+    let mut output = Vec::new();
+    let mut in_service = false;
+    let mut rpc_keep = None;
+    let mut rpc_brace_depth = 0_i32;
+
+    for line in source.lines() {
+        if !in_service {
+            output.push(line);
+            if line.contains("service Forge {") {
+                in_service = true;
+            }
+            continue;
+        }
+
+        if let Some(keep) = rpc_keep {
+            if keep {
+                output.push(line);
+            }
+            rpc_brace_depth += line.matches('{').count() as i32;
+            rpc_brace_depth -= line.matches('}').count() as i32;
+            if (rpc_brace_depth == 0 && line.contains(';'))
+                || (rpc_brace_depth == 0 && line.contains('}'))
+            {
+                rpc_keep = None;
+            }
+            continue;
+        }
+
+        if line.trim() == "}" {
+            output.push(line);
+            in_service = false;
+            continue;
+        }
+
+        if let Some(rpc_start) = line.find("rpc ") {
+            let rpc_name = line[rpc_start + 4..]
+                .split('(')
+                .next()
+                .unwrap_or_default()
+                .trim();
+            let keep = KEEP_RPCS.contains(&rpc_name);
+            if keep {
+                output.push(line);
+            }
+            rpc_brace_depth = line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            if !line.contains(';') && !(line.contains('{') && rpc_brace_depth == 0) {
+                rpc_keep = Some(keep);
+            }
+        }
+    }
+
+    output.join("\n")
 }

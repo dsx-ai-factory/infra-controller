@@ -151,9 +151,6 @@ make preview-openapi
 
 # Generate Go SDK from OpenAPI spec
 make generate-sdk
-
-# Publish OpenAPI docs
-make publish-openapi
 ```
 
 `generate-sdk` uses a pinned openapi-generator, downloaded to `.tools/` and

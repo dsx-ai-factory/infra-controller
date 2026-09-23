@@ -7,6 +7,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
@@ -82,3 +83,21 @@ func (r *MemReader) GetHostExternalIDsByRackIDs(_ context.Context, rackIDs []str
 }
 
 var _ StatusReader = (*MemReader)(nil)
+
+// GetStatusesByManagementMACs uses MAC-keyed statuses for compute and MAC-keyed
+// host lists for rack devices. Tests seed these with SetStatus/SetRackHosts.
+func (r *MemReader) GetStatusesByManagementMACs(_ context.Context, componentType devicetypes.ComponentType, macs []string) (map[string][]*types.ComponentOperationStatus, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string][]*types.ComponentOperationStatus, len(macs))
+	for _, mac := range macs {
+		if componentType == devicetypes.ComponentTypeCompute {
+			out[mac] = []*types.ComponentOperationStatus{r.statuses[mac]}
+		} else {
+			for _, host := range r.hosts[mac] {
+				out[mac] = append(out[mac], r.statuses[host])
+			}
+		}
+	}
+	return out, nil
+}

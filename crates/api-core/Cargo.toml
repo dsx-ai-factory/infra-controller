@@ -26,10 +26,6 @@ repository.workspace = true
 [lib]
 name = "carbide_api_core"
 
-[[test]]
-name = "integration"
-path = "tests/integration/main.rs"
-
 [dependencies]
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
 bmc-vendor = { path = "../bmc-vendor" }
@@ -235,16 +231,13 @@ carbide-site-explorer = { path = "../site-explorer", features = [
   "test-support",
 ] }
 carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
-carbide-test-harness = { path = "../test-harness" }
 carbide-test-support = { path = "../test-support" }
 carbide-utils = { path = "../utils", features = ["test-support"] }
 prometheus-text-parser = { path = "../prometheus-text-parser" }
 state-controller = { path = "../state-controller", features = ["test-support"] }
 
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
-const_format = { workspace = true }
 ctor = { workspace = true }
-data-encoding = { workspace = true }
 figment = { workspace = true, features = ["env", "test", "toml"] }
 mockito = { workspace = true }
 prost = { workspace = true }

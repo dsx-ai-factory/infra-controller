@@ -39,7 +39,9 @@ type PowerController interface {
 // Required descriptor capability: capability.CapabilityPowerStatus.
 type PowerStatusReader interface {
 	// GetPowerStatus queries the current power state of each component in the
-	// target. Returns a map of component ID to PowerStatus.
+	// target. Keys are the requested Core IDs or MAC addresses. Missing or failed
+	// responses are omitted; an Unknown value means a response was received but
+	// its power state could not be determined.
 	GetPowerStatus(ctx context.Context, target common.Target) (map[string]operations.PowerStatus, error) //nolint
 }
 

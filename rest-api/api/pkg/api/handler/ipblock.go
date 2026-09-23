@@ -126,62 +126,80 @@ func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site Infrastructure Provider does not match Org", nil)
 	}
 
-	// Check if an ipblock already exists for the provider with given name at the site
-	// TODO consider doing this with an advisory lock for correctness
 	ipbDAO := cdbm.NewIPBlockDAO(cipbh.dbSession)
-	ipbs, tot, err := ipbDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.IPBlockFilterInput{
-			SiteIDs:                   []uuid.UUID{site.ID},
-			InfrastructureProviderIDs: []uuid.UUID{ip.ID},
-			Names:                     []string{apiRequest.Name},
-			ExcludeDerived:            true,
-		},
-		cdbp.PageInput{},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for name uniqueness of ip block")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create IPBlock due to db error", nil)
-	}
-	if tot > 0 {
-		logger.Warn().Str("providerId", ip.ID.String()).Str("name", apiRequest.Name).Msg("ip block with same name already exists")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, fmt.Sprintf("IPBlock with name: %s for Site: %s already exists for provider", apiRequest.Name, apiRequest.SiteID), validation.Errors{
-			"id": errors.New(ipbs[0].ID.String()),
-		})
-	}
-
-	// Check if an ipblock already exists for the provider with given prefix/prefixLength at the site
-	ipbp, totp, err := ipbDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.IPBlockFilterInput{
-			SiteIDs:                   []uuid.UUID{site.ID},
-			InfrastructureProviderIDs: []uuid.UUID{ip.ID},
-			Names:                     []string{apiRequest.Name},
-			Prefixes:                  []string{apiRequest.Prefix},
-			PrefixLengths:             []int{apiRequest.PrefixLength},
-			ExcludeDerived:            true,
-		},
-		cdbp.PageInput{},
-		nil,
-	)
-
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for prefix and prefixlength uniqueness of ip block")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create IPBlock due to db error", nil)
-	}
-	if totp > 0 {
-		logger.Warn().Str("providerId", ip.ID.String()).Str("prefix", apiRequest.Prefix).Int("prefix_length", apiRequest.PrefixLength).Msg("ip block with same prefix and prefix_length already exists")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, fmt.Sprintf("IPBlock with prefix: %s and prefix_length: %d for Site: %s already exists for provider", apiRequest.Prefix, apiRequest.PrefixLength, apiRequest.SiteID), validation.Errors{
-			"id": errors.New(ipbp[0].ID.String()),
-		})
-	}
 
 	var ipb *cdbm.IPBlock
 	var ssd *cdbm.StatusDetail
 	err = cdb.WithTx(ctx, cipbh.dbSession, func(tx *cdb.Tx) error {
+		// Site Config prefix import and DatacenterOnly IP Block creation share
+		// this lock; SitePrefix inventory reconciliation will use it too. Run
+		// uniqueness checks after successful acquisition so a retried loser sees
+		// the root that committed first.
+		if apiRequest.RoutingType == cdbm.IPBlockRoutingTypeDatacenterOnly {
+			derr := tx.TryAcquireAdvisoryLock(
+				ctx,
+				cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, site.ID),
+				nil,
+			)
+			if derr != nil {
+				if errors.Is(derr, cdb.ErrXactAdvisoryLockFailed) {
+					logger.Warn().Err(derr).Msg("Site fabric IP Block lock is held by another writer")
+					return cutil.NewAPIError(http.StatusConflict, "Site fabric IP Blocks are being updated; retry the request", nil)
+				}
+				logger.Error().Err(derr).Msg("failed to acquire Site fabric IP Block lock")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create IP Block", nil)
+			}
+		}
+
+		// TODO consider serializing name uniqueness across all routing types.
+		ipbs, total, derr := ipbDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.IPBlockFilterInput{
+				SiteIDs:                   []uuid.UUID{site.ID},
+				InfrastructureProviderIDs: []uuid.UUID{ip.ID},
+				Names:                     []string{apiRequest.Name},
+				ExcludeDerived:            true,
+			},
+			cdbp.PageInput{},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error checking for name uniqueness of ip block")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create IPBlock due to db error", nil)
+		}
+		if total > 0 {
+			logger.Warn().Str("providerId", ip.ID.String()).Str("name", apiRequest.Name).Msg("ip block with same name already exists")
+			return cutil.NewAPIError(http.StatusConflict, fmt.Sprintf("IPBlock with name: %s for Site: %s already exists for provider", apiRequest.Name, apiRequest.SiteID), validation.Errors{
+				"id": errors.New(ipbs[0].ID.String()),
+			})
+		}
+
+		ipbs, total, derr = ipbDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.IPBlockFilterInput{
+				SiteIDs:                   []uuid.UUID{site.ID},
+				InfrastructureProviderIDs: []uuid.UUID{ip.ID},
+				Prefixes:                  []string{apiRequest.Prefix},
+				PrefixLengths:             []int{apiRequest.PrefixLength},
+				RoutingTypes:              []string{apiRequest.RoutingType},
+				ExcludeDerived:            true,
+			},
+			cdbp.PageInput{},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error checking for prefix and prefixlength uniqueness of ip block")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create IPBlock due to db error", nil)
+		}
+		if total > 0 {
+			logger.Warn().Str("providerId", ip.ID.String()).Str("prefix", apiRequest.Prefix).Int("prefix_length", apiRequest.PrefixLength).Msg("ip block with same prefix and prefix_length already exists")
+			return cutil.NewAPIError(http.StatusConflict, fmt.Sprintf("IPBlock with prefix: %s and prefix_length: %d for Site: %s already exists for provider", apiRequest.Prefix, apiRequest.PrefixLength, apiRequest.SiteID), validation.Errors{
+				"id": errors.New(ipbs[0].ID.String()),
+			})
+		}
+
 		ipamStorage := ipam.NewIpamStorage(cipbh.dbSession.DB, tx.GetBunTx())
 		// Create the prefix in IPAM
 		prefix, derr := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, apiRequest.Prefix, apiRequest.PrefixLength, apiRequest.RoutingType, ip.ID.String(), site.ID.String())
@@ -1108,32 +1126,52 @@ func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
 		logger.Error().Str("IP Block ID", ipbID.String()).Err(err).Msg("error retrieving provider IP Block DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve IPBlock, DB error", nil)
 	}
-
-	// Verify that the IPBlock does not have any allocations associated with it
-	acDAO := cdbm.NewAllocationConstraintDAO(dipbh.dbSession)
-	_, acCount, err := acDAO.GetAll(ctx, nil, cdbm.AllocationConstraintFilterInput{
-		ResourceType:    cutil.GetPtr(cdbm.AllocationResourceTypeIPBlock),
-		ResourceTypeIDs: []uuid.UUID{ipb.ID},
-	}, cdbp.PageInput{}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("error getting allocation constraints")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Error retrieving Allocations for IP Block", nil)
-	}
-	if acCount > 0 {
-		logger.Warn().Msg("allocation constraints exist for ipBlock")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("%v Allocations exist for IP Block, unable to delete", acCount), nil)
+	const coreLinkedDeleteMessage = "This IP Block is linked to an OperatorManaged SitePrefix; remove the corresponding prefix from Core's site_fabric_prefixes configuration instead"
+	if ipb.SitePrefixID != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, coreLinkedDeleteMessage, nil)
 	}
 
 	err = cdb.WithTx(ctx, dipbh.dbSession, func(tx *cdb.Tx) error {
+		lockedIPBlock, derr := ipbDAO.GetByIDForUpdate(ctx, tx, ipbID)
+		if derr != nil {
+			if errors.Is(derr, cdb.ErrDoesNotExist) {
+				return cutil.NewAPIError(http.StatusNotFound, "Specified IP Block does not exist, or has been deleted", nil)
+			}
+			logger.Error().Err(derr).Msg("error locking IP Block in DB")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Error locking IP Block, DB error", nil)
+		}
+		if lockedIPBlock.SitePrefixID != nil {
+			return cutil.NewAPIError(http.StatusConflict, coreLinkedDeleteMessage, nil)
+		}
+
+		// Check for allocations while holding the lock on a DatacenterOnly Site
+		// fabric root that can receive a Core link. A child that commits first is
+		// visible here; a later child must wait for deletion.
+		acDAO := cdbm.NewAllocationConstraintDAO(dipbh.dbSession)
+		_, acCount, derr := acDAO.GetAll(ctx, tx, cdbm.AllocationConstraintFilterInput{
+			ResourceType:    cutil.GetPtr(cdbm.AllocationResourceTypeIPBlock),
+			ResourceTypeIDs: []uuid.UUID{lockedIPBlock.ID},
+		}, cdbp.PageInput{}, nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error getting allocation constraints")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Error retrieving Allocations for IP Block", nil)
+		}
+		if acCount > 0 {
+			logger.Warn().Msg("allocation constraints exist for ipBlock")
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("%v Allocations exist for IP Block, unable to delete", acCount), nil)
+		}
+
 		// Delete IPBlock in DB
-		if derr := ipbDAO.Delete(ctx, tx, ipbID); derr != nil {
+		derr = ipbDAO.Delete(ctx, tx, ipbID)
+		if derr != nil {
 			logger.Error().Err(derr).Msg("error deleting IP Block in DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Error deleting IP Block, DB error", nil)
 		}
 
 		// delete IPAM entry for this ipBlock
 		ipamStorage := ipam.NewIpamStorage(dipbh.dbSession.DB, tx.GetBunTx())
-		if derr := ipam.DeleteIpamEntryForIPBlock(ctx, ipamStorage, ipb.Prefix, ipb.PrefixLength, ipb.RoutingType, ipb.InfrastructureProviderID.String(), ipb.SiteID.String()); derr != nil {
+		derr = ipam.DeleteIpamEntryForIPBlock(ctx, ipamStorage, lockedIPBlock.Prefix, lockedIPBlock.PrefixLength, lockedIPBlock.RoutingType, lockedIPBlock.InfrastructureProviderID.String(), lockedIPBlock.SiteID.String())
+		if derr != nil {
 			logger.Error().Err(derr).Msg("failed to delete IPAM record for IP Block")
 			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Could not delete IPAM entry for IP Block. Details: %s", derr.Error()), nil)
 		}

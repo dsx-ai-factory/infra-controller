@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -119,12 +120,13 @@ func TestAPIDpuMachine_FromProto(t *testing.T) {
 	}
 
 	hostMachineID := "test-host-machine-id"
-	dpuMachine := APIDpuMachine{}
-	dpuMachine.FromProto(protoDpuMachine, APIDpuMachineProtoContext{
+	protoContext := APIDpuMachineProtoContext{
 		HostMachineID:            hostMachineID,
 		SiteID:                   site.ID,
 		InfrastructureProviderID: site.InfrastructureProviderID,
-	})
+	}
+	dpuMachine := APIDpuMachine{}
+	dpuMachine.FromProto(protoDpuMachine, protoContext)
 
 	assert.Equal(t, "test-machine-id", dpuMachine.ID)
 	// HostMachineID must be the host Machine ID from the context, not the DPU's own ID.
@@ -155,6 +157,74 @@ func TestAPIDpuMachine_FromProto(t *testing.T) {
 	assert.Equal(t, maxUint32, dpuMachine.DpuNetworkConfig.AdminInterface.VpcVni)
 	assert.Equal(t, []uint32{maxUint32}, dpuMachine.DpuNetworkConfig.AdminInterface.VpcPeerVnis)
 	assert.Equal(t, maxUint32, *dpuMachine.DpuNetworkConfig.AdminInterface.Mtu)
+
+	populatedNetworkConfig := proto.Clone(protoDpuMachine.DpuNetworkConfig).(*corev1.ManagedHostNetworkConfigResponse)
+	populatedNetworkConfig.DhcpServers = []string{"10.0.0.2"}
+	populatedNetworkConfig.TenantInterfaces = []*corev1.FlatInterfaceConfig{
+		{
+			VlanId: 100,
+		},
+	}
+	populatedNetworkConfig.RouteServers = []string{"10.0.0.3"}
+	populatedNetworkConfig.DeprecatedDenyPrefixes = []string{"10.0.1.0/24"}
+	populatedNetworkConfig.DenyPrefixes = []string{"10.0.2.0/24"}
+	populatedNetworkConfig.SiteFabricPrefixes = []string{"10.0.3.0/24"}
+	populatedNetworkConfig.AnycastSitePrefixes = []string{"10.0.4.0/24"}
+
+	tests := []struct {
+		name        string
+		protoConfig *corev1.ManagedHostNetworkConfigResponse
+		check       func(*testing.T, *APIDpuNetworkConfig)
+	}{
+		{
+			name:        "empty collections serialize as arrays",
+			protoConfig: protoDpuMachine.DpuNetworkConfig,
+			check: func(t *testing.T, networkConfig *APIDpuNetworkConfig) {
+				encodedNetworkConfig, err := json.Marshal(networkConfig)
+				require.NoError(t, err)
+
+				var networkConfigResponse map[string]interface{}
+				err = json.Unmarshal(encodedNetworkConfig, &networkConfigResponse)
+				require.NoError(t, err)
+
+				for _, field := range []string{
+					"dhcpServers",
+					"tenantInterfaces",
+					"routeServers",
+					"deprecatedDenyPrefixes",
+					"denyPrefixes",
+					"siteFabricPrefixes",
+					"anycastSitePrefixes",
+				} {
+					assert.Equal(t, []interface{}{}, networkConfigResponse[field])
+				}
+			},
+		},
+		{
+			name:        "populated collections are preserved",
+			protoConfig: populatedNetworkConfig,
+			check: func(t *testing.T, networkConfig *APIDpuNetworkConfig) {
+				assert.Equal(t, []string{"10.0.0.2"}, networkConfig.DhcpServers)
+				require.Len(t, networkConfig.TenantInterfaces, 1)
+				assert.Equal(t, uint32(100), networkConfig.TenantInterfaces[0].VlanID)
+				assert.Equal(t, []string{"10.0.0.3"}, networkConfig.RouteServers)
+				assert.Equal(t, []string{"10.0.1.0/24"}, networkConfig.DeprecatedDenyPrefixes)
+				assert.Equal(t, []string{"10.0.2.0/24"}, networkConfig.DenyPrefixes)
+				assert.Equal(t, []string{"10.0.3.0/24"}, networkConfig.SiteFabricPrefixes)
+				assert.Equal(t, []string{"10.0.4.0/24"}, networkConfig.AnycastSitePrefixes)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testProtoDpuMachine := proto.Clone(protoDpuMachine).(*corev1.DpuMachine)
+			testProtoDpuMachine.DpuNetworkConfig = test.protoConfig
+			dpuMachine := APIDpuMachine{}
+			dpuMachine.FromProto(testProtoDpuMachine, protoContext)
+			test.check(t, dpuMachine.DpuNetworkConfig)
+		})
+	}
 }
 
 // TestAPIDpuMachine_FromProto_NilMachine guards against a panic when a
@@ -291,7 +361,7 @@ func TestAPIDpuMachine_ZeroValueJSON(t *testing.T) {
 		"interfaces":               nil,
 		"softwareComponents":       nil,
 		"health":                   nil,
-		"labels":                   nil,
+		"labels":                   map[string]interface{}{},
 		"state":                    "",
 		"dpuNetworkConfig":         nil,
 		"lastRebooted":             nil,

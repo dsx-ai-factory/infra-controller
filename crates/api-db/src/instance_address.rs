@@ -21,6 +21,7 @@ use std::ops::DerefMut;
 
 use carbide_network::virtualization::{VpcVirtualizationType, get_host_ip};
 use carbide_uuid::instance::InstanceId;
+use carbide_uuid::machine::MachineIdSubtypeTrait;
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::VpcId;
 use ipnetwork::IpNetwork;
@@ -29,7 +30,7 @@ use model::ConfigValidationError;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::instance::config::network::{InstanceInterfaceConfig, InstanceNetworkConfig};
 use model::instance_address::InstanceAddress;
-use model::machine::Machine;
+use model::machine::{HostMachine, Machine};
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig, NetworkSegmentType,
@@ -372,7 +373,7 @@ pub async fn allocate(
     txn: &mut PgConnection,
     instance_id: InstanceId,
     mut updated_config: InstanceNetworkConfig,
-    machine: &Machine,
+    machine: &HostMachine,
 ) -> DatabaseResult<InstanceNetworkConfig> {
     // We expect only one prefix per segment (IPv4 or IPv6).
     // We're potentially about to insert a couple rows, so create a savepoint.
@@ -713,13 +714,15 @@ struct OverlayAddressAllocation {
     slaac_interface_prefixes: HashMap<NetworkPrefixId, IpNetwork>,
 }
 
-impl AssignIpsFrom<(&Machine, &NetworkPrefix)> for InstanceInterfaceConfig {
+impl<ID: MachineIdSubtypeTrait> AssignIpsFrom<(&Machine<ID>, &NetworkPrefix)>
+    for InstanceInterfaceConfig
+{
     // Zero-dpu config: For machines without DPUs, the machines's interface will be on an
     // HostInband network segment, which will be the same segment as the instance wants. In
     // this case, the host's interface *is* the instance interface, so we copy the config from it.
     fn assign_ips_from(
         &mut self,
-        source: (&Machine, &NetworkPrefix),
+        source: (&Machine<ID>, &NetworkPrefix),
     ) -> DatabaseResult<Vec<IpNetwork>> {
         let (machine, network_prefix) = source;
 

@@ -53,6 +53,7 @@ func NewGetAllExploredEndpointHandler(dbSession *cdb.Session, scp *sc.ClientPool
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string true "ID of Site"
+// @Param machineId query string false "Filter reports by Machine ID"
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Endpoint ID ordering" Enums(ID_ASC, ID_DESC) default(ID_ASC)
@@ -106,7 +107,7 @@ func (h GetAllExploredEndpointHandler) Handle(c echo.Context) error {
 		ctx,
 		stc,
 		corev1.Forge_FindExploredEndpointIds_FullMethodName,
-		&corev1.ExploredEndpointSearchFilter{},
+		apiRequest.ToProto(),
 		&ids,
 		siteID,
 	)

@@ -31,6 +31,7 @@ carbide-api-model = { path = "../api-model", default-features = false }
 carbide-instrument = { path = "../instrument" }
 carbide-redfish = { path = "../redfish", default-features = false }
 carbide-secrets = { path = "../secrets" }
+carbide-uuid = { path = "../uuid" }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }

@@ -765,7 +765,7 @@ func TestNetworkSecurityGroupHandler_Create(t *testing.T) {
 			}
 
 			if test.requestPayload.Labels != nil {
-				e := reflect.DeepEqual(test.requestPayload.Labels, rst.Labels)
+				e := reflect.DeepEqual(test.requestPayload.Labels, map[string]string(rst.Labels))
 				if !e {
 					t.Errorf("\n\n-------------- Expected --------------\n\n%+v\n\n--------------  Got --------------\n\n%+v", test.requestPayload.Labels, rst.Labels)
 				}
@@ -2373,7 +2373,7 @@ func TestNetworkSecurityGroupHandler_Update(t *testing.T) {
 			}
 
 			if test.requestPayload.Labels != nil {
-				e := reflect.DeepEqual(test.requestPayload.Labels, rst.Labels)
+				e := reflect.DeepEqual(test.requestPayload.Labels, map[string]string(rst.Labels))
 				if !e {
 					t.Errorf("\n\n-------------- Expected --------------\n\n%+v\n\n--------------  Got --------------\n\n%+v", test.requestPayload.Labels, rst.Labels)
 				}

@@ -26,7 +26,8 @@ if [ $# -ne 2 ]; then
 fi
 
 MAX_RETRY=10
-API_SERVER=$1:$2
+source "$(dirname "${BASH_SOURCE[0]}")/host_port.sh" || exit $?
+API_SERVER=$(host_port "$1" "$2")
 DPU_CONFIG_FILE="/tmp/forge-dpu-agent-sim-config.toml"
 
 HOST_MACHINE_ID=$(grpcurl -d '{}' -insecure "${API_SERVER}" forge.Forge/FindMachines | python3 -c "import sys,json

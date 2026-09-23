@@ -23,7 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	Manager "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
@@ -167,7 +167,7 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 	_, err = client.CoreV1().Secrets("default").Create(context.TODO(), mockTemporalSecret, metav1.CreateOptions{})
 
 	// Test with a valid OTP
-	encryptedOtp := cloudutils.EncryptData([]byte(mockOtp), ManagerAccess.Conf.EB.Temporal.ClusterID)
+	encryptedOtp := cutils.EncryptData([]byte(mockOtp), ManagerAccess.Conf.EB.Temporal.ClusterID)
 	encryptedOtpB64 := base64.StdEncoding.EncodeToString(encryptedOtp)
 
 	wrun := &tmocks.WorkflowRun{}

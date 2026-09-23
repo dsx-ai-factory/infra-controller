@@ -97,7 +97,7 @@ pub(crate) struct Args {
     #[clap(
         short = 'b',
         long,
-        help = "Whole-disk target that the image overwrites. Accepts 'smallest', /dev/nvme<controller>n<namespace>, /dev/sd<letters>, or /dev/disk/by-id/<identifier>. If omitted or empty, selection prefers a disk with an EFI partition, then /dev/nvme0n1 or /dev/sda."
+        help = "Whole-disk target that the image overwrites. Accepts 'smallest', /dev/nvme<controller>n<namespace>, /dev/sd<letters>, /dev/vd<letters>, or /dev/disk/by-id/<identifier>. If omitted or empty, selection prefers a disk with an EFI partition, then /dev/nvme0n1 or /dev/sda."
     )]
     boot_disk: Option<String>,
     #[clap(long, help = "UUID of the image boot filesystem (/boot)")]

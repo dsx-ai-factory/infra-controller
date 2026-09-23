@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -157,12 +158,7 @@ func (s *PostgresStore) GetRacksByIDs(
 		return nil, errors.GRPCErrorInternal(err.Error())
 	}
 
-	results := make([]*rack.Rack, 0, len(rackDaos))
-	for _, rackDao := range rackDaos {
-		results = append(results, dao.RackFrom(&rackDao))
-	}
-
-	return results, nil
+	return s.racksFromDAOs(ctx, s.pg.DB, rackDaos)
 }
 
 // GetRacksByIDsIncludingDeleted retrieves multiple racks by UUID, including
@@ -181,11 +177,7 @@ func (s *PostgresStore) GetRacksByIDsIncludingDeleted(
 		return nil, s.checkDBGetError(err, "")
 	}
 
-	results := make([]*rack.Rack, 0, len(rackDaos))
-	for i := range rackDaos {
-		results = append(results, dao.RackFrom(&rackDaos[i]))
-	}
-	return results, nil
+	return s.racksFromDAOs(ctx, s.pg.DB, rackDaos)
 }
 
 // GetRackByExternalID retrieves a rack by its external ID.
@@ -207,7 +199,7 @@ func (s *PostgresStore) GetRackByExternalID(
 		return nil, s.checkDBGetError(err, fmt.Sprintf("rack with external id %s", externalID))
 	}
 
-	return dao.RackFrom(&rackDAO), nil
+	return s.rackFromDAO(ctx, s.pg.DB, &rackDAO)
 }
 
 // GetRackBySerial retrieves a rack by its serial number and manufacturer.
@@ -282,7 +274,7 @@ func (s *PostgresStore) GetRackByIdentifier(
 	if err != nil {
 		return nil, err
 	}
-	return dao.RackFrom(rackDao), nil
+	return s.rackFromDAO(ctx, s.pg.DB, rackDao)
 }
 
 func uniqueRackByName(racks []model.Rack, name string) (*model.Rack, error) {
@@ -350,12 +342,8 @@ func (s *PostgresStore) GetListOfRacks(
 		return nil, 0, err
 	}
 
-	results := make([]*rack.Rack, 0, len(racks))
-	for _, rackDao := range racks {
-		results = append(results, dao.RackFrom(&rackDao))
-	}
-
-	return results, total, nil
+	results, err := s.racksFromDAOs(ctx, s.pg.DB, racks)
+	return results, total, err
 }
 
 // GetListOfComponents lists components matching the given criteria.
@@ -442,6 +430,9 @@ func (s *PostgresStore) GetComponentByBMCMAC(
 	}
 
 	c, err := model.GetComponentByBMCMAC(ctx, s.pg.DB, macAddress)
+	if stderrors.Is(err, model.ErrAmbiguousBMCMAC) {
+		return nil, status.Errorf(codes.FailedPrecondition, "component with BMC MAC %q is ambiguous", macAddress)
+	}
 	if err != nil {
 		return nil, s.checkDBGetError(err, fmt.Sprintf("component with BMC MAC %s", macAddress))
 	}
@@ -707,8 +698,9 @@ func (s *PostgresStore) GetRacksForNVLDomain(
 			return err
 		}
 
-		for _, rack := range racks {
-			results = append(results, dao.RackFrom(&rack))
+		results, err = s.racksFromDAOs(ctx, tx, racks)
+		if err != nil {
+			return err
 		}
 
 		return nil
@@ -783,7 +775,50 @@ func (s *PostgresStore) getRack(
 		return nil, err
 	}
 
-	return dao.RackFrom(cur), nil
+	return s.rackFromDAO(ctx, idb, cur)
+}
+
+func (s *PostgresStore) rackFromDAO(
+	ctx context.Context,
+	idb bun.IDB,
+	rackDAO *model.Rack,
+) (*rack.Rack, error) {
+	if rackDAO == nil {
+		return nil, nil
+	}
+
+	racks, err := s.racksFromDAOs(ctx, idb, []model.Rack{*rackDAO})
+	if err != nil {
+		return nil, err
+	}
+	return racks[0], nil
+}
+
+// racksFromDAOs converts racks and derives their operation statuses with one
+// bulk component-status read. The derivation is independent of whether the
+// caller requested component expansion.
+func (s *PostgresStore) racksFromDAOs(
+	ctx context.Context,
+	idb bun.IDB,
+	rackDAOs []model.Rack,
+) ([]*rack.Rack, error) {
+	rackIDs := make([]uuid.UUID, 0, len(rackDAOs))
+	for i := range rackDAOs {
+		rackIDs = append(rackIDs, rackDAOs[i].ID)
+	}
+
+	statuses, err := model.GetRackOperationStatuses(ctx, idb, rackIDs)
+	if err != nil {
+		return nil, errors.GRPCErrorInternal(err.Error())
+	}
+
+	results := make([]*rack.Rack, 0, len(rackDAOs))
+	for i := range rackDAOs {
+		converted := dao.RackFrom(&rackDAOs[i])
+		converted.OperationStatus = statuses[rackDAOs[i].ID]
+		results = append(results, converted)
+	}
+	return results, nil
 }
 
 func (s *PostgresStore) getComponent(

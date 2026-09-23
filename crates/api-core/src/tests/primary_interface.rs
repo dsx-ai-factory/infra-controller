@@ -18,7 +18,9 @@
 use std::str::FromStr;
 
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{
+    HostMachineId, MachineIdSubtypeTrait, MachineInterfaceId, StableHostMachineId,
+};
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use ipnetwork::IpNetwork;
@@ -115,9 +117,15 @@ impl SetPrimaryPersistenceState {
 }
 
 // Snapshot of every persisted field that a primary interface update can change.
+fn stable_host_id(host_id: HostMachineId) -> StableHostMachineId {
+    host_id
+        .try_into()
+        .expect("site-explorer fixture should produce a stable host ID")
+}
+
 async fn load_set_primary_persistence_state(
     pool: &sqlx::PgPool,
-    host_id: MachineId,
+    host_id: impl MachineIdSubtypeTrait,
 ) -> Result<SetPrimaryPersistenceState, sqlx::Error> {
     Ok(SetPrimaryPersistenceState {
         interface_identities: sqlx::query_as(
@@ -257,7 +265,7 @@ async fn test_set_primary_interface_does_not_apply_the_zero_dpu_guard(
     let result = env
         .api
         .set_primary_interface(tonic::Request::new(forge::SetPrimaryInterfaceRequest {
-            host_machine_id: Some(zero_dpu_host.host_snapshot.id),
+            host_machine_id: Some(stable_host_id(zero_dpu_host.host_snapshot.id)),
             interface_id: Some(missing_interface_id),
             force_reconcile: false,
             ..Default::default()
@@ -295,7 +303,7 @@ async fn test_set_primary_interface_records_same_target_operator_authority(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id = stable_host_id(host.host_snapshot.id);
 
     let current_primary_id = {
         let mut txn = env.pool.begin().await?;
@@ -447,7 +455,7 @@ async fn test_set_primary_interface_repairs_divergent_operator_target(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id = stable_host_id(host.host_snapshot.id);
 
     let (current_primary_id, current_primary_target, divergent_target) = {
         let mut txn = env.pool.begin().await?;
@@ -483,7 +491,7 @@ async fn test_set_primary_interface_repairs_divergent_operator_target(
     let mut txn = env.pool.begin().await?;
     db::machine_desired_boot_interface::force_set(
         txn.as_mut(),
-        &host_id.try_into().unwrap(),
+        &host_id.into(),
         &divergent_target,
         BootInterfaceSelectionSource::Operator,
     )
@@ -499,7 +507,7 @@ async fn test_set_primary_interface_repairs_divergent_operator_target(
         }))
         .await?;
 
-    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.into())
         .await?
         .expect("the repaired desired target should be persisted");
     assert_eq!(desired.value, current_primary_target);
@@ -518,7 +526,7 @@ async fn test_set_primary_interface_refreshes_operator_target_interface_id(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id = stable_host_id(host.host_snapshot.id);
 
     let (current_primary_id, current_primary_target, obsolete_target) = {
         let mut txn = env.pool.begin().await?;
@@ -546,7 +554,7 @@ async fn test_set_primary_interface_refreshes_operator_target_interface_id(
     let mut txn = env.pool.begin().await?;
     let obsolete = db::machine_desired_boot_interface::force_set(
         txn.as_mut(),
-        &host_id.try_into().unwrap(),
+        &host_id.into(),
         &obsolete_target,
         BootInterfaceSelectionSource::Operator,
     )
@@ -562,7 +570,7 @@ async fn test_set_primary_interface_refreshes_operator_target_interface_id(
         }))
         .await?;
 
-    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.into())
         .await?
         .expect("the refreshed desired target should be persisted");
     assert_eq!(desired.value, current_primary_target);
@@ -588,7 +596,7 @@ async fn test_set_primary_interface_promotes_a_non_primary_interface(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id = stable_host_id(host.host_snapshot.id);
 
     // One host interface is primary; pick a different (non-primary) host NIC to promote.
     let (original_primary_id, promote_id, promote_target) = {
@@ -780,7 +788,7 @@ async fn test_set_primary_interface_promotes_a_non_primary_interface(
         "the desired-target change should advance the aggregate once",
     );
 
-    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.into())
         .await?
         .expect("the selected target should be persisted");
     assert_eq!(desired.value, promote_target);
@@ -814,7 +822,7 @@ async fn test_set_primary_interface_promotes_a_non_primary_interface(
             ..Default::default()
         }))
         .await?;
-    let forced = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let forced = db::machine_desired_boot_interface::get(&env.pool, &host_id.into())
         .await?
         .expect("the forced request should retain the desired target");
     assert_eq!(forced.value, promote_target);
@@ -855,10 +863,9 @@ async fn test_set_primary_interface_promotes_a_non_primary_interface(
             force_reconcile: false,
         }))
         .await?;
-    let legacy_forced =
-        db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
-            .await?
-            .expect("the legacy alias should retain the desired target");
+    let legacy_forced = db::machine_desired_boot_interface::get(&env.pool, &host_id.into())
+        .await?
+        .expect("the legacy alias should retain the desired target");
     assert_eq!(legacy_forced.value, promote_target);
     assert_eq!(
         legacy_forced.version.version_nr(),
@@ -886,7 +893,7 @@ async fn test_set_primary_interface_rolls_back_primary_and_desired_together(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id = stable_host_id(host.host_snapshot.id);
 
     let promote_id = {
         let mut txn = env.pool.begin().await?;
@@ -957,7 +964,7 @@ async fn test_set_primary_interface_rolls_back_when_network_update_returns_no_ro
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id = stable_host_id(host.host_snapshot.id);
 
     let promote_id = {
         let mut txn = env.pool.begin().await?;
@@ -1066,7 +1073,7 @@ async fn test_set_primary_interface_rejects_deleted_instance_and_rolls_back_writ
     let mut deletion = env.pool.begin().await?;
     db::instance::mark_as_deleted(instance.id, deletion.as_mut()).await?;
     deletion.commit().await?;
-    let state_before = load_set_primary_persistence_state(&env.pool, host_id.into()).await?;
+    let state_before = load_set_primary_persistence_state(&env.pool, host_id).await?;
 
     struct Case {
         name: &'static str,
@@ -1090,7 +1097,7 @@ async fn test_set_primary_interface_rejects_deleted_instance_and_rolls_back_writ
         let error = env
             .api
             .set_primary_interface(tonic::Request::new(forge::SetPrimaryInterfaceRequest {
-                host_machine_id: Some(host_id.into()),
+                host_machine_id: Some(host_id),
                 interface_id: Some(case.interface_id),
                 force_reconcile: case.force_reconcile,
                 ..Default::default()
@@ -1103,7 +1110,7 @@ async fn test_set_primary_interface_rejects_deleted_instance_and_rolls_back_writ
             format!("instance {} is being deleted", instance.id),
         );
 
-        let state_after = load_set_primary_persistence_state(&env.pool, host_id.into()).await?;
+        let state_after = load_set_primary_persistence_state(&env.pool, host_id).await?;
         assert_eq!(state_after, state_before, "{} persisted state", case.name);
     }
 
@@ -1121,7 +1128,7 @@ async fn test_set_primary_interface_hands_ready_intent_to_the_controller(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id = stable_host_id(host.host_snapshot.id);
     assert_eq!(host.managed_state, ManagedHostState::Ready);
 
     let (original_primary_id, original_target, promote_id) = {
@@ -1188,10 +1195,9 @@ async fn test_set_primary_interface_hands_ready_intent_to_the_controller(
             .fetch_one(&env.pool)
             .await?;
     assert_eq!(ready_state.0, ManagedHostState::Ready);
-    let ready_desired =
-        db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
-            .await?
-            .expect("the Ready request should persist its target");
+    let ready_desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.into())
+        .await?
+        .expect("the Ready request should persist its target");
 
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
         .bind(host_id.to_string())
@@ -1247,10 +1253,9 @@ async fn test_set_primary_interface_hands_ready_intent_to_the_controller(
             .fetch_one(&env.pool)
             .await?;
     assert_eq!(assigned_state_after.0, assigned_state);
-    let assigned_desired =
-        db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
-            .await?
-            .expect("the Assigned request should persist its target");
+    let assigned_desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.into())
+        .await?
+        .expect("the Assigned request should persist its target");
     assert_eq!(assigned_desired.value, original_target);
     assert_eq!(
         assigned_desired.version.version_nr(),
@@ -1270,7 +1275,7 @@ async fn test_set_primary_interface_rejects_non_admin_interface_on_dpu_host(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id = stable_host_id(host.host_snapshot.id);
 
     // A non-primary host interface to target. The host's other DPU interface
     // stays the Admin primary, so the host still has a DPU-backed admin link.
@@ -1374,7 +1379,7 @@ async fn test_set_primary_interface_promotes_a_zero_dpu_host_interface(
 
     let zero_dpu_host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::zero_dpu()).await?;
-    let host_id = zero_dpu_host.host_snapshot.id;
+    let host_id = stable_host_id(zero_dpu_host.host_snapshot.id);
 
     // A zero-DPU host's plain NIC lands on the HostInband segment and is not flagged
     // primary at ingestion -- promote it by id.
@@ -1435,7 +1440,7 @@ async fn test_set_primary_interface_repairs_dpu_host_with_no_admin_primary(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id = stable_host_id(host.host_snapshot.id);
 
     // The current Admin primary, plus a non-primary Admin interface to promote.
     let (current_primary_id, promote_id) = {

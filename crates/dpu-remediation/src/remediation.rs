@@ -24,7 +24,7 @@ use std::time::Duration;
 use carbide_instrument::emit;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::dpu_remediations::RemediationId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use rand::RngExt;
 use rpc::Metadata;
 use rpc::forge::{
@@ -46,11 +46,11 @@ const MAX_LOOP_DELAY_TIME_SECS: u64 = 360; // 120% of 300
 const MAX_SCRIPT_TIMEOUT_SECS: u64 = 120; // two minutes, best I can do.
 
 pub struct MachineInfo {
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
 }
 
 impl MachineInfo {
-    pub fn new(machine_id: MachineId) -> Self {
+    pub fn new(machine_id: DpuMachineId) -> Self {
         Self { machine_id }
     }
     pub fn get_envs(&self, status_path: &Path) -> HashMap<String, String> {
@@ -138,7 +138,7 @@ impl RemediationExecutor {
                                 Ok(results) => results,
                                 Err(error) => {
                                     emit(RemediationStatusOutputDecodeFailed::new(
-                                        self.machine_info.machine_id,
+                                        self.machine_info.machine_id.into(),
                                         remediation_id,
                                         format!("{error:?}"),
                                     ));
@@ -238,7 +238,7 @@ impl RemediationExecutor {
                                         }
                                         Err(error) => {
                                             emit(RemediationApplyFailed::new(
-                                                self.machine_info.machine_id,
+                                                self.machine_info.machine_id.into(),
                                                 *remediation_id,
                                                 format!("{error:?}"),
                                             ));
@@ -250,7 +250,7 @@ impl RemediationExecutor {
                                 }
                                 _ => {
                                     emit(RemediationResponseInvalid::new(
-                                        self.machine_info.machine_id,
+                                        self.machine_info.machine_id.into(),
                                         next_remediation.remediation_script.is_some(),
                                         next_remediation.remediation_id.is_some(),
                                     ));
@@ -259,7 +259,7 @@ impl RemediationExecutor {
                         }
                         Err(remediation_fetch_error) => {
                             emit(RemediationFetchFailed::new(
-                                self.machine_info.machine_id,
+                                self.machine_info.machine_id.into(),
                                 format!("{remediation_fetch_error:?}"),
                             ));
                         }
@@ -267,7 +267,7 @@ impl RemediationExecutor {
                 }
                 Err(client_creation_error) => {
                     emit(RemediationClientCreationFailed::new(
-                        self.machine_info.machine_id,
+                        self.machine_info.machine_id.into(),
                         format!("{client_creation_error:?}"),
                     ));
                 }

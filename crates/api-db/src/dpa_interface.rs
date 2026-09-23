@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
-use carbide_uuid::dpa_interface::{DpaInterfaceId, NULL_DPA_INTERFACE_ID};
+use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::machine::HostMachineId;
 use config_version::ConfigVersion;
 use mac_address::MacAddress;
@@ -32,6 +32,7 @@ use sqlx::PgConnection;
 
 use super::DatabaseError;
 use crate::db_read::DbReader;
+use crate::{ConditionalWrite, ControllerStateNotCurrent};
 
 pub async fn persist(
     value: NewDpaInterface,
@@ -375,6 +376,76 @@ pub async fn find_by_machine_ids(
     ))
 }
 
+/// A SpectrumX attachment-selector group projected from non-deleted DPA interfaces.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpectrumXDeviceCapability {
+    /// The non-empty device description used as the attachment `device` selector.
+    pub device: String,
+    /// The number of interfaces in the group. Valid `device_instance` selectors
+    /// are `0..count`, resolved in PCI-name order during attachment allocation.
+    pub count: u32,
+}
+
+/// Batch-load SpectrumX attachment-selector inventory for a set of host machines.
+///
+/// This intentionally projects and aggregates only the fields needed by
+/// machine capability discovery instead of loading complete DPA-interface rows,
+/// whose configuration and device-info JSON can be substantially wider. This
+/// inventory does not represent site-level SpectrumX enablement or readiness.
+pub async fn find_spectrum_x_capabilities_by_machine_ids(
+    txn: impl DbReader<'_>,
+    machine_ids: &[HostMachineId],
+) -> Result<std::collections::HashMap<HostMachineId, Vec<SpectrumXDeviceCapability>>, DatabaseError>
+{
+    if machine_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct SpectrumXCapabilityRow {
+        machine_id: HostMachineId,
+        device: String,
+        count: i64,
+    }
+
+    let query = "SELECT machine_id, device_description AS device, COUNT(*) AS count
+        FROM dpa_interfaces
+        WHERE deleted IS NULL
+          AND machine_id = ANY($1)
+          AND device_description IS NOT NULL
+          AND device_description <> ''
+        GROUP BY machine_id, device_description
+        ORDER BY machine_id, device_description";
+    let rows = sqlx::query_as::<_, SpectrumXCapabilityRow>(query)
+        .bind(machine_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    let mut capabilities_by_machine =
+        std::collections::HashMap::<HostMachineId, Vec<SpectrumXDeviceCapability>>::new();
+    for row in rows {
+        let count = row
+            .count
+            .try_into()
+            .map_err(|error| DatabaseError::Internal {
+                message: format!(
+                    "SpectrumX interface count {} for machine {} and device {:?} does not fit in u32: {error}",
+                    row.count, row.machine_id, row.device,
+                ),
+            })?;
+        capabilities_by_machine
+            .entry(row.machine_id)
+            .or_default()
+            .push(SpectrumXDeviceCapability {
+                device: row.device,
+                count,
+            });
+    }
+
+    Ok(capabilities_by_machine)
+}
+
 pub async fn find_by_ids(
     txn: impl DbReader<'_>,
     dpa_ids: &[DpaInterfaceId],
@@ -448,18 +519,19 @@ pub async fn all_dpa_states_in_sync(
     Ok(true)
 }
 
-/// Updates the dpa interface state that is owned by the state controller
-/// under the premise that the current controller state version didn't change.
+/// `try_update_controller_state` updates the DPA controller state when its
+/// version matches `expected_version`, replacing that version with `new_version`.
 ///
-/// Returns `true` if the state could be updated, and `false` if the object
-/// either doesn't exist anymore or is at a different version.
+/// Returns `NotApplied(ControllerStateNotCurrent)` if the row is missing or its
+/// version differs. `new_version` must advance `expected_version`; the caller must
+/// commit any surrounding transaction. Database failures are returned as errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     id: DpaInterfaceId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &DpaInterfaceControllerState,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     let query = "UPDATE dpa_interfaces SET controller_state_version=$1, controller_state=$2::json where id=$3::uuid AND controller_state_version=$4 returning id";
     let result = sqlx::query_as::<_, DpaInterfaceId>(query)
         .bind(new_version)
@@ -470,7 +542,10 @@ pub async fn try_update_controller_state(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.is_some())
+    Ok(match result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 pub async fn update_controller_state_outcome(
@@ -528,31 +603,43 @@ pub async fn batch_is_machine_dpa_capable(
         .collect())
 }
 
-/// Updates the desired network configuration for a host
+/// `DpaNetworkConfigNotCurrent` means the interface is missing or its network
+/// config version no longer matches the snapshot. The write does not distinguish
+/// these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DpaNetworkConfigNotCurrent;
+
+/// `try_update_network_config` updates the desired DPA network configuration and
+/// advances its version when it matches `expected_version`.
+///
+/// Returns `Applied(interface_id)` when the update applies, or
+/// `NotApplied(DpaNetworkConfigNotCurrent)` if the interface is missing or its
+/// version differs. The caller must commit any surrounding transaction.
+/// Database failures are returned as errors.
 pub async fn try_update_network_config(
     txn: &mut PgConnection,
     interface_id: &DpaInterfaceId,
     expected_version: ConfigVersion,
     new_state: &DpaInterfaceNetworkConfig,
-) -> Result<DpaInterfaceId, DatabaseError> {
+) -> Result<ConditionalWrite<DpaInterfaceId, DpaNetworkConfigNotCurrent>, DatabaseError> {
     let next_version = expected_version.increment();
 
     let query = "UPDATE dpa_interfaces SET network_config_version=$1, network_config=$2::json
             WHERE id=$3::uuid AND network_config_version=$4
             RETURNING id";
-    let query_result: Result<DpaInterfaceId, _> = sqlx::query_as(query)
+    let result: Option<DpaInterfaceId> = sqlx::query_as(query)
         .bind(next_version)
         .bind(sqlx::types::Json(new_state))
         .bind(interface_id)
         .bind(expected_version)
-        .fetch_one(txn)
-        .await;
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
 
-    match query_result {
-        Ok(interface_id) => Ok(interface_id),
-        Err(sqlx::Error::RowNotFound) => Ok(NULL_DPA_INTERFACE_ID),
-        Err(e) => Err(DatabaseError::query(query, e)),
-    }
+    Ok(match result {
+        Some(interface_id) => ConditionalWrite::Applied(interface_id),
+        None => ConditionalWrite::NotApplied(DpaNetworkConfigNotCurrent),
+    })
 }
 
 #[cfg(test)]
@@ -561,16 +648,19 @@ mod test {
 
     use carbide_libmlx_model::device::info::MlxDeviceInfo;
     use carbide_test_support::query_counter::count_queries;
+    use carbide_uuid::dpa_interface::DpaInterfaceId;
     use carbide_uuid::machine::{
         HostMachineId as MachineId, MachineId as GenericMachineId, MachineIdSource, MachineType,
     };
     use mac_address::MacAddress;
     use model::dpa_interface::{
-        DpaInterfaceControllerState, DpaInterfaceType, DpaSearchConfig, NewDpaInterface,
+        DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaInterfaceType, DpaSearchConfig,
+        NewDpaInterface,
     };
     use model::machine::ManagedHostState;
 
-    use crate::machine;
+    use super::{DpaNetworkConfigNotCurrent, try_update_network_config};
+    use crate::{ConditionalWrite, machine};
 
     /// Query-count regression guard for the batched DPA-interface loader.
     ///
@@ -764,6 +854,79 @@ mod test {
             "empty input must produce an empty map"
         );
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn network_config_requires_current_interface(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
+        machine::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        let interface = super::persist(
+            NewDpaInterface {
+                machine_id,
+                mac_address: "00:11:22:33:44:55".parse()?,
+                device_type: "SuperNIC".to_string(),
+                pci_name: "0000:cc:00.0".to_string(),
+                device_description: None,
+                interface_type: DpaInterfaceType::Svpc,
+            },
+            &mut txn,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let old_version = interface.network_config.version;
+        let desired = DpaInterfaceNetworkConfig {
+            use_admin_network: Some(false),
+            ..Default::default()
+        };
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            try_update_network_config(&mut txn, &interface.id, old_version, &desired).await?,
+            ConditionalWrite::Applied(interface.id)
+        );
+        txn.commit().await?;
+
+        for (scenario, id) in [
+            ("stale snapshot", interface.id),
+            ("missing interface", DpaInterfaceId::nil()),
+        ] {
+            let mut txn = pool.begin().await?;
+            assert_eq!(
+                try_update_network_config(
+                    &mut txn,
+                    &id,
+                    old_version,
+                    &DpaInterfaceNetworkConfig::default(),
+                )
+                .await?,
+                ConditionalWrite::NotApplied(DpaNetworkConfigNotCurrent),
+                "{scenario}"
+            );
+            txn.commit().await?;
+        }
+
+        let persisted = super::find_by_ids(&pool, &[interface.id], false)
+            .await?
+            .pop()
+            .expect("DPA interface exists");
+        assert_eq!(persisted.network_config.value, desired);
+        assert_eq!(
+            persisted.network_config.version.version_nr(),
+            old_version.version_nr() + 1
+        );
         Ok(())
     }
 

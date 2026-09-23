@@ -266,7 +266,7 @@ pub(crate) async fn attest_quote(
 
     // TODO: consider if this code can be turned into a templated function and reused
     // in bind_attest_key
-    let machine_id =
+    let machine_id: MachineId =
         crate::handlers::utils::convert_and_log_machine_id(request.machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;

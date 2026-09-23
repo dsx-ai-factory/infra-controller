@@ -4,7 +4,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -83,7 +82,7 @@ func InitTemporalClients(tcfg *cconfig.TemporalConfig, tracingEnabled bool) (tsd
 	}
 
 	tOptions := tsdkClient.Options{
-		HostPort: fmt.Sprintf("%v:%v", tcfg.Host, tcfg.Port),
+		HostPort: tcfg.GetHostPort(),
 		// This client connects to `cloud` namespace
 		Namespace: tcfg.Namespace,
 		ConnectionOptions: tsdkClient.ConnectionOptions{
@@ -277,16 +276,16 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 		routeGroup.Use(middleware.AuditLog(dbSession))
 	}
 
-	jwtOriginConfig := cfg.GetOrInitJWTOriginConfig()
-	if jwtOriginConfig == nil {
-		log.Panic().Msg("JWT origin config not initialized, cannot initialize auth middleware")
+	tokenOriginConfig := cfg.GetOrInitTokenOriginConfig()
+	if tokenOriginConfig == nil {
+		log.Panic().Msg("token origin config not initialized, cannot initialize auth middleware")
 	}
 
 	keycloakConfig, _ := cfg.GetOrInitKeycloakConfig()
 	payloadEncryptionConfig := cconfig.NewPayloadEncryptionConfig(cfg.GetTemporalEncryptionKey())
 
 	// Wrap the auth middleware to check readiness (optional, can be removed if panic is sufficient)
-	authMiddleware := authn.Auth(dbSession, tc, jwtOriginConfig, payloadEncryptionConfig, keycloakConfig)
+	authMiddleware := authn.Auth(dbSession, tc, tokenOriginConfig, payloadEncryptionConfig, keycloakConfig)
 	routeGroup.Use(authMiddleware)
 
 	apiRoutes := api.NewAPIRoutes(dbSession, tc, tnc, scp, cfg, dps)

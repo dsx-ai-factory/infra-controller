@@ -36,8 +36,8 @@ type OperatingSystemUpdateRequest struct {
 	ImageAuthType NullableString `json:"imageAuthType,omitempty"`
 	// Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha.
 	ImageAuthToken NullableString `json:"imageAuthToken,omitempty"`
-	// Optional whole-disk target that will be overwritten with the image. Accepts `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest` selects the smallest enumerated whole disk, preferring one with an EFI partition to break a size tie. Partition aliases ending in `-part<digits>` are rejected. Omitting this field or sending null preserves the current value. Sending an explicit empty string clears the value and restores automatic selection: prefer a disk with an EFI partition, then fall back to `/dev/nvme0n1` or `/dev/sda`.
-	ImageDisk NullableString `json:"imageDisk,omitempty" validate:"regexp=^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\\s]+))$"`
+	// Optional whole-disk target that will be overwritten with the image. Accepts `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest` selects the smallest enumerated whole disk, preferring one with an EFI partition to break a size tie. Partition aliases ending in `-part<digits>` are rejected. Omitting this field or sending null preserves the current value. Sending an explicit empty string clears the value and restores automatic selection: prefer a disk with an EFI partition, then fall back to `/dev/nvme0n1` or `/dev/sda`.
+	ImageDisk NullableString `json:"imageDisk,omitempty" validate:"regexp=^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\\s]+))$"`
 	// Root filesystem UUID; this or `rootFsLabel` is required for image-based OS
 	RootFsId NullableString `json:"rootFsId,omitempty"`
 	// Root filesystem label; this or `rootFsId` is required for image-based OS

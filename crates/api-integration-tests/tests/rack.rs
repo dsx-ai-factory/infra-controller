@@ -212,11 +212,13 @@ async fn run_machine_a_tron_racks_test(
         host_bmc_password: None,
         dpu_bmc_password: None,
         api_refresh_interval: Duration::from_millis(500),
+        scout_stream_reconnect_interval: Duration::from_secs(1),
         mock_bmc_ssh_server: false,
         enable_ipmi_simulation: false,
         hw_mac_address_ranges: None,
         mac_address_pool: None,
         ufm_mock: Default::default(),
+        rms_mock: Default::default(),
     };
 
     let (provisionable_handles, mat_handle) = api_test_helper::machine_a_tron::run_local(

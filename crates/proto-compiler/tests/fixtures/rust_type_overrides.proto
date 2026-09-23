@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package carbide.proto.compiler.fixture.rust_type_overrides;
+
+import "codegen/v1/rust_type.proto";
+import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
+
+message PublicMachineId {
+  string id = 1;
+}
+
+message PublicMachineIdList {
+  repeated PublicMachineId machine_ids = 1;
+}
+
+message Request {
+  PublicMachineId singular = 1 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
+  optional PublicMachineId optional_id = 2 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
+  repeated PublicMachineId repeated_ids = 3 [(carbide.codegen.v1.field_rust_type) = ".common.StableHostMachineId"];
+  PublicMachineIdList list = 4 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineIdList"];
+
+  message Nested {
+    PublicMachineId id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
+  }
+
+  Nested nested = 5;
+}
+
+service FixtureService {
+  rpc Direct(PublicMachineId) returns (PublicMachineId) {
+    option (carbide.codegen.v1.method_rust_input_type) = ".common.StableHostMachineId";
+    option (carbide.codegen.v1.method_rust_output_type) = ".common.DpuMachineId";
+  }
+}

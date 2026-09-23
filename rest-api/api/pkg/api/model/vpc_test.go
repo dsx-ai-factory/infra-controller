@@ -616,11 +616,13 @@ func TestNewAPIVpc(t *testing.T) {
 			},
 		},
 		{
-			name: "get new APIVpc includes routing profile for FNN VPC",
+			name: "get new APIVpc preserves short custom profile and 24-bit active VNI",
 			args: args{
 				dbVpc: func() cdbm.Vpc {
 					fnnVpc := dbVpc
 					fnnVpc.NetworkVirtualizationType = cutil.GetPtr(cdbm.VpcFNN)
+					fnnVpc.RoutingProfile = cutil.GetPtr("x")
+					fnnVpc.ActiveVni = cutil.GetPtr(70000)
 					return fnnVpc
 				}(),
 				dbsds: dbsds,
@@ -635,10 +637,10 @@ func TestNewAPIVpc(t *testing.T) {
 				SiteID:                    util.GetUUIDPtrToStrPtr(&dbVpc.SiteID),
 				NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
 				SlaacEnabled:              true,
-				RoutingProfile:            cutil.GetPtr(APIVpcRoutingProfileInternal),
+				RoutingProfile:            cutil.GetPtr("x"),
 				ControllerVpcID:           util.GetUUIDPtrToStrPtr(dbVpc.ControllerVpcID),
 				RequestedVni:              dbVpc.Vni,
-				Vni:                       dbVpc.ActiveVni,
+				Vni:                       cutil.GetPtr(70000),
 				Status:                    dbVpc.Status,
 				Labels: map[string]string{
 					"zone": "1",

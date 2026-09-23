@@ -28,6 +28,10 @@ pub(crate) struct GenericAmi<'a> {
 }
 
 impl GenericAmi<'_> {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "Self";
         redfish::manager::Config {
@@ -49,10 +53,10 @@ impl GenericAmi<'_> {
         }
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "Self";
 
         let boot_opt_builder = |id: &str, kind| {

@@ -25,7 +25,7 @@
 //! appear in the Redfish simulator.
 
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
-use carbide_uuid::machine::HostMachineId;
+use carbide_uuid::machine::{HostMachineId, StableHostMachineId};
 use chrono::{DateTime, Utc};
 use ipnetwork::IpNetwork;
 use model::machine::{InstanceState, ManagedHostState};
@@ -53,7 +53,7 @@ async fn host_with_moved_primary(
     env: &api_fixtures::TestEnv,
 ) -> Result<
     (
-        HostMachineId,
+        StableHostMachineId,
         MachineBootInterfaceTarget,
         MachineBootInterfaceTarget,
     ),
@@ -62,7 +62,7 @@ async fn host_with_moved_primary(
     let host =
         api_fixtures::site_explorer::new_host(env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id: HostMachineId = host.host_snapshot.id.try_into()?;
+    let host_id: StableHostMachineId = host.host_snapshot.id.try_into()?;
 
     let (original_target, promote_id, promote_target) = {
         let mut txn = env.pool.begin().await?;
@@ -90,7 +90,7 @@ async fn host_with_moved_primary(
 
     env.api
         .set_primary_interface(tonic::Request::new(forge::SetPrimaryInterfaceRequest {
-            host_machine_id: Some(host_id.into()),
+            host_machine_id: Some(host_id),
             interface_id: Some(promote_id),
             force_reconcile: false,
             ..Default::default()
@@ -201,7 +201,7 @@ async fn test_managed_reapply_preserves_selection_until_operator_enters_a_mac(
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
     let host_id = host.host_snapshot.id;
-    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("ingestion should select a desired target");
     let expected_pair = match &desired.value {
@@ -252,7 +252,7 @@ async fn test_managed_reapply_preserves_selection_until_operator_enters_a_mac(
         "reapplying the resolved target must preserve why it was selected",
     );
     assert_eq!(
-        db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+        db::machine_desired_boot_interface::get(&env.pool, &host_id)
             .await?
             .expect("reapply should retain a target")
             .value,
@@ -289,7 +289,7 @@ async fn test_managed_reapply_refreshes_same_mac_redfish_id_without_reselecting(
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
     let host_id = host.host_snapshot.id;
-    let before = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let before = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("ingestion should select a desired target");
     let before_pair = match &before.value {
@@ -325,7 +325,7 @@ async fn test_managed_reapply_refreshes_same_mac_redfish_id_without_reselecting(
         }))
         .await?;
 
-    let after = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let after = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("managed reapply should retain a desired target");
     assert_eq!(
@@ -491,7 +491,7 @@ async fn test_set_dpu_first_persists_a_zero_dpu_host_target_without_redfish(
     env.run_network_segment_controller_iteration().await;
 
     let host = api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::zero_dpu()).await?;
-    let host_id: HostMachineId = host.host_snapshot.id.try_into()?;
+    let host_id: HostMachineId = host.host_snapshot.id;
 
     let inband_target = {
         let mut txn = env.pool.begin().await?;
@@ -544,7 +544,7 @@ async fn test_boot_interface_candidates_skips_dpu_machines(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(1))
             .await?;
-    let host_id = HostMachineId::try_from(host.host_snapshot.id)?;
+    let host_id = host.host_snapshot.id;
     let dpu_id = host
         .dpu_snapshots
         .first()
@@ -553,7 +553,7 @@ async fn test_boot_interface_candidates_skips_dpu_machines(
 
     let mut txn = env.pool.begin().await?;
     assert!(
-        summarize_boot_interface_candidates_for_test(txn.as_mut(), Some(dpu_id))
+        summarize_boot_interface_candidates_for_test(txn.as_mut(), Some(dpu_id.into()))
             .await?
             .is_none(),
         "a DPU machine should not resolve boot-interface rows",
@@ -624,7 +624,7 @@ async fn test_machine_setup_keeps_unowned_endpoint_redfish_direct(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(1))
             .await?;
-    let host_id = HostMachineId::try_from(host.host_snapshot.id)?;
+    let host_id = host.host_snapshot.id;
     let bmc_info = &host.host_snapshot.status.bmc_info;
     let bmc_ip = bmc_info.ip.expect("host should have a BMC IP");
     let bmc_interface_id = bmc_info
@@ -683,7 +683,7 @@ async fn test_managed_host_without_a_resolvable_target_preserves_action_requirem
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(1))
             .await?;
-    let host_id: HostMachineId = host.host_snapshot.id.try_into()?;
+    let host_id: HostMachineId = host.host_snapshot.id;
 
     let mut txn = env.pool.begin().await?;
     sqlx::query("DELETE FROM machine_boot_interfaces WHERE machine_id = $1")
@@ -767,8 +767,8 @@ async fn test_machine_setup_uses_the_bmc_endpoints_actual_owner(
     let caller_supplied =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(1))
             .await?;
-    let actual_id: HostMachineId = actual.host_snapshot.id.try_into()?;
-    let caller_supplied_id: HostMachineId = caller_supplied.host_snapshot.id.try_into()?;
+    let actual_id: HostMachineId = actual.host_snapshot.id;
+    let caller_supplied_id: HostMachineId = caller_supplied.host_snapshot.id;
     let actual_bmc_ip = actual
         .host_snapshot
         .status

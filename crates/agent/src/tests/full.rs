@@ -30,7 +30,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use carbide_network::virtualization::{VpcVirtualizationType, get_svi_ip};
 use carbide_uuid::domain::DomainId;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineInterfaceId};
 use carbide_uuid::network::NetworkSegmentId;
 use chrono::{DateTime, TimeZone, Utc};
 use eyre::WrapErr;
@@ -937,6 +937,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         remote_id: "".to_string(),
         deny_prefixes: vec!["1.1.1.1/32".to_string()],
         site_fabric_prefixes: vec!["2.2.2.2/32".to_string()],
+        site_fabric_null_routes: None,
+        vpc_peer_vnis_authoritative: true,
         vpc_isolation_behavior: rpc::forge::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
         deprecated_deny_prefixes: vec![],
         enable_dhcp: true,
@@ -1022,7 +1024,7 @@ async fn handle_find_interfaces() -> impl axum::response::IntoResponse {
                 .expect("valid interface id"),
         ),
         attached_dpu_machine_id: Some(
-            MachineId::from_str("fm100ds7f2c7e5i3nlho0cfq4ke3ma8chtpn49qm6j12rv63l6fa527j8c0")
+            DpuMachineId::from_str("fm100ds7f2c7e5i3nlho0cfq4ke3ma8chtpn49qm6j12rv63l6fa527j8c0")
                 .expect("valid machine id"),
         ),
         machine_id: Some(

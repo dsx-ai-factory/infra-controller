@@ -23,17 +23,11 @@
         type: swp
       pf0vf0_if:
         type: swp
-        acl: 
+        acl:
           p0000_deny_prefixes_ipv4:
             inbound: {}
           p0004_security_policy_override_ipv4_host_ingress:
             outbound: {}
-          p0009_vpc_1025197_peer_egress_from_host:
-            inbound: {}
-          p0009_vpc_1025197_peer_ingress_to_host:
-            outbound: {}
-          p0010_vpc_1025197_isolation_ipv4:
-            inbound: {}
           dhcp_flood_prevention:
             inbound: {} 
         bridge:
@@ -56,17 +50,11 @@
               up: {}
       pf0hpf_if:
         type: swp
-        acl: 
+        acl:
           p0000_deny_prefixes_ipv4:
             inbound: {}
           p0004_security_policy_override_ipv4_host_ingress:
             outbound: {}
-          p0009_vpc_1025186_peer_egress_from_host:
-            inbound: {}
-          p0009_vpc_1025186_peer_ingress_to_host:
-            outbound: {}
-          p0010_vpc_1025186_isolation_ipv4:
-            inbound: {} 
         ip:
           address:
             10.217.5.161/30: {} 
@@ -426,6 +414,14 @@
           vni:
             '1025186': {} 
         router:
+          static:
+            10.217.0.0/16:
+              address-family: ipv4-unicast
+              distance:
+                '250':
+                  via:
+                    blackhole:
+                      type: blackhole
           bgp:
             path-selection:
               multipath:
@@ -495,6 +491,14 @@
           vni:
             '1025197': {} 
         router:
+          static:
+            10.217.0.0/16:
+              address-family: ipv4-unicast
+              distance:
+                '250':
+                  via:
+                    blackhole:
+                      type: blackhole
           bgp:
             path-selection:
               multipath:
@@ -592,87 +596,6 @@
             match:
               ip:
                 dest-ip: 198.51.100.0/24
-
-
-      p0009_vpc_1025186_peer_egress_from_host:
-        type: ipv4
-        rule:
-          '1':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.217.6.176/29
-      p0009_vpc_1025186_peer_ingress_to_host:
-        type: ipv4
-        rule:
-          '1':
-            action:
-              permit: {}
-            match:
-              ip:
-                source-ip: 10.217.6.176/29
-      p0010_vpc_1025186_isolation_ipv4:
-        type: ipv4
-        rule:
-          '20':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.217.5.160/30
-          '21':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.217.5.168/29
-          '1000':
-            action:
-              deny: {}
-            match:
-              ip:
-                dest-ip: 10.217.0.0/16
-      p0009_vpc_1025197_peer_egress_from_host:
-        type: ipv4
-        rule:
-          '1':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.217.6.176/29
-      p0009_vpc_1025197_peer_ingress_to_host:
-        type: ipv4
-        rule:
-          '1':
-            action:
-              permit: {}
-            match:
-              ip:
-                source-ip: 10.217.6.176/29
-      p0010_vpc_1025197_isolation_ipv4:
-        type: ipv4
-        rule:
-          '10':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.217.5.160/30
-          '11':
-            action:
-              permit: {}
-            match:
-              ip:
-                dest-ip: 10.217.5.168/29
-          '1000':
-            action:
-              deny: {}
-            match:
-              ip:
-                dest-ip: 10.217.0.0/16
-
 
 
       p0004_security_policy_override_ipv4_host_ingress:

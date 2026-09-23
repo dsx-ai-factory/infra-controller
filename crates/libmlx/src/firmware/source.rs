@@ -75,12 +75,19 @@ impl FirmwareSource {
         })
     }
 
-    // from_url parses a URL string into a FirmwareSource. The URL
-    // prefix determines the source type:
-    //   - "https://" or "http://"  -> Http
-    //   - "ssh://[user@]host:path" -> Ssh (SCP-style colon separator)
-    //   - "file://path"            -> Local (strips the prefix)
-    //   - anything else            -> Local (treated as a filesystem path)
+    /// `from_url` parses a URL string into a `FirmwareSource`. The URL
+    /// prefix determines the source type:
+    ///
+    /// - `https://` or `http://` -> `Http`
+    /// - `ssh://[user@]host:path` -> `Ssh` (SCP-style colon separator)
+    /// - `file://path` -> `Local` (strips the prefix)
+    /// - anything else -> `Local` (treated as a filesystem path)
+    ///
+    /// IPv6 SSH hosts use brackets: `ssh://user@[2001:db8::1]:path`.
+    /// SSH sources use port 22. An omitted username uses the `USER` environment
+    /// variable, falling back to `LOGNAME` and then `root` when unavailable.
+    /// Remote paths may be absolute or relative and preserve colons and `@`.
+    /// Empty hosts or paths, or a missing host/path separator, return an error.
     pub fn from_url(url: &str) -> FirmwareResult<Self> {
         if url.starts_with("https://") || url.starts_with("http://") {
             Ok(Self::http(url))
@@ -365,15 +372,31 @@ fn credential_type_name(cred: &Credentials) -> &'static str {
 //   ssh://user@host:relative/path   -> relative path from home dir
 //   ssh://user@host:/absolute/path  -> absolute path
 //
+// IPv6 hosts use brackets, as in `ssh://user@[2001:db8::1]:path`.
+// Return the host without brackets for the SSH client's socket lookup.
+//
 // User defaults to the current user if omitted.
 fn parse_ssh_url(url: &str) -> FirmwareResult<(String, String, String)> {
     let stripped = url
         .strip_prefix("ssh://")
         .ok_or_else(|| FirmwareError::ConfigError(format!("Not an SSH URL: '{url}'")))?;
 
-    let (host_part, remote_path) = stripped.split_once(':').ok_or_else(|| {
+    // An `@` after the first colon belongs to the path, not the username.
+    let (username, host_and_path) = match stripped.split_once('@') {
+        Some((username, host_and_path)) if !username.contains(':') => {
+            (username.to_string(), host_and_path)
+        }
+        _ => (whoami().unwrap_or_else(|| "root".to_string()), stripped),
+    };
+
+    let (host, remote_path) = if let Some(bracketed) = host_and_path.strip_prefix('[') {
+        bracketed.split_once("]:")
+    } else {
+        host_and_path.split_once(':')
+    }
+    .ok_or_else(|| {
         FirmwareError::ConfigError(format!(
-            "SSH URL must use ssh://[user@]host:path format, got: '{url}'"
+            "SSH URL must use ssh://[user@]host:path format (bracket IPv6 hosts), got: '{url}'"
         ))
     })?;
 
@@ -383,22 +406,13 @@ fn parse_ssh_url(url: &str) -> FirmwareResult<(String, String, String)> {
         )));
     }
 
-    let (username, host) = if let Some((user, h)) = host_part.split_once('@') {
-        (user.to_string(), h.to_string())
-    } else {
-        (
-            whoami().unwrap_or_else(|| "root".to_string()),
-            host_part.to_string(),
-        )
-    };
-
     if host.is_empty() {
         return Err(FirmwareError::ConfigError(format!(
             "SSH URL missing host: '{url}'"
         )));
     }
 
-    Ok((host, username, remote_path.to_string()))
+    Ok((host.to_string(), username, remote_path.to_string()))
 }
 
 // whoami returns the current username, if available.
@@ -600,32 +614,41 @@ mod coverage_tests {
         .await;
     }
 
-    // parse_ssh_url splits an SCP-style ssh:// URL into (host, username,
-    // remote_path). We project to (host, remote_path) so the assertion stays
-    // whoami-independent even on the default-user rows. Rejection rows use Fails
-    // (ConfigError is not PartialEq).
+    // Check the host, username, and remote path. The default username comes
+    // from the test's environment. Compare error text because FirmwareError
+    // is not PartialEq.
     #[test]
     fn parse_ssh_url_splits_components() {
+        let default_user = whoami().unwrap_or_else(|| "root".to_string());
+
         scenarios!(
-            run = |url| {
-                parse_ssh_url(url)
-                    .map(|(host, _user, path)| (host, path))
-                    .map_err(drop)
-            };
+            run = |url| parse_ssh_url(url).map_err(|error| error.to_string());
             "user, host, absolute path" {
-                "ssh://deploy@host.example:/abs/fw.bin" => Yields(("host.example".to_string(), "/abs/fw.bin".to_string())),
+                "ssh://deploy@host.example:/abs/fw.bin" => Yields(("host.example".to_string(), "deploy".to_string(), "/abs/fw.bin".to_string())),
             }
 
             "user, host, relative path" {
-                "ssh://deploy@host.example:rel/fw.bin" => Yields(("host.example".to_string(), "rel/fw.bin".to_string())),
+                "ssh://deploy@host.example:rel/fw.bin" => Yields(("host.example".to_string(), "deploy".to_string(), "rel/fw.bin".to_string())),
             }
 
             "no user, host, absolute path" {
-                "ssh://host.example:/abs/fw.bin" => Yields(("host.example".to_string(), "/abs/fw.bin".to_string())),
+                "ssh://host.example:/abs/fw.bin" => Yields(("host.example".to_string(), default_user.clone(), "/abs/fw.bin".to_string())),
+            }
+
+            "user, bracketed IPv6 host, relative path" {
+                "ssh://deploy@[2001:db8::1]:rel/fw.bin" => Yields(("2001:db8::1".to_string(), "deploy".to_string(), "rel/fw.bin".to_string())),
+            }
+
+            "no user, bracketed IPv6 host, absolute path" {
+                "ssh://[2001:db8::1]:/abs/fw.bin" => Yields(("2001:db8::1".to_string(), default_user.clone(), "/abs/fw.bin".to_string())),
             }
 
             "path containing a colon keeps the rest after the first colon" {
-                "ssh://host.example:/abs:with:colons" => Yields(("host.example".to_string(), "/abs:with:colons".to_string())),
+                "ssh://host.example:/abs:with:colons" => Yields(("host.example".to_string(), default_user.clone(), "/abs:with:colons".to_string())),
+            }
+
+            "an at sign in the path is not a username separator" {
+                "ssh://host.example:/fw@release.bin" => Yields(("host.example".to_string(), default_user.clone(), "/fw@release.bin".to_string())),
             }
 
             "not an ssh URL (missing prefix)" {
@@ -636,8 +659,16 @@ mod coverage_tests {
                 "ssh://hostonly" => Fails,
             }
 
+            "IPv6 host missing the colon after the closing bracket" {
+                "ssh://[2001:db8::1]/abs/fw.bin" => FailsWith("configuration error: SSH URL must use ssh://[user@]host:path format (bracket IPv6 hosts), got: 'ssh://[2001:db8::1]/abs/fw.bin'".to_string()),
+            }
+
             "empty remote path" {
                 "ssh://deploy@host.example:" => Fails,
+            }
+
+            "empty bracketed host" {
+                "ssh://[]:/abs/fw.bin" => Fails,
             }
 
             "empty host with a user" {

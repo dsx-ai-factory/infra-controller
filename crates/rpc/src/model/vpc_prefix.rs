@@ -68,6 +68,7 @@ impl TryFrom<rpc::forge::VpcPrefixCreationRequest> for NewVpcPrefix {
             config,
             metadata,
             vpc_id,
+            overlap_vpc_id: None,
         })
     }
 }

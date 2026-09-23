@@ -23,7 +23,7 @@
         type: swp
       pf0hpf_if:
         type: swp
-        acl: 
+        acl:
           p0000_deny_prefixes_ipv4:
             inbound: {}
           p0004_security_policy_override_ipv4_host_egress:          
@@ -34,8 +34,6 @@
             outbound: {}
           p0004_security_policy_override_ipv6_host_ingress:
             outbound: {}
-          p0010_vpc_10101_isolation_ipv4:
-            inbound: {} 
         ip:
           address:
             192.168.0.0/16: {} 
@@ -353,6 +351,13 @@
               via:
                 vlan10:
                   type: interface
+            2.2.2.2/32:
+              address-family: ipv4-unicast
+              distance:
+                '250':
+                  via:
+                    blackhole:
+                      type: blackhole
           bgp:
             path-selection:
               multipath:
@@ -446,18 +451,6 @@
             match:
               ip:
                 dest-ip: 1.1.1.1/32
-
-
-      p0010_vpc_10101_isolation_ipv4:
-        type: ipv4
-        rule:
-          '1000':
-            action:
-              deny: {}
-            match:
-              ip:
-                dest-ip: 2.2.2.2/32
-
 
       p0005_0_security_group_ipv4_host_egress: 
         rule:

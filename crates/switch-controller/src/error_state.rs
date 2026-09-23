@@ -51,7 +51,7 @@ pub async fn handle_error(
             "Switch maintenance requested from Error; transitioning to Maintenance"
         );
         return Ok(StateHandlerOutcome::transition(
-            SwitchControllerState::maintenance_for_operation(req.operation),
+            SwitchControllerState::maintenance_for_request(req.clone()),
         ));
     }
 

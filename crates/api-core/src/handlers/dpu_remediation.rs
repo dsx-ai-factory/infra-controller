@@ -16,7 +16,6 @@
  */
 use ::rpc::forge as rpc;
 use ::rpc::model::RpcTryFrom;
-use carbide_uuid::machine::DpuMachineId;
 use db::dpu_remediation::AppliedRemediationIdQueryType;
 use model::dpu_remediation::{
     ApproveRemediation, DisableRemediation, EnableRemediation, NewRemediation, RevokeRemediation,
@@ -229,10 +228,7 @@ pub(crate) async fn find_applied_remediation_ids(
         (Some(remediation_id), None) => {
             Ok(AppliedRemediationIdQueryType::RemediationId(remediation_id))
         }
-        (None, Some(machine_id)) => Ok(AppliedRemediationIdQueryType::Machine(
-            DpuMachineId::try_from(machine_id)
-                .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?,
-        )),
+        (None, Some(machine_id)) => Ok(AppliedRemediationIdQueryType::Machine(machine_id)),
     }?;
 
     let (remediation_ids, dpu_machine_ids) =
@@ -240,7 +236,7 @@ pub(crate) async fn find_applied_remediation_ids(
 
     let response = rpc::AppliedRemediationIdList {
         remediation_ids,
-        dpu_machine_ids: dpu_machine_ids.into_iter().map(Into::into).collect(),
+        dpu_machine_ids,
     };
 
     txn.commit().await?;

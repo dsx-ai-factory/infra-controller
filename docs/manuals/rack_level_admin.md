@@ -19,7 +19,7 @@ NICo provides APIs and automated workflows to manage these components for the fo
 Rack-level administration does not require one fixed backend stack. NICo Core
 must be configured with a component-manager backend for each role being managed:
 
-- [RMS](../configuration/component-manager-rms.md) can provide compute, switch,
+- [RMS](../configuration/rms.md) can provide compute, switch,
   and power-shelf management.
 - An externally managed NSM is required only when the switch backend is set to
   `nsm`.
@@ -58,10 +58,10 @@ The end-to-end service path for NICo rack-level administration goes in the follo
 NICo Core supports NVSwitch Manager (NSM) and PowerShelf Manager (PSM)
 backends for switch and power-shelf access. NVIDIA Rack Manager Service (RMS)
 can serve compute, switch, and power-shelf roles and provides rack-level power
-and firmware operations. See
-[Component Manager RMS Backends](../configuration/component-manager-rms.md)
-for RMS configuration requirements and the documented GB200, GB300, and VRNVL72
-role/vendor support matrix.
+and firmware operations. Refer to
+[RMS Configuration](../configuration/rms.md)
+for RMS configuration requirements and a link to the RMS compatibility
+reference. Confirm hardware support against the deployed RMS release.
 
 ## Rack-Level Operations
 

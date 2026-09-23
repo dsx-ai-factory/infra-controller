@@ -53,18 +53,6 @@ const (
 	siteFabricIPBlockReadyMsg = "IP Block is ready for use"
 )
 
-// siteFabricIPBlocksLockID derives the advisory lock that serializes Site
-// fabric IP Block creation for a Site. It is shared with the activity's tests,
-// which acquire the same lock to exercise contention handling.
-func getSiteFabricIPBlockLockID(dbSite *cdbm.Site) uint64 {
-	return cdb.GetAdvisoryLockIDFromString(fmt.Sprintf(
-		"site-fabric-ip-blocks:%s:%s:%s",
-		dbSite.InfrastructureProviderID.String(),
-		dbSite.ID.String(),
-		cdbm.IPBlockRoutingTypeDatacenterOnly,
-	))
-}
-
 // ManageSite is an activity wrapper for managing Site lifecycle that allows
 // injecting DB access
 type ManageSite struct {
@@ -192,6 +180,8 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 	ifcDAO := cdbm.NewInterfaceDAO(mst.dbSession)
 	nvliDAO := cdbm.NewNVLinkInterfaceDAO(mst.dbSession)
 	ibiDAO := cdbm.NewInfiniBandInterfaceDAO(mst.dbSession)
+	sxpDAO := cdbm.NewSpectrumXPartitionDAO(mst.dbSession)
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(mst.dbSession)
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(mst.dbSession)
 	skgiaDAO := cdbm.NewSSHKeyGroupInstanceAssociationDAO(mst.dbSession)
 	nsgDAO := cdbm.NewNetworkSecurityGroupDAO(mst.dbSession)
@@ -252,6 +242,32 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 		}
 	}
 
+	// The provider-root pass above removes active tenant-less rows, including
+	// roots linked to OperatorManaged SitePrefixes. Remove the remaining linked
+	// TenantManaged rows too; they have no legacy IPAM state to clean up.
+	linkedIPBlocks, _, err := ipbDAO.GetAll(
+		ctx,
+		nil,
+		cdbm.IPBlockFilterInput{
+			SiteIDs:        []uuid.UUID{siteID},
+			CoreLinkedOnly: true,
+		},
+		cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)},
+		nil,
+	)
+	if err != nil {
+		logger.Error().Err(err).Msg("error retrieving Core-linked IP Blocks for Site from DB")
+		return err
+	}
+
+	for _, ipb := range linkedIPBlocks {
+		err = ipbDAO.Delete(ctx, nil, ipb.ID)
+		if err != nil && err != cdb.ErrDoesNotExist {
+			logger.Error().Err(err).Str("IP Block ID", ipb.ID.String()).Msg("error deleting Core-linked IP Block in db")
+			return err
+		}
+	}
+
 	// Delete Instances
 	// Check that Instance exists
 	instances, _, err := instanceDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{siteID}}, cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)}, nil)
@@ -295,6 +311,13 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 	err = ibiDAO.DeleteAllBySiteID(ctx, nil, siteID)
 	if err != nil {
 		logger.Error().Err(err).Msg("error deleting InfiniBand Interfaces for Site from DB")
+		return err
+	}
+
+	// Delete SpectrumX attachments for site
+	err = sxaDAO.DeleteAllBySiteID(ctx, nil, siteID)
+	if err != nil {
+		logger.Error().Err(err).Msg("error deleting SpectrumX Attachments for Site from DB")
 		return err
 	}
 
@@ -448,6 +471,13 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 			logger.Error().Err(serr).Str("IB Partition ID", ibp.ID.String()).Msg("error deleting IB Partition record in DB")
 			return serr
 		}
+	}
+
+	// Delete SpectrumX Partitions for site
+	err = sxpDAO.DeleteAllBySiteID(ctx, nil, siteID)
+	if err != nil {
+		logger.Error().Err(err).Msg("error deleting SpectrumX Partition records in DB for Site")
+		return err
 	}
 
 	// Delete NVLink Logical Partitions
@@ -988,7 +1018,11 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 	statusDetailDAO := cdbm.NewStatusDetailDAO(mst.dbSession)
 
 	err = cdb.WithTx(ctx, mst.dbSession, func(tx *cdb.Tx) error {
-		derr := tx.AcquireAdvisoryLock(ctx, getSiteFabricIPBlockLockID(dbSite), false)
+		derr := tx.AcquireAdvisoryLock(
+			ctx,
+			cdbm.SiteFabricIPBlockLockID(dbSite.InfrastructureProviderID, dbSite.ID),
+			false,
+		)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("failed to acquire advisory lock for Site fabric IP Blocks")
 			return derr

@@ -8,7 +8,7 @@ default_to_workspace = false
 DOCA_REPO_URL = "https://github.com/NVIDIA/doca-platform.git"
 DOCA_BRANCH = "v0.1.0-carbide-47c105e2-nightly"
 # Comment out DOCA_COMMIT when a tag/branch exists.
-DOCA_COMMIT = "8cb2a6378cfc8165afac270541b376105d26019c"
+DOCA_COMMIT = "53fec54d1036248e5278f6b7ada00cff45c82c6f"
 DOCA_CLONE_DIR = "${CARGO_MAKE_WORKING_DIRECTORY}/doca-platform"
 CRD_SOURCE_PATH = "${DOCA_CLONE_DIR}/deploy/charts/dpf-operator/templates/crds"
 CRD_DEST_PATH = "${CARGO_MAKE_WORKING_DIRECTORY}/crds"

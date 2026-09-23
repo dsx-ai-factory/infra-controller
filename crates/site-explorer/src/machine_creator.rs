@@ -14,7 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use carbide_instrument::emit;
 use carbide_rack::rms_node_type::compute_node_identity_for_profile;
@@ -23,7 +26,8 @@ use carbide_secrets::credentials::{
 };
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId};
-use db::Transaction;
+use db::machine::MachineNetworkConfigNotCurrent;
+use db::{ConditionalWrite, Transaction};
 use itertools::Itertools;
 use librms::RmsApi;
 use librms::protos::rack_manager as rms;
@@ -34,8 +38,9 @@ use model::hardware_info::HardwareInfo;
 use model::machine::machine_id::host_id_from_dpu_hardware_info;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
-    CURRENT_STATE_MODEL_VERSION, ConfigureAstraState, Machine, MachineInterfaceSnapshot,
-    ManagedHostState, pick_boot_interface, pick_boot_prediction,
+    AnyMachine, CURRENT_STATE_MODEL_VERSION, ConfigureAstraState, LoadSnapshotOptions,
+    MachineInterfaceSnapshot, ManagedHostState, dpf_based_dpu_provisioning_possible,
+    pick_boot_interface, pick_boot_prediction,
 };
 use model::machine_boot_interface::{
     BootInterfaceSelectionSource, MachineBootInterface, MachineBootInterfaceTarget,
@@ -55,10 +60,17 @@ use sqlx::{PgConnection, PgPool};
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::managed_host::ManagedHost;
-use crate::metrics::{SiteExplorationMetrics, SiteExplorerMachineSlotTrayPersistenceFailed};
+use crate::metrics::{
+    SiteExplorationMetrics, SiteExplorerMachineSlotTrayFetchFailed,
+    SiteExplorerMachineSlotTrayPersistenceFailed, SiteExplorerMachineSlotTrayResponseMissing,
+    SiteExplorerMachineSlotTrayValueInvalid,
+};
 use crate::{IdentifiedManagedHost, SiteExplorerConfig};
 
 const DESIRED_BOOT_INTERFACE_RECONCILE_PAGE_SIZE: i64 = 100;
+// Match RMS's 10-second I/O timeout with a total attempt deadline: HTTP/2
+// keepalives must not extend best-effort enrichment's hold on the iteration lock.
+const RMS_MACHINE_LOCATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Creates machines from site-explorer managed-host reports.
 pub struct MachineCreator {
@@ -68,6 +80,7 @@ pub struct MachineCreator {
     rack_profiles: Arc<RackProfileConfig>,
     rms_client: Option<Arc<dyn RmsApi>>,
     credential_manager: Arc<dyn CredentialManager>,
+    dpf_enabled_at_site: bool,
 }
 
 impl MachineCreator {
@@ -79,6 +92,7 @@ impl MachineCreator {
         rack_profiles: Arc<RackProfileConfig>,
         rms_client: Option<Arc<dyn RmsApi>>,
         credential_manager: Arc<dyn CredentialManager>,
+        dpf_enabled_at_site: bool,
     ) -> Self {
         Self {
             database_connection,
@@ -87,6 +101,7 @@ impl MachineCreator {
             rack_profiles,
             rms_client,
             credential_manager,
+            dpf_enabled_at_site,
         }
     }
 
@@ -132,6 +147,178 @@ impl MachineCreator {
         }
 
         Ok(())
+    }
+
+    /// Best-effort fills missing machine location data in one RMS batch.
+    ///
+    /// Site Explorer calls this after its ingestion and audit phases so RMS
+    /// latency cannot serialize machine creation. Machines whose response is
+    /// absent or whose request fails remain eligible on the next iteration.
+    /// The RPC deadline includes lazy connection setup; expiry cancels this
+    /// attempt, emits a failure event, and leaves stored location data unchanged.
+    pub(crate) async fn reconcile_machine_locations(
+        &self,
+        bmc_ips: &[IpAddr],
+    ) -> SiteExplorerResult<()> {
+        let Some(rms_client) = &self.rms_client else {
+            return Ok(());
+        };
+        if bmc_ips.is_empty() {
+            return Ok(());
+        }
+
+        let identities =
+            db::machine::find_rms_identities_by_bmc_ips(&self.database_connection, bmc_ips).await?;
+        let mut machine_ids_by_node_id = HashMap::new();
+        let mut nodes = Vec::new();
+
+        for identity in identities {
+            if identity.slot_number.is_some() && identity.tray_index.is_some() {
+                continue;
+            }
+            let Some(rack_id) = identity.rack_id else {
+                continue;
+            };
+            let Some(rack_profile_id) = identity.rack_profile_id else {
+                tracing::warn!(
+                    %rack_id,
+                    host_machine_id = %identity.id,
+                    "Rack has no rack_profile_id for RMS slot and tray reconciliation"
+                );
+                continue;
+            };
+            let Some(rack_profile) = self.rack_profiles.get(rack_profile_id.as_str()) else {
+                tracing::warn!(
+                    %rack_id,
+                    %rack_profile_id,
+                    host_machine_id = %identity.id,
+                    "Rack profile is not configured for RMS slot and tray reconciliation"
+                );
+                continue;
+            };
+            let node_identity = match compute_node_identity_for_profile(rack_profile) {
+                Ok(node_identity) => node_identity,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        %rack_id,
+                        %rack_profile_id,
+                        host_machine_id = %identity.id,
+                        "Rack profile cannot identify a compute node for RMS slot and tray reconciliation"
+                    );
+                    continue;
+                }
+            };
+            let host_machine_id = match identity.id.parse::<MachineId>() {
+                Ok(host_machine_id) => host_machine_id,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        host_machine_id = %identity.id,
+                        "Invalid machine ID during RMS slot and tray reconciliation"
+                    );
+                    continue;
+                }
+            };
+            let bmc_credentials = self
+                .credential_manager
+                .get_credentials(&CredentialKey::BmcCredentials {
+                    credential_type: BmcCredentialType::BmcRoot {
+                        bmc_mac_address: identity.bmc_mac_address,
+                    },
+                })
+                .await
+                .ok()
+                .flatten()
+                .map(
+                    |Credentials::UsernamePassword { username, password }| rms::Credentials {
+                        auth: Some(rms::credentials::Auth::UserPass(rms::UsernamePassword {
+                            username,
+                            password,
+                        })),
+                    },
+                );
+
+            let mut node = rms::NodeInfo {
+                node_id: identity.id.clone(),
+                rack_id: rack_id.to_string(),
+                r#type: None,
+                node_descriptor: None,
+                bmc_endpoint: Some(rms::Endpoint {
+                    interface: Some(rms::NetworkInterface {
+                        ip_address: identity.bmc_ip.to_string(),
+                        mac_address: identity.bmc_mac_address.to_string(),
+                        host_name: None,
+                    }),
+                    port: 443,
+                    credentials: bmc_credentials,
+                }),
+                ..Default::default()
+            };
+            node_identity.apply_to_node_info(&mut node);
+            machine_ids_by_node_id.insert(identity.id, host_machine_id);
+            nodes.push(node);
+        }
+
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        let response = match tokio::time::timeout(
+            RMS_MACHINE_LOCATION_TIMEOUT,
+            rms_client.batch_get_node_device_info(rms::BatchGetNodeDeviceInfoRequest {
+                nodes: Some(rms::NodeSet { nodes }),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                emit(SiteExplorerMachineSlotTrayFetchFailed::new(
+                    error.to_string(),
+                ));
+                return Ok(());
+            }
+            Err(_) => {
+                emit(SiteExplorerMachineSlotTrayFetchFailed::new(format!(
+                    "RMS slot and tray lookup timed out after {RMS_MACHINE_LOCATION_TIMEOUT:?}"
+                )));
+                return Ok(());
+            }
+        };
+
+        for details in response.node_device_details {
+            let Some(host_machine_id) = machine_ids_by_node_id.remove(&details.node_id) else {
+                tracing::warn!(
+                    rms_node_id = %details.node_id,
+                    "RMS returned unrequested machine slot and tray data"
+                );
+                continue;
+            };
+            let (slot_number, tray_index) = rms_slot_and_tray(&details);
+            persist_machine_slot_and_tray(
+                &self.database_connection,
+                host_machine_id,
+                slot_number,
+                tray_index,
+            )
+            .await;
+        }
+
+        for _ in machine_ids_by_node_id {
+            emit(SiteExplorerMachineSlotTrayResponseMissing::new());
+        }
+
+        Ok(())
+    }
+
+    /// Runs the production RMS location reconciliation from integration tests.
+    #[cfg(feature = "test-support")]
+    pub async fn reconcile_machine_locations_for_test(
+        &self,
+        bmc_ips: &[IpAddr],
+    ) -> SiteExplorerResult<()> {
+        self.reconcile_machine_locations(bmc_ips).await
     }
 
     /// Best-effort reconciles every host whose desired boot interface is still
@@ -229,23 +416,6 @@ impl MachineCreator {
         };
         let machine_data = Some(&expected_machine.data);
         let mut managed_host = ManagedHost::init(explored_host);
-
-        let bmc_credentials =
-            if expected_machine.data.rack_id.is_some() && self.rms_client.is_some() {
-                let key = CredentialKey::BmcCredentials {
-                    credential_type: BmcCredentialType::BmcRoot {
-                        bmc_mac_address: expected_machine.bmc_mac_address,
-                    },
-                };
-                match self.credential_manager.get_credentials(&key).await {
-                    Ok(Some(Credentials::UsernamePassword { username, password })) => {
-                        Some((username, password))
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            };
 
         // Admission permit BEFORE the transaction: waiters on the admin-segment
         // advisory lock must queue in memory, not on open pool connections.
@@ -398,6 +568,13 @@ impl MachineCreator {
         )
         .await?;
 
+        if self
+            .dpf_based_dpu_provisioning_possible(&mut txn, &host_machine_id)
+            .await?
+        {
+            db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &host_machine_id).await?;
+        }
+
         let mut rack_profile_id = None;
         if let Some(rack_id) = machine_data.and_then(|d| d.rack_id.as_ref()) {
             tracing::info!(%rack_id, %host_machine_id, "Ensuring rack exists for host machine");
@@ -437,9 +614,7 @@ impl MachineCreator {
         )
         .await?;
 
-        let rms_node_identity = if let (Some(rack_id), Some(_)) =
-            (&expected_machine.data.rack_id, &self.rms_client)
-        {
+        if let (Some(rack_id), Some(_)) = (&expected_machine.data.rack_id, &self.rms_client) {
             let Some(rack_profile_id) = rack_profile_id.as_ref() else {
                 return Err(SiteExplorerError::InvalidArgument(format!(
                     "rack {rack_id} has no rack_profile_id for RMS slot and tray lookup for host machine {host_machine_id}"
@@ -452,72 +627,41 @@ impl MachineCreator {
                 )));
             };
 
-            Some(
-                compute_node_identity_for_profile(rack_profile)
-                    .map_err(|error| SiteExplorerError::InvalidArgument(error.to_string()))?,
-            )
-        } else {
-            None
-        };
+            compute_node_identity_for_profile(rack_profile)
+                .map_err(|error| SiteExplorerError::InvalidArgument(error.to_string()))?;
+        }
 
         txn.commit().await?;
 
-        if let (Some(rack_id), Some(rms_client), Some(node_identity)) = (
-            &expected_machine.data.rack_id,
-            &self.rms_client,
-            rms_node_identity,
-        ) {
-            let mut node = rms::NodeInfo {
-                node_id: host_machine_id.to_string(),
-                rack_id: rack_id.to_string(),
-                r#type: None,
-                node_descriptor: None,
-                bmc_endpoint: Some(rms::Endpoint {
-                    interface: Some(rms::NetworkInterface {
-                        ip_address: explored_host.host_bmc_ip.to_string(),
-                        mac_address: expected_machine.bmc_mac_address.to_string(),
-                        host_name: None,
-                    }),
-                    port: 443,
-                    credentials: bmc_credentials.map(|(username, password)| rms::Credentials {
-                        auth: Some(rms::credentials::Auth::UserPass(rms::UsernamePassword {
-                            username,
-                            password,
-                        })),
-                    }),
-                }),
-                ..Default::default()
-            };
-
-            node_identity.apply_to_node_info(&mut node);
-
-            let request = rms::BatchGetNodeDeviceInfoRequest {
-                nodes: Some(rms::NodeSet { nodes: vec![node] }),
-            };
-            let (slot_number, tray_index) =
-                crate::fetch_slot_and_tray(rms_client.as_ref(), request).await;
-            let mut update_txn = Transaction::begin(pool).await?;
-            if let Err(e) = db::machine::update_slot_and_tray(
-                &mut update_txn,
-                &host_machine_id,
-                slot_number,
-                tray_index,
-            )
-            .await
-            {
-                emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
-                    e.to_string(),
-                    host_machine_id.to_string(),
-                ));
-                update_txn
-                    .rollback_or_log("site-explorer slot and tray update after operation failure")
-                    .await;
-            } else {
-                update_txn.commit().await?;
-            }
-        }
+        tracing::info!(
+            host_bmc_ip_address = %explored_host.host_bmc_ip,
+            %host_machine_id,
+            dpu_count = managed_host.explored_host.dpus.len(),
+            "Created managed host from explored endpoint"
+        );
 
         Ok(true)
+    }
+
+    async fn dpf_based_dpu_provisioning_possible(
+        &self,
+        txn: &mut PgConnection,
+        host_machine_id: &HostMachineId,
+    ) -> SiteExplorerResult<bool> {
+        let managed_host =
+            db::managed_host::load_snapshot(txn, host_machine_id, LoadSnapshotOptions::default())
+                .await?
+                .ok_or_else(|| {
+                    SiteExplorerError::internal(format!(
+                        "managed host {host_machine_id} disappeared while being created"
+                    ))
+                })?;
+
+        Ok(dpf_based_dpu_provisioning_possible(
+            &managed_host,
+            self.dpf_enabled_at_site,
+            false,
+        ))
     }
 
     // Returns MachineId if machine was created.
@@ -590,13 +734,8 @@ impl MachineCreator {
             {
                 match prediction.machine_id.machine_id_subtype() {
                     MachineIdSubtype::StableHost(stable_machine_id) => {
-                        reconcile_desired_boot_interface(
-                            txn,
-                            stable_machine_id.as_host_machine_id(),
-                            None,
-                            None,
-                        )
-                        .await?;
+                        reconcile_desired_boot_interface(txn, &stable_machine_id, None, None)
+                            .await?;
                         return Ok(None);
                     }
                     MachineIdSubtype::PredictedHost(predicted_machine_id) => {
@@ -665,13 +804,7 @@ impl MachineCreator {
                 primary_mac,
             )
             .await?;
-            reconcile_desired_boot_interface(
-                txn,
-                machine_id.as_host_machine_id(),
-                None,
-                declared_primary,
-            )
-            .await?;
+            reconcile_desired_boot_interface(txn, &machine_id, None, declared_primary).await?;
             return Ok(None);
         }
 
@@ -712,8 +845,7 @@ impl MachineCreator {
                 predicted_host_mac_addresses = ?mac_addresses,
                 "Predicted host already exists, with different mac addresses from this one. Potentially multiple machines with same serial number?"
             );
-            reconcile_desired_boot_interface(txn, &existing_machine.id.try_into()?, None, None)
-                .await?;
+            reconcile_desired_boot_interface(txn, &existing_machine.id, None, None).await?;
             return Ok(None);
         }
 
@@ -1039,7 +1171,7 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
-    ) -> SiteExplorerResult<Option<Machine>> {
+    ) -> SiteExplorerResult<Option<AnyMachine>> {
         if let Some(dpu_machine) = self.create_dpu_machine(txn, explored_dpu).await? {
             self.configure_dpu_interface(txn, explored_dpu).await?;
             let dpu_machine_id: &MachineId = explored_dpu.report.machine_id.as_ref().unwrap();
@@ -1174,7 +1306,7 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
-    ) -> SiteExplorerResult<Option<Machine>> {
+    ) -> SiteExplorerResult<Option<AnyMachine>> {
         let dpu_machine_id = explored_dpu.report.machine_id.as_ref().unwrap();
         match db::machine::find_one(&mut *txn, dpu_machine_id, MachineSearchConfig::default())
             .await?
@@ -1287,7 +1419,7 @@ impl MachineCreator {
     async fn update_dpu_network_config(
         &self,
         txn: &mut PgConnection,
-        dpu_machine: &Machine,
+        dpu_machine: &AnyMachine,
     ) -> SiteExplorerResult<()> {
         let (mut network_config, version) = dpu_machine.network_config.clone().take();
         if network_config.loopback_ip.is_none() {
@@ -1309,10 +1441,11 @@ impl MachineCreator {
             .await?;
         }
 
-        // A stale version must fail the whole transaction so any addresses
-        // allocated above return to their pools.
-        if !db::machine::try_update_network_config(txn, &dpu_machine.id, version, &network_config)
-            .await?
+        // Missing and changed targets share this rejection. Fail the whole
+        // transaction so any addresses allocated above return to their pools.
+        if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
+            db::machine::try_update_network_config(txn, &dpu_machine.id, version, &network_config)
+                .await?
         {
             return Err(db::DatabaseError::ConcurrentModificationError(
                 "machine",
@@ -1339,13 +1472,20 @@ impl MachineCreator {
                 db::machine::get_network_config(&mut *txn, host_machine_id)
                     .await?
                     .take();
-            db::machine::try_update_network_config(
-                txn,
-                host_machine_id,
-                network_config_version,
-                &network_config,
-            )
-            .await?;
+            if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
+                db::machine::try_update_network_config(
+                    txn,
+                    host_machine_id,
+                    network_config_version,
+                    &network_config,
+                )
+                .await?
+            {
+                return Err(db::DatabaseError::FailedPrecondition(format!(
+                    "network configuration for machine {host_machine_id} changed or is no longer available"
+                ))
+                .into());
+            }
         }
         Ok(active_config_changed)
     }
@@ -1446,6 +1586,54 @@ impl MachineCreator {
         .await?;
 
         Ok(PredictedHostMachineId::try_from(predicted_machine_id)?)
+    }
+}
+
+fn rms_slot_and_tray(details: &rms::NodeDeviceInfo) -> (Option<i32>, Option<i32>) {
+    let slot_number = crate::rms_location_value(details.slot_number).unwrap_or_else(|value| {
+        emit(SiteExplorerMachineSlotTrayValueInvalid::SlotNumber { value });
+        None
+    });
+    let tray_index = crate::rms_location_value(details.tray_index).unwrap_or_else(|value| {
+        emit(SiteExplorerMachineSlotTrayValueInvalid::TrayIndex { value });
+        None
+    });
+
+    (slot_number, tray_index)
+}
+
+/// Persists best-effort RMS location data without changing machine-creation success.
+async fn persist_machine_slot_and_tray(
+    pool: &PgPool,
+    host_machine_id: MachineId,
+    slot_number: Option<i32>,
+    tray_index: Option<i32>,
+) {
+    let mut txn = match Transaction::begin(pool).await {
+        Ok(txn) => txn,
+        Err(error) => {
+            emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
+                error.to_string(),
+                host_machine_id.to_string(),
+            ));
+            return;
+        }
+    };
+
+    if let Err(error) =
+        db::machine::update_slot_and_tray(&mut txn, &host_machine_id, slot_number, tray_index).await
+    {
+        emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
+            error.to_string(),
+            host_machine_id.to_string(),
+        ));
+        txn.rollback_or_log("site-explorer slot and tray update after operation failure")
+            .await;
+    } else if let Err(error) = txn.commit().await {
+        emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
+            error.to_string(),
+            host_machine_id.to_string(),
+        ));
     }
 }
 

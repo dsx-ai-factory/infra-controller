@@ -136,6 +136,7 @@ type Interface struct {
 }
 
 // EthernetInterfaceKey returns a stable string key for the Interface fields controlled by an update request.
+// Equivalent requested IP addresses must reuse the interface instead of replacing it.
 func (ifc Interface) EthernetInterfaceKey() string {
 	values := url.Values{}
 	if ifc.SubnetID != nil {
@@ -164,7 +165,12 @@ func (ifc Interface) EthernetInterfaceKey() string {
 		values.Set("device_instance", strconv.Itoa(*ifc.DeviceInstance))
 	}
 	if ifc.RequestedIpAddress != nil {
-		values.Set("requested_ip_address", *ifc.RequestedIpAddress)
+		requestedIPAddress := *ifc.RequestedIpAddress
+		address, err := netip.ParseAddr(requestedIPAddress)
+		if err == nil {
+			requestedIPAddress = address.String()
+		}
+		values.Set("requested_ip_address", requestedIPAddress)
 	}
 	if ifc.InlineRoutingProfile != nil {
 		values.Set("has_inline_routing_profile", "true")

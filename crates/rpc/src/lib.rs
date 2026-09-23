@@ -76,6 +76,7 @@ pub use crate::protos::machine_discovery::{
 };
 pub use crate::protos::{agent_local, fmds, health, scout_firmware_upgrade, site_explorer};
 
+pub mod admission_retry;
 pub mod errors;
 pub mod forge_tls_client;
 pub mod libmlx;
@@ -930,6 +931,7 @@ impl forge::MachineCapabilityDeviceType {
 
         Ok(Some(match s.to_uppercase().as_str() {
             "DPU" => Self::Dpu as i32,
+            "SPECTRUMX" => Self::SpectrumX as i32,
             "UNKNOWN" => Self::Unknown as i32,
             _ => 0,
         }))
@@ -955,6 +957,7 @@ impl forge::MachineCapabilityDeviceType {
             forge::MachineCapabilityDeviceType::Dpu => "DPU".to_string(),
             forge::MachineCapabilityDeviceType::Unknown => "UNKNOWN".to_string(),
             forge::MachineCapabilityDeviceType::Nvlink => "NVLINK".to_string(),
+            forge::MachineCapabilityDeviceType::SpectrumX => "SpectrumX".to_string(),
         })
     }
 }

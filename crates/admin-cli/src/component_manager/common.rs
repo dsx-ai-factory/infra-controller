@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
@@ -76,8 +76,10 @@ impl From<ComputeTrayComponentArg> for rpc::forge::ComputeTrayComponent {
     }
 }
 
+/// Switch-id-only target for operations that have no pre-ingestion MAC path
+/// (e.g. `configure-switch-certificate`).
 #[derive(ClapArgs, Debug)]
-pub(super) struct SwitchTargetArgs {
+pub(super) struct SwitchIdArgs {
     #[clap(
         long = "switch-id",
         required = true,
@@ -88,30 +90,92 @@ pub(super) struct SwitchTargetArgs {
     switch_ids: Vec<SwitchId>,
 }
 
-impl From<SwitchTargetArgs> for rpc::forge::SwitchIdList {
-    fn from(args: SwitchTargetArgs) -> Self {
+impl From<SwitchIdArgs> for rpc::forge::SwitchIdList {
+    fn from(args: SwitchIdArgs) -> Self {
         Self {
             ids: args.switch_ids,
         }
     }
 }
 
+/// Switch target: either switch ids or BMC MAC addresses, exactly one of which
+/// must be supplied. MACs let operators target switches before ingestion has
+/// assigned a switch id.
 #[derive(ClapArgs, Debug)]
+#[clap(group(
+    clap::ArgGroup::new("switch_target")
+        .required(true)
+        .args(["switch_ids", "mac_addresses"])
+))]
+pub(super) struct SwitchTargetArgs {
+    #[clap(
+        long = "switch-id",
+        num_args = 1..,
+        value_delimiter = ',',
+        help = "Switch IDs to target"
+    )]
+    switch_ids: Vec<SwitchId>,
+
+    #[clap(flatten)]
+    macs: MacTargetArgs,
+}
+
+/// The resolved switch selection, mapped by each command into the proto oneof
+/// variant for its request type.
+pub(super) enum SwitchSelection {
+    SwitchIds(rpc::forge::SwitchIdList),
+    Macs(rpc::forge::MacAddressList),
+}
+
+impl SwitchTargetArgs {
+    pub(super) fn into_selection(self) -> SwitchSelection {
+        if !self.macs.is_present() {
+            SwitchSelection::SwitchIds(rpc::forge::SwitchIdList {
+                ids: self.switch_ids,
+            })
+        } else {
+            SwitchSelection::Macs(self.macs.into())
+        }
+    }
+}
+
+/// Power shelf target: either power shelf ids or PMC MAC addresses, exactly one
+/// of which must be supplied. MACs let operators target power shelves before
+/// ingestion has assigned a power shelf id.
+#[derive(ClapArgs, Debug)]
+#[clap(group(
+    clap::ArgGroup::new("power_shelf_target")
+        .required(true)
+        .args(["power_shelf_ids", "mac_addresses"])
+))]
 pub(super) struct PowerShelfTargetArgs {
     #[clap(
         long = "power-shelf-id",
-        required = true,
         num_args = 1..,
         value_delimiter = ',',
         help = "Power shelf IDs to target"
     )]
     power_shelf_ids: Vec<PowerShelfId>,
+
+    #[clap(flatten)]
+    macs: MacTargetArgs,
 }
 
-impl From<PowerShelfTargetArgs> for rpc::forge::PowerShelfIdList {
-    fn from(args: PowerShelfTargetArgs) -> Self {
-        Self {
-            ids: args.power_shelf_ids,
+/// The resolved power-shelf selection, mapped by each command into the proto
+/// oneof variant for its request type.
+pub(super) enum PowerShelfSelection {
+    PowerShelfIds(rpc::forge::PowerShelfIdList),
+    Macs(rpc::forge::MacAddressList),
+}
+
+impl PowerShelfTargetArgs {
+    pub(super) fn into_selection(self) -> PowerShelfSelection {
+        if !self.macs.is_present() {
+            PowerShelfSelection::PowerShelfIds(rpc::forge::PowerShelfIdList {
+                ids: self.power_shelf_ids,
+            })
+        } else {
+            PowerShelfSelection::Macs(self.macs.into())
         }
     }
 }
@@ -132,7 +196,7 @@ pub(super) struct ComputeTrayTargetArgs {
         value_delimiter = ',',
         help = "Machine IDs to target"
     )]
-    machine_ids: Vec<MachineId>,
+    machine_ids: Vec<HostMachineId>,
 
     #[clap(flatten)]
     macs: MacTargetArgs,
@@ -141,14 +205,14 @@ pub(super) struct ComputeTrayTargetArgs {
 /// The resolved compute-tray selection, mapped by each command into the proto
 /// oneof variant for its request type.
 pub(super) enum ComputeTraySelection {
-    MachineIds(rpc::common::MachineIdList),
+    MachineIds(rpc::common::HostMachineIdList),
     Macs(rpc::forge::MacAddressList),
 }
 
 impl ComputeTrayTargetArgs {
     pub(super) fn into_selection(self) -> ComputeTraySelection {
         if !self.macs.is_present() {
-            ComputeTraySelection::MachineIds(rpc::common::MachineIdList {
+            ComputeTraySelection::MachineIds(rpc::common::HostMachineIdList {
                 machine_ids: self.machine_ids,
             })
         } else {

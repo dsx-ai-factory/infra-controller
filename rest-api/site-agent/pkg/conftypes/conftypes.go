@@ -41,7 +41,23 @@ type TemporalConfig struct {
 	TemporalSubscribeQueue     string `json:"temporalSubscribeQueue"`
 	TemporalInventorySchedule  string `json:"temporalInventorySchedule"`
 	TemporalCertPath           string `json:"temporalCertPath"`
+	// InventoryCloudPageSize is the number of inventory items published to Cloud per
+	// Temporal workflow page. Read from INVENTORY_CLOUD_PAGE_SIZE, defaulting to
+	// DefaultInventoryCloudPageSize; bounded by MaxInventoryCloudPageSize.
+	InventoryCloudPageSize int `json:"inventoryCloudPageSize"`
 }
+
+const (
+	// DefaultInventoryCloudPageSize is the fallback page size when
+	// INVENTORY_CLOUD_PAGE_SIZE is unset. Matches the historical hardcoded value.
+	DefaultInventoryCloudPageSize = 25
+	// MaxInventoryCloudPageSize caps the configurable page size. Do not read it as a size that
+	// fits Temporal's 2MB blob limit: a real Machine has measured at 49KB after pruning and
+	// 156KB before it, so 100 of them exceeds the limit either way. Staying under it is the
+	// publish ladder's job, which shrinks a page until it measures small enough, and this bound
+	// only keeps the starting page size somewhere sensible.
+	MaxInventoryCloudPageSize = 100
+)
 
 // GetTemporalCertOTPFullPath - Get Temporal Cert OTP path
 func (tc *TemporalConfig) GetTemporalCertOTPFullPath() string {

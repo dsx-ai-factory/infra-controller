@@ -26,7 +26,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::{get, post};
 use carbide_host_support::agent_config::MachineIdentityConfig;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use eyre::eyre;
 use forge_dpu_agent_utils::utils::create_forge_client;
 use forge_dpu_fmds_shared::machine_identity::{
@@ -91,7 +91,7 @@ pub(super) trait InstanceMetadataRouterState: Sync + Send {
 pub(super) struct InstanceMetadataRouterStateImpl {
     latest_instance_data: ArcSwapOption<InstanceMetadata>,
     latest_network_config: ArcSwapOption<ManagedHostNetworkConfigResponse>,
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
     forge_api: String,
     forge_client_config: Arc<ForgeClientConfig>,
     outbound_governor:
@@ -199,7 +199,7 @@ impl InstanceMetadataRouterStateImpl {
     }
 
     pub(super) fn new(
-        machine_id: MachineId,
+        machine_id: DpuMachineId,
         forge_api: String,
         forge_client_config: Arc<ForgeClientConfig>,
         machine_identity: MachineIdentityConfig,

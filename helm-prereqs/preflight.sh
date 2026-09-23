@@ -25,6 +25,7 @@
 # Checks (in order — fails fast so the most actionable issues appear first):
 #   1. Environment variables    — presence and format
 #   2. Required tools           — helm, helmfile, kubectl, jq, ssh-keygen
+#                                  Core VIP validation also needs python3 + PyYAML
 #   3. values/metallb-config.yaml — YAML, pools, advertisement mode, ASNs
 #   4. Cluster reachability     — kubectl can reach the API server
 #   5. Node resources           — at least 3 schedulable (Ready + untainted) nodes
@@ -93,7 +94,6 @@ if ! ${_SOURCED}; then
         case "$1" in
             --skip-core)      SKIP_CORE=true ;;
             --skip-rest)      SKIP_REST=true ;;
-            --skip-flow)      SKIP_FLOW=true ;;
             --skip-dpf)       INSTALL_DPF=false ;;
             --install-dpf)    INSTALL_DPF=true ;;
             --skip-rms)       INSTALL_RMS=false ;;
@@ -509,8 +509,6 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
         ERRORS+=("NICO_DPF_DPU_INTERFACE is not set    (controller interface for the DPU cluster keepalived VIP; required unless --skip-dpf)")
     [[ -z "${NICO_DPF_DPU_CLUSTER_VIP:-}" ]] && \
         ERRORS+=("NICO_DPF_DPU_CLUSTER_VIP is not set    (VIP the DPUs use to reach their control plane; required unless --skip-dpf)")
-    [[ -z "${NICO_DPF_BMC_ROOT_PASSWORD:-}" ]] && \
-        WARNINGS+=("NICO_DPF_BMC_ROOT_PASSWORD is not set  (site-wide BMC root password; setup.sh will skip automated credential seeding — set it manually via nico-admin-cli after deploy before DPU provisioning will work)")
     if [[ -z "${NICO_DPF_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}" ]]; then
         WARNINGS+=("NICO_DPF_NGC_API_KEY / REGISTRY_PULL_SECRET not set — the DPF operator + public DOCA images still pull anonymously, but the Argo repo secrets are skipped, so the private NICo DPUService charts (carbide) won't authenticate unless you mirror/build them into your own registry")
     fi
@@ -521,18 +519,18 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
     # the whole DPF prereq stack. Without this, a --core-values file with a
     # missing/commented [dpf] block passes preflight and aborts only in phase 6,
     # after argo-cd, kamaji, NFD, the operator and its CRs are already installed,
-    # leaving a half-provisioned cluster. This mirrors the setup.sh two-phase
+    # leaving a half-provisioned cluster. This mirrors setup.sh's rendered-values
     # guard, but it is a pure function of the static file so it can run up front.
     if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
-        # Reproduce setup.sh's DPF-ON rendering: the default file ships the [dpf]
+        # Reproduce setup.sh's DPF rendering: the default file ships the [dpf]
         # block '#dpf# '-commented (uncomment it); a --core-values file is
         # expected to carry a live [dpf] block already.
         if [[ -n "${CORE_VALUES:-}" ]]; then
-            _dpf_on_src="$(cat "${_CORE_VALUES_CFG}")"
+            _dpf_values_src="$(cat "${_CORE_VALUES_CFG}")"
         else
-            _dpf_on_src="$(sed -E 's/^([[:space:]]*)#dpf# ?/\1/' "${_CORE_VALUES_CFG}")"
+            _dpf_values_src="$(sed -E 's/^([[:space:]]*)#dpf# ?/\1/' "${_CORE_VALUES_CFG}")"
         fi
-        _dpf_enabled_val="$(printf '%s\n' "${_dpf_on_src}" | awk '
+        _dpf_enabled_val="$(printf '%s\n' "${_dpf_values_src}" | awk '
             /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { indpf = ($0 ~ /^[[:space:]]*\[dpf\][[:space:]]*$/) ? 1 : 0 }
             indpf==1 && /^[[:space:]]*enabled[[:space:]]*=/ {
                 # Anchor to the FIRST "=" so a trailing comment (e.g. "# default=true")
@@ -678,16 +676,29 @@ if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
     if _strip_comments "${_CORE_VALUES_CFG}" | grep -qE '^[[:space:]]*hostname:[[:space:]]*("")?[[:space:]]*$'; then
         ERRORS+=("${_CORE_VALUES_LABEL}: nico-api.hostname is empty — set your external nico-api hostname")
     fi
-    # Every enabled externalService needs a VIP from the MetalLB pool
-    if _strip_comments "${_CORE_VALUES_CFG}" | grep -qE 'loadBalancerIPs:[[:space:]]*("")?[[:space:]]*$'; then
-        ERRORS+=("${_CORE_VALUES_LABEL}: one or more loadBalancerIPs are empty — assign each enabled externalService a VIP from your MetalLB pool")
+    # Parse YAML so formatting cannot bypass active-Service checks; parser failures are errors.
+    if ! command -v python3 &>/dev/null; then
+        ERRORS+=("Core VIP preflight requires python3 with PyYAML — install them before running setup.sh")
+    elif _vip_checks="$(python3 "${SCRIPT_DIR}/check-external-service-vips.py" "${_CORE_VALUES_CFG}" --metallb-stdin <<< "${_METALLB_RENDERED}" 2>&1)"; then
+        # Duplicate VIPs remain warnings; missing, malformed, or out-of-pool VIPs are errors.
+        # Route pool errors to their own input file.
+        while IFS= read -r _check; do
+            case "${_check}" in
+                "ERROR[pool]: "*) ERRORS+=("${_METALLB_CFG_LABEL}: ${_check#ERROR\[pool\]: }") ;;
+                "ERROR: "*) ERRORS+=("${_CORE_VALUES_LABEL}: ${_check#ERROR: }") ;;
+                "WARNING: "*) WARNINGS+=("${_CORE_VALUES_LABEL}: ${_check#WARNING: }") ;;
+            esac
+        done <<< "${_vip_checks}"
+    else
+        ERRORS+=("${_CORE_VALUES_LABEL}: ${_vip_checks}")
     fi
 fi
 
-# MetalLB: a pool declared with no CIDR/range entries
-if [[ -f "${_METALLB_CFG}" && ! -d "${_METALLB_CFG}" ]]; then
+# Keep the prerequisite-only empty-pool check independent of Python when Core is skipped.
+# Core installs validate both address families from parsed pools above.
+if [[ "${SKIP_CORE:-false}" == "true" && -f "${_METALLB_CFG}" && ! -d "${_METALLB_CFG}" ]]; then
     if _strip_comments "${_METALLB_CFG}" | grep -qE '^kind:[[:space:]]*IPAddressPool' && \
-       ! _strip_comments "${_METALLB_CFG}" | grep -qE '^[[:space:]]*-[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+       ! _strip_comments "${_METALLB_CFG}" | grep -qE '^[[:space:]]*-[[:space:]]*["'\'']?([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9A-Fa-f]*:)'; then
         ERRORS+=("${_METALLB_CFG_LABEL}: IPAddressPool has no addresses — add your VIP CIDR(s)/range(s)")
     fi
 fi
@@ -700,10 +711,8 @@ if [[ -f "${_SITE_VALUES_CFG}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3c. IP / subnet validation — every service VIP must be a valid IPv4 that
-#     falls inside one of the MetalLB IPAddressPool CIDRs/ranges, and VIPs must
-#     not collide. Catches typos and pool/VIP mismatches before MetalLB silently
-#     fails to allocate (services stuck <pending>).
+# 3c. IPv4-only DPF VIP and Kea DHCP hook IP validation.
+#     External Service VIPs and MetalLB pool syntax are checked above for both families.
 # ---------------------------------------------------------------------------
 _ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24)+(b<<16)+(c<<8)+d )); }
 _is_ipv4() {
@@ -749,31 +758,6 @@ if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
                   | grep -E '/[0-9]+$|-' )
     fi
 
-    # Collect every configured service VIP (non-empty loadBalancerIPs values).
-    _SEEN_VIPS=""
-    while IFS= read -r _vip; do
-        [[ -z "${_vip}" ]] && continue
-        if ! _is_ipv4 "${_vip}"; then
-            ERRORS+=("${_CORE_VALUES_LABEL}: loadBalancerIP '${_vip}' is not a valid IPv4 address")
-            continue
-        fi
-        # Duplicate VIP across services
-        if [[ " ${_SEEN_VIPS} " == *" ${_vip} "* ]]; then
-            WARNINGS+=("${_CORE_VALUES_LABEL}: VIP ${_vip} is assigned to more than one service — each service needs a unique IP")
-        fi
-        _SEEN_VIPS="${_SEEN_VIPS} ${_vip}"
-        # Containment in a MetalLB pool
-        if [[ ${#_POOL_BLOCKS[@]} -gt 0 ]]; then
-            _in_pool=false
-            for _blk in "${_POOL_BLOCKS[@]}"; do
-                if _ip_in_block "${_vip}" "${_blk}"; then _in_pool=true; break; fi
-            done
-            ${_in_pool} || \
-                ERRORS+=("${_CORE_VALUES_LABEL}: VIP ${_vip} is not within any MetalLB IPAddressPool (${_METALLB_CFG_LABEL}) — MetalLB cannot allocate it")
-        fi
-    done < <(sed -E 's/[[:space:]]+#.*$//; /^[[:space:]]*#/d' "${_CORE_VALUES_CFG}" \
-              | grep -E 'loadBalancerIPs:' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' )
-
     # kea DHCP hook IPs (nameservers / ntpServer / provisioningServer) are handed
     # to DPUs at boot — validate format + pool-containment (no dup check: these
     # intentionally mirror the unbound/ntp/pxe VIPs above).
@@ -792,17 +776,6 @@ if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
     done < <(sed -E 's/[[:space:]]+#.*$//; /^[[:space:]]*#/d' "${_CORE_VALUES_CFG}" \
               | grep -E 'nameservers:|ntpServer:|provisioningServer:' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' )
 
-    # Validate MetalLB pool blocks are well-formed CIDR/range.
-    for _blk in "${_POOL_BLOCKS[@]}"; do
-        _net="${_blk%%[-/]*}"
-        if ! _is_ipv4 "${_net}"; then
-            ERRORS+=("${_METALLB_CFG_LABEL}: pool entry '${_blk}' is not a valid CIDR/range")
-        elif [[ "${_blk}" == */* ]]; then
-            _bits="${_blk#*/}"
-            { [[ "${_bits}" =~ ^[0-9]+$ ]] && (( _bits >= 0 && _bits <= 32 )); } || \
-                ERRORS+=("${_METALLB_CFG_LABEL}: pool entry '${_blk}' has an invalid CIDR prefix length")
-        fi
-    done
 fi
 
 # nico-core: bootArtifactContainers must be populated or DPU/host HTTP boot 404s

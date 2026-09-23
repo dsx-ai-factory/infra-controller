@@ -53,7 +53,7 @@ pub async fn handle_discovering(
 
     let mut txn = ctx.services.db_pool.begin().await?;
 
-    let available_compute = db_machine::find(
+    let available_compute = db_machine::find::<MachineId>(
         txn.as_mut(),
         ObjectFilter::<MachineId>::All,
         MachineSearchConfig {

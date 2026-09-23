@@ -17,20 +17,20 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
+use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    BmcCommand, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
-    POWER_CYCLE_DELAY, SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
+    ActionError, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, MockPowerState,
+    POWER_CYCLE_DELAY, ResourceResetType,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRequestInfo, DhcpRequester, DhcpResponseInfo, vendor_class};
 use crate::machine_state_machine::{MachineStateError, OsImage};
@@ -51,6 +51,13 @@ struct SwitchLiveState {
     ssh_endpoint_port: Option<u16>,
     ssh_host_key: Option<String>,
     state: &'static str,
+    /// BMC account passwords restored from the previous snapshot at startup,
+    /// re-applied onto a freshly built BMC mock so a rotated password survives a
+    /// machine-a-tron restart (issue #5966).
+    bmc_credentials: Option<Vec<bmc_mock::BmcAccountCredential>>,
+    /// Live BMC account service, so `persisted()` can export the current
+    /// passwords at shutdown rather than a stale mirror (issue #5966).
+    bmc_account_service: Option<Weak<bmc_mock::AccountServiceState>>,
 }
 
 impl SwitchLiveState {
@@ -63,6 +70,18 @@ impl SwitchLiveState {
             ssh_endpoint_port: None,
             ssh_host_key: None,
             state: fsm.state_string(),
+            bmc_credentials: None,
+            bmc_account_service: None,
+        }
+    }
+
+    /// Credentials to write into the next device snapshot: the current live BMC
+    /// passwords when the mock is running, else the passwords restored at
+    /// startup.
+    fn bmc_accounts_for_snapshot(&self) -> Option<Vec<bmc_mock::BmcAccountCredential>> {
+        match self.bmc_account_service.as_ref().and_then(Weak::upgrade) {
+            Some(account_service) => Some(account_service.export_credentials()),
+            None => self.bmc_credentials.clone(),
         }
     }
 }
@@ -73,21 +92,28 @@ struct SwitchCallbacks {
     mailbox: ActorMailbox<SwitchMessage>,
 }
 
-impl Callbacks for SwitchCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        self.state.read().unwrap().power_state
-    }
-
-    fn send_power_command(
-        &self,
-        reset_type: SystemPowerControl,
-    ) -> Result<(), SetSystemPowerError> {
+impl SwitchCallbacks {
+    pub(crate) fn set_power_state(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        self.get_power_state().validate_reset_type(reset_type)?;
         self.mailbox
             .send(SwitchMessage::Bmc(BmcCommand::SetSystemPower {
                 request: reset_type,
                 reply: None,
             }))
-            .map_err(|error| SetSystemPowerError::CommandSendError(error.to_string()))
+            .map_err(|error| ActionError::Internal(error.into()))
+    }
+}
+
+impl Callbacks for SwitchCallbacks {
+    fn get_power_state(&self) -> MockPowerState {
+        self.state.read().unwrap().power_state
+    }
+
+    async fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.set_power_state(reset_type)
     }
 
     fn state_refresh_indication(&self) {
@@ -176,13 +202,15 @@ impl SwitchActor {
             desired_host_firmware: None,
         };
         let (fsm, actions) = SwitchFsm::init(true);
+        let mut live_state = SwitchLiveState::new(&fsm);
+        live_state.bmc_credentials = persisted.bmc_accounts;
         Self {
             mat_id: persisted.mat_id,
             machine_config_section,
             host_info,
             app_context,
             config,
-            live_state: Arc::new(RwLock::new(SwitchLiveState::new(&fsm))),
+            live_state: Arc::new(RwLock::new(live_state)),
             bmc_injection: Arc::new(InjectionStore::new()),
             _bmc_mock: None,
             bmc_dhcp_info: None,
@@ -409,6 +437,18 @@ impl SwitchActor {
                 .change_factory_default_password(password);
         }
 
+        // Restore snapshot-saved passwords onto the freshly built BMC mock so a
+        // rotated password survives a restart (issue #5966).
+        let saved_credentials = self.live_state.read().unwrap().bmc_credentials.clone();
+        if let Some(saved_credentials) = saved_credentials {
+            bmc_mock
+                .state()
+                .account_service_state
+                .restore_credentials(&saved_credentials);
+        }
+        self.live_state.write().unwrap().bmc_account_service =
+            Some(Arc::downgrade(&bmc_mock.state().account_service_state));
+
         let bmc_handle = {
             self.app_context
                 .bmc_registry
@@ -438,16 +478,17 @@ impl SwitchActor {
         Ok(())
     }
 
-    fn set_system_power(&mut self, request: SystemPowerControl) -> SetSystemPowerResult {
-        use SystemPowerControl::*;
+    fn set_system_power(&mut self, request: ResourceResetType) -> Result<(), ActionError> {
+        use ResourceResetType::*;
 
         match request {
             On | ForceOn => self.fsm_event(Event::PowerOn),
             GracefulShutdown | ForceOff => self.fsm_event(Event::PowerOff),
             GracefulRestart | ForceRestart | PowerCycle => self.fsm_event(Event::PowerCycle),
-            PushPowerButton | Nmi | Suspend | Pause | Resume => {
-                return Err(SetSystemPowerError::BadRequest(format!(
-                    "Machine-a-tron mock: unsupported power request {request:?}"
+            _ => {
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "machine-a-tron mock: unsupported power request {:?}",
+                    request
                 )));
             }
         }
@@ -543,6 +584,20 @@ impl SwitchHandle {
         self.0.mat_id
     }
 
+    /// Drive power through the guard the BMC mock uses, so an RMS power
+    /// request obeys the same rules as a Redfish one.
+    pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
+        SwitchCallbacks {
+            state: self.0.live_state.clone(),
+            mailbox: self.0.mailbox.clone(),
+        }
+        .set_power_state(request)
+    }
+
+    pub(crate) fn power_state(&self) -> MockPowerState {
+        self.0.live_state.read().unwrap().power_state
+    }
+
     pub(crate) fn pause(&self) -> eyre::Result<()> {
         self.0.mailbox.send(SwitchMessage::SetPaused(true))?;
         Ok(())
@@ -604,6 +659,12 @@ impl SwitchHandle {
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
             active_host_firmware: None,
+            bmc_accounts: self
+                .0
+                .live_state
+                .read()
+                .unwrap()
+                .bmc_accounts_for_snapshot(),
         }
     }
 
@@ -636,6 +697,10 @@ impl SwitchHandle {
 
     pub(crate) fn bmc_ip(&self) -> Option<Ipv4Addr> {
         self.0.live_state.read().unwrap().bmc_ip
+    }
+
+    pub(crate) fn nvos_ip(&self) -> Option<Ipv4Addr> {
+        self.0.live_state.read().unwrap().nvos_ip
     }
 }
 

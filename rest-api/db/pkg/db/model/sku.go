@@ -23,6 +23,7 @@ const (
 	// SkuRelationName is the relation name for the Sku model
 	SkuRelationName = "Sku"
 	// names of order by fields
+	SkuOrderByID      = "id"
 	SkuOrderByCreated = "created"
 	skuOrderByUpdated = "updated"
 	// SkuOrderByDefault default field to be used for ordering when none specified
@@ -31,7 +32,7 @@ const (
 
 var (
 	// SkuOrderByFields is a list of valid order by fields for the SKU model
-	SkuOrderByFields = []string{SkuOrderByCreated, skuOrderByUpdated}
+	SkuOrderByFields = []string{SkuOrderByID, SkuOrderByCreated, skuOrderByUpdated}
 	// SkuRelatedEntities is a list of valid relation by fields for the Sku model
 	SkuRelatedEntities = map[string]bool{
 		SiteRelationName: true,

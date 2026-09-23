@@ -36,6 +36,8 @@ type Rack struct {
 	SerialNumber *string `json:"serialNumber,omitempty"`
 	// Description of the Rack
 	Description *string `json:"description,omitempty"`
+	// Operability phase aggregated from tray operationStatus values.
+	OperationStatus string `json:"operationStatus"`
 	// IDs of the NVLink Domains containing this Rack. Empty when the Rack is not assigned to an NVLink Domain.
 	NvLinkDomainIds []string `json:"nvLinkDomainIds"`
 	// Physical or logical location of the Rack
@@ -51,8 +53,9 @@ type _Rack Rack
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRack(nvLinkDomainIds []string, taskStats TaskStats) *Rack {
+func NewRack(operationStatus string, nvLinkDomainIds []string, taskStats TaskStats) *Rack {
 	this := Rack{}
+	this.OperationStatus = operationStatus
 	this.NvLinkDomainIds = nvLinkDomainIds
 	this.TaskStats = taskStats
 	return &this
@@ -258,6 +261,30 @@ func (o *Rack) SetDescription(v string) {
 	o.Description = &v
 }
 
+// GetOperationStatus returns the OperationStatus field value
+func (o *Rack) GetOperationStatus() string {
+	if o == nil {
+		var ret string
+		return ret
+	}
+
+	return o.OperationStatus
+}
+
+// GetOperationStatusOk returns a tuple with the OperationStatus field value
+// and a boolean to check if the value has been set.
+func (o *Rack) GetOperationStatusOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.OperationStatus, true
+}
+
+// SetOperationStatus sets field value
+func (o *Rack) SetOperationStatus(v string) {
+	o.OperationStatus = v
+}
+
 // GetNvLinkDomainIds returns the NvLinkDomainIds field value
 func (o *Rack) GetNvLinkDomainIds() []string {
 	if o == nil {
@@ -398,6 +425,7 @@ func (o Rack) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.Description) {
 		toSerialize["description"] = o.Description
 	}
+	toSerialize["operationStatus"] = o.OperationStatus
 	toSerialize["nvLinkDomainIds"] = o.NvLinkDomainIds
 	if !IsNil(o.Location) {
 		toSerialize["location"] = o.Location
@@ -414,6 +442,7 @@ func (o *Rack) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
+		"operationStatus",
 		"nvLinkDomainIds",
 		"taskStats",
 	}

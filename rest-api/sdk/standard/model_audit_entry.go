@@ -27,12 +27,11 @@ type AuditEntry struct {
 	Id *string `json:"id,omitempty"`
 	// API endpoint
 	Endpoint *string `json:"endpoint,omitempty"`
-	// Query parameters
-	QueryParams *string `json:"queryParams,omitempty"`
+	// Query parameters from the request URL, keyed by parameter name. Each value contains all values supplied for that parameter.
+	QueryParams map[string][]string `json:"queryParams,omitempty"`
 	// HTTP method
-	Method *string `json:"method,omitempty"`
-	// HTTP body in JSON format
-	Body *string `json:"body,omitempty"`
+	Method *string         `json:"method,omitempty"`
+	Body   *AuditEntryBody `json:"body,omitempty"`
 	// HTTP response status code
 	StatusCode *int32 `json:"statusCode,omitempty"`
 	// HTTP response status message
@@ -137,19 +136,19 @@ func (o *AuditEntry) SetEndpoint(v string) {
 }
 
 // GetQueryParams returns the QueryParams field value if set, zero value otherwise.
-func (o *AuditEntry) GetQueryParams() string {
+func (o *AuditEntry) GetQueryParams() map[string][]string {
 	if o == nil || IsNil(o.QueryParams) {
-		var ret string
+		var ret map[string][]string
 		return ret
 	}
-	return *o.QueryParams
+	return o.QueryParams
 }
 
 // GetQueryParamsOk returns a tuple with the QueryParams field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *AuditEntry) GetQueryParamsOk() (*string, bool) {
+func (o *AuditEntry) GetQueryParamsOk() (map[string][]string, bool) {
 	if o == nil || IsNil(o.QueryParams) {
-		return nil, false
+		return map[string][]string{}, false
 	}
 	return o.QueryParams, true
 }
@@ -163,9 +162,9 @@ func (o *AuditEntry) HasQueryParams() bool {
 	return false
 }
 
-// SetQueryParams gets a reference to the given string and assigns it to the QueryParams field.
-func (o *AuditEntry) SetQueryParams(v string) {
-	o.QueryParams = &v
+// SetQueryParams gets a reference to the given map[string][]string and assigns it to the QueryParams field.
+func (o *AuditEntry) SetQueryParams(v map[string][]string) {
+	o.QueryParams = v
 }
 
 // GetMethod returns the Method field value if set, zero value otherwise.
@@ -201,9 +200,9 @@ func (o *AuditEntry) SetMethod(v string) {
 }
 
 // GetBody returns the Body field value if set, zero value otherwise.
-func (o *AuditEntry) GetBody() string {
+func (o *AuditEntry) GetBody() AuditEntryBody {
 	if o == nil || IsNil(o.Body) {
-		var ret string
+		var ret AuditEntryBody
 		return ret
 	}
 	return *o.Body
@@ -211,7 +210,7 @@ func (o *AuditEntry) GetBody() string {
 
 // GetBodyOk returns a tuple with the Body field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *AuditEntry) GetBodyOk() (*string, bool) {
+func (o *AuditEntry) GetBodyOk() (*AuditEntryBody, bool) {
 	if o == nil || IsNil(o.Body) {
 		return nil, false
 	}
@@ -227,8 +226,8 @@ func (o *AuditEntry) HasBody() bool {
 	return false
 }
 
-// SetBody gets a reference to the given string and assigns it to the Body field.
-func (o *AuditEntry) SetBody(v string) {
+// SetBody gets a reference to the given AuditEntryBody and assigns it to the Body field.
+func (o *AuditEntry) SetBody(v AuditEntryBody) {
 	o.Body = &v
 }
 

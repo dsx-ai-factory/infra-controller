@@ -135,6 +135,28 @@ pub(crate) async fn create(
             .map_err(|_| CarbideError::InvalidArgument("invalid service_type".to_string()))?
             .into();
 
+    let dpu_target = match (&service_type, req.dpu_target) {
+        (ExtensionServiceType::KubernetesPod, None) => None,
+        (ExtensionServiceType::DpfHelmChart, Some(value)) => Some(
+            rpc::DpuExtensionServiceDpuTarget::try_from(value)
+                .map_err(|_| {
+                    CarbideError::InvalidArgument(
+                        "dpu_target must be PRIMARY, ALL_ACTIVE, or ALL for helm services".into(),
+                    )
+                })?
+                .into(),
+        ),
+        (ExtensionServiceType::DpfHelmChart, None) => {
+            return Err(CarbideError::MissingArgument("dpu_target").into());
+        }
+        (ExtensionServiceType::KubernetesPod, Some(_)) => {
+            return Err(CarbideError::InvalidArgument(
+                "dpu_target is unsupported for kubernetes pod services".into(),
+            )
+            .into());
+        }
+    };
+
     let initial_version = ConfigVersion::initial();
 
     // Validate service type is supported by the site
@@ -201,6 +223,7 @@ pub(crate) async fn create(
                     initial_version,
                     &service_id,
                     &service_type,
+                    dpu_target,
                     &req.service_name,
                     &tenant_organization_id,
                     req.description.as_deref(),
@@ -245,6 +268,9 @@ pub(crate) async fn create(
     // Create response with service details
     let response = rpc::DpuExtensionService {
         service_id: service.id.to_string(),
+        dpu_target: service
+            .dpu_target
+            .map(|target| rpc::DpuExtensionServiceDpuTarget::from(target) as i32),
         service_type: rpc::DpuExtensionServiceType::from(service_type) as i32,
         service_name: service.name,
         tenant_organization_id: service.tenant_organization_id.to_string(),
@@ -557,6 +583,9 @@ async fn updated_extension_service_response(
     );
 
     let response = rpc::DpuExtensionService {
+        dpu_target: updated_service
+            .dpu_target
+            .map(|target| rpc::DpuExtensionServiceDpuTarget::from(target) as i32),
         service_id: service_id.to_string(),
         service_type: rpc::DpuExtensionServiceType::from(updated_service.service_type.clone())
             as i32,

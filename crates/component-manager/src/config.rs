@@ -50,10 +50,10 @@ pub struct ComponentManagerConfig {
     #[serde(default)]
     pub compute_tray_use_state_controller: bool,
 
-    /// Enables the NVOS password-rotation backend capability.
+    /// Legacy rollout gate retained so existing site configurations deserialize.
     ///
-    /// Keep this rollout gate until every reachable RMS supports repeat-safe
-    /// current-to-target password convergence.
+    /// The value is accepted and serialized but does not change RMS
+    /// password-rotation support.
     #[serde(default)]
     pub nvos_password_rotation_enabled: bool,
 }
@@ -203,12 +203,29 @@ mod tests {
     }
 
     #[test]
-    fn nvos_password_rotation_deserializes() {
-        for (toml, expected) in [("", false), ("nvos_password_rotation_enabled = true", true)] {
+    fn nvos_password_rotation_config_is_preserved_for_compatibility() {
+        for (toml, expected) in [
+            ("", false),
+            ("nvos_password_rotation_enabled = false", false),
+            ("nvos_password_rotation_enabled = true", true),
+        ] {
             let cfg: ComponentManagerConfig =
                 toml::from_str(toml).expect("component-manager configuration should deserialize");
 
             assert_eq!(cfg.nvos_password_rotation_enabled, expected);
+
+            let serialized =
+                toml::to_string(&cfg).expect("component-manager configuration should serialize");
+
+            let serialized_value: toml::Value = toml::from_str(&serialized)
+                .expect("serialized component-manager configuration should be valid TOML");
+
+            assert_eq!(
+                serialized_value
+                    .get("nvos_password_rotation_enabled")
+                    .and_then(toml::Value::as_bool),
+                Some(expected),
+            );
         }
     }
 

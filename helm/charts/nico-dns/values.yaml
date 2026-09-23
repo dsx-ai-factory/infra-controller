@@ -55,6 +55,11 @@ resources:
   limits:
     memory: 256Mi
 
+## OTLP gRPC endpoint that DNS traces are exported to (e.g.
+## "http://opentelemetry-collector.otel.svc.cluster.local:4317"). Empty by
+## default, which disables trace export.
+otlpEndpoint: ""
+
 ## PodMonitor for the Prometheus Operator to scrape the metrics container port
 ## (8053) directly off each pod. Disabled by default; requires the Prometheus
 ## Operator CRDs (monitoring.coreos.com/v1).

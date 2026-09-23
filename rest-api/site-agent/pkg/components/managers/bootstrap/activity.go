@@ -10,7 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 
-	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
@@ -36,7 +36,8 @@ func (o *OTPHandler) ReceiveAndSaveOTP(ctx context.Context, base64EncodedEncrypt
 	// Base64 decode the OTP
 	encryptedOtpBytes, err := base64.StdEncoding.DecodeString(base64EncodedEncryptedOtp)
 	if err != nil {
-		logger.Error().Err(err).Str("OTP", base64EncodedEncryptedOtp).Msg("Failed to decode Base64 OTP")
+		logger.Error().Err(err).Str("OTP", cutils.RedactSecret(base64EncodedEncryptedOtp, cutils.SecretLogPrefixLen)).
+			Msg("Failed to decode Base64 OTP")
 		return temporal.NewNonRetryableApplicationError(err.Error(), "ErrBase64DecodeOTP", err)
 	}
 
@@ -60,7 +61,7 @@ func (o *OTPHandler) ReceiveAndSaveOTP(ctx context.Context, base64EncodedEncrypt
 	}
 
 	// Decrypt the new OTP using the siteID
-	decryptedOtp := cloudutils.DecryptData(encryptedOtpBytes, ManagerAccess.Conf.EB.Temporal.ClusterID)
+	decryptedOtp := cutils.DecryptData(encryptedOtpBytes, ManagerAccess.Conf.EB.Temporal.ClusterID)
 
 	// Update the OTP in the bootstrap-info secret without base64 encoding
 	bootstrapInfoSecret.Data["otp"] = []byte(decryptedOtp)

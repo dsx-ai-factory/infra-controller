@@ -215,6 +215,27 @@ pub async fn find_objects_with_attachments(
         .map_err(|err| DatabaseError::query(builder.sql(), err))
 }
 
+/// `find_retained_attachments` finds resources whose configuration still uses
+/// this NSG, including resources being deleted. Deletion intent does not mean
+/// the DPU has stopped serving their tenant network.
+///
+/// The caller holds the NSG row lock while inspecting and changing its policy.
+pub async fn find_retained_attachments(
+    txn: &mut PgConnection,
+    id: &NetworkSecurityGroupId,
+) -> Result<NetworkSecurityGroupAttachments, DatabaseError> {
+    let query = "SELECT $1::varchar AS id,
+        COALESCE((SELECT json_agg(id) FROM vpcs
+                  WHERE network_security_group_id = $1), '[]') AS vpc_ids,
+        COALESCE((SELECT json_agg(id) FROM instances
+                  WHERE network_security_group_id = $1), '[]') AS instance_ids";
+    sqlx::query_as(query)
+        .bind(id)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Queries the DB for the NSG propagation status across sets of objects
 ///
 /// * `txn`                        - A reference to an active DB transaction

@@ -77,8 +77,6 @@ type APIClient struct {
 
 	ExpectedSwitchAPI *ExpectedSwitchAPIService
 
-	HealthReportAPI *HealthReportAPIService
-
 	HostFirmwareConfigAPI *HostFirmwareConfigAPIService
 
 	IPBlockAPI *IPBlockAPIService
@@ -126,6 +124,8 @@ type APIClient struct {
 	SiteAPI *SiteAPIService
 
 	SiteExplorerAPI *SiteExplorerAPIService
+
+	SpectrumXPartitionAPI *SpectrumXPartitionAPIService
 
 	SubnetAPI *SubnetAPIService
 
@@ -181,7 +181,6 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.ExpectedPowerShelfAPI = (*ExpectedPowerShelfAPIService)(&c.common)
 	c.ExpectedRackAPI = (*ExpectedRackAPIService)(&c.common)
 	c.ExpectedSwitchAPI = (*ExpectedSwitchAPIService)(&c.common)
-	c.HealthReportAPI = (*HealthReportAPIService)(&c.common)
 	c.HostFirmwareConfigAPI = (*HostFirmwareConfigAPIService)(&c.common)
 	c.IPBlockAPI = (*IPBlockAPIService)(&c.common)
 	c.IPXETemplateAPI = (*IPXETemplateAPIService)(&c.common)
@@ -206,6 +205,7 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.ServiceAccountAPI = (*ServiceAccountAPIService)(&c.common)
 	c.SiteAPI = (*SiteAPIService)(&c.common)
 	c.SiteExplorerAPI = (*SiteExplorerAPIService)(&c.common)
+	c.SpectrumXPartitionAPI = (*SpectrumXPartitionAPIService)(&c.common)
 	c.SubnetAPI = (*SubnetAPIService)(&c.common)
 	c.TaskAPI = (*TaskAPIService)(&c.common)
 	c.TaskRunAPI = (*TaskRunAPIService)(&c.common)

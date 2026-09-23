@@ -30,6 +30,10 @@ tests:
     asserts:
       - isKind:
           of: Service
+      # The slow metrics endpoint also needs to be reachable from IPv6 collectors.
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: PreferDualStack
       - equal:
           path: metadata.labels["app.kubernetes.io/metrics"]
           value: nico-api-object-metrics

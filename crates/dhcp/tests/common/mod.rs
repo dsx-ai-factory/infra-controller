@@ -93,7 +93,7 @@ fn hook_library_path() -> String {
 pub(super) fn v6_drop_metric_value(endpoint: SocketAddr, reason: &str) -> f64 {
     labeled_counter_value(
         endpoint,
-        "carbide_dropped_v6_requests_total",
+        "carbide_dhcp_v6_requests_dropped_total",
         "reason",
         reason,
     )
@@ -109,7 +109,7 @@ pub(super) fn wait_for_v6_drop_metric_at_least(
 ) -> bool {
     wait_for_labeled_counter_at_least(
         endpoint,
-        "carbide_dropped_v6_requests_total",
+        "carbide_dhcp_v6_requests_dropped_total",
         "reason",
         reason,
         minimum,

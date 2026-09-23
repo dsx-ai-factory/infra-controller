@@ -55,7 +55,7 @@ async fn apply_health_report(
     update_message: String,
 ) -> CarbideCliResult<()> {
     // Set a HostUpdateInProgress health report entry on the Host
-    let host_id = match id.machine_type() {
+    let host_id: Option<carbide_uuid::machine::MachineId> = match id.machine_type() {
         MachineType::Host => Some(id),
         MachineType::Dpu => {
             let machine = api_client
@@ -66,7 +66,7 @@ async fn apply_health_report(
                 .next();
 
             if let Some(host_id) = machine.map(|x| x.associated_host_machine_id) {
-                host_id
+                host_id.map(Into::into)
             } else {
                 return Err(CarbideCliError::GenericError(format!(
                     "Could not find host attached with dpu {id}",
@@ -104,7 +104,7 @@ async fn apply_health_report(
         let report = get_health_report(HealthReportTemplates::HostUpdate, Some(update_message));
 
         api_client
-            .machine_insert_health_report_override(*host_machine_id, report.into(), false)
+            .machine_insert_health_report_override(host_machine_id, report.into(), false)
             .await?;
     }
 

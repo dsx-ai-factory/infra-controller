@@ -39,15 +39,36 @@ func TestMapComponentOperationStatus_Compute(t *testing.T) {
 		{"waiting_for_cleanup", "WaitingForCleanup/Init", types.PhaseInUse, allComputeOps()},
 		{"dpu_reprovision", "Reprovisioning/Init", types.PhaseInUse, allComputeOps()},
 		{"host_reprovision", "HostReprovisioning/Init", types.PhaseInUse, allComputeOps()},
+		{"configure_astra", "ConfigureAstra/Init", types.PhaseInUse, allComputeOps()},
+		{"boot_configuring", "BootConfiguring/Init", types.PhaseInUse, allComputeOps()},
+		{"maintenance", "Maintenance(FirmwareUpdate)", types.PhaseInUse, allComputeOps()},
+		{"rotating_bmc", "RotatingBmc", types.PhaseInUse, allComputeOps()},
+		{"rotating_host_uefi", "RotatingHostUefi/Init", types.PhaseInUse, allComputeOps()},
+		{"rotating_dpu_uefi", "RotatingDpuUefi/machine-1", types.PhaseInUse, allComputeOps()},
+		{"rotating_nic_lockdown", "RotatingNicLockdown", types.PhaseInUse, allComputeOps()},
 
 		// Terminal.
 		{"failed", "Failed/SomeCause", types.PhaseError, allComputeOps()},
+		{"decommissioning", "Decommissioning/SuppressingSiteExplorer", types.PhaseDeleting, allComputeOps()},
 		{"force_deletion", "ForceDeletion", types.PhaseDeleting, allComputeOps()},
 
 		// Defaults.
 		{"empty", "", types.PhaseUnknown, nil},
-		// Validation Display has no fixed prefix; treat as Initializing.
-		{"validation_pass_through", "DhcpReachable", types.PhaseInitializing, allComputeOps()},
+		// Validation Display delegates to ValidationState's Debug representation.
+		{
+			"machine_validation",
+			"MachineValidation { machine_validation: RebootHost { validation_id: MachineValidationId(00000000-0000-0000-0000-000000000001) } }",
+			types.PhaseInitializing,
+			allComputeOps(),
+		},
+		{"machine_validation_incomplete", "MachineValidation {", types.PhaseUnknown, nil},
+		{
+			"machine_validation_unknown_variant",
+			"MachineValidation { machine_validation: WarpDrive { value: 1 } }",
+			types.PhaseUnknown,
+			nil,
+		},
+		{"unknown", "WarpDrive", types.PhaseUnknown, nil},
 	}
 
 	for _, tc := range cases {
@@ -70,8 +91,11 @@ func TestMapComponentOperationStatus_Switch(t *testing.T) {
 		{"created", `{"state":"created"}`, types.PhaseInitializing, allNVSwitchOps()},
 		{"initializing", `{"state":"initializing"}`, types.PhaseInitializing, allNVSwitchOps()},
 		{"configuring", `{"state":"configuring"}`, types.PhaseInitializing, allNVSwitchOps()},
+		{"fetch_info", `{"state":"fetchinfo"}`, types.PhaseInitializing, allNVSwitchOps()},
 		{"validating", `{"state":"validating"}`, types.PhaseInitializing, allNVSwitchOps()},
 		{"bomvalidating", `{"state":"bomvalidating"}`, types.PhaseInitializing, allNVSwitchOps()},
+		{"rotating_bmc", `{"state":"rotatingbmc","retry_count":0}`, types.PhaseInUse, allNVSwitchOps()},
+		{"maintenance", `{"state":"maintenance","operation":"reconfigurecertificate"}`, types.PhaseInUse, allNVSwitchOps()},
 		{
 			"reprovisioning_with_substate",
 			`{"state":"reprovisioning","reprovisioning_state":"WaitingForRackFirmwareUpgrade"}`,
@@ -79,6 +103,7 @@ func TestMapComponentOperationStatus_Switch(t *testing.T) {
 			allNVSwitchOps(),
 		},
 		{"error", `{"state":"error"}`, types.PhaseError, allNVSwitchOps()},
+		{"decommissioning", `{"state":"decommissioning"}`, types.PhaseDeleting, allNVSwitchOps()},
 		{"deleting", `{"state":"deleting"}`, types.PhaseDeleting, allNVSwitchOps()},
 
 		// Invalid / unknown — fail closed.
@@ -107,13 +132,21 @@ func TestMapComponentOperationStatus_PowerShelf(t *testing.T) {
 		{"initializing", `{"state":"initializing"}`, types.PhaseInitializing, allPowerShelfOps()},
 		{"fetching_data", `{"state":"fetchingdata"}`, types.PhaseInitializing, allPowerShelfOps()},
 		{"configuring", `{"state":"configuring"}`, types.PhaseInitializing, allPowerShelfOps()},
+		{"rotating_bmc", `{"state":"rotatingbmc","retry_count":0}`, types.PhaseInUse, allPowerShelfOps()},
 		{
 			"maintenance_with_op",
 			`{"state":"maintenance","maintenance":{"operation":"poweron"}}`,
 			types.PhaseInUse,
 			allPowerShelfOps(),
 		},
+		{
+			"reprovisioning",
+			`{"state":"reprovisioning","reprovisioning_state":"WaitingForRackFirmwareUpgrade"}`,
+			types.PhaseInUse,
+			allPowerShelfOps(),
+		},
 		{"error", `{"state":"error"}`, types.PhaseError, allPowerShelfOps()},
+		{"decommissioning", `{"state":"decommissioning"}`, types.PhaseDeleting, allPowerShelfOps()},
 		{"deleting", `{"state":"deleting"}`, types.PhaseDeleting, allPowerShelfOps()},
 
 		{"empty", "", types.PhaseUnknown, nil},

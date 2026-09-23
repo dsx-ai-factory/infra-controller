@@ -1,21 +1,21 @@
 # Security Policy: NVIDIA Infra Controller (NICo)
 
 NVIDIA Infra Controller (NICo) is a control plane for site-local bare-metal
-lifecycle management. This policy covers the repository at the root of this
-clone, including the Rust Core services, Go REST services, managed-host and DPU
-agents, deployment charts, and supporting build artifacts.
+lifecycle management. This policy applies to the entire repository and its
+officially published release artifacts.
 
 ## Reporting a Vulnerability
 
-If you discover a potential security vulnerability, please **do not open a public
-issue, pull request, discussion, or chat thread with exploit details**.
+If you discover a potential security vulnerability, do not submit it through
+GitHub Issues, pull requests, Discussions, GitHub Security Advisories, GitHub
+private vulnerability reporting, or other public channels. Report it directly
+to NVIDIA PSIRT through one of these channels:
 
-- Report via the [NVIDIA Vulnerability Disclosure Program](https://www.nvidia.com/en-us/security/) (preferred).
-- E-Mail: [psirt@nvidia.com](mailto:psirt@nvidia.com)
-  - We encourage you to use the following PGP key for secure email communication:
-    [NVIDIA public PGP Key](https://www.nvidia.com/en-us/security/pgp-key)
-- GitHub: Use the **Security** tab > **Report a vulnerability** to submit a
-  private report directly on this repository.
+- **Web (preferred):**
+  [NVIDIA Vulnerability Disclosure Program](https://www.nvidia.com/en-us/security/report-vulnerability/)
+- **Email:** [psirt@nvidia.com](mailto:psirt@nvidia.com). Encrypt sensitive
+  information using the
+  [NVIDIA public PGP key](https://www.nvidia.com/en-us/security/pgp-key).
 
 Please include the following information:
 
@@ -29,16 +29,10 @@ Please include the following information:
 - Relevant logs, audit entries, metrics, configuration snippets, and deployment
   mode, with secrets and customer/site identifiers removed.
 
-Detailed reports help NVIDIA evaluate and address issues faster. NVIDIA's PSIRT
-team will acknowledge receipt, validate severity, develop fixes, and publish
-security bulletins as appropriate.
-
-NVIDIA does not offer a bug bounty program for this project. Externally
-reported security issues may receive acknowledgement when addressed under
-NVIDIA's coordinated vulnerability disclosure policy. See NVIDIA's
-[Product Security portal](https://www.nvidia.com/en-us/security) and
-[PSIRT policies](https://www.nvidia.com/en-us/security/psirt-policies/) for
-additional information.
+NVIDIA PSIRT manages vulnerability intake, validation, remediation
+coordination, and disclosure. Response timing, coordinated disclosure,
+and reporter acknowledgement are governed by the
+[NVIDIA PSIRT policies](https://www.nvidia.com/en-us/security/psirt-policies/).
 
 ## Security Architecture & Context
 
@@ -245,19 +239,15 @@ and support scripts.
 - Operators validate site-specific Helm values, bootstrap scripts, and generated
   configuration before applying them to production clusters. Examples and local
   development defaults are not production hardening guidance.
-- The software is provided "as is" without warranties of any kind. Features,
-  APIs, and configurations may change in future releases. For production
-  deployments, please test thoroughly in non-critical environments first.
 
 ## Supported Versions and Security Updates
 
 The software is provided "as is" without warranties of any kind. Features,
-APIs, and configurations may change in future releases. For production
-deployments, please test thoroughly in non-critical environments first. Security
-fixes should be consumed from maintained release branches, tagged container
-images, or commits designated by the NICo maintainers and NVIDIA PSIRT.
-Operators should test updates in a non-critical environment before upgrading
-production control planes.
+APIs, and configurations may change in future releases. Security fixes should
+be consumed from maintained release branches, tagged container images,
+or commits designated by the NICo maintainers and NVIDIA PSIRT. Operators
+should test updates in a non-critical environment before upgrading production
+control planes.
 
 ## Deployment Hardening Checklist
 

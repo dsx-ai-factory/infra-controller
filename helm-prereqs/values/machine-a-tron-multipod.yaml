@@ -9,7 +9,7 @@
 #       -n nico-system -f <your-copy>.yaml
 #
 # Requirements:
-#  * oobDhcpRelayAddress must be within Kubernetes ServiceCIDR
+#  * bmcDhcpRelayAddress must be within Kubernetes ServiceCIDR
 #    - vanilla k8s: 10.96.0.0/12
 #    - kind: 10.96.0.0/16
 #    - k3d: 10.43.0.0/16
@@ -65,16 +65,16 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 100
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
+        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
   mat-1:
     machines:
       compute:
         hwType: wiwynn_gb200_nvl
         hostCount: 100
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "10.96.64.1"  # NICo assigns unique IPs
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.96.64.1"  # NICo assigns unique IPs
+        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
 
 resources:
   limits:

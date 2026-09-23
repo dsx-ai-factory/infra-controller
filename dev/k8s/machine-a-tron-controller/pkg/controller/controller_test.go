@@ -64,6 +64,7 @@ func TestServiceBuilder_BuildService(t *testing.T) {
 		BaseSelector: map[string]string{
 			"app": "machine-a-tron",
 		},
+		EnableStateAnnotations: true,
 	}
 
 	machine := &matclient.MachineStatus{
@@ -109,6 +110,42 @@ func TestServiceBuilder_BuildService(t *testing.T) {
 
 	// Check selector
 	assert.Equal(t, builder.BaseSelector, svc.Spec.Selector)
+}
+
+func TestServiceBuilder_BuildService_StateAnnotationsDisabled(t *testing.T) {
+	builder := &ServiceBuilder{
+		Namespace: "test-ns",
+		BaseSelector: map[string]string{
+			"app": "machine-a-tron",
+		},
+		EnableStateAnnotations: false, // explicitly disabled
+	}
+
+	machine := &matclient.MachineStatus{
+		MatID:        "host-uuid-12345678",
+		MachineID:    ptr("nico-machine-id"),
+		HardwareType: ptr("GB200"),
+		APIState:     "Ready",
+		PowerState:   "On",
+		BMC: matclient.BMCStatus{
+			IP: ptr("192.168.1.100"),
+			Redfish: matclient.EndpointStatus{
+				ReachablePort: 443,
+				ListenPort:    8443,
+			},
+		},
+	}
+
+	svc := builder.BuildService(machine, MachineTypeHost, "", "")
+
+	// State annotations should be absent
+	assert.Empty(t, svc.Annotations[AnnotationAPIState])
+	assert.Empty(t, svc.Annotations[AnnotationPowerState])
+
+	// Static annotations should still be present
+	assert.Equal(t, "192.168.1.100", svc.Annotations[AnnotationBMCIP])
+	assert.Equal(t, "GB200", svc.Annotations[AnnotationHardwareType])
+	assert.Equal(t, "8443", svc.Annotations[AnnotationRedfishListenPort])
 }
 
 func TestServiceBuilder_BuildService_WithIPMI(t *testing.T) {
@@ -265,61 +302,81 @@ func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 		},
 	}
 
-	status := &matclient.MachinesStatusResponse{
-		Machines: []matclient.MachineStatus{
-			{
-				MatID:      "host-1",
-				APIState:   "Ready",
-				PowerState: "On",
-				BMC: matclient.BMCStatus{
-					Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8443},
-				},
-				DPUs: []matclient.MachineStatus{
-					{
-						MatID:      "dpu-1",
-						APIState:   "Ready",
-						PowerState: "On",
-						BMC: matclient.BMCStatus{
-							Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8444},
-						},
-					},
-					{
-						MatID:      "dpu-2",
-						APIState:   "Ready",
-						PowerState: "On",
-						BMC: matclient.BMCStatus{
-							Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8445},
-						},
-					},
-				},
+	machine := func(matID string, ip *string, dpus ...matclient.MachineStatus) matclient.MachineStatus {
+		return matclient.MachineStatus{
+			MatID:      matID,
+			APIState:   "Ready",
+			PowerState: "On",
+			BMC: matclient.BMCStatus{
+				IP:      ip,
+				Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8443},
 			},
-			{
-				MatID:      "host-2",
-				APIState:   "Ready",
-				PowerState: "On",
-				BMC: matclient.BMCStatus{
-					Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8446},
-				},
-			},
-		},
-	}
-
-	services := builder.BuildServicesFromStatus(status, "")
-
-	// Should have 4 services: 2 hosts + 2 DPUs
-	assert.Len(t, services, 4)
-
-	// Verify parent links for DPUs
-	dpuServices := make([]*corev1.Service, 0)
-	for _, svc := range services {
-		if svc.Labels[LabelMachineType] == MachineTypeDPU {
-			dpuServices = append(dpuServices, svc)
+			DPUs: dpus,
 		}
 	}
 
-	assert.Len(t, dpuServices, 2)
-	for _, svc := range dpuServices {
-		assert.Equal(t, "host-1", svc.Labels[LabelParentMatID])
+	tests := []struct {
+		name     string
+		machines []matclient.MachineStatus
+		// want lists the Services expected to be built, in order, as "<type>/<mat-id>".
+		want []string
+	}{
+		{
+			name: "host and DPUs with BMC IPs",
+			machines: []matclient.MachineStatus{
+				machine("host-1", ptr("10.0.0.1"),
+					machine("dpu-1", ptr("10.0.0.2")),
+					machine("dpu-2", ptr("10.0.0.3"))),
+				machine("host-2", ptr("10.0.0.4")),
+			},
+			want: []string{"host/host-1", "dpu/dpu-1", "dpu/dpu-2", "host/host-2"},
+		},
+		{
+			name:     "host with nil BMC IP",
+			machines: []matclient.MachineStatus{machine("host-1", nil)},
+			want:     nil,
+		},
+		{
+			name:     "host with empty BMC IP",
+			machines: []matclient.MachineStatus{machine("host-1", ptr(""))},
+			want:     nil,
+		},
+		{
+			name: "DPUs without BMC IP under host with BMC IP",
+			machines: []matclient.MachineStatus{
+				machine("host-1", ptr("10.0.0.1"),
+					machine("dpu-1", nil),
+					machine("dpu-2", ptr(""))),
+			},
+			want: []string{"host/host-1"},
+		},
+		{
+			name: "DPU with BMC IP under host without BMC IP",
+			machines: []matclient.MachineStatus{
+				machine("host-1", nil,
+					machine("dpu-1", ptr("10.0.0.2"))),
+			},
+			want: []string{"dpu/dpu-1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := &matclient.MachinesStatusResponse{Machines: tt.machines}
+			services := builder.BuildServicesFromStatus(status, "")
+
+			var got []string
+			for _, svc := range services {
+				got = append(got, svc.Labels[LabelMachineType]+"/"+svc.Labels[LabelMatID])
+				assert.Equal(t, svc.Annotations[AnnotationBMCIP], svc.Spec.ClusterIP,
+					"%s: ClusterIP must be the reported BMC IP", svc.Name)
+				if svc.Labels[LabelMachineType] == MachineTypeDPU {
+					assert.Equal(t, "host-1", svc.Labels[LabelParentMatID],
+						"%s: DPU Service must link its parent host", svc.Name)
+				}
+			}
+			assert.Equal(t, tt.want, got)
+		})
 	}
 }
 

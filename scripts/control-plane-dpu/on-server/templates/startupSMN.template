@@ -247,8 +247,8 @@
                   {{.DatacenterASN}}:{{.FnnCommonAdminNetworkTarget}}: {}             # Admin network routes
                   {{.DatacenterASN}}:{{.FnnCommonSiteControllerRouteTarget}}: {}      # Site-controllers
 {{- $site := ds "site"}}
-{{- if coll.Has $site "routeTargetsToImport"}}
-{{- range $k, $v := $site.routeTargetsToImport}}
+{{- if and (coll.Has $site "fnn") (coll.Has $site.fnn "routeTargetsToImport")}}
+{{- range $k, $v := $site.fnn.routeTargetsToImport}}
                   {{$k}}: {}
 {{- end}}
 {{- end}}

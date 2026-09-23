@@ -70,15 +70,17 @@ impl From<MockHost> for forge::Machine {
     }
 }
 
-impl From<MockHost> for forge::Instance {
-    fn from(value: MockHost) -> Self {
-        Self {
+impl TryFrom<MockHost> for forge::Instance {
+    type Error = carbide_uuid::machine::InvalidMachineType;
+
+    fn try_from(value: MockHost) -> Result<Self, Self::Error> {
+        Ok(Self {
             id: Some(common::InstanceId {
                 value: value.instance_id.to_string(),
             }),
-            machine_id: Some(value.machine_id),
+            machine_id: Some(value.machine_id.try_into()?),
             ..Default::default()
-        }
+        })
     }
 }
 

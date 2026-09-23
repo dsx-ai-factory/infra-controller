@@ -20,6 +20,9 @@ use std::sync::LazyLock;
 use sqlx::PgPool;
 use sqlx::migrate::{MigrateError, Migrator};
 
+#[cfg(test)]
+mod prefix_overlap_scope;
+
 static MIGRATION_LAYOUT: LazyLock<MigrationLayout> = LazyLock::new(|| {
     MigrationLayout::new(
         sqlx::migrate!("./migrations.pre-squash.20260708172302"),

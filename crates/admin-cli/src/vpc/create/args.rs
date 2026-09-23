@@ -26,8 +26,8 @@ EXAMPLES:
 Create a tenant VPC:
     $ nico-admin-cli --cloud-unsafe-op=my_username vpc create --name tenant-vpc-1 --org-id tenant-org-1
 
-Create a tenant VPC with flat virtualization and a chosen ID:
-    $ nico-admin-cli --cloud-unsafe-op=my_username vpc create --name tenant-vpc-1 --org-id tenant-org-1 --id ad1f9fd5-8438-4407-b259-72fdb7896d42 --virtualization-type flat
+Create a tenant VPC with flat virtualization:
+    $ nico-admin-cli --cloud-unsafe-op=my_username vpc create --name tenant-vpc-1 --org-id tenant-org-1 --virtualization-type flat
 
 Create an FNN VPC with SLAAC enabled:
     $ nico-admin-cli --cloud-unsafe-op=admin vpc create --name tenant-vpc-1 --org-id fds34511233a --virtualization-type fnn --slaac-enabled true
@@ -37,13 +37,13 @@ pub(crate) struct Args {
     #[clap(long, help = "Name to give the new VPC")]
     name: String,
 
-    #[clap(long, help = "Discription for the new VPC")]
+    #[clap(long, help = "Description for the new VPC")]
     description: Option<String>,
 
     #[clap(
         long,
         value_name = "VpcId",
-        help = "Optional VPC ID to use instead of allowing the API server to generate one"
+        help = "Accepted but ignored; the API server always generates the VPC ID"
     )]
     id: Option<VpcId>,
 

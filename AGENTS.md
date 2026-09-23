@@ -375,9 +375,8 @@ check before requesting review.
   - For REST, use `rest-api/openapi/spec.yaml` for the contract and inspect the
     handler or model for conditional behavior the schema cannot express. When
     the spec changes, run `make rest-api/lint-openapi`,
-    `make rest-api/generate-sdk`, `make rest-api/publish-openapi`, and
-    `make openapi-breaking`; do not edit `rest-api/sdk/standard/` or
-    `rest-api/docs/index.html`.
+    `make rest-api/generate-sdk`, and `make openapi-breaking`; do not edit
+    `rest-api/sdk/standard/`.
 
 - **Workflow parity:** Make the documentation match the workflow that actually runs.
 

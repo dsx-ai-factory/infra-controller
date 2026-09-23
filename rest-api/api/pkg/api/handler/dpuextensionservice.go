@@ -193,6 +193,7 @@ func (cdesh CreateDpuExtensionServiceHandler) Handle(c echo.Context) error {
 				Name:        apiRequest.Name,
 				Description: apiRequest.Description,
 				ServiceType: apiRequest.ServiceType,
+				DpuTarget:   apiRequest.DpuTarget,
 				SiteID:      site.ID,
 				TenantID:    tenant.ID,
 				Status:      cdbm.DpuExtensionServiceStatusPending,

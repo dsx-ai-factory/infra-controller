@@ -145,7 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request_normalizing_middleware = map_request(middleware::normalize_url);
     let final_app = request_normalizing_middleware.layer(app); // this one has to wrap all the others for the map_request to be able to affect routing
 
-    let listener = tokio::net::TcpListener::bind(socket_addr)
+    let listener = metrics_endpoint::bind_tcp_listener(socket_addr)
         .await
         .map_err(|err| {
             tracing::error!(error = %err, "unable to bind tcp listener");

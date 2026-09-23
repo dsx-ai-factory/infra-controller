@@ -20,16 +20,16 @@ import (
 // checks if the ExpectedPowerShelfUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &ExpectedPowerShelfUpdateRequest{}
 
-// ExpectedPowerShelfUpdateRequest Request data to update an existing Expected Power Shelf.  Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
+// ExpectedPowerShelfUpdateRequest Request data to update an existing Expected Power Shelf.  Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
 type ExpectedPowerShelfUpdateRequest struct {
 	// ID of the Expected Power Shelf to update (ignored for single update, used for identification in batch operations).
 	Id NullableString `json:"id,omitempty"`
 	// Immutable MAC address of the Expected Power Shelf's BMC (Baseboard Management Controller). Omit this field when updating. A formatting-equivalent value is accepted for compatibility and preserves the originally stored spelling, but changing the physical MAC address is rejected with HTTP 400.
 	// Deprecated
 	BmcMacAddress NullableString `json:"bmcMacAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
-	// Username for accessing the Expected Power Shelf's BMC
+	// Username for accessing the Expected Power Shelf's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcPassword in the same request.
 	DefaultBmcUsername NullableString `json:"defaultBmcUsername,omitempty"`
-	// Password for accessing the Expected Power Shelf's BMC
+	// Password for accessing the Expected Power Shelf's BMC. Omission or null preserves the value; a non-empty value requires defaultBmcUsername in the same request.
 	DefaultBmcPassword NullableString `json:"defaultBmcPassword,omitempty"`
 	// Serial number of the Expected Power Shelf
 	ShelfSerialNumber NullableString `json:"shelfSerialNumber,omitempty"`

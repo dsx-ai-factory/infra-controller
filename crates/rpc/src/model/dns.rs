@@ -18,7 +18,7 @@
 use chrono::{DateTime, Utc};
 use dns_record::SoaRecord;
 use model::dns::domain_info::DomainInfo;
-use model::dns::{Domain, DomainMetadata, NewDomain, SoaSnapshot};
+use model::dns::{Answer, Domain, DomainMetadata, NewDomain, ResourceRecord, SoaSnapshot};
 
 use crate as rpc;
 use crate::errors::RpcDataConversionError;
@@ -142,5 +142,100 @@ impl From<DomainMetadata> for rpc::protos::dns::Metadata {
         rpc::protos::dns::Metadata {
             allow_axfr_from: vec![metadata.allow_axfr_from.join(",")],
         }
+    }
+}
+
+/// Maps a classified answer onto the lookup response. `outcome` and
+/// `authoritative` are both derived from the variant, so they cannot disagree.
+/// `Refused` and `NotImplemented` exist on the wire for `carbide-dns` but
+/// nico-api never produces them.
+impl From<Answer> for rpc::protos::dns::DnsResourceRecordLookupResponse {
+    fn from(answer: Answer) -> Self {
+        use rpc::protos::dns::DnsLookupOutcome;
+
+        let authoritative = answer.is_authoritative();
+        let (outcome, records, authority_soa) = match answer {
+            Answer::Records { records, .. } => (DnsLookupOutcome::Records, records, None),
+            Answer::NoData { zone, soa } => (
+                DnsLookupOutcome::NoData,
+                vec![],
+                Some(ResourceRecord::soa(&zone, &soa)),
+            ),
+            Answer::NxDomain { zone, soa } => (
+                DnsLookupOutcome::NoSuchName,
+                vec![],
+                Some(ResourceRecord::soa(&zone, &soa)),
+            ),
+            Answer::NotAuthoritative => (DnsLookupOutcome::NotAuthoritative, vec![], None),
+        };
+        Self {
+            records: records.into_iter().map(to_proto_record).collect(),
+            outcome: outcome as i32,
+            authority_soa: authority_soa.map(to_proto_record),
+            authoritative,
+        }
+    }
+}
+
+fn to_proto_record(record: ResourceRecord) -> rpc::protos::dns::DnsResourceRecord {
+    dns_record::DnsResourceRecordReply::from(record).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+    use dns_record::{DnsResourceRecordType, SoaRecord};
+    use model::dns::{Answer, Fqdn, ResourceRecord};
+
+    use super::*;
+
+    fn zone() -> Fqdn {
+        Fqdn::parse("mysite.example.com").expect("fixture zone")
+    }
+
+    fn soa() -> SoaRecord {
+        SoaRecord::new("mysite.example.com")
+    }
+
+    fn a_record() -> ResourceRecord {
+        ResourceRecord {
+            q_type: DnsResourceRecordType::A.to_string(),
+            q_name: "gpu.mysite.example.com.".to_string(),
+            ttl: 300,
+            content: "192.0.2.10".to_string(),
+            domain_id: None,
+        }
+    }
+
+    /// One row per matrix line: proto tag, AA, whether an authority SOA is
+    /// present, and the answer count. The tags are the wire contract.
+    #[test]
+    fn answer_maps_onto_the_lookup_response() {
+        value_scenarios!(
+            run = |answer: Answer| {
+                let proto = rpc::protos::dns::DnsResourceRecordLookupResponse::from(answer);
+                (
+                    proto.outcome,
+                    proto.authoritative,
+                    proto.authority_soa.is_some(),
+                    proto.records.len(),
+                )
+            };
+            "in-zone RRset" {
+                Answer::Records { zone: zone(), records: vec![a_record()] } => (1, true, false, 1),
+            }
+            "empty Records is Records, not NXDOMAIN" {
+                Answer::Records { zone: zone(), records: vec![] } => (1, true, false, 0),
+            }
+            "NODATA carries authority SOA" {
+                Answer::NoData { zone: zone(), soa: soa() } => (2, true, true, 0),
+            }
+            "NXDOMAIN carries authority SOA" {
+                Answer::NxDomain { zone: zone(), soa: soa() } => (3, true, true, 0),
+            }
+            "not authoritative" {
+                Answer::NotAuthoritative => (4, false, false, 0),
+            }
+        );
     }
 }

@@ -66,9 +66,6 @@ devenv.local.yaml
 # direnv
 .direnv
 
-# pre-commit
-.pre-commit-config.yaml
-
 # Trust anchor the dpu-agent mirrors for key-less consumers (issue #355). The
 # agent tests point `[forge-system] root-ca` at dev/certs/forge_root.pem, so
 # running them publishes a copy beside it. Runtime artifact, never committed.

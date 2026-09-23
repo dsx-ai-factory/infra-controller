@@ -17,6 +17,8 @@
 lease_time_secs: 604800  # Seconds
 renewal_time_secs: 3600  # Seconds
 rebinding_time_secs: 432000  # Seconds
+dhcpv6_preferred_lifetime_secs: 3600  # Seconds
+dhcpv6_valid_lifetime_secs: 7200  # Seconds
 carbide_nameservers:
   - 10.217.126.20
 carbide_api_url: https://carbide-api.forge-system.svc.cluster.local:1079

@@ -17,7 +17,7 @@
 
 use model::site_explorer::{Inventory as ModelInventory, Service as ModelService};
 use nv_redfish::update_service::SoftwareInventory;
-use nv_redfish::{Bmc, Resource, ServiceRoot};
+use nv_redfish::{Bmc, ServiceRoot};
 
 use crate::{Error, hw};
 
@@ -47,8 +47,8 @@ impl<B: Bmc> ExploredInventories<B> {
                 .members
                 .iter()
                 .map(|inventory| ModelInventory {
-                    id: inventory.id().to_string(),
-                    description: inventory.description().map(|v| v.to_string()),
+                    id: inventory.raw().id.clone(),
+                    description: inventory.raw().description.clone().flatten(),
                     version: match hw_type {
                         Some(hw::HwType::Lenovo) => {
                             inventory.version().map(|v| {

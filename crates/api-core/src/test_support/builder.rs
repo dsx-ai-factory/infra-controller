@@ -234,6 +234,8 @@ impl TestApiBuilder {
         let real_bmc_client = Arc::new(AuthenticatedBmcClient::new(
             redfish_pool.clone(),
             nv_redfish_pool,
+            // Tests run without [bmc_proxy]: everything dials the sim directly.
+            None,
             carbide_ipmi::test_support(),
             credential_manager.clone(),
         ));
@@ -293,6 +295,7 @@ impl TestApiBuilder {
             // dyn upcast: the ops handle is also the general pool in tests.
             redfish_pool: redfish_pool.clone(),
             bmc_credential_ops: redfish_pool,
+            bmc_proxy_passthrough: None,
             eth_data,
             common_pools: self.common_pools,
             ib_fabric_manager,

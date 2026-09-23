@@ -40,6 +40,23 @@ hardware_health_reports = "MonitorOnly"
 enabled = true
 create_machines = true
 
+{{- if .Values.bmcProxy.enabled }}
+
+[bmc_proxy]
+# Ordinary BMC Redfish traffic -- including established-endpoint
+# credentialed exploration -- goes through nico-bmc-proxy; credential
+# setup, session minting, password rotation, exploration's anonymous
+# vendor probes, and component-manager compute-tray power control stay
+# direct.
+enabled = true
+address = "{{ .Values.bmcProxy.address | default (printf "nico-bmc-proxy.%s.svc.cluster.local:1079" (include "nico-api.namespace" .)) }}"
+# Client identity presented to the proxy's mTLS listener; the defaults are the
+# SPIFFE workload paths this pod already mounts.
+client_cert = "/var/run/secrets/spiffe.io/tls.crt"
+client_key = "/var/run/secrets/spiffe.io/tls.key"
+root_ca = "/var/run/secrets/spiffe.io/ca.crt"
+{{- end }}
+
 [node_auth]
 # Node (Scout / DPU-agent) authentication to the API.
 # See docs/design/machine-identity/node-auth-jwt.md.
@@ -94,8 +111,12 @@ additional_issuer_cns = [{{ range $i, $cn := .Values.auth.additionalIssuerCns }}
 {{- if not (has .Values.credentials.ufmSource (list "local_first" "backend" "local")) }}
 {{- fail "nico-api.credentials.ufmSource must be one of local_first, backend, or local" }}
 {{- end }}
+{{- if not (has .Values.credentials.bmcSiteWideRootSource (list "local_first" "backend" "local")) }}
+{{- fail "nico-api.credentials.bmcSiteWideRootSource must be one of local_first, backend, or local" }}
+{{- end }}
 [credentials]
 ufm_source = {{ .Values.credentials.ufmSource | quote }}
+bmc_site_wide_root_source = {{ .Values.credentials.bmcSiteWideRootSource | quote }}
 
 {{- if .Values.credentials.file.existingSecret.name }}
 [credentials.file]

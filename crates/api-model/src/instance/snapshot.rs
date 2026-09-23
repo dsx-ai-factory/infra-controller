@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::instance_type::InstanceTypeId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
@@ -48,7 +48,7 @@ pub struct InstanceSnapshot {
     /// Instance ID
     pub id: InstanceId,
     /// Machine ID
-    pub machine_id: MachineId,
+    pub machine_id: HostMachineId,
 
     /// InstanceType ID
     pub instance_type_id: Option<InstanceTypeId>,
@@ -189,7 +189,13 @@ pub fn from_pg_json_and_os(
 
     Ok(InstanceSnapshot {
         id: value.id,
-        machine_id: value.machine_id,
+        machine_id: value
+            .machine_id
+            .try_into()
+            .map_err(|e| sqlx::Error::ColumnDecode {
+                index: "machine_id".to_string(),
+                source: Box::new(e),
+            })?,
         instance_type_id: value.instance_type_id,
         metadata,
         config,
@@ -305,7 +311,12 @@ impl TryFrom<InstanceSnapshotPgJson> for InstanceSnapshot {
 
         Ok(InstanceSnapshot {
             id: value.id,
-            machine_id: value.machine_id,
+            machine_id: value.machine_id.try_into().map_err(|e| {
+                sqlx::error::Error::ColumnDecode {
+                    index: "machine_id".to_string(),
+                    source: Box::new(e),
+                }
+            })?,
             instance_type_id: value.instance_type_id,
             metadata,
             config,

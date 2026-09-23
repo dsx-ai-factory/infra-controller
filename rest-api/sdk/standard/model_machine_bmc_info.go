@@ -22,7 +22,7 @@ var _ MappedNullable = &MachineBMCInfo{}
 
 // MachineBMCInfo Describes BMC information of a Machine
 type MachineBMCInfo struct {
-	// IP address of the Machine BMC
+	// IPv4 or IPv6 address of the Machine BMC
 	Ip NullableString `json:"ip,omitempty"`
 	// MAC address of the Machine BMC
 	Mac NullableString `json:"mac,omitempty"`

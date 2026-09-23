@@ -35,7 +35,10 @@ use carbide_uuid::machine::MachineType;
 use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
 use chrono::Utc;
 use config::SiteExplorerConfig;
-use db::{self, DatabaseError, Transaction, machine, power_shelf as db_power_shelf};
+use db::explored_endpoints::EndpointReportNotCurrent;
+use db::{
+    self, ConditionalWrite, DatabaseError, Transaction, machine, power_shelf as db_power_shelf,
+};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
@@ -79,6 +82,7 @@ pub use metrics::{SiteExplorationMetrics, site_explorer_latency_histogram_view};
 mod bmc_endpoint_explorer;
 mod redfish;
 pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
+pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
 mod machine_creator;
@@ -89,7 +93,10 @@ use db::ObjectColumnFilter;
 use db::work_lock_manager::WorkLockManagerHandle;
 pub use managed_host::is_endpoint_in_managed_host;
 use model::DpuModel;
-use model::expected_machine::{ExpectedInterface, ExpectedInterfaceIpAllocation, HostDpuPolicy};
+use model::expected_machine::{
+    ExpectedInterface, ExpectedInterfaceIpAllocation, ExpectedMachine, ExpectedMachineRequest,
+    HostDpuPolicy,
+};
 use model::firmware::FirmwareComponentType;
 use model::network_segment::NetworkSegmentType;
 mod switch_creator;
@@ -105,27 +112,10 @@ use errors::{SiteExplorerError, SiteExplorerResult};
 use self::metrics::{
     BmcResetFinished, BmcResetMethod, BmcResetStatus, BmcResetTimestampPersistenceFailed,
     BootInterfaceSelected, DpuMigrationSignal, PairingBlockerReason, SiteExplorerIterationFinished,
-    SiteExplorerMachineSlotTrayFetchFailed, SiteExplorerMachineSlotTrayResponseMissing,
-    SiteExplorerMachineSlotTrayValueInvalid, exploration_error_to_metric_label,
+    exploration_error_to_metric_label,
 };
 use crate::config::SiteExplorerExploreMode;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
-
-/// Return whether an expected interface is explicitly a non-Redfish DPU OS
-/// endpoint.
-///
-/// Host is the compatibility default for existing interface declarations, so
-/// those entries remain scannable even when they look like data interfaces.
-/// DPU BMC interfaces remain scannable too. A top-level BMC MAC is an
-/// ExpectedMachine identity, so it wins over a historical DPU OS declaration
-/// that reused the same address on any row.
-fn should_skip_expected_interface_redfish_scan(
-    interface: &ExpectedInterface,
-    expected_host_bmc_macs: &HashSet<MacAddress>,
-) -> bool {
-    !expected_host_bmc_macs.contains(&interface.mac_address)
-        && interface.role == model::expected_machine::ExpectedInterfaceRole::DpuOs
-}
 
 /// Return whether a HostInband row can be treated as a Redfish endpoint.
 ///
@@ -263,43 +253,6 @@ fn rms_location_value(value: Option<u32>) -> Result<Option<i32>, u32> {
     value
         .map(|value| i32::try_from(value).map_err(|_| value))
         .transpose()
-}
-
-/// Fetches `slot_number` and `tray_index` from RMS for one rack/node pair.
-/// Each value remains usable when the other is absent or outside `i32`.
-pub async fn fetch_slot_and_tray(
-    rms_client: &dyn librms::RmsApi,
-    request: librms::protos::rack_manager::BatchGetNodeDeviceInfoRequest,
-) -> (Option<i32>, Option<i32>) {
-    match rms_client.batch_get_node_device_info(request).await {
-        Ok(info) => {
-            let Some(node_device_details) = info.node_device_details.first() else {
-                carbide_instrument::emit(SiteExplorerMachineSlotTrayResponseMissing::new());
-                return (None, None);
-            };
-
-            let slot_number =
-                rms_location_value(node_device_details.slot_number).unwrap_or_else(|value| {
-                    carbide_instrument::emit(SiteExplorerMachineSlotTrayValueInvalid::SlotNumber {
-                        value,
-                    });
-                    None
-                });
-            let tray_index =
-                rms_location_value(node_device_details.tray_index).unwrap_or_else(|value| {
-                    carbide_instrument::emit(SiteExplorerMachineSlotTrayValueInvalid::TrayIndex {
-                        value,
-                    });
-                    None
-                });
-
-            (slot_number, tray_index)
-        }
-        Err(e) => {
-            carbide_instrument::emit(SiteExplorerMachineSlotTrayFetchFailed::new(e.to_string()));
-            (None, None)
-        }
-    }
 }
 
 pub struct Endpoint<'a> {
@@ -512,6 +465,10 @@ impl SiteExplorer {
     const SITE_EXPLORER_HEALTH_REPORT_WRITE_BATCH_SIZE: usize = 500;
 
     #[allow(clippy::too_many_arguments)]
+    /// Creates a site explorer.
+    ///
+    /// When `dpf_enabled_at_site` is true, eligible hosts are marked for DPF-managed ingestion.
+    /// Otherwise, hosts use the non-DPF ingestion path.
     pub fn new(
         database_connection: sqlx::PgPool,
         explorer_config: SiteExplorerConfig,
@@ -523,6 +480,7 @@ impl SiteExplorer {
         rack_profiles: RackProfileConfig,
         rms_client: Option<Arc<dyn RmsApi>>,
         credential_manager: Arc<dyn CredentialManager>,
+        dpf_enabled_at_site: bool,
     ) -> Self {
         // We want to hold metrics for longer than the iteration interval, so there is continuity
         // in emitting metrics. However we want to avoid reporting outdated metrics in case
@@ -547,6 +505,7 @@ impl SiteExplorer {
                 rack_profiles,
                 rms_client.clone(),
                 credential_manager,
+                dpf_enabled_at_site,
             ),
             switch_creator: SwitchCreator::new(
                 database_connection.clone(),
@@ -1212,6 +1171,26 @@ impl SiteExplorer {
             }
         }
 
+        let reconcile_machine_locations_start = Instant::now();
+        let host_bmc_ips = identified_hosts
+            .iter()
+            .map(|identified| identified.explored_host.host_bmc_ip)
+            .collect::<Vec<_>>();
+        if let Err(error) = self
+            .machine_creator
+            .reconcile_machine_locations(&host_bmc_ips)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                "Machine RMS location reconciliation failed; a later Site Explorer run will retry"
+            );
+        }
+        metrics.record_phase_latency(
+            "reconcile_machine_locations",
+            reconcile_machine_locations_start.elapsed(),
+        );
+
         Ok(identified_hosts
             .into_iter()
             .map(|identified| (identified.explored_host, identified.report))
@@ -1441,6 +1420,12 @@ impl SiteExplorer {
         let explored_endpoints =
             db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
 
+        // Ingested BMC IPs are read once for the whole loop rather than per endpoint.
+        // The iteration work lock makes site-explorer the only writer that ingests
+        // machines, so nothing can become ingested while the loop below runs.
+        let already_ingested_bmc_ips =
+            db::machine_topology::find_all_ingested_bmc_ips(&mut txn).await?;
+
         txn.commit().await?;
 
         let mut explored_dpus = HashMap::new();
@@ -1472,10 +1457,13 @@ impl SiteExplorer {
             }
 
             if ep.report.is_dpu() {
-                if self.can_ingest_dpu_endpoint(metrics, &ep).await? {
+                if self.can_ingest_dpu_endpoint(metrics, &ep, &already_ingested_bmc_ips)? {
                     explored_dpus.insert(ep.address, ep);
                 }
-            } else if self.can_ingest_host_endpoint(metrics, &ep).await? {
+            } else if self
+                .can_ingest_host_endpoint(metrics, &ep, &already_ingested_bmc_ips)
+                .await?
+            {
                 explored_hosts.insert(ep.address, ep);
             }
         }
@@ -1741,11 +1729,9 @@ impl SiteExplorer {
                         if expected_managed_dpus_total > 0 {
                             tracing::warn!(
                                 bmc_ip_address = %ep.address,
-                                exploration_report = ?ep,
                                 discovered_dpu_count = dpus_explored_for_host.len(),
                                 expected_managed_dpu_count = expected_managed_dpus_total,
                                 all_dpus_configured_properly_in_host,
-                                discovered_dpu_details = ?dpus_explored_for_host,
                                 "cannot identify managed host because the site explorer has not discovered all attached DPUs"
                             );
                         }
@@ -2317,6 +2303,7 @@ impl SiteExplorer {
         for suppression in suppressions
             .iter()
             .filter(|suppression| suppression.acknowledged_at.is_none())
+            .unique_by(|suppression| suppression.bmc_mac_address)
         {
             let bmc_ips = db::machine_interface::lookup_bmc_ip_by_mac_address(
                 &self.database_connection,
@@ -2407,12 +2394,9 @@ impl SiteExplorer {
             .map(|sku| (sku.id, sku.device_type))
             .collect();
 
-        // Record Expected Machine metrics and apply configured address
-        // policies. Every role uses `try_apply_expected_interface`; its role
-        // only determines the row's interface type and primary setting. Fixed
-        // addresses create rows when needed, while Retained changes a matching
-        // DHCP address to `Static`. The database helpers are idempotent, so
-        // steady-state passes do not change rows.
+        // Record Expected Machine metrics and create initial Fixed
+        // reservations. DHCP inserts Retained allocations as `Static`; later
+        // inventory passes leave existing allocation types unchanged.
         let preallocate_start = Instant::now();
         for expected_machine in &expected_machines {
             let device_type = expected_machine
@@ -2444,6 +2428,7 @@ impl SiteExplorer {
             let host_bmc = expected_machine.effective_host_bmc();
             try_apply_expected_interface(
                 &self.database_connection,
+                expected_machine,
                 &host_bmc,
                 self.config.retained_boot_interface_window,
             )
@@ -2456,6 +2441,7 @@ impl SiteExplorer {
             {
                 try_apply_expected_interface(
                     &self.database_connection,
+                    expected_machine,
                     nic,
                     self.config.retained_boot_interface_window,
                 )
@@ -2549,20 +2535,46 @@ impl SiteExplorer {
             .iter()
             .map(|machine| machine.bmc_mac_address)
             .collect::<HashSet<_>>();
+        let expected_bmc_macs = expected_machines
+            .iter()
+            .map(|machine| machine.bmc_mac_address)
+            .chain(
+                expected_switches
+                    .iter()
+                    .map(|switch| switch.bmc_mac_address),
+            )
+            .chain(
+                expected_power_shelves
+                    .iter()
+                    .map(|power_shelf| power_shelf.bmc_mac_address),
+            )
+            .collect::<HashSet<_>>();
         let expected_non_redfish_interface_macs = expected_machines
             .iter()
             .flat_map(|machine| &machine.data.interfaces)
             .filter(|interface| {
-                should_skip_expected_interface_redfish_scan(interface, &expected_host_bmc_macs)
+                // A DpuOs interface terminates on the DPU operating system,
+                // not its management controller. Redfish is exposed through
+                // the separate DpuBmc interface.
+                interface.role == model::expected_machine::ExpectedInterfaceRole::DpuOs
             })
             .map(|interface| interface.mac_address)
+            .chain(
+                expected_switches
+                    .iter()
+                    .flat_map(|switch| &switch.nvos_mac_addresses)
+                    .copied(),
+            )
+            // An explicit BMC identity wins if legacy data assigns the same
+            // MAC address to both a BMC and an OS interface.
+            .filter(|mac_address| !expected_bmc_macs.contains(mac_address))
             .collect::<HashSet<_>>();
 
         // Tenant and Admin segments are never Redfish discovery networks. The
-        // Underlay may contain DPU OS data interfaces, so keep explicit DPU OS
-        // MACs out of the scan unless that MAC is an ExpectedMachine BMC
-        // identity. Host remains the compatibility default for legacy entries,
-        // and DPU BMC interfaces remain eligible.
+        // Underlay may contain DPU OS and switch NVOS data interfaces, so keep
+        // their explicit MACs out of the scan unless a MAC is also an expected
+        // BMC identity. Host remains the compatibility default for legacy
+        // ExpectedMachine entries, and DPU BMC interfaces remain eligible.
         //
         // Load interfaces after allocation reconciliation so this iteration
         // also sees newly-created fixed reservations.
@@ -2579,13 +2591,11 @@ impl SiteExplorer {
         let scannable_interfaces: Vec<MachineInterfaceSnapshot> = interfaces
             .into_iter()
             .filter(|iface| {
-                let is_bmc = iface.interface_type == InterfaceType::Bmc;
                 // On Underlay an unadopted interface is a BMC to explore, and adopted BMCs
                 // stay visible too.
                 let underlay = underlay_segments.contains(&iface.segment_id)
-                    && (is_bmc
-                        || (iface.machine_id.is_none()
-                            && !expected_non_redfish_interface_macs.contains(&iface.mac_address)));
+                    && !expected_non_redfish_interface_macs.contains(&iface.mac_address)
+                    && (iface.interface_type == InterfaceType::Bmc || iface.machine_id.is_none());
                 // Host data interfaces also DHCP on HostInband. Only scan BMC
                 // rows plus an anonymous row at an ExpectedMachine BMC identity,
                 // which covers historical rows that were left typed as Data.
@@ -2921,6 +2931,9 @@ impl SiteExplorer {
         metrics.record_update_explored_endpoints_count("endpoint_error_update_attempts", 0);
         metrics.record_update_explored_endpoints_count("firmware_version_update_attempts", 0);
         metrics.record_update_explored_endpoints_count("redfish_remediation_candidates", 0);
+        // Commit the whole batch before dispatching remediation. A later write
+        // failure must roll back earlier reports and request clearing, since it
+        // also discards the remediation collected for them.
         let mut txn = self.txn_begin().await?;
 
         let mut redfish_errors = Vec::new();
@@ -2962,6 +2975,10 @@ impl SiteExplorer {
                 }
             }
 
+            // Keep topology writes ahead of endpoint writes to match machine deletion's
+            // lock order. A savepoint lets a rejected report undo only its own topology.
+            let mut txn = db::Transaction::begin_inner(txn.as_pgconn()).await?;
+
             // Update possible stale machine versions
             // Configured firmware versions remain the preferred source. Hosts
             // without firmware-management configuration, such as Lenovo GB300
@@ -3000,7 +3017,7 @@ impl SiteExplorer {
                                     "Initial exploration of endpoint"
                                 );
                             }
-                            db::explored_endpoints::try_update(
+                            let report_write = db::explored_endpoints::try_update(
                                 address,
                                 old_version,
                                 &report,
@@ -3009,18 +3026,37 @@ impl SiteExplorer {
                             )
                             .await?;
                             endpoint_report_update_attempts += 1;
+                            match report_write {
+                                ConditionalWrite::Applied(()) => {}
+                                ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+                                    // Skip transient remediation: it would use
+                                    // the rejected report's stale endpoint snapshot.
+                                    txn.rollback().await?;
+                                    continue;
+                                }
+                            }
                         }
                         Err(e) => {
                             // If an endpoint can not be explored we don't delete the known information, since it's
                             // still helpful. The failure might just be intermittent.
-                            db::explored_endpoints::try_update_last_exploration_error(
-                                address,
-                                old_version,
-                                &e,
-                                exploration_duration,
-                                &mut txn,
-                            )
-                            .await?;
+                            let error_write =
+                                db::explored_endpoints::try_update_last_exploration_error(
+                                    address,
+                                    old_version,
+                                    &e,
+                                    exploration_duration,
+                                    &mut txn,
+                                )
+                                .await?;
+                            match error_write {
+                                ConditionalWrite::Applied(()) => {}
+                                ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+                                    // The endpoint disappeared or its report changed
+                                    // while we were probing. Don't remediate an error
+                                    // the database didn't accept.
+                                    redfish_error = None;
+                                }
+                            }
                             endpoint_error_update_attempts += 1;
                         }
                     }
@@ -3073,6 +3109,8 @@ impl SiteExplorer {
                     }
                 }
             }
+
+            txn.commit().await?;
 
             // We wait until the end to add it to redfish_errors so we can move endpoint safely
             if let Some(e) = redfish_error {
@@ -3551,28 +3589,16 @@ impl SiteExplorer {
 
     /// can_ingest_dpu_endpoint returns a boolean indicating whether the site explorer should continue ingesting a DPU endpoint.
     /// it will always return true for a DPU that has already been ingested.
-    async fn can_ingest_dpu_endpoint(
+    ///
+    /// `already_ingested_bmc_ips` is the caller's snapshot of ingested BMC IPs, so
+    /// this decision costs no database round trip per endpoint.
+    fn can_ingest_dpu_endpoint(
         &self,
         metrics: &mut SiteExplorationMetrics,
         dpu_endpoint: &ExploredEndpoint,
+        already_ingested_bmc_ips: &HashSet<IpAddr>,
     ) -> SiteExplorerResult<bool> {
-        let is_managed_host_created_for_endpoint = match self
-            .is_managed_host_created_for_endpoint(dpu_endpoint.address)
-            .await
-        {
-            Ok(managed_host_exists) => managed_host_exists,
-            Err(e) => {
-                tracing::error!(
-                    %dpu_endpoint,
-                    error = %e,
-                    "Failed to determine whether managed host was created"
-                );
-                // return true by default
-                true
-            }
-        };
-
-        if is_managed_host_created_for_endpoint {
+        if already_ingested_bmc_ips.contains(&dpu_endpoint.address) {
             // this dpu has already been ingested
             return Ok(true);
         }
@@ -3721,28 +3747,16 @@ impl SiteExplorer {
     /// If the host has not been ingested, is a Lenovo,  and infinite boot is disabled, the function will try to enable
     /// infinite boot and return false.
     /// Otherwise, the function will return true.
+    ///
+    /// `already_ingested_bmc_ips` is the caller's snapshot of ingested BMC IPs, so
+    /// this decision costs no database round trip per endpoint.
     async fn can_ingest_host_endpoint(
         &self,
         metrics: &mut SiteExplorationMetrics,
         host_endpoint: &ExploredEndpoint,
+        already_ingested_bmc_ips: &HashSet<IpAddr>,
     ) -> SiteExplorerResult<bool> {
-        let is_managed_host_created_for_endpoint = match self
-            .is_managed_host_created_for_endpoint(host_endpoint.address)
-            .await
-        {
-            Ok(managed_host_exists) => managed_host_exists,
-            Err(e) => {
-                tracing::error!(
-                    %host_endpoint,
-                    error = %e,
-                    "Failed to determine whether managed host was created"
-                );
-                // return true by default
-                true
-            }
-        };
-
-        if is_managed_host_created_for_endpoint {
+        if already_ingested_bmc_ips.contains(&host_endpoint.address) {
             // this host has already been ingested
             return Ok(true);
         }
@@ -4123,58 +4137,93 @@ pub async fn try_preallocate_one(
 /// `try_apply_expected_interface` applies the allocation policy for one
 /// configured or compatibility-derived expected interface.
 ///
-/// Every role follows this same policy path. Fixed reservations are
-/// materialized while expected configuration is reconciled. Retained follows
-/// the existing Host BMC behavior: a matching DHCP address becomes `Static`
-/// for this interface row's lifetime, but the selected address is not written
-/// back to `ExpectedMachine` for a later re-ingestion. Dynamic needs no
-/// reconciliation here.
+/// Fixed reservations apply only before that family's first stateful
+/// allocation. Dynamic and Retained allocations are created by DHCP, so
+/// neither requires reconciliation here.
 ///
 /// Each interface gets its own transaction so one invalid reservation cannot
 /// stop Site Explorer from processing the remaining expected inventory.
+///
+/// The captured `expected_machine` must identify a stored row. Its declaration
+/// is revalidated under a lock held through the address write and commit.
+/// Deleted or changed declarations are skipped; the next inventory pass reads
+/// the new configuration.
 pub async fn try_apply_expected_interface(
     pool: &PgPool,
+    expected_machine: &ExpectedMachine,
     expected_interface: &ExpectedInterface,
     retained_window: Option<chrono::Duration>,
 ) {
-    let allocation = expected_interface.resolved_ip_allocation();
-    let mut txn = match allocation {
-        ExpectedInterfaceIpAllocation::Dynamic => return,
-        ExpectedInterfaceIpAllocation::Fixed | ExpectedInterfaceIpAllocation::Retained => {
-            match db::Transaction::begin(pool).await {
-                Ok(txn) => txn,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        mac_address = %expected_interface.mac_address,
-                        "Site-explorer expected-interface allocation: txn_begin failed"
-                    );
-                    return;
-                }
-            }
+    if expected_interface.resolved_ip_allocation() != ExpectedInterfaceIpAllocation::Fixed {
+        return;
+    }
+    let mut txn = match db::Transaction::begin(pool).await {
+        Ok(txn) => txn,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                mac_address = %expected_interface.mac_address,
+                "Site-explorer expected-interface allocation: txn_begin failed"
+            );
+            return;
         }
     };
 
-    let result = match allocation {
-        ExpectedInterfaceIpAllocation::Dynamic => {
-            unreachable!("dynamic allocation returns before opening a transaction")
+    // The inventory snapshot was read in an earlier transaction. Keep this
+    // lock through allocation so an edit or deletion cannot commit between
+    // validating the declaration and writing a `Static` address.
+    let current = match db::expected_machine::find_for_update(
+        txn.as_pgconn(),
+        &ExpectedMachineRequest {
+            id: expected_machine.id,
+            bmc_mac_address: None,
+        },
+    )
+    .await
+    {
+        Ok(Some(current)) => current,
+        Ok(None) => {
+            txn.rollback_or_log("expected machine deleted before allocation")
+                .await;
+            return;
         }
-        ExpectedInterfaceIpAllocation::Fixed => {
-            db::machine_interface::preallocate_expected_machine_interface(
-                txn.as_pgconn(),
-                expected_interface,
-                retained_window,
-            )
-            .await
-        }
-        ExpectedInterfaceIpAllocation::Retained => {
-            db::machine_interface::retain_expected_machine_interface_address(
-                txn.as_pgconn(),
-                expected_interface,
-            )
-            .await
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                expected_machine_id = ?expected_machine.id,
+                mac_address = %expected_interface.mac_address,
+                "Site-explorer expected-interface allocation: configuration lookup failed"
+            );
+            txn.rollback_or_log("expected interface allocation lookup failed")
+                .await;
+            return;
         }
     };
+
+    let declaration_matches = if expected_interface.mac_address == current.bmc_mac_address {
+        current.effective_host_bmc() == *expected_interface
+    } else {
+        current.data.interfaces.contains(expected_interface)
+    };
+    // Replace-all can reuse an ID for a different BMC MAC. That must not
+    // authorize a declaration captured for the previous owner.
+    if current.bmc_mac_address != expected_machine.bmc_mac_address || !declaration_matches {
+        tracing::debug!(
+            expected_machine_id = ?expected_machine.id,
+            mac_address = %expected_interface.mac_address,
+            "Site-explorer expected-interface allocation: owner or declaration changed, skipping"
+        );
+        txn.rollback_or_log("expected owner or interface declaration changed before allocation")
+            .await;
+        return;
+    }
+
+    let result = db::machine_interface::preallocate_expected_machine_interface(
+        txn.as_pgconn(),
+        expected_interface,
+        retained_window,
+    )
+    .await;
 
     match result {
         Ok(()) => {
@@ -4769,7 +4818,6 @@ mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, Check, check_cases, check_values, value_scenarios};
     use config_version::ConfigVersion;
-    use model::expected_machine::ExpectedInterfaceRole;
     use model::site_explorer::{
         ComputerSystem, Inventory, NetworkAdapter, PreingestionState, Service,
     };
@@ -4913,57 +4961,6 @@ mod tests {
                 },
             ],
             rms_location_value,
-        );
-    }
-
-    /// Only an explicit DPU OS role suppresses Redfish scanning.
-    ///
-    /// Host remains eligible because it is the default for legacy entries
-    /// that did not declare an interface role. The ExpectedMachine BMC key
-    /// takes precedence over a historical conflicting DPU OS declaration.
-    #[test]
-    fn expected_interface_role_controls_redfish_scan_classification() {
-        let host_bmc_mac_address = "AA:BB:CC:DD:EE:FF".parse().unwrap();
-        let other_mac_address = "AA:BB:CC:DD:EE:FE".parse().unwrap();
-        let expected_host_bmc_macs = HashSet::from([host_bmc_mac_address]);
-        check_values(
-            [
-                Check {
-                    scenario: "legacy host entry",
-                    input: (ExpectedInterfaceRole::Host, other_mac_address),
-                    expect: false,
-                },
-                Check {
-                    scenario: "DPU OS interface",
-                    input: (ExpectedInterfaceRole::DpuOs, other_mac_address),
-                    expect: true,
-                },
-                Check {
-                    scenario: "DPU BMC interface",
-                    input: (ExpectedInterfaceRole::DpuBmc, other_mac_address),
-                    expect: false,
-                },
-                Check {
-                    scenario: "Host BMC interface",
-                    input: (ExpectedInterfaceRole::HostBmc, host_bmc_mac_address),
-                    expect: false,
-                },
-                Check {
-                    scenario: "historical DPU OS declaration at any ExpectedMachine BMC identity",
-                    input: (ExpectedInterfaceRole::DpuOs, host_bmc_mac_address),
-                    expect: false,
-                },
-            ],
-            |(role, mac_address)| {
-                should_skip_expected_interface_redfish_scan(
-                    &ExpectedInterface {
-                        mac_address,
-                        role,
-                        ..Default::default()
-                    },
-                    &expected_host_bmc_macs,
-                )
-            },
         );
     }
 

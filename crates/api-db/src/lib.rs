@@ -24,11 +24,14 @@ pub mod bmc_redfish_session;
 pub mod bmc_suppression;
 pub mod carbide_version;
 pub mod compute_allocation;
+mod conditional_write;
+mod config_drift;
 pub mod credential_rotation;
 pub mod db_read;
 pub mod desired_firmware;
 pub mod dhcp_entry;
 pub mod dhcp_record;
+pub mod direct_dispatch_firmware_job;
 pub mod dns;
 pub mod dpa_interface;
 pub mod dpu_agent_upgrade_policy;
@@ -37,6 +40,7 @@ pub mod dpu_remediation;
 pub mod expected_machine;
 pub mod expected_power_shelf;
 pub mod expected_rack;
+pub mod expected_rack_group;
 pub mod expected_switch;
 pub mod explored_endpoints;
 pub mod explored_managed_host;
@@ -105,6 +109,10 @@ pub mod vpc_dpu_loopback;
 pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
+
+pub use conditional_write::{
+    ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

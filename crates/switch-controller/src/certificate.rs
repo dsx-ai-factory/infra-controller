@@ -18,6 +18,7 @@
 //! Switch certificate configuration via Component Manager.
 
 use carbide_uuid::switch::SwitchId;
+use component_manager::error::ComponentManagerError;
 use model::component_manager::ConfigureSwitchCertificateState;
 use model::switch::Switch;
 use state_controller::state_handler::{
@@ -174,17 +175,25 @@ pub async fn poll_configure_switch_certificate_job(
         ));
     };
 
-    let status = component_manager
+    let status = match component_manager
         .get_configure_switch_certificate_job_status(job_id)
         .await
-        .map_err(|error| {
-            StateHandlerError::GenericError(eyre::eyre!(
+    {
+        Ok(status) => status,
+        Err(error @ ComponentManagerError::NotFound(_)) => {
+            return Ok(ConfigureSwitchCertificatePollOutcome::Failed(
+                error.to_string(),
+            ));
+        }
+        Err(error) => {
+            return Err(StateHandlerError::GenericError(eyre::eyre!(
                 "switch {:?}: failed to get switch certificate job status for {}: {}",
                 switch_id,
                 job_id,
                 error
-            ))
-        })?;
+            )));
+        }
+    };
 
     Ok(match status.state {
         ConfigureSwitchCertificateState::Completed => {

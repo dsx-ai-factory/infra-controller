@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use crate::SshError;
@@ -105,9 +105,6 @@ async fn scp_cmd_write(
     password: &str,
     timeout_secs: u64,
 ) -> Result<(), SshError> {
-    let ip_str = ip_address.ip().to_string();
-    let port_str = ip_address.port().to_string();
-
     tracing::info!(
         local_path,
         remote_path,
@@ -129,17 +126,7 @@ async fn scp_cmd_write(
             .map_err(io_ssh_error)?;
     }
 
-    let mut child = tokio::process::Command::new("scp")
-        .args([
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "PubkeyAuthentication=no",
-            "-P",
-            &port_str,
-            local_path,
-            &format!("{username}@{ip_str}:{remote_path}"),
-        ])
+    let mut child = scp_command(local_path, remote_path, ip_address, username)
         .env("SSH_ASKPASS", &askpass_path)
         .env("SSH_ASKPASS_REQUIRE", "force")
         .env("DISPLAY", "dummy")
@@ -181,6 +168,32 @@ async fn scp_cmd_write(
     ))))
 }
 
+fn scp_command(
+    local_path: &str,
+    remote_path: &str,
+    ip_address: SocketAddr,
+    username: &str,
+) -> tokio::process::Command {
+    // SCP separates the host and path with ':', so IPv6 needs brackets.
+    let host = match ip_address.ip() {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    let port = ip_address.port().to_string();
+    let mut command = tokio::process::Command::new("scp");
+    command.args([
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "PubkeyAuthentication=no",
+        "-P",
+        &port,
+        local_path,
+        &format!("{username}@{host}:{remote_path}"),
+    ]);
+    command
+}
+
 fn io_ssh_error(e: std::io::Error) -> SshError {
     SshError::Io(e)
 }
@@ -211,4 +224,66 @@ pub async fn check_console_for_markers(
         .lines()
         .any(|line| markers.iter().any(|marker| line.contains(marker)));
     Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::scp_command;
+
+    #[test]
+    fn scp_arguments_preserve_paths_and_port_for_both_address_families() {
+        struct Case {
+            name: &'static str,
+            address: &'static str,
+            port: &'static str,
+            destination: &'static str,
+        }
+
+        let cases = [
+            Case {
+                name: "IPv4",
+                address: "192.0.2.1:22",
+                port: "22",
+                destination: "root@192.0.2.1:/dev/rshim0/boot",
+            },
+            Case {
+                name: "IPv6 with custom port",
+                address: "[2001:db8::1]:2222",
+                port: "2222",
+                destination: "root@[2001:db8::1]:/dev/rshim0/boot",
+            },
+        ];
+
+        for case in cases {
+            // Keep a space in the filename to check that it stays one argument.
+            let local_path = "/tmp/pre ingestion.bfb";
+            let command = scp_command(
+                local_path,
+                "/dev/rshim0/boot",
+                case.address.parse().expect("valid BMC socket address"),
+                "root",
+            );
+            let command = command.as_std();
+            assert_eq!(command.get_program(), OsStr::new("scp"), "{}", case.name);
+            let expected_args = [
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "PubkeyAuthentication=no",
+                "-P",
+                case.port,
+                local_path,
+                case.destination,
+            ]
+            .map(OsStr::new);
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                expected_args,
+                "{}",
+                case.name,
+            );
+        }
+    }
 }

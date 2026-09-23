@@ -13,7 +13,10 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
+	"strings"
 
 	goipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	"github.com/metal-stack/v"
@@ -348,7 +351,7 @@ func main() {
 					dbname := ctx.String("db-name")
 
 					opts := options.Client()
-					opts.ApplyURI(fmt.Sprintf(`mongodb://%s:%s`, host, port))
+					opts.ApplyURI(mongoURI(host, port))
 					opts.Auth = &options.Credential{
 						AuthMechanism: `SCRAM-SHA-1`,
 						Username:      user,
@@ -377,6 +380,18 @@ func main() {
 		log.Fatalf("Error in cli: %v", err)
 	}
 
+}
+
+func mongoURI(host, port string) string {
+	// JoinHostPort adds IPv6 brackets; accept hosts that already include them.
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	u := url.URL{
+		Scheme: "mongodb",
+		Host:   net.JoinHostPort(host, port),
+	}
+	return u.String()
 }
 
 func getConfig(ctx *cli.Context) config {

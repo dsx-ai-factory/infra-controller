@@ -19,6 +19,7 @@ mod args;
 mod cmd;
 
 pub(super) use args::Args;
+use rpc::forge::ExpectedMachineRequest;
 
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
@@ -26,8 +27,10 @@ use crate::errors::CarbideCliResult;
 
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        let request =
+            Option::<ExpectedMachineRequest>::try_from(self).unwrap_or_else(|error| error.exit());
         cmd::show_expected_machines(
-            &self,
+            request,
             &ctx.api_client,
             ctx.config.format,
             &mut ctx.output_file,

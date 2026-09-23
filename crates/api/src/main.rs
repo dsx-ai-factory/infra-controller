@@ -17,13 +17,12 @@
 #![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 use std::path::Path;
-use std::str::FromStr;
 
-use carbide::{Command, Options};
+use carbide::{Command, Options, postgres_connect_options};
 use carbide_secrets::CredentialConfig;
 use clap::CommandFactory;
 use sqlx::PgPool;
-use sqlx::postgres::{PgConnectOptions, PgSslMode};
+use sqlx::postgres::PgSslMode;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -42,7 +41,7 @@ async fn main() -> eyre::Result<()> {
     match sub_cmd {
         Command::Migrate(m) => {
             tracing::info!("Running migrations");
-            let mut pg_connection_options = PgConnectOptions::from_str(&m.datastore[..])?;
+            let mut pg_connection_options = postgres_connect_options(&m.datastore)?;
             let root_cafile_path = Path::new("/var/run/secrets/spiffe.io/ca.crt");
             if root_cafile_path.exists() {
                 tracing::info!("using TLS for postgres connection.");

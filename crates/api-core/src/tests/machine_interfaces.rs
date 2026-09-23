@@ -888,7 +888,7 @@ async fn machine_bmc_info_uses_bmc_interface_and_interfaces_exclude_it(
     let host_bmc_interface = interfaces
         .iter()
         .find(|interface| {
-            interface.machine_id == Some(host_machine.id)
+            interface.machine_id == Some(host_machine.id.into())
                 && interface.interface_type == InterfaceType::Bmc
         })
         .expect("host BMC interface must exist");
@@ -904,7 +904,7 @@ async fn machine_bmc_info_uses_bmc_interface_and_interfaces_exclude_it(
     let dpu_bmc_interface = interfaces
         .iter()
         .find(|interface| {
-            interface.machine_id == Some(dpu_machine.id)
+            interface.machine_id == Some(dpu_machine.id.into())
                 && interface.interface_type == InterfaceType::Bmc
         })
         .expect("DPU BMC interface must exist");

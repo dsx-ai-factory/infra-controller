@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	inventorymanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/manager"
 	inventorystore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/store"
@@ -23,6 +24,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
 // --- Minimal mock for inventorymanager.Manager ---
@@ -202,8 +204,9 @@ func TestGetRackInfoByIDPrefersExternalID(t *testing.T) {
 	mgr := newMockManager()
 	internalID := uuid.New()
 	mgr.racks[internalID] = &rack.Rack{
-		Info:       deviceinfo.DeviceInfo{ID: internalID, Name: "rack-1"},
-		ExternalID: "core-rack-01",
+		Info:            deviceinfo.DeviceInfo{ID: internalID, Name: "rack-1"},
+		ExternalID:      "core-rack-01",
+		OperationStatus: types.PhaseError,
 	}
 
 	response, err := (&FlowServerImpl{inventoryManager: mgr}).GetRackInfoByID(
@@ -214,6 +217,7 @@ func TestGetRackInfoByIDPrefersExternalID(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, response.GetRack())
 	assert.Equal(t, "core-rack-01", response.GetRack().GetExternalId())
+	assert.Equal(t, pb.Phase_PHASE_ERROR, response.GetRack().GetOperationStatus())
 }
 
 func TestGetRackInfoByIDDoesNotResolveFlowUUID(t *testing.T) {
@@ -499,6 +503,83 @@ func TestPatchComponent_Success(t *testing.T) {
 	assert.Equal(t, 3, updated.Position.SlotID)
 	assert.Equal(t, 2, updated.Position.TrayIndex)
 	assert.Equal(t, 5, updated.Position.HostID)
+}
+
+func TestPatchComponent_PositionMask(t *testing.T) {
+	mustNotApply := "must-not-be-applied"
+	for _, tc := range []struct {
+		name            string
+		position        *pb.RackPosition
+		updateMask      *fieldmaskpb.FieldMask
+		firmwareVersion *string
+		wantPosition    component.InRackPosition
+		wantCode        codes.Code
+	}{
+		{
+			name:         "slot only",
+			position:     &pb.RackPosition{},
+			updateMask:   &fieldmaskpb.FieldMask{Paths: []string{"position.slot_id"}},
+			wantPosition: component.InRackPosition{SlotID: 0, TrayIndex: 2, HostID: 3},
+		},
+		{
+			name:         "tray only",
+			position:     &pb.RackPosition{},
+			updateMask:   &fieldmaskpb.FieldMask{Paths: []string{"position.tray_idx"}},
+			wantPosition: component.InRackPosition{SlotID: 1, TrayIndex: 0, HostID: 3},
+		},
+		{
+			name:         "host only",
+			position:     &pb.RackPosition{},
+			updateMask:   &fieldmaskpb.FieldMask{Paths: []string{"position.host_id"}},
+			wantPosition: component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 0},
+		},
+		{
+			name:            "empty mask",
+			position:        &pb.RackPosition{},
+			updateMask:      &fieldmaskpb.FieldMask{},
+			firmwareVersion: &mustNotApply,
+			wantPosition:    component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 3},
+			wantCode:        codes.InvalidArgument,
+		},
+		{
+			name:            "unsupported path",
+			position:        &pb.RackPosition{},
+			updateMask:      &fieldmaskpb.FieldMask{Paths: []string{"position.unknown"}},
+			firmwareVersion: &mustNotApply,
+			wantPosition:    component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 3},
+			wantCode:        codes.InvalidArgument,
+		},
+		{
+			name:            "missing position",
+			updateMask:      &fieldmaskpb.FieldMask{Paths: []string{"position.slot_id"}},
+			firmwareVersion: &mustNotApply,
+			wantPosition:    component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 3},
+			wantCode:        codes.InvalidArgument,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := newMockManager()
+			compID := uuid.New()
+			mgr.components[compID] = &component.Component{
+				Info:            deviceinfo.DeviceInfo{ID: compID},
+				FirmwareVersion: "original",
+				Position:        component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 3},
+			}
+
+			server := &FlowServerImpl{inventoryManager: mgr}
+			_, err := server.PatchComponent(context.Background(), &pb.PatchComponentRequest{
+				Id:              &pb.UUID{Id: compID.String()},
+				FirmwareVersion: tc.firmwareVersion,
+				Position:        tc.position,
+				UpdateMask:      tc.updateMask,
+			})
+			require.Equal(t, tc.wantCode, status.Code(err))
+			assert.Equal(t, tc.wantPosition, mgr.components[compID].Position)
+			if tc.wantCode != codes.OK {
+				assert.Equal(t, "original", mgr.components[compID].FirmwareVersion)
+			}
+		})
+	}
 }
 
 func TestPatchComponent_MissingID(t *testing.T) {

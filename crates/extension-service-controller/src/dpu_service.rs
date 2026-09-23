@@ -19,11 +19,15 @@
 
 use std::collections::BTreeMap;
 
-use carbide_dpf::{DetachedDpuServiceDefinition, DetachedHelmChart, DpuServiceObservation};
+use carbide_dpf::{
+    DetachedDpuServiceDefinition, DetachedHelmChart, DetachedServiceDaemonSet,
+    DetachedServiceDaemonSetRollingUpdate, DetachedServiceDaemonSetUpdateStrategy,
+    DpuServiceObservation, IntOrString,
+};
 use carbide_uuid::extension_service::ExtensionServiceId;
 use model::extension_service::{
     DPF_HELM_CHART_OWNER_LABEL, DPF_HELM_CHART_PLACEMENT_LABEL_VALUE, DpfHelmChartIdentity,
-    DpfHelmChartServiceData,
+    DpfHelmChartIntOrString, DpfHelmChartServiceData,
 };
 use serde_json::{Map, Value, json};
 
@@ -49,7 +53,7 @@ pub fn project_dpu_service(
         helm_chart: projected_helm_chart(&identity, data),
         deploy_in_cluster: false,
         security_privileged: data.security_privileged,
-        node_selector_labels: detached_node_selector_labels(&identity),
+        service_daemon_set: Some(projected_service_daemon_set(&identity, data)),
     }
 }
 
@@ -58,9 +62,9 @@ pub fn project_dpu_service(
 /// absent: they must be validated before applying this patch, never repaired
 /// or overwritten.
 ///
-/// `existing_values` is used to make the `values` field a complete replacement
+/// `existing` is used to make tenant-owned objects complete replacements
 /// despite JSON Merge Patch's recursive object-merge behavior. Any key absent
-/// from the desired values is emitted as `null`, recursively removing it from
+/// from a desired object is emitted as `null`, recursively removing it from
 /// the live DPUService.
 ///
 /// An absent desired `values` is represented by `null` so the entire stored
@@ -68,7 +72,7 @@ pub fn project_dpu_service(
 /// absent values by omitting that field.
 pub fn dpu_service_mutable_patch(
     projected: &DetachedDpuServiceDefinition,
-    existing_values: Option<&BTreeMap<String, Value>>,
+    existing: Option<&DpuServiceObservation>,
 ) -> Value {
     let helm_chart = &projected.helm_chart;
     let mut helm_chart_patch = Map::from_iter([(
@@ -84,17 +88,89 @@ pub fn dpu_service_mutable_patch(
         helm_chart.values.as_ref().map_or(Value::Null, |values| {
             Value::Object(values_replacement_merge_patch(
                 &json_object(values),
-                &existing_values.map(json_object).unwrap_or_default(),
+                &existing
+                    .and_then(|existing| existing.helm_chart.values.as_ref())
+                    .map(json_object)
+                    .unwrap_or_default(),
             ))
         }),
     );
+
+    // Replace only the tenant-configurable daemon-set fields.
+    let service_daemon_set = projected.service_daemon_set.as_ref();
+    let existing_service_daemon_set =
+        existing.and_then(|existing| existing.service_daemon_set.as_ref());
+    let service_daemon_set_patch = Map::from_iter([
+        (
+            "annotations".to_owned(),
+            optional_object_replacement_patch(
+                service_daemon_set.and_then(|daemon_set| daemon_set.annotations.as_ref()),
+                existing_service_daemon_set.and_then(|daemon_set| daemon_set.annotations.as_ref()),
+            ),
+        ),
+        (
+            "labels".to_owned(),
+            optional_object_replacement_patch(
+                service_daemon_set.and_then(|daemon_set| daemon_set.labels.as_ref()),
+                existing_service_daemon_set.and_then(|daemon_set| daemon_set.labels.as_ref()),
+            ),
+        ),
+        (
+            "resources".to_owned(),
+            optional_object_replacement_patch(
+                service_daemon_set.and_then(|daemon_set| daemon_set.resources.as_ref()),
+                existing_service_daemon_set.and_then(|daemon_set| daemon_set.resources.as_ref()),
+            ),
+        ),
+        (
+            "updateStrategy".to_owned(),
+            optional_value_replacement_patch(
+                service_daemon_set
+                    .and_then(|daemon_set| daemon_set.update_strategy.as_ref())
+                    .map(update_strategy_json),
+                existing_service_daemon_set
+                    .and_then(|daemon_set| daemon_set.update_strategy.clone()),
+            ),
+        ),
+    ]);
 
     json!({
         "spec": {
             "helmChart": helm_chart_patch,
             "security": {"privileged": projected.security_privileged},
+            "serviceDaemonSet": service_daemon_set_patch,
         },
     })
+}
+
+/// Converts an optional typed map into a replacement-style JSON Merge Patch so
+/// keys removed by a tenant do not survive in the live DPUService.
+fn optional_object_replacement_patch<T: serde::Serialize>(
+    desired: Option<&BTreeMap<String, T>>,
+    existing: Option<&BTreeMap<String, T>>,
+) -> Value {
+    // Serialize both maps before applying the common JSON replacement logic.
+    optional_value_replacement_patch(
+        desired.map(|value| serde_json::to_value(value).expect("map serialization is infallible")),
+        existing.map(|value| serde_json::to_value(value).expect("map serialization is infallible")),
+    )
+}
+
+/// Produces a JSON Merge Patch value that replaces objects recursively and
+/// clears the live field when the desired value is absent.
+fn optional_value_replacement_patch(desired: Option<Value>, existing: Option<Value>) -> Value {
+    // Object replacement requires explicit nulls for keys that disappeared;
+    // scalar values and absent fields already have direct merge-patch forms.
+    match desired {
+        Some(Value::Object(desired)) => Value::Object(values_replacement_merge_patch(
+            &desired,
+            &existing
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default(),
+        )),
+        Some(value) => value,
+        None => Value::Null,
+    }
 }
 
 fn values_replacement_merge_patch(
@@ -171,7 +247,10 @@ pub fn verify_dpu_service_ownership(
     )?;
     let expected_node_selector = node_selector_json(&detached_node_selector_labels(&identity));
     immutable_field_matches(
-        existing.service_daemon_set_node_selector.as_ref(),
+        existing
+            .service_daemon_set
+            .as_ref()
+            .and_then(|daemon_set| daemon_set.node_selector.as_ref()),
         Some(&expected_node_selector),
         "spec.serviceDaemonSet.nodeSelector",
     )
@@ -216,6 +295,76 @@ fn projected_helm_chart(
     }
 }
 
+/// Projects the extension service's DaemonSet settings and its required
+/// NICo-owned placement into the generic detached DPF representation.
+fn projected_service_daemon_set(
+    identity: &DpfHelmChartIdentity,
+    data: &DpfHelmChartServiceData,
+) -> DetachedServiceDaemonSet {
+    let service_daemon_set = data.service_daemon_set.as_ref();
+
+    // Always supply NICo-owned placement while preserving omission of each
+    // tenant-configurable field.
+    DetachedServiceDaemonSet {
+        node_selector_labels: Some(detached_node_selector_labels(identity)),
+        annotations: service_daemon_set.and_then(|daemon_set| daemon_set.annotations.clone()),
+        labels: service_daemon_set.and_then(|daemon_set| daemon_set.labels.clone()),
+        resources: service_daemon_set
+            .and_then(|daemon_set| daemon_set.resources.as_ref())
+            .map(|resources| {
+                resources
+                    .iter()
+                    .map(|(name, quantity)| (name.clone(), projected_int_or_string(quantity)))
+                    .collect()
+            }),
+        update_strategy: service_daemon_set
+            .and_then(|daemon_set| daemon_set.update_strategy.as_ref())
+            .map(|strategy| DetachedServiceDaemonSetUpdateStrategy {
+                strategy_type: strategy.strategy_type.clone(),
+                rolling_update: strategy.rolling_update.as_ref().map(|rolling| {
+                    DetachedServiceDaemonSetRollingUpdate {
+                        max_surge: rolling.max_surge.as_ref().map(projected_int_or_string),
+                        max_unavailable: rolling
+                            .max_unavailable
+                            .as_ref()
+                            .map(projected_int_or_string),
+                    }
+                }),
+            }),
+    }
+}
+
+/// Preserves the integer-or-string representation expected by DPF.
+fn projected_int_or_string(value: &DpfHelmChartIntOrString) -> IntOrString {
+    match value {
+        DpfHelmChartIntOrString::Int(value) => IntOrString::Int(*value),
+        DpfHelmChartIntOrString::String(value) => IntOrString::String(value.clone()),
+    }
+}
+
+/// Serializes an observed update strategy using the DPF field names needed to
+/// calculate a replacement-style merge patch against the desired strategy.
+fn update_strategy_json(strategy: &DetachedServiceDaemonSetUpdateStrategy) -> Value {
+    // Omit absent strategy fields so the replacement helper can distinguish
+    // them from explicitly supplied values.
+    let mut value = Map::new();
+    if let Some(strategy_type) = &strategy.strategy_type {
+        value.insert("type".to_owned(), json!(strategy_type));
+    }
+    if let Some(rolling_update) = &strategy.rolling_update {
+        // Preserve the nested rolling-update shape used by the DPF CRD.
+        let mut rolling = Map::new();
+        if let Some(max_surge) = &rolling_update.max_surge {
+            rolling.insert("maxSurge".to_owned(), json!(max_surge));
+        }
+        if let Some(max_unavailable) = &rolling_update.max_unavailable {
+            rolling.insert("maxUnavailable".to_owned(), json!(max_unavailable));
+        }
+        value.insert("rollingUpdate".to_owned(), Value::Object(rolling));
+    }
+    Value::Object(value)
+}
+
 fn detached_node_selector_labels(identity: &DpfHelmChartIdentity) -> BTreeMap<String, String> {
     BTreeMap::from([(
         identity.placement_label_key.clone(),
@@ -258,6 +407,8 @@ fn immutable_absent(
 mod tests {
     use std::str::FromStr;
 
+    use carbide_dpf::DpuServiceDaemonSetObservation;
+
     use super::*;
 
     const SERVICE_ID: &str = "00000000-0000-0000-0000-000000000001";
@@ -274,10 +425,12 @@ mod tests {
             chart_version: "1.2.3".to_owned(),
             security_privileged: true,
             values,
+            service_daemon_set: None,
         }
     }
 
     fn observation(projected: &DetachedDpuServiceDefinition) -> DpuServiceObservation {
+        let service_daemon_set = projected.service_daemon_set.as_ref();
         DpuServiceObservation {
             name: Some(projected.name.clone()),
             namespace: Some(projected.namespace.clone()),
@@ -295,9 +448,21 @@ mod tests {
             interfaces_present: false,
             paused: None,
             security_privileged: Some(projected.security_privileged),
-            service_daemon_set_node_selector: Some(node_selector_json(
-                &projected.node_selector_labels,
-            )),
+            service_daemon_set: service_daemon_set.map(|daemon_set| {
+                DpuServiceDaemonSetObservation {
+                    node_selector: daemon_set
+                        .node_selector_labels
+                        .as_ref()
+                        .map(node_selector_json),
+                    annotations: daemon_set.annotations.clone(),
+                    labels: daemon_set.labels.clone(),
+                    resources: daemon_set.resources.clone(),
+                    update_strategy: daemon_set
+                        .update_strategy
+                        .as_ref()
+                        .map(update_strategy_json),
+                }
+            }),
             service_id: None,
             config_ports_present: false,
         }
@@ -334,7 +499,14 @@ mod tests {
         );
         assert!(projected.security_privileged);
         assert_eq!(
-            projected.node_selector_labels,
+            projected
+                .service_daemon_set
+                .as_ref()
+                .unwrap()
+                .node_selector_labels
+                .as_ref()
+                .unwrap()
+                .clone(),
             BTreeMap::from([(
                 "nico/extsvc-00000000-0000-0000-0000-000000000001".to_owned(),
                 "enabled".to_owned(),
@@ -349,6 +521,99 @@ mod tests {
         assert!(!projected.deploy_in_cluster);
     }
 
+    /// Verifies typed daemon-set fields round-trip into a replacement patch
+    /// while NICo-owned placement remains excluded from tenant updates.
+    #[test]
+    fn projection_and_patch_include_typed_daemon_set_fields_but_not_placement() {
+        // Build the observed state with both typed scalar variants and keys
+        // that the desired replacement will remove.
+        let initial = DpfHelmChartServiceData::parse(
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "security.privileged":true,
+                "serviceDaemonSet":{
+                    "labels":{"app":"old","remove-me":"value"},
+                    "annotations":{"example.com/owner":"old"},
+                    "resources":{"nvidia.com/bf_sf":1},
+                    "updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}
+                }
+            }"#,
+        )
+        .unwrap();
+        let initial_projection = project_dpu_service(service_id(), NAMESPACE, &initial);
+
+        // Confirm projection preserves integer quantities and limits.
+        assert_eq!(
+            initial_projection
+                .service_daemon_set
+                .as_ref()
+                .unwrap()
+                .resources
+                .as_ref()
+                .unwrap()["nvidia.com/bf_sf"],
+            IntOrString::Int(1)
+        );
+        assert_eq!(
+            initial_projection
+                .service_daemon_set
+                .as_ref()
+                .unwrap()
+                .update_strategy
+                .as_ref()
+                .unwrap()
+                .rolling_update
+                .as_ref()
+                .unwrap()
+                .max_unavailable,
+            Some(IntOrString::Int(0))
+        );
+
+        // Change mutable fields and omit old keys to exercise replacement
+        // semantics rather than JSON Merge Patch's default recursive merge.
+        let desired = DpfHelmChartServiceData::parse(
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "security.privileged":true,
+                "serviceDaemonSet":{
+                    "labels":{"app":"new"},
+                    "annotations":{},
+                    "resources":{"nvidia.com/bf_sf":"2"},
+                    "updateStrategy":{"type":"OnDelete"}
+                }
+            }"#,
+        )
+        .unwrap();
+        let desired_projection = project_dpu_service(service_id(), NAMESPACE, &desired);
+        let existing = observation(&initial_projection);
+        let patch = dpu_service_mutable_patch(&desired_projection, Some(&existing));
+
+        // Removed nested keys must become null while supplied values replace
+        // their observed counterparts.
+        assert_eq!(
+            patch["spec"]["serviceDaemonSet"],
+            json!({
+                "annotations": {"example.com/owner": null},
+                "labels": {"app": "new", "remove-me": null},
+                "resources": {"nvidia.com/bf_sf": "2"},
+                "updateStrategy": {
+                    "type": "OnDelete",
+                    "rollingUpdate": null,
+                },
+            })
+        );
+
+        // Tenant updates must never include NICo-owned placement.
+        assert!(
+            patch["spec"]["serviceDaemonSet"]
+                .get("nodeSelector")
+                .is_none()
+        );
+    }
+
     #[test]
     fn mutable_patch_has_no_identity_or_attachment_fields() {
         let projected = project_dpu_service(service_id(), NAMESPACE, &data(None));
@@ -361,7 +626,11 @@ mod tests {
         assert!(patch["spec"].get("interfaces").is_none());
         assert!(patch["spec"].get("configPorts").is_none());
         assert!(patch["spec"].get("dpuClusterSelector").is_none());
-        assert!(patch["spec"].get("serviceDaemonSet").is_none());
+        assert!(
+            patch["spec"]["serviceDaemonSet"]
+                .get("nodeSelector")
+                .is_none()
+        );
         assert!(
             patch["spec"]["helmChart"]["source"]
                 .get("releaseName")
@@ -388,7 +657,9 @@ mod tests {
             ]))),
         );
 
-        let patch = dpu_service_mutable_patch(&projected, Some(&existing_values));
+        let mut existing = observation(&projected);
+        existing.helm_chart.values = Some(existing_values);
+        let patch = dpu_service_mutable_patch(&projected, Some(&existing));
 
         assert_eq!(
             patch["spec"]["helmChart"]["values"],
@@ -408,7 +679,9 @@ mod tests {
         let projected = project_dpu_service(service_id(), NAMESPACE, &data(Some(Map::new())));
         let existing_values = BTreeMap::from_iter([("debug".to_owned(), json!(true))]);
 
-        let patch = dpu_service_mutable_patch(&projected, Some(&existing_values));
+        let mut existing = observation(&projected);
+        existing.helm_chart.values = Some(existing_values);
+        let patch = dpu_service_mutable_patch(&projected, Some(&existing));
 
         assert_eq!(patch["spec"]["helmChart"]["values"], json!({"debug": null}));
     }
@@ -465,7 +738,11 @@ mod tests {
         );
 
         let mut wrong_placement = observation(&projected);
-        wrong_placement.service_daemon_set_node_selector = Some(json!({
+        wrong_placement
+            .service_daemon_set
+            .as_mut()
+            .unwrap()
+            .node_selector = Some(json!({
             "nodeSelectorTerms": [{"matchExpressions": []}],
         }));
         assert_eq!(

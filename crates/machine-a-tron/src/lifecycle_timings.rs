@@ -38,24 +38,24 @@ use serde::{Deserialize, Serialize};
 ///
 /// A `LifecycleTimings` value is resolved once at [`MachineStateMachine`] construction
 /// time and stored on the state machine. Timer events (`SetTimer(MachineOn)`,
-/// `SetTimer(PowerCycle)`) read from this struct rather than from flat config fields.
+/// `SetTimer(OsReady)`, `SetTimer(PowerOffGraceful)`, `SetTimer(PowerCycle)`) read from
+/// this struct rather than from flat config fields.
 ///
 /// [`MachineStateMachine`]: crate::machine_state_machine::MachineStateMachine
 #[derive(Debug, Clone, PartialEq)]
 pub struct LifecycleTimings {
-    /// Time from power signal to BMC DHCP / Redfish becoming available.
-    pub power_on_bmc_ready: Duration,
-    /// Time from BMC up to OS agent ready (covers PXE boot).
+    /// Host `On` → the OS asks for DHCP (covers POST and PXE boot). Maps to the
+    /// `SetTimer(OsReady)` arm. Zero, the platform default, means the OS asks for DHCP
+    /// as soon as the host is `On`.
     pub power_on_os_ready: Duration,
-    /// Graceful shutdown signal → host offline.
+    /// Graceful shutdown signal → host offline. Maps to the `SetTimer(PowerOffGraceful)`
+    /// arm. Zero, the platform default, makes it immediate.
     pub power_off_graceful: Duration,
     /// Force power off → host offline.  Maps to the `SetTimer(PowerCycle)` arm.
     pub power_off_force: Duration,
     /// Full reboot cycle (off + on).  Maps to the `SetTimer(MachineOn)` arm.
     pub reboot: Duration,
-    /// Hard reset — may be faster than a full reboot on some platforms.
-    pub reset: Duration,
-    /// Offset after `power_on_bmc_ready` before SSH console is available.
+    /// Offset after the BMC comes online before SSH console is available.
     pub bmc_ssh_ready_offset: Duration,
     /// Duration the BMC is unreachable after `Manager.Reset` / `ipmitool bmc reset cold`.
     /// Phase 4 will use this to drive the `BmcAvailability::Resetting` window in bmc-mock.
@@ -67,9 +67,6 @@ impl LifecycleTimings {
     /// the corresponding value, leaving `None` fields unchanged.
     pub fn with_overrides(self, overrides: &PartialLifecycleTimings) -> Self {
         Self {
-            power_on_bmc_ready: overrides
-                .power_on_bmc_ready
-                .unwrap_or(self.power_on_bmc_ready),
             power_on_os_ready: overrides
                 .power_on_os_ready
                 .unwrap_or(self.power_on_os_ready),
@@ -78,7 +75,6 @@ impl LifecycleTimings {
                 .unwrap_or(self.power_off_graceful),
             power_off_force: overrides.power_off_force.unwrap_or(self.power_off_force),
             reboot: overrides.reboot.unwrap_or(self.reboot),
-            reset: overrides.reset.unwrap_or(self.reset),
             bmc_ssh_ready_offset: overrides
                 .bmc_ssh_ready_offset
                 .unwrap_or(self.bmc_ssh_ready_offset),
@@ -94,12 +90,10 @@ impl LifecycleTimings {
         // clamp handles both negative and NaN (f64::NAN.max(0.0) == 0.0 in Rust)
         let f = factor.max(0.0);
         Self {
-            power_on_bmc_ready: self.power_on_bmc_ready.mul_f64(f),
             power_on_os_ready: self.power_on_os_ready.mul_f64(f),
             power_off_graceful: self.power_off_graceful.mul_f64(f),
             power_off_force: self.power_off_force.mul_f64(f),
             reboot: self.reboot.mul_f64(f),
-            reset: self.reset.mul_f64(f),
             bmc_ssh_ready_offset: self.bmc_ssh_ready_offset.mul_f64(f),
             bmc_reset: self.bmc_reset.mul_f64(f),
         }
@@ -154,16 +148,11 @@ mod opt_duration_str {
 /// ```toml
 /// [machines.my-group.timing_overrides]
 /// host.reboot = "300s"
-/// dpu.power_on_bmc_ready = "45s"
+/// host.power_on_os_ready = "420s"
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PartialLifecycleTimings {
-    #[serde(
-        with = "opt_duration_str",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub power_on_bmc_ready: Option<Duration>,
     #[serde(
         with = "opt_duration_str",
         default,
@@ -193,12 +182,6 @@ pub struct PartialLifecycleTimings {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub reset: Option<Duration>,
-    #[serde(
-        with = "opt_duration_str",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
     pub bmc_ssh_ready_offset: Option<Duration>,
     #[serde(
         with = "opt_duration_str",
@@ -211,6 +194,7 @@ pub struct PartialLifecycleTimings {
 /// Per-group TOML timing overrides — one [`PartialLifecycleTimings`] for the host
 /// role and one for the DPU role.  Absent fields default to the platform profile.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct LifecycleTimingOverrides {
     #[serde(default)]
     pub host: PartialLifecycleTimings,
@@ -247,12 +231,10 @@ impl PlatformTimingProfile {
         // DPU timings are shared across all host platforms — BF3/BF4 have similar
         // boot characteristics regardless of the server chassis they are installed in.
         let dpu = LifecycleTimings {
-            power_on_bmc_ready: Duration::from_secs(60),
-            power_on_os_ready: Duration::from_secs(120),
-            power_off_graceful: Duration::from_secs(30),
+            power_on_os_ready: Duration::ZERO,
+            power_off_graceful: Duration::ZERO,
             power_off_force,
             reboot: Duration::from_secs(180),
-            reset: Duration::from_secs(180),
             bmc_ssh_ready_offset: Duration::from_secs(20),
             bmc_reset: Duration::from_secs(90),
         };
@@ -260,12 +242,10 @@ impl PlatformTimingProfile {
         let host = match hw {
             // GB200 NVL: large GPU chassis, complex OpenBMC, longer POST due to GPU init.
             HardwareType::WiwynnGB200Nvl => LifecycleTimings {
-                power_on_bmc_ready: Duration::from_secs(180),
-                power_on_os_ready: Duration::from_secs(420),
-                power_off_graceful: Duration::from_secs(45),
+                power_on_os_ready: Duration::ZERO,
+                power_off_graceful: Duration::ZERO,
                 power_off_force,
                 reboot: Duration::from_secs(600),
-                reset: Duration::from_secs(600),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(120),
             },
@@ -273,12 +253,10 @@ impl PlatformTimingProfile {
             // Dell iDRAC9 servers (R750 = BF3, R760 = BF4): standard boot cadence.
             HardwareType::DellPowerEdgeR750 | HardwareType::DellPowerEdgeR760Bf4 => {
                 LifecycleTimings {
-                    power_on_bmc_ready: Duration::from_secs(90),
-                    power_on_os_ready: Duration::from_secs(300),
-                    power_off_graceful: Duration::from_secs(30),
+                    power_on_os_ready: Duration::ZERO,
+                    power_off_graceful: Duration::ZERO,
                     power_off_force,
                     reboot: Duration::from_secs(390),
-                    reset: Duration::from_secs(390),
                     bmc_ssh_ready_offset: Duration::from_secs(30),
                     bmc_reset: Duration::from_secs(90),
                 }
@@ -286,36 +264,30 @@ impl PlatformTimingProfile {
 
             // Lenovo GB300 NVL: similar GPU complexity to WiwynnGB200.
             HardwareType::LenovoGB300Nvl => LifecycleTimings {
-                power_on_bmc_ready: Duration::from_secs(150),
-                power_on_os_ready: Duration::from_secs(360),
-                power_off_graceful: Duration::from_secs(45),
+                power_on_os_ready: Duration::ZERO,
+                power_off_graceful: Duration::ZERO,
                 power_off_force,
                 reboot: Duration::from_secs(510),
-                reset: Duration::from_secs(510),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(120),
             },
 
             // DGX GB300 / DGX VR: large NVIDIA GPU system, extended POST.
             HardwareType::NvidiaDgxGb300 | HardwareType::NvidiaDgxVr => LifecycleTimings {
-                power_on_bmc_ready: Duration::from_secs(150),
-                power_on_os_ready: Duration::from_secs(480),
-                power_off_graceful: Duration::from_secs(45),
+                power_on_os_ready: Duration::ZERO,
+                power_off_graceful: Duration::ZERO,
                 power_off_force,
                 reboot: Duration::from_secs(630),
-                reset: Duration::from_secs(630),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(120),
             },
 
             // DGX H100: NVIDIA GPU server, moderately long POST.
             HardwareType::NvidiaDgxH100 => LifecycleTimings {
-                power_on_bmc_ready: Duration::from_secs(120),
-                power_on_os_ready: Duration::from_secs(420),
-                power_off_graceful: Duration::from_secs(45),
+                power_on_os_ready: Duration::ZERO,
+                power_off_graceful: Duration::ZERO,
                 power_off_force,
                 reboot: Duration::from_secs(540),
-                reset: Duration::from_secs(540),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(120),
             },
@@ -323,12 +295,10 @@ impl PlatformTimingProfile {
             // Supermicro GB300 NVL and generic Supermicro.
             HardwareType::SupermicroGb300Nvl | HardwareType::GenericSupermicro => {
                 LifecycleTimings {
-                    power_on_bmc_ready: Duration::from_secs(120),
-                    power_on_os_ready: Duration::from_secs(360),
-                    power_off_graceful: Duration::from_secs(30),
+                    power_on_os_ready: Duration::ZERO,
+                    power_off_graceful: Duration::ZERO,
                     power_off_force,
                     reboot: Duration::from_secs(480),
-                    reset: Duration::from_secs(480),
                     bmc_ssh_ready_offset: Duration::from_secs(30),
                     bmc_reset: Duration::from_secs(90),
                 }
@@ -336,24 +306,20 @@ impl PlatformTimingProfile {
 
             // HPE iLO6: faster BMC reset than most platforms.
             HardwareType::HpeProliantDl380aGen11 => LifecycleTimings {
-                power_on_bmc_ready: Duration::from_secs(90),
-                power_on_os_ready: Duration::from_secs(300),
-                power_off_graceful: Duration::from_secs(30),
+                power_on_os_ready: Duration::ZERO,
+                power_off_graceful: Duration::ZERO,
                 power_off_force,
                 reboot: Duration::from_secs(390),
-                reset: Duration::from_secs(390),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(60),
             },
 
             // Generic AMI: moderate defaults for unknown AMI-BMC servers.
             HardwareType::GenericAmi => LifecycleTimings {
-                power_on_bmc_ready: Duration::from_secs(120),
-                power_on_os_ready: Duration::from_secs(300),
-                power_off_graceful: Duration::from_secs(30),
+                power_on_os_ready: Duration::ZERO,
+                power_off_graceful: Duration::ZERO,
                 power_off_force,
                 reboot: Duration::from_secs(420),
-                reset: Duration::from_secs(420),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(90),
             },
@@ -365,12 +331,10 @@ impl PlatformTimingProfile {
             | HardwareType::DeltaPowerShelf
             | HardwareType::NvidiaSwitchNd5200Ld
             | HardwareType::NvidiaSwitchN5700Ld => LifecycleTimings {
-                power_on_bmc_ready: Duration::ZERO,
                 power_on_os_ready: Duration::ZERO,
                 power_off_graceful: Duration::ZERO,
                 power_off_force,
                 reboot: Duration::ZERO,
-                reset: Duration::ZERO,
                 bmc_ssh_ready_offset: Duration::ZERO,
                 bmc_reset: Duration::ZERO,
             },
@@ -426,14 +390,6 @@ mod tests {
         ];
         for hw in &compute {
             let p = PlatformTimingProfile::for_hardware_type(hw);
-            assert!(
-                p.host.power_on_bmc_ready > Duration::ZERO,
-                "{hw:?}: power_on_bmc_ready is zero"
-            );
-            assert!(
-                p.host.power_on_os_ready > Duration::ZERO,
-                "{hw:?}: power_on_os_ready is zero"
-            );
             assert!(p.host.reboot > Duration::ZERO, "{hw:?}: reboot is zero");
             assert!(
                 p.host.bmc_reset > Duration::ZERO,
@@ -458,12 +414,51 @@ mod tests {
                 Duration::ZERO,
                 "{hw:?}: reboot should be zero"
             );
-            assert_eq!(
-                p.host.power_on_bmc_ready,
-                Duration::ZERO,
-                "{hw:?}: power_on_bmc_ready should be zero"
-            );
         }
+    }
+
+    #[test]
+    fn phase_timings_are_zero_in_every_platform_default() {
+        // `power_on_os_ready` and `power_off_graceful` are zero in every profile: an
+        // unmodified configuration boots and shuts down with no added delay.
+        for hw in &[
+            HardwareType::DellPowerEdgeR750,
+            HardwareType::DellPowerEdgeR760Bf4,
+            HardwareType::WiwynnGB200Nvl,
+            HardwareType::LenovoGB300Nvl,
+            HardwareType::NvidiaDgxGb300,
+            HardwareType::NvidiaDgxH100,
+            HardwareType::NvidiaDgxVr,
+            HardwareType::SupermicroGb300Nvl,
+            HardwareType::GenericAmi,
+            HardwareType::GenericSupermicro,
+            HardwareType::HpeProliantDl380aGen11,
+            HardwareType::LiteOnPowerShelf,
+            HardwareType::DeltaPowerShelf,
+            HardwareType::NvidiaSwitchNd5200Ld,
+            HardwareType::NvidiaSwitchN5700Ld,
+        ] {
+            let p = PlatformTimingProfile::for_hardware_type(hw);
+            for (role, t) in [("host", &p.host), ("dpu", &p.dpu)] {
+                assert_eq!(t.power_on_os_ready, Duration::ZERO, "{hw:?} {role}");
+                assert_eq!(t.power_off_graceful, Duration::ZERO, "{hw:?} {role}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_override_sets_one_phase_timing_only() {
+        let base = PlatformTimingProfile::for_hardware_type(&HardwareType::WiwynnGB200Nvl).host;
+        let with_phase = base.clone().with_overrides(&PartialLifecycleTimings {
+            power_on_os_ready: Some(Duration::from_secs(420)),
+            ..Default::default()
+        });
+        assert_eq!(with_phase.power_on_os_ready, Duration::from_secs(420));
+        assert_eq!(
+            with_phase.reboot, base.reboot,
+            "reboot is untouched by the phase"
+        );
+        assert_eq!(with_phase.power_off_graceful, Duration::ZERO);
     }
 
     #[test]
@@ -483,8 +478,6 @@ mod tests {
     fn wiwynn_gb200_has_longer_timings_than_dell() {
         let gb200 = PlatformTimingProfile::for_hardware_type(&HardwareType::WiwynnGB200Nvl);
         let dell = PlatformTimingProfile::for_hardware_type(&HardwareType::DellPowerEdgeR750);
-        assert!(gb200.host.power_on_bmc_ready > dell.host.power_on_bmc_ready);
-        assert!(gb200.host.power_on_os_ready > dell.host.power_on_os_ready);
         assert!(gb200.host.reboot > dell.host.reboot);
     }
 
@@ -543,22 +536,18 @@ mod tests {
     fn with_overrides_all_fields() {
         let base = PlatformTimingProfile::for_hardware_type(&HardwareType::GenericAmi).host;
         let overrides = PartialLifecycleTimings {
-            power_on_bmc_ready: Some(Duration::from_secs(1)),
             power_on_os_ready: Some(Duration::from_secs(2)),
             power_off_graceful: Some(Duration::from_secs(3)),
             power_off_force: Some(Duration::from_secs(4)),
             reboot: Some(Duration::from_secs(5)),
-            reset: Some(Duration::from_secs(6)),
             bmc_ssh_ready_offset: Some(Duration::from_secs(7)),
             bmc_reset: Some(Duration::from_secs(8)),
         };
         let result = base.with_overrides(&overrides);
-        assert_eq!(result.power_on_bmc_ready, Duration::from_secs(1));
         assert_eq!(result.power_on_os_ready, Duration::from_secs(2));
         assert_eq!(result.power_off_graceful, Duration::from_secs(3));
         assert_eq!(result.power_off_force, Duration::from_secs(4));
         assert_eq!(result.reboot, Duration::from_secs(5));
-        assert_eq!(result.reset, Duration::from_secs(6));
         assert_eq!(result.bmc_ssh_ready_offset, Duration::from_secs(7));
         assert_eq!(result.bmc_reset, Duration::from_secs(8));
     }
@@ -577,7 +566,6 @@ mod tests {
         let base = PlatformTimingProfile::for_hardware_type(&HardwareType::WiwynnGB200Nvl).host;
         let scaled = base.scale(0.0);
         assert_eq!(scaled.reboot, Duration::ZERO);
-        assert_eq!(scaled.power_on_bmc_ready, Duration::ZERO);
         assert_eq!(scaled.bmc_reset, Duration::ZERO);
     }
 
@@ -586,7 +574,8 @@ mod tests {
         let base = PlatformTimingProfile::for_hardware_type(&HardwareType::DellPowerEdgeR750).host;
         let scaled = base.clone().scale(0.5);
         assert_eq!(scaled.reboot, base.reboot / 2);
-        assert_eq!(scaled.power_on_bmc_ready, base.power_on_bmc_ready / 2);
+        assert_eq!(scaled.power_on_os_ready, base.power_on_os_ready / 2);
+        assert_eq!(scaled.power_off_graceful, base.power_off_graceful / 2);
     }
 
     #[test]
@@ -624,7 +613,6 @@ mod tests {
         let overrides = LifecycleTimingOverrides {
             host: PartialLifecycleTimings {
                 reboot: Some(Duration::from_secs(300)),
-                power_on_bmc_ready: Some(Duration::from_secs(45)),
                 ..Default::default()
             },
             dpu: PartialLifecycleTimings {
@@ -636,6 +624,25 @@ mod tests {
         let round_tripped: LifecycleTimingOverrides =
             toml::from_str(&toml_str).expect("deserializes");
         assert_eq!(round_tripped, overrides);
+    }
+
+    #[test]
+    fn unknown_or_removed_timing_key_is_rejected() {
+        // A key this version no longer knows (removed or misspelled) must fail
+        // loudly at config load, not be ignored as a silently different timing.
+        for (table, key) in [
+            ("host", "power_on_bmc_ready"),
+            ("dpu", "reset"),
+            ("host", "rebot"),
+        ] {
+            let toml_str = format!("[{table}]\n{key} = \"60s\"\n");
+            let error = toml::from_str::<LifecycleTimingOverrides>(&toml_str)
+                .expect_err("unknown timing key must be rejected");
+            assert!(
+                error.to_string().contains(key),
+                "error should name the offending key {key}: {error}"
+            );
+        }
     }
 
     #[test]

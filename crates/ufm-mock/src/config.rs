@@ -187,9 +187,13 @@ pub struct StandaloneConfig {
     pub mock: UfmMockConfig,
 }
 
+/// PEM certificate chain and private key for a TLS listener.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct TlsConfig {
+    /// PEM certificate chain served on the listener.
     pub cert_path: PathBuf,
+    /// PEM private key matching `cert_path`.
     pub key_path: PathBuf,
 }
 

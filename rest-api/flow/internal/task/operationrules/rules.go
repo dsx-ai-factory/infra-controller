@@ -82,6 +82,25 @@ type RuleDefinition struct {
 	Steps   []SequenceStep `json:"steps"`
 }
 
+// HasApplicableStep reports whether at least one rule step targets one of the
+// component types selected for a task. Rules describe rack-wide sequencing,
+// while a task may intentionally carry only a component-scoped subset.
+func (rd *RuleDefinition) HasApplicableStep(
+	componentTypes map[devicetypes.ComponentType]struct{},
+) bool {
+	if rd == nil || len(componentTypes) == 0 {
+		return false
+	}
+
+	for _, step := range rd.Steps {
+		if _, ok := componentTypes[step.ComponentType]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Stage represents a single execution stage with all its steps
 type Stage struct {
 	Number int            // The actual stage number from the rule definition

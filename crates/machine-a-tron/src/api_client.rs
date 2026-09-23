@@ -18,7 +18,7 @@
 use base64::prelude::*;
 use bmc_mock::{DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, MachineInfo};
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineInterfaceId};
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::{RackId, RackProfileId};
@@ -33,6 +33,7 @@ use rpc::forge::{
 use rpc::protos::forge_api_client::ForgeApiClient;
 
 use crate::MachineConfig;
+use crate::status::DeviceKind;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientApiError {
@@ -66,8 +67,61 @@ impl From<ForgeApiClient> for ApiClient {
     }
 }
 
+/// One expected inventory record that machine-a-tron registers at startup.
+#[derive(Clone, Debug)]
+pub(crate) enum ExpectedRecord {
+    Rack {
+        rack_id: RackId,
+        rack_profile_id: RackProfileId,
+    },
+    Machine {
+        bmc_mac_address: String,
+        chassis_serial_number: String,
+        rack_id: Option<RackId>,
+        dpu_policy: Option<HostDpuPolicy>,
+        dpf_enabled: bool,
+        interfaces: Vec<ExpectedInterface>,
+    },
+    Switch {
+        bmc_mac_address: String,
+        switch_serial_number: String,
+        nvos_mac_addresses: Vec<String>,
+        rack_id: Option<RackId>,
+    },
+    PowerShelf {
+        bmc_mac_address: String,
+        shelf_serial_number: String,
+        rack_id: Option<RackId>,
+    },
+}
+
+impl ExpectedRecord {
+    /// Human-readable identity used in logs and the registration summary.
+    pub(crate) fn identifier(&self) -> String {
+        let (kind, serial, bmc_mac_address) = match self {
+            Self::Rack { rack_id, .. } => return format!("rack {rack_id}"),
+            Self::Machine {
+                chassis_serial_number,
+                bmc_mac_address,
+                ..
+            } => (DeviceKind::Machine, chassis_serial_number, bmc_mac_address),
+            Self::Switch {
+                switch_serial_number,
+                bmc_mac_address,
+                ..
+            } => (DeviceKind::Switch, switch_serial_number, bmc_mac_address),
+            Self::PowerShelf {
+                shelf_serial_number,
+                bmc_mac_address,
+                ..
+            } => (DeviceKind::PowerShelf, shelf_serial_number, bmc_mac_address),
+        };
+        format!("{kind} {serial} ({bmc_mac_address})")
+    }
+}
+
 pub struct DpuNetworkStatusArgs<'a> {
-    pub dpu_machine_id: MachineId,
+    pub dpu_machine_id: DpuMachineId,
     pub network_config_version: String,
     pub instance_network_config_version: Option<String>,
     pub instance_config_version: Option<String>,
@@ -219,6 +273,7 @@ impl ApiClient {
                 dpu_extension_service_version: None,
                 dpu_extension_services: vec![],
                 astra_config_status: None,
+                lldp: None,
             })
             .await
             .map_err(ClientApiError::InvocationError)
@@ -362,17 +417,68 @@ impl ApiClient {
             .map_err(ClientApiError::InvocationError)
     }
 
+    /// Registers one expected inventory record of any supported kind.
+    pub(crate) async fn add_expected_record(&self, record: ExpectedRecord) -> ClientApiResult<()> {
+        match record {
+            ExpectedRecord::Rack {
+                rack_id,
+                rack_profile_id,
+            } => self.ensure_expected_rack(rack_id, rack_profile_id).await,
+            ExpectedRecord::Machine {
+                bmc_mac_address,
+                chassis_serial_number,
+                rack_id,
+                dpu_policy,
+                dpf_enabled,
+                interfaces,
+            } => {
+                self.add_expected_machine(
+                    bmc_mac_address,
+                    chassis_serial_number,
+                    rack_id,
+                    dpu_policy,
+                    dpf_enabled,
+                    interfaces,
+                )
+                .await
+            }
+            ExpectedRecord::Switch {
+                bmc_mac_address,
+                switch_serial_number,
+                nvos_mac_addresses,
+                rack_id,
+            } => {
+                self.add_expected_switch(
+                    bmc_mac_address,
+                    switch_serial_number,
+                    nvos_mac_addresses,
+                    rack_id,
+                )
+                .await
+            }
+            ExpectedRecord::PowerShelf {
+                bmc_mac_address,
+                shelf_serial_number,
+                rack_id,
+            } => {
+                self.add_expected_power_shelf(bmc_mac_address, shelf_serial_number, rack_id)
+                    .await
+            }
+        }
+    }
+
     /// Registers a mock expected machine. Static BMC (`bmc_ip_address`) is left unset here;
     /// real environments set it through the admin CLI / API when DHCP discovery is not used.
     /// `dpu_policy` is the per-host policy -- pass `Some(Ignore)` for zero-DPU
     /// mock hosts or `Some(Nic)` for DPU-in-NIC-mode mock hosts; `None` for
-    /// normal DPU hosts.
+    /// normal DPU hosts. `dpf_enabled` marks the host as DPF-managed in NICo.
     pub async fn add_expected_machine(
         &self,
         bmc_mac_address: String,
         chassis_serial_number: String,
         rack_id: Option<RackId>,
         dpu_policy: Option<HostDpuPolicy>,
+        dpf_enabled: bool,
         interfaces: Vec<ExpectedInterface>,
     ) -> ClientApiResult<()> {
         self.0
@@ -390,8 +496,8 @@ impl ApiClient {
                 rack_id,
                 default_pause_ingestion_and_poweron: None,
                 #[allow(deprecated)]
-                dpf_enabled: true,
-                is_dpf_enabled: Some(true),
+                dpf_enabled,
+                is_dpf_enabled: Some(dpf_enabled),
                 bmc_ip_address: None,
                 bmc_retain_credentials: None,
                 dpu_mode: dpu_policy.map(|policy| rpc::forge::DpuMode::from(policy) as i32),

@@ -278,19 +278,43 @@ func TestManageInstanceType_UpdateInstanceTypesInDB(t *testing.T) {
 	cloudUnknownType := &cdbm.InstanceType{ID: uuid.New(), Name: "unknown-to-cloud"}
 
 	count := uint32(16)
-	siteKnownType := &corev1.InstanceType{Id: cloudUnknownType.ID.String(), Metadata: &corev1.Metadata{
-		Name: cloudUnknownType.Name,
-	}, Attributes: &corev1.InstanceTypeAttributes{DesiredCapabilities: []*corev1.InstanceTypeMachineCapabilityFilterAttributes{
+	sharedNetworkCapabilityName := "ConnectX-8"
+	spectrumXDeviceType := corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X
+	sameNameNetworkCapabilities := []*corev1.InstanceTypeMachineCapabilityFilterAttributes{
+		{
+			CapabilityType: corev1.MachineCapabilityType_CAP_TYPE_NETWORK,
+			Name:           &sharedNetworkCapabilityName,
+			Count:          &count,
+		},
+		{
+			CapabilityType: corev1.MachineCapabilityType_CAP_TYPE_NETWORK,
+			Name:           &sharedNetworkCapabilityName,
+			Count:          &count,
+			DeviceType:     &spectrumXDeviceType,
+		},
+	}
+	staleGenericCount := 8
+	staleSpectrumXCount := 4
+	spectrumXDBDeviceType := cdbm.MachineCapabilityDeviceTypeSpectrumX
+	testInstanceTypeBuildMachineCapability(t, dbSession, &pagedInstanceTypes[3].ID, cdbm.MachineCapabilityTypeNetwork, sharedNetworkCapabilityName, nil, &staleGenericCount, nil)
+	testInstanceTypeBuildMachineCapability(t, dbSession, &pagedInstanceTypes[3].ID, cdbm.MachineCapabilityTypeNetwork, sharedNetworkCapabilityName, nil, &staleSpectrumXCount, &spectrumXDBDeviceType)
+
+	siteKnownTypeCapabilities := []*corev1.InstanceTypeMachineCapabilityFilterAttributes{
 		{
 			CapabilityType: corev1.MachineCapabilityType_CAP_TYPE_CPU,
 			Name:           cutil.GetPtr("xeon"),
 			Count:          &count,
 		},
-	}}}
+	}
+	siteKnownTypeCapabilities = append(siteKnownTypeCapabilities, sameNameNetworkCapabilities...)
+	siteKnownType := &corev1.InstanceType{Id: cloudUnknownType.ID.String(), Metadata: &corev1.Metadata{
+		Name: cloudUnknownType.Name,
+	}, Attributes: &corev1.InstanceTypeAttributes{DesiredCapabilities: siteKnownTypeCapabilities}}
 
 	// Add one more InstanceType to site that cloud won't know about
 	pagedCtrlInstanceTypes = append(pagedCtrlInstanceTypes, siteKnownType)
 	pagedInvIds = append(pagedInvIds, siteKnownType.Id)
+	siteSharedTypesMap[siteKnownType.Id] = siteKnownType
 
 	// Add some capability known to cloud but not site to
 	// an instance type known to both cloud and site
@@ -327,6 +351,13 @@ func TestManageInstanceType_UpdateInstanceTypesInDB(t *testing.T) {
 			DeviceType:     &deviceType,
 		},
 	}}
+
+	// Exercise the update path with two capabilities that share a type and name
+	// but have distinct device-type identities.
+	pagedCtrlInstanceTypes[3].Attributes = &corev1.InstanceTypeAttributes{
+		DesiredCapabilities: sameNameNetworkCapabilities,
+	}
+	pagedCtrlInstanceTypes[3].Version = "anything-that-does-not-match"
 
 	tSiteClientPool := testTemporalSiteClientPool(t)
 	assert.NotNil(t, tSiteClientPool)
@@ -507,7 +538,8 @@ func TestManageInstanceType_UpdateInstanceTypesInDB(t *testing.T) {
 					},
 				},
 			},
-			readyInstanceTypes: append(pagedInstanceTypes[30:34], cloudUnknownType),
+			readyInstanceTypes:      append(pagedInstanceTypes[30:34], cloudUnknownType),
+			expectCapabilitiesMatch: true,
 		},
 	}
 	for _, tt := range tests {
@@ -555,7 +587,7 @@ func TestManageInstanceType_UpdateInstanceTypesInDB(t *testing.T) {
 					})
 
 					siteInstanceType := siteSharedTypesMap[instanceType.ID.String()]
-					assert.NotNil(t, siteInstanceType)
+					require.NotNil(t, siteInstanceType)
 
 					siteCaps := siteInstanceType.Attributes.GetDesiredCapabilities()
 
@@ -563,6 +595,9 @@ func TestManageInstanceType_UpdateInstanceTypesInDB(t *testing.T) {
 					if assert.Equal(t, tot, len(siteCaps)) {
 						for i := range tot {
 							assert.Equal(t, cloudCaps[i].Name, *siteCaps[i].Name)
+							if cloudCaps[i].Name == sharedNetworkCapabilityName {
+								assert.Equal(t, int(siteCaps[i].GetCount()), *cloudCaps[i].Count)
+							}
 							if cloudCaps[i].Type == cdbm.MachineCapabilityTypeNetwork && cloudCaps[i].DeviceType != nil {
 								var protoDeviceType corev1.MachineCapabilityDeviceType
 								switch *cloudCaps[i].DeviceType {
@@ -570,6 +605,8 @@ func TestManageInstanceType_UpdateInstanceTypesInDB(t *testing.T) {
 									protoDeviceType = corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU
 								case cdbm.MachineCapabilityDeviceTypeNVLink:
 									protoDeviceType = corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK
+								case cdbm.MachineCapabilityDeviceTypeSpectrumX:
+									protoDeviceType = corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X
 								default:
 									t.Fatalf("unsupported DeviceType %q in test fixture", *cloudCaps[i].DeviceType)
 								}

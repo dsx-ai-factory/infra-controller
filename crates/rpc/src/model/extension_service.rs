@@ -54,6 +54,26 @@ impl From<rpc::DpuExtensionServiceType> for ExtensionServiceType {
     }
 }
 
+impl From<model::extension_service::DpuTarget> for rpc::DpuExtensionServiceDpuTarget {
+    fn from(target: model::extension_service::DpuTarget) -> Self {
+        match target {
+            model::extension_service::DpuTarget::Primary => Self::Primary,
+            model::extension_service::DpuTarget::AllActive => Self::AllActive,
+            model::extension_service::DpuTarget::All => Self::All,
+        }
+    }
+}
+
+impl From<rpc::DpuExtensionServiceDpuTarget> for model::extension_service::DpuTarget {
+    fn from(target: rpc::DpuExtensionServiceDpuTarget) -> Self {
+        match target {
+            rpc::DpuExtensionServiceDpuTarget::Primary => Self::Primary,
+            rpc::DpuExtensionServiceDpuTarget::AllActive => Self::AllActive,
+            rpc::DpuExtensionServiceDpuTarget::All => Self::All,
+        }
+    }
+}
+
 impl From<ExtensionServiceLifecycleState> for rpc::DpuExtensionServiceLifecycleState {
     fn from(state: ExtensionServiceLifecycleState) -> Self {
         match state {
@@ -111,6 +131,9 @@ impl From<ExtensionServiceSnapshot> for rpc::DpuExtensionService {
     fn from(snapshot: ExtensionServiceSnapshot) -> Self {
         Self {
             service_id: snapshot.service_id.into(),
+            dpu_target: snapshot
+                .dpu_target
+                .map(|target| rpc::DpuExtensionServiceDpuTarget::from(target) as i32),
             service_type: snapshot.service_type as i32,
             service_name: snapshot.service_name,
             tenant_organization_id: snapshot.tenant_organization_id.to_string(),

@@ -26,10 +26,10 @@ use std::time::SystemTime;
 
 use byte_unit::UnitType;
 use carbide_utils::none_if_empty::NoneIfEmpty;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Utc};
 use itertools::Itertools;
-use rpc::common::MachineIdList;
+use rpc::common::DpuMachineIdList;
 // use rpc::forge::forge_server::Forge;
 use rpc::forge::{
     BmcInfo, ConnectedDevice, GetSiteExplorationRequest, MachineType, ManagedHostQuarantineState,
@@ -77,7 +77,7 @@ impl ManagedHostMetadata {
             .unwrap_or_default();
 
         // Find connected devices for this machines
-        let dpu_id_request = tonic::Request::new(MachineIdList {
+        let dpu_id_request = tonic::Request::new(DpuMachineIdList {
             machine_ids: machines
                 .iter()
                 .flat_map(|m| m.associated_dpu_machine_ids.clone())
@@ -495,9 +495,9 @@ struct IndexedManagedHostMetadata {
     /// The managed hosts (non-dpu)
     managed_hosts: Vec<Machine>,
     /// DPU's indexed by their ID
-    dpus_by_id: HashMap<MachineId, Machine>,
+    dpus_by_id: HashMap<DpuMachineId, Machine>,
     /// Switch connections for each DPU, indexed by the DPU MachineId
-    switch_connections_by_dpu_id: HashMap<MachineId, Vec<DpuSwitchConnection>>,
+    switch_connections_by_dpu_id: HashMap<DpuMachineId, Vec<DpuSwitchConnection>>,
     /// Exploration reports, indexed by the BMC address
     exploration_reports_by_address: HashMap<String, EndpointExplorationReport>,
 }
@@ -509,11 +509,11 @@ impl From<ManagedHostMetadata> for IndexedManagedHostMetadata {
             .into_iter()
             .map(|n| (n.id.clone(), n))
             .collect();
-        let switch_connections_by_dpu_id: HashMap<MachineId, Vec<DpuSwitchConnection>> = value
+        let switch_connections_by_dpu_id: HashMap<DpuMachineId, Vec<DpuSwitchConnection>> = value
             .connected_devices
             .into_iter()
             .filter_map(|cd| {
-                let dpu_id = cd.id?;
+                let dpu_id = cd.id.and_then(|id| DpuMachineId::try_from(id).ok())?;
                 let network_device = cd
                     .network_device_id
                     .as_ref()
@@ -532,9 +532,12 @@ impl From<ManagedHostMetadata> for IndexedManagedHostMetadata {
             .filter(|m| m.machine_type() == MachineType::Host)
             .collect();
 
-        let dpus_by_id: HashMap<MachineId, Machine> = dpus
+        let dpus_by_id: HashMap<DpuMachineId, Machine> = dpus
             .into_iter()
-            .filter_map(|m| m.id.map(|i| (i, m)))
+            .filter_map(|m| {
+                m.id.and_then(|id| DpuMachineId::try_from(id).ok())
+                    .map(|i| (i, m))
+            })
             .collect();
 
         let exploration_reports_by_address: HashMap<String, EndpointExplorationReport> = value

@@ -124,7 +124,7 @@ func TestNewAPISkuWithFullComponents(t *testing.T) {
 	updatedTime := time.Now()
 	minStorageSizeMb := uint32(7_600_000)
 	maxStorageSizeMb := uint32(7_800_000)
-	pciPattern := `^/devices/pci.*nvme[0-3]$`
+	pciPattern := `^/devices/pci.*/nvme$`
 
 	t.Run("complete GPU server with all component types", func(t *testing.T) {
 		dbSku := &cdbm.SKU{
@@ -923,7 +923,7 @@ func TestAPISkuCreateRequest(t *testing.T) {
 		assert.Equal(t, "informational-model", sku.Components.Storage[0].Model)
 		assert.Equal(t, cutil.GetPtr(uint32(3_600_000)), sku.Components.Storage[0].MinSizeMb)
 		assert.Equal(t, cutil.GetPtr(uint32(3_900_000)), sku.Components.Storage[0].MaxSizeMb)
-		assert.Equal(t, []string{`^/devices/pci.*nvme0$`}, sku.Components.Storage[0].PciPatterns)
+		assert.Equal(t, []string{`^/devices/pci.*/nvme$`}, sku.Components.Storage[0].PciPatterns)
 	})
 
 	t.Run("preserves omitted description in proto", func(t *testing.T) {
@@ -1035,7 +1035,7 @@ func TestAPISkuStorage_Validate(t *testing.T) {
 			"count":2,
 			"minSizeMiB":3600000,
 			"maxSizeMiB":3900000,
-			"pciPatterns":["^/devices/pci.*nvme[0-1]$"]
+			"pciPatterns":["^/devices/pci.*/nvme$"]
 		}`), &storage)
 		require.NoError(t, err)
 		require.NoError(t, storage.Validate())
@@ -1043,7 +1043,7 @@ func TestAPISkuStorage_Validate(t *testing.T) {
 		assert.Equal(t, uint32(2), storage.Count)
 		assert.Equal(t, cutil.GetPtr(uint32(3_600_000)), storage.MinSizeMiB)
 		assert.Equal(t, cutil.GetPtr(uint32(3_900_000)), storage.MaxSizeMiB)
-		assert.Equal(t, []string{`^/devices/pci.*nvme[0-1]$`}, storage.PciPatterns)
+		assert.Equal(t, []string{`^/devices/pci.*/nvme$`}, storage.PciPatterns)
 	})
 
 	for name, body := range map[string]string{
@@ -1229,7 +1229,7 @@ func testAPISkuComponents() *APISkuComponents {
 			Count:       2,
 			MinSizeMiB:  cutil.GetPtr(uint32(3_600_000)),
 			MaxSizeMiB:  cutil.GetPtr(uint32(3_900_000)),
-			PciPatterns: []string{`^/devices/pci.*nvme0$`},
+			PciPatterns: []string{`^/devices/pci.*/nvme$`},
 		}},
 		InfinibandDevices: []APISkuInfinibandDevice{{
 			Vendor:          "NVIDIA",

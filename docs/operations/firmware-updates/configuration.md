@@ -441,7 +441,7 @@ selected by the rack or component backend. Refer to
 ### Rack profile firmware object
 
 A rack profile can specify one firmware-object JSON document to use as the
-default firmware input during rack ingestion:
+default input for automatic rack firmware and switch NVOS updates:
 
 ```toml
 [rack_profiles.NVL72]
@@ -450,6 +450,7 @@ product_family = "gb200"
 [rack_profiles.NVL72.firmware_object]
 url = "https://firmware.example.com/objects/nvl72.json"
 fetch_timeout = "30s"
+access_token_credential = "nvl72-artifacts"
 
 [rack_profiles.NVL72.rack_capabilities.compute]
 vendor = "NVIDIA"
@@ -464,7 +465,28 @@ vendor = "LiteOn"
 count = 8
 ```
 
+When `firmware_object` is configured for a profile with switches, the SOT JSON
+must contain an NVOS image whose firmware type matches `rack_hardware_class`.
+NICo requests `prod` when `rack_hardware_class` is omitted. RMS records an
+asynchronous update failure when the document does not contain the required
+image. After all NVOS image jobs complete or fail, NICo uses RMS to verify or
+restore the desired NVOS admin password on each selected switch before the rack
+leaves the NVOS update phase. Without `firmware_object`, NICo skips both
+automatic update phases. An explicit maintenance request can supply a firmware
+object instead.
+If no firmware object is available while a selected switch is in
+`WaitingForNVOSUpgrade` for a reprovision request whose initiator is
+`rack-{rack_id}`, the rack transitions to `Error` instead of skipping the NVOS
+phase.
+
 The `url` field identifies the document location. The optional `fetch_timeout`
 field accepts duration strings such as `30s` and `60s` and defaults to `30s`.
 Use seconds for this request timeout, although the parser accepts other
 duration units such as milliseconds (`ms`), minutes (`m`), and hours (`h`).
+The optional `access_token_credential` field names a credential that contains a
+firmware artifact access token. Store the token by running
+`nico-admin-cli credential firmware-access-token set`. NICo reads the credential
+when compute-tray pre-ingestion starts and forwards the token to RMS. The rack
+profile contains no secret. When the field is omitted, NICo sends the RMS
+no-auth sentinel. The rack state-machine firmware path keeps its existing token
+behavior.

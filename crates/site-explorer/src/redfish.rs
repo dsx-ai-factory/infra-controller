@@ -25,9 +25,11 @@ use carbide_network::deserialize_input_mac_to_address;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::conv::{IntoModel, bmc_vendor};
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
-use carbide_redfish::libredfish::{BmcCredentialOps, RedfishAuth, RedfishClientCreationError};
+use carbide_redfish::libredfish::{
+    BmcCredentialOps, RedfishAuth, RedfishClientCreationError, RedfishClientPool,
+};
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
-use carbide_secrets::credentials::Credentials;
+use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
 use libredfish::model::ODataId;
 use libredfish::model::oem::nvidia_dpu::NicMode;
 use libredfish::model::service_root::RedfishVendor;
@@ -53,16 +55,87 @@ const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
 pub(super) struct RedfishClient {
     redfish_client_pool: Arc<dyn BmcCredentialOps>,
     nv_redfish_client_pool: Arc<NvRedfishClientPool>,
+    /// Pools targeting nico-bmc-proxy; `Some` only when `[bmc_proxy]` is
+    /// enabled. Established-endpoint traffic uses them; everything else,
+    /// and everything when `None`, uses the direct pools above exactly as
+    /// before the proxy existed.
+    proxied: Option<ProxiedPools>,
+}
+
+/// The pools that reach nico-bmc-proxy, handed to site-explorer only when
+/// `[bmc_proxy]` is enabled.
+#[derive(Clone)]
+pub struct ProxiedPools {
+    pub redfish: Arc<dyn RedfishClientPool>,
+    pub nv_redfish: Arc<NvRedfishClientPool>,
+}
+
+/// An endpoint whose stored per-BMC root credential is established: the
+/// caller already resolved it (and validated it is non-empty), and the
+/// MAC names the same `BmcRoot{mac}` key nico-bmc-proxy resolves itself.
+#[derive(Clone)]
+pub struct EstablishedBmc {
+    pub(crate) bmc_mac_address: MacAddress,
+    pub(crate) credentials: Credentials,
+}
+
+/// How site-explorer reaches a BMC for one operation.
+///
+/// `Established` is ordinary traffic: with `[bmc_proxy]` enabled it routes
+/// via nico-bmc-proxy authenticating by key; otherwise it dials the BMC
+/// directly with the carried credential, exactly as before. `Direct`
+/// carries explicit credentials (factory defaults, expected-entity entries,
+/// a just-set password) and always dials the BMC directly: this is the
+/// credential-setup path.
+#[derive(Clone)]
+pub enum BmcAccess {
+    Established(EstablishedBmc),
+    Direct(Credentials),
 }
 
 impl RedfishClient {
     pub(super) fn new(
         redfish_client_pool: Arc<dyn BmcCredentialOps>,
         nv_redfish_client_pool: Arc<NvRedfishClientPool>,
+        proxied: Option<ProxiedPools>,
     ) -> Self {
         Self {
             redfish_client_pool,
             nv_redfish_client_pool,
+            proxied,
+        }
+    }
+
+    /// Client for an established endpoint. With `[bmc_proxy]` enabled it
+    /// authenticates by credential key on the proxied pool (the proxy
+    /// resolves the same `BmcRoot{mac}` key); otherwise it is the plain
+    /// direct client with the credential the caller already resolved.
+    async fn create_established_redfish_client(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc: EstablishedBmc,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        match &self.proxied {
+            Some(proxied) => {
+                proxied
+                    .redfish
+                    .create_client(
+                        &bmc_ip_address.ip().to_string(),
+                        Some(bmc_ip_address.port()),
+                        RedfishAuth::Key(CredentialKey::BmcCredentials {
+                            credential_type: BmcCredentialType::BmcRoot {
+                                bmc_mac_address: bmc.bmc_mac_address,
+                            },
+                        }),
+                        vendor,
+                    )
+                    .await
+            }
+            None => {
+                self.create_direct_redfish_client(bmc_ip_address, bmc.credentials, vendor)
+                    .await
+            }
         }
     }
 
@@ -162,11 +235,6 @@ impl RedfishClient {
                 // while it is still initializing; `Some(_)` means a vendor we don't
                 // recognize yet. See NVBug 6036327.
                 let observed = service_root.vendor_string();
-                tracing::info!(
-                    %bmc_ip_address,
-                    observed_vendor = ?observed,
-                    "BMC ServiceRoot did not report a recognized vendor"
-                );
                 Err(EndpointExplorationError::MissingVendor { observed })
             }
         }
@@ -276,14 +344,21 @@ impl RedfishClient {
     pub(super) async fn generate_exploration_report(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        access: BmcAccess,
         boot_interface: Option<&BootInterfaceTarget>,
         vendor: Option<RedfishVendor>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
-        let client = self
-            .create_direct_redfish_client(bmc_ip_address, credentials, vendor)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
+        let client = match access {
+            BmcAccess::Established(bmc) => {
+                self.create_established_redfish_client(bmc_ip_address, bmc, vendor)
+                    .await
+            }
+            BmcAccess::Direct(credentials) => {
+                self.create_direct_redfish_client(bmc_ip_address, credentials, vendor)
+                    .await
+            }
+        }
+        .map_err(map_redfish_client_creation_error)?;
 
         let service_root = client.get_service_root().await.map_err(map_redfish_error)?;
         let redfish_vendor = service_root.vendor();
@@ -404,14 +479,36 @@ impl RedfishClient {
         })
     }
 
+    /// Picks the nv-redfish pool and credentials for one report fetch.
+    ///
+    /// Established with `[bmc_proxy]` enabled: the proxied pool with no
+    /// credentials (the proxy resolves them). Established otherwise: the
+    /// direct pool with the credential the caller already resolved --
+    /// exactly the pre-split behavior. Direct: the caller's explicit
+    /// credentials on the direct pool.
+    fn nv_pool_and_credentials(
+        &self,
+        access: BmcAccess,
+    ) -> (&NvRedfishClientPool, Option<Credentials>) {
+        match (access, &self.proxied) {
+            (BmcAccess::Established(_), Some(proxied)) => (proxied.nv_redfish.as_ref(), None),
+            (BmcAccess::Established(bmc), None) => {
+                (self.nv_redfish_client_pool.as_ref(), Some(bmc.credentials))
+            }
+            (BmcAccess::Direct(credentials), _) => {
+                (self.nv_redfish_client_pool.as_ref(), Some(credentials))
+            }
+        }
+    }
+
     pub(super) async fn nv_generate_exploration_report(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        access: BmcAccess,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
-        let service_root = self
-            .nv_redfish_client_pool
+        let (nv_pool, credentials) = self.nv_pool_and_credentials(access);
+        let service_root = nv_pool
             .service_root_with_cache_predicate(bmc_ip_address, credentials, |root| {
                 let complete = root.root.chassis.is_some() && root.root.managers.is_some();
                 if !complete {
@@ -444,11 +541,11 @@ impl RedfishClient {
     pub(super) async fn reset_bmc(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
         reset_type: Option<libredfish::ManagerResetType>,
     ) -> Result<(), EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -463,10 +560,10 @@ impl RedfishClient {
     pub(super) async fn get_power_state(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
     ) -> Result<libredfish::PowerState, EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -476,11 +573,11 @@ impl RedfishClient {
     pub(super) async fn power(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
         action: libredfish::SystemPowerControl,
     ) -> Result<(), EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -491,12 +588,12 @@ impl RedfishClient {
     pub(super) async fn chassis_reset(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
         chassis_id: &str,
         action: libredfish::SystemPowerControl,
     ) -> Result<(), EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -510,10 +607,10 @@ impl RedfishClient {
     pub(super) async fn disable_secure_boot(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
     ) -> Result<(), EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -528,11 +625,11 @@ impl RedfishClient {
     pub(super) async fn lockdown(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
         action: libredfish::EnabledDisabled,
     ) -> Result<(), EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -544,10 +641,10 @@ impl RedfishClient {
     pub(super) async fn lockdown_status(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
     ) -> Result<LockdownStatus, EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -561,10 +658,10 @@ impl RedfishClient {
     pub(super) async fn enable_infinite_boot(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
     ) -> Result<(), EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -579,10 +676,10 @@ impl RedfishClient {
     pub(super) async fn is_infinite_boot_enabled(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
     ) -> Result<Option<bool>, EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -595,11 +692,11 @@ impl RedfishClient {
     pub(super) async fn machine_setup(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<(), EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -638,11 +735,11 @@ impl RedfishClient {
     pub(super) async fn set_boot_order_dpu_first(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
         boot_interface: &BootInterfaceTarget,
     ) -> Result<(), EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -657,11 +754,11 @@ impl RedfishClient {
     pub(super) async fn set_nic_mode(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
         mode: NicMode,
     ) -> Result<(), EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -673,10 +770,10 @@ impl RedfishClient {
     pub(super) async fn is_viking(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
     ) -> Result<bool, EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -693,10 +790,10 @@ impl RedfishClient {
     pub(super) async fn clear_nvram(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
+        bmc: EstablishedBmc,
     ) -> Result<(), EndpointExplorationError> {
         let client = self
-            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .create_established_redfish_client(bmc_ip_address, bmc, None)
             .await
             .map_err(map_redfish_client_creation_error)?;
 
@@ -1530,6 +1627,12 @@ pub(crate) fn map_redfish_client_creation_error(
         RedfishClientCreationError::MissingArgument(argument) => EndpointExplorationError::Other {
             details: format!("Missing argument to RedFish client: {argument}"),
         },
+        // Reachable when `[bmc_proxy]` is enabled: established-endpoint
+        // operations use the proxied pool, which rejects e.g. non-443 BMC
+        // ports with this variant.
+        RedfishClientCreationError::Unsupported(details) => {
+            EndpointExplorationError::Other { details }
+        }
     }
 }
 
@@ -1737,7 +1840,8 @@ mod tests {
     use model::machine_boot_interface::{MachineBootInterface, MachineBootInterfaceTarget};
 
     use super::{
-        BootInterfaceTarget, EndpointExplorationError, MachineSetupStatus, RedfishClient,
+        BmcAccess, BmcCredentialType, BootInterfaceTarget, CredentialKey, EndpointExplorationError,
+        EstablishedBmc, MachineSetupStatus, ProxiedPools, RedfishClient,
         fetch_machine_setup_status, nv_bmc_explore_config, record_evaluated_boot_interface,
         should_fetch_network_adapter_ports,
     };
@@ -1749,7 +1853,7 @@ mod tests {
     fn build_redfish_client(sim: Arc<RedfishSim>) -> RedfishClient {
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
         let nv_pool = Arc::new(NvRedfishClientPool::new(proxy_address));
-        RedfishClient::new(sim, nv_pool)
+        RedfishClient::new(sim, nv_pool, None)
     }
 
     #[tokio::test]
@@ -1765,10 +1869,10 @@ mod tests {
         let report = redfish
             .generate_exploration_report(
                 test_addr(),
-                Credentials::UsernamePassword {
+                BmcAccess::Direct(Credentials::UsernamePassword {
                     username: "root".to_string(),
                     password: "password".to_string(),
-                },
+                }),
                 None,
                 None,
             )
@@ -2053,5 +2157,169 @@ mod tests {
             password_change_client_vendors,
         )
         .await;
+    }
+
+    // --- established-vs-direct routing ------------------------------------
+
+    fn nv_pool() -> Arc<NvRedfishClientPool> {
+        Arc::new(NvRedfishClientPool::new(Arc::new(ArcSwap::new(Arc::new(
+            None,
+        )))))
+    }
+
+    fn established(mac: MacAddress, credentials: Credentials) -> EstablishedBmc {
+        EstablishedBmc {
+            bmc_mac_address: mac,
+            credentials,
+        }
+    }
+
+    /// A client with `[bmc_proxy]` enabled, built from two distinct sims so
+    /// tests can observe which pool an operation routed through.
+    fn proxied_client() -> (
+        RedfishClient,
+        Arc<RedfishSim>,
+        Arc<RedfishSim>,
+        Arc<NvRedfishClientPool>,
+    ) {
+        let ops_sim = Arc::new(RedfishSim::default());
+        let general_sim = Arc::new(RedfishSim::default());
+        let proxied_nv = nv_pool();
+        let client = RedfishClient::new(
+            ops_sim.clone(),
+            nv_pool(),
+            Some(ProxiedPools {
+                redfish: general_sim.clone(),
+                nv_redfish: proxied_nv.clone(),
+            }),
+        );
+        (client, ops_sim, general_sim, proxied_nv)
+    }
+
+    /// With `[bmc_proxy]` enabled, established-endpoint operations
+    /// authenticate by credential key on the PROXIED pool -- naming this
+    /// BMC's stored root key, which the proxy resolves itself -- and never
+    /// touch the direct ops pool.
+    #[tokio::test]
+    async fn established_operations_use_the_proxied_pool_with_key_auth() {
+        use carbide_redfish::libredfish::test_support::RedfishAuthKind;
+        let (client, ops_sim, general_sim, _) = proxied_client();
+        let mac: MacAddress = "02:00:00:00:00:07".parse().unwrap();
+
+        client
+            .get_power_state(
+                test_addr(),
+                established(mac, Credentials::new("root", "pw")),
+            )
+            .await
+            .expect("established read succeeds on the sim");
+
+        assert!(
+            ops_sim.create_client_calls().is_empty(),
+            "an established read must not touch the direct ops pool"
+        );
+        let calls = general_sim.create_client_calls();
+        assert_eq!(calls.len(), 1, "one client from the proxied pool");
+        assert_eq!(calls[0].auth, RedfishAuthKind::Key);
+        assert_eq!(
+            calls[0].auth_key.as_deref(),
+            Some(
+                CredentialKey::BmcCredentials {
+                    credential_type: BmcCredentialType::BmcRoot {
+                        bmc_mac_address: mac,
+                    },
+                }
+                .to_key_str()
+                .as_ref()
+            ),
+            "the key must name this BMC's stored root credential"
+        );
+    }
+
+    /// With `[bmc_proxy]` disabled, an established operation is exactly the
+    /// pre-split call: the credential the caller already resolved, sent as
+    /// explicit auth on the direct pool -- no key resolution, no second
+    /// store read.
+    #[tokio::test]
+    async fn established_operations_dial_direct_with_carried_credentials_when_disabled() {
+        use carbide_redfish::libredfish::test_support::RedfishAuthKind;
+        let ops_sim = Arc::new(RedfishSim::default());
+        let client = RedfishClient::new(ops_sim.clone(), nv_pool(), None);
+        let mac: MacAddress = "02:00:00:00:00:09".parse().unwrap();
+
+        client
+            .get_power_state(
+                test_addr(),
+                established(mac, Credentials::new("root", "pw")),
+            )
+            .await
+            .expect("established read succeeds on the sim");
+
+        let calls = ops_sim.create_client_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].auth,
+            RedfishAuthKind::Direct,
+            "disabled mode must send the carried credential directly, as before"
+        );
+    }
+
+    /// Credential-setup traffic (explicit credentials) stays on the direct
+    /// ops pool even with `[bmc_proxy]` enabled.
+    #[tokio::test]
+    async fn direct_credential_operations_stay_on_the_ops_pool() {
+        use carbide_redfish::libredfish::test_support::RedfishAuthKind;
+        let (client, ops_sim, general_sim, _) = proxied_client();
+
+        client
+            .validate_bmc_credentials(test_addr(), Credentials::new("root", "password"))
+            .await
+            .expect("validation succeeds on the sim");
+
+        assert!(
+            general_sim.create_client_calls().is_empty(),
+            "credential validation must not route via the proxied pool"
+        );
+        let calls = ops_sim.create_client_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].auth, RedfishAuthKind::Direct);
+    }
+
+    /// The nv-redfish selection: established + proxy -> proxied pool with no
+    /// credentials; established without proxy -> direct pool with the
+    /// carried credential (pre-split behavior); direct -> direct pool with
+    /// the explicit credential.
+    #[test]
+    fn nv_pool_selection_follows_the_access_class() {
+        let mac: MacAddress = "02:00:00:00:00:08".parse().unwrap();
+        let stored = Credentials::new("root", "stored-password");
+
+        let (client, _, _, proxied_nv) = proxied_client();
+        let (pool, credentials) = client
+            .nv_pool_and_credentials(BmcAccess::Established(established(mac, stored.clone())));
+        assert!(std::ptr::eq(pool, proxied_nv.as_ref()));
+        assert!(
+            credentials.is_none(),
+            "the proxy resolves the BMC's credentials itself"
+        );
+
+        let direct_client = RedfishClient::new(Arc::new(RedfishSim::default()), nv_pool(), None);
+        let (pool, credentials) = direct_client
+            .nv_pool_and_credentials(BmcAccess::Established(established(mac, stored.clone())));
+        assert!(std::ptr::eq(
+            pool,
+            direct_client.nv_redfish_client_pool.as_ref()
+        ));
+        assert_eq!(
+            credentials,
+            Some(stored),
+            "disabled mode carries the resolved credential through"
+        );
+
+        let explicit = Credentials::new("root", "factory");
+        let (pool, credentials) =
+            client.nv_pool_and_credentials(BmcAccess::Direct(explicit.clone()));
+        assert!(std::ptr::eq(pool, client.nv_redfish_client_pool.as_ref()));
+        assert_eq!(credentials, Some(explicit));
     }
 }

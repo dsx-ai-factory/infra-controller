@@ -87,12 +87,18 @@ func normalizeProtoFile(protoFile string) {
 // removeCodegenAnnotations removes Rust-only code generation metadata before
 // the Core protobuf snapshot is passed to Buf and the Go protobuf compiler.
 func removeCodegenAnnotations(content string) string {
-	codegenImport := regexp.MustCompile(`(?m)^[ \t]*import "codegen/v1/(?:derive|extern_path)\.proto";[ \t]*\n(?:[ \t]*\n)?`)
+	codegenImport := regexp.MustCompile(`(?m)^[ \t]*import "codegen/v1/(?:derive|extern_path|rust_type)\.proto";[ \t]*\n(?:[ \t]*\n)?`)
 	content = codegenImport.ReplaceAllString(content, "")
 	fileOption := regexp.MustCompile(`(?ms)^[ \t]*option \(carbide\.codegen\.v1\.imported_extern_path\) = \{.*?^[ \t]*\};[ \t]*\n(?:[ \t]*\n)?`)
 	content = fileOption.ReplaceAllString(content, "")
 	declarationOption := regexp.MustCompile(`(?m)^[ \t]*option \(carbide\.codegen\.v1\.(?:message|enum)_(?:derive|extern_path)\) = "[^"]+";[ \t]*\n?`)
-	return declarationOption.ReplaceAllString(content, "")
+	content = declarationOption.ReplaceAllString(content, "")
+	methodOverride := regexp.MustCompile(`(?ms)(^[ \t]*rpc\b[^{;]*?\breturns[ \t]*\([^)]*\))[ \t]*\{\n(?:[ \t]*option \(carbide\.codegen\.v1\.method_rust_(?:input|output)_type\) = "[^"]+";[ \t]*\n)+[ \t]*\}`)
+	content = methodOverride.ReplaceAllString(content, "${1};")
+	fieldOverrideWithOtherOptions := regexp.MustCompile(`,[ \t]*\(carbide\.codegen\.v1\.field_rust_type\)[ \t]*=[ \t]*"[^"]+"`)
+	content = fieldOverrideWithOtherOptions.ReplaceAllString(content, "")
+	fieldOverride := regexp.MustCompile(`[ \t]*\[[ \t]*\(carbide\.codegen\.v1\.field_rust_type\)[ \t]*=[ \t]*"[^"]+"[ \t]*\]`)
+	return fieldOverride.ReplaceAllString(content, "")
 }
 
 // addOrReplaceLicenseHeader strips any existing comment/blank-line preamble

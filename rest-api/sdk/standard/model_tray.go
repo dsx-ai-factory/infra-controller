@@ -45,7 +45,8 @@ type Tray struct {
 	// Flow-derived operability phase of the tray
 	OperationStatus *string `json:"operationStatus,omitempty"`
 	// Whether the tray is considered leaking coolant
-	LeakStatus *string `json:"leakStatus,omitempty"`
+	LeakStatus         *string             `json:"leakStatus,omitempty"`
+	LeakHandlingStatus *LeakHandlingStatus `json:"leakHandlingStatus,omitempty"`
 	// Position of the Tray within the Rack
 	Position *TrayPosition `json:"position,omitempty"`
 	// BMC (Baseboard Management Controller) entries for the tray
@@ -430,6 +431,38 @@ func (o *Tray) SetLeakStatus(v string) {
 	o.LeakStatus = &v
 }
 
+// GetLeakHandlingStatus returns the LeakHandlingStatus field value if set, zero value otherwise.
+func (o *Tray) GetLeakHandlingStatus() LeakHandlingStatus {
+	if o == nil || IsNil(o.LeakHandlingStatus) {
+		var ret LeakHandlingStatus
+		return ret
+	}
+	return *o.LeakHandlingStatus
+}
+
+// GetLeakHandlingStatusOk returns a tuple with the LeakHandlingStatus field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *Tray) GetLeakHandlingStatusOk() (*LeakHandlingStatus, bool) {
+	if o == nil || IsNil(o.LeakHandlingStatus) {
+		return nil, false
+	}
+	return o.LeakHandlingStatus, true
+}
+
+// HasLeakHandlingStatus returns a boolean if a field has been set.
+func (o *Tray) HasLeakHandlingStatus() bool {
+	if o != nil && !IsNil(o.LeakHandlingStatus) {
+		return true
+	}
+
+	return false
+}
+
+// SetLeakHandlingStatus gets a reference to the given LeakHandlingStatus and assigns it to the LeakHandlingStatus field.
+func (o *Tray) SetLeakHandlingStatus(v LeakHandlingStatus) {
+	o.LeakHandlingStatus = &v
+}
+
 // GetPosition returns the Position field value if set, zero value otherwise.
 func (o *Tray) GetPosition() TrayPosition {
 	if o == nil || IsNil(o.Position) {
@@ -618,6 +651,9 @@ func (o Tray) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.LeakStatus) {
 		toSerialize["leakStatus"] = o.LeakStatus
+	}
+	if !IsNil(o.LeakHandlingStatus) {
+		toSerialize["leakHandlingStatus"] = o.LeakHandlingStatus
 	}
 	if !IsNil(o.Position) {
 		toSerialize["position"] = o.Position

@@ -16,7 +16,7 @@
  */
 
 use ::rpc::forge::HostReprovisioningRequest;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::StableHostMachineId;
 use prettytable::{Table, row};
 
 use super::args::{ReprovisionClear, ReprovisionSet};
@@ -54,7 +54,7 @@ pub(super) async fn trigger_reprovisioning_set(
         let report = get_health_report(HealthReportTemplates::HostUpdate, Some(update_message));
 
         api_client
-            .machine_insert_health_report_override(data.id, report.into(), false)
+            .machine_insert_health_report_override(data.id.as_machine_id(), report.into(), false)
             .await?;
     }
 
@@ -79,7 +79,7 @@ pub(super) async fn list_hosts_pending(api_client: &ApiClient) -> CarbideCliResu
 }
 
 pub(super) async fn mark_manual_firmware_upgrade_complete(
-    machine_id: MachineId,
+    machine_id: StableHostMachineId,
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
     api_client

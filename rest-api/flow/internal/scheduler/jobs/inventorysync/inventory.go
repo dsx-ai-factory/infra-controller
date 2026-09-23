@@ -14,7 +14,8 @@
 // transactional batch reconcile, resurrection of soft-deleted rows,
 // column-whitelist updates, tombstone GC, and a drift-table replace. Follow-up:
 // add those as transactional batch methods on the store (e.g.
-// ReconcileExpectedRacks / ReconcileExpectedComponents / ReplaceAllDrifts) and
+// ReconcileExpectedRacks / ReconcileExpectedComponents /
+// ReplaceDriftsByComponentType) and
 // route both halves of this job through the manager so there's a single
 // writer. Tracked separately from the correctness fixes.
 package inventorysync
@@ -28,6 +29,7 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // runInventoryOne is a single iteration of the inventory sync job. Order:
@@ -38,15 +40,11 @@ import (
 //     step is skipped entirely and Flow's existing ingestion path is the
 //     sole writer to rack / component.
 //  2. runActualSync reconciles actual component state, projects valid NVLink
-//     domain observations, and returns one combined drift set (the "actual"
-//     half — see actual_sync*.go).
-//  3. The drift set replaces the whole component_drift table atomically so
-//     stale rows from previous runs can't linger. The replace is skipped
-//     when any actual-sync snapshot or reconciliation failed:
-//     component_drift is a full-table replace with no per-type discriminator,
-//     so writing a partial view would wipe the drifts of the failed types. The
-//     existing table is left intact until a fully successful cycle refreshes
-//     it.
+//     domain observations, and returns an independent result for Compute,
+//     NVSwitch, and PowerShelf (the "actual" half — see actual_sync*.go).
+//  3. Each successful type atomically replaces only its own drift rows. A
+//     failed type preserves its previous rows, and one persistence failure does
+//     not prevent later types from being attempted.
 //
 // Errors are handled inside each step: any per-type RPC failure is logged
 // and that type's drifts are skipped, but the rest of the cycle continues.
@@ -64,18 +62,34 @@ func runInventoryOne(
 		log.Debug().Msgf("Expected-inventory mirror: skipped this cycle (gate %s is off)", envExpectedSyncEnabled)
 	}
 
-	drifts, allSyncOK := runActualSync(ctx, pool, nicoClient)
-	if !allSyncOK {
-		log.Warn().Int("drifts_this_cycle", len(drifts)).
-			Msg("Drift detection: one or more actual-sync snapshots or reconciliations failed; preserving existing component_drift table this cycle instead of overwriting it with a partial view")
-		return
+	results := runActualSync(ctx, pool, nicoClient)
+	allPersisted := true
+	for _, result := range results {
+		componentType := devicetypes.ComponentTypeToString(result.componentType)
+		if !result.syncOK {
+			allPersisted = false
+			log.Warn().Str("component_type", componentType).
+				Msg("Drift detection failed; preserving this component type's previous drift records")
+			continue
+		}
+
+		if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+			return model.ReplaceDriftsByComponentType(ctx, tx, componentType, result.drifts)
+		}); err != nil {
+			allPersisted = false
+			log.Error().Err(err).Str("component_type", componentType).
+				Msg("Unable to persist drift records")
+			continue
+		}
+		log.Info().Str("component_type", componentType).
+			Msg("Drift snapshot persisted")
 	}
 
-	if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
-		return model.ReplaceAllDrifts(ctx, tx, drifts)
-	}); err != nil {
-		log.Error().Msgf("Unable to persist drift records: %v", err)
-	} else {
-		log.Info().Msgf("Drift detection complete: %d drift(s) detected", len(drifts))
+	if allPersisted {
+		if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+			return model.DeleteLegacyUnscopedDrifts(ctx, tx)
+		}); err != nil {
+			log.Error().Err(err).Msg("Unable to remove legacy unscoped drift records")
+		}
 	}
 }

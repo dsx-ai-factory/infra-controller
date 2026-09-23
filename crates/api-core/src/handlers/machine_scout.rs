@@ -43,7 +43,7 @@ pub(crate) async fn cleanup_machine_completed(
     let cleanup_info = request.into_inner();
     tracing::info!(?cleanup_info, "cleanup_machine_completed");
 
-    let machine_id = convert_and_log_machine_id::<MachineId>(cleanup_info.machine_id.as_ref())?;
+    let machine_id: MachineId = convert_and_log_machine_id(cleanup_info.machine_id.as_ref())?;
 
     // Load machine from DB
     let (machine, mut txn) = api
@@ -170,14 +170,14 @@ pub(crate) async fn forge_agent_control(
 
     use rpc::forge_agent_control_response::Action;
 
-    let machine_id =
-        convert_and_log_machine_id::<MachineId>(request.into_inner().machine_id.as_ref())?;
+    let machine_id: MachineId =
+        convert_and_log_machine_id(request.into_inner().machine_id.as_ref())?;
 
     let (machine, mut txn) = api
         .load_machine(&machine_id, MachineSearchConfig::default())
         .await?;
 
-    let dpu_machine_id = machine.dpu_machine_id();
+    let dpu_machine_id = carbide_uuid::machine::DpuMachineId::try_from(machine.id);
     let host_machine = if let Ok(dpu_machine_id) = &dpu_machine_id {
         db::machine::find_host_by_dpu_machine_id(&mut txn, dpu_machine_id)
             .await?
@@ -187,7 +187,10 @@ pub(crate) async fn forge_agent_control(
             })?
     } else {
         db::machine::update_scout_contact_time(&machine_id, &mut txn).await?;
-        machine.clone()
+        machine
+            .clone()
+            .try_into()
+            .map_err(|error| CarbideError::internal(format!("invalid host machine: {error}")))?
     };
 
     // Respond based on machine current state
@@ -465,7 +468,7 @@ pub(crate) async fn forge_agent_control(
 /// Records reboot duration metric for a machine if applicable
 fn record_reboot_duration_metric(
     metric_emitter: &ApiMetricsEmitter,
-    machine: &model::machine::Machine,
+    machine: &model::machine::AnyMachine,
 ) {
     let Some(last_reboot_requested) = &machine.status.last_reboot_requested else {
         return;
@@ -519,7 +522,7 @@ pub(crate) async fn reboot_completed(
     log_request_data(&request);
 
     let req = request.into_inner();
-    let machine_id = convert_and_log_machine_id::<MachineId>(req.machine_id.as_ref())?;
+    let machine_id: MachineId = convert_and_log_machine_id(req.machine_id.as_ref())?;
 
     let (machine, mut txn) = api
         .load_machine(&machine_id, MachineSearchConfig::default())

@@ -1,0 +1,19 @@
+suite: ConfigMap input changes roll nico-api
+templates:
+  - deployment.yaml
+tests:
+  - it: hashes the default config inputs
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["checksum/config"]
+          value: 75f3b8075bbef837daa95f4118d11d973907a38449833e96150d80fdd21eb415
+  - it: changes the checksum when the BMC credential source changes
+    set:
+      credentials.bmcSiteWideRootSource: local
+    asserts:
+      - notEqual:
+          path: spec.template.metadata.annotations["checksum/config"]
+          value: 75f3b8075bbef837daa95f4118d11d973907a38449833e96150d80fdd21eb415
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: '^[a-f0-9]{64}$'

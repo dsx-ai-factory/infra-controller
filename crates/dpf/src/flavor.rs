@@ -36,6 +36,7 @@ use crate::crds::dpuflavors_generated::{
     DpuFlavorSystemdServices, DpuFlavorSystemdServicesOperation,
 };
 use crate::crds::dpuflavortemplates_generated::{DPUFlavorTemplate, DpuFlavorTemplateSpec};
+use crate::service_vpc_slot::ServiceVpcSlots;
 use crate::types::{
     DEFAULT_DPU_NUM_OF_VFS, DEFAULT_PF_TOTAL_SF_RESERVED, DOCA_HBN_SERVICE_NAME,
     DpfInterceptBridge, DpfInterceptBridging, DpfProxyDetails, DpuDeploymentType,
@@ -125,6 +126,7 @@ fn get_default_ovs_defaults_base() -> String {
         "_ovs-vsctl set Interface p0 type=dpdk\n",
         "_ovs-vsctl set Interface p0 mtu_request=9216\n",
         "_ovs-vsctl set Port p0 external_ids:dpf-type=physical\n",
+        "_ovs-vsctl --if-exists del-br br-hbn\n",
         "_ovs-vsctl --may-exist add-br br-hbn\n",
         "_ovs-vsctl set bridge br-hbn datapath_type=netdev\n",
         "_ovs-vsctl set bridge br-hbn fail_mode=secure\n",
@@ -185,7 +187,10 @@ fn get_bf4_ovs_defaults_base() -> String {
 }
 
 /// Builds the BF3 OVS bootstrap with deterministic configured peer bridges.
-fn get_default_ovs_defaults_with_topology(topology: Option<&DpfInterceptBridging>) -> String {
+fn get_default_ovs_defaults_with_topology(
+    topology: Option<&DpfInterceptBridging>,
+    service_vpc_slots: ServiceVpcSlots,
+) -> String {
     // Retain the BF3 base verbatim, then append normalized intercept-bridge state.
     let mut script = get_default_ovs_defaults_base();
     if let Some(topology) = topology {
@@ -193,12 +198,16 @@ fn get_default_ovs_defaults_with_topology(topology: Option<&DpfInterceptBridging
             format!("'{}'", interface.identity.bf3_raw_netdev_name())
         });
     }
+    service_vpc_slots.append_ovs_bridges(&mut script);
     append_ovn_encap_ip_bootstrap(&mut script);
     script
 }
 
 /// Builds the generic-BF4 OVS bootstrap after preflighting every configured PF.
-fn get_bf4_ovs_defaults_with_topology(topology: Option<&DpfInterceptBridging>) -> String {
+fn get_bf4_ovs_defaults_with_topology(
+    topology: Option<&DpfInterceptBridging>,
+    service_vpc_slots: ServiceVpcSlots,
+) -> String {
     // Explicit bash, as on Astra: the base uses `export -f`, which errors under dash.
     let mut script = String::from("#!/bin/bash\n");
     append_pre_ovs_hook(&mut script);
@@ -215,6 +224,7 @@ fn get_bf4_ovs_defaults_with_topology(topology: Option<&DpfInterceptBridging>) -
             }
         });
     }
+    service_vpc_slots.append_ovs_bridges(&mut script);
     append_ovn_encap_ip_bootstrap(&mut script);
     append_post_ovs_hook(&mut script);
     script
@@ -469,6 +479,7 @@ pub fn default_flavor_for(
         pf_total_sf,
         None,
         None,
+        ServiceVpcSlots::default(),
         &[],
     )
 }
@@ -490,6 +501,7 @@ pub(crate) fn default_flavor_for_with_topology(
     pf_total_sf: u32,
     intercept_bridging: Option<&DpfInterceptBridging>,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
+    service_vpc_slots: ServiceVpcSlots,
     extra_bfcfg_parameters: &[String],
 ) -> Result<DPUFlavor, crate::error::DpfError> {
     match deployment_type {
@@ -500,6 +512,7 @@ pub(crate) fn default_flavor_for_with_topology(
             pf_total_sf,
             intercept_bridging,
             dhcp_acl_interfaces,
+            service_vpc_slots,
             extra_bfcfg_parameters,
         ),
         DpuDeploymentType::Bf4Astra => Err(crate::error::DpfError::ConfigError(
@@ -513,6 +526,7 @@ pub(crate) fn default_flavor_for_with_topology(
             pf_total_sf,
             intercept_bridging,
             dhcp_acl_interfaces,
+            service_vpc_slots,
             extra_bfcfg_parameters,
         ),
     }
@@ -538,11 +552,14 @@ pub fn flavor_bf4(
         DEFAULT_PF_TOTAL_SF_RESERVED,
         None,
         None,
+        ServiceVpcSlots::default(),
         &[],
     )
 }
 
 /// Builds generic BF4 flavor state from the validated site VF count and intercept-bridging topology.
+// Each argument is an independent site input; a struct would move the same list one level out.
+#[allow(clippy::too_many_arguments)]
 fn flavor_bf4_with_topology(
     namespace: &str,
     proxy: &Option<DpfProxyDetails>,
@@ -550,6 +567,7 @@ fn flavor_bf4_with_topology(
     pf_total_sf: u32,
     intercept_bridging: Option<&DpfInterceptBridging>,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
+    service_vpc_slots: ServiceVpcSlots,
     extra_bfcfg_parameters: &[String],
 ) -> Result<DPUFlavor, crate::error::DpfError> {
     reject_template_delimiters(extra_bfcfg_parameters)?;
@@ -579,7 +597,10 @@ fn flavor_bf4_with_topology(
             host_network_interface_configs: None,
             nvconfig: Some(vec![get_bf4_nvconfig(num_of_vfs, pf_total_sf)]),
             ovs: Some(crate::crds::dpuflavors_generated::DpuFlavorOvs {
-                raw_config_script: Some(get_bf4_ovs_defaults_with_topology(intercept_bridging)),
+                raw_config_script: Some(get_bf4_ovs_defaults_with_topology(
+                    intercept_bridging,
+                    service_vpc_slots,
+                )),
             }),
             sysctl: None,
             system_reserved_resources: None,
@@ -588,8 +609,8 @@ fn flavor_bf4_with_topology(
             // rawConfigScript sets the value during provisioning. Retain this ordered oneshot so
             // DPF versions with systemdServices support also enforce it after network readiness.
             systemd_services: Some(vec![ovn_encap_systemd_service()]),
-            host_os_init: None,
-            scalable_functions: None,
+            dma: None,
+            service_readiness: None,
         },
     })
 }
@@ -630,8 +651,8 @@ pub fn flavor_bf4_astra(
         }),
         system_reserved_resources: None,
         systemd_services: Some(vec![]),
-        host_os_init: None,
-        scalable_functions: None,
+        dma: None,
+        service_readiness: None,
     };
 
     let flavor = DPUFlavor {
@@ -802,6 +823,7 @@ pub fn default_flavor(
         DEFAULT_PF_TOTAL_SF_RESERVED,
         None,
         None,
+        ServiceVpcSlots::default(),
         &[],
     )
 }
@@ -817,6 +839,7 @@ fn default_flavor_with_topology(
     pf_total_sf: u32,
     intercept_bridging: Option<&DpfInterceptBridging>,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
+    service_vpc_slots: ServiceVpcSlots,
     extra_bfcfg_parameters: &[String],
 ) -> Result<DPUFlavor, crate::error::DpfError> {
     reject_template_delimiters(extra_bfcfg_parameters)?;
@@ -846,7 +869,10 @@ fn default_flavor_with_topology(
             host_network_interface_configs: None,
             nvconfig: Some(vec![get_nvconfig(num_of_vfs, pf_total_sf, deployment_type)]),
             ovs: Some(crate::crds::dpuflavors_generated::DpuFlavorOvs {
-                raw_config_script: Some(get_default_ovs_defaults_with_topology(intercept_bridging)),
+                raw_config_script: Some(get_default_ovs_defaults_with_topology(
+                    intercept_bridging,
+                    service_vpc_slots,
+                )),
             }),
             sysctl: None,
             system_reserved_resources: None,
@@ -855,8 +881,8 @@ fn default_flavor_with_topology(
             // rawConfigScript sets the value during provisioning. Retain this ordered oneshot so
             // DPF versions with systemdServices support also enforce it after network readiness.
             systemd_services: Some(vec![ovn_encap_systemd_service()]),
-            host_os_init: None,
-            scalable_functions: None,
+            dma: None,
+            service_readiness: None,
         },
     })
 }
@@ -1170,6 +1196,7 @@ fn get_bf4_nvconfig(num_of_vfs: u32, pf_total_sf: u32) -> DpuFlavorNvconfig {
         // DPF does not allow anyother wild card. It takes only '*'
         device: Some(DpuFlavorNvconfigDevice::KopiumVariant0), //"*"
         parameters: Some(parameters),
+        force: None,
     }
 }
 
@@ -1602,6 +1629,7 @@ fn get_nvconfig(
         // DPF does not allow anyother wild card. It takes only '*'
         device: Some(DpuFlavorNvconfigDevice::KopiumVariant0), //"*"
         parameters: Some(parameters),
+        force: None,
     }
 }
 
@@ -1633,6 +1661,7 @@ fn get_bf4_astra_nvconfig(pf_total_sf: u32) -> DpuFlavorNvconfig {
         // DPF does not allow anyother wild card. It takes only '*'
         device: Some(DpuFlavorNvconfigDevice::KopiumVariant0), //"*"
         parameters: Some(parameters),
+        force: None,
     }
 }
 
@@ -1819,7 +1848,8 @@ mod tests {
     fn bf3_intercept_bridging_bootstrap_renders_expected_raw_representors() {
         // Render BF3 bootstrap for one configured PF and VF.
         let topology = intercept_bridging();
-        let script = get_default_ovs_defaults_with_topology(Some(&topology));
+        let script =
+            get_default_ovs_defaults_with_topology(Some(&topology), ServiceVpcSlots::default());
 
         // BF3 drops controller only from its platform raw-netdev convention.
         assert!(script.contains("host_representor='pf3hpf'"));
@@ -1854,7 +1884,8 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "en8f2");
 
         // VF discovery is intentionally absent; the expected VF is the PF netdev plus its suffix.
-        let script = get_bf4_ovs_defaults_with_topology(Some(&topology));
+        let script =
+            get_bf4_ovs_defaults_with_topology(Some(&topology), ServiceVpcSlots::default());
         assert!(script.contains("host_representor=\"${dpf_c2p3_netdev}vf4\""));
         assert!(script.contains("external_ids='{}' || true"));
         assert!(!script.contains("phys_port_name 'c2pf3vf4'"));
@@ -1920,7 +1951,8 @@ mod tests {
     fn bf4_intercept_bridging_preflight_precedes_all_ovs_mutation() {
         // Locate the final preflight call and the first inherited OVS cleanup operation.
         let topology = intercept_bridging();
-        let script = get_bf4_ovs_defaults_with_topology(Some(&topology));
+        let script =
+            get_bf4_ovs_defaults_with_topology(Some(&topology), ServiceVpcSlots::default());
 
         let final_resolution = script
             .find("resolve_dpf_pf 'c2pf3'")
@@ -1948,14 +1980,26 @@ mod tests {
                 61,
                 None,
                 None,
+                ServiceVpcSlots::default(),
                 &[],
             )
             .unwrap(),
         );
         assert!(bf3.contains(&"NUM_OF_VFS=3".to_string()));
         assert!(bf3.contains(&"PF_TOTAL_SF=61".to_string()));
-        let generic_bf4 =
-            parameters(flavor_bf4_with_topology("ns", &None, 5, 63, None, None, &[]).unwrap());
+        let generic_bf4 = parameters(
+            flavor_bf4_with_topology(
+                "ns",
+                &None,
+                5,
+                63,
+                None,
+                None,
+                ServiceVpcSlots::default(),
+                &[],
+            )
+            .unwrap(),
+        );
         assert!(generic_bf4.contains(&"NUM_OF_VFS=5".to_string()));
         assert!(generic_bf4.contains(&"PF_TOTAL_SF=63".to_string()));
 
@@ -2033,6 +2077,7 @@ mod tests {
             DEFAULT_PF_TOTAL_SF_RESERVED,
             None,
             None,
+            ServiceVpcSlots::default(),
             &extra,
         )
         .unwrap()
@@ -2124,6 +2169,7 @@ mod tests {
             DEFAULT_PF_TOTAL_SF_RESERVED,
             None,
             None,
+            ServiceVpcSlots::default(),
             &extra,
         )
         .map(drop)
@@ -2184,6 +2230,7 @@ mod tests {
                 DEFAULT_PF_TOTAL_SF_RESERVED,
                 None,
                 None,
+                ServiceVpcSlots::default(),
                 &extra,
             )
             .unwrap()
@@ -2232,6 +2279,7 @@ mod tests {
                 DEFAULT_PF_TOTAL_SF_RESERVED + 7,
                 Some(topology),
                 Some(&interfaces),
+                ServiceVpcSlots::default(),
                 &[],
             )
             .unwrap()
@@ -2281,16 +2329,36 @@ mod tests {
         value_scenarios!(
             run = |script: String| script.ends_with(&expected);
             "BF3 provisioning" {
-                get_default_ovs_defaults_with_topology(None) => true,
+                get_default_ovs_defaults_with_topology(None, ServiceVpcSlots::default()) => true,
             }
 
             // BF4 runs the operator's post-OVS hook last, so the encap-IP block is
             // the final NICo-authored step rather than the final line.
             "generic BF4 provisioning" {
-                get_bf4_ovs_defaults_with_topology(None) => false,
+                get_bf4_ovs_defaults_with_topology(None, ServiceVpcSlots::default()) => false,
             }
         );
-        assert!(get_bf4_ovs_defaults_with_topology(None).contains(&expected));
+        assert!(
+            get_bf4_ovs_defaults_with_topology(None, ServiceVpcSlots::default())
+                .contains(&expected)
+        );
+    }
+
+    #[test]
+    fn ovs_bootstrap_creates_service_vpc_slot_bridges() {
+        let expected = concat!(
+            "_ovs-vsctl --may-exist add-br br-svc-0\n",
+            "_ovs-vsctl set bridge br-svc-0 datapath_type=netdev\n",
+            "_ovs-vsctl set bridge br-svc-0 fail_mode=standalone\n",
+        );
+
+        let slots = ServiceVpcSlots::new(1).unwrap();
+        assert!(get_default_ovs_defaults_with_topology(None, slots).contains(expected));
+        assert!(get_bf4_ovs_defaults_with_topology(None, slots).contains(expected));
+        assert!(
+            !get_default_ovs_defaults_with_topology(None, ServiceVpcSlots::default())
+                .contains("br-svc-")
+        );
     }
 
     /// Every BF4 script must run the pre hook before any OVS work and the post
@@ -2302,11 +2370,14 @@ mod tests {
         // also occurs inside the pre-hook's own filename.
         for (script, first_ovs_operation) in [
             (
-                get_bf4_ovs_defaults_with_topology(None),
+                get_bf4_ovs_defaults_with_topology(None, ServiceVpcSlots::default()),
                 "ovs-vsctl --if-exists del-br",
             ),
             (
-                get_bf4_ovs_defaults_with_topology(Some(&intercept_bridging())),
+                get_bf4_ovs_defaults_with_topology(
+                    Some(&intercept_bridging()),
+                    ServiceVpcSlots::default(),
+                ),
                 "ovs-vsctl --if-exists del-br",
             ),
             (get_bf4_astra_ovs_defaults(), "/etc/mellanox/ovs-script.sh"),
@@ -3386,7 +3457,7 @@ mod tests {
             [Case {
                 scenario: "doca/offload/br-sfc setup lines present",
                 input: (
-                    get_default_ovs_defaults_with_topology(None),
+                    get_default_ovs_defaults_with_topology(None, ServiceVpcSlots::default()),
                     &[
                         "other_config:doca-init=true",
                         "other_config:hw-offload=true",
@@ -3394,6 +3465,7 @@ mod tests {
                         "datapath_type=netdev",
                         "type=dpdk",
                         "mtu_request=9216",
+                        "_ovs-vsctl --if-exists del-br br-hbn\n_ovs-vsctl --may-exist add-br br-hbn",
                     ][..],
                 ),
                 expect: Yields(true),
