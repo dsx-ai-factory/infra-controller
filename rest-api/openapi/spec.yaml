@@ -27951,9 +27951,9 @@ components:
 
         Omitted credential fields and JSON null preserve the stored credentials. To change BMC credentials, provide both defaultBmcUsername and defaultBmcPassword as non-empty strings in the same request. A partial pair is rejected with HTTP 400 before any update. Credential removal is not supported. Credentials are never returned in responses.
 
-        For single updates (PATCH /expected-machine/{id}), the id field is optional in body and will be ignored if provided (the ID from the URL path is used).
+        For single updates (`PATCH /expected-machine/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
 
-        For batch updates (PATCH /expected-machine/batch), the id field is required to identify which Expected Machine to update.
+        For batch updates (`PATCH /expected-machine/batch`), each item must include a non-null `id` to identify which Expected Machine to update.
       examples:
         - defaultBmcUsername: newadmin
           defaultBmcPassword: newpassword123
@@ -27974,9 +27974,9 @@ components:
           description: |-
             ID of the Expected Machine to update.
 
-            Optional for individual Expected Machine update (ignored if provided, ID from URL path is used).
+            For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
 
-            Required for batch update operations.
+            Required and non-null in every batch update item.
         bmcMacAddress:
           type:
             - string
