@@ -37,6 +37,8 @@ use rpc::forge::{
 };
 use tonic::{Code, Request};
 
+use crate::cfg::file::{AdminFnnConfig, VpcIsolationBehaviorType};
+use crate::handlers::tenant_prefix_overlap::validate_retained_state;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
 use crate::tests::common::api_fixtures::{
@@ -44,6 +46,7 @@ use crate::tests::common::api_fixtures::{
     create_test_env_with_overrides, get_config,
 };
 use crate::tests::common::network_segment::NetworkSegmentHelper;
+use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 fn tenant_managed_site_prefix(
@@ -120,7 +123,7 @@ async fn persist_configured_site_prefix(env: &TestEnv, prefix: &str) -> SitePref
         .unwrap()
 }
 
-/// Reads the effective FNN null routes through the public Version RPC so
+/// Reads operator null routes through the public Version RPC so
 /// retention tests verify the operator-visible contract rather than DB state.
 async fn runtime_config_null_routes(env: &TestEnv) -> Vec<String> {
     env.api
@@ -133,7 +136,7 @@ async fn runtime_config_null_routes(env: &TestEnv) -> Vec<String> {
         .runtime_config
         .expect("display_config must return runtime configuration")
         .site_fabric_null_routes
-        .expect("new Core must report the effective null-route set")
+        .expect("new Core must report the operator null-route set")
         .items
 }
 
@@ -196,6 +199,637 @@ async fn empty_site_prefix_inventory_and_missing_get_are_valid(pool: sqlx::PgPoo
         .unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
     assert_eq!(error.message(), "at least one ID must be provided");
+}
+
+#[crate::sqlx_test]
+async fn dpu_isolation_includes_retained_tenant_roots_without_reactivating_operator_roots(
+    pool: sqlx::PgPool,
+) {
+    let mut config = get_config();
+    config.max_site_prefix_isolation_rules = 1;
+    config.site_fabric_prefixes = vec![
+        "10.217.0.9/16".parse().unwrap(),
+        "fd00::/48".parse().unwrap(),
+    ];
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(config.site_fabric_prefixes.clone()),
+            ..TestEnvOverrides::with_config(config).with_fnn_config(None)
+        },
+    )
+    .await;
+    assert!(!env.config.tenant_prefix_overlap_enabled);
+
+    // These retained rows model a site that lowered its rule limit. Protection
+    // must still include every lifecycle state rather than fail DPU rendering.
+    for (tenant, prefix, state) in [
+        (
+            "tenant-a",
+            "10.42.0.0/25",
+            SitePrefixLifecycleState::Provisioning,
+        ),
+        (
+            "tenant-b",
+            "10.42.0.128/25",
+            SitePrefixLifecycleState::Ready,
+        ),
+        ("tenant-c", "172.16.0.0/24", SitePrefixLifecycleState::Error),
+        (
+            "tenant-d",
+            "192.168.0.0/24",
+            SitePrefixLifecycleState::Deleting,
+        ),
+    ] {
+        create_fixture_tenant(&env, tenant).await.unwrap();
+        persist_tenant_site_prefix(&env, tenant_managed_site_prefix(prefix, tenant), state).await;
+    }
+    let retired_operator = persist_configured_site_prefix(&env, "198.51.100.0/24").await;
+    let mut txn = env.pool.begin().await.unwrap();
+    db::site_prefix::reconcile_configured(&mut txn, &[])
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(
+        db::site_prefix::find_by_ids(&env.pool, &[retired_operator.id])
+            .await
+            .unwrap()[0]
+            .status
+            .lifecycle_state,
+        SitePrefixLifecycleState::Deleting,
+    );
+
+    let host = create_managed_host(&env).await;
+    let response = env
+        .api
+        .get_managed_host_network_config(Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(host.dpu_ids[0]),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let expected = [
+        "10.42.0.0/24",
+        "10.217.0.0/16",
+        "172.16.0.0/24",
+        "192.168.0.0/24",
+        "fd00::/48",
+    ];
+    assert_eq!(response.site_fabric_prefixes, expected);
+    assert_eq!(
+        response.deprecated_deny_prefixes,
+        [
+            "10.42.0.0/24",
+            "10.217.0.0/16",
+            "172.16.0.0/24",
+            "192.168.0.0/24",
+        ]
+    );
+
+    // Attach FNN on the same host so both wire contracts protect every
+    // retained tenant state, including roots unrelated to this Instance.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
+    let vpc_id = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .metadata(Metadata::new_with_default_name())
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let segment_id =
+        NetworkSegmentHelper::new_with_tenant_prefix("10.217.1.0/24", "10.217.1.1", vpc_id)
+            .create_with_api(&env.api)
+            .await
+            .unwrap()
+            .id
+            .unwrap();
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    host.instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let response = env
+        .api
+        .get_managed_host_network_config(Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(host.dpu().id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut expected_null_routes = expected.map(str::to_string).to_vec();
+    expected_null_routes.sort();
+    assert_eq!(
+        response.site_fabric_null_routes.unwrap().items,
+        expected_null_routes
+    );
+    assert_eq!(
+        runtime_config_null_routes(&env).await,
+        ["10.217.0.0/16", "fd00::/48"]
+    );
+}
+
+#[crate::sqlx_test]
+async fn site_prefix_isolation_admission_counts_compacted_site_rules(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config.max_site_prefix_isolation_rules = 3;
+    config.site_fabric_prefixes = vec!["10.217.0.0/16".parse().unwrap()];
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(config.site_fabric_prefixes.clone()),
+            ..TestEnvOverrides::with_config(config)
+        },
+    )
+    .await;
+    create_fixture_tenant(&env, "tenant-a").await.unwrap();
+    create_fixture_tenant(&env, "tenant-b").await.unwrap();
+
+    let mut created_ids = Vec::new();
+    for (tenant, prefix) in [
+        ("tenant-a", "10.42.0.0/25"),
+        ("tenant-b", "10.42.0.128/25"),
+        ("tenant-a", "172.16.0.0/24"),
+    ] {
+        let id = SitePrefixId::new();
+        let created = env
+            .api
+            .create_site_prefix(Request::new(creation_request(id, tenant, prefix)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            created.status.unwrap().lifecycle_state,
+            RpcSitePrefixLifecycleState::Provisioning as i32
+        );
+        created_ids.push(id);
+    }
+    env.api
+        .delete_site_prefix(Request::new(SitePrefixDeletionRequest {
+            id: Some(created_ids[2]),
+            tenant_organization_id: "tenant-a".to_string(),
+        }))
+        .await
+        .unwrap();
+
+    let rejected_id = SitePrefixId::new();
+    let error = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            rejected_id,
+            "tenant-b",
+            "192.168.0.0/24",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.message(),
+        "SitePrefix isolation rule limit reached: rules in use 3, after creation 4, limit 3"
+    );
+    assert!(
+        error
+            .metadata()
+            .get("nico-error-mitigation")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("max_site_prefix_isolation_rules")
+    );
+    assert!(
+        db::site_prefix::find_by_ids(&env.pool, &[rejected_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let history = env
+        .api
+        .find_site_prefix_state_histories(Request::new(SitePrefixStateHistoriesRequest {
+            site_prefix_ids: vec![rejected_id],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(history.histories.is_empty());
+}
+
+#[crate::sqlx_test]
+async fn lowered_isolation_limit_preserves_retry_but_rejects_a_compacting_new_root(
+    pool: sqlx::PgPool,
+) {
+    let mut config = get_config();
+    config.max_site_prefix_isolation_rules = 1;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            site_prefixes: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .await;
+    for tenant in ["tenant-a", "tenant-b", "tenant-c"] {
+        create_fixture_tenant(&env, tenant).await.unwrap();
+    }
+    let existing = persist_tenant_site_prefix(
+        &env,
+        tenant_managed_site_prefix("10.1.0.0/24", "tenant-a"),
+        SitePrefixLifecycleState::Provisioning,
+    )
+    .await;
+    persist_tenant_site_prefix(
+        &env,
+        tenant_managed_site_prefix("10.2.0.0/24", "tenant-b"),
+        SitePrefixLifecycleState::Provisioning,
+    )
+    .await;
+    let retry = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            existing.id,
+            "tenant-a",
+            "10.1.0.0/24",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retry.id, Some(existing.id));
+    assert_eq!(retry.metadata.unwrap().name, existing.metadata.name);
+
+    let error = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            SitePrefixId::new(),
+            "tenant-c",
+            "10.0.0.0/8",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.message(),
+        "SitePrefix isolation rule limit reached: rules in use 2, after creation 1, limit 1"
+    );
+}
+
+#[crate::sqlx_test]
+async fn tenant_site_prefix_admission_rejects_configured_denied_space(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config.deny_prefixes = vec!["10.2.0.0/16".parse().unwrap(), "fd00::/8".parse().unwrap()];
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            site_prefixes: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .await;
+    create_fixture_tenant(&env, "tenant-a").await.unwrap();
+    create_fixture_tenant(&env, "tenant-b").await.unwrap();
+    let existing = persist_tenant_site_prefix(
+        &env,
+        tenant_managed_site_prefix("10.2.0.0/24", "tenant-a"),
+        SitePrefixLifecycleState::Provisioning,
+    )
+    .await;
+    let retry = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            existing.id,
+            "tenant-a",
+            "10.2.0.0/24",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retry.id, Some(existing.id));
+
+    for prefix in ["10.2.1.0/24", "10.0.0.0/8"] {
+        let error = env
+            .api
+            .create_site_prefix(Request::new(creation_request(
+                SitePrefixId::new(),
+                "tenant-b",
+                prefix,
+            )))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert!(error.message().contains(&format!(
+            "tenant SitePrefix {prefix} overlaps configured deny prefix 10.2.0.0/16"
+        )));
+    }
+    let created = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            SitePrefixId::new(),
+            "tenant-b",
+            "192.168.0.0/24",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(created.config.unwrap().prefix, "192.168.0.0/24");
+}
+
+#[crate::sqlx_test]
+async fn concurrent_tenant_roots_share_the_site_isolation_limit(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config.max_site_prefix_isolation_rules = 1;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            site_prefixes: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .await;
+    create_fixture_tenant(&env, "tenant-a").await.unwrap();
+    create_fixture_tenant(&env, "tenant-b").await.unwrap();
+
+    let mut blocker = env.pool.begin().await.unwrap();
+    db::tenant_prefix_overlap::lock_checks(&mut blocker)
+        .await
+        .unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let first_id = SitePrefixId::new();
+    let second_id = SitePrefixId::new();
+    let first_api = env.api.clone();
+    let first = tokio::spawn(async move {
+        first_api
+            .create_site_prefix(Request::new(creation_request(
+                first_id,
+                "tenant-a",
+                "10.1.0.0/24",
+            )))
+            .await
+    });
+    let first_pid =
+        wait_for_blocked_query(&env.pool, blocker_pid, "tenant_prefix_overlap:checks").await;
+    let second_api = env.api.clone();
+    let second = tokio::spawn(async move {
+        second_api
+            .create_site_prefix(Request::new(creation_request(
+                second_id,
+                "tenant-b",
+                "10.2.0.0/24",
+            )))
+            .await
+    });
+    wait_for_blocked_query(&env.pool, first_pid, "tenant_prefix_overlap:checks").await;
+    blocker.commit().await.unwrap();
+    let results = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let error = results.into_iter().find_map(Result::err).unwrap();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.message(),
+        "SitePrefix isolation rule limit reached: rules in use 1, after creation 2, limit 1"
+    );
+    assert_eq!(
+        db::site_prefix::find_by_ids(&env.pool, &[first_id, second_id])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[crate::sqlx_test]
+async fn explicit_null_routes_reject_uncovered_creation_but_preserve_retries(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config.site_fabric_null_routes = Some(vec!["10.0.0.0/8".parse().unwrap()]);
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    create_fixture_tenant(&env, "tenant-a").await.unwrap();
+    create_fixture_tenant(&env, "tenant-b").await.unwrap();
+    assert!(!env.config.tenant_prefix_overlap_enabled);
+
+    // An older configuration admitted this root. Retrying its immutable
+    // identity does not add uncovered space or rewrite its history.
+    let existing = persist_tenant_site_prefix(
+        &env,
+        tenant_managed_site_prefix("192.168.0.0/24", "tenant-a"),
+        SitePrefixLifecycleState::Provisioning,
+    )
+    .await;
+    let history_request = SitePrefixStateHistoriesRequest {
+        site_prefix_ids: vec![existing.id],
+    };
+    let history_before = env
+        .api
+        .find_site_prefix_state_histories(Request::new(history_request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    let retry = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            existing.id,
+            "tenant-a",
+            "192.168.0.0/24",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retry.id, Some(existing.id));
+    assert_eq!(retry.version, existing.version.to_string());
+    assert_eq!(retry.metadata.unwrap().name, existing.metadata.name);
+    assert_eq!(
+        env.api
+            .find_site_prefix_state_histories(Request::new(history_request))
+            .await
+            .unwrap()
+            .into_inner(),
+        history_before
+    );
+
+    let rejected_id = SitePrefixId::new();
+    let error = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            rejected_id,
+            "tenant-b",
+            "192.168.0.0/24",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "tenant SitePrefix 192.168.0.0/24 is not covered by configured site_fabric_null_routes"
+    );
+    assert!(
+        db::site_prefix::find_by_ids(&env.pool, &[rejected_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let history = env
+        .api
+        .find_site_prefix_state_histories(Request::new(SitePrefixStateHistoriesRequest {
+            site_prefix_ids: vec![rejected_id],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(history.histories.is_empty());
+}
+
+#[crate::sqlx_test]
+async fn open_isolation_does_not_require_tenant_null_routes_or_rule_budget(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config.vpc_isolation_behavior = VpcIsolationBehaviorType::Open;
+    config.site_fabric_null_routes = Some(vec![]);
+    config.max_site_prefix_isolation_rules = 0;
+    config.deny_prefixes = vec!["10.2.0.0/16".parse().unwrap()];
+    let mut overrides = TestEnvOverrides::with_config(config).with_fnn_config(None);
+    overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
+        enabled: true,
+        vpc_vni: Some(10000),
+        routing_profile: Default::default(),
+    });
+    let env = create_test_env_with_overrides(pool, overrides).await;
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
+        .await
+        .unwrap();
+    crate::db_init::update_network_segments_svi_ip(&env.pool)
+        .await
+        .unwrap();
+    let host = create_managed_host(&env).await;
+    create_fixture_tenant(&env, "tenant-a").await.unwrap();
+
+    let root = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            SitePrefixId::new(),
+            "tenant-a",
+            "192.168.0.0/24",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(root.config.unwrap().prefix, "192.168.0.0/24");
+    validate_retained_state(&env.api).await.unwrap();
+    let response = env
+        .api
+        .get_managed_host_network_config(Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(host.dpu().id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.use_admin_network);
+    assert_eq!(
+        response.network_virtualization_type,
+        Some(rpc::forge::VpcVirtualizationType::Fnn as i32)
+    );
+    assert_eq!(
+        response.vpc_isolation_behavior,
+        rpc::forge::VpcIsolationBehaviorType::VpcIsolationOpen as i32
+    );
+    assert!(response.site_fabric_null_routes.unwrap().items.is_empty());
+
+    // `open` removes mutual isolation, not the configured site-wide deny list.
+    let error = env
+        .api
+        .create_site_prefix(Request::new(creation_request(
+            SitePrefixId::new(),
+            "tenant-a",
+            "10.2.0.0/24",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert!(error.message().contains("overlaps configured deny prefix"));
+}
+
+#[crate::sqlx_test]
+async fn uncovered_retained_tenant_root_blocks_fnn_admin_and_startup_but_not_version(
+    pool: sqlx::PgPool,
+) {
+    let mut config = get_config();
+    config.site_fabric_null_routes = Some(vec![]);
+    let mut overrides = TestEnvOverrides::with_config(config).with_fnn_config(None);
+    overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
+        enabled: true,
+        vpc_vni: Some(10000),
+        routing_profile: Default::default(),
+    });
+    let env = create_test_env_with_overrides(pool, overrides).await;
+    assert!(!env.config.tenant_prefix_overlap_enabled);
+
+    // Test setup does not run the startup hooks that attach the Admin FNN VPC.
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
+        .await
+        .unwrap();
+    crate::db_init::update_network_segments_svi_ip(&env.pool)
+        .await
+        .unwrap();
+    let host = create_managed_host(&env).await;
+    let response = env
+        .api
+        .get_managed_host_network_config(Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(host.dpu().id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.use_admin_network);
+    assert_eq!(
+        response.network_virtualization_type,
+        Some(rpc::forge::VpcVirtualizationType::Fnn as i32)
+    );
+
+    // Another replica can admit this root after the host reaches Admin FNN.
+    create_fixture_tenant(&env, "tenant-a").await.unwrap();
+    persist_tenant_site_prefix(
+        &env,
+        tenant_managed_site_prefix("192.168.0.0/24", "tenant-a"),
+        SitePrefixLifecycleState::Deleting,
+    )
+    .await;
+    let mut txn = env.pool.begin().await.unwrap();
+    assert!(
+        db::tenant_prefix_overlap::find_duplicate_vpc_ids(&mut *txn, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    txn.commit().await.unwrap();
+
+    // Version must still show the explicit override so operators can inspect it.
+    assert!(runtime_config_null_routes(&env).await.is_empty());
+    let fnn_error = env
+        .api
+        .get_managed_host_network_config(Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(host.dpu().id),
+        }))
+        .await
+        .unwrap_err();
+    let startup_error: tonic::Status = validate_retained_state(&env.api).await.unwrap_err().into();
+    for (operation, error) in [("Admin FNN", fnn_error), ("startup", startup_error)] {
+        assert_eq!(error.code(), Code::FailedPrecondition, "{operation}");
+        assert_eq!(
+            error.message(),
+            "tenant SitePrefix 192.168.0.0/24 is not covered by configured site_fabric_null_routes",
+            "{operation}"
+        );
+    }
 }
 
 #[crate::sqlx_test]
@@ -1072,10 +1706,9 @@ async fn dpu_response_retains_containing_roots_for_unassigned_predecessor_prefix
     rendered_roots.sort();
     let expected = vec![broad_root.to_string()];
 
-    // Core conservatively discovers both possible parents, then collapses the
-    // inherited exact union for the new field. Legacy fields remain bound to
-    // the now-empty configured site-prefix list so old agents behave exactly
-    // as they did before route-based isolation was introduced.
+    // Core discovers both possible operator parents, then combines their exact
+    // union for FNN. Legacy fields exclude retiring operator roots; this fixture
+    // has no configured or tenant roots, so those fields remain empty.
     assert_eq!(rendered_roots, expected);
     assert!(response.site_fabric_prefixes.is_empty());
     assert!(response.deprecated_deny_prefixes.is_empty());
@@ -1103,6 +1736,15 @@ async fn dpu_response_uses_explicit_fnn_null_route_override(
         TestEnvOverrides::with_config(config).with_fnn_config(None),
     )
     .await;
+
+    create_fixture_tenant(&env, "tenant-null-route").await?;
+    env.api
+        .create_site_prefix(Request::new(creation_request(
+            SitePrefixId::new(),
+            "tenant-null-route",
+            "10.2.0.0/16",
+        )))
+        .await?;
 
     // Attach an FNN instance so the public DPU handler takes its FNN-specific
     // null-route path rather than the ETV site-prefix path.
@@ -1135,16 +1777,16 @@ async fn dpu_response_uses_explicit_fnn_null_route_override(
         .into_inner();
     let expected = vec![null_route.to_string(), stronger_null_route.to_string()];
 
-    // The original site-prefix data remains in the legacy fields. The
-    // contained /24 remains present only in the new field so an authorized /8
-    // import does not make that range reachable on updated agents.
+    // Legacy agents still receive the tenant root. Its /16 must not replace
+    // the explicit /8 and /24 routes: the narrower blackhole remains stronger
+    // than an authorized /8 import on updated agents.
     assert_eq!(
         response.site_fabric_prefixes,
-        vec![inherited_root.to_string()]
+        vec!["10.2.0.0/16".to_string(), inherited_root.to_string()]
     );
     assert_eq!(
         response.deprecated_deny_prefixes,
-        vec![inherited_root.to_string()]
+        vec!["10.2.0.0/16".to_string(), inherited_root.to_string()]
     );
     assert_eq!(
         response
@@ -1153,6 +1795,7 @@ async fn dpu_response_uses_explicit_fnn_null_route_override(
             .items,
         expected
     );
+    assert_eq!(runtime_config_null_routes(&env).await, expected);
 
     Ok(())
 }

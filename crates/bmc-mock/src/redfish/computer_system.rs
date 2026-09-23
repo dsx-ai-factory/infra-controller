@@ -31,8 +31,8 @@ use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch, json_patch};
 use crate::redfish::Builder;
 use crate::{
-    BootOptionKind, Callbacks, MachineRouterOptions, MockPowerState, POWER_CYCLE_DELAY,
-    SetSystemPowerError, http, redfish,
+    ActionError, BootOptionKind, Callbacks, MachineRouterOptions, MockPowerState,
+    POWER_CYCLE_DELAY, http, redfish,
 };
 
 pub(super) fn collection() -> redfish::Collection<'static> {
@@ -922,7 +922,7 @@ async fn post_reset_system<C: Callbacks>(
     // introduce a deadlock if the API server holds a lock on the row for this machine
     // while issuing a redfish call, and MachineStateMachine is blocked waiting for the row lock
     // to be released.
-    match callbacks.set_power_state(reset_type) {
+    match callbacks.computer_system_reset(reset_type).await {
         Ok(_) => {
             state.record_event(redfish::log_service::LogEntryDraft::reset_requested(
                 &resource(&system_id).odata_id,
@@ -930,10 +930,8 @@ async fn post_reset_system<C: Callbacks>(
             ));
             json!({}).into_ok_response()
         }
-        Err(SetSystemPowerError::BadRequest(_)) => StatusCode::BAD_REQUEST.into_response(),
-        Err(SetSystemPowerError::CommandSendError(_)) => {
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        Err(ActionError::BadRequest(_)) => StatusCode::BAD_REQUEST.into_response(),
+        Err(ActionError::Internal(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 

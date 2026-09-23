@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    Callbacks, HostFirmwareVersions, HostMachineInfo, MachineInfo, MockPowerState,
-    ResourceResetType, SetSystemPowerError, SetSystemPowerResult,
+    ActionError, HostFirmwareVersions, HostMachineInfo, MachineInfo, MockPowerState,
+    ResourceResetType,
 };
 use carbide_utils::test_support::certs::create_random_self_signed_cert;
 use carbide_uuid::machine::MachineId;
@@ -495,7 +495,7 @@ impl HostMachine {
         }
     }
 
-    fn set_system_power(&mut self, request: ResourceResetType) -> SetSystemPowerResult {
+    fn set_system_power(&mut self, request: ResourceResetType) -> Result<(), ActionError> {
         tracing::debug!(?request, "Received host system-power request",);
 
         match request {
@@ -589,10 +589,7 @@ pub(crate) struct MachineHandle(Arc<HostMachineActor>);
 impl MachineHandle {
     /// Drive power through the guard the BMC mock uses, so an RMS power
     /// request obeys the same rules as a Redfish one.
-    pub(crate) fn set_system_power(
-        &self,
-        request: ResourceResetType,
-    ) -> Result<(), SetSystemPowerError> {
+    pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
         LiveStateCallbacks::new(self.0.live_state.clone(), self.0.bmc_control_tx.clone())
             .set_power_state(request)
     }

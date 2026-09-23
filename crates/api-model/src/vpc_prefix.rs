@@ -173,6 +173,9 @@ pub struct NewVpcPrefix {
     pub id: VpcPrefixId,
     pub site_prefix_id: Option<SitePrefixId>,
     pub vpc_id: VpcId,
+    /// VPC scope selected by Core after checking tenant-prefix eligibility.
+    /// `None` keeps the prefix globally exclusive; API requests cannot set this field.
+    pub overlap_vpc_id: Option<VpcId>,
     pub config: VpcPrefixConfig,
     pub metadata: Metadata,
 }

@@ -97,6 +97,8 @@ jobs:
     name: Lint OpenAPI
     runs-on: linux-amd64-cpu4
     continue-on-error: false
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -107,6 +109,9 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: '24'
+
+      - name: Test NVSwitch registration form
+        run: node --test nvswitch-manager/cmd/ui_registration_test.mjs
 
       - name: Install Redocly CLI
         run: npm install -g @redocly/cli@latest

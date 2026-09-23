@@ -245,6 +245,7 @@ func ComponentFrom(c *pb.Component) (*component.Component, error) {
 		FirmwareVersion: c.GetFirmwareVersion(),
 		Position:        RackPositionFrom(c.GetPosition()),
 		BmcsByType:      bmcsByType,
+		ComponentID:     c.GetComponentId(),
 		PowerState:      c.GetPowerState(),
 		RackExternalID:  c.GetRackExternalId(),
 	}

@@ -5,7 +5,9 @@
 
 use std::collections::HashSet;
 
-use model::expected_rack_group::{ExpectedRackGroup, ExpectedRackGroupMember, RackGroupTopology};
+use model::expected_rack_group::{
+    ExpectedRackGroup, ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupTopology,
+};
 use model::metadata::Metadata;
 
 use crate as rpc;
@@ -28,16 +30,7 @@ impl From<ExpectedRackGroup> for rpc::forge::ExpectedRackGroup {
         Self {
             rack_group_id: Some(group.rack_group_id),
             topology: group.topology.to_string(),
-            rack_ids: group.rack_ids,
-            members: group
-                .members
-                .into_iter()
-                .map(|member| rpc::forge::ExpectedRackGroupMember {
-                    r#type: member.device_type.to_string(),
-                    manufacturer: member.manufacturer,
-                    id: member.id,
-                })
-                .collect(),
+            racks: group.racks.into_iter().map(Into::into).collect(),
             metadata: Some(group.metadata.into()),
         }
     }
@@ -57,27 +50,44 @@ impl TryFrom<rpc::forge::ExpectedRackGroup> for ExpectedRackGroup {
                 "topology must contain 1 to 128 characters and not be blank",
             ));
         }
-        let mut racks = HashSet::new();
-        for rack in &value.rack_ids {
-            if rack.as_str().trim().is_empty() || !racks.insert(rack) {
-                return Err(invalid(
-                    "rack_ids must contain non-blank, unique identifiers",
-                ));
-            }
-        }
+        let mut rack_ids = HashSet::new();
         let mut members = HashSet::new();
-        for member in &value.members {
-            if member.r#type.trim().is_empty()
-                || member.manufacturer.trim().is_empty()
-                || member.id.trim().is_empty()
-            {
+        let mut racks = Vec::with_capacity(value.racks.len());
+        for rack in value.racks {
+            let rack_id = rack
+                .rack_id
+                .ok_or(RpcDataConversionError::MissingArgument("racks.rack_id"))?;
+            if rack_id.as_str().trim().is_empty() || !rack_ids.insert(rack_id.clone()) {
                 return Err(invalid(
-                    "member type, manufacturer and id must not be blank",
+                    "racks must contain non-blank, unique rack identifiers",
                 ));
             }
-            if !members.insert((&member.r#type, &member.manufacturer, &member.id)) {
-                return Err(invalid("duplicate device member"));
+            let mut devices = Vec::with_capacity(rack.members.len());
+            for member in rack.members {
+                if member.manufacturer.trim().is_empty() || member.id.trim().is_empty() {
+                    return Err(invalid("member manufacturer and id must not be blank"));
+                }
+                let device_type = member
+                    .r#type
+                    .parse()
+                    .map_err(|_| invalid("member type must be Compute, Switch or PowerShelf"))?;
+                if !members.insert((
+                    member.r#type.clone(),
+                    member.manufacturer.clone(),
+                    member.id.clone(),
+                )) {
+                    return Err(invalid("duplicate device member across racks"));
+                }
+                devices.push(ExpectedRackGroupMember {
+                    device_type,
+                    manufacturer: member.manufacturer,
+                    id: member.id,
+                });
             }
+            racks.push(ExpectedRackGroupRack {
+                rack_id,
+                members: devices,
+            });
         }
         let metadata = Metadata::try_from(value.metadata.unwrap_or_default())?;
         metadata
@@ -86,22 +96,26 @@ impl TryFrom<rpc::forge::ExpectedRackGroup> for ExpectedRackGroup {
         Ok(Self {
             rack_group_id,
             topology: RackGroupTopology::new(value.topology),
-            rack_ids: value.rack_ids,
-            members: value
-                .members
-                .into_iter()
-                .map(|member| {
-                    Ok(ExpectedRackGroupMember {
-                        device_type: member.r#type.parse().map_err(|_| {
-                            invalid("member type must be Compute, Switch or PowerShelf")
-                        })?,
-                        manufacturer: member.manufacturer,
-                        id: member.id,
-                    })
-                })
-                .collect::<Result<_, RpcDataConversionError>>()?,
+            racks,
             metadata,
         })
+    }
+}
+
+impl From<ExpectedRackGroupRack> for rpc::forge::ExpectedRackGroupRack {
+    fn from(rack: ExpectedRackGroupRack) -> Self {
+        Self {
+            rack_id: Some(rack.rack_id),
+            members: rack
+                .members
+                .into_iter()
+                .map(|m| rpc::forge::ExpectedRackGroupMember {
+                    r#type: m.device_type.to_string(),
+                    manufacturer: m.manufacturer,
+                    id: m.id,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -115,12 +129,20 @@ mod tests {
         rpc::forge::ExpectedRackGroup {
             rack_group_id: Some(RackGroupId::new("54f74aea-76eb-4f0a-aab2-b607136f4d35")),
             topology: "gb200_nvl72r1_c2g4".to_string(),
-            rack_ids: vec![RackId::new("rack-02"), RackId::new("rack-01")],
-            members: vec![rpc::forge::ExpectedRackGroupMember {
-                r#type: "Compute".to_string(),
-                manufacturer: "NVIDIA".to_string(),
-                id: "device-01".to_string(),
-            }],
+            racks: vec![
+                rpc::forge::ExpectedRackGroupRack {
+                    rack_id: Some(RackId::new("rack-02")),
+                    members: vec![rpc::forge::ExpectedRackGroupMember {
+                        r#type: "Compute".to_string(),
+                        manufacturer: "NVIDIA".to_string(),
+                        id: "device-01".to_string(),
+                    }],
+                },
+                rpc::forge::ExpectedRackGroupRack {
+                    rack_id: Some(RackId::new("rack-01")),
+                    members: vec![],
+                },
+            ],
             metadata: None,
         }
     }
@@ -130,24 +152,29 @@ mod tests {
         let source = wire();
         let group = ExpectedRackGroup::try_from(source.clone()).unwrap();
         let back: rpc::forge::ExpectedRackGroup = group.into();
-        assert_eq!(back.rack_ids, source.rack_ids);
-        assert_eq!(back.members, source.members);
+        assert_eq!(back.racks, source.racks);
         assert_eq!(back.topology, source.topology);
         type Mutation = fn(&mut rpc::forge::ExpectedRackGroup);
         let cases: &[(&str, Mutation)] = &[
             ("missing identity", |v| v.rack_group_id = None),
             ("blank topology", |v| v.topology = " ".to_string()),
-            ("duplicate rack", |v| v.rack_ids.push(v.rack_ids[0].clone())),
-            ("duplicate device", |v| v.members.push(v.members[0].clone())),
-            ("blank device identity", |v| v.members[0].id.clear()),
+            ("duplicate rack", |v| v.racks.push(v.racks[0].clone())),
+            ("duplicate device across racks", |v| {
+                let m = v.racks[0].members[0].clone();
+                v.racks[1].members.push(m);
+            }),
+            ("missing rack identity", |v| v.racks[0].rack_id = None),
+            ("blank device identity", |v| {
+                v.racks[0].members[0].id.clear()
+            }),
             ("REST spelling rejected", |v| {
-                v.members[0].r#type = "NVSwitch".into()
+                v.racks[0].members[0].r#type = "NVSwitch".into()
             }),
             ("lowercase spelling rejected", |v| {
-                v.members[0].r#type = "switch".into()
+                v.racks[0].members[0].r#type = "switch".into()
             }),
             ("unknown device type", |v| {
-                v.members[0].r#type = "Other".into()
+                v.racks[0].members[0].r#type = "Other".into()
             }),
         ];
         for (name, modify) in cases {
@@ -156,8 +183,7 @@ mod tests {
             assert!(ExpectedRackGroup::try_from(input).is_err(), "{name}");
         }
         let mut empty = wire();
-        empty.rack_ids.clear();
-        empty.members.clear();
+        empty.racks.clear();
         assert!(ExpectedRackGroup::try_from(empty).is_ok());
     }
 
@@ -202,14 +228,14 @@ mod tests {
     fn expected_rack_group_member_types_round_trip() {
         for name in ["Compute", "Switch", "PowerShelf"] {
             let mut input = wire();
-            input.members[0].r#type = name.into();
+            input.racks[0].members[0].r#type = name.into();
             let group = ExpectedRackGroup::try_from(input.clone()).unwrap();
-            let stored = serde_json::to_value(&group.members).unwrap();
+            let stored = serde_json::to_value(&group.racks[0].members).unwrap();
             assert_eq!(stored[0]["type"], name);
             let members: Vec<ExpectedRackGroupMember> = serde_json::from_value(stored).unwrap();
-            assert_eq!(members, group.members);
+            assert_eq!(members, group.racks[0].members);
             let output: rpc::forge::ExpectedRackGroup = group.into();
-            assert_eq!(output.members, input.members);
+            assert_eq!(output.racks[0].members, input.racks[0].members);
         }
     }
 }

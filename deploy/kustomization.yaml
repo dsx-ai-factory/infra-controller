@@ -14,6 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+# Deprecated in NICo 2.3 and removed in NICo 2.4: install with the Helm charts
+# under helm/ via helm-prereqs/setup.sh instead. See deploy/README.md.
+
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

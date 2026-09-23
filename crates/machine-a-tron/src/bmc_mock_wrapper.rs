@@ -21,8 +21,8 @@ use axum::Router;
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::ipmi_sim::{ConsoleOutputStreamFactory, IpmiSimConfig, IpmiSimHandle};
 use bmc_mock::{
-    BmcState, Callbacks, CombinedServer, HardwareType, HostnameQuerying, MachineInfo,
-    ResourceResetType, SetSystemPowerResult,
+    ActionError, BmcState, Callbacks, CombinedServer, HardwareType, HostnameQuerying, MachineInfo,
+    ResourceResetType,
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -37,7 +37,7 @@ use crate::mock_ssh_server::{MockSshServerHandle, PromptBehavior};
 pub(crate) enum BmcCommand {
     SetSystemPower {
         request: ResourceResetType,
-        reply: Option<tokio::sync::oneshot::Sender<SetSystemPowerResult>>,
+        reply: Option<tokio::sync::oneshot::Sender<Result<(), ActionError>>>,
     },
     StateRefreshIndication,
 }

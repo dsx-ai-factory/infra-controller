@@ -141,19 +141,20 @@ envFrom:
   vaultClusterInfo:
     configMapName: vault-cluster-info
 
-# startupProbe gates the livenessProbe until MAT has bound its redfish port.
-# MAT binds the port only after registering all expected machines via the API,
-# which can take a while for large deployments (time scales with host count).
-# Without a startupProbe the kubelet kills the pod mid-registration (exit 137)
-# Scale the failureThreshold to cover your largest deployment:
-#   hosts=2300  → default (20 * 30s = 10 min)
-#   hosts=4500  → failureThreshold: 60  (30 min)
-#   hosts=13500 → failureThreshold: 1200 (10 h, see machine-a-tron-scale.yaml)
+# startupProbe gates liveness until MAT binds the redfish port, which happens
+# only after it registers every expected rack, host, switch and power shelf
+# with nico-api. DPUs are not registered: a GB200 rack has 71 BMCs but adds 36
+# records (1 rack + 18 hosts + 9 switches + 8 power shelves). Too short a
+# window kills the pod mid-registration (exit 137, issue #5968). Default 120 x
+# 30s = 60 min. Rule: ~2s per record this pod registers, round up, divide by
+# periodSeconds; e.g. 25 racks x 36 = 900 records = 30 min, so 60 min leaves
+# headroom for the 2s worst case (~10 pods registering against one nico-api at
+# once) plus a retry after an outage. A long window only delays hang detection.
 startupProbe:
   tcpSocket:
     port: redfish
   periodSeconds: 30
-  failureThreshold: 20
+  failureThreshold: 120
   successThreshold: 1
   timeoutSeconds: 10
 

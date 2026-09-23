@@ -55,18 +55,13 @@ firmware, log, NMX-T, NMX-C, NVUE REST, and leak-related data when configured.
 
 ### Helm Configuration
 
-Enable hardware health in Helm values:
-
-```yaml
-nico-hardware-health:
-  enabled: true
-```
+`nico-hardware-health` is a core component of the umbrella chart and is
+always installed; it has no `enabled` toggle.
 
 Enable metrics scraping with its ServiceMonitor:
 
 ```yaml
 nico-hardware-health:
-  enabled: true
   replicas: 1
 
   serviceMonitor:

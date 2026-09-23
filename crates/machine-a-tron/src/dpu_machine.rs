@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::MacAddressPool;
 use bmc_mock::{
-    DpuMachineInfo, DpuSettings, HardwareType, MachineInfo, ResourceResetType, SetSystemPowerResult,
+    ActionError, DpuMachineInfo, DpuSettings, HardwareType, MachineInfo, ResourceResetType,
 };
 use carbide_uuid::machine::MachineId;
 use eyre::Context;
@@ -326,7 +326,7 @@ impl DpuMachine {
 enum DpuMachineMessage {
     SetSystemPower {
         request: ResourceResetType,
-        reply: Option<oneshot::Sender<SetSystemPowerResult>>,
+        reply: Option<oneshot::Sender<Result<(), ActionError>>>,
     },
     WaitUntilMachineUpWithApiState(String, oneshot::Sender<()>),
     SetPaused(bool),

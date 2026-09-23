@@ -1244,6 +1244,8 @@ mod tests {
                         chassis,
                         sensors: Vec::new(),
                         oem_capacity_watts: Some(5500.0),
+                        oem_power_output: None,
+                        oem_fan_speed_target_percent: None,
                     }],
                 );
             }

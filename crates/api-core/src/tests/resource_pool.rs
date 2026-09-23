@@ -238,8 +238,22 @@ async fn test_simple(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     );
 
     // return the values
-    db::resource_pool::release(&pool, &mut txn, auto_allocated).await?;
-    db::resource_pool::release(&pool, &mut txn, non_auto_allocated).await?;
+    assert_eq!(
+        db::resource_pool::release(&pool, &mut txn, auto_allocated, OwnerType::Machine, "123")
+            .await?,
+        db::ConditionalWrite::Applied(()),
+    );
+    assert_eq!(
+        db::resource_pool::release(
+            &pool,
+            &mut txn,
+            non_auto_allocated,
+            OwnerType::Machine,
+            "123",
+        )
+        .await?,
+        db::ConditionalWrite::Applied(()),
+    );
 
     assert_eq!(
         db::resource_pool::stats(&mut *txn, pool.name()).await?,

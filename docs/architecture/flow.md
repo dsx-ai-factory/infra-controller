@@ -16,7 +16,7 @@ flowchart TD
     Core --> Backend[Configured hardware backend]
 ```
 
-[Flow component-manager configuration](../configuration/flow-component-manager.md) selects Flow implementations and providers. [Core RMS backend configuration](../configuration/component-manager-rms.md) controls the downstream Core layer.
+[Flow component-manager configuration](../configuration/flow-component-manager.md) selects Flow implementations and providers. [Core RMS configuration](../configuration/rms.md) controls the downstream Core layer.
 
 ## Inventory and execution
 

@@ -280,14 +280,31 @@ env:
 ##     username: ignored-for-token-or-certificate-auth
 ##     password: bearer-token-or-empty
 ##
-## In the default local_first mode, these entries override matching persistent
-## backend credentials. Set ufmSource to local to require local entries for
-## every configured fabric and disable persistent-backend UFM access.
+## bmc_site_wide_root:
+##   username: root
+##   password: existing-version-0-password
+##
+## In the default local_first modes, these entries override matching persistent
+## backend credentials. Set a source to local to make its local entries
+## authoritative and disable persistent-backend mutation for that credential.
 credentials:
   # local_first preserves environment/file overrides with persistent-backend
   # fallback. backend ignores local UFM entries. local requires every configured
   # fabric in the environment/file sources and rejects backend mutations.
   ufmSource: local_first
+  # Controls only the unversioned (version 0) site-wide BMC root. local_first
+  # reads environment, then file, then falls back to the backend. backend ignores
+  # the local v0 entry. local reads environment, then file, with no backend
+  # fallback and rejects backend v0 mutations. Treat local v0 as
+  # bootstrap/ingestion input; after a device uses it, coordinated rotation
+  # advances to a backend-managed version. With DPF enabled, local mode requires
+  # v0 before Core starts when v0 is current or the target cannot be resolved.
+  # local_first and backend may start empty, but new DPU registration waits for
+  # the shared Secret to be published. The default pinned DPF v26.4.0 does not
+  # support credential rotation; do not rotate while DPF manages a DPU
+  # (NVIDIA/infra-controller#6147).
+  # Versioned roots always use persistent backends.
+  bmcSiteWideRootSource: local_first
   file:
     existingSecret:
       name: ""

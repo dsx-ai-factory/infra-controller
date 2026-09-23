@@ -218,6 +218,7 @@ jobs:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.cargo/**'
               - 'Makefile.toml'
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yaml'
@@ -906,7 +907,7 @@ jobs:
     uses: ./.github/workflows/docker-build.yml
     with:
       dockerfile_path: dev/k8s/machine-a-tron-controller/Dockerfile
-      context_path: dev/k8s/machine-a-tron-controller
+      context_path: .
       image_name: ${{ needs.prepare.outputs.image_registry }}/mat-k8s-controller
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/mat-k8s-controller:${{ needs.prepare.outputs.major_minor_version }}-latest
@@ -1784,6 +1785,8 @@ jobs:
               values = yaml.safe_load(stream)
           print(yaml.safe_dump({"scrape_configs": values["prometheus"]["prometheusSpec"]["additionalScrapeConfigs"]}))
           PYCONFIG
+          PROMTOOL="${RUNNER_TEMP}/prometheus-${prometheus_version}.linux-amd64/promtool" \
+            /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_ipv6_scraping.py'
 
       - name: Check Core VIP preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
@@ -1796,6 +1799,7 @@ jobs:
           registry-password: ${{ secrets.NVCR_TOKEN }}
           charts: >-
             bluefield/charts/nico-dpu-agent
+            bluefield/charts/nico-fmds
             bluefield/charts/nico-otelcol
             helm
             helm/charts/nico-api
@@ -1803,7 +1807,7 @@ jobs:
             helm/charts/nico-dhcp
             helm/charts/nico-dns
             helm/charts/nico-dsx-exchange-consumer
-            helm/charts/nico-flow
+            helm/nico-flow
             helm/charts/nico-hardware-health
             helm/charts/nico-machine-a-tron
             helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
@@ -1895,6 +1899,9 @@ jobs:
 
       - name: Test observability install summary
         run: bash helm-prereqs/tests/install-observability-summary_test.sh
+
+      - name: Test DPF single Core deployment
+        run: bash helm-prereqs/tests/setup-dpf-single-core-deploy_test.sh
 
   build-push-helm-prereqs-chart:
     needs:

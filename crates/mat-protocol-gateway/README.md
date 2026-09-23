@@ -18,7 +18,10 @@ API clients hit the same socket.
 The binary default is `0.0.0.0:9888` over plain HTTP, which is what you get
 when the gateway is started without a configuration file. A deployment that
 terminates TLS in the gateway sets `listen_address` and `[tls]` in the
-configuration file.
+configuration file. The gateway re-reads `tls.cert_path` and `tls.key_path`
+every 30 seconds and serves a changed pair without a restart. A pair that does
+not load is logged once and the served certificate stays in use until the
+files change again.
 
 | Path | Purpose |
 |------|---------|

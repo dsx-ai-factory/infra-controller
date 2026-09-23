@@ -37,11 +37,14 @@ Show one expected switch by ID:
 pub(crate) struct Args {
     #[clap(
         default_value(None),
-        help = "BMC MAC address of the expected switch to show. Leave unset for all."
+        help = "BMC MAC address of the expected switch to show. Omit both this address and --id to list all expected switches."
     )]
     bmc_mac_address: Option<MacAddress>,
 
-    #[clap(long, help = "ID (UUID) of the expected switch to show.")]
+    #[clap(
+        long,
+        help = "ID (UUID) of the expected switch to show. Cannot be combined with a BMC MAC address."
+    )]
     id: Option<Uuid>,
 }
 

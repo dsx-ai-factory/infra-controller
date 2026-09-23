@@ -30,6 +30,7 @@ pub struct TestCredentialManager {
     credentials: Mutex<HashMap<String, Credentials>>,
     fallback_credentials: Option<Credentials>,
     pub set_credentials_sleep_time_ms: AtomicU32,
+    create_credentials_failure: AtomicBool,
     delete_credentials_failure: AtomicBool,
     set_credentials_failure: AtomicBool,
 }
@@ -42,6 +43,7 @@ impl TestCredentialManager {
             credentials: Mutex::new(HashMap::new()),
             fallback_credentials: Some(fallback_credentials),
             set_credentials_sleep_time_ms: Default::default(),
+            create_credentials_failure: Default::default(),
             delete_credentials_failure: Default::default(),
             set_credentials_failure: Default::default(),
         }
@@ -59,6 +61,13 @@ impl TestCredentialManager {
     /// caller can exercise a persist-failure path without touching a real store.
     pub fn set_set_credentials_failure(&self, fail: bool) {
         self.set_credentials_failure
+            .store(fail, atomic::Ordering::Release);
+    }
+
+    /// Makes `create_credentials` return an error without persisting the
+    /// credential.
+    pub fn set_create_credentials_failure(&self, fail: bool) {
+        self.create_credentials_failure
             .store(fail, atomic::Ordering::Release);
     }
 }
@@ -119,6 +128,14 @@ impl CredentialWriter for TestCredentialManager {
             .load(atomic::Ordering::Acquire);
         if sleep_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(sleep_ms as _)).await;
+        }
+        if self
+            .create_credentials_failure
+            .load(atomic::Ordering::Acquire)
+        {
+            return Err(SecretsError::GenericError(eyre::eyre!(
+                "test credential create failure"
+            )));
         }
         let mut data = self.credentials.lock().await;
         let key_str = key.to_key_str();

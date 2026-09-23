@@ -16,12 +16,19 @@ async fn expected_rack_group_duplicate_create(pool: sqlx::PgPool) {
     let group = ExpectedRackGroup {
         rack_group_id: Some(RackGroupId::new("group")),
         topology: "gb200_nvl72r1_c2g4".to_string(),
+        racks: vec![rpc::forge::ExpectedRackGroupRack {
+            rack_id: Some("rack-01".parse().unwrap()),
+            members: vec![rpc::forge::ExpectedRackGroupMember {
+                r#type: "Switch".into(),
+                manufacturer: "NVIDIA".into(),
+                id: "switch-01".into(),
+            }],
+        }],
         metadata: Some(Metadata {
             name: "n".repeat(256),
             description: "d".repeat(1024),
             labels: vec![],
         }),
-        ..Default::default()
     };
     env.api
         .add_expected_rack_group(Request::new(group.clone()))

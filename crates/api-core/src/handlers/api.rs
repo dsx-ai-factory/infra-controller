@@ -49,7 +49,7 @@ pub(crate) async fn version(
             vec![]
         };
         let effective_null_routes = config
-            .resolved_site_fabric_null_routes(&retained_operator_roots)
+            .resolved_site_fabric_null_routes(&retained_operator_roots, &[])
             .into_iter()
             .map(|prefix| prefix.to_string())
             .collect();

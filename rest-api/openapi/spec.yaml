@@ -1404,10 +1404,30 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: |-
+            Core rejected a `SiteWideRoot` write because
+            `bmc_site_wide_root_source` is `local`. Before any managed device
+            uses version 0, supply or correct it through the configured local
+            environment or credential file. After ingestion, leave the local
+            value unchanged and use BMC credential rotation to advance to a
+            backend-managed version. `BMCRoot` writes remain supported.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       operationId: create-or-update-bmc-credential
       description: |-
         Create or update a site-wide or per-BMC root credential. Equivalent
         to `nico-admin-cli credential add-bmc`.
+
+        When `kind` is `SiteWideRoot` and Core uses
+        `bmc_site_wide_root_source = "local"`, Core rejects the write with 412;
+        before any managed device uses version 0, supply or correct it through
+        the configured local environment or credential file. After ingestion,
+        leave the local value unchanged and use BMC credential rotation to
+        advance to a backend-managed version. This source policy does not block
+        `BMCRoot` writes.
 
         User must have authorization role with `PROVIDER_ADMIN` suffix.
   '/v2/org/{org}/nico/credential/uefi':
@@ -12086,6 +12106,8 @@ paths:
                               macAddress: 'AA:BB:CC:DD:EE:01'
                               ipAddress: 10.0.0.101
                           powerState: 'on'
+                          leakStatus: Leaking
+                          leakHandlingStatus: ShuttingDown
           headers:
             X-Pagination:
               schema:
@@ -12174,6 +12196,8 @@ paths:
                             macAddress: 'AA:BB:CC:DD:EE:01'
                             ipAddress: 10.0.0.101
                         powerState: 'on'
+                        leakStatus: NoLeak
+                        leakHandlingStatus: None
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -14298,6 +14322,8 @@ paths:
                       description: Compute tray in slot 1
                       firmwareVersion: 2.1.0
                       powerState: 'on'
+                      leakStatus: Leaking
+                      leakHandlingStatus: Down
                       position:
                         slotId: 1
                         trayIdx: 0
@@ -14369,6 +14395,8 @@ paths:
                     description: Compute tray in slot 1
                     firmwareVersion: 2.1.0
                     powerState: 'on'
+                    leakStatus: Leaking
+                    leakHandlingStatus: Failed
                     position:
                       slotId: 1
                       trayIdx: 0
@@ -24456,6 +24484,8 @@ components:
                   macAddress: 'AA:BB:CC:DD:EE:01'
                   ipAddress: 10.0.0.101
               powerState: 'on'
+              leakStatus: Leaking
+              leakHandlingStatus: ShuttingDown
       properties:
         id:
           type: string
@@ -24669,6 +24699,8 @@ components:
             - NoLeak
             - Leaking
           description: Whether the component is considered leaking coolant
+        leakHandlingStatus:
+          $ref: '#/components/schemas/LeakHandlingStatus'
     BMCInfo:
       title: BMCInfo
       type: object
@@ -24700,6 +24732,8 @@ components:
           description: Compute tray in slot 1
           firmwareVersion: 2.1.0
           powerState: 'on'
+          leakStatus: NoLeak
+          leakHandlingStatus: None
           position:
             slotId: 1
             trayIdx: 0
@@ -24762,6 +24796,8 @@ components:
             - NoLeak
             - Leaking
           description: Whether the tray is considered leaking coolant
+        leakHandlingStatus:
+          $ref: '#/components/schemas/LeakHandlingStatus'
         position:
           $ref: '#/components/schemas/TrayPosition'
           description: 'Position of the Tray within the Rack'
@@ -26242,6 +26278,21 @@ components:
         error:
           type: string
           description: Failure summary when `status == failed`. Truncated to 512 bytes.
+    LeakHandlingStatus:
+      title: LeakHandlingStatus
+      type: string
+      description: |-
+        Flow's leakage-handling status. Unknown means Flow could not determine the status;
+        None means no supported handling task exists; ShuttingDown means a forced-shutdown
+        task is waiting, pending, or running; Down means it completed; and Failed means the
+        latest supported handling task failed or was terminated. Down describes handling
+        progress, not the component's current power state.
+      enum:
+        - Unknown
+        - None
+        - ShuttingDown
+        - Down
+        - Failed
     TaskReportV1Status:
       title: TaskReportV1Status
       type: string
