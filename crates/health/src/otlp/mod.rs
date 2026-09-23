@@ -252,10 +252,12 @@ const MAX_EXPORT_RETRIES: usize = 5;
 /// `max_request_bytes`.
 ///
 /// A range whose request is too large, or that the target rejects with
-/// `RESOURCE_EXHAUSTED`, is split in half until each part fits; a single item
-/// is always sent. Other retryable failures resend the same range, rebuilt
-/// with the same export time, up to five times. A range that still fails is
-/// dropped and reported with [`OtlpExportFailed`].
+/// `RESOURCE_EXHAUSTED`, is split in half at once until each part fits; a
+/// single item is always sent. Other retryable failures, including
+/// `RESOURCE_EXHAUSTED` for a single item, resend the same range, rebuilt with
+/// the same export time, up to five times with a backoff that starts over for
+/// each range. A range that still fails is dropped and reported with
+/// [`OtlpExportFailed`].
 pub(crate) async fn export_items<E: OtlpExport>(
     export: &mut E,
     items: &[E::Item],
@@ -263,10 +265,6 @@ pub(crate) async fn export_items<E: OtlpExport>(
     signal: OtlpSignal,
 ) {
     let observed_nanos = convert::export_time_nanos();
-    let mut backoff = ExponentialBackoff::new(&BackoffConfig {
-        initial: Duration::from_millis(100),
-        max: Duration::from_secs(10),
-    });
     // Ranges waiting to be sent, the next one last.
     let mut pending: Vec<Range<usize>> = std::iter::once(0..items.len()).collect();
 
@@ -281,6 +279,10 @@ pub(crate) async fn export_items<E: OtlpExport>(
             continue;
         }
 
+        let mut backoff = ExponentialBackoff::new(&BackoffConfig {
+            initial: Duration::from_millis(100),
+            max: Duration::from_secs(10),
+        });
         let mut request = Some(request);
         for attempt in 0..=MAX_EXPORT_RETRIES {
             // `send` consumes the request, so only a retry pays for another
@@ -301,16 +303,13 @@ pub(crate) async fn export_items<E: OtlpExport>(
                 Err(status)
                     if status.code() == tonic::Code::ResourceExhausted && range.len() > 1 =>
                 {
-                    let delay = backoff.next_delay();
                     tracing::warn!(
                         error = status.message(),
                         endpoint = %target.endpoint,
                         ?signal,
                         record_count,
-                        retry_in = ?delay,
                         "otlp target rejected export as resource exhausted, splitting it"
                     );
-                    tokio::time::sleep(delay).await;
                     push_halves(&mut pending, range.clone());
                     break;
                 }
@@ -531,13 +530,12 @@ mod tests {
 
     use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio::time::timeout;
-
-    use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, check_cases_async};
 
     use super::{
         OtlpExport, OtlpExportFailed, OtlpSignal, connect_replacement_target_with_timeout,
@@ -694,6 +692,8 @@ mod tests {
     /// is recorded.
     struct FakeExport {
         reject_multi_item_requests: bool,
+        /// Answer the first attempt of every distinct request `UNAVAILABLE`.
+        fail_first_attempt: bool,
         sent: Vec<Vec<usize>>,
     }
 
@@ -715,9 +715,13 @@ mod tests {
 
         async fn send(&mut self, request: Vec<usize>) -> Result<(), tonic::Status> {
             let rejected = self.reject_multi_item_requests && request.len() > 1;
+            let first_attempt = !self.sent.contains(&request);
             self.sent.push(request);
             if rejected {
                 return Err(tonic::Status::resource_exhausted("message too large"));
+            }
+            if self.fail_first_attempt && first_attempt {
+                return Err(tonic::Status::unavailable("collector restarting"));
             }
             Ok(())
         }
@@ -726,11 +730,19 @@ mod tests {
     struct ExportCase {
         items: Vec<usize>,
         reject_multi_item_requests: bool,
+        fail_first_attempt: bool,
     }
 
     async fn requests_sent(case: ExportCase) -> Result<Vec<Vec<usize>>, std::convert::Infallible> {
+        Ok(run_export(case).await.0)
+    }
+
+    /// Runs `export_items` against a fake target that accepts at most 10
+    /// bytes, returning every request it saw and the (virtual) time it took.
+    async fn run_export(case: ExportCase) -> (Vec<Vec<usize>>, Duration) {
         let mut export = FakeExport {
             reject_multi_item_requests: case.reject_multi_item_requests,
+            fail_first_attempt: case.fail_first_attempt,
             sent: Vec::new(),
         };
         let target = OtlpTargetConfig {
@@ -744,8 +756,9 @@ mod tests {
             include_diagnostics: false,
             include_alert_details: false,
         };
+        let started = tokio::time::Instant::now();
         export_items(&mut export, &case.items, &target, OtlpSignal::Logs).await;
-        Ok(export.sent)
+        (export.sent, started.elapsed())
     }
 
     #[tokio::test(start_paused = true)]
@@ -757,6 +770,7 @@ mod tests {
                     input: ExportCase {
                         items: vec![3, 3, 4],
                         reject_multi_item_requests: false,
+                        fail_first_attempt: false,
                     },
                     expect: Yields(vec![vec![3, 3, 4]]),
                 },
@@ -765,6 +779,7 @@ mod tests {
                     input: ExportCase {
                         items: vec![6, 7, 8],
                         reject_multi_item_requests: false,
+                        fail_first_attempt: false,
                     },
                     expect: Yields(vec![vec![6], vec![7], vec![8]]),
                 },
@@ -773,6 +788,7 @@ mod tests {
                     input: ExportCase {
                         items: vec![20],
                         reject_multi_item_requests: false,
+                        fail_first_attempt: false,
                     },
                     expect: Yields(vec![vec![20]]),
                 },
@@ -781,6 +797,7 @@ mod tests {
                     input: ExportCase {
                         items: vec![1, 2, 3],
                         reject_multi_item_requests: true,
+                        fail_first_attempt: false,
                     },
                     expect: Yields(vec![vec![1, 2, 3], vec![1], vec![2, 3], vec![2], vec![3]]),
                 },
@@ -788,5 +805,45 @@ mod tests {
             requests_sent,
         )
         .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn export_items_retry_timing() {
+        struct TimingCase {
+            scenario: &'static str,
+            input: ExportCase,
+            expect: std::ops::Range<Duration>,
+        }
+
+        for case in [
+            TimingCase {
+                scenario: "a batch rejected as resource exhausted is split without waiting",
+                input: ExportCase {
+                    items: vec![1, 2, 3],
+                    reject_multi_item_requests: true,
+                    fail_first_attempt: false,
+                },
+                expect: Duration::ZERO..Duration::from_nanos(1),
+            },
+            TimingCase {
+                // Each range waits one fresh 100-200 ms first delay; a backoff
+                // shared across ranges would wait at least 700 ms.
+                scenario: "each range starts its own backoff",
+                input: ExportCase {
+                    items: vec![6, 7, 8],
+                    reject_multi_item_requests: false,
+                    fail_first_attempt: true,
+                },
+                expect: Duration::from_millis(300)..Duration::from_millis(600),
+            },
+        ] {
+            let (_sent, elapsed) = run_export(case.input).await;
+            assert!(
+                case.expect.contains(&elapsed),
+                "{}: took {elapsed:?}, expected {:?}",
+                case.scenario,
+                case.expect
+            );
+        }
     }
 }
