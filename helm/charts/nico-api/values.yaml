@@ -526,6 +526,12 @@ databaseConfig: {}
 externalService:
   enabled: false
   type: LoadBalancer
+  # Empty values keep Kubernetes defaults. Use SingleStack with [IPv6] for an
+  # IPv6-only Service, or RequireDualStack with [IPv4, IPv6] for both families.
+  # PreferDualStack allows fallback on a single-stack cluster. An existing
+  # Service's primary family (the first entry) cannot be changed in place.
+  ipFamilyPolicy: ""
+  ipFamilies: []
   externalTrafficPolicy: Local
   annotations: {}
   # annotations:
