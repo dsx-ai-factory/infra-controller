@@ -539,6 +539,52 @@ pub async fn find_reserved(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// List the addresses (ids) of parked reservations matching the filter.
+///
+/// The address is the stable id used to page a listing: callers fetch the full
+/// rows in bounded chunks via [`find_reserved_by_ids`]. Only parked rows
+/// (`interface_id IS NULL`) are returned, ordered by MAC then family then
+/// address so the paged listing is deterministic.
+pub async fn find_reserved_ids(
+    txn: &mut PgConnection,
+    mac_address: Option<MacAddress>,
+    address: Option<IpAddr>,
+) -> Result<Vec<IpAddr>, DatabaseError> {
+    let query = "SELECT address
+        FROM machine_interface_addresses
+        WHERE interface_id IS NULL AND reserved_by_mac IS NOT NULL
+          AND ($1::macaddr IS NULL OR reserved_by_mac = $1::macaddr)
+          AND ($2::inet IS NULL OR address = $2::inet)
+        ORDER BY reserved_by_mac, family(address), address";
+    sqlx::query_scalar(query)
+        .bind(mac_address)
+        .bind(address)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Fetch full parked reservations for a page of address ids.
+///
+/// Only parked rows (`interface_id IS NULL`) are returned, so an id that has
+/// since been re-owned or released is silently dropped. Ordered by MAC then
+/// family then address to match [`find_reserved_ids`].
+pub async fn find_reserved_by_ids(
+    txn: &mut PgConnection,
+    addresses: &[IpAddr],
+) -> Result<Vec<ReservedAddress>, DatabaseError> {
+    let query = "SELECT address, reserved_by_mac, allocation_type
+        FROM machine_interface_addresses
+        WHERE interface_id IS NULL AND reserved_by_mac IS NOT NULL
+          AND address = ANY($1)
+        ORDER BY reserved_by_mac, family(address), address";
+    sqlx::query_as(query)
+        .bind(addresses)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 /// Release parked reservations matching the filter, making their addresses
 /// available to allocators again.
 ///
@@ -1567,17 +1613,31 @@ mod tests {
         Ok(())
     }
 
-    /// Releasing a parked reservation frees its address; active addresses are
-    /// never touched by a release.
+    /// Releasing by MAC frees only that MAC's parked reservation; an active
+    /// marked address on the same MAC keeps its interface and is never released.
     #[crate::sqlx_test]
     async fn release_reserved_frees_parked_addresses(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('release-parked-only', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
         let mac: MacAddress = "02:00:00:00:00:32".parse()?;
         let parked: IpAddr = "192.0.2.61".parse()?;
-        insert_reserved(&mut txn, mac, parked, AllocationType::Static).await?;
+        let active: IpAddr = "2001:db8::32".parse()?;
 
+        // Parked IPv4 reservation (no interface) and an active, marked IPv6 on the
+        // same MAC (interface attached). Both carry the MAC as owner.
+        insert_reserved(&mut txn, mac, parked, AllocationType::Static).await?;
+        let interface_id = create_test_interface(&mut txn, segment_id, mac, "release").await?;
+        insert(&mut txn, interface_id, active, AllocationType::Static).await?;
+        assert!(mark_reserved(&mut txn, interface_id, IpAddressFamily::Ipv6).await?);
+
+        // Only the parked row is a reservation; the active marked row is not.
         assert_eq!(
             find_reserved(&mut txn, None, None).await?,
             vec![ReservedAddress {
@@ -1589,7 +1649,16 @@ mod tests {
 
         let released = release_reserved(&mut txn, Some(mac), None).await?;
         assert_eq!(released, vec![parked]);
+
+        // The parked address is gone; the active IPv6 keeps its interface.
         assert!(find_reserved(&mut txn, None, None).await?.is_empty());
+        assert!(find_by_address(txn.as_mut(), parked).await?.is_none());
+        // find_by_address only resolves active interface addresses, so a match
+        // proves the marked IPv6 still has its interface.
+        let active_row = find_by_address(txn.as_mut(), active)
+            .await?
+            .expect("active marked address must survive a release by MAC");
+        assert_eq!(active_row.id, interface_id);
 
         txn.rollback().await?;
         Ok(())

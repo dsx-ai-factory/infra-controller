@@ -3829,10 +3829,10 @@ pub async fn update_last_dhcp(
 /// Delete an interface.
 ///
 /// When `release_reserved_addresses` is `false` (the default teardown for
-/// `DeleteInterface`, decommissioning, and non-wipe force deletion), any
-/// address the interface marked for preservation is parked as a reservation
-/// owned by its MAC so the same MAC can reclaim it on re-ingestion. Set it to
-/// `true` for an intentional permanent wipe, which deletes those addresses too.
+/// `DeleteInterface` and non-wipe force deletion), any address the interface
+/// marked for preservation is parked as a reservation owned by its MAC so the
+/// same MAC can reclaim it on re-ingestion. Set it to `true` for an intentional
+/// permanent wipe, which deletes those addresses too.
 pub async fn delete(
     interface_id: &MachineInterfaceId,
     txn: &mut PgConnection,

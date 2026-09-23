@@ -1292,12 +1292,22 @@ impl Forge for Api {
         crate::handlers::machine::admin_force_delete_machine(self, request).await
     }
 
-    async fn admin_find_reserved_addresses(
+    async fn admin_find_reserved_address_ids(
         &self,
         request: Request<rpc::AdminFindReservedAddressesRequest>,
-    ) -> Result<Response<rpc::AdminFindReservedAddressesResponse>, Status> {
-        crate::handlers::machine_interface_address::admin_find_reserved_addresses(self, request)
+    ) -> Result<Response<rpc::AdminReservedAddressIdList>, Status> {
+        crate::handlers::machine_interface_address::admin_find_reserved_address_ids(self, request)
             .await
+    }
+
+    async fn admin_find_reserved_addresses_by_ids(
+        &self,
+        request: Request<rpc::AdminReservedAddressesByIdsRequest>,
+    ) -> Result<Response<rpc::AdminFindReservedAddressesResponse>, Status> {
+        crate::handlers::machine_interface_address::admin_find_reserved_addresses_by_ids(
+            self, request,
+        )
+        .await
     }
 
     async fn admin_release_reserved_addresses(
