@@ -20,7 +20,8 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::{StreamExt, stream};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use nv_redfish::core::{Bmc, EntityTypeRef, ToSnakeCase};
 use nv_redfish::schema::sensor::Sensor;
 use nv_redfish::sensor::SensorLink;
@@ -193,27 +194,35 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for SensorCollector<B> {
             }
         }
 
-        // Build the fetch futures borrowing from the shared snapshot, then
-        // drive them concurrently. Each future borrows `&self`, the entity, and
-        // its sensor (all alive for as long as `inventory` is held here). When
-        // probing, take just the first sensor: one fetch is enough to test
-        // reachability and re-arm or clear the breaker.
-        let this = &*self;
-        let failures = &fetch_failures;
-        let fetches = inventory.entities.iter().flat_map(|entity| {
-            entity
-                .sensors()
-                .iter()
-                .map(move |sensor| this.update_sensor(entity, sensor, failures))
-        });
-        let futures: Vec<_> = fetches.take(sensor_limit.unwrap_or(usize::MAX)).collect();
+        // Collect the sensors to fetch, borrowing from the shared snapshot, and
+        // create each fetch future only when a `request_concurrency` slot frees
+        // up: a fetch future is several KiB, so building one per sensor up
+        // front multiplies sweep memory by the sensor count. Each future
+        // borrows `&self`, the entity, and its sensor (all alive for as long as
+        // `inventory` is held here). No closure is held across an await, which
+        // keeps this future `Send`. When probing, take just the first sensor:
+        // one fetch is enough to test reachability and re-arm or clear the
+        // breaker.
+        let sensors: Vec<_> = inventory
+            .entities
+            .iter()
+            .flat_map(|entity| entity.sensors().iter().map(move |sensor| (entity, sensor)))
+            .take(sensor_limit.unwrap_or(usize::MAX))
+            .collect();
 
-        let processed: usize = stream::iter(futures)
-            .buffer_unordered(self.request_concurrency)
-            .collect::<Vec<usize>>()
-            .await
-            .into_iter()
-            .sum();
+        let mut in_flight = FuturesUnordered::new();
+        let mut processed = 0;
+        for (entity, sensor) in sensors {
+            if in_flight.len() == self.request_concurrency
+                && let Some(count) = in_flight.next().await
+            {
+                processed += count;
+            }
+            in_flight.push(self.update_sensor(entity, sensor, &fetch_failures));
+        }
+        while let Some(count) = in_flight.next().await {
+            processed += count;
+        }
 
         self.emit_event(CollectorEvent::MetricCollectionEnd);
 
@@ -1392,5 +1401,60 @@ mod tests {
             observe_collection,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn collection_counts_every_sensor_when_sensors_exceed_request_slots() {
+        let handle = liteon_powershelf_bmc().await;
+        let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:55")));
+        let shared = Arc::new(ArcSwapOption::empty());
+        let mut collector = SensorCollector::<TestBmc> {
+            endpoint: endpoint.clone(),
+            event_context: EventContext::from_endpoint(endpoint.as_ref(), "sensor_collector"),
+            shared: shared.clone(),
+            data_sink: Some(Arc::new(CapturingSink::default())),
+            request_concurrency: 2,
+            include_sensor_thresholds: true,
+        };
+        handle.state.injection.upsert(Rule {
+            id: RuleId::from("sensor-fetch-failure"),
+            selector: Selector::OdataId(SENSOR_PATH.to_string()),
+            action: Action::Status(500),
+            remaining: None,
+        });
+        let chassis = first_chassis(&handle).await;
+        let sensors: Vec<_> = chassis
+            .sensor_links()
+            .await
+            .expect("sensor links")
+            .expect("fixture has sensors")
+            .into_iter()
+            .take(5)
+            .collect();
+        assert_eq!(sensors.len(), 5, "fixture has five sensors");
+        assert_eq!(sensors[0].odata_id().to_string(), SENSOR_PATH);
+        store_inventory(
+            &shared,
+            vec![DiscoveredEntity::Chassis {
+                entity: chassis,
+                sensors,
+                shelf_power: None,
+                gpu: None,
+            }],
+        );
+
+        let iteration = collector
+            .run_iteration()
+            .await
+            .expect("sensor collection succeeds");
+
+        assert_eq!(
+            ObservedIteration::from(iteration),
+            ObservedIteration {
+                refresh_triggered: false,
+                entity_count: Some(4),
+                fetch_failures: 1,
+            }
+        );
     }
 }

@@ -361,6 +361,14 @@ mod tests {
     use mac_address::MacAddress;
 
     use super::*;
+    use crate::otlp::collector_logs::logs_service_server::{LogsService, LogsServiceServer};
+    use crate::otlp::collector_logs::{ExportLogsServiceRequest, ExportLogsServiceResponse};
+    use crate::otlp::collector_metrics::metrics_service_server::{
+        MetricsService, MetricsServiceServer,
+    };
+    use crate::otlp::collector_metrics::{
+        ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+    };
     use crate::sink::event_mapper::OpenBmcEventMapper;
     use crate::sink::{
         CompositeDataSink, DiagnosticLogRecord, LogRecord, LogSeverity, MetricSample,
@@ -731,6 +739,8 @@ mod tests {
                 endpoint: "http://first.example:4317".to_string(),
                 batch_size: 512,
                 queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                max_concurrent_exports: OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                 flush_interval: std::time::Duration::from_secs(2),
                 include_diagnostics: false,
                 include_alert_details: false,
@@ -740,6 +750,8 @@ mod tests {
                 endpoint: "http://second.example:4317".to_string(),
                 batch_size: 512,
                 queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                max_concurrent_exports: OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                 flush_interval: std::time::Duration::from_secs(2),
                 include_diagnostics: false,
                 include_alert_details: false,
@@ -972,5 +984,246 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 2);
+    }
+
+    /// Records every export and rejects the first export of each signal with
+    /// a retryable status.
+    #[derive(Default)]
+    struct FlakyCollector {
+        logs: std::sync::Mutex<Vec<ExportLogsServiceRequest>>,
+        metrics: std::sync::Mutex<Vec<ExportMetricsServiceRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LogsService for FlakyCollector {
+        async fn export(
+            &self,
+            request: tonic::Request<ExportLogsServiceRequest>,
+        ) -> Result<tonic::Response<ExportLogsServiceResponse>, tonic::Status> {
+            let mut logs = self.logs.lock().unwrap();
+            logs.push(request.into_inner());
+            if logs.len() == 1 {
+                return Err(tonic::Status::unavailable("first export fails"));
+            }
+            Ok(tonic::Response::new(ExportLogsServiceResponse::default()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetricsService for FlakyCollector {
+        async fn export(
+            &self,
+            request: tonic::Request<ExportMetricsServiceRequest>,
+        ) -> Result<tonic::Response<ExportMetricsServiceResponse>, tonic::Status> {
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.push(request.into_inner());
+            if metrics.len() == 1 {
+                return Err(tonic::Status::unavailable("first export fails"));
+            }
+            Ok(tonic::Response::new(ExportMetricsServiceResponse::default()))
+        }
+    }
+
+    /// Serves `router` on a loopback port and returns the OTLP endpoint URL.
+    async fn serve_collector(router: tonic::transport::server::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind collector listener");
+        let address = listener.local_addr().expect("collector address");
+        tokio::spawn(
+            router.serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        format!("http://{address}")
+    }
+
+    /// Starts an OTLP sink whose drains export to `endpoint`.
+    fn sink_exporting_to(
+        endpoint: String,
+        batch_size: usize,
+        max_concurrent_exports: usize,
+        flush_interval: std::time::Duration,
+        name: &str,
+    ) -> OtlpSink {
+        let metrics_manager = MetricsManager::new(name).expect("metrics manager should initialize");
+        OtlpSink::new_many(
+            &[OtlpTargetConfig {
+                endpoint,
+                batch_size,
+                queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                max_concurrent_exports,
+                flush_interval,
+                include_diagnostics: false,
+                include_alert_details: false,
+                tls: None,
+            }],
+            Arc::new(OpenBmcEventMapper),
+            &metrics_manager,
+            name,
+        )
+        .expect("OTLP sink should initialize")
+        .remove(0)
+    }
+
+    /// Waits up to ten seconds for `condition` to hold.
+    async fn wait_until(condition: impl Fn() -> bool, what: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !condition() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting until {what}"));
+    }
+
+    #[tokio::test]
+    async fn export_retry_resends_the_same_request() {
+        let collector = Arc::new(FlakyCollector::default());
+        let endpoint = serve_collector(
+            tonic::transport::Server::builder()
+                .add_service(LogsServiceServer::from_arc(collector.clone()))
+                .add_service(MetricsServiceServer::from_arc(collector.clone())),
+        )
+        .await;
+        let sink = sink_exporting_to(
+            endpoint,
+            1,
+            OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
+            std::time::Duration::from_secs(1),
+            "otlp_retry_test",
+        );
+
+        let context = test_context();
+        sink.handle_event(&context, &log_event("OpenBMC.0.1.Test", "[]"));
+        sink.handle_event(&context, &metric_event());
+        wait_until(
+            || {
+                collector.logs.lock().unwrap().len() >= 2
+                    && collector.metrics.lock().unwrap().len() >= 2
+            },
+            "each signal is exported twice",
+        )
+        .await;
+
+        let logs = collector.logs.lock().unwrap();
+        assert_eq!(logs[1], logs[0], "retried logs export");
+        let metrics = collector.metrics.lock().unwrap();
+        assert_eq!(metrics[1], metrics[0], "retried metrics export");
+    }
+
+    /// Holds each metrics export until the gate hands out a permit, and
+    /// records how many exports were in flight at once.
+    struct GatedCollector {
+        gate: tokio::sync::Semaphore,
+        in_flight: std::sync::atomic::AtomicUsize,
+        max_in_flight: std::sync::atomic::AtomicUsize,
+        exported_points: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl GatedCollector {
+        fn new(open_permits: usize) -> Self {
+            Self {
+                gate: tokio::sync::Semaphore::new(open_permits),
+                in_flight: Default::default(),
+                max_in_flight: Default::default(),
+                exported_points: Default::default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetricsService for GatedCollector {
+        async fn export(
+            &self,
+            request: tonic::Request<ExportMetricsServiceRequest>,
+        ) -> Result<tonic::Response<ExportMetricsServiceResponse>, tonic::Status> {
+            use std::sync::atomic::Ordering::SeqCst;
+
+            let in_flight = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.max_in_flight.fetch_max(in_flight, SeqCst);
+            self.gate.acquire().await.expect("gate is open").forget();
+            self.in_flight.fetch_sub(1, SeqCst);
+            let points = request
+                .into_inner()
+                .resource_metrics
+                .iter()
+                .flat_map(|rm| &rm.scope_metrics)
+                .map(|sm| sm.metrics.len())
+                .sum();
+            self.exported_points.lock().unwrap().push(points);
+            Ok(tonic::Response::new(ExportMetricsServiceResponse::default()))
+        }
+    }
+
+    async fn serve_gated_collector(collector: &Arc<GatedCollector>) -> String {
+        serve_collector(
+            tonic::transport::Server::builder()
+                .add_service(MetricsServiceServer::from_arc(collector.clone())),
+        )
+        .await
+    }
+
+    fn push_metrics(sink: &OtlpSink, count: usize) {
+        let context = test_context();
+        for index in 0..count {
+            sink.handle_event(
+                &context,
+                &metric_event_with(&format!("k{index}"), "gauge", "celsius"),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_exports_every_full_batch_without_waiting_for_the_flush_interval() {
+        let collector = Arc::new(GatedCollector::new(tokio::sync::Semaphore::MAX_PERMITS));
+        let sink = sink_exporting_to(
+            serve_gated_collector(&collector).await,
+            2,
+            1,
+            std::time::Duration::from_secs(3600),
+            "otlp_backlog_test",
+        );
+
+        push_metrics(&sink, 6);
+
+        wait_until(
+            || collector.exported_points.lock().unwrap().len() >= 3,
+            "three full batches are exported",
+        )
+        .await;
+        assert_eq!(*collector.exported_points.lock().unwrap(), vec![2, 2, 2]);
+    }
+
+    #[tokio::test]
+    async fn drain_keeps_at_most_max_concurrent_exports_in_flight() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let collector = Arc::new(GatedCollector::new(0));
+        let sink = sink_exporting_to(
+            serve_gated_collector(&collector).await,
+            1,
+            2,
+            std::time::Duration::from_secs(3600),
+            "otlp_concurrency_test",
+        );
+
+        push_metrics(&sink, 3);
+
+        wait_until(
+            || collector.in_flight.load(SeqCst) >= 2,
+            "two exports are in flight",
+        )
+        .await;
+        // Give a third export time to arrive if the drain did not wait for a slot.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(collector.max_in_flight.load(SeqCst), 2);
+
+        collector.gate.add_permits(3);
+        wait_until(
+            || collector.exported_points.lock().unwrap().len() == 3,
+            "all three batches are exported",
+        )
+        .await;
+        assert_eq!(collector.max_in_flight.load(SeqCst), 2);
     }
 }

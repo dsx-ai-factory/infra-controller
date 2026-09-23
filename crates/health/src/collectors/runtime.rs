@@ -248,6 +248,13 @@ impl StreamMetrics {
 }
 
 /// Builds collector metric labels and includes `rack_id` only when available.
+/// A uniformly random duration shorter than `interval`, at millisecond
+/// resolution.
+fn random_phase(interval: Duration) -> Duration {
+    let millis = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX);
+    Duration::from_millis(rand::rng().random_range(0..millis.max(1)))
+}
+
 pub(crate) fn collector_metric_labels(
     collector_type: &str,
     endpoint_key: String,
@@ -371,6 +378,10 @@ impl Collector {
         let handle = tokio::spawn(async move {
             let collector_type = runner.collector_type();
             let _collector_registry = collector_registry;
+            // The first iteration runs at once; the sleep after it is a random
+            // part of the interval, so collectors started together do not keep
+            // iterating together.
+            let mut next_sleep = random_phase(iteration_interval);
             loop {
                 tokio::select! {
                     _ = cancel_token_clone.cancelled() => {
@@ -424,7 +435,8 @@ impl Collector {
                             }
                         }
 
-                        tokio::time::sleep(iteration_interval).await;
+                        tokio::time::sleep(next_sleep).await;
+                        next_sleep = iteration_interval;
                     } => {
                     }
                 }
@@ -885,6 +897,105 @@ mod tests {
 
         assert_eq!(callbacks, [Some(true), Some(true)]);
         assert!(callback_rx.try_recv().is_err());
+
+        Ok(())
+    }
+
+    /// Records the time of every iteration.
+    struct TimedCollector {
+        runs: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
+    }
+
+    impl PeriodicCollector<BmcClient> for TimedCollector {
+        type Config = Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>;
+
+        fn new_runner(
+            _bmc: Arc<BmcClient>,
+            _endpoint: Arc<BmcEndpoint>,
+            runs: Self::Config,
+        ) -> Result<Self, HealthError> {
+            Ok(Self { runs })
+        }
+
+        async fn run_iteration(&mut self) -> Result<IterationResult, HealthError> {
+            self.runs.lock().unwrap().push(tokio::time::Instant::now());
+            Ok(IterationResult {
+                refresh_triggered: false,
+                entity_count: None,
+                fetch_failures: 0,
+            })
+        }
+
+        fn collector_type(&self) -> &'static str {
+            "timed_test_collector"
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn collectors_started_together_spread_after_their_first_iteration()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let interval = Duration::from_secs(60);
+        let metrics_manager = Arc::new(MetricsManager::new("test_periodic_phase")?);
+        let started = tokio::time::Instant::now();
+        let mut collectors = Vec::new();
+        let mut runs = Vec::new();
+        for index in 0..20_u8 {
+            let endpoint = Arc::new(test_endpoint(mac(&format!("00:11:22:33:44:{index:02x}"))));
+            let times = Arc::new(std::sync::Mutex::new(Vec::new()));
+            collectors.push(Collector::start::<TimedCollector>(
+                endpoint.clone(),
+                Arc::clone(endpoint.bmc()),
+                times.clone(),
+                CollectorStartContext {
+                    limiter: Arc::new(crate::limiter::NoopLimiter),
+                    iteration_interval: interval,
+                    collector_registry: Arc::new(metrics_manager.create_collector_registry(
+                        format!("periodic_phase_test_{index}"),
+                        "test_periodic_phase",
+                    )?),
+                    metrics_manager: metrics_manager.clone(),
+                },
+            )?);
+            runs.push(times);
+        }
+
+        tokio::time::sleep(interval * 2).await;
+        for collector in collectors {
+            collector.stop().await;
+        }
+
+        let offsets: Vec<Vec<Duration>> = runs
+            .iter()
+            .map(|runs| {
+                runs.lock()
+                    .unwrap()
+                    .iter()
+                    .map(|run| *run - started)
+                    .collect()
+            })
+            .collect();
+        for runs in &offsets {
+            assert_eq!(
+                runs[0],
+                Duration::ZERO,
+                "first iteration runs at once: {runs:?}"
+            );
+            assert!(
+                runs[1] < interval,
+                "second iteration within the first interval: {runs:?}"
+            );
+            assert_eq!(
+                runs[2] - runs[1],
+                interval,
+                "later iterations keep the interval: {runs:?}"
+            );
+        }
+        let second_runs: std::collections::HashSet<Duration> =
+            offsets.iter().map(|runs| runs[1]).collect();
+        assert!(
+            second_runs.len() > 1,
+            "second iterations spread out: {second_runs:?}"
+        );
 
         Ok(())
     }

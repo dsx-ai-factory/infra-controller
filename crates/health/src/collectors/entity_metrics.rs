@@ -20,7 +20,8 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::{StreamExt, stream};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use nv_redfish::core::Bmc;
 use nv_redfish::oem::nvidia::processor_metrics::NvidiaProcessorMetrics;
 use nv_redfish::oem::nvidia::schema::nvidia_memory_metrics::NvidiaMemoryMetrics;
@@ -835,20 +836,23 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for MetricsCollector<B> {
         let fetch_failures = AtomicUsize::new(0);
         self.emit_event(CollectorEvent::MetricCollectionStart);
 
-        let this = &*self;
-        let failures = &fetch_failures;
-        let futures: Vec<_> = inventory
-            .entities
-            .iter()
-            .map(|entity| this.collect_entity(entity, failures))
-            .collect();
-
-        let processed: usize = stream::iter(futures)
-            .buffer_unordered(self.request_concurrency)
-            .collect::<Vec<usize>>()
-            .await
-            .into_iter()
-            .sum();
+        // Create each fetch future only when a `request_concurrency` slot
+        // frees up: a fetch future is several KiB, so building one per entity
+        // up front multiplies sweep memory by the entity count. No closure is
+        // held across an await, which keeps this future `Send`.
+        let mut in_flight = FuturesUnordered::new();
+        let mut processed = 0;
+        for entity in &inventory.entities {
+            if in_flight.len() == self.request_concurrency
+                && let Some(count) = in_flight.next().await
+            {
+                processed += count;
+            }
+            in_flight.push(self.collect_entity(entity, &fetch_failures));
+        }
+        while let Some(count) = in_flight.next().await {
+            processed += count;
+        }
 
         self.emit_event(CollectorEvent::MetricCollectionEnd);
 
@@ -993,12 +997,14 @@ impl<B: Bmc + 'static> MetricsCollector<B> {
 mod tests {
     use std::convert::Infallible;
     use std::sync::Mutex as StdMutex;
+    use std::time::Instant;
 
     use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, Check, check_cases_async, check_values};
     use serde_json::json;
 
     use super::*;
+    use crate::collectors::inventory::EntityInventory;
     use crate::collectors::projection_test_support::{ProjectionFixture, TestBmc, TestEntity};
     use crate::endpoint::test_support::{mac, test_endpoint};
 
@@ -2019,5 +2025,45 @@ mod tests {
             collect,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn iteration_counts_every_entity_when_entities_exceed_request_slots() {
+        let fixture = ProjectionFixture::new().await;
+        let mut entities = Vec::new();
+        for entity in [
+            TestEntity::Processor,
+            TestEntity::Memory,
+            TestEntity::Drive,
+            TestEntity::PowerSupply,
+            TestEntity::ProcessorWithMalformedMetrics,
+        ] {
+            entities.push(fixture.entity(entity).await);
+        }
+        let shared = Arc::new(arc_swap::ArcSwapOption::from_pointee(EntityInventory {
+            entities,
+            discovered_at: Instant::now(),
+            generation: 1,
+        }));
+        let mut collector = MetricsCollector::new_runner(
+            fixture.bmc(),
+            Arc::new(test_endpoint(mac("00:11:22:33:44:55"))),
+            MetricsCollectorConfig {
+                data_sink: None,
+                shared,
+                request_concurrency: NonZeroUsize::new(2).unwrap(),
+            },
+        )
+        .expect("metrics collector should build");
+
+        let iteration = collector
+            .run_iteration()
+            .await
+            .expect("metrics collection succeeds");
+
+        assert_eq!(
+            (iteration.entity_count, iteration.fetch_failures),
+            (Some(4), 1)
+        );
     }
 }

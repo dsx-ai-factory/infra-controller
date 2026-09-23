@@ -16,16 +16,14 @@
  */
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use carbide_instrument::emit;
 use tonic::transport::Channel;
 
+use super::collector_logs::ExportLogsServiceRequest;
 use super::collector_logs::logs_service_client::LogsServiceClient;
 use super::convert::build_export_request;
-use super::{OtlpExportFailed, OtlpSignal, connect_replacement_target, target_endpoint};
-use crate::collectors::{BackoffConfig, ExponentialBackoff};
-use crate::config::{OtlpTargetConfig, OtlpTlsConfig};
+use super::{OtlpExport, OtlpSignal, run_drain};
+use crate::config::OtlpTargetConfig;
 use crate::sink::otlp::OtlpQueue;
 use crate::sink::{CollectorEvent, EventContext};
 
@@ -39,205 +37,47 @@ impl OtlpDrainTask {
         Self { queue, target }
     }
 
-    fn drain_batch(&self, batch: &mut Vec<(EventContext, CollectorEvent)>) {
-        let remaining = self.target.batch_size.saturating_sub(batch.len());
-
-        for _ in 0..remaining {
-            match self.queue.pop() {
-                Some((_key, value)) => batch.push(value),
-                None => break,
-            }
-        }
-    }
-
     pub(crate) async fn run(self) {
-        let mut client = self.connect().await;
-
-        let mut batch = Vec::with_capacity(self.target.batch_size);
-        let mut interval = tokio::time::interval(self.target.flush_interval);
-
-        // Non-TLS targets use the default only to construct a dormant interval;
-        // the select guard below disables reloads for them. Start after one full
-        // period and delay missed ticks so stalled drains do not initiate a
-        // burst of replacement connections when they resume.
-        let tls_reload_period = self
-            .target
-            .tls
-            .as_ref()
-            .map_or(OtlpTlsConfig::DEFAULT_RELOAD_INTERVAL, |tls| {
-                tls.reload_interval
-            });
-
-        let mut tls_reload_interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + tls_reload_period,
-            tls_reload_period,
-        );
-
-        tls_reload_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            tokio::select! {
-                _ = self.queue.notified() => {
-                    self.drain_batch(&mut batch);
-
-                    if batch.len() >= self.target.batch_size {
-                        self.flush(&mut client, &mut batch).await;
-                        interval.reset();
-                    }
-                }
-                _ = interval.tick() => {
-                    self.drain_batch(&mut batch);
-                    if !batch.is_empty() {
-                        self.flush(&mut client, &mut batch).await;
-                    }
-                }
-                _ = tls_reload_interval.tick(), if self.target.tls.is_some() => {
-                    match connect_replacement_target(&self.target).await {
-                        Ok(channel) => {
-                            client = LogsServiceClient::new(channel);
-
-                            tracing::debug!(
-                                endpoint = %self.target.endpoint,
-                                "refreshed otlp target TLS material"
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                ?error,
-                                endpoint = %self.target.endpoint,
-                                "failed to reload otlp target TLS material, keeping current client"
-                            );
-                        }
-                    }
-                }
+        let include_alert_details = self.target.include_alert_details;
+        run_drain(self.queue, self.target, OtlpSignal::Logs, move |channel| {
+            LogsExport {
+                client: LogsServiceClient::new(channel),
+                include_alert_details,
             }
-        }
+        })
+        .await;
+    }
+}
+
+/// Log export to one target.
+#[derive(Clone)]
+struct LogsExport {
+    client: LogsServiceClient<Channel>,
+    include_alert_details: bool,
+}
+
+impl OtlpExport for LogsExport {
+    type Item = (EventContext, CollectorEvent);
+    type Request = ExportLogsServiceRequest;
+
+    fn build(&self, items: &[Self::Item], observed_nanos: u64) -> Self::Request {
+        build_export_request(items, observed_nanos, self.include_alert_details)
     }
 
-    async fn connect(&self) -> LogsServiceClient<Channel> {
-        let mut backoff = ExponentialBackoff::new(&BackoffConfig {
-            initial: Duration::from_secs(1),
-            max: Duration::from_secs(30),
-        });
-
-        loop {
-            let endpoint = match target_endpoint(&self.target).await {
-                Ok(endpoint) => endpoint,
-                Err(error) => {
-                    let delay = backoff.next_delay();
-
-                    tracing::warn!(
-                        ?error,
-                        endpoint = %self.target.endpoint,
-                        retry_in = ?delay,
-                        "failed to configure otlp target connection"
-                    );
-
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-            };
-
-            match endpoint.connect().await {
-                Ok(channel) => {
-                    tracing::info!(
-                        endpoint = %self.target.endpoint,
-                        "connected to otlp target"
-                    );
-
-                    return LogsServiceClient::new(channel);
-                }
-                Err(error) => {
-                    let delay = backoff.next_delay();
-
-                    tracing::warn!(
-                        ?error,
-                        endpoint = %self.target.endpoint,
-                        retry_in = ?delay,
-                        "failed to connect to otlp target"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-    }
-
-    async fn flush(
-        &self,
-        client: &mut LogsServiceClient<Channel>,
-        batch: &mut Vec<(EventContext, CollectorEvent)>,
-    ) {
-        if batch.is_empty() {
-            return;
-        }
-
-        let request = build_export_request(batch, self.target.include_alert_details);
-        batch.clear();
-
-        let record_count = request
+    fn record_count(request: &Self::Request) -> usize {
+        request
             .resource_logs
             .iter()
             .flat_map(|rl| &rl.scope_logs)
             .map(|sl| sl.log_records.len())
-            .sum::<usize>();
-
-        if record_count == 0 {
-            return;
-        }
-
-        const MAX_RETRIES: usize = 5;
-
-        let mut backoff = ExponentialBackoff::new(&BackoffConfig {
-            initial: Duration::from_millis(100),
-            max: Duration::from_secs(10),
-        });
-
-        for attempt in 0..=MAX_RETRIES {
-            match client.export(request.clone()).await {
-                Ok(_) => {
-                    tracing::debug!(
-                        endpoint = %self.target.endpoint,
-                        record_count,
-                        "exported logs to otlp target"
-                    );
-
-                    break;
-                }
-                Err(status) if is_retryable(&status) && attempt < MAX_RETRIES => {
-                    let delay = backoff.next_delay();
-                    tracing::warn!(
-                        grpc_status_code = ?status.code(),
-                        error = status.message(),
-                        endpoint = %self.target.endpoint,
-                        attempt,
-                        retry_in = ?delay,
-                        "retryable otlp export error"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-                Err(status) => {
-                    emit(OtlpExportFailed {
-                        signal: OtlpSignal::Logs,
-                        code: status.code().into(),
-                        error: status.message().to_string(),
-                        record_count,
-                        attempt,
-                        endpoint: self.target.endpoint.clone(),
-                    });
-                    break;
-                }
-            }
-        }
+            .sum()
     }
-}
 
-fn is_retryable(status: &tonic::Status) -> bool {
-    matches!(
-        status.code(),
-        tonic::Code::Unavailable
-            | tonic::Code::DeadlineExceeded
-            | tonic::Code::ResourceExhausted
-            | tonic::Code::Aborted
-            | tonic::Code::Internal
-    )
+    fn encoded_len(request: &Self::Request) -> usize {
+        prost::Message::encoded_len(request)
+    }
+
+    async fn send(&mut self, request: Self::Request) -> Result<(), tonic::Status> {
+        self.client.export(request).await.map(drop)
+    }
 }

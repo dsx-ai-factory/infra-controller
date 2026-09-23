@@ -136,6 +136,15 @@ batch_size = 512
 # identity. Must be greater than zero. Default: 32768. Changes require a service
 # restart.
 queue_capacity = 32768
+# Maximum encoded size, in bytes, of one export request. A larger batch, or one
+# the target rejects with RESOURCE_EXHAUSTED, is split and sent in parts; a
+# single record is always sent on its own. Must be greater than zero. Default:
+# 4194304 (4 MiB), the OpenTelemetry Collector's default gRPC receive limit.
+max_request_bytes = 4194304
+# Maximum export requests in flight to this target for each signal. Batches
+# share one connection and may arrive out of order. Must be greater than zero.
+# Default: 4.
+max_concurrent_exports = 4
 flush_interval = "2s"
 
 # Include Redfish diagnostic payload fields in OTLP logs for this target.
@@ -234,6 +243,9 @@ skip_empty_reports = true
 # Rate Limiting
 # ==============================================================================
 
+# Global token bucket that every collector iteration waits on before it runs.
+# Disabled unless this table is present; omitted fields use their defaults:
+# bucket_burst = 100, bucket_replenish = "30ms", max_jitter = "50ms".
 [rate_limit]
 bucket_burst = 200
 bucket_replenish = "35ms"

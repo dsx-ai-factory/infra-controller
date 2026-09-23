@@ -77,6 +77,9 @@ pub struct Config {
 
     pub sinks: SinksConfig,
 
+    /// Global token bucket that every collector iteration waits on before it
+    /// runs. Disabled by default; a `[rate_limit]` table enables it, with
+    /// defaults for any omitted field.
     pub rate_limit: Configurable<RateLimitConfig>,
 
     pub collectors: CollectorsConfig,
@@ -118,7 +121,7 @@ impl Default for Config {
             endpoint_sources: EndpointSourcesConfig::default(),
             tls: TlsConfig::default(),
             sinks: SinksConfig::default(),
-            rate_limit: Configurable::Enabled(RateLimitConfig::default()),
+            rate_limit: Configurable::Disabled,
             collectors: CollectorsConfig::default(),
             attributes: AttributesConfig::default(),
             processors: ProcessorsConfig::default(),
@@ -669,6 +672,24 @@ pub struct OtlpTargetConfig {
     #[serde(default = "OtlpTargetConfig::default_queue_capacity")]
     pub queue_capacity: usize,
 
+    /// Maximum encoded size, in bytes, of one export request.
+    ///
+    /// A batch whose request would be larger is split and sent in parts, as is
+    /// a batch the target rejects with `RESOURCE_EXHAUSTED`. A single log
+    /// record or metric point is always sent on its own, so the target still
+    /// decides whether to accept it. Defaults to 4 MiB, the default gRPC
+    /// receive limit of the OpenTelemetry Collector, and must be greater than
+    /// zero.
+    #[serde(default = "OtlpTargetConfig::default_max_request_bytes")]
+    pub max_request_bytes: usize,
+
+    /// Maximum number of export requests in flight to this target for each
+    /// signal. Batches are exported concurrently over one connection, so
+    /// their arrival order is not guaranteed. Defaults to 4 and must be
+    /// greater than zero.
+    #[serde(default = "OtlpTargetConfig::default_max_concurrent_exports")]
+    pub max_concurrent_exports: usize,
+
     /// Maximum time to wait before flushing a non-empty batch for either
     /// signal. Defaults to two seconds.
     #[serde(
@@ -698,6 +719,8 @@ pub struct OtlpTargetConfig {
 
 impl OtlpTargetConfig {
     pub(crate) const DEFAULT_QUEUE_CAPACITY: usize = 32_768;
+    pub(crate) const DEFAULT_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+    pub(crate) const DEFAULT_MAX_CONCURRENT_EXPORTS: usize = 4;
 
     fn default_batch_size() -> usize {
         512
@@ -705,6 +728,14 @@ impl OtlpTargetConfig {
 
     fn default_queue_capacity() -> usize {
         Self::DEFAULT_QUEUE_CAPACITY
+    }
+
+    fn default_max_request_bytes() -> usize {
+        Self::DEFAULT_MAX_REQUEST_BYTES
+    }
+
+    fn default_max_concurrent_exports() -> usize {
+        Self::DEFAULT_MAX_CONCURRENT_EXPORTS
     }
 
     fn default_flush_interval() -> std::time::Duration {
@@ -720,6 +751,16 @@ impl OtlpTargetConfig {
 
         if self.queue_capacity == 0 {
             return Err(format!("{path}.queue_capacity must be greater than 0"));
+        }
+
+        if self.max_request_bytes == 0 {
+            return Err(format!("{path}.max_request_bytes must be greater than 0"));
+        }
+
+        if self.max_concurrent_exports == 0 {
+            return Err(format!(
+                "{path}.max_concurrent_exports must be greater than 0"
+            ));
         }
 
         if self.flush_interval.is_zero() {
@@ -2927,6 +2968,8 @@ mod tests {
             tls: None,
             batch_size: 512,
             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+            max_concurrent_exports: OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
             flush_interval: Duration::from_secs(2),
             include_diagnostics: false,
             include_alert_details: false,
@@ -3147,6 +3190,21 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_table_enables_the_limiter_with_defaults() {
+        let config: Config = Figment::new()
+            .merge(Toml::string("[rate_limit]\n"))
+            .extract()
+            .expect("failed to parse");
+
+        let Configurable::Enabled(rate_limit) = config.rate_limit else {
+            panic!("an empty [rate_limit] table enables the limiter");
+        };
+        assert_eq!(rate_limit.bucket_replenish, Duration::from_millis(30));
+        assert_eq!(rate_limit.bucket_burst, 100);
+        assert_eq!(rate_limit.max_jitter, Duration::from_millis(50));
+    }
+
+    #[test]
     fn test_static_only_config() {
         let toml_content = r#"
 endpoint_discovery_interval = "1m"
@@ -3200,13 +3258,7 @@ cache_size = 50
         assert_eq!(config.metrics.prefix, "carbide_hardware_new_health");
         assert_eq!(config.endpoint_discovery_interval, Duration::from_secs(60));
 
-        if let Configurable::Enabled(ref rate_limit) = config.rate_limit {
-            assert_eq!(rate_limit.bucket_replenish, Duration::from_millis(30));
-            assert_eq!(rate_limit.bucket_burst, 100);
-            assert_eq!(rate_limit.max_jitter, Duration::from_millis(50));
-        } else {
-            panic!("rate limit empty")
-        }
+        assert!(!config.rate_limit.is_enabled());
 
         assert!(config.collectors.sensors.is_enabled());
         if let Configurable::Enabled(ref sensors) = config.collectors.sensors {
@@ -3818,6 +3870,26 @@ reload_interval = "30s"
                 IndexedOtlpTarget {
                     index: 2,
                     target: OtlpTargetConfig {
+                        max_request_bytes: 0,
+                        ..otlp_target("http://site.example:4317")
+                    },
+                } => FailsWith(
+                    "sinks.otlp.targets[2].max_request_bytes must be greater than 0".to_string()
+                ),
+
+                IndexedOtlpTarget {
+                    index: 2,
+                    target: OtlpTargetConfig {
+                        max_concurrent_exports: 0,
+                        ..otlp_target("http://site.example:4317")
+                    },
+                } => FailsWith(
+                    "sinks.otlp.targets[2].max_concurrent_exports must be greater than 0".to_string()
+                ),
+
+                IndexedOtlpTarget {
+                    index: 2,
+                    target: OtlpTargetConfig {
                         flush_interval: Duration::ZERO,
                         ..otlp_target("http://site.example:4317")
                     },
@@ -3988,6 +4060,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: false,
                             include_alert_details: false,
@@ -4027,6 +4102,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: true,
                             include_alert_details: false,
@@ -4046,6 +4124,9 @@ reload_interval = "30s"
                                 endpoint: "http://site.example:4317".to_string(),
                                 batch_size: 512,
                                 queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                                max_concurrent_exports:
+                                    OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                                 flush_interval: Duration::from_secs(2),
                                 include_diagnostics: false,
                                 include_alert_details: false,
@@ -4055,6 +4136,9 @@ reload_interval = "30s"
                                 endpoint: "http://central.example:4317".to_string(),
                                 batch_size: 512,
                                 queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                                max_concurrent_exports:
+                                    OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                                 flush_interval: Duration::from_secs(2),
                                 include_diagnostics: true,
                                 include_alert_details: false,
@@ -4102,6 +4186,9 @@ reload_interval = "30s"
                             endpoint: "http://localhost:4317".to_string(),
                             batch_size: 512,
                             queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+                            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                            max_concurrent_exports:
+                                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
                             flush_interval: Duration::from_secs(2),
                             include_diagnostics: false,
                             include_alert_details: false,
@@ -4146,7 +4233,7 @@ reload_interval = "30s"
             config.metrics.bmc_latency_attributes(),
             BmcLatencyAttribute::ATTRIBUTES.to_vec()
         );
-        assert!(config.rate_limit.is_enabled());
+        assert!(!config.rate_limit.is_enabled());
         assert!(config.processors.leak_detection.is_enabled());
         assert!(config.collectors.leak_detector.is_enabled());
         assert!(!config.collectors.nmxc.is_enabled());

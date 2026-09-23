@@ -405,19 +405,26 @@ fn convert_event(
     }
 }
 
-/// Builds an OTLP log export request grouped by endpoint.
-///
-/// `include_alert_details` is the receiving target's policy, so one target can
-/// carry per-alert detail while another receives only the report counts.
-pub fn build_export_request(
-    batch: &[(EventContext, CollectorEvent)],
-    include_alert_details: bool,
-) -> ExportLogsServiceRequest {
-    let observed_nanos = SystemTime::now()
+/// Current time in nanoseconds since the Unix epoch, recorded once per export
+/// batch as its observed time.
+pub fn export_time_nanos() -> u64 {
+    SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_nanos() as u64;
+        .as_nanos() as u64
+}
 
+/// Builds an OTLP log export request grouped by endpoint.
+///
+/// `observed_nanos` is the batch's export time; building the same batch with
+/// the same time yields the same records. `include_alert_details` is the
+/// receiving target's policy, so one target can carry per-alert detail while
+/// another receives only the report counts.
+pub fn build_export_request(
+    batch: &[(EventContext, CollectorEvent)],
+    observed_nanos: u64,
+    include_alert_details: bool,
+) -> ExportLogsServiceRequest {
     let mut by_endpoint: HashMap<String, (Vec<KeyValue>, Vec<OtlpLogRecord>)> = HashMap::new();
 
     for (context, event) in batch {
@@ -452,17 +459,14 @@ pub fn build_export_request(
 
 /// Builds an OTLP metric export request grouped by endpoint.
 ///
-/// Every sample maps to an OTLP `Gauge` point; Sum and Histogram mapping can
-/// be added when the health metric model exposes those temporality choices.
+/// Every sample maps to an OTLP `Gauge` point stamped with `observed_nanos`,
+/// the batch's export time; Sum and Histogram mapping can be added when the
+/// health metric model exposes those temporality choices.
 pub fn build_metrics_export_request(
     batch: &[(EventContext, MetricSample)],
+    observed_nanos: u64,
     metric_name_prefix: &str,
 ) -> ExportMetricsServiceRequest {
-    let observed_nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-
     let mut by_endpoint: HashMap<String, (Vec<KeyValue>, Vec<OtlpMetric>)> = HashMap::new();
 
     for (context, sample) in batch {
@@ -860,7 +864,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(context, event)], false);
+        let request = build_export_request(&[(context, event)], EXPORT_NANOS, false);
         let attrs = &request.resource_logs[0]
             .resource
             .as_ref()
@@ -923,7 +927,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(context, event)], false);
+        let request = build_export_request(&[(context, event)], EXPORT_NANOS, false);
         let attrs = &request.resource_logs[0]
             .resource
             .as_ref()
@@ -1029,7 +1033,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(ctx, log)], false);
+        let request = build_export_request(&[(ctx, log)], EXPORT_NANOS, false);
         assert_eq!(request.resource_logs.len(), 1);
 
         let records = &request.resource_logs[0].scope_logs[0].log_records;
@@ -1047,7 +1051,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(test_context(), log)], false);
+        let request = build_export_request(&[(test_context(), log)], EXPORT_NANOS, false);
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
 
         assert_eq!(record.severity_text, "UNSPECIFIED");
@@ -1063,7 +1067,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(test_context(), log)], false);
+        let request = build_export_request(&[(test_context(), log)], EXPORT_NANOS, false);
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
 
         assert_eq!(record.severity_text, "FATAL");
@@ -1102,7 +1106,7 @@ mod tests {
             diagnostic_record: None,
         }));
 
-        let request = build_export_request(&[(ctx, log)], false);
+        let request = build_export_request(&[(ctx, log)], EXPORT_NANOS, false);
 
         let records = &request.resource_logs[0].scope_logs[0].log_records;
         let record = &records[0];
@@ -1125,7 +1129,7 @@ mod tests {
             (ctx.clone(), CollectorEvent::MetricCollectionStart),
             (ctx, CollectorEvent::MetricCollectionEnd),
         ];
-        let request = build_export_request(&batch, false);
+        let request = build_export_request(&batch, EXPORT_NANOS, false);
         assert!(request.resource_logs.is_empty());
     }
 
@@ -1182,7 +1186,11 @@ mod tests {
             .into(),
         );
 
-        let request = build_export_request(&[(test_context(), report)], include_alert_details);
+        let request = build_export_request(
+            &[(test_context(), report)],
+            EXPORT_NANOS,
+            include_alert_details,
+        );
 
         request.resource_logs[0].scope_logs[0].log_records[0].clone()
     }
@@ -1234,7 +1242,7 @@ mod tests {
             .into(),
         );
 
-        let request = build_export_request(&[(test_context(), report)], true);
+        let request = build_export_request(&[(test_context(), report)], EXPORT_NANOS, true);
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
         let attrs = record.attributes.as_slice();
 
@@ -1419,7 +1427,7 @@ mod tests {
             .into(),
         );
 
-        let request = build_export_request(&[(ctx, report)], true);
+        let request = build_export_request(&[(ctx, report)], EXPORT_NANOS, true);
         let records = &request.resource_logs[0].scope_logs[0].log_records;
         let record = &records[0];
         let attrs = record.attributes.as_slice();
@@ -1589,7 +1597,7 @@ mod tests {
         };
 
         let batch = vec![log(ctx1.clone()), log(ctx2), log(ctx1)];
-        let request = build_export_request(&batch, false);
+        let request = build_export_request(&batch, EXPORT_NANOS, false);
 
         assert_eq!(request.resource_logs.len(), 2);
         let total_records: usize = request
@@ -1627,6 +1635,7 @@ mod tests {
                 (rest_ctx, sample("nvue_rest")),
                 (gnmi_ctx, sample("nvue_gnmi")),
             ],
+            EXPORT_NANOS,
             "carbide_hardware_health",
         );
 
@@ -1655,7 +1664,8 @@ mod tests {
             context: None,
         };
 
-        let request = build_metrics_export_request(&[(ctx, sample)], "carbide_hardware_health");
+        let request =
+            build_metrics_export_request(&[(ctx, sample)], EXPORT_NANOS, "carbide_hardware_health");
         let metrics = &request.resource_metrics[0].scope_metrics[0].metrics;
 
         assert_eq!(metrics.len(), 1);
@@ -1702,7 +1712,11 @@ mod tests {
             context: None,
         };
 
-        let request = build_metrics_export_request(&[(context, sample)], "carbide_hardware_health");
+        let request = build_metrics_export_request(
+            &[(context, sample)],
+            EXPORT_NANOS,
+            "carbide_hardware_health",
+        );
         let resource_metrics = &request.resource_metrics[0];
         let metrics = &resource_metrics.scope_metrics[0].metrics;
 
