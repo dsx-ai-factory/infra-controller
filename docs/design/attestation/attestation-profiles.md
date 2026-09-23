@@ -155,13 +155,21 @@ One `mode` field holds one value.
 whose own class has no profile. An exact class match always wins, so `any` is
 consulted only after that lookup misses.
 
-Seeding `any` with `mode: ALL`: whatever the BMC offers
-on hardware nobody has profiled, attest it. Without a fallback, an unprofiled
-class contributes nothing — the machine fails, and a failed machine is not an
-attested one. Because an exact match wins, a `mode: NONE` profile on a real class
-is how an operator says "this platform has nothing to attest," and it keeps the
-`ALL` net off hardware that can never satisfy it. Power shelves and generic Dell hosts are
-the cases to seed that way.
+Seed `any` with `mode: ALL` to attest whatever the BMC offers on hardware
+nobody has profiled.
+
+Without that fallback, a machine whose class has no profile is never attested.
+It is not blocked either. Scheduling reports `NoProfile`, and the machine
+continues to exactly the state it would have reached if attestation had run and
+passed. Nothing later in the flow can tell those two apart, so §6.4 is the only
+place the gap is visible.
+
+A `mode: NONE` profile on a real class also attests nothing, but on purpose.
+`NONE` means an operator decided this platform has nothing to attest.
+`NoProfile` means nobody decided anything. Since an exact match beats `any`,
+`NONE` is also how to keep the `ALL` fallback off hardware that could never
+satisfy it. Power shelves and generic Dell hosts are the cases to seed that
+way.
 
 ### 4.3 Patterns: exact and prefix
 
@@ -174,7 +182,7 @@ Each pattern is independently exact or prefix, and one selection may mix them.
 
 Prefix exists because a GB200 tray reports several GPU roots of trust — the
 fixture in `crates/redfish/src/libredfish/test_support.rs` shows
-`HGX_IRoT_GPU_0`, `HGX_IRoT_GPU_1`, and `HGX_IRoT_GPU_2` alongside `HGX_BMC_0` —
+`HGX_IRoT_GPU_0`, `HGX_IRoT_GPU_1`, and `HGX_IRoT_GPU_2` alongside `ERoT_BMC_0` —
 and one prefix covers them however many a tray has.
 
 ### 4.4 The policy is a JSON document
@@ -248,17 +256,20 @@ list attesters before collecting.
 4. Find the policy: the class first, then `any`. An endpoint with no class
   recorded reaches `any` too, so an unexplored endpoint is covered by the site's
   default rather than left unattested. If neither yields one, stop with the
-  matching failure from §5.3.
+  matching outcome from §5.3.
 5. If the policy is `mode: NONE`, stop and report `AttestationDisabled`. The BMC
   is not contacted.
 6. Connect to the BMC. If its service root advertises no `ComponentIntegrity`
   collection, stop and report `NoAttestersFound`. Otherwise list its
   `ComponentIntegrity` resources.
-7. Keep the eligible ones: `ComponentIntegrityEnabled` true and type `SPDM`.
-   Eligibility comes before patterns because an ID says nothing about whether
-   the component can be attested. `ComponentIntegrityTypeVersion` is not
-   filtered on, which drops the `1.1.0` check in the deleted
-   `get_supported_components()` (§9). The version is not persisted.
+7. Keep the eligible ones: `ComponentIntegrityEnabled` true, type `SPDM`, and
+   `ComponentIntegrityTypeVersion` at or above `1.1.0`. Eligibility comes
+   before patterns because an ID says nothing about whether the component can
+   be attested. The version is compared, not matched exactly as the deleted
+   `get_supported_components()` (§9) did, so a newer responder still attests
+   and an older one does not. A version that does not parse is kept, with a
+   warning, because BMCs report `unknown` and `N/A` here and rejecting those
+   would stop attesting working hardware. The version is not persisted.
 8. Apply the selection's patterns to what remains and take the outcome from
   §5.3.
 9. On success, write one `spdm_machine_devices_attestation` row per selected
@@ -332,10 +343,10 @@ flowchart TD
     C -->|"No"| D{"Is an 'any' profile stored?"}
 
     D -->|"Yes"| Y2["Use the 'any' profile"]
-    D -->|"No"| X2["Fail: NoProfile"]
+    D -->|"No"| X2["NoProfile.<br/>Nothing scheduled"]
 
     E -->|"Yes"| Y2
-    E -->|"No"| X1["Fail: ClassNotRecorded"]
+    E -->|"No"| X1["ClassNotRecorded.<br/>Nothing scheduled"]
 ```
 
 Section 6.4 shows these same situations against a real inventory.
@@ -354,7 +365,7 @@ flowchart TD
 
     S0 --> Q2{"Does the service root advertise<br/>a ComponentIntegrity collection?"}
     Q2 -->|"No"| O4["NoAttestersFound.<br/>Nothing scheduled"]
-    Q2 -->|"Yes"| S1["List it and keep only the eligible<br/>ones: enabled, type SPDM"]
+    Q2 -->|"Yes"| S1["List it and keep only the eligible ones:<br/>enabled, type SPDM, version at or above 1.1.0"]
 
     S1 --> Q3{"Which mode?"}
 
@@ -487,8 +498,9 @@ message AttestationCoverageEntry {
   // The mode that would apply, absent when nothing would.
   optional AttesterSelectionMode mode = 4;
   // The attester sets recorded for the class (§7.5), one entry per distinct
-  // digest. Empty before the class is first attested; above one entry, the
-  // class spans hardware carrying different components.
+  // digest. Empty before a collection is successfully explored; above one
+  // entry, the class has reported different components, which
+  // `reporting_endpoints` tells apart from spanning them now.
   repeated AttesterSet attester_sets = 5;
 }
 
@@ -618,17 +630,21 @@ so `any` attests them with whatever their BMCs report. The four SR680a V3s have
 a profile of their own that attests nothing, which is a deliberate exclusion
 rather than an oversight — the two rows read differently and only this view
 tells them apart. The 72 GB200 trays share a profile, and the two variants under
-one class mean at least one tray reports seven attesters where the rest report
-eight (§7.5). And one endpoint has no class recorded yet, either because it is
-new or because its explorations are failing, so there is nothing to key on and
-`any` covers it too.
+one class mean it has reported seven attesters as well as eight; whether a tray
+still differs from the rest today is in the per-set endpoint counts (§7.5),
+since a variant keeps its row after the endpoints reporting it are gone. And
+one endpoint has no class recorded yet, either because it is new or because its
+explorations are failing, so there is nothing to key on and `any` covers it
+too.
 
 `EXPLORED ENDPOINTS` counts rows of `explored_endpoints` rather than machines,
 because `hardware_class` is recorded per endpoint and a machine can present more
 than one. Hardware nobody has explored has no row at all.
-`VARIANTS` renders how many attester sets the class has (§7.5); more than one
-means it spans hardware carrying different SPDM-capable components. It does not
-move when an operator switches a component's integrity reporting off, which is a
+`VARIANTS` renders how many attester sets the class has recorded (§7.5); more
+than one means it has reported different SPDM-capable components, not that it
+spans them now. A set keeps its row once the endpoints reporting it are gone, so
+a class can carry one variant today and still count two. It does not move when
+an operator switches a component's integrity reporting off, which is a
 configuration difference rather than a hardware one. Zero means nothing has been
 recorded yet, which is every class before its first exploration.
 `ATTESTERS` renders how many attesters those sets hold, listing every distinct
@@ -696,7 +712,9 @@ one that is absent. `None` means the BMC reported no collection — some platfor
 answer `NotSupported` — while `Some([])` means it reported an empty one. A failed
 fetch also records `None`, with a warning: the list drives coverage while
 scheduling reads the collection live, so it must not fail an exploration that
-otherwise succeeded. The next exploration restores it.
+otherwise succeeded. The next exploration restores it. A failed fetch sets
+`component_integrity_unavailable` as well, which is what separates a BMC that
+could not answer from one reporting nothing (§7.5).
 
 ### 7.2 The profile table
 
@@ -880,6 +898,11 @@ digest, so a tray reporting none where its peers report eight shows up as a
 second set rather than as nothing observed. Only §7.1's `None` — no collection
 reported, or a fetch that failed — records neither a digest nor a row.
 
+Those two differ in what happens to the endpoint's `attester_digest`. A BMC
+reporting no collection clears it, since the endpoint no longer reports the set
+it was counted under. A failed fetch leaves it, because a BMC that could not
+answer has not said its attesters changed.
+
 **Scoped by type, not by enablement.** A `TPM` member is never attested, and
 `ComponentIntegrityEnabled` is read-write, so filtering on it would put
 configuration inside the identity: switching SPDM off on one GPU would read as
@@ -967,8 +990,13 @@ whatever drives host ingestion, firmware update, and tenant switching (§12).
 ## 9 Removing the old list
 
 `is_supported_product()`, `get_supported_components()`, and the `PRODUCT_GB200`
-and `PRODUCT_GB300` constants are deleted along with the version check they
-carried, which no profile can express and none needs.
+and `PRODUCT_GB300` constants are deleted. A profile replaces the product
+allowlist they carried.
+
+Their version check stays, in a different form: the exact `1.1.0` match becomes
+a comparison against that same minimum (§5 step 7). Which SPDM versions this
+build can measure is a fact about the implementation, not a policy choice, so
+it belongs in code rather than in a profile.
 
 ## 10 Logging and metrics
 

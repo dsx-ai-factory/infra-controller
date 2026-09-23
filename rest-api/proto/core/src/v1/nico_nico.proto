@@ -1377,9 +1377,10 @@ message AttestationCoverageEntry {
   optional AttesterSelectionMode mode = 4;
   // The distinct sets of SPDM-capable attesters recorded for this class, one
   // entry per digest, ordered by digest. Empty until an exploration records
-  // one. More than one means the class spans hardware carrying different
-  // attestable components, which a profile's patterns cannot show on their
-  // own.
+  // one. More than one means the class has reported different attestable
+  // components, which a profile's patterns cannot show on their own; a set
+  // keeps its entry after the endpoints reporting it are gone, so read
+  // `reporting_endpoints` for which of them the class carries now.
   repeated AttesterSet attester_sets = 5;
 }
 
