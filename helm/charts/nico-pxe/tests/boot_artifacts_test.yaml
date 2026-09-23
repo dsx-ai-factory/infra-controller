@@ -128,3 +128,14 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[1].name
           value: custom-init
+
+  - it: should reject empty split and fallback images
+    set:
+      bootArtifactContainers:
+        - name: empty-image
+          repository: registry.example.com/boot-artifacts
+          tag: ""
+          image: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-pxe.bootArtifactContainers[0] requires either non-empty repository and tag or a non-empty image"

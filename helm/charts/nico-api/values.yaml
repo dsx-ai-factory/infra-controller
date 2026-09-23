@@ -122,14 +122,26 @@ resources:
 ## a positive integer (validated at render).
 fileDescriptorLimit: 65536
 
-## Optional init containers (general-purpose pass-through)
+## Optional general-purpose init containers, run in list order after bootArtifactContainers.
+## Omitted or empty lists add no general-purpose init containers.
+## Set both non-empty `repository` + `tag` to build `image: <repository>:<tag>`;
+## they take precedence over `image`. If either is omitted or empty, supply `image`.
+## Rendering fails if neither form supplies an image; the error identifies the list entry.
+## No repository or tag defaults are inherited from global.image.
+## All other Kubernetes container fields pass through unchanged; mounts are not injected.
 initContainers: []
+# initContainers:
+#   - name: custom-init
+#     repository: <your-registry>/custom-init
+#     tag: "<tag>"
+#     command: ["sh", "-c", "echo initializing"]
 
 ## Boot-artifact init containers
 ## Each entry is rendered as a Kubernetes init container with the boot-artifacts
 ## volume automatically mounted at /forge-boot-artifacts/blobs/internal.
-## Prefer separate `repository` + `tag` fields (they win when set). The combined
-## `image: <ref>:<tag>` form is still honored for backward compatibility.
+## Set both non-empty `repository` + `tag` to override `image`. If either is omitted
+## or empty, supply `image` (a tag or digest reference). No global.image defaults apply.
+## Rendering fails if neither form supplies an image; the error identifies the list entry.
 bootArtifactContainers: []
 # bootArtifactContainers:
 #   - name: boot-artifacts-x86-64

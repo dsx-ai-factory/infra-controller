@@ -1,0 +1,1 @@
+../../../templates/_container_image.tpl
