@@ -525,31 +525,14 @@ impl PreingestionState {
     /// successful exploration lifts it. `Complete` and `Failed` waits have no
     /// preingestion consumer.
     pub fn parks_for_explorer_refresh(&self) -> bool {
-        match self {
+        matches!(
+            self,
             Self::InitialBMCReset {
                 phase: InitialBmcResetPhase::WaitForExplorerRefresh,
-            }
-            | Self::RecheckVersions
-            | Self::NewFirmwareReportedWait { .. }
-            | Self::RecheckVersionsAfterFailure { .. } => true,
-            Self::Initial
-            | Self::ScriptRunning
-            | Self::BfbRecoveryNeeded { .. }
-            | Self::BfbPlatformPowercycle { .. }
-            | Self::BfbCopyInProgress { .. }
-            | Self::BfbInstallationWait { .. }
-            | Self::InitialReset { .. }
-            | Self::InitialBMCReset {
-                phase: InitialBmcResetPhase::Start { .. } | InitialBmcResetPhase::WaitForBmc,
-            }
-            | Self::SetNtpServers { .. }
-            | Self::TimeSyncReset { .. }
-            | Self::RackFirmwareUpdateWait { .. }
-            | Self::UpgradeFirmwareWait { .. }
-            | Self::ResetForNewFirmware { .. }
-            | Self::Failed { .. }
-            | Self::Complete => false,
-        }
+            } | Self::RecheckVersions
+                | Self::NewFirmwareReportedWait { .. }
+                | Self::RecheckVersionsAfterFailure { .. }
+        )
     }
 }
 

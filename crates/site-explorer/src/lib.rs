@@ -304,16 +304,29 @@ impl ExplorationPlan<'_> {
     }
 }
 
-/// Shares of the `explorations_per_run` budget for the three tiers inside it:
-/// unexplored endpoints, preingestion refresh waits, routine refreshes.
-const EXPLORATION_SHARES_PERCENT: [usize; 3] = [70, 20, 10];
-const _: () = assert!(
-    EXPLORATION_SHARES_PERCENT[0] + EXPLORATION_SHARES_PERCENT[1] + EXPLORATION_SHARES_PERCENT[2]
-        == 100
-);
+/// Shares of the `explorations_per_run` budget for the three tiers inside it.
+const UNEXPLORED_SHARE_PERCENT: usize = 70;
+const REFRESH_WAIT_SHARE_PERCENT: usize = 20;
+const ROUTINE_SHARE_PERCENT: usize = 10;
+const _: () =
+    assert!(UNEXPLORED_SHARE_PERCENT + REFRESH_WAIT_SHARE_PERCENT + ROUTINE_SHARE_PERCENT == 100);
+
+/// Endpoints per tier of the `explorations_per_run` budget: candidates or slots.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TierCounts {
+    unexplored: usize,
+    refresh_waits: usize,
+    routine: usize,
+}
+
+impl TierCounts {
+    fn total(&self) -> usize {
+        self.unexplored + self.refresh_waits + self.routine
+    }
+}
 
 /// Sorts the candidates into tiers and spends `budget` on them. Each tier gets
-/// its share of the budget ([`EXPLORATION_SHARES_PERCENT`]) oldest first:
+/// its share of the budget (the `*_SHARE_PERCENT` constants) oldest first:
 /// unexplored endpoints by interface creation, the other two by report time.
 /// Slots a tier cannot fill go to the other tiers in the same order, unexplored
 /// first, so no slot stays unused while any tier has candidates. From a budget
@@ -350,17 +363,17 @@ fn plan_explorations<'a>(
     let unexplored_candidates = unexplored.len();
     let refresh_wait_candidates = refresh_waits.len();
     let routine_candidates = routine.len();
-    let [take_unexplored, take_refresh_waits, take_routine] = allocate(
+    let take = allocate(
         budget,
-        [
-            unexplored_candidates,
-            refresh_wait_candidates,
-            routine_candidates,
-        ],
+        TierCounts {
+            unexplored: unexplored_candidates,
+            refresh_waits: refresh_wait_candidates,
+            routine: routine_candidates,
+        },
     );
-    unexplored.truncate(take_unexplored);
-    refresh_waits.truncate(take_refresh_waits);
-    routine.truncate(take_routine);
+    unexplored.truncate(take.unexplored);
+    refresh_waits.truncate(take.refresh_waits);
+    routine.truncate(take.routine);
     ExplorationPlan {
         priority,
         unexplored,
@@ -375,18 +388,27 @@ fn plan_explorations<'a>(
 /// How many of `budget` each tier gets: its share, capped by its candidates,
 /// then the unused rest tier by tier in order. Rounding leftovers go to the
 /// first tier, so a budget below ten still reaches the tiers in order.
-fn allocate(budget: usize, candidates: [usize; 3]) -> [usize; 3] {
-    let budget = budget.min(candidates.iter().sum());
-    let mut quotas = EXPLORATION_SHARES_PERCENT.map(|share| budget * share / 100);
-    quotas[0] += budget - quotas.iter().sum::<usize>();
-    let mut take = [0; 3];
-    for tier in 0..3 {
-        take[tier] = quotas[tier].min(candidates[tier]);
-    }
-    let mut spare = budget - take.iter().sum::<usize>();
-    for tier in 0..3 {
-        let more = (candidates[tier] - take[tier]).min(spare);
-        take[tier] += more;
+fn allocate(budget: usize, candidates: TierCounts) -> TierCounts {
+    let budget = budget.min(candidates.total());
+    let mut quotas = TierCounts {
+        unexplored: budget * UNEXPLORED_SHARE_PERCENT / 100,
+        refresh_waits: budget * REFRESH_WAIT_SHARE_PERCENT / 100,
+        routine: budget * ROUTINE_SHARE_PERCENT / 100,
+    };
+    quotas.unexplored += budget - quotas.total();
+    let mut take = TierCounts {
+        unexplored: quotas.unexplored.min(candidates.unexplored),
+        refresh_waits: quotas.refresh_waits.min(candidates.refresh_waits),
+        routine: quotas.routine.min(candidates.routine),
+    };
+    let mut spare = budget - take.total();
+    for (taken, wanted) in [
+        (&mut take.unexplored, candidates.unexplored),
+        (&mut take.refresh_waits, candidates.refresh_waits),
+        (&mut take.routine, candidates.routine),
+    ] {
+        let more = (wanted - *taken).min(spare);
+        *taken += more;
         spare -= more;
     }
     take
@@ -5654,33 +5676,38 @@ mod tests {
 
     #[test]
     fn allocate_gives_each_tier_its_share_and_passes_unused_slots_on() {
+        let counts = |unexplored, refresh_waits, routine| TierCounts {
+            unexplored,
+            refresh_waits,
+            routine,
+        };
         // input: (budget, candidates per tier); expect: slots per tier
         check_values(
             [
                 Check {
                     scenario: "every tier full: 70/20/10",
-                    input: (10, [20, 20, 20]),
-                    expect: [7, 2, 1],
+                    input: (10, counts(20, 20, 20)),
+                    expect: counts(7, 2, 1),
                 },
                 Check {
                     scenario: "no unexplored: its share flows to refresh waits, then routine",
-                    input: (10, [0, 5, 20]),
-                    expect: [0, 5, 5],
+                    input: (10, counts(0, 5, 20)),
+                    expect: counts(0, 5, 5),
                 },
                 Check {
                     scenario: "no candidates for the later tiers: unexplored takes everything",
-                    input: (10, [20, 0, 0]),
-                    expect: [10, 0, 0],
+                    input: (10, counts(20, 0, 0)),
+                    expect: counts(10, 0, 0),
                 },
                 Check {
                     scenario: "the rounding leftover of a small budget goes to unexplored",
-                    input: (1, [1, 1, 1]),
-                    expect: [1, 0, 0],
+                    input: (1, counts(1, 1, 1)),
+                    expect: counts(1, 0, 0),
                 },
                 Check {
                     scenario: "fewer candidates than budget: all of them",
-                    input: (10, [1, 1, 1]),
-                    expect: [1, 1, 1],
+                    input: (10, counts(1, 1, 1)),
+                    expect: counts(1, 1, 1),
                 },
             ],
             |(budget, candidates)| allocate(budget, candidates),
