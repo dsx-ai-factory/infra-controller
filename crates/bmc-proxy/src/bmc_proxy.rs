@@ -26,7 +26,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::IntoResponse;
-use axum::routing::{any, get};
+use axum::routing::any;
 use carbide_authn::SpiffeContext;
 use carbide_authn::middleware::{
     AuthContext, Authorization, CertDescriptionMiddleware, ConnectionAttributes, Principal,
@@ -248,7 +248,7 @@ pub(crate) async fn start(
     };
 
     let app = Router::new()
-        .route("/", get(root_url))
+        .route("/", any(root_or_proxy))
         .route("/{*path}", any(proxy_request))
         .with_state(state.clone())
         .layer(from_fn_with_state(state.clone(), authorize_proxy_request))
@@ -628,7 +628,8 @@ fn cert_description_layer<AZ: Authorization>(
     ))
 }
 
-async fn root_url() -> &'static str {
+/// Returns the build banner served by an untargeted `GET /`.
+fn root_url() -> &'static str {
     const ROOT_CONTENTS: &str = if carbide_version::literal!(build_version).is_empty() {
         "Carbide BMC proxy development build\n"
     } else {
@@ -639,6 +640,36 @@ async fn root_url() -> &'static str {
         )
     };
     ROOT_CONTENTS
+}
+
+/// Serves the proxy banner only when `/` is not targeted at a BMC.
+///
+/// A same-BMC redirect can legitimately rewrite to `/`; the resulting request
+/// carries `Forwarded` and must receive the same proxy and ACL handling as any
+/// other BMC resource path. A malformed `Forwarded` value also enters the proxy
+/// so it fails closed rather than being mistaken for a banner request.
+async fn root_or_proxy(
+    State(state): State<BmcProxyState>,
+    request: Request<Body>,
+) -> Result<Response<Body>, Response<Body>> {
+    if request.headers().contains_key("forwarded") {
+        return proxy_request(State(state), request).await;
+    }
+    if request.method() == Method::GET {
+        return Ok(root_url().into_response());
+    }
+    if request.method() == Method::HEAD {
+        let mut response = root_url().into_response();
+        *response.body_mut() = Body::empty();
+        return Ok(response);
+    }
+
+    let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
+    response.headers_mut().insert(
+        http::header::ALLOW,
+        http::HeaderValue::from_static("GET,HEAD"),
+    );
+    Ok(response)
 }
 
 async fn proxy_request(
@@ -1724,7 +1755,8 @@ mod tests {
     use std::time::Duration;
 
     use axum::body::Body;
-    use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
+    use axum::extract::State;
+    use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
     use bytes::Bytes;
     use carbide_authn::middleware::{AuthContext, ExternalUserInfo, Principal};
     use carbide_instrument::LabelValue;
@@ -1754,7 +1786,8 @@ mod tests {
         create_client, error_response, evict_cached_credentials, forwarded_header_value,
         idle_bounded_cache, ip_for_forwarded_target, is_hop_by_hop_header, method_supports_body,
         parse_forwarded_host_value, path_the_acls_cannot_speak_for, prepare_response_body,
-        redirect_location, refuse_rewritten_path, request_principal_ids, span_status,
+        redirect_location, refuse_rewritten_path, request_principal_ids, root_or_proxy,
+        span_status,
     };
 
     const TEST_CONFIG: &str = r#"
@@ -1782,6 +1815,7 @@ mod tests {
         "spiffe-service-id/forge-system/carbide-api" = [
             "GET /redfish/v1/Registries/%23*",
             "GET /redfish/v1/**",
+            "GET /**",
         ]
     "#;
 
@@ -2244,6 +2278,48 @@ mod tests {
             .expect("request builds")
     }
 
+    /// `/` is both the local banner and a possible BMC redirect target. The
+    /// `Forwarded` target decides which behavior applies, before method routing
+    /// can turn a non-GET proxy request into a local 405.
+    #[tokio::test]
+    async fn root_dispatches_targeted_requests_to_the_proxy() {
+        let state = test_state_with_config(AUTHORIZATION_TEST_CONFIG);
+        let response_status = |result: Result<Response<Body>, Response<Body>>| match result {
+            Ok(response) | Err(response) => response.status(),
+        };
+
+        let banner = root_or_proxy(State(state.clone()), probe_request("/")).await;
+        assert_eq!(response_status(banner), StatusCode::OK);
+
+        let mut targeted = authorization_request(AuthorizationRequestCase {
+            method: Method::GET,
+            path: "/",
+            principals: Some(vec![Principal::SpiffeServiceIdentifier(
+                "forge-system/carbide-api".to_string(),
+            )]),
+        });
+        targeted.headers_mut().insert(
+            "forwarded",
+            HeaderValue::from_static("host=not-an-ip-address"),
+        );
+        let targeted = root_or_proxy(State(state.clone()), targeted).await;
+        assert_eq!(response_status(targeted), StatusCode::BAD_REQUEST);
+
+        let untargeted_post = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .body(Body::empty())
+            .expect("request builds");
+        let untargeted_post = root_or_proxy(State(state), untargeted_post)
+            .await
+            .expect("the local method rejection is a complete response");
+        assert_eq!(untargeted_post.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            untargeted_post.headers().get(http::header::ALLOW),
+            Some(&HeaderValue::from_static("GET,HEAD"))
+        );
+    }
+
     const REQUEST_PATH_LABELS: [(&str, &str); 2] =
         [("authorization_layer", "request_path"), ("method", "get")];
 
@@ -2360,6 +2436,8 @@ mod tests {
             };
 
             "the same BMC becomes a relative reference" {
+                ("https://192.0.2.5/redfish", "https://192.0.2.5/")
+                    => RedirectLocation::Relative(HeaderValue::from_static("/")),
                 ("https://192.0.2.5/redfish", "https://192.0.2.5/redfish/v1/")
                     => RedirectLocation::Relative(HeaderValue::from_static("/redfish/v1/")),
                 ("https://192.0.2.5/redfish", "https://192.0.2.5/redfish/v1?$select=Id")
