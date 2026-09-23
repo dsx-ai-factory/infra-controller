@@ -7507,8 +7507,8 @@ type AttestationCoverageEntry struct {
 	// none.
 	HardwareClass string `protobuf:"bytes,1,opt,name=hardware_class,json=hardwareClass,proto3" json:"hardware_class,omitempty"`
 	// How many explored endpoints carry it.
-	Endpoints int32               `protobuf:"varint,2,opt,name=endpoints,proto3" json:"endpoints,omitempty"`
-	Coverage  AttestationCoverage `protobuf:"varint,3,opt,name=coverage,proto3,enum=forge.AttestationCoverage" json:"coverage,omitempty"`
+	ExploredEndpoints int32               `protobuf:"varint,2,opt,name=explored_endpoints,json=exploredEndpoints,proto3" json:"explored_endpoints,omitempty"`
+	Coverage          AttestationCoverage `protobuf:"varint,3,opt,name=coverage,proto3,enum=forge.AttestationCoverage" json:"coverage,omitempty"`
 	// The mode of the profile that would apply, absent when none would.
 	Mode *AttesterSelectionMode `protobuf:"varint,4,opt,name=mode,proto3,enum=forge.AttesterSelectionMode,oneof" json:"mode,omitempty"`
 	// The distinct sets of SPDM-capable attesters recorded for this class, one
@@ -7558,9 +7558,9 @@ func (x *AttestationCoverageEntry) GetHardwareClass() string {
 	return ""
 }
 
-func (x *AttestationCoverageEntry) GetEndpoints() int32 {
+func (x *AttestationCoverageEntry) GetExploredEndpoints() int32 {
 	if x != nil {
-		return x.Endpoints
+		return x.ExploredEndpoints
 	}
 	return 0
 }
@@ -7593,9 +7593,9 @@ type AttesterSet struct {
 	// membership and not with whether a member's integrity reporting is on.
 	Digest string `protobuf:"bytes,1,opt,name=digest,proto3" json:"digest,omitempty"`
 	// Explored endpoints of this class last reporting this set. Sums to at most
-	// the entry's `endpoints`, since an endpoint explored before this was
-	// recorded carries no digest yet.
-	Endpoints int32 `protobuf:"varint,2,opt,name=endpoints,proto3" json:"endpoints,omitempty"`
+	// the entry's `explored_endpoints`, since an endpoint explored before this
+	// was recorded carries no digest yet.
+	ReportingEndpoints int32 `protobuf:"varint,2,opt,name=reporting_endpoints,json=reportingEndpoints,proto3" json:"reporting_endpoints,omitempty"`
 	// How many attesters the set holds. Zero where the BMC reported an SPDM
 	// collection with no SPDM members, which is a set in its own right and
 	// distinct from a class that has recorded none.
@@ -7641,9 +7641,9 @@ func (x *AttesterSet) GetDigest() string {
 	return ""
 }
 
-func (x *AttesterSet) GetEndpoints() int32 {
+func (x *AttesterSet) GetReportingEndpoints() int32 {
 	if x != nil {
-		return x.Endpoints
+		return x.ReportingEndpoints
 	}
 	return 0
 }
@@ -69085,17 +69085,17 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1cGetAttestationProfileRequest\x12%\n" +
 	"\x0ehardware_class\x18\x01 \x01(\tR\rhardwareClass\"X\n" +
 	"\x1fListAttestationProfilesResponse\x125\n" +
-	"\bprofiles\x18\x01 \x03(\v2\x19.forge.AttestationProfileR\bprofiles\"\x90\x02\n" +
+	"\bprofiles\x18\x01 \x03(\v2\x19.forge.AttestationProfileR\bprofiles\"\xa1\x02\n" +
 	"\x18AttestationCoverageEntry\x12%\n" +
-	"\x0ehardware_class\x18\x01 \x01(\tR\rhardwareClass\x12\x1c\n" +
-	"\tendpoints\x18\x02 \x01(\x05R\tendpoints\x126\n" +
+	"\x0ehardware_class\x18\x01 \x01(\tR\rhardwareClass\x12-\n" +
+	"\x12explored_endpoints\x18\x02 \x01(\x05R\x11exploredEndpoints\x126\n" +
 	"\bcoverage\x18\x03 \x01(\x0e2\x1a.forge.AttestationCoverageR\bcoverage\x125\n" +
 	"\x04mode\x18\x04 \x01(\x0e2\x1c.forge.AttesterSelectionModeH\x00R\x04mode\x88\x01\x01\x127\n" +
 	"\rattester_sets\x18\x05 \x03(\v2\x12.forge.AttesterSetR\fattesterSetsB\a\n" +
-	"\x05_mode\"a\n" +
+	"\x05_mode\"t\n" +
 	"\vAttesterSet\x12\x16\n" +
-	"\x06digest\x18\x01 \x01(\tR\x06digest\x12\x1c\n" +
-	"\tendpoints\x18\x02 \x01(\x05R\tendpoints\x12\x1c\n" +
+	"\x06digest\x18\x01 \x01(\tR\x06digest\x12/\n" +
+	"\x13reporting_endpoints\x18\x02 \x01(\x05R\x12reportingEndpoints\x12\x1c\n" +
 	"\tattesters\x18\x03 \x01(\x05R\tattesters\"\xbd\x01\n" +
 	"\x1eGetAttestationCoverageResponse\x129\n" +
 	"\aentries\x18\x01 \x03(\v2\x1f.forge.AttestationCoverageEntryR\aentries\x12K\n" +

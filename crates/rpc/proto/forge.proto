@@ -1391,7 +1391,7 @@ message AttestationCoverageEntry {
   // none.
   string hardware_class = 1;
   // How many explored endpoints carry it.
-  int32 endpoints = 2;
+  int32 explored_endpoints = 2;
   AttestationCoverage coverage = 3;
   // The mode of the profile that would apply, absent when none would.
   optional AttesterSelectionMode mode = 4;
@@ -1409,9 +1409,9 @@ message AttesterSet {
   // membership and not with whether a member's integrity reporting is on.
   string digest = 1;
   // Explored endpoints of this class last reporting this set. Sums to at most
-  // the entry's `endpoints`, since an endpoint explored before this was
-  // recorded carries no digest yet.
-  int32 endpoints = 2;
+  // the entry's `explored_endpoints`, since an endpoint explored before this
+  // was recorded carries no digest yet.
+  int32 reporting_endpoints = 2;
   // How many attesters the set holds. Zero where the BMC reported an SPDM
   // collection with no SPDM members, which is a set in its own right and
   // distinct from a class that has recorded none.

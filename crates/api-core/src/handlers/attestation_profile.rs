@@ -261,7 +261,7 @@ pub(crate) async fn coverage(
         entries.push(rpc::AttestationCoverageEntry {
             attester_sets: attester_sets.remove(&hardware_class).unwrap_or_default(),
             hardware_class,
-            endpoints: count.endpoints as i32,
+            explored_endpoints: count.endpoints as i32,
             coverage: coverage.into(),
             mode: mode.map(Into::into),
         });
@@ -294,7 +294,7 @@ async fn attester_sets_by_class(
             .or_default()
             .push(rpc::AttesterSet {
                 digest: set.attester_digest,
-                endpoints: set.endpoints as i32,
+                reporting_endpoints: set.reporting_endpoints as i32,
                 attesters: set.attesters,
             });
     }

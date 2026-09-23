@@ -55,7 +55,7 @@ pub struct AttesterSetCount {
     pub hardware_class: String,
     pub attester_digest: String,
     pub attesters: i32,
-    pub endpoints: i64,
+    pub reporting_endpoints: i64,
 }
 
 /// Every recorded set, ordered by class and digest.
@@ -72,7 +72,7 @@ pub async fn counts_by_class(db: impl DbReader<'_>) -> DatabaseResult<Vec<Attest
         SELECT sets.hardware_class,
                sets.attester_digest,
                jsonb_array_length(sets.attester_ids) AS attesters,
-               COUNT(endpoints.address) AS endpoints
+               COUNT(endpoints.address) AS reporting_endpoints
         FROM hardware_class_attesters sets
         LEFT JOIN explored_endpoints endpoints
             ON endpoints.hardware_class = sets.hardware_class
@@ -200,7 +200,13 @@ mod test {
             .await
             .unwrap()
             .into_iter()
-            .map(|count| (count.attester_digest, count.attesters, count.endpoints))
+            .map(|count| {
+                (
+                    count.attester_digest,
+                    count.attesters,
+                    count.reporting_endpoints,
+                )
+            })
             .collect();
 
         assert_eq!(

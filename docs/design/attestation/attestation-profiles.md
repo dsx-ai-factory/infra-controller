@@ -482,7 +482,7 @@ enum AttestationCoverage {
 message AttestationCoverageEntry {
   // Empty for the endpoints exploration has recorded no class for.
   string hardware_class = 1;
-  int32 endpoints = 2;
+  int32 explored_endpoints = 2;
   AttestationCoverage coverage = 3;
   // The mode that would apply, absent when nothing would.
   optional AttesterSelectionMode mode = 4;
@@ -495,8 +495,8 @@ message AttestationCoverageEntry {
 message AttesterSet {
   string digest = 1;
   // Explored endpoints of this class last reporting this set. Sums to at most
-  // the entry's `endpoints`, since an endpoint may have no digest yet.
-  int32 endpoints = 2;
+  // the entry's `explored_endpoints`, since an endpoint may have no digest yet.
+  int32 reporting_endpoints = 2;
   // How many attesters the set holds. Zero where the BMC reported an SPDM
   // collection with no SPDM members.
   int32 attesters = 3;
