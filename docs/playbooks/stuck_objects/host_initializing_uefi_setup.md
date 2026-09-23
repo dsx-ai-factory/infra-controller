@@ -40,9 +40,11 @@ nico-admin-cli host clear-uefi-password --query <machine-id>
 ```
 
 The command also accepts a host MAC address. NICo must have a recorded UEFI
-password and enough BMC information to select the current credential. If NICo
-reports that no password is recorded, do not repeatedly run the command; use
-the BMC procedure below to reconcile the device state.
+password and enough BMC information to select the current credential. When no
+password is recorded, the command returns a successful no-op and the controller
+logs `No UEFI password is recorded as set on this host; nothing to clear`. Do
+not repeatedly run the command in that case; use the BMC procedure below to
+reconcile the device state.
 
 ## Reconcile the BMC Directly
 

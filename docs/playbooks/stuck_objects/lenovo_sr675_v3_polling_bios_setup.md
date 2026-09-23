@@ -30,6 +30,19 @@ state, so NICo never observes the desired settings.
 Clearing CMOS resets that UEFI state. Running machine setup afterward reapplies
 the settings and boot interface that NICo requires.
 
+## Allow Automated Recovery to Finish
+
+When the BIOS setup check continues to return false, NICo automatically starts
+recovery after `polling_bios_setup_stuck_threshold` elapses. The default
+threshold is 15 minutes. Recovery powers off the host, resets the BMC, powers
+the host on, and runs machine setup again. NICo uses the shared
+`max_bios_config_retries` budget, which defaults to three attempts.
+
+Inspect the managed-host history and controller logs while recovery runs. Do
+not clear CMOS while an automated recovery attempt is in progress. Continue
+with the manual procedure only after NICo exhausts the configured retry budget,
+or after the host repeatedly returns to `PollingBiosSetup` without converging.
+
 <Warning>
 
 Clearing CMOS resets firmware configuration. Record any site-specific BIOS
