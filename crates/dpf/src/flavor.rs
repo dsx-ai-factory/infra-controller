@@ -489,7 +489,7 @@ pub fn default_flavor_for(
         None,
         ServiceVpcSlots::default(),
         &[],
-        true,
+        false,
     )
 }
 
@@ -566,7 +566,7 @@ pub fn flavor_bf4(
         None,
         ServiceVpcSlots::default(),
         &[],
-        true,
+        false,
     )
 }
 
@@ -847,7 +847,7 @@ pub fn default_flavor(
         None,
         ServiceVpcSlots::default(),
         &[],
-        true,
+        false,
     )
 }
 
@@ -2201,7 +2201,7 @@ mod tests {
             let interfaces = crate::sdk::build_astra_dpu_interfaces_vec();
             let pf_total_sf =
                 crate::sdk::calculate_astra_pf_total_sf(interfaces.as_slice()).unwrap();
-            let template = flavor_bf4_astra("ns", &None, pf_total_sf, &extra, true).unwrap();
+            let template = flavor_bf4_astra("ns", &None, pf_total_sf, &extra, false).unwrap();
             return flavor_spec_from_template(&template).bfcfg_parameters;
         }
         default_flavor_for_with_topology(
@@ -2214,7 +2214,7 @@ mod tests {
             None,
             ServiceVpcSlots::default(),
             &extra,
-            true,
+            false,
         )
         .unwrap()
         .spec
@@ -2307,7 +2307,7 @@ mod tests {
             None,
             ServiceVpcSlots::default(),
             &extra,
-            true,
+            false,
         )
         .map(drop)
         .map_err(drop)
@@ -3622,7 +3622,7 @@ mod tests {
             16,
             DEFAULT_PF_TOTAL_SF_RESERVED,
             DpuDeploymentType::Bf3,
-            true,
+            false,
         );
         value_scenarios!(
             run = |v| v;
@@ -3631,7 +3631,7 @@ mod tests {
             }
 
             "parameter count" {
-                nv.parameters.as_ref().map(|p| p.len()) == Some(17) => true,
+                nv.parameters.as_ref().map(|p| p.len()) == Some(16) => true,
             }
 
             "carries the SRIOV enable flag" {

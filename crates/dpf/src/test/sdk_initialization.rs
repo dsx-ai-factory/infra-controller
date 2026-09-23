@@ -929,6 +929,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .flavor_name("astra-flavor")
             .services(services)
             .deployment_scoped_service_interfaces(true)
+            .enable_delay_host_init(true)
             .deployment_type(DpuDeploymentType::Bf4Astra)
             .build()
             .expect("scoped Astra test configuration must be valid"),

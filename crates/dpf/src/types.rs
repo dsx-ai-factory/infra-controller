@@ -184,7 +184,7 @@ impl Default for InitDpfResourcesConfig {
             interfaces: Vec::new(),
             proxy: None,
             extra_bfcfg_parameters: Vec::new(),
-            enable_delay_host_init: true,
+            enable_delay_host_init: false,
             deployment_type: DpuDeploymentType::Bf3,
         }
     }
@@ -1439,8 +1439,8 @@ mod tests {
         );
         value_scenarios!(
             run = |()| InitDpfResourcesConfig::default().enable_delay_host_init;
-            "host initialization delay is enabled" {
-                () => true,
+            "host initialization delay is disabled" {
+                () => false,
             }
         );
     }

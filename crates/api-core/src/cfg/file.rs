@@ -2285,9 +2285,8 @@ pub struct DpfDeploymentConfig {
     #[serde(default)]
     pub extra_bfcfg_parameters: Vec<String>,
     /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
-    /// Defaults to `true` when omitted; setting it to `false` restores immediate host
-    /// initialization.
-    #[serde(default = "default_to_true")]
+    /// Defaults to `false` when omitted; setting it to `true` enables the delay.
+    #[serde(default)]
     pub enable_delay_host_init: bool,
 }
 
@@ -2302,7 +2301,7 @@ impl Default for DpfDeploymentConfig {
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
-            enable_delay_host_init: true,
+            enable_delay_host_init: false,
         }
     }
 }
@@ -7912,23 +7911,23 @@ helm_repo_url = "oci://registry.example.test/doca"
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
-            enable_delay_host_init: true,
+            enable_delay_host_init: false,
         }
     }
 
     #[test]
-    fn dpf_deployment_delay_host_init_defaults_to_true_and_accepts_false() {
+    fn dpf_deployment_delay_host_init_defaults_to_false_and_accepts_true() {
         let base = r#"
             flavor_name = "flavor"
             deployment_name = "deployment"
             node_label_key = "example.com/dpu"
         "#;
         let defaulted: DpfDeploymentConfig = toml::from_str(base).unwrap();
-        let disabled: DpfDeploymentConfig =
-            toml::from_str(&format!("{base}\nenable_delay_host_init = false")).unwrap();
+        let enabled: DpfDeploymentConfig =
+            toml::from_str(&format!("{base}\nenable_delay_host_init = true")).unwrap();
 
-        assert!(defaulted.enable_delay_host_init);
-        assert!(!disabled.enable_delay_host_init);
+        assert!(!defaulted.enable_delay_host_init);
+        assert!(enabled.enable_delay_host_init);
     }
 
     /// Verifies deployment selectors remain distinct from each other and NICo-owned labels.
