@@ -68,6 +68,7 @@ mod managed_host_decommissioning;
 mod managed_host_reset;
 #[cfg(feature = "linux-build")]
 mod measured_boot;
+mod mlx_device_report;
 mod network_security_group;
 mod network_segment;
 mod network_segment_find;
