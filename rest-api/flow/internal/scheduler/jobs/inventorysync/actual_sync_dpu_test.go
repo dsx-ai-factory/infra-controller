@@ -268,7 +268,12 @@ func TestSyncMachinesLinksHostAndReconcilesAssociatedDPUInOneCycle(t *testing.T)
 	const hostMAC = "aa:bb:cc:dd:ee:10"
 	const dpuMAC = "aa:bb:cc:dd:ee:11"
 
-	component := model.Component{Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute)}
+	component := model.Component{
+		Type:      devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),
+		SlotID:    unknownPositionValue,
+		TrayIndex: unknownPositionValue,
+		HostID:    unknownPositionValue,
+	}
 	require.NoError(t, component.Create(ctx, pool.DB))
 	createTestBMC(ctx, t, pool, component.ID, hostMAC)
 

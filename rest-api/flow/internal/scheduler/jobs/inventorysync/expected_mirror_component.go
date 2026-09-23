@@ -38,6 +38,7 @@ const (
 	labelComponentTrayIdx      = "tray_idx"
 	labelComponentHostID       = "host_id"
 	expectedDescriptionKey     = "expected_description"
+	unknownPositionValue       = -1
 )
 
 // expectedComponentSpec is the normalised view of one Core expected_* row.
@@ -63,10 +64,10 @@ type expectedComponentSpec struct {
 	BMC            expectedBMCSpec
 	// preserveFields names mirror-managed integer columns whose source Core
 	// label was malformed (non-integer string). The mirror keeps Flow's
-	// existing value for these columns on UPDATE instead of overwriting
-	// with the zero left in the field above. INSERT still writes zero —
-	// there's no existing row to preserve — but populateLabelsIntoSpec logs
-	// the malformation either way so operators see the Core data bug.
+	// existing value for these columns on UPDATE. INSERT writes the negative
+	// unknown-position sentinel because there is no existing value to preserve.
+	// populateLabelsIntoSpec logs the malformation either way so operators see
+	// the Core data bug.
 	preserveFields map[string]bool
 }
 
@@ -144,10 +145,10 @@ func powerShelfDetailToSpec(d nicoapi.ExpectedPowerShelfDetail) expectedComponen
 }
 
 // populateLabelsIntoSpec fills in the label-derived fields on spec. Each int
-// label parsed by parseLabelInt that turns out to be non-integer is logged
+// label parsed by parseLabelInt that turns out to be invalid is logged
 // and marked in spec.preserveFields so the mirror's update path will keep
 // Flow's existing value for that column instead of overwriting it with the
-// zero strconv.Atoi left behind. spec.Type must already be set so the warn
+// unknown-position sentinel. spec.Type must already be set so the warn
 // carries the component type for log filtering.
 func populateLabelsIntoSpec(s *expectedComponentSpec, labels map[string]string) {
 	s.Manufacturer = labels[labelComponentManufacturer]
@@ -164,8 +165,8 @@ func populateLabelsIntoSpec(s *expectedComponentSpec, labels map[string]string) 
 	} {
 		raw := labels[lbl.labelKey]
 		v, ok := parseLabelInt(raw)
+		lbl.assign(v)
 		if ok {
-			lbl.assign(v)
 			continue
 		}
 		s.markPreserve(lbl.fieldName)
@@ -174,22 +175,22 @@ func populateLabelsIntoSpec(s *expectedComponentSpec, labels map[string]string) 
 			Str("serial", s.SerialNumber).
 			Str("label", lbl.labelKey).
 			Str("raw", raw).
-			Msg("Expected-inventory mirror: Core label is not an integer; preserving Flow's existing value on update (insert path falls back to 0)")
+			Msg("Expected-inventory mirror: Core label is not a non-negative integer; preserving Flow's existing value on update (insert path uses unknown position)")
 	}
 }
 
-// parseLabelInt distinguishes "Core omitted the label" (empty input → 0,
-// ok=true) from "Core sent something that isn't an integer" (non-empty
-// non-numeric → 0, ok=false). The caller treats the first as Core
-// authoritatively saying zero, and the second as a Core-side data bug
-// worth logging + falling back on (preserve Flow's value on UPDATE).
+// parseLabelInt distinguishes an omitted or empty Core label (the authoritative
+// unknown-position sentinel, ok=true) from a malformed or negative non-empty
+// label (unknown-position sentinel, ok=false). A literal "0" remains valid.
+// The caller preserves Flow's existing value on UPDATE only for invalid labels;
+// an omitted or empty label authoritatively clears a prior position.
 func parseLabelInt(raw string) (int, bool) {
 	if raw == "" {
-		return 0, true
+		return unknownPositionValue, true
 	}
 	n, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, false
+	if err != nil || n < 0 {
+		return unknownPositionValue, false
 	}
 	return n, true
 }
@@ -785,7 +786,7 @@ func componentDescriptionWithExpected(existing map[string]any, expected string) 
 // (Status, IngestedAt) and audit (CreatedAt, UpdatedAt) are intentionally not
 // touched. Fields named in spec.preserveFields are also skipped — those are the
 // columns whose Core labels were malformed and so should keep Flow's existing
-// value rather than be overwritten with the parseLabelInt fallback zero.
+// value rather than be overwritten with the unknown-position sentinel.
 //
 // Manufacturer and serial number are descriptive metadata owned by Core. The
 // host BMC MAC identifies the mirrored component, so corrected or cleared
@@ -815,7 +816,7 @@ func applyComponentChanges(existing, desired *model.Component, spec expectedComp
 // would queue UPDATE rows for state owned by other loops. Fields named in
 // spec.preserveFields are also skipped so a malformed Core label can't
 // drive a spurious UPDATE that would clobber Flow's value with the
-// fallback zero.
+// unknown-position sentinel.
 func diffComponentFields(existing, desired *model.Component, spec expectedComponentSpec) []fieldChange {
 	var diffs []fieldChange
 	if existing.Name != desired.Name {
