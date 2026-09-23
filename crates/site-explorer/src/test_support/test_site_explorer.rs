@@ -23,7 +23,7 @@ use model::site_explorer::{EndpointExplorationError, EndpointExplorationReport};
 
 use super::mock_endpoint_explorer::MockEndpointExplorer;
 use crate::errors::SiteExplorerResult;
-use crate::{SiteExplorer, SiteIdentifiedHosts};
+use crate::{EndpointExplorationService, SiteExplorer, SiteIdentifiedHosts};
 
 pub struct TestSiteExplorer {
     endpoint_explorer: Arc<MockEndpointExplorer>,
@@ -40,6 +40,10 @@ impl TestSiteExplorer {
 
     pub fn endpoint_explorer(&self) -> &MockEndpointExplorer {
         self.endpoint_explorer.as_ref()
+    }
+
+    pub fn endpoint_exploration_service(&self) -> Arc<EndpointExplorationService> {
+        self.site_explorer.endpoint_exploration_service.clone()
     }
 
     pub fn insert_endpoints(&self, endpoints: Vec<(IpAddr, EndpointExplorationReport)>) {

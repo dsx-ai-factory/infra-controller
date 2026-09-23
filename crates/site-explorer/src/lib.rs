@@ -41,6 +41,7 @@ use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
 use librms::RmsApi;
 use mac_address::MacAddress;
+use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::errors::OperatorError;
 use model::expected_entity::ExpectedEntity;
 use model::expected_power_shelf::ExpectedPowerShelf;
@@ -400,6 +401,11 @@ pub struct SiteExplorer {
     /// so a reset whose timestamp write failed still throttles the next reset.
     recent_bmc_resets: RecentBmcResets,
     // rms_client: Option<Arc<dyn RmsApi>>,
+}
+
+/// State captured once and applied throughout a Site Explorer iteration.
+struct SiteExplorerRunContext {
+    suppressed_bmc_macs: HashSet<MacAddress>,
 }
 
 impl SiteExplorer {
@@ -930,10 +936,16 @@ impl SiteExplorer {
         &self,
         metrics: &mut SiteExplorationMetrics,
     ) -> SiteExplorerResult<SiteIdentifiedHosts> {
+        let suppressed_bmc_macs = self.acknowledge_site_explorer_suppressions().await?;
+        let run_context = SiteExplorerRunContext {
+            suppressed_bmc_macs,
+        };
         self.check_preconditions(metrics).await?;
 
         let update_explored_endpoints_start = Instant::now();
-        let expected_endpoint_index = self.update_explored_endpoints(metrics).await?;
+        let expected_endpoint_index = self
+            .update_explored_endpoints(metrics, &run_context)
+            .await?;
         metrics.record_phase_latency(
             "update_explored_endpoints",
             update_explored_endpoints_start.elapsed(),
@@ -947,7 +959,9 @@ impl SiteExplorer {
         // 2b) If the endpoint is for a host: make sure that the host is on and that infinite boot is enabled. Otherwise, we will not be able to provision the DPU appropriately
         // once we create a managed host and add it to the state machine.
         let identify_machines_to_ingest_start = Instant::now();
-        let (explored_dpus, explored_hosts) = self.identify_machines_to_ingest(metrics).await?;
+        let (explored_dpus, explored_hosts) = self
+            .identify_machines_to_ingest(metrics, &expected_endpoint_index, &run_context)
+            .await?;
         metrics.record_phase_latency(
             "identify_machines_to_ingest",
             identify_machines_to_ingest_start.elapsed(),
@@ -1003,7 +1017,9 @@ impl SiteExplorer {
 
         // Identify and create power shelves
         let identify_power_shelves_to_ingest_start = Instant::now();
-        let explored_power_shelves = self.identify_power_shelves_to_ingest().await?;
+        let explored_power_shelves = self
+            .identify_power_shelves_to_ingest(&expected_endpoint_index, &run_context)
+            .await?;
         metrics.record_phase_latency(
             "identify_power_shelves_to_ingest",
             identify_power_shelves_to_ingest_start.elapsed(),
@@ -1028,7 +1044,9 @@ impl SiteExplorer {
 
         // Identify and create switches
         let identify_switches_to_ingest_start = Instant::now();
-        let explored_switches = self.identify_switches_to_ingest().await?;
+        let explored_switches = self
+            .identify_switches_to_ingest(&expected_endpoint_index, &run_context)
+            .await?;
         metrics.record_phase_latency(
             "identify_switches_to_ingest",
             identify_switches_to_ingest_start.elapsed(),
@@ -1299,6 +1317,8 @@ impl SiteExplorer {
     async fn identify_machines_to_ingest(
         &self,
         metrics: &mut SiteExplorationMetrics,
+        expected_endpoint_index: &ExploredEndpointIndex,
+        run_context: &SiteExplorerRunContext,
     ) -> SiteExplorerResult<(
         HashMap<IpAddr, ExploredEndpoint>,
         HashMap<IpAddr, ExploredEndpoint>,
@@ -1316,6 +1336,19 @@ impl SiteExplorer {
         let mut explored_dpus = HashMap::new();
         let mut explored_hosts = HashMap::new();
         for ep in explored_endpoints.into_iter() {
+            if let Some(bmc_interface) = expected_endpoint_index.underlay_interface(&ep.address)
+                && run_context
+                    .suppressed_bmc_macs
+                    .contains(&bmc_interface.mac_address)
+            {
+                tracing::info!(
+                    bmc_ip_address = %ep.address,
+                    bmc_mac_address = %bmc_interface.mac_address,
+                    "Skipping ingestion of acknowledged suppressed BMC",
+                );
+                continue;
+            }
+
             if ep.report.endpoint_type != EndpointType::Bmc {
                 continue;
             }
@@ -1925,6 +1958,8 @@ impl SiteExplorer {
 
     async fn identify_power_shelves_to_ingest(
         &self,
+        expected_endpoint_index: &ExploredEndpointIndex,
+        run_context: &SiteExplorerRunContext,
     ) -> SiteExplorerResult<Vec<(ExploredEndpoint, EndpointExplorationReport)>> {
         let mut txn = self
             .database_connection
@@ -1941,6 +1976,20 @@ impl SiteExplorer {
 
         let mut explored_power_shelves = Vec::new();
         for ep in explored_endpoints.into_iter() {
+            if let Some(expected) =
+                expected_endpoint_index.matched_expected_power_shelf(&ep.address)
+                && run_context
+                    .suppressed_bmc_macs
+                    .contains(&expected.bmc_mac_address)
+            {
+                tracing::info!(
+                    bmc_ip_address = %ep.address,
+                    bmc_mac_address = %expected.bmc_mac_address,
+                    "Skipping ingestion of suppressed power shelf",
+                );
+                continue;
+            }
+
             if ep.report.endpoint_type != EndpointType::Bmc {
                 continue;
             }
@@ -1953,7 +2002,11 @@ impl SiteExplorer {
         Ok(explored_power_shelves)
     }
 
-    async fn identify_switches_to_ingest(&self) -> SiteExplorerResult<Vec<ExploredManagedSwitch>> {
+    async fn identify_switches_to_ingest(
+        &self,
+        expected_endpoint_index: &ExploredEndpointIndex,
+        run_context: &SiteExplorerRunContext,
+    ) -> SiteExplorerResult<Vec<ExploredManagedSwitch>> {
         let mut txn = self
             .database_connection
             .begin()
@@ -1968,6 +2021,21 @@ impl SiteExplorer {
             .map_err(|e| DatabaseError::new("end find_all_preingestion_complete data", e))?;
         let managed_switches = explored_endpoints
             .iter()
+            .filter(|ep| {
+                if let Some(expected) = expected_endpoint_index.matched_expected_switch(&ep.address)
+                    && run_context
+                        .suppressed_bmc_macs
+                        .contains(&expected.bmc_mac_address)
+                {
+                    tracing::info!(
+                        bmc_ip_address = %ep.address,
+                        bmc_mac_address = %expected.bmc_mac_address,
+                        "Skipping ingestion of suppressed switch",
+                    );
+                    return false;
+                }
+                true
+            })
             .filter(|ep| ep.report.endpoint_type == EndpointType::Bmc && ep.report.is_switch())
             .map(|ep| ExploredManagedSwitch {
                 bmc_ip: ep.address,
@@ -1996,9 +2064,66 @@ impl SiteExplorer {
             })
     }
 
+    /// Acknowledges pending Site Explorer suppressions and returns all site explorer suppressed BMC MAC addresses.
+    async fn acknowledge_site_explorer_suppressions(
+        &self,
+    ) -> SiteExplorerResult<HashSet<MacAddress>> {
+        let suppressions = db::bmc_suppression::find_all_by_subsystem(
+            &self.database_connection,
+            BmcSuppressionSubsystem::SiteExplorer,
+        )
+        .await?;
+        let suppressed_bmc_macs = suppressions
+            .iter()
+            .map(|suppression| suppression.bmc_mac_address)
+            .collect();
+
+        let mut guards = Vec::new();
+        let mut acknowledgements = Vec::new();
+        for suppression in suppressions
+            .iter()
+            .filter(|suppression| suppression.acknowledged_at.is_none())
+        {
+            let bmc_ips = db::machine_interface::lookup_bmc_ip_by_mac_address(
+                &self.database_connection,
+                suppression.bmc_mac_address,
+            )
+            .await?;
+            let mut suppression_guards = Vec::new();
+            let mut all_endpoints_available = true;
+            for bmc_ip in bmc_ips {
+                let Some(guard) = self.endpoint_exploration_service.try_claim_endpoint(bmc_ip)
+                else {
+                    all_endpoints_available = false;
+                    break;
+                };
+                suppression_guards.push(guard);
+            }
+            if all_endpoints_available {
+                guards.extend(suppression_guards);
+                acknowledgements.push(suppression.bmc_mac_address);
+            }
+        }
+
+        if !acknowledgements.is_empty() {
+            let mut txn = self.txn_begin().await?;
+            db::bmc_suppression::acknowledge_unacknowledged(
+                &mut txn,
+                &acknowledgements,
+                BmcSuppressionSubsystem::SiteExplorer,
+            )
+            .await?;
+            txn.commit().await?;
+        }
+        drop(guards);
+
+        Ok(suppressed_bmc_macs)
+    }
+
     async fn update_explored_endpoints(
         &self,
         metrics: &mut SiteExplorationMetrics,
+        run_context: &SiteExplorerRunContext,
     ) -> SiteExplorerResult<ExploredEndpointIndex> {
         let load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
@@ -2067,6 +2192,17 @@ impl SiteExplorer {
                 device_type,
             );
 
+            if run_context
+                .suppressed_bmc_macs
+                .contains(&expected_machine.bmc_mac_address)
+            {
+                tracing::info!(
+                    bmc_mac_address = %expected_machine.bmc_mac_address,
+                    "Skipping network reservation preallocation for suppressed expected machine",
+                );
+                continue;
+            }
+
             // Compatibility columns may be the only Host BMC configuration on
             // rows created before the nested role existed. Resolve that one
             // declaration in memory, then skip any stored entry at the BMC
@@ -2094,6 +2230,17 @@ impl SiteExplorer {
         }
 
         for expected_switch in &expected_switches {
+            if run_context
+                .suppressed_bmc_macs
+                .contains(&expected_switch.bmc_mac_address)
+            {
+                tracing::info!(
+                    bmc_mac_address = %expected_switch.bmc_mac_address,
+                    "Skipping network reservation preallocation for suppressed expected switch",
+                );
+                continue;
+            }
+
             if let Some(bmc_ip) = expected_switch.bmc_ip_address {
                 try_preallocate_one(
                     &self.database_connection,
@@ -2135,6 +2282,17 @@ impl SiteExplorer {
         }
 
         for expected_power_shelf in &expected_power_shelves {
+            if run_context
+                .suppressed_bmc_macs
+                .contains(&expected_power_shelf.bmc_mac_address)
+            {
+                tracing::info!(
+                    bmc_mac_address = %expected_power_shelf.bmc_mac_address,
+                    "Skipping network reservation preallocation for suppressed expected power shelf",
+                );
+                continue;
+            }
+
             if let Some(bmc_ip) = expected_power_shelf.bmc_ip_address {
                 try_preallocate_one(
                     &self.database_connection,
@@ -2232,6 +2390,11 @@ impl SiteExplorer {
         for (address, endpoint) in index.explored_endpoints() {
             match index.underlay_interface(address) {
                 Some(iface) => {
+                    if run_context.suppressed_bmc_macs.contains(&iface.mac_address) {
+                        tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
+                        continue;
+                    }
+
                     if endpoint.exploration_requested {
                         priority_update_endpoints.push((*address, iface, endpoint));
                     } else {
@@ -2275,12 +2438,24 @@ impl SiteExplorer {
         // If there is a MachineInterface and no previously discovered information,
         // we need to detect it. This includes both regular machines, PowerShelves
         // and Switches.
-        let unexplored_endpoints = index.get_unexplored_endpoints();
+        let unexplored_endpoints = index
+            .get_unexplored_endpoints()
+            .into_iter()
+            .filter(|(address, iface)| {
+                if run_context
+                    .suppressed_bmc_macs
+                    .contains(&iface.mac_address)
+                {
+                    tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
+                    return false;
+                }
+                true
+            })
+            .collect::<Vec<_>>();
         metrics.record_update_explored_endpoints_count(
             "unexplored_candidates",
             unexplored_endpoints.len(),
         );
-
         // Now that we gathered the candidates for exploration, let's decide what
         // we are actually going to explore. The config limits the amount of explorations
         // per iteration.

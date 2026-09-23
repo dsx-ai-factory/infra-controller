@@ -697,6 +697,7 @@ pub async fn refresh_endpoint(
             let status_code = match err.code() {
                 tonic::Code::AlreadyExists => StatusCode::CONFLICT,
                 tonic::Code::NotFound => StatusCode::NOT_FOUND,
+                tonic::Code::FailedPrecondition => StatusCode::PRECONDITION_FAILED,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             tracing::error!(error = %err, bmc_ip_address = endpoint_ip, "refresh_endpoint");

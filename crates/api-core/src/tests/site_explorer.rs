@@ -25,6 +25,7 @@ use common::api_fixtures::TestEnv;
 use db::{self, ObjectColumnFilter};
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
+use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
 use model::hardware_info::HardwareInfo;
 use model::machine::ManagedHostStateSnapshot;
 use model::machine_boot_interface::MachineBootInterfaceTarget;
@@ -842,6 +843,71 @@ async fn prepare_endpoint_exploration_case(
         .clear();
 
     Ok(endpoint)
+}
+
+#[sqlx_test]
+async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = common::api_fixtures::create_test_env(pool.clone()).await;
+    let mh = common::api_fixtures::create_managed_host(&env).await;
+    let bmc_ip = host_bmc_ip(&env, &mh).await?;
+
+    let mut txn = env.pool.begin().await?;
+    let bmc_interface = db::machine_interface::find_by_ip(txn.as_mut(), bmc_ip)
+        .await?
+        .ok_or_else(|| format!("expected BMC interface at {bmc_ip}"))?;
+    db::bmc_suppression::upsert(
+        txn.as_mut(),
+        &NewBmcSuppression {
+            bmc_mac_address: bmc_interface.mac_address,
+            reason: "manual refresh rejection test".to_string(),
+            subsystem: BmcSuppressionSubsystem::SiteExplorer,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    let re_explore_error = env
+        .api
+        .re_explore_endpoint(Request::new(rpc::forge::ReExploreEndpointRequest {
+            ip_address: bmc_ip.to_string(),
+            if_version_match: None,
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(re_explore_error.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        re_explore_error
+            .message()
+            .contains(&bmc_interface.mac_address.to_string())
+    );
+    assert!(
+        !explored_endpoint(&env, bmc_ip).await?.exploration_requested,
+        "a rejected re-exploration must not remain queued"
+    );
+
+    let calls_before_refresh = endpoint_explore_call_count(&env, bmc_ip);
+    let refresh_error = env
+        .api
+        .refresh_endpoint_report(Request::new(rpc::forge::RefreshEndpointReportRequest {
+            ip_address: bmc_ip.to_string(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(refresh_error.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        refresh_error
+            .message()
+            .contains(&bmc_interface.mac_address.to_string())
+    );
+    assert_eq!(
+        endpoint_explore_call_count(&env, bmc_ip),
+        calls_before_refresh,
+        "a rejected immediate refresh must not probe the BMC"
+    );
+
+    Ok(())
 }
 
 #[sqlx_test]
