@@ -49,14 +49,15 @@ const HEADERS: [&str; 13] = [
     "Labels",
 ];
 
-#[allow(deprecated)]
 fn convert_machine_to_nice_format(
     machine: forgerpc::Machine,
     history_count: u32,
 ) -> CarbideCliResult<String> {
     let mut lines = String::new();
-    let sku = machine.hw_sku.unwrap_or_default();
-    let sku_device_type = machine.hw_sku_device_type.unwrap_or_default();
+    let status = machine.status.unwrap_or_default();
+    let config = machine.config.unwrap_or_default();
+    let sku = config.hw_sku.unwrap_or_default();
+    let sku_device_type = status.hw_sku_device_type.unwrap_or_default();
 
     let mut data = vec![
         (
@@ -72,7 +73,7 @@ fn convert_machine_to_nice_format(
         ("MACHINE TYPE", get_machine_type(machine.id)),
         (
             "FAILURE",
-            machine.failure_details.unwrap_or("None".to_string()),
+            status.failure_details.unwrap_or("None".to_string()),
         ),
         ("VERSION", machine.version),
         ("SKU", sku),
@@ -96,7 +97,7 @@ fn convert_machine_to_nice_format(
                 .unwrap_or_else(|| "N/A".to_string()),
         ),
     ];
-    if let Some(di) = machine.discovery_info
+    if let Some(di) = status.discovery_info
         && let Some(dmi) = di.dmi_data
     {
         data.push(("VENDOR", dmi.sys_vendor));
@@ -107,7 +108,7 @@ fn convert_machine_to_nice_format(
         data.push(("BIOS VERSION", dmi.bios_version));
         data.push(("BOARD VERSION", dmi.board_version));
     }
-    let autoupdate = if let Some(autoupdate) = machine.firmware_autoupdate {
+    let autoupdate = if let Some(autoupdate) = config.firmware_autoupdate {
         autoupdate.to_string()
     } else {
         "Default".to_string()
@@ -168,10 +169,10 @@ fn convert_machine_to_nice_format(
     }
 
     writeln!(&mut lines, "INTERFACES:")?;
-    if machine.interfaces.is_empty() {
+    if status.interfaces.is_empty() {
         writeln!(&mut lines, "\tEMPTY")?;
     } else {
-        for (i, interface) in machine.interfaces.into_iter().enumerate() {
+        for (i, interface) in status.interfaces.into_iter().enumerate() {
             let data = vec![
                 ("SN", i.to_string()),
                 ("ID", interface.id.unwrap_or_default().to_string()),
@@ -218,7 +219,7 @@ fn convert_machine_to_nice_format(
         }
     }
 
-    if let Some(health) = machine.health
+    if let Some(health) = status.health
         && !health.alerts.is_empty()
     {
         writeln!(&mut lines, "ALERTS:")?;
@@ -236,7 +237,6 @@ fn get_machine_type(machine_id: Option<MachineId>) -> String {
         .unwrap_or_else(|| "Unknown".to_string())
 }
 
-#[allow(deprecated)]
 fn convert_machines_to_nice_table(
     machines: forgerpc::MachineList,
     widths: Option<&ColumnWidths>,
@@ -255,7 +255,8 @@ fn convert_machines_to_nice_table(
 
     for machine in machines.machines {
         let machine_id_string = machine.id.map(|id| id.to_string()).unwrap_or_default();
-        let mut machine_interfaces = machine
+        let status = machine.status.unwrap_or_default();
+        let mut machine_interfaces = status
             .interfaces
             .into_iter()
             .filter(|x| x.primary_interface)
@@ -271,8 +272,8 @@ fn convert_machines_to_nice_table(
             )
         } else {
             let mi = machine_interfaces.remove(0);
-            let dpu_ids = if !machine.associated_dpu_machine_ids.is_empty() {
-                machine
+            let dpu_ids = if !status.associated_dpu_machine_ids.is_empty() {
+                status
                     .associated_dpu_machine_ids
                     .iter()
                     .map(|i| i.to_string())
@@ -294,7 +295,7 @@ fn convert_machines_to_nice_table(
             )
         };
         let mut vendor = String::new();
-        if let Some(di) = machine.discovery_info
+        if let Some(di) = status.discovery_info
             && let Some(dmi) = di.dmi_data
         {
             vendor = dmi.sys_vendor;
@@ -315,7 +316,7 @@ fn convert_machines_to_nice_table(
             .map(|t| t.to_string())
             .unwrap_or_default();
 
-        let is_unhealthy = machine
+        let is_unhealthy = status
             .health
             .map(|x| !x.alerts.is_empty())
             .unwrap_or_default();
@@ -356,16 +357,10 @@ fn convert_machines_to_nice_table(
 
     table
 }
-
-/// `memory_device_groups` didn't exist before condensing was introduced; rehydrate and clear it
-/// on both the deprecated top-level `discovery_info` and `status.discovery_info` so a raw JSON
-/// dump of `machine` stays byte-for-byte identical to the pre-condensing output, which only ever
-/// had `memory_devices`.
-#[allow(deprecated)]
+/// `memory_device_groups` didn't exist before condensing was introduced; rehydrate and clear
+/// `status.discovery_info` so a raw JSON dump of `machine` stays true to the pre-condensing output
+///  which only ever had `memory_devices`.
 fn rehydrate_machine_memory_devices(machine: &mut rpc::Machine) -> CarbideCliResult<()> {
-    if let Some(discovery_info) = machine.discovery_info.as_mut() {
-        discovery_info.rehydrate_memory_devices()?;
-    }
     if let Some(discovery_info) = machine
         .status
         .as_mut()
@@ -381,7 +376,6 @@ struct TableDisplayOptions<'a> {
     columns: &'a ColumnSelection,
 }
 
-#[allow(deprecated)]
 async fn show_all_machines(
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     output_format: &OutputFormat,
@@ -438,7 +432,6 @@ async fn show_all_machines(
     Ok(())
 }
 
-#[allow(deprecated)]
 async fn show_machine_information(
     machine_id: MachineId,
     args: &Args,
@@ -518,7 +511,6 @@ pub(crate) async fn handle_show(
     Ok(())
 }
 
-#[allow(deprecated)]
 pub(crate) async fn get_next_free_machine(
     api_client: &ApiClient,
     machine_ids: &mut VecDeque<MachineId>,
@@ -543,7 +535,6 @@ pub(crate) async fn get_next_free_machine(
 /// here, rather than looping this once per machine -- a few thousand
 /// individual lookups is exactly the pattern that trips per-client admission
 /// control at fleet scale.
-#[allow(deprecated)]
 pub(crate) async fn get_next_free_machine_prefetched(
     api_client: &ApiClient,
     machine_ids: &mut VecDeque<MachineId>,
@@ -561,7 +552,6 @@ pub(crate) async fn get_next_free_machine_prefetched(
     .await
 }
 
-#[allow(deprecated)]
 async fn get_next_free_machine_inner(
     api_client: &ApiClient,
     machine_ids: &mut VecDeque<MachineId>,
@@ -583,10 +573,10 @@ async fn get_next_free_machine_inner(
                 tracing::debug!("Machine is not ready");
                 continue;
             }
+            let status = machine.status.as_ref();
             if flat_vpc_id.is_some() {
-                if machine
-                    .instance_network_restrictions
-                    .as_ref()
+                if status
+                    .and_then(|status| status.instance_network_restrictions.as_ref())
                     .is_some_and(|r| {
                         r.network_segment_membership_type()
                             == forgerpc::InstanceNetworkSegmentMembershipType::Static
@@ -598,7 +588,7 @@ async fn get_next_free_machine_inner(
                     continue;
                 }
             }
-            if let Some(discovery_info) = &machine.discovery_info {
+            if let Some(discovery_info) = status.and_then(|status| status.discovery_info.as_ref()) {
                 let dpu_interfaces = discovery_info
                     .network_interfaces
                     .iter()
@@ -637,13 +627,8 @@ mod tests {
         }
     }
 
-    #[allow(deprecated)]
-    fn machine_with_discovery_info(
-        top: Option<DiscoveryInfo>,
-        status: Option<DiscoveryInfo>,
-    ) -> Machine {
+    fn machine_with_discovery_info(status: Option<DiscoveryInfo>) -> Machine {
         Machine {
-            discovery_info: top,
             status: Some(forgerpc::MachineStatus {
                 discovery_info: status,
                 ..Default::default()
@@ -654,32 +639,13 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
-    fn rehydrates_grouped_records_in_both_discovery_locations() {
-        let mut machine = machine_with_discovery_info(
-            Some(DiscoveryInfo {
-                memory_device_groups: vec![group(16384, "DDR5", 2)],
-                ..Default::default()
-            }),
-            Some(DiscoveryInfo {
-                memory_device_groups: vec![group(8192, "DDR4", 3)],
-                ..Default::default()
-            }),
-        );
+    fn rehydrates_grouped_records() {
+        let mut machine = machine_with_discovery_info(Some(DiscoveryInfo {
+            memory_device_groups: vec![group(8192, "DDR4", 3)],
+            ..Default::default()
+        }));
 
         rehydrate_machine_memory_devices(&mut machine).unwrap();
-
-        let top = machine.discovery_info.as_ref().unwrap();
-        assert_eq!(
-            top.memory_devices,
-            vec![
-                MemoryDevice {
-                    size_mb: Some(16384),
-                    mem_type: Some("DDR5".to_string()),
-                };
-                2
-            ]
-        );
-        assert!(top.memory_device_groups.is_empty());
 
         let status = machine
             .status
@@ -703,29 +669,18 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
-    fn zero_count_groups_leave_legacy_memory_devices_untouched_in_both_locations() {
+    fn zero_count_groups_leave_legacy_memory_devices_untouched() {
         let legacy = vec![MemoryDevice {
             size_mb: Some(8192),
             mem_type: Some("DDR4".to_string()),
         }];
-        let mut machine = machine_with_discovery_info(
-            Some(DiscoveryInfo {
-                memory_device_groups: vec![group(16384, "DDR5", 0)],
-                memory_devices: legacy.clone(),
-                ..Default::default()
-            }),
-            Some(DiscoveryInfo {
-                memory_device_groups: vec![group(16384, "DDR5", 0)],
-                memory_devices: legacy.clone(),
-                ..Default::default()
-            }),
-        );
+        let mut machine = machine_with_discovery_info(Some(DiscoveryInfo {
+            memory_device_groups: vec![group(16384, "DDR5", 0)],
+            memory_devices: legacy.clone(),
+            ..Default::default()
+        }));
 
         rehydrate_machine_memory_devices(&mut machine).unwrap();
-
-        let top = machine.discovery_info.as_ref().unwrap();
-        assert_eq!(top.memory_devices, legacy);
-        assert!(top.memory_device_groups.is_empty());
 
         let status = machine
             .status
@@ -739,7 +694,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn aggregate_count_above_max_is_rejected() {
         let max = MemoryDeviceGroup::MAX_REHYDRATE_COUNT;
         let big_group = group(8192, "DDR4", max / 2 + 1);
@@ -748,39 +702,28 @@ mod tests {
             ..Default::default()
         };
 
-        for mut machine in [
-            machine_with_discovery_info(Some(big_discovery_info()), None),
-            machine_with_discovery_info(None, Some(big_discovery_info())),
-        ] {
-            let err = rehydrate_machine_memory_devices(&mut machine).unwrap_err();
-            assert!(matches!(
-                err,
-                CarbideCliError::RpcDataConversionError(
-                    RpcDataConversionError::MemoryDeviceCountExceeded(_, m)
-                ) if m == max
-            ));
-        }
+        let mut machine = machine_with_discovery_info(Some(big_discovery_info()));
+
+        let err = rehydrate_machine_memory_devices(&mut machine).unwrap_err();
+        assert!(matches!(
+            err,
+            CarbideCliError::RpcDataConversionError(
+                RpcDataConversionError::MemoryDeviceCountExceeded(_, m)
+            ) if m == max
+        ));
     }
 
     #[test]
-    #[allow(deprecated)]
     fn json_dump_contains_memory_devices_and_omits_memory_device_groups() {
-        let mut machine = machine_with_discovery_info(
-            Some(DiscoveryInfo {
-                memory_device_groups: vec![group(16384, "DDR5", 2)],
-                ..Default::default()
-            }),
-            Some(DiscoveryInfo {
-                memory_device_groups: vec![group(8192, "DDR4", 1)],
-                ..Default::default()
-            }),
-        );
+        let mut machine = machine_with_discovery_info(Some(DiscoveryInfo {
+            memory_device_groups: vec![group(8192, "DDR4", 1)],
+            ..Default::default()
+        }));
 
         rehydrate_machine_memory_devices(&mut machine).unwrap();
 
         let json = serde_json::to_string(&machine).unwrap();
         assert!(json.contains("memory_devices"));
-        assert!(json.contains("DDR5"));
         assert!(json.contains("DDR4"));
         assert!(!json.contains("memory_device_groups"));
     }

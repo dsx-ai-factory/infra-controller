@@ -15,10 +15,6 @@
  * limitations under the License.
  */
 
-// The deprecated fields on `rpc::forge::Machine` must still be read here for
-// backwards-compat. See https://github.com/NVIDIA/infra-controller/issues/2793
-#![allow(deprecated)]
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -124,7 +120,12 @@ async fn test_site_explorer_health_report(pool: PgPool) -> Result<(), Box<dyn st
     let host_bmc_ip = build_data.host_bmc_ip();
 
     let host_machine = find_machine(test_harness.api(), created_host.host.id.into()).await?;
-    let alerts = &host_machine.health.as_ref().unwrap().alerts;
+    let alerts = &host_machine
+        .status
+        .as_ref()
+        .and_then(|status| status.health.as_ref())
+        .unwrap()
+        .alerts;
     assert!(
         alerts.is_empty(),
         "expected no health alerts after successful exploration, got: {alerts:#?}"
@@ -140,7 +141,13 @@ async fn test_site_explorer_health_report(pool: PgPool) -> Result<(), Box<dyn st
 
     let host_machine = find_machine(test_harness.api(), created_host.host.id.into()).await?;
 
-    let mut alerts = host_machine.health.as_ref().unwrap().alerts.clone();
+    let mut alerts = host_machine
+        .status
+        .as_ref()
+        .and_then(|status| status.health.as_ref())
+        .unwrap()
+        .alerts
+        .clone();
     assert_eq!(
         alerts.len(),
         1,
@@ -306,7 +313,8 @@ async fn test_orphan_managed_host_alert_emitted(
     explorer.run_single_iteration().await?;
     let alerts = find_machine(test_harness.api(), created_host.host.id.into())
         .await?
-        .health
+        .status
+        .and_then(|status| status.health)
         .unwrap()
         .alerts;
     assert!(
@@ -333,7 +341,8 @@ async fn test_orphan_managed_host_alert_emitted(
     explorer.run_single_iteration().await?;
     let alerts = find_machine(test_harness.api(), created_host.host.id.into())
         .await?
-        .health
+        .status
+        .and_then(|status| status.health)
         .unwrap()
         .alerts;
     assert!(

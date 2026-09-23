@@ -14,10 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// Flat `rpc::forge::Machine` fields are deprecated in favour of `status`/`config`
-// sub-messages, but this module must still read them until the REST API is migrated.
-// See https://github.com/NVIDIA/infra-controller/issues/2793
-#![allow(deprecated)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -93,7 +89,9 @@ impl Ord for MachineRowDisplay {
 
 impl MachineRowDisplay {
     fn new(m: forgerpc::Machine, instance_type: String) -> Self {
-        let mut machine_interfaces = m
+        let status = m.status.unwrap_or_default();
+        let config = m.config.unwrap_or_default();
+        let mut machine_interfaces = status
             .interfaces
             .into_iter()
             .filter(|x| x.primary_interface)
@@ -110,7 +108,7 @@ impl MachineRowDisplay {
         let mut num_gpus = 0;
         let mut num_ib_ifs = 0;
         let mut num_nvlink_gpus = 0;
-        if let Some(di) = m.discovery_info.as_ref() {
+        if let Some(di) = status.discovery_info.as_ref() {
             if let Some(dmi) = di.dmi_data.as_ref() {
                 sys_vendor = dmi.sys_vendor.clone();
                 product_serial = dmi.product_serial.clone();
@@ -118,21 +116,21 @@ impl MachineRowDisplay {
             num_gpus = di.gpus.len();
             num_ib_ifs = di.infiniband_interfaces.len();
         }
-        if let Some(nvlink_info) = m.nvlink_info.as_ref() {
+        if let Some(nvlink_info) = status.nvlink_info.as_ref() {
             num_nvlink_gpus = nvlink_info.gpus.len();
         }
-        let replace_count = m
+        let replace_count = status
             .health_sources
             .iter()
             .filter(|o| o.mode() == HealthReportApplyMode::Replace)
             .count();
-        let merge_count = m
+        let merge_count = status
             .health_sources
             .iter()
             .filter(|o| o.mode() == HealthReportApplyMode::Merge)
             .count();
 
-        let health = m
+        let health = status
             .health
             .as_ref()
             .map(|h| {
@@ -158,12 +156,12 @@ impl MachineRowDisplay {
             ip_address,
             mac_address,
             is_host: m.machine_type == forgerpc::MachineType::Host as i32,
-            associated_dpu_ids: m
+            associated_dpu_ids: status
                 .associated_dpu_machine_ids
                 .into_iter()
                 .map(|i| i.to_string())
                 .collect(),
-            associated_host_id: m
+            associated_host_id: status
                 .associated_host_machine_id
                 .map(|id| id.to_string())
                 .unwrap_or_default(),
@@ -181,7 +179,7 @@ impl MachineRowDisplay {
                 }
             ),
             metadata: m.metadata.unwrap_or_default(),
-            instance_type_id: m.instance_type_id.unwrap_or_default(),
+            instance_type_id: config.instance_type_id.unwrap_or_default(),
             instance_type,
             num_nvlink_gpus,
         }
@@ -276,8 +274,9 @@ async fn show(
         .iter()
         .filter(|m| should_show_machine(m))
         .filter_map(|m| {
-            m.instance_type_id
+            m.config
                 .as_ref()
+                .and_then(|config| config.instance_type_id.as_ref())
                 .filter(|id| !id.is_empty())
                 .cloned()
         })
@@ -296,8 +295,9 @@ async fn show(
         .filter(should_show_machine)
         .map(|m| {
             let instance_type = m
-                .instance_type_id
+                .config
                 .as_ref()
+                .and_then(|config| config.instance_type_id.as_ref())
                 .and_then(|id| instance_types.get(id.as_str()))
                 .cloned()
                 .unwrap_or_default();
@@ -834,7 +834,10 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             records: m.events.into_iter().rev().map(Into::into).collect(),
         };
 
-        let interfaces: Vec<_> = m
+        let status = m.status.unwrap_or_default();
+        let config = m.config.unwrap_or_default();
+
+        let interfaces: Vec<_> = status
             .interfaces
             .into_iter()
             .enumerate()
@@ -865,7 +868,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
         let mut inventory = Vec::new();
         let mut nvlink_gpus = Vec::new();
 
-        let discovery_info_json = m
+        let discovery_info_json = status
             .discovery_info
             .as_ref()
             .map(|info| {
@@ -874,7 +877,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             })
             .unwrap_or_else(|| "null".to_string());
 
-        if let Some(di) = m.discovery_info {
+        if let Some(di) = status.discovery_info {
             if let Some(dmi) = di.dmi_data {
                 product_name = dmi.product_name;
                 product_serial = dmi.product_serial;
@@ -895,7 +898,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
                     iface_display.vendor = props.vendor;
                     iface_display.slot = props.slot.clone().unwrap_or_default();
                 }
-                if let Some(ib_status) = m.ib_status.as_ref() {
+                if let Some(ib_status) = status.infiniband.as_ref() {
                     iface_display.observed_at =
                         to_time(ib_status.observed_at, Some(&machine_id)).unwrap_or_default();
 
@@ -927,7 +930,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             inventory.extend(inv.components);
         }
 
-        if let Some(nvlink_info) = m.nvlink_info {
+        if let Some(nvlink_info) = status.nvlink_info {
             let domain_id = nvlink_info.domain_uuid.unwrap_or_default();
             let domain_uuid = domain_id.to_string();
             let domain_health_url = health::nvlink_domain_health_url(&domain_id);
@@ -946,11 +949,11 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
                 .collect();
         }
 
-        let quarantine_state = m
-            .quarantine_state
+        let quarantine_state = status
+            .quarantine
             .and_then(|q| ManagedHostQuarantineState::try_from(q).ok());
         let is_host = m.machine_type == forgerpc::MachineType::Host as i32;
-        let host_id = m
+        let host_id = status
             .associated_host_machine_id
             .map_or_else(String::default, |id| id.to_string());
         let health_reports_link_text = if is_host {
@@ -961,8 +964,8 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
         let health_detail = super::HealthDetail::new(
             format!("/admin/machine/{machine_id}/health"),
             health_reports_link_text,
-            m.health,
-            m.health_sources,
+            status.health,
+            status.health_sources,
         );
         let has_complete_bmc_info = m
             .bmc_info
@@ -978,7 +981,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
                 m.state_reason,
                 m.state_sla,
             ),
-            last_reboot: to_time(m.last_reboot_time, Some(&machine_id))
+            last_reboot: to_time(status.last_reboot_time, Some(&machine_id))
                 .unwrap_or("N/A".to_string()),
             metadata_detail: super::MetadataDetail {
                 metadata: m.metadata.unwrap_or_default(),
@@ -1000,23 +1003,23 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             ib_interfaces,
             interfaces,
             inventory,
-            maintenance_reference_is_link: m
+            maintenance_reference_is_link: config
                 .maintenance_reference
                 .as_ref()
                 .map(|r| r.starts_with("http"))
                 .unwrap_or_default(),
-            maintenance_reference: m.maintenance_reference.unwrap_or_default(),
-            maintenance_start_time: to_time(m.maintenance_start_time, Some(&machine_id))
+            maintenance_reference: config.maintenance_reference.unwrap_or_default(),
+            maintenance_start_time: to_time(config.maintenance_start_time, Some(&machine_id))
                 .unwrap_or_default(),
             host_id,
             health_detail,
             discovery_info_json,
-            capabilities_json: m
+            capabilities_json: status
                 .capabilities
                 .as_ref()
                 .map(|set| serde_json::to_string_pretty(set).unwrap_or("Invalid JSON".to_string()))
                 .unwrap_or_else(|| "{}".to_string()),
-            capabilities: m
+            capabilities: status
                 .capabilities
                 .map(|s| {
                     let mut caps = Vec::new();
@@ -1073,14 +1076,14 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
                 })
                 .unwrap_or_default(),
             validation_runs: Vec::new(),
-            hw_sku: m.hw_sku.unwrap_or_default(),
+            hw_sku: config.hw_sku.unwrap_or_default(),
             available_skus: Vec::new(), // filled in later
             quarantine_state_is_link: quarantine_state
                 .as_ref()
                 .is_some_and(|r| r.reason_str().starts_with("http")),
             quarantine_state,
-            has_instance_type: m.instance_type_id.is_some(),
-            instance_type_id: m.instance_type_id.unwrap_or_default(),
+            has_instance_type: config.instance_type_id.is_some(),
+            instance_type_id: config.instance_type_id.unwrap_or_default(),
             instance_type: "".to_string(),
             nvlink_gpus,
             desired_boot_interface: None,
@@ -1118,8 +1121,9 @@ pub(super) async fn detail(
     // on the boot-interface response. Preserve the exact row IDs to join those
     // two facts when projecting the API's primary-interface policy.
     let dpu_backed_machine_interface_ids = machine
-        .interfaces
+        .status
         .iter()
+        .flat_map(|status| status.interfaces.iter())
         .filter(|interface| interface.attached_dpu_machine_id.is_some())
         .filter_map(|interface| interface.id)
         .collect::<HashSet<_>>();

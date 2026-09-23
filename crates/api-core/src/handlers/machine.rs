@@ -1111,10 +1111,6 @@ fn snapshot_map_to_rpc_machines(
                 capabilities.network.sort_unstable_by(|a, b| {
                     a.name.cmp(&b.name).then(a.device_type.cmp(&b.device_type))
                 });
-                #[allow(deprecated)]
-                {
-                    rpc_machine.capabilities = Some(capabilities.clone());
-                }
             }
             result.machines.push(rpc_machine);
         }

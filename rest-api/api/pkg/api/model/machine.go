@@ -629,8 +629,6 @@ func NewAPIMachine(dbm *cdbm.Machine, dbmcs []cdbm.MachineCapability, dbmis []cd
 		if machine := dbm.Metadata.Machine; machine != nil {
 			if status := machine.GetStatus(); status != nil && status.LastScoutObservedVersion != nil {
 				apim.ScoutVersion = status.LastScoutObservedVersion
-			} else {
-				apim.ScoutVersion = machine.LastScoutObservedVersion
 			}
 		}
 		for _, dpuID := range dbm.Metadata.GetStatus().GetAssociatedDpuMachineIds() {

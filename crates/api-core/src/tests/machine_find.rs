@@ -183,14 +183,6 @@ async fn test_find_machine_with_sku(pool: sqlx::PgPool) {
         machine.config.as_ref().and_then(|c| c.hw_sku.as_ref()),
         Some(&sku_id)
     );
-    #[allow(deprecated)]
-    {
-        assert_eq!(
-            machine.hw_sku.as_ref(),
-            Some(&sku_id),
-            "deprecated flat field must mirror config.hw_sku"
-        );
-    }
 }
 
 #[crate::sqlx_test]
