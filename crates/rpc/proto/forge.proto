@@ -611,6 +611,8 @@ service Forge {
   // Replace the full record, including both lists and metadata.
   rpc UpdateExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
   rpc GetExpectedRackGroup(ExpectedRackGroupRequest) returns (ExpectedRackGroup);
+  // Return all declarations ordered by rack group ID; an empty site returns an empty list.
+  rpc GetAllExpectedRackGroups(google.protobuf.Empty) returns (ExpectedRackGroupList);
   rpc FindExpectedRackGroupIds(ExpectedRackGroupSearchFilter) returns (ExpectedRackGroupIdList);
   rpc FindExpectedRackGroupsByIds(ExpectedRackGroupsByIdsRequest) returns (ExpectedRackGroupList);
   // Atomically clear existing groups and insert the supplied list; an empty list clears all groups.

@@ -289,6 +289,10 @@ func workflowOrchestrator() error {
 
 	ManagerAccess.API.ExpectedRack.RegisterSubscriber()
 	ManagerAccess.API.ExpectedRack.RegisterPublisher()
+	err = ManagerAccess.API.ExpectedRackGroup.RegisterPublisher()
+	if err != nil {
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("ExpectedRackGroup: failed to register publisher")
+	}
 
 	ManagerAccess.API.ExpectedSwitch.RegisterSubscriber()
 	ManagerAccess.API.ExpectedSwitch.RegisterPublisher()

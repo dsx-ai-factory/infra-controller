@@ -2070,6 +2070,13 @@ impl Forge for Api {
         crate::handlers::expected_rack_group::get_expected_rack_group(self, request).await
     }
 
+    async fn get_all_expected_rack_groups(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<rpc::ExpectedRackGroupList>, Status> {
+        crate::handlers::expected_rack_group::get_all_expected_rack_groups(self, request).await
+    }
+
     async fn find_expected_rack_group_ids(
         &self,
         request: Request<rpc::ExpectedRackGroupSearchFilter>,

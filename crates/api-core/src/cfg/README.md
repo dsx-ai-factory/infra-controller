@@ -1183,6 +1183,7 @@ events, so consumers handle them identically.
 | `node_label_key` | `String` | `carbide.nvidia.com/controlled.node.v2` | Label key used to select DPU nodes for this deployment. |
 | `services` | `Option<Box<DpfMandatoryServicesConfig>>` | inherit `[dpf.services]` | Optional complete per-deployment mandatory-service override. Omitted service entries use built-in defaults rather than top-level values. |
 | `extra_services` | `BTreeMap<DpfExtraService, DpfServiceConfigOverride>` | `{}` | Deployment-local overlays for supported extra services. |
+| `enable_delay_host_init` | `bool` | `false` | When enabled, delay host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true. |
 
 Every active DPF deployment must use distinct `deployment_name`, `flavor_name`, and `node_label_key` values. A deployment `node_label_key` must not be `feature.node.kubernetes.io/dpu-enabled`, which marks every DPF-managed node, or `carbide.nvidia.com/host-bmc-ip`, whose per-node contextual value is the host BMC address. These checks use the local configuration and do not query or modify cluster resources.
 
