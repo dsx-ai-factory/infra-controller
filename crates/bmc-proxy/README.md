@@ -138,7 +138,10 @@ same-BMC `Location` the proxy cannot rewrite safely — a
 resolved path beginning with `//`, another port or scheme, or a value it cannot parse — is
 withheld: a redirect is rejected with a `502` error, and any other response (a `201 Created`,
 say) passes without the header. A redirect to a different host is passed through untouched and
-is **not** re-authorized by this proxy.
+is **not** re-authorized by this proxy. Suppression logs contain only a bounded reason, never the
+`Location` value. Only a rejected redirect increments
+`carbide_bmc_proxy_authorization_denied_total`; withholding the header from another response is
+log-only because the request itself succeeded.
 
 Examples:
 

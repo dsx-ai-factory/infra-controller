@@ -154,10 +154,10 @@ impl RequestPathRejected {
     }
 }
 
-/// An upstream `Location` naming this BMC in a form that cannot be safely made
-/// relative (see `bmc_proxy::redirect_location`) was withheld: a redirect is
-/// refused with 502, any other response passes without the header.
-/// `response_status` says which of the two happened.
+/// A redirect was denied because its upstream `Location` named this BMC in a
+/// form that could not be safely made relative (see
+/// `bmc_proxy::redirect_location`). The bounded `reason` identifies the failed
+/// safety check without recording the potentially sensitive target.
 #[derive(Event)]
 #[event(
     event_name = "bmc_proxy_redirect_suppressed",
@@ -173,20 +173,20 @@ pub(crate) struct RedirectSuppressed {
     #[context]
     response_status: u16,
     #[context]
-    redirect_target: String,
+    reason: String,
     #[context]
     method: String,
 }
 
 impl RedirectSuppressed {
-    /// Records an upstream `Location` that the proxy cannot relay without
-    /// bypassing or changing its authorization boundary.
-    pub(crate) fn new(method: &Method, status: StatusCode, redirect_target: String) -> Self {
+    /// Records a redirect denied because its `Location` cannot be relayed
+    /// without bypassing or changing the proxy's authorization boundary.
+    pub(crate) fn new(method: &Method, status: StatusCode, reason: &str) -> Self {
         Self {
             authorization_layer: AuthorizationLayer::Redirect,
             method_label: method.into(),
             response_status: status.as_u16(),
-            redirect_target,
+            reason: reason.to_string(),
             method: method.as_str().to_string(),
         }
     }
@@ -360,11 +360,10 @@ pub(crate) struct UpstreamAuthRetried {
 
 /// A request the proxy forwarded to a BMC completed, successfully or not.
 /// The duration covers the upstream leg through the response headers;
-/// response bodies stream back separately. One send may follow up to five
-/// redirects internally, so the status is the final hop's -- `http3xx`
-/// generally means a non-followed 3xx such as a 304. Metric-only: the
-/// forward has never logged per request in either direction, and a
-/// failure's detail already reaches the caller in the 502 response body.
+/// response bodies stream back separately. Redirect following is disabled,
+/// so `http3xx` means the BMC returned a redirect or another 3xx response.
+/// Metric-only: the forward has never logged per request in either direction,
+/// and a failure's detail already reaches the caller in the 502 response body.
 #[derive(Event)]
 #[event(
     event_name = "bmc_proxy_upstream_request_completed",

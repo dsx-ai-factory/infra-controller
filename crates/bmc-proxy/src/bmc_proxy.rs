@@ -975,11 +975,6 @@ impl UpstreamBody {
                 body,
                 declared_length,
             } => {
-                // A streamed body cannot be replayed, so reqwest's redirect
-                // layer forwards a BMC 307/308 to the caller as-is instead of
-                // following it the way buffered requests do. Callers pushing
-                // firmware should use the canonical UpdateService URI rather
-                // than rely on redirects.
                 let body = body.take().ok_or_else(|| {
                     ProxyError::from((
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1252,21 +1247,18 @@ fn build_response(
     // Every Location value, not just the first: a duplicate header is malformed
     // to begin with, and a harmless first value must not vouch for a second.
     if status.is_redirection()
-        && let Some(value) = headers
+        && let Some(reason) = headers
             .get_all(reqwest::header::LOCATION)
             .iter()
-            .find(|value| {
-                matches!(
-                    redirect_location(value, origins),
-                    RedirectLocation::Suppressed
-                )
+            .find_map(|value| {
+                if let RedirectLocation::Suppressed(reason) = redirect_location(value, origins) {
+                    Some(reason)
+                } else {
+                    None
+                }
             })
     {
-        emit(RedirectSuppressed::new(
-            method,
-            status,
-            String::from_utf8_lossy(value.as_bytes()).into_owned(),
-        ));
+        emit(RedirectSuppressed::new(method, status, reason.as_str()));
         return error_response(
             (
                 StatusCode::BAD_GATEWAY,
@@ -1302,11 +1294,12 @@ fn build_response(
                 RedirectLocation::Unchanged => response = response.header(name, value),
                 // A redirect was refused above; on any other status the response
                 // stands and only this header is withheld.
-                RedirectLocation::Suppressed => emit(RedirectSuppressed::new(
-                    method,
-                    status,
-                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
-                )),
+                RedirectLocation::Suppressed(reason) => tracing::warn!(
+                    method = %method,
+                    response_status = status.as_u16(),
+                    reason = reason.as_str(),
+                    "Upstream Location withheld: it could not be safely relayed",
+                ),
             }
             continue;
         }
@@ -1346,38 +1339,71 @@ impl BmcOrigins {
 /// How the proxy's response should relay an upstream `Location`.
 #[derive(Debug, PartialEq)]
 enum RedirectLocation {
-    /// This BMC: make it relative (path, no authority section) so the client re-enters
-    /// this proxy vs going to BMC directly.
+    /// This BMC: strip the authority so the follow-up can re-enter this proxy
+    /// instead of targeting the BMC directly.
     Relative(http::HeaderValue),
-    /// Another host: left untouched, not ours to deal with
+    /// Another HTTP(S) host: preserve the original value because the client
+    /// controls how it routes the follow-up request.
     Unchanged,
-    /// This BMC in a form we cannot safely rewrite -- a resolved path beginning
+    /// This BMC in a form we cannot safely rewrite: a resolved path beginning
     /// with `//` (an authority once made relative), another port or scheme, an
-    /// unparseable reference -- or any non-http(s) scheme, which names a handler
-    /// rather than a host. Withheld: a redirect is refused with a 502, any other
-    /// response passes without the header.
-    Suppressed,
+    /// unparseable reference, or any non-HTTP(S) scheme. Withheld: a redirect
+    /// is refused with a 502, while any other response passes without the
+    /// `Location` header.
+    Suppressed(RedirectSuppressionReason),
 }
 
-/// Classifies an upstream `Location`. Per RFC 9110 §10.2.2 it is resolved against
-/// the request, so `//bmc/x` and `x` name the same target as `https://bmc/x`. Since
-/// redirects are returned rather than followed, the client sees a `Location` that is
-/// either rewritten to a relative reference (the same authority stripped), returned
-/// as-is (another host), or withheld. "This BMC" is either of `origins`. The
-/// fragment survives the rewrite: a 3xx `Location` without one makes the client
-/// inherit the original request's instead (RFC 9110 §10.2.2).
+/// The bounded reason an upstream `Location` cannot be relayed safely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RedirectSuppressionReason {
+    InvalidHeaderValue,
+    InvalidUriReference,
+    UnsupportedScheme,
+    OriginMismatch,
+    AmbiguousPath,
+    InvalidRelativeReference,
+}
+
+impl RedirectSuppressionReason {
+    /// Returns the stable, non-sensitive spelling recorded in logs.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidHeaderValue => "invalid_header_value",
+            Self::InvalidUriReference => "invalid_uri_reference",
+            Self::UnsupportedScheme => "unsupported_scheme",
+            Self::OriginMismatch => "origin_mismatch",
+            Self::AmbiguousPath => "ambiguous_path",
+            Self::InvalidRelativeReference => "invalid_relative_reference",
+        }
+    }
+}
+
+/// Classifies an upstream `Location` after resolving it against the upstream
+/// request URL, as required by RFC 9110 §10.2.2. A same-BMC target that can be
+/// represented safely without its authority becomes [`RedirectLocation::Relative`];
+/// an HTTP(S) target on another host remains [`RedirectLocation::Unchanged`]. An
+/// unsafe or unparseable value becomes [`RedirectLocation::Suppressed`].
+/// [`build_response`] then rejects a redirect containing a suppressed value with
+/// `502`, while a non-redirect response keeps its status and omits only that
+/// `Location` header.
+///
+/// Both recognized origins identify the same BMC: the origin used for the
+/// upstream request and the BMC's direct-IP origin. Rewriting preserves a
+/// fragment explicitly present in `Location`, including an empty `#`. When
+/// `Location` has no fragment, the rewritten value has none either, allowing the
+/// client to inherit the original request's fragment as RFC 9110 §10.2.2 requires.
 fn redirect_location(value: &http::HeaderValue, origins: &BmcOrigins) -> RedirectLocation {
     let Ok(raw) = value.to_str() else {
-        return RedirectLocation::Suppressed;
+        return RedirectLocation::Suppressed(RedirectSuppressionReason::InvalidHeaderValue);
     };
     let Ok(location) = origins.upstream.join(raw) else {
-        return RedirectLocation::Suppressed;
+        return RedirectLocation::Suppressed(RedirectSuppressionReason::InvalidUriReference);
     };
     // `join` takes any registered scheme -- `javascript:`, `data:`, `mailto:` --
     // hostless, so it would classify as another host and be forwarded to
     // whatever handler the client keeps for it.
     if !matches!(location.scheme(), "http" | "https") {
-        return RedirectLocation::Suppressed;
+        return RedirectLocation::Suppressed(RedirectSuppressionReason::UnsupportedScheme);
     }
     let this_bmc = origins
         .candidates()
@@ -1392,8 +1418,11 @@ fn redirect_location(value: &http::HeaderValue, origins: &BmcOrigins) -> Redirec
             && location.port_or_known_default() == origin.port_or_known_default()
     });
     // `Location: //something/path` reads as a redirect to a new host.
-    if !same_origin || location.path().starts_with("//") {
-        return RedirectLocation::Suppressed;
+    if !same_origin {
+        return RedirectLocation::Suppressed(RedirectSuppressionReason::OriginMismatch);
+    }
+    if location.path().starts_with("//") {
+        return RedirectLocation::Suppressed(RedirectSuppressionReason::AmbiguousPath);
     }
     let mut relative = location.path().to_string();
     if let Some(query) = location.query() {
@@ -1406,7 +1435,7 @@ fn redirect_location(value: &http::HeaderValue, origins: &BmcOrigins) -> Redirec
     }
     match http::HeaderValue::from_str(&relative) {
         Ok(value) => RedirectLocation::Relative(value),
-        Err(_) => RedirectLocation::Suppressed,
+        Err(_) => RedirectLocation::Suppressed(RedirectSuppressionReason::InvalidRelativeReference),
     }
 }
 
@@ -1780,11 +1809,12 @@ mod tests {
         BmcCredentials, BmcOrigins, BmcProxyState, CREDENTIAL_CACHE_IDLE_TTL, ConnectionFailReason,
         CredentialCache, ForwardedTarget, IP_CACHE_TTL, MAX_BUFFERED_BODY_SIZE,
         MAX_REDACTABLE_ERROR_BODY_SIZE, MethodLabel, OMITTED_BMC_ERROR_RESPONSE,
-        PreparedResponseBody, RedirectLocation, TcpAcceptFailed, TlsCertificateReloadFailed,
-        TlsConnectionFailed, UpstreamBody, authorize_principal_allow_list, bmc_proxy_request_span,
-        bounded_cache, build_authority, build_http_client, build_response, copy_request_headers,
-        create_client, error_response, evict_cached_credentials, forwarded_header_value,
-        idle_bounded_cache, ip_for_forwarded_target, is_hop_by_hop_header, method_supports_body,
+        PreparedResponseBody, RedirectLocation, RedirectSuppressionReason, TcpAcceptFailed,
+        TlsCertificateReloadFailed, TlsConnectionFailed, UpstreamBody,
+        authorize_principal_allow_list, bmc_proxy_request_span, bounded_cache, build_authority,
+        build_http_client, build_response, copy_request_headers, create_client, error_response,
+        evict_cached_credentials, forwarded_header_value, idle_bounded_cache,
+        ip_for_forwarded_target, is_hop_by_hop_header, method_supports_body,
         parse_forwarded_host_value, path_the_acls_cannot_speak_for, prepare_response_body,
         redirect_location, refuse_rewritten_path, request_principal_ids, root_or_proxy,
         span_status,
@@ -2323,7 +2353,7 @@ mod tests {
     const REQUEST_PATH_LABELS: [(&str, &str); 2] =
         [("authorization_layer", "request_path"), ("method", "get")];
 
-    // Two tests rather than one table: `MetricsCapture::start` holds a
+    // Separate tests rather than one table: `MetricsCapture::start` holds a
     // process-wide lock for its guard's life.
     #[test]
     fn rewritten_path_is_refused_and_recorded() {
@@ -2411,14 +2441,14 @@ mod tests {
                 ("https://192.0.2.5:8443/redfish", "192.0.2.5", "https://192.0.2.5:8443/x")
                     => RedirectLocation::Relative(HeaderValue::from_static("/x")),
                 ("https://192.0.2.5:8443/redfish", "192.0.2.5", "https://192.0.2.5:9000/x")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::OriginMismatch),
             }
 
             "the BMC's address on another port, or with a // path, is still refused" {
                 ("https://proxy.local:1079/redfish/v1", "10.0.0.5", "https://10.0.0.5:8443/x")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::OriginMismatch),
                 ("https://proxy.local:1079/redfish/v1", "10.0.0.5", "https://10.0.0.5//169.254.169.254/x")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::AmbiguousPath),
             }
 
             "another host is still left as it arrived" {
@@ -2496,40 +2526,41 @@ mod tests {
             // Neither is safe, however the `//` was spelled.
             "a same-BMC path starting with // is refused rather than forwarded" {
                 ("https://192.0.2.5/redfish", "https://192.0.2.5//169.254.169.254/x")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::AmbiguousPath),
                 ("https://192.0.2.5/redfish", "//192.0.2.5//169.254.169.254/x")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::AmbiguousPath),
                 ("https://192.0.2.5/redfish", "https://192.0.2.5/\\169.254.169.254/x")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::AmbiguousPath),
                 ("https://192.0.2.5/redfish", "https://192.0.2.5/x/..//169.254.169.254/y")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::AmbiguousPath),
             }
 
             // The proxy reaches the BMC at one origin only, so it can neither
             // rewrite this to a path nor let the client go there directly.
             "the same host on another port or scheme is refused" {
                 ("https://192.0.2.5/redfish", "https://192.0.2.5:8443/redfish/v1/")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::OriginMismatch),
                 ("https://192.0.2.5/redfish", "http://192.0.2.5/redfish/v1/")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::OriginMismatch),
             }
 
             // A value we cannot classify is not relayed: fail closed.
             "a Location that cannot be resolved is refused" {
-                ("https://192.0.2.5/redfish", "http://[::1") => RedirectLocation::Suppressed,
+                ("https://192.0.2.5/redfish", "http://[::1")
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::InvalidUriReference),
                 ("https://192.0.2.5/redfish", "https://192.0.2.5/x\u{ff}")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::InvalidHeaderValue),
             }
 
             // `join` takes any registered scheme; hostless, these would classify
             // as another host and be forwarded to whatever handler the client has.
             "a Location that is not http(s) is refused, whatever its host" {
                 ("https://192.0.2.5/redfish", "javascript:alert(1)")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::UnsupportedScheme),
                 ("https://192.0.2.5/redfish", "data:text/html,<script>1</script>")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::UnsupportedScheme),
                 ("https://192.0.2.5/redfish", "ftp://192.0.2.5/x")
-                    => RedirectLocation::Suppressed,
+                    => RedirectLocation::Suppressed(RedirectSuppressionReason::UnsupportedScheme),
             }
 
             // Structural escapes survive the rewrite; the client's next request
@@ -2576,6 +2607,9 @@ mod tests {
             authorization_event_names(&logs),
             vec!["bmc_proxy_redirect_suppressed".to_string()]
         );
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].field("reason"), Some("ambiguous_path"));
+        assert_eq!(logs[0].field("redirect_target"), None);
         assert_eq!(
             metrics.counter_delta(AUTHORIZATION_DENIED_METRIC, &REDIRECT_LABELS),
             1.0
@@ -2656,21 +2690,38 @@ mod tests {
 
         let mut withheld = None;
         let logs = capture_logs(|| {
-            withheld = Some(created("https://192.0.2.5//169.254.169.254/x"));
+            withheld = Some(created(
+                "https://sensitive-user:secret-password@192.0.2.5:8443/sensitive-resource?token=secret-token#secret-fragment",
+            ));
         });
         let withheld = withheld.expect("build_response always returns");
         assert_eq!(withheld.status(), StatusCode::CREATED);
         assert!(!withheld.headers().contains_key(reqwest::header::LOCATION));
-        assert_eq!(
-            authorization_event_names(&logs),
-            vec!["bmc_proxy_redirect_suppressed".to_string()]
-        );
+        assert!(authorization_event_names(&logs).is_empty());
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].field("method"), Some("POST"));
+        assert_eq!(logs[0].field("response_status"), Some("201"));
+        assert_eq!(logs[0].field("reason"), Some("origin_mismatch"));
+        assert_eq!(logs[0].field("redirect_target"), None);
+        let rendered_logs = format!("{logs:?}");
+        for secret in [
+            "sensitive-user",
+            "secret-password",
+            "sensitive-resource",
+            "secret-token",
+            "secret-fragment",
+        ] {
+            assert!(
+                !rendered_logs.contains(secret),
+                "suppressed Location data leaked into logs: {secret}"
+            );
+        }
         assert_eq!(
             metrics.counter_delta(
                 AUTHORIZATION_DENIED_METRIC,
                 &[("authorization_layer", "redirect"), ("method", "post")]
             ),
-            1.0
+            0.0
         );
     }
 
