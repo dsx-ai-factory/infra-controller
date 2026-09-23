@@ -20,9 +20,9 @@
 use std::collections::BTreeMap;
 
 use carbide_dpf::{
-    DetachedDpuServiceDefinition, DetachedHelmChart, DetachedServiceDaemonSet,
-    DetachedServiceDaemonSetRollingUpdate, DetachedServiceDaemonSetUpdateStrategy,
-    DpuServiceObservation, IntOrString,
+    DetachedDpuServiceDefinition, DetachedDpuServiceSecurity, DetachedHelmChart,
+    DetachedServiceDaemonSet, DetachedServiceDaemonSetRollingUpdate,
+    DetachedServiceDaemonSetUpdateStrategy, DpuServiceObservation, IntOrString,
 };
 use carbide_uuid::extension_service::ExtensionServiceId;
 use model::extension_service::{
@@ -52,7 +52,10 @@ pub fn project_dpu_service(
         )]),
         helm_chart: projected_helm_chart(&identity, data),
         deploy_in_cluster: false,
-        security_privileged: data.security_privileged,
+        security: DetachedDpuServiceSecurity {
+            privileged: data.security.privileged,
+            spiffe: data.security.spiffe.is_some(),
+        },
         service_daemon_set: Some(projected_service_daemon_set(&identity, data)),
     }
 }
@@ -137,7 +140,10 @@ pub fn dpu_service_mutable_patch(
     json!({
         "spec": {
             "helmChart": helm_chart_patch,
-            "security": {"privileged": projected.security_privileged},
+            "security": {
+                "privileged": projected.security.privileged,
+                "spiffe": projected.security.spiffe.then(|| json!({})),
+            },
             "serviceDaemonSet": service_daemon_set_patch,
         },
     })
@@ -408,6 +414,7 @@ mod tests {
     use std::str::FromStr;
 
     use carbide_dpf::DpuServiceDaemonSetObservation;
+    use model::extension_service::DpfHelmChartServiceSecurity;
 
     use super::*;
 
@@ -423,7 +430,10 @@ mod tests {
             repo_url: "oci://registry.example.com/charts".to_owned(),
             chart_name: "tenant-service".to_owned(),
             chart_version: "1.2.3".to_owned(),
-            security_privileged: true,
+            security: DpfHelmChartServiceSecurity {
+                privileged: true,
+                spiffe: None,
+            },
             values,
             service_daemon_set: None,
         }
@@ -447,7 +457,10 @@ mod tests {
             dpu_cluster_selector_present: false,
             interfaces_present: false,
             paused: None,
-            security_privileged: Some(projected.security_privileged),
+            security: Some(carbide_dpf::DpuServiceSecurityObservation {
+                privileged: Some(projected.security.privileged),
+                spiffe: projected.security.spiffe,
+            }),
             service_daemon_set: service_daemon_set.map(|daemon_set| {
                 DpuServiceDaemonSetObservation {
                     node_selector: daemon_set
@@ -497,7 +510,8 @@ mod tests {
             projected.helm_chart.values.as_ref().unwrap()["image"],
             json!({"tag": "1.2.3", "repository": "registry.example.com/tenant/service"})
         );
-        assert!(projected.security_privileged);
+        assert!(projected.security.privileged);
+        assert!(!projected.security.spiffe);
         assert_eq!(
             projected
                 .service_daemon_set
@@ -532,7 +546,7 @@ mod tests {
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
-                "security.privileged":true,
+                "security":{"privileged":true,"spiffe":{}},
                 "serviceDaemonSet":{
                     "labels":{"app":"old","remove-me":"value"},
                     "annotations":{"example.com/owner":"old"},
@@ -544,7 +558,8 @@ mod tests {
         .unwrap();
         let initial_projection = project_dpu_service(service_id(), NAMESPACE, &initial);
 
-        // Confirm projection preserves integer quantities and limits.
+        // Confirm projection preserves security, integer quantities, and limits.
+        assert!(initial_projection.security.spiffe);
         assert_eq!(
             initial_projection
                 .service_daemon_set
@@ -577,7 +592,7 @@ mod tests {
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service",
                 "chartVersion":"1.2.3",
-                "security.privileged":true,
+                "security":{"privileged":true},
                 "serviceDaemonSet":{
                     "labels":{"app":"new"},
                     "annotations":{},
@@ -605,6 +620,7 @@ mod tests {
                 },
             })
         );
+        assert_eq!(patch["spec"]["security"]["spiffe"], Value::Null);
 
         // Tenant updates must never include NICo-owned placement.
         assert!(
