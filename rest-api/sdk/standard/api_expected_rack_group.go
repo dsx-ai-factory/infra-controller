@@ -926,7 +926,7 @@ type ApiUpdateExpectedRackGroupRequest struct {
 	expectedRackGroupUpdateRequest *ExpectedRackGroupUpdateRequest
 }
 
-// Expected Rack Group update request
+// Expected Rack Group update request.  Provide a non-null value for at least one of &#x60;rackGroupId&#x60;, &#x60;topology&#x60;, &#x60;racks&#x60;, &#x60;name&#x60;, &#x60;description&#x60;, or &#x60;labels&#x60;. An empty object, a body containing only &#x60;id&#x60;, or a body with all six fields omitted or set to &#x60;null&#x60; returns HTTP 400. Empty arrays for &#x60;racks&#x60;, empty objects for &#x60;labels&#x60;, and empty strings for &#x60;name&#x60; or &#x60;description&#x60; count as updates and clear those values.  The &#x60;rackGroupId&#x60; field is immutable on update. Providing its existing value alone satisfies the update requirement and still updates the modification time and sends the group to Core. Changing it returns HTTP 400.
 func (r ApiUpdateExpectedRackGroupRequest) ExpectedRackGroupUpdateRequest(expectedRackGroupUpdateRequest ExpectedRackGroupUpdateRequest) ApiUpdateExpectedRackGroupRequest {
 	r.expectedRackGroupUpdateRequest = &expectedRackGroupUpdateRequest
 	return r
