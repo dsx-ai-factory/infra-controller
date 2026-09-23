@@ -237,7 +237,7 @@ func TestGeneratedCommandInfosExposeBodyFormSchema(t *testing.T) {
 
 	rackPower := byName["rack power-control-racks power-control-racks"]
 	state := requireGeneratedBodyFormField(t, rackPower, "state")
-	assert.Equal(t, []string{"on", "off", "cycle", "forceoff", "forcecycle"}, state.Enum)
+	assert.Equal(t, []string{"on", "off", "cycle", "forceoff", "forcecycle", "acpowercycle"}, state.Enum)
 }
 
 func TestGeneratedBodyFormRealSchemaPersistsSiteBeforeVPCSelectors(t *testing.T) {

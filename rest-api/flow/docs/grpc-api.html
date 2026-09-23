@@ -179,6 +179,10 @@
             <ul>
 
                 <li>
+                  <a href="#v1.ACPowerCycleRackRequest"><span class="badge">M</span>ACPowerCycleRackRequest</a>
+                </li>
+
+                <li>
                   <a href="#v1.AddComponentRequest"><span class="badge">M</span>AddComponentRequest</a>
                 </li>
 
@@ -1090,6 +1094,63 @@
         <h2 id="flow.proto">flow.proto</h2><a href="#title">Top</a>
       </div>
       <p></p>
+
+
+        <h3 id="v1.ACPowerCycleRackRequest">ACPowerCycleRackRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>target_spec</td>
+                  <td><a href="#v1.OperationTargetSpec">OperationTargetSpec</a></td>
+                  <td></td>
+                  <td><p>Target racks or NVLink domains with an optional type filter, or specific components </p></td>
+                </tr>
+
+                <tr>
+                  <td>description</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>optional task description </p></td>
+                </tr>
+
+                <tr>
+                  <td>queue_options</td>
+                  <td><a href="#v1.QueueOptions">QueueOptions</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rule_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td>optional</td>
+                  <td><p>optional: override rule resolution with a specific rule </p></td>
+                </tr>
+
+                <tr>
+                  <td>override_readiness_check</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p>When true, proceed with the AC power cycle even if one or more target
+components (or, for rack-scoped components, any host on the owning
+rack) are reported as not ready for the operation by their
+persisted ComponentOperationStatus. Intended for operator-supervised
+maintenance where tenant impact has been acknowledged out-of-band;
+the bypass is recorded in the server log. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
 
 
         <h3 id="v1.AddComponentRequest">AddComponentRequest</h3>
@@ -9402,6 +9463,13 @@ becomes available, or can be cancelled explicitly via CancelTask.</p></td>
               <tr>
                 <td>PowerResetRack</td>
                 <td><a href="#v1.PowerResetRackRequest">PowerResetRackRequest</a></td>
+                <td><a href="#v1.SubmitTaskResponse">SubmitTaskResponse</a></td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>ACPowerCycleRack</td>
+                <td><a href="#v1.ACPowerCycleRackRequest">ACPowerCycleRackRequest</a></td>
                 <td><a href="#v1.SubmitTaskResponse">SubmitTaskResponse</a></td>
                 <td><p></p></td>
               </tr>

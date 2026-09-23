@@ -716,6 +716,27 @@ func (r *FlowServerImpl) PowerResetRack(ctx context.Context, req *flowv1.PowerRe
 	}, nil
 }
 
+// ACPowerCycleRack implements interface FlowServer
+func (r *FlowServerImpl) ACPowerCycleRack(ctx context.Context, req *flowv1.ACPowerCycleRackRequest) (*flowv1.SubmitTaskResponse, error) {
+	if req == nil || req.TargetSpec == nil {
+		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
+	}
+
+	taskID := uuid.NewString()
+	task := &flowv1.Task{
+		Id:           &flowv1.UUID{Id: taskID},
+		Operation:    "ACPowerCycleRack",
+		Status:       flowv1.TaskStatus_TASK_STATUS_PENDING,
+		ExecutorType: flowv1.TaskExecutorType_TASK_EXECUTOR_TYPE_TEMPORAL,
+		Message:      "AC power cycle task created",
+	}
+	r.tasks[taskID] = task
+
+	return &flowv1.SubmitTaskResponse{
+		TaskIds: []*flowv1.UUID{{Id: taskID}},
+	}, nil
+}
+
 // BringUpRack implements interface FlowServer
 func (r *FlowServerImpl) BringUpRack(ctx context.Context, req *flowv1.BringUpRackRequest) (*flowv1.SubmitTaskResponse, error) {
 	if req == nil || req.TargetSpec == nil {

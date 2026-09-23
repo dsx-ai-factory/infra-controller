@@ -47,6 +47,7 @@ service Flow {
     rpc PowerOnRack(PowerOnRackRequest) returns (SubmitTaskResponse);
     rpc PowerOffRack(PowerOffRackRequest) returns (SubmitTaskResponse);
     rpc PowerResetRack(PowerResetRackRequest) returns (SubmitTaskResponse);
+    rpc ACPowerCycleRack(ACPowerCycleRackRequest) returns (SubmitTaskResponse);
 
     // Component CRUD
     rpc GetComponentInfoByID(GetComponentInfoByIDRequest) returns (GetComponentInfoResponse);
@@ -784,6 +785,20 @@ message PowerResetRackRequest {
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
     bool override_readiness_check = 6;
+}
+
+message ACPowerCycleRackRequest {
+    OperationTargetSpec target_spec = 1;  // Target racks or NVLink domains with an optional type filter, or specific components
+    string description = 2;               // optional task description
+    optional QueueOptions queue_options = 3;
+    optional UUID rule_id = 4;            // optional: override rule resolution with a specific rule
+    // When true, proceed with the AC power cycle even if one or more target
+    // components (or, for rack-scoped components, any host on the owning
+    // rack) are reported as not ready for the operation by their
+    // persisted ComponentOperationStatus. Intended for operator-supervised
+    // maintenance where tenant impact has been acknowledged out-of-band;
+    // the bypass is recorded in the server log.
+    bool override_readiness_check = 5;
 }
 
 message BringUpRackRequest {

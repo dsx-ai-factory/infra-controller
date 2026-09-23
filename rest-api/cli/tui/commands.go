@@ -4399,7 +4399,7 @@ func cmdTrayGet(s *Session, args []string) error {
 // powerStateChoices is the canonical list accepted by every power-control
 // endpoint (see UpdatePowerStateRequest in OpenAPI). Kept in one place so
 // rack and tray commands cannot drift from each other.
-var powerStateChoices = []string{"on", "off", "cycle", "forceoff", "forcecycle"}
+var powerStateChoices = []string{"on", "off", "cycle", "forceoff", "forcecycle", "acpowercycle"}
 
 // printTaskIDs renders the standard taskIds-bearing response from a
 // lifecycle action. Action endpoints return one task ID per affected

@@ -240,7 +240,7 @@ func (m *Manager) PowerControl(
 		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_SHUTDOWN
 	case operations.PowerOperationForcePowerOff:
 		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_OFF
-	case operations.PowerOperationRestart:
+	case operations.PowerOperationRestart, operations.PowerOperationWarmReset:
 		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_GRACEFUL_RESTART
 	case operations.PowerOperationForceRestart:
 		action = corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_RESTART

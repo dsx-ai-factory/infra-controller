@@ -661,10 +661,15 @@ func (c *Client) executePowerControl(
 			Forced:     false,
 		})
 
-	case pb.PowerControlOp_POWER_CONTROL_OP_FORCE_RESTART, pb.PowerControlOp_POWER_CONTROL_OP_COLD_RESET:
+	case pb.PowerControlOp_POWER_CONTROL_OP_FORCE_RESTART:
 		rsp, err = c.client.PowerResetRack(ctx, &pb.PowerResetRackRequest{
 			TargetSpec: targetSpec,
 			Forced:     true,
+		})
+
+	case pb.PowerControlOp_POWER_CONTROL_OP_COLD_RESET:
+		rsp, err = c.client.ACPowerCycleRack(ctx, &pb.ACPowerCycleRackRequest{
+			TargetSpec: targetSpec,
 		})
 
 	default:
