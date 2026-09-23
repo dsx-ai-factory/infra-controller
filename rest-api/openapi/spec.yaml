@@ -30503,7 +30503,7 @@ components:
         - repoURL
         - chartName
         - chartVersion
-        - security.privileged
+        - security
       properties:
         repoURL:
           type: string
@@ -30518,15 +30518,34 @@ components:
           type: string
           minLength: 1
           description: Helm chart version
-        security.privileged:
-          type: boolean
-          description: DPF privileged-workload setting. This is a literal dotted key, not a nested security object; false is valid.
+        security:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartSecurity'
         values:
           type: [object, 'null']
           additionalProperties: true
           description: Optional chart values. values.serviceDaemonSet.nodeSelector is reserved for NICo and must not be supplied.
         serviceDaemonSet:
           $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartServiceDaemonSet'
+    DpuExtensionServiceDpfHelmChartSecurity:
+      title: DpuExtensionServiceDpfHelmChartSecurity
+      type: object
+      additionalProperties: false
+      description: Security settings projected onto the DPF DPUService.
+      required:
+        - privileged
+      properties:
+        privileged:
+          type: boolean
+          description: DPF privileged-workload setting; false is valid.
+        spiffe:
+          $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartSpiffe'
+          description: Presence-gated opt-in to SPIFFE workload identity. Supply an empty object to enable it.
+    DpuExtensionServiceDpfHelmChartSpiffe:
+      title: DpuExtensionServiceDpfHelmChartSpiffe
+      type: object
+      additionalProperties: false
+      description: Empty presence-gated SPIFFE configuration for a DPF DPUService.
+      example: {}
     DpuExtensionServiceDpfHelmChartServiceDaemonSet:
       title: DpuExtensionServiceDpfHelmChartServiceDaemonSet
       type: [object, 'null']
@@ -30609,7 +30628,7 @@ components:
           serviceType: DpfHelmChart
           dpuTarget: AllActive
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
-          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security.privileged":true,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
+          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
       properties:
         name:
           type: string

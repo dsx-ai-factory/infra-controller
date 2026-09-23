@@ -74,13 +74,21 @@ func ValidatePodYaml(yamlData []byte) error {
 
 // dpfHelmChartData defines a DPF Helm extension service's Data field
 type dpfHelmChartData struct {
-	RepoURL            string                        `json:"repoURL"`
-	ChartName          string                        `json:"chartName"`
-	ChartVersion       string                        `json:"chartVersion"`
-	SecurityPrivileged *bool                         `json:"security.privileged"`
-	Values             map[string]any                `json:"values,omitempty"`
-	ServiceDaemonSet   *dpfHelmChartServiceDaemonSet `json:"serviceDaemonSet,omitempty"`
+	RepoURL          string                        `json:"repoURL"`
+	ChartName        string                        `json:"chartName"`
+	ChartVersion     string                        `json:"chartVersion"`
+	Security         *dpfHelmChartSecurity         `json:"security"`
+	Values           map[string]any                `json:"values,omitempty"`
+	ServiceDaemonSet *dpfHelmChartServiceDaemonSet `json:"serviceDaemonSet,omitempty"`
 }
+
+// dpfHelmChartSecurity defines DPF workload security settings
+type dpfHelmChartSecurity struct {
+	Privileged *bool                       `json:"privileged"`
+	Spiffe     *dpfHelmChartSecuritySpiffe `json:"spiffe,omitempty"`
+}
+
+type dpfHelmChartSecuritySpiffe struct{}
 
 // dpfHelmChartServiceDaemonSet defines the supported DaemonSet settings while
 // excluding placement fields such as nodeSelector, which NICo owns in Core.
@@ -126,7 +134,7 @@ func ValidateDpfHelmChartData(jsonData []byte) error {
 		return errors.New("chartVersion must not be empty")
 	}
 
-	if chart.SecurityPrivileged == nil {
+	if chart.Security == nil || chart.Security.Privileged == nil {
 		return errors.New("security.privileged must be specified")
 	}
 
