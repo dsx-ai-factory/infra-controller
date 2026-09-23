@@ -1466,6 +1466,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		expectedControllerVpcIDs map[string]uuid.UUID
 		wantErr                  bool
 		verifyChildSpanner       bool
+		check                    func(t *testing.T)
 	}
 	tests := []testCase{
 		{
@@ -2432,7 +2433,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "test Instance create API endpoint failure, specify a machine ID already assigned",
+			name: "test Instance create API endpoint conflict, specify a Ready machine ID already assigned",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -2455,8 +2456,18 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				},
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
-				respCode:    http.StatusBadRequest,
+				respCode:    http.StatusConflict,
 				respMessage: "is assigned to an Instance, cannot be used for new Instance",
+			},
+			check: func(t *testing.T) {
+				machine, err := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, mcassigned.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.MachineStatusReady, machine.Status)
+				assert.True(t, machine.IsAssigned)
+				tsc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, "CreateInstanceV2",
+					mock.MatchedBy(func(req *corev1.InstanceAllocationRequest) bool {
+						return req.GetMachineId().GetId() == mcassigned.ID
+					}))
 			},
 			wantErr: false,
 		},
@@ -3901,10 +3912,13 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		name           string
 		assigned       bool
 		allowUnhealthy bool
+		machineStatus  string
+		responseCode   int
 	}{
-		{"release at assignment gate", true, false},
-		{"release at status gate", false, false},
-		{"release at status gate allowing unhealthy", false, true},
+		{"release at assignment gate", true, false, cdbm.MachineStatusInUse, http.StatusConflict},
+		{"Ready release at assignment gate", true, false, cdbm.MachineStatusReady, http.StatusConflict},
+		{"release at status gate", false, false, cdbm.MachineStatusInUse, http.StatusBadRequest},
+		{"release at status gate allowing unhealthy", false, true, cdbm.MachineStatusInUse, http.StatusBadRequest},
 	} {
 		tests = append(tests, testCase{
 			name:   gate.name,
@@ -3916,11 +3930,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					Interfaces:            []model.APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(subnet1.ID.String())}},
 					AllowUnhealthyMachine: cutil.GetPtr(gate.allowUnhealthy),
 				},
-				reqOrg: tnOrg, reqUser: tnu1, respCode: http.StatusBadRequest,
+				reqOrg: tnOrg, reqUser: tnu1, respCode: gate.responseCode,
 				checkRecovery: true, respRetryable: cutil.GetPtr(true),
 				prepareReq: func(t *testing.T, req *model.APIInstanceCreateRequest) {
 					machine := testInstanceBuildMachine(t, dbSession, ip.ID, st1.ID, cutil.GetPtr(gate.assigned), nil)
-					_, updateErr := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: machine.ID, Status: cutil.GetPtr(cdbm.MachineStatusInUse)})
+					_, updateErr := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: machine.ID, Status: cutil.GetPtr(gate.machineStatus)})
 					require.NoError(t, updateErr)
 					testInstanceBuildInstance(t, dbSession, uuid.NewString(), tn1.ID, ip.ID, st1.ID, nil, vpc1.ID, &machine.ID, nil, nil, cdbm.InstanceStatusTerminating)
 					req.MachineID = &machine.ID
@@ -4088,6 +4102,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				} else {
 					assert.NotContains(t, response.Message, "Do not retry automatically.")
 				}
+			}
+			if tt.check != nil {
+				tt.check(t)
 			}
 			if tt.args.respCode != http.StatusCreated {
 				if targetedMachine != nil {
@@ -11836,7 +11853,7 @@ func TestCreateInstanceHandler_machineUnavailableError(t *testing.T) {
 				locked, getErr := cdbm.NewMachineDAO(session).GetByID(ctx, tx, machine.ID, nil, true)
 				require.NoError(t, getErr)
 				apiErr := cih.machineUnavailableError(ctx, tx, zerolog.Nop(), locked, tenant.ID, "unavailable")
-				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+				assert.Equal(t, http.StatusConflict, apiErr.Code)
 				assert.Equal(t, tt.want, apiErr.Retryable)
 				assert.Equal(t, "unavailable", apiErr.Message)
 				return nil

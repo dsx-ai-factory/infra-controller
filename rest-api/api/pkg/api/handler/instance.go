@@ -2181,7 +2181,11 @@ func instanceCreateUncertainError(apiErr *cutil.APIError, instance *cdbm.Instanc
 // The caller holds the machine row/advisory locks in tx. Do not filter by tenant:
 // that would hide a conflicting occupant. GetAll excludes soft-deleted instances.
 func (cih CreateInstanceHandler) machineUnavailableError(ctx context.Context, tx *cdb.Tx, logger zerolog.Logger, machine *cdbm.Machine, tenantID uuid.UUID, message string) *cutil.APIError {
-	apiErr := cutil.NewAPIError(http.StatusBadRequest, message, nil)
+	code := http.StatusBadRequest
+	if machine.IsAssigned {
+		code = http.StatusConflict
+	}
+	apiErr := cutil.NewAPIError(code, message, nil)
 	instances, total, err := cdbm.NewInstanceDAO(cih.dbSession).GetAll(ctx, tx,
 		cdbm.InstanceFilterInput{MachineIDs: []string{machine.ID}, SiteIDs: []uuid.UUID{machine.SiteID}},
 		cdbp.PageInput{Limit: cutil.GetPtr(2)}, nil)

@@ -8705,7 +8705,7 @@ paths:
                 release-pending:
                   value:
                     source: nico
-                    message: 'Machine: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g is assigned to an Instance, cannot be used for new Instance'
+                    message: 'Machine: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g has status: InUse that does not allow Instance creation'
                     data: null
                     retryable: true
                 validation-error:
@@ -8715,6 +8715,19 @@ paths:
                     data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: The request conflicts with an existing resource or operation, such as an already assigned machine or a power operation in progress for the VPC.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                release-pending:
+                  value:
+                    source: nico
+                    message: 'Machine: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g is assigned to an Instance, cannot be used for new Instance'
+                    data: null
+                    retryable: true
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -8748,6 +8761,11 @@ paths:
         Create an Instance for Tenant.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+
+        A request targeting an already assigned `machineId` returns HTTP 409. A `Ready` response does not
+        reserve the Machine: another request can assign it before creation is processed.
+        `allowUnhealthyMachine` does not bypass the assignment check. Honor the `retryable`
+        classification below before retrying, or select another available Machine.
 
         Machine-unavailable errors are retryable only when a unique current Instance
         belongs to this Tenant and is Terminating. Other current occupants are not
