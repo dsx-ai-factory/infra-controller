@@ -48,7 +48,9 @@ impl TryFrom<Machine> for TrayData {
 
     fn try_from(value: Machine) -> Result<Self, Self::Error> {
         let id = value.id.ok_or(RvsError::MissingField("Machine.id"))?;
-        let status = value.status.unwrap_or_default();
+        let status = value
+            .status
+            .ok_or(RvsError::MissingField("Machine.status"))?;
 
         let nvl = status.nvlink_info.map(|info| TrayNvlData {
             domain_uuid: info.domain_uuid,
@@ -112,6 +114,45 @@ impl TryFrom<Rack> for RackData {
             id: value.id.ok_or(RvsError::MissingField("Rack.id"))?,
             state: value.rack_state,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
+
+    use super::*;
+
+    #[test]
+    fn tray_data_rejects_missing_status() {
+        let machine = Machine {
+            id: Some(MachineId::new(
+                MachineIdSource::Tpm,
+                [1; 32],
+                MachineType::Host,
+            )),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            TrayData::try_from(machine),
+            Err(RvsError::MissingField("Machine.status"))
+        ));
+    }
+
+    #[test]
+    fn tray_data_accepts_empty_status() {
+        let id = MachineId::new(MachineIdSource::Tpm, [1; 32], MachineType::Host);
+        let machine = Machine {
+            id: Some(id),
+            status: Some(Default::default()),
+            ..Default::default()
+        };
+
+        let tray = TrayData::try_from(machine).expect("present empty status should be valid");
+        assert_eq!(tray.id, id);
+        assert!(tray.nvl.is_none());
+        assert!(tray.ib.is_none());
     }
 }
 

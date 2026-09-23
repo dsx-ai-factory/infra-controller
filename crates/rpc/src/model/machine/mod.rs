@@ -355,8 +355,8 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
 
         // -- Build the new structured status sub-message --
         let status_msg = rpc::forge::MachineStatus {
-            interfaces: interfaces_rpc.clone(),
-            discovery_info: discovery_info.clone(),
+            interfaces: interfaces_rpc,
+            discovery_info,
             last_reboot_time: machine.status.last_reboot_time.map(|t| t.into()),
             last_observation_time,
             associated_host_machine_id: None, // Gets filled in the `ManagedHostStateSnapshot` conversion
@@ -371,14 +371,14 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
                 .last_reboot_requested
                 .as_ref()
                 .map(|x| x.mode.to_string()),
-            dpu_agent_version: dpu_agent_version.clone(),
-            health: Some(health.clone().into()),
-            health_sources: health_sources.clone(),
-            failure_details: failure_details.clone(),
-            infiniband: ib_status.clone(),
-            capabilities: capabilities.clone(),
+            dpu_agent_version,
+            health: Some(health.into()),
+            health_sources,
+            failure_details,
+            infiniband: ib_status,
+            capabilities,
             hw_sku: machine.status.hw_sku.clone().map(|s| s.into()),
-            quarantine: quarantine_state.clone(),
+            quarantine: quarantine_state,
             hw_sku_device_type: machine.status.hw_sku_device_type.clone(),
             update_complete: machine.status.update_complete,
             nvlink_info: machine.status.nvlink_info.clone().map(|i| i.into()),
