@@ -305,7 +305,7 @@ fn reported(
         .map(|entry| {
             (
                 entry.hardware_class.as_str(),
-                entry.endpoints,
+                entry.explored_endpoints,
                 entry.coverage(),
                 selection_mode(entry.mode),
             )
@@ -471,7 +471,7 @@ async fn coverage_reports_the_attester_sets_each_class_carries(pool: PgPool) {
             entry
                 .attester_sets
                 .iter()
-                .map(|set| (set.attesters, set.endpoints))
+                .map(|set| (set.attesters, set.reporting_endpoints))
                 .sorted()
                 .collect()
         })

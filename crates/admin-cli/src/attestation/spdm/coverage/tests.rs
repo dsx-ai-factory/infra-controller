@@ -77,13 +77,13 @@ fn rows(output: &[u8]) -> Vec<Vec<String>> {
 
 fn entry(
     hardware_class: &str,
-    endpoints: i32,
+    explored_endpoints: i32,
     coverage: AttestationCoverage,
     mode: Option<AttesterSelectionMode>,
 ) -> AttestationCoverageEntry {
     AttestationCoverageEntry {
         hardware_class: hardware_class.to_string(),
-        endpoints,
+        explored_endpoints,
         coverage: coverage.into(),
         mode: mode.map(Into::into),
         attester_sets: Vec::new(),
@@ -98,12 +98,12 @@ fn attester_sets() -> Vec<AttesterSet> {
     vec![
         AttesterSet {
             digest: "1e05c4".to_string(),
-            endpoints: 71,
+            reporting_endpoints: 71,
             attesters: 8,
         },
         AttesterSet {
             digest: "9a7fb2".to_string(),
-            endpoints: 1,
+            reporting_endpoints: 1,
             attesters: 7,
         },
     ]
@@ -245,8 +245,8 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
     assert_eq!(
         reported[1]["attester_sets"],
         serde_json::json!([
-            {"digest": "1e05c4", "endpoints": 71, "attesters": 8},
-            {"digest": "9a7fb2", "endpoints": 1, "attesters": 7},
+            {"digest": "1e05c4", "reporting_endpoints": 71, "attesters": 8},
+            {"digest": "9a7fb2", "reporting_endpoints": 1, "attesters": 7},
         ])
     );
     assert_eq!(

@@ -147,7 +147,7 @@ fn attester_counts(sets: &[AttesterSetView]) -> String {
 #[derive(Serialize)]
 struct AttesterSetView {
     digest: String,
-    endpoints: i32,
+    reporting_endpoints: i32,
     attesters: i32,
 }
 
@@ -166,14 +166,14 @@ fn coverage_views(coverage: &GetAttestationCoverageResponse) -> Vec<CoverageView
                     .as_ref()
                     .map_or("n/a", |_| own_profile(entry.coverage)),
                 would_use: would_use(entry.coverage, entry.mode),
-                explored_endpoints: Some(entry.endpoints),
+                explored_endpoints: Some(entry.explored_endpoints),
                 attester_sets: Some(
                     entry
                         .attester_sets
                         .iter()
                         .map(|set| AttesterSetView {
                             digest: set.digest.clone(),
-                            endpoints: set.endpoints,
+                            reporting_endpoints: set.reporting_endpoints,
                             attesters: set.attesters,
                         })
                         .collect(),
