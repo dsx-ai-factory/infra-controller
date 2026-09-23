@@ -212,6 +212,13 @@ pub struct EndpointExplorationReport {
     /// distinct from `Some([])` for one it reported empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_integrities: Option<Vec<ComponentIntegrityEntry>>,
+    /// Set when the BMC advertised a `ComponentIntegrity` collection that
+    /// could not be fetched, so `component_integrities` is absent for want of
+    /// an answer rather than because the BMC reports none. A transient BMC
+    /// failure must not read as hardware losing its attesters, so the endpoint
+    /// keeps the digest its last successful exploration recorded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub component_integrity_unavailable: bool,
     /// If the endpoint is a BMC that belongs to a Machine and enough data is
     /// available to calculate the `MachineId`, this field contains the `MachineId`
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -991,6 +998,7 @@ impl EndpointExplorationReport {
             chassis: Vec::new(),
             service: Vec::new(),
             component_integrities: None,
+            component_integrity_unavailable: false,
             vendor: None,
             hardware_class: None,
             machine_id: None,
@@ -3882,6 +3890,7 @@ mod tests {
             last_exploration_error: None,
             last_exploration_latency: None,
             component_integrities: None,
+            component_integrity_unavailable: false,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
             hardware_class: None,
             managers: vec![Manager {
@@ -4048,6 +4057,7 @@ mod tests {
             last_exploration_error: None,
             last_exploration_latency: None,
             component_integrities: None,
+            component_integrity_unavailable: false,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
             hardware_class: None,
             managers: vec![Manager {

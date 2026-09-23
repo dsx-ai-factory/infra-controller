@@ -477,7 +477,8 @@ impl RedfishClient {
             systems: vec![system],
             chassis,
             service,
-            component_integrities,
+            component_integrities: component_integrities.entries,
+            component_integrity_unavailable: component_integrities.unavailable,
             vendor,
             hardware_class: Some(hardware_class),
             versions: HashMap::default(),
@@ -1605,39 +1606,62 @@ async fn fetch_secure_boot_status(client: &dyn Redfish) -> Result<SecureBootStat
     Ok(SecureBootStatus { is_enabled })
 }
 
+/// What an exploration learned about the BMC's `ComponentIntegrity`
+/// collection.
+///
+/// A BMC that advertises no collection and one whose collection could not be
+/// read both leave `entries` absent, but only the second is a missing answer:
+/// the first is the BMC saying it has nothing to attest. Coverage reads the
+/// two differently, so they are kept apart here rather than merged into one
+/// absence.
+#[derive(Default)]
+struct ComponentIntegrityObservation {
+    /// The members the collection listed, unfiltered.
+    entries: Option<Vec<ComponentIntegrityEntry>>,
+    /// Set when the collection was advertised but fetching it failed.
+    unavailable: bool,
+}
+
 /// What the BMC says it can attest, unfiltered.
 ///
-/// `None` both when the service root advertises no collection and when the
-/// fetch fails: the list drives attestation coverage, while scheduling reads
-/// the collection live from the BMC, so losing it must not fail an exploration
-/// that otherwise succeeded.
+/// A failed fetch is reported rather than raised: the list drives attestation
+/// coverage, while scheduling reads the collection live from the BMC, so
+/// losing it must not fail an exploration that otherwise succeeded.
 async fn fetch_component_integrities(
     client: &dyn Redfish,
     service_root: &libredfish::model::service_root::ServiceRoot,
-) -> Option<Vec<ComponentIntegrityEntry>> {
+) -> ComponentIntegrityObservation {
     // A BMC without the collection has nothing to list, and asking anyway only
     // buys a 404.
-    service_root.component_integrity.as_ref()?;
+    if service_root.component_integrity.is_none() {
+        return ComponentIntegrityObservation::default();
+    }
 
-    let collection = client
-        .get_component_integrities()
-        .await
-        .inspect_err(|error| {
+    let collection = match client.get_component_integrities().await {
+        Ok(collection) => collection,
+        Err(error) => {
             tracing::warn!(%error, "Failed to fetch the ComponentIntegrity collection.");
-        })
-        .ok()?;
+            return ComponentIntegrityObservation {
+                entries: None,
+                unavailable: true,
+            };
+        }
+    };
 
-    Some(
-        collection
-            .members
-            .iter()
-            .map(|member| ComponentIntegrityEntry {
-                id: member.id.clone(),
-                component_integrity_type: member.component_integrity_type.clone(),
-                component_integrity_enabled: member.component_integrity_enabled,
-            })
-            .collect(),
-    )
+    ComponentIntegrityObservation {
+        entries: Some(
+            collection
+                .members
+                .iter()
+                .map(|member| ComponentIntegrityEntry {
+                    id: member.id.clone(),
+                    component_integrity_type: member.component_integrity_type.clone(),
+                    component_integrity_enabled: member.component_integrity_enabled,
+                })
+                .collect(),
+        ),
+        unavailable: false,
+    }
 }
 
 async fn fetch_lockdown_status(client: &dyn Redfish) -> Result<LockdownStatus, RedfishError> {

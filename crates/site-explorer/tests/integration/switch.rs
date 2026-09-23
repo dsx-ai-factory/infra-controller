@@ -152,6 +152,7 @@ async fn test_site_explorer_switch_discovery(
         switch_ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
             component_integrities: None,
+            component_integrity_unavailable: false,
             hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,

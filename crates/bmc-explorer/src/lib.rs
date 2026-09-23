@@ -38,9 +38,8 @@ use itertools::Itertools;
 use mac_address::MacAddress;
 use manager::ExploredManager;
 use model::site_explorer::{
-    ComponentIntegrityEntry, ComputerSystem, EndpointExplorationReport, EndpointType,
-    InternalLockdownStatus, LockdownStatus, MachineSetupDiff, MachineSetupStatus,
-    derive_hardware_class,
+    ComputerSystem, EndpointExplorationReport, EndpointType, InternalLockdownStatus,
+    LockdownStatus, MachineSetupDiff, MachineSetupStatus, derive_hardware_class,
 };
 use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
@@ -338,7 +337,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         systems: vec![system],
         chassis: explored_chassis.to_model(),
         service,
-        component_integrities,
+        component_integrities: component_integrities.entries,
+        component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.and_then(|hw_type| hw_type.bmc_vendor()),
         hardware_class: Some(hardware_class),
         versions: HashMap::default(),
@@ -389,7 +389,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
     root: &ServiceRoot<B>,
     explored_chassis: ExploredChassisCollection<B>,
     explored_inventories: ExploredInventories<B>,
-    component_integrities: Option<Vec<ComponentIntegrityEntry>>,
+    component_integrities: component_integrity::Observation,
 ) -> Result<EndpointExplorationReport, Error<B>> {
     let hw_type = hw::HwType::DeltaPowerShelf;
 
@@ -418,7 +418,8 @@ async fn build_delta_powershelf_report<B: Bmc>(
         systems: vec![system],
         chassis: explored_chassis.to_model(),
         service: explored_inventories.to_model(Some(hw_type)),
-        component_integrities,
+        component_integrities: component_integrities.entries,
+        component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.bmc_vendor(),
         hardware_class: Some(hardware_class),
         versions: HashMap::default(),

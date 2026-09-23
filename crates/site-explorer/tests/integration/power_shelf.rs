@@ -138,6 +138,7 @@ async fn test_site_explorer_power_shelf_discovery(
         power_shelf.ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
             component_integrities: None,
+            component_integrity_unavailable: false,
             hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
@@ -251,6 +252,7 @@ async fn test_site_explorer_power_shelf_discovery_with_static_ip(
         power_shelf.ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
             component_integrities: None,
+            component_integrity_unavailable: false,
             hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
@@ -503,6 +505,7 @@ async fn test_site_explorer_power_shelf_with_expected_config(
         power_shelf.ip.parse().unwrap(), // Use expected IP address, not DHCP-assigned IP
         Ok(EndpointExplorationReport {
             component_integrities: None,
+            component_integrity_unavailable: false,
             hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
@@ -617,6 +620,7 @@ async fn test_site_explorer_power_shelf_creation_limit(
             power_shelf.ip.parse().unwrap(), // Use expected IP address, not DHCP-assigned IP
             Ok(EndpointExplorationReport {
                 component_integrities: None,
+                component_integrity_unavailable: false,
                 hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
@@ -726,6 +730,7 @@ async fn test_site_explorer_power_shelf_disabled(
         power_shelf.ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
             component_integrities: None,
+            component_integrity_unavailable: false,
             hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
@@ -904,6 +909,7 @@ async fn test_power_shelf_state_history_error_handling(
     // Create exploration report for power shelf
     let exploration_report = EndpointExplorationReport {
         component_integrities: None,
+        component_integrity_unavailable: false,
         hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         last_exploration_error: None,

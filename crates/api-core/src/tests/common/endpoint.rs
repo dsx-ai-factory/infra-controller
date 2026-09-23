@@ -95,6 +95,7 @@ fn build_exploration_report(
 
     EndpointExplorationReport {
         component_integrities: None,
+        component_integrity_unavailable: false,
         hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         vendor: Some(bmc_vendor::BMCVendor::Dell),

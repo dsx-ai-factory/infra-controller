@@ -54,35 +54,55 @@ struct Member {
     component_integrity_enabled: bool,
 }
 
+/// What an exploration learned about the BMC's `ComponentIntegrity`
+/// collection.
+///
+/// A BMC that advertises no collection and one whose collection could not be
+/// read both leave `entries` absent, but only the second is a missing answer:
+/// the first is the BMC saying it has nothing to attest. Coverage reads the
+/// two differently, so they are kept apart here rather than merged into one
+/// absence.
+#[derive(Default)]
+pub(crate) struct Observation {
+    /// The members the collection listed, unfiltered.
+    pub(crate) entries: Option<Vec<ComponentIntegrityEntry>>,
+    /// Set when the collection was advertised but fetching it failed.
+    pub(crate) unavailable: bool,
+}
+
 /// What the BMC says it can attest, unfiltered.
 ///
-/// `None` both when the service root advertises no collection and when the
-/// fetch fails: the list drives attestation coverage, while scheduling reads
-/// the collection live from the BMC, so losing it must not fail an exploration
-/// that otherwise succeeded.
-pub(crate) async fn explore<B: Bmc>(
-    bmc: &B,
-    root: &nv_redfish::ServiceRoot<B>,
-) -> Option<Vec<ComponentIntegrityEntry>> {
-    let link = root.root.component_integrity.as_ref()?;
+/// A failed fetch is reported rather than raised: the list drives attestation
+/// coverage, while scheduling reads the collection live from the BMC, so
+/// losing it must not fail an exploration that otherwise succeeded.
+pub(crate) async fn explore<B: Bmc>(bmc: &B, root: &nv_redfish::ServiceRoot<B>) -> Observation {
+    let Some(link) = root.root.component_integrity.as_ref() else {
+        return Observation::default();
+    };
     match bmc
         .expand::<Collection>(&link.odata_id, ExpandQuery::default())
         .await
     {
-        Ok(collection) => Some(
-            collection
-                .members
-                .iter()
-                .map(|member| ComponentIntegrityEntry {
-                    id: member.id.clone(),
-                    component_integrity_type: member.component_integrity_type.clone(),
-                    component_integrity_enabled: member.component_integrity_enabled,
-                })
-                .collect(),
-        ),
+        Ok(collection) => Observation {
+            entries: Some(
+                collection
+                    .members
+                    .iter()
+                    .map(|member| ComponentIntegrityEntry {
+                        id: member.id.clone(),
+                        component_integrity_type: member.component_integrity_type.clone(),
+                        component_integrity_enabled: member.component_integrity_enabled,
+                    })
+                    .collect(),
+            ),
+            unavailable: false,
+        },
         Err(error) => {
             tracing::warn!(%error, "Failed to fetch the ComponentIntegrity collection.");
-            None
+            Observation {
+                entries: None,
+                unavailable: true,
+            }
         }
     }
 }

@@ -53,6 +53,7 @@ fn dpu_report(nic_mode: BlueFieldOperatingMode) -> EndpointExplorationReport {
 fn host_bmc_report() -> EndpointExplorationReport {
     EndpointExplorationReport {
         component_integrities: None,
+        component_integrity_unavailable: false,
         hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         vendor: Some(bmc_vendor::BMCVendor::Dell),
