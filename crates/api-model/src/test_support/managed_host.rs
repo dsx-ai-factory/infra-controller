@@ -291,6 +291,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
             last_exploration_error: None,
             last_exploration_latency: None,
             component_integrities: None,
+            component_integrity_unavailable: false,
             vendor: value.vendor,
             hardware_class: value.hardware_class,
             managers: vec![Manager {

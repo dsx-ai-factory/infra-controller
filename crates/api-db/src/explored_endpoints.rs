@@ -425,9 +425,11 @@ pub async fn hardware_class_recorded(
 ///
 /// A report recording no `ComponentIntegrity` collection clears the column,
 /// since the row mirrors the last exploration and a kept digest would count
-/// the endpoint under a set its BMC no longer reports. An exploration that
-/// failed outright keeps its previous report, and with it its digest, through
-/// [`try_update_last_exploration_error`].
+/// the endpoint under a set its BMC no longer reports. A collection the BMC
+/// advertised but could not serve is not that: the caller keeps the previous
+/// digest, so a transient failure does not read as hardware losing its
+/// attesters. An exploration that failed outright keeps its previous report,
+/// and with it its digest, through [`try_update_last_exploration_error`].
 fn attester_digest(report: &EndpointExplorationReport) -> Option<String> {
     report.attester_set().map(|set| set.digest)
 }
@@ -448,13 +450,15 @@ pub async fn try_update(
     let new_version = old_version.increment();
     let attester_digest = attester_digest(exploration_report);
     let query = "
-UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false, hardware_class=$4, attester_digest=$5
-WHERE address=$6 AND version=$7";
+UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false, hardware_class=$4,
+    attester_digest = CASE WHEN $5 THEN attester_digest ELSE $6 END
+WHERE address=$7 AND version=$8";
     let query_result = sqlx::query(query)
         .bind(new_version)
         .bind(sqlx::types::Json(exploration_report))
         .bind(waiting_for_explorer_refresh)
         .bind(exploration_report.hardware_class.as_deref())
+        .bind(exploration_report.component_integrity_unavailable)
         .bind(attester_digest)
         .bind(address)
         .bind(old_version)
@@ -1419,6 +1423,53 @@ mod tests {
             ConditionalWrite::Applied(()),
         );
         assert_eq!(read_attester_digest(&mut txn, address).await, None);
+    }
+
+    /// A BMC that advertises the collection and then fails to serve it has
+    /// reported nothing about its attesters, so the endpoint has to keep the
+    /// digest it last observed. Clearing it would drop the endpoint out of its
+    /// set's count and read as hardware losing its roots of trust.
+    #[crate::sqlx_test]
+    async fn an_unavailable_collection_keeps_the_last_observed_digest(pool: sqlx::PgPool) {
+        async fn read_attester_digest(txn: &mut PgConnection, address: IpAddr) -> Option<String> {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT attester_digest FROM explored_endpoints WHERE address = $1",
+            )
+            .bind(address)
+            .fetch_one(txn)
+            .await
+            .expect("read attester_digest")
+        }
+
+        let mut txn = pool.begin().await.unwrap();
+        let address: IpAddr = "10.0.6.2".parse().unwrap();
+        let observed = EndpointExplorationReport {
+            component_integrities: Some(vec![model::site_explorer::ComponentIntegrityEntry {
+                id: "HGX_ERoT_GPU_0".to_string(),
+                component_integrity_type: "SPDM".to_string(),
+                component_integrity_enabled: true,
+            }]),
+            ..Default::default()
+        };
+
+        insert(address, &observed, false, &mut txn).await.unwrap();
+        let recorded = read_attester_digest(&mut txn, address).await;
+        assert_eq!(recorded, observed.attester_set().map(|set| set.digest));
+
+        let version = read_version(&mut txn, address).await;
+        let unavailable = EndpointExplorationReport {
+            component_integrities: None,
+            component_integrity_unavailable: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            try_update(address, version, &unavailable, false, &mut txn)
+                .await
+                .unwrap(),
+            ConditionalWrite::Applied(()),
+        );
+
+        assert_eq!(read_attester_digest(&mut txn, address).await, recorded);
     }
 
     /// An operator reads this to decide what to profile, so every class the
