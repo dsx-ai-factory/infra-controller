@@ -79,6 +79,19 @@ pub(crate) async fn get_expected_rack_group(
     Ok(Response::new(group.into()))
 }
 
+pub(crate) async fn get_all_expected_rack_groups(
+    api: &Api,
+    _request: Request<()>,
+) -> Result<Response<rpc::ExpectedRackGroupList>, Status> {
+    let mut txn = api.txn_begin().await?;
+    let groups = db_expected_rack_group::find_all(&mut txn).await?;
+    txn.rollback_or_log("read-only load of all expected rack groups")
+        .await;
+    Ok(Response::new(rpc::ExpectedRackGroupList {
+        expected_rack_groups: groups.into_iter().map(Into::into).collect(),
+    }))
+}
+
 pub(crate) async fn find_ids(
     api: &Api,
     _request: Request<rpc::ExpectedRackGroupSearchFilter>,

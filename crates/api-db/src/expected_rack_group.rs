@@ -53,8 +53,8 @@ pub async fn find_by_rack_group_id(
     Ok(Some(row.into_group()))
 }
 
-#[cfg(test)]
-async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedRackGroup>> {
+/// Returns all expected rack groups ordered by their external ID.
+pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedRackGroup>> {
     let query = "SELECT rack_group_id, topology, racks, metadata_name, metadata_description, metadata_labels FROM expected_rack_groups ORDER BY rack_group_id";
     let rows: Vec<GroupRow> = sqlx::query_as(query)
         .fetch_all(&mut *txn)
