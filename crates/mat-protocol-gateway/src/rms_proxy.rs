@@ -227,7 +227,8 @@ impl RmsProxy {
 
     /// The single instance a rack-scoped request goes to. Every node must name a rack of the
     /// same owner: the RMS operations routed this way act on one instance, so a request spanning
-    /// instances is a caller error, a dropped owner is `UNAVAILABLE` and an unknown rack
+    /// instances is a caller error. A node whose rack cannot be routed keeps its own status
+    /// wherever it sits in the request: a dropped owner is `UNAVAILABLE`, an unknown rack
     /// `NOT_FOUND`.
     fn rack_owner(&self, nodes: &[rms::NodeInfo]) -> Result<Backend, Status> {
         self.ensure_ownership_ready()?;
@@ -236,7 +237,7 @@ impl RmsProxy {
         };
         let owner = self.rack_owner_of(first)?;
         for node in &nodes[1..] {
-            if self.rack_owner_of(node).as_ref() != Ok(&owner) {
+            if self.rack_owner_of(node)? != owner {
                 return Err(Status::invalid_argument(format!(
                     "the nodes span rack {:?} on machine-a-tron {owner} and rack {:?}; a rack-scoped request must name racks of one instance",
                     first.rack_id, node.rack_id
@@ -1917,6 +1918,22 @@ mod tests {
                     expect: refused(
                         Code::InvalidArgument,
                         "the nodes span rack \"rack-001\" on machine-a-tron mat-a and rack \"rack-002\"; a rack-scoped request must name racks of one instance",
+                    ),
+                },
+                Case {
+                    scenario: "a routable first rack and a dropped later rack keep UNAVAILABLE",
+                    input: vec![rack_node("s1", "rack-001"), rack_node("s4", "rack-004")],
+                    expect: refused(
+                        Code::Unavailable,
+                        "machine-a-tron mat-b owns rack \"rack-004\" but has not answered its status polls for ownership.stale_after; retry once it answers",
+                    ),
+                },
+                Case {
+                    scenario: "a routable first rack and an unknown later rack keep NOT_FOUND",
+                    input: vec![rack_node("s1", "rack-001"), rack_node("s9", "rack-999")],
+                    expect: refused(
+                        Code::NotFound,
+                        "no machine-a-tron instance owns rack \"rack-999\"",
                     ),
                 },
                 Case {
