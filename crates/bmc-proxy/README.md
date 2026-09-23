@@ -204,9 +204,12 @@ Behavior that follows from the store:
   waits at most 10 seconds for the fetch before that response is served;
   the fetch continues on its own. A BMC slow to fail does not make callers
   wait out its budget.
-- The cache runs at most 4 fetches against one BMC at a time; further
-  fetches queue. A fetch outlives the caller that started it, so this bounds
-  what a caller asking for many resources and leaving can pile onto a BMC.
+- The cache runs at most 4 fetches against one BMC at a time and accepts at
+  most 32 running or waiting; further fetches are refused at once with `503`
+  and counted as `refused`, and a waiting fetch that gets no slot within the
+  class `upstream_timeout` fails the same way. A fetch outlives the caller
+  that started it, so this bounds what a caller asking for many resources and
+  leaving can pile onto a BMC.
 - Only requests whose query is empty or made of Redfish's own parameters
   (`$expand`, `$select`, `$filter`, `$top`, `$skip`, `$skiptoken`, `only`,
   `excerpt`) are cached. A BMC ignores other parameters and answers the same
@@ -214,13 +217,18 @@ Behavior that follows from the store:
   requests are forwarded with `X-Nico-Cache: uncacheable`.
 - A caller whose `If-None-Match` names the stored `ETag` receives `304 Not
   Modified` without the body being sent.
-- `Cache-Control: no-cache`, `no-store`, or `max-age=0`, or `Pragma:
-  no-cache`, on the request skips the stored response in every case: the
-  caller gets what the BMC answers, a `304` included, and gets the BMC's
-  failure rather than a stored fallback. The fetched response is still stored,
-  unless the class is held after a write or the resource is held off after an
-  unstorable fetch: the cache is shared and exists to protect the BMC, not to
-  serve one caller's preference.
+- `Cache-Control: no-cache` or `max-age=0`, or `Pragma: no-cache`, on the
+  request skips the stored response in every case: the caller gets what the
+  BMC answers, a `304` included, and gets the BMC's failure rather than a
+  stored fallback. The fetched response is still stored, unless the class is
+  held after a write or the resource is held off after an unstorable fetch:
+  the cache is shared and exists to protect the BMC, not to serve one caller's
+  preference. `Cache-Control: no-store` on the request goes further: it is
+  forwarded directly and nothing is stored.
+- A response the BMC marks `Cache-Control: no-store`, `private`, or
+  `no-cache` is never stored and drops any stored entry a `304` would have
+  refreshed; the store is shared, and `no-cache` asks for a validation the
+  store does not perform within `ttl`.
 - A write (`POST`, `PUT`, `PATCH`, or `DELETE`) the BMC did not answer with a
   4xx drops the stored responses of every class whose `invalidated_by` it
   matches for that BMC, and starts that class's `hold_after_write` for the

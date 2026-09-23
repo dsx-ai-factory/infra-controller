@@ -79,6 +79,12 @@ const HOLD_OFF_RECORD_CAPACITY: u64 = 65_536;
 /// caller-facing wait is the same as for a busy BMC.
 const MAX_FETCHES_PER_BMC: usize = 4;
 
+/// Fetches the cache accepts for one BMC at a time, running or waiting for
+/// one of the [`MAX_FETCHES_PER_BMC`] slots. A burst of distinct resources
+/// must not queue an unbounded number of tasks that all reach the BMC after
+/// their callers left; past this bound a fetch is refused at once.
+const MAX_PENDING_FETCHES_PER_BMC: usize = 32;
+
 /// The query parameters Redfish defines. A BMC ignores any other parameter
 /// and answers the same resource, so a request carrying one is not cached:
 /// keying it would let a caller mint an unbounded number of entries, each
@@ -407,6 +413,9 @@ pub(crate) struct ResponseCache {
     hold_offs: MokaCache<CacheKey, HoldOff>,
     /// Per-BMC bound on concurrent fetches, see [`MAX_FETCHES_PER_BMC`].
     fetch_permits: Mutex<HashMap<IpAddr, Arc<Semaphore>>>,
+    /// Per-BMC bound on running plus waiting fetches, see
+    /// [`MAX_PENDING_FETCHES_PER_BMC`].
+    pending_slots: Mutex<HashMap<IpAddr, Arc<Semaphore>>>,
 }
 
 /// One fetch in progress: what requests join, and which fetch it is.
@@ -459,15 +468,16 @@ impl ResponseCache {
                 .time_to_live(2 * UNSTORABLE_FETCH_HOLD_OFF)
                 .build(),
             fetch_permits: Mutex::new(HashMap::new()),
+            pending_slots: Mutex::new(HashMap::new()),
         }
     }
 
     fn fetch_permits_for(&self, bmc: IpAddr) -> Arc<Semaphore> {
-        Arc::clone(
-            lock(&self.fetch_permits)
-                .entry(bmc)
-                .or_insert_with(|| Arc::new(Semaphore::new(MAX_FETCHES_PER_BMC))),
-        )
+        per_bmc_semaphore(&self.fetch_permits, bmc, MAX_FETCHES_PER_BMC)
+    }
+
+    fn pending_slots_for(&self, bmc: IpAddr) -> Arc<Semaphore> {
+        per_bmc_semaphore(&self.pending_slots, bmc, MAX_PENDING_FETCHES_PER_BMC)
     }
 
     fn class_state(&self, bmc: IpAddr, class: &ClassName) -> ClassState {
@@ -586,6 +596,19 @@ impl ResponseCache {
         if let Some(entry) = in_flight.get(&key) {
             return (entry.receiver.clone(), true);
         }
+        // Past the pending bound nothing is spawned: the refusal is published
+        // at once, and the request decides what to do with it.
+        let Ok(pending_slot) = self.pending_slots_for(key.bmc).try_acquire_owned() else {
+            emit(CacheRefreshCompleted {
+                class: class.name.clone(),
+                result: RefreshResult::Refused,
+            });
+            let (_sender, receiver) = watch::channel(Some(FetchOutcome::Failed {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: format!("too many fetches pending for BMC {}", key.bmc),
+            }));
+            return (receiver, false);
+        };
         // Build the fetch and the guard that removes the map entry before
         // inserting it, so nothing that can fail sits between the entry and
         // its remover; a task the runtime drops unrun drops the guard too.
@@ -624,13 +647,33 @@ impl ResponseCache {
         tokio::spawn(
             async move {
                 // Queue behind the BMC's other fetches; joiners keep waiting
-                // on the receiver meanwhile. The semaphore is never closed.
-                let _permit = permits.acquire_owned().await;
-                let outcome = cache.run_fetch(&key, &class, existing, fetch).await;
+                // on the receiver meanwhile. The wait is bounded by the class
+                // budget, so a fetch cannot sit in the queue longer than it
+                // could have run.
+                let outcome =
+                    match tokio::time::timeout(class.upstream_timeout, permits.acquire_owned())
+                        .await
+                    {
+                        Ok(Ok(_permit)) => cache.run_fetch(&key, &class, existing, fetch).await,
+                        Ok(Err(_)) | Err(_) => {
+                            emit(CacheRefreshCompleted {
+                                class: class.name.clone(),
+                                result: RefreshResult::Refused,
+                            });
+                            FetchOutcome::Failed {
+                                status: StatusCode::SERVICE_UNAVAILABLE,
+                                message: format!(
+                                    "no fetch slot for BMC {} within {:?}",
+                                    key.bmc, class.upstream_timeout
+                                ),
+                            }
+                        }
+                    };
                 // Publish before leaving the in-flight map, so a request
                 // arriving now either joins this fetch or finds what it stored.
                 sender.send_replace(Some(outcome));
                 drop(guard);
+                drop(pending_slot);
             }
             .instrument(span),
         );
@@ -674,7 +717,7 @@ impl ResponseCache {
                     body,
                 },
                 _,
-            ) if !is_encoded(&headers) => {
+            ) if !is_encoded(&headers) && !forbids_shared_storage(&headers) => {
                 let entry = Arc::new(CachedResponse {
                     headers: storable_headers(headers),
                     body,
@@ -697,14 +740,25 @@ impl ResponseCache {
                 },
                 Some(previous),
             ) => {
+                let headers =
+                    storable_headers(merge_validated_headers(&previous.headers, &headers));
+                let forbidden = forbids_shared_storage(&headers);
                 let entry = Arc::new(CachedResponse {
-                    headers: storable_headers(merge_validated_headers(&previous.headers, &headers)),
+                    headers,
                     body: previous.body.clone(),
                     stored_at: now,
                     generation,
                     lifetime: policy.lifetime,
                 });
-                if held {
+                if forbidden {
+                    // The BMC now forbids a shared cache to hold this; the
+                    // waiters get the body it just confirmed, the store does
+                    // not keep it.
+                    self.entries.invalidate(key).await;
+                    self.record_hold_off(key, HoldOffReason::Unstorable, now)
+                        .await;
+                    (RefreshResult::Uncacheable, FetchOutcome::Revalidated(entry))
+                } else if held {
                     (RefreshResult::Uncacheable, FetchOutcome::Revalidated(entry))
                 } else {
                     self.entries.insert(key.clone(), Arc::clone(&entry)).await;
@@ -839,6 +893,39 @@ impl ResponseCache {
 fn storable_headers(mut headers: HeaderMap) -> HeaderMap {
     headers.remove(header::SET_COOKIE);
     headers
+}
+
+/// One semaphore per BMC, created on first use with `permits`.
+fn per_bmc_semaphore(
+    map: &Mutex<HashMap<IpAddr, Arc<Semaphore>>>,
+    bmc: IpAddr,
+    permits: usize,
+) -> Arc<Semaphore> {
+    Arc::clone(
+        lock(map)
+            .entry(bmc)
+            .or_insert_with(|| Arc::new(Semaphore::new(permits))),
+    )
+}
+
+/// Whether the BMC forbade a shared cache to hold this response, with
+/// `Cache-Control: no-store` or `private`, or asked for validation on every
+/// reuse with `no-cache`, which the store does not do within `ttl`.
+fn forbids_shared_storage(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::CACHE_CONTROL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(|directive| {
+            directive
+                .split('=')
+                .next()
+                .unwrap_or(directive)
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .any(|directive| matches!(directive.as_str(), "no-store" | "private" | "no-cache"))
 }
 
 /// Whether the BMC applied a transfer encoding the store cannot hand to a
@@ -1550,6 +1637,44 @@ mod tests {
                     expect: Yields((false, true)),
                 },
                 Case {
+                    scenario: "a 200 the BMC marks private is not stored and holds the key off",
+                    input: RefreshInput {
+                        reply: || {
+                            let mut headers = HeaderMap::new();
+                            headers.insert(
+                                header::CACHE_CONTROL,
+                                HeaderValue::from_static("private, max-age=60"),
+                            );
+                            UpstreamReply::Response {
+                                status: StatusCode::OK,
+                                headers,
+                                body: Bytes::from_static(b"mine"),
+                            }
+                        },
+                        prior: false,
+                    },
+                    expect: Yields((false, true)),
+                },
+                Case {
+                    scenario: "a 304 that now says no-store drops the entry",
+                    input: RefreshInput {
+                        reply: || {
+                            let mut headers = HeaderMap::new();
+                            headers.insert(
+                                header::CACHE_CONTROL,
+                                HeaderValue::from_static("no-store"),
+                            );
+                            UpstreamReply::Response {
+                                status: StatusCode::NOT_MODIFIED,
+                                headers,
+                                body: Bytes::new(),
+                            }
+                        },
+                        prior: true,
+                    },
+                    expect: Yields((false, true)),
+                },
+                Case {
                     scenario: "a 404 on refresh evicts the stale entry",
                     input: RefreshInput {
                         reply: || status_reply(StatusCode::NOT_FOUND),
@@ -1687,6 +1812,161 @@ mod tests {
             assert_eq!(body_of(&outcome).as_deref(), Some("bounded"));
         }
         assert_eq!(started.load(Ordering::SeqCst), MAX_FETCHES_PER_BMC + 2);
+    }
+
+    /// Past the pending bound a fetch is refused at once instead of queuing a
+    /// task that would reach the BMC after its caller left.
+    #[tokio::test]
+    async fn pending_fetches_per_bmc_are_bounded() {
+        let table = classes();
+        let inventory = class(&table, "inventory");
+        let cache = Arc::new(ResponseCache::new(MAX_BYTES));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let mut waiters = Vec::new();
+        for index in 0..MAX_PENDING_FETCHES_PER_BMC {
+            let cache = Arc::clone(&cache);
+            let inventory = Arc::clone(&inventory);
+            let key = key(
+                BMC,
+                &inventory,
+                &format!("/redfish/v1/UpdateService/FirmwareInventory/FW_{index}"),
+            );
+            let release = Arc::clone(&release);
+            waiters.push(tokio::spawn(async move {
+                cache
+                    .fetch(key, &inventory, None, move || {
+                        move |_| async move {
+                            while !release.load(Ordering::SeqCst) {
+                                tokio::task::yield_now().await;
+                            }
+                            ok_reply("admitted", None)
+                        }
+                    })
+                    .await
+            }));
+        }
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        let refused_key = key(
+            BMC,
+            &inventory,
+            "/redfish/v1/UpdateService/FirmwareInventory/FW_x",
+        );
+        let (outcome, joined) = tokio::time::timeout(
+            Duration::from_secs(1),
+            cache.fetch(refused_key.clone(), &inventory, None, || {
+                |_| async { ok_reply("never", None) }
+            }),
+        )
+        .await
+        .expect("a refused fetch answers at once");
+        assert!(!joined);
+        assert!(
+            matches!(
+                outcome,
+                FetchOutcome::Failed {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    ..
+                }
+            ),
+            "the fetch past the bound is refused"
+        );
+        assert!(
+            !cache.in_flight.lock().unwrap().contains_key(&refused_key),
+            "nothing was spawned for it"
+        );
+
+        release.store(true, Ordering::SeqCst);
+        for waiter in waiters {
+            let (outcome, _) = waiter.await.expect("waiter completes");
+            assert_eq!(body_of(&outcome).as_deref(), Some("admitted"));
+        }
+    }
+
+    /// A fetch that cannot get a slot within the class budget fails instead
+    /// of waiting indefinitely; nothing reaches the BMC for it.
+    #[tokio::test(start_paused = true)]
+    async fn waiting_for_a_fetch_slot_is_bounded_by_the_class_budget() {
+        let table = classes();
+        let inventory = class(&table, "inventory");
+        let cache = Arc::new(ResponseCache::new(MAX_BYTES));
+        let release = Arc::new(Notify::new());
+        let ran = Arc::new(AtomicUsize::new(0));
+
+        let mut holders = Vec::new();
+        for index in 0..MAX_FETCHES_PER_BMC {
+            let cache = Arc::clone(&cache);
+            let inventory = Arc::clone(&inventory);
+            let key = key(
+                BMC,
+                &inventory,
+                &format!("/redfish/v1/UpdateService/FirmwareInventory/FW_{index}"),
+            );
+            let release = Arc::clone(&release);
+            let ran = Arc::clone(&ran);
+            holders.push(tokio::spawn(async move {
+                cache
+                    .fetch(key, &inventory, None, move || {
+                        move |_| async move {
+                            ran.fetch_add(1, Ordering::SeqCst);
+                            release.notified().await;
+                            ok_reply("held", None)
+                        }
+                    })
+                    .await
+            }));
+        }
+        while ran.load(Ordering::SeqCst) < MAX_FETCHES_PER_BMC {
+            tokio::task::yield_now().await;
+        }
+
+        let waiting = {
+            let cache = Arc::clone(&cache);
+            let inventory = Arc::clone(&inventory);
+            let key = key(
+                BMC,
+                &inventory,
+                "/redfish/v1/UpdateService/FirmwareInventory/FW_late",
+            );
+            let ran = Arc::clone(&ran);
+            tokio::spawn(async move {
+                cache
+                    .fetch(key, &inventory, None, move || {
+                        move |_| async move {
+                            ran.fetch_add(1, Ordering::SeqCst);
+                            ok_reply("late", None)
+                        }
+                    })
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        tokio::time::advance(inventory.upstream_timeout + Duration::from_secs(1)).await;
+
+        let (outcome, _) = waiting.await.expect("the waiting fetch completes");
+        assert!(
+            matches!(
+                outcome,
+                FetchOutcome::Failed {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    ..
+                }
+            ),
+            "the fetch gave up waiting for a slot"
+        );
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            MAX_FETCHES_PER_BMC,
+            "its request never reached the BMC"
+        );
+
+        release.notify_waiters();
+        for holder in holders {
+            holder.await.expect("holder completes");
+        }
     }
 
     #[test]

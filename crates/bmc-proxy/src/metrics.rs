@@ -363,6 +363,9 @@ pub(crate) enum RefreshResult {
     Uncacheable,
     /// The forward produced no response.
     Failed,
+    /// No fetch was made: the BMC already had its maximum number of fetches
+    /// pending, or none of them freed a slot within the class budget.
+    Refused,
 }
 
 /// An upstream fetch the response cache issued completed. Metric-only: the
@@ -375,7 +378,7 @@ pub(crate) enum RefreshResult {
     component = "nico-bmc-proxy",
     log = off,
     metric = counter,
-    describe = "Number of upstream fetches the response cache issued for misses and refreshes, by request class and result (stored, revalidated, uncacheable, failed)"
+    describe = "Number of upstream fetches the response cache issued for misses and refreshes, by request class and result (stored, revalidated, uncacheable, failed, refused)"
 )]
 pub(crate) struct CacheRefreshCompleted {
     #[label]
@@ -752,6 +755,7 @@ mod tests {
                 RefreshResult::Revalidated.label_value() => "revalidated".to_string(),
                 RefreshResult::Uncacheable.label_value() => "uncacheable".to_string(),
                 RefreshResult::Failed.label_value() => "failed".to_string(),
+                RefreshResult::Refused.label_value() => "refused".to_string(),
             }
         );
     }

@@ -945,8 +945,22 @@ async fn serve_cached_get(
         .await;
     }
 
+    let directive = cache_directive(&parts.headers);
+    if directive == CacheDirective::NoStore {
+        // Neither served from the store nor stored: forwarded directly.
+        return forward_uncached(
+            &state,
+            target_ip,
+            parts,
+            class,
+            path_and_query,
+            CacheOutcome::Bypass,
+        )
+        .await;
+    }
+
     let key = CacheKey::new(target_ip, class.name.clone(), &path_and_query);
-    let bypass = requests_fresh_response(&parts.headers);
+    let bypass = directive == CacheDirective::Revalidate;
     let existing = state.response_cache.lookup(&key).await;
     // Built once, run only by the request that starts a fetch; a joiner drops
     // it unused.
@@ -1258,10 +1272,20 @@ fn fetch_request_headers(request_headers: &HeaderMap) -> HeaderMap {
     headers
 }
 
-/// Whether the caller asked to skip the stored response, with
-/// `Cache-Control: no-cache`, `no-store`, or `max-age=0`, or the HTTP/1.0
-/// `Pragma: no-cache`.
-fn requests_fresh_response(headers: &HeaderMap) -> bool {
+/// What the caller's cache directives ask of the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheDirective {
+    /// No directive: served from the store when it can be.
+    Serve,
+    /// `Cache-Control: no-cache` or `max-age=0`, or the HTTP/1.0
+    /// `Pragma: no-cache`: the stored response is skipped; the fetched one is
+    /// still stored.
+    Revalidate,
+    /// `Cache-Control: no-store`: neither served nor stored.
+    NoStore,
+}
+
+fn cache_directive(headers: &HeaderMap) -> CacheDirective {
     let directive_present = |name: HeaderName, directives: &[&str]| {
         headers
             .get_all(name)
@@ -1271,10 +1295,15 @@ fn requests_fresh_response(headers: &HeaderMap) -> bool {
             .map(|directive| directive.trim().to_ascii_lowercase())
             .any(|directive| directives.contains(&directive.as_str()))
     };
-    directive_present(
-        header::CACHE_CONTROL,
-        &["no-cache", "no-store", "max-age=0"],
-    ) || directive_present(header::PRAGMA, &["no-cache"])
+    if directive_present(header::CACHE_CONTROL, &["no-store"]) {
+        CacheDirective::NoStore
+    } else if directive_present(header::CACHE_CONTROL, &["no-cache", "max-age=0"])
+        || directive_present(header::PRAGMA, &["no-cache"])
+    {
+        CacheDirective::Revalidate
+    } else {
+        CacheDirective::Serve
+    }
 }
 
 /// Names how the cache answered on a response leaving the cache path.
@@ -1336,9 +1365,31 @@ fn if_none_match_names(request_headers: &HeaderMap, etag: Option<&HeaderValue>) 
         .get_all(header::IF_NONE_MATCH)
         .iter()
         .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
+        .flat_map(entity_tags)
         .any(|candidate| candidate == "*" || weak(candidate) == weak(etag))
+}
+
+/// The entity-tags of one `If-None-Match` value. A tag may contain a comma
+/// inside its quotes, so the list is split only on commas outside them.
+fn entity_tags(value: &str) -> Vec<&str> {
+    let mut tags = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    for (index, character) in value.char_indices() {
+        match character {
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                tags.push(&value[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    tags.push(&value[start..]);
+    tags.into_iter()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .collect()
 }
 
 /// How reading an upstream body for the store ended.
@@ -2201,7 +2252,7 @@ mod tests {
         TlsCertificateReloadFailed, TlsConnectionFailed, UpstreamBody,
         authorize_principal_allow_list, bmc_proxy_request_span, bounded_cache, build_authority,
         build_http_client, build_response, copy_request_headers, create_client,
-        evict_cached_credentials, forwarded_header_value, idle_bounded_cache,
+        evict_cached_credentials, forwarded_header_value, idle_bounded_cache, if_none_match_names,
         ip_for_forwarded_target, is_hop_by_hop_header, method_supports_body,
         parse_forwarded_host_value, prepare_response_body, proxy_request_inner,
         request_may_have_reached_bmc, request_principal_ids, span_status,
@@ -2768,6 +2819,40 @@ mod tests {
         assert!(!request_may_have_reached_bmc(&builder_error));
         assert!(!request_may_have_reached_bmc(&connect_error));
         assert!(request_may_have_reached_bmc(&timeout_error));
+    }
+
+    struct IfNoneMatchInput {
+        header: &'static str,
+        etag: &'static str,
+    }
+
+    /// `If-None-Match` is a comma-separated list, but a tag may carry a comma
+    /// inside its quotes, and comparison is weak for `GET`.
+    #[test]
+    fn if_none_match_lists_are_split_only_between_tags() {
+        value_scenarios!(
+            run = |IfNoneMatchInput { header, etag }| {
+                let mut headers = HeaderMap::new();
+                headers.insert(header::IF_NONE_MATCH, HeaderValue::from_static(header));
+                if_none_match_names(&headers, Some(&HeaderValue::from_static(etag)))
+            };
+            "plain lists" {
+                IfNoneMatchInput { header: "\"a\"", etag: "\"a\"" } => true,
+                IfNoneMatchInput { header: "\"x\", \"a\"", etag: "\"a\"" } => true,
+                IfNoneMatchInput { header: "\"x\"", etag: "\"a\"" } => false,
+                IfNoneMatchInput { header: "*", etag: "\"a\"" } => true,
+            }
+
+            "a comma inside the quotes stays in the tag" {
+                IfNoneMatchInput { header: "\"a,b\"", etag: "\"a,b\"" } => true,
+                IfNoneMatchInput { header: "\"x\", \"a,b\"", etag: "\"a,b\"" } => true,
+                IfNoneMatchInput { header: "\"a\", \"b\"", etag: "\"a,b\"" } => false,
+            }
+
+            "weak tags match strong ones" {
+                IfNoneMatchInput { header: "W/\"a,b\"", etag: "\"a,b\"" } => true,
+            }
+        );
     }
 
     #[test]
@@ -4008,6 +4093,8 @@ mod tests {
     const SYSTEM_PATH: &str = "/redfish/v1/Systems/System_0";
     const CHASSIS_PATH: &str = "/redfish/v1/Chassis/C0";
     const CHASSIS_BODY: &str = r#"{"Id":"C0"}"#;
+    const MEMBER_PATH: &str = "/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0";
+    const MEMBER_BODY: &str = r#"{"Id":"FW_BMC_0","Version":"1.0"}"#;
     const HUGE_PATH: &str = "/redfish/v1/UpdateService/FirmwareInventory/Huge";
     /// One byte past what the store accepts.
     const HUGE_LEN: usize = MAX_BUFFERED_BODY_SIZE + 1;
@@ -4061,6 +4148,9 @@ mod tests {
                 .into_response(),
             (Method::GET, CHASSIS_PATH) => {
                 ([(header::CONTENT_TYPE, "application/json")], CHASSIS_BODY).into_response()
+            }
+            (Method::GET, MEMBER_PATH) => {
+                ([(header::CONTENT_TYPE, "application/json")], MEMBER_BODY).into_response()
             }
             (Method::GET, HUGE_PATH) => (
                 [(header::CONTENT_TYPE, "application/json")],
@@ -4229,6 +4319,10 @@ mod tests {
         }
     }
 
+    fn cache_of_observed(observed: &Observed) -> Option<&str> {
+        observed.cache.as_deref()
+    }
+
     fn observed(status: u16, cache: Option<&str>, has_age: bool, body: &str) -> Observed {
         Observed {
             status,
@@ -4281,6 +4375,30 @@ mod tests {
             observed(304, Some("hit"), true, ""),
         );
         assert_eq!(bmc.hits(Method::GET, INVENTORY_PATH), 1);
+
+        // A `no-store` request is forwarded and stores nothing: the next plain
+        // read of the same resource is a miss.
+        assert_eq!(
+            send(
+                &state,
+                proxied_request(
+                    Method::GET,
+                    MEMBER_PATH,
+                    &[(header::CACHE_CONTROL, "no-store")],
+                ),
+            )
+            .await,
+            observed(200, Some("bypass"), false, MEMBER_BODY),
+        );
+        assert_eq!(
+            send(&state, proxied_request(Method::GET, MEMBER_PATH, &[])).await,
+            observed(200, Some("miss"), true, MEMBER_BODY),
+        );
+        assert_eq!(bmc.hits(Method::GET, MEMBER_PATH), 2);
+        assert_eq!(
+            cache_of_observed(&send(&state, proxied_request(Method::GET, MEMBER_PATH, &[])).await),
+            Some("hit")
+        );
 
         // A bypass goes upstream and is not a hit.
         assert_eq!(
@@ -4435,9 +4553,9 @@ mod tests {
         }
         assert_eq!(bmc.hits(Method::GET, SYSTEM_PATH), 2);
 
-        assert_eq!(lookups("miss"), 3.0);
-        assert_eq!(lookups("hit"), 4.0);
-        assert_eq!(lookups("bypass"), 2.0);
+        assert_eq!(lookups("miss"), 4.0);
+        assert_eq!(lookups("hit"), 5.0);
+        assert_eq!(lookups("bypass"), 3.0);
         assert_eq!(lookups("stale_if_error"), 0.0);
         assert_eq!(
             metrics.counter_delta(
