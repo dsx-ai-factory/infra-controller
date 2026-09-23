@@ -96,6 +96,20 @@ func TestFromCallConfig_PrecedenceChain(t *testing.T) {
 			},
 		},
 		{
+			name: "configured_base_url_accepts_equivalent_ipv6_literal",
+			in: map[string]any{
+				"base_url": "http://[::1]:19080/v2",
+			},
+			req:  requestWithBearer("from-header"),
+			opts: Options{BaseURL: "http://[0:0:0:0:0:0:0:1]:19080/v2", Org: "opts-org", APIName: "nico"},
+			expected: expect{
+				baseURL: "http://[::1]:19080/v2",
+				org:     "opts-org",
+				apiName: "nico",
+				token:   "from-header",
+			},
+		},
+		{
 			name: "configured_base_url_rejects_different_path_case",
 			in: map[string]any{
 				"base_url": "https://opts.example.com/V2",
