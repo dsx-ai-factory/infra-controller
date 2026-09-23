@@ -22,7 +22,32 @@ nico-admin-cli expected-switch update
 
 ## DESCRIPTION
 
-Update expected switch
+Update an expected switch.
+
+Select the switch by either BMC MAC address or ID. Supply at least one
+update field. Omitted fields and empty metadata names or descriptions
+remain unchanged. Supplied labels replace the whole label collection.
+Supplied NVOS MAC addresses replace the stored list.
+
+Supply a username, password, or both for BMC or NVOS. Each omitted
+credential field keeps its stored value. NVOS credentials must contain
+both values after the update, so configuring them for the first time
+requires both flags. Empty BMC values leave their fields unchanged; Core
+PATCH rejects empty NVOS values. Legacy fallback uses the validation
+rules on the older server.
+
+The command first tries Core PATCH, which merges selected fields
+atomically. It falls back to the legacy update on `Unimplemented` or
+`PermissionDenied`, or when a MAC lookup returns no ID. Legacy
+fallback preserves omitted fields and accepts either selector when Core
+supports the switch update mask introduced in
+[PR #3706](https://github.com/dsx-ai-factory/infra-controller/pull/3706). Earlier
+servers use a full replacement: select by BMC MAC address and supply
+every value you need to preserve. The legacy request still requires
+authorization. Other PATCH errors and failed legacy updates remain
+errors.
+
+[Core PATCH RPCs](https://github.com/dsx-ai-factory/infra-controller/pull/6359)
 
 ## OPTIONS
 
@@ -60,18 +85,18 @@ NVOS password of the expected switch
 
 `--meta-name <META_NAME>`
 
-The name that should be used as part of the Metadata for newly created
-Switches. If empty, the SwitchId will be used
+Replace the metadata name. An empty or omitted value leaves it unchanged
 
 `--meta-description <META_DESCRIPTION>`
 
-The description that should be used as part of the Metadata for newly
-created Machines
+Replace the metadata description. An empty or omitted value leaves it
+unchanged
 
 `--label <LABEL>`
 
-A label that will be added as metadata for the newly created Machine.
-The labels key and value must be separated by a : character
+Replace all metadata labels with the supplied key or key:value entries.
+Repeat for each label. Duplicate keys are rejected; label order is not
+preserved. Omission preserves labels
 
 `--rack_id <RACK_ID>`
 
@@ -128,8 +153,9 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mynewpassword
+nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin
 nico-admin-cli expected-switch update --id 12345678-1234-5678-90ab-cdef01234567 --switch-serial-number DGX-H100-640GB
+nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --nvos-password mynewpassword
 nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --nvos-username admin --nvos-password mynewpassword
 ```
 

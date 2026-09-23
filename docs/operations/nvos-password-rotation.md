@@ -22,7 +22,7 @@ NVOS password rotation is a site-wide, asynchronous operation. NICo publishes on
 - Configure RMS connectivity, rack profiles, and switch vendor data as described in [RMS Configuration](../configuration/rms.md).
 - Ensure each managed switch has a BMC MAC address.
 - Ensure each managed switch has an NVOS credential that authenticates to the switch. The credential must be available from the expected-switch record or the NICo credential store.
-- Set expected-switch NVOS username and password fields together. Both values must be non-empty, or both fields must be unset.
+- Supply both NVOS credential fields when configuring them for the first time. Once configured, either field can be patched independently while preserving the omitted value. Both stored values must remain non-empty.
 
 Enable the RMS switch backend in the `nico-api` site configuration.
 

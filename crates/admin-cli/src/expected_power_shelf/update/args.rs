@@ -24,13 +24,31 @@ use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Update an expected power shelf.
+///
+/// Select the shelf by either BMC MAC address or ID. Supply at least one update field.
+/// With Core PATCH, supplied fields replace their stored values and omitted fields remain unchanged.
+/// Supplied labels replace the whole label collection. An empty metadata name or description clears that field.
+///
+/// Supply a BMC username, password, or both. Each omitted credential field keeps its stored value.
+/// Core PATCH rejects empty selected credentials. Legacy fallback uses the validation rules on the older server.
+///
+/// The command first tries Core PATCH, which merges selected fields atomically. It falls back to
+/// the legacy update on `Unimplemented` or `PermissionDenied`, or when a MAC lookup returns no ID.
+/// The legacy shelf update reads the record, merges selected fields locally, and replaces it.
+/// Omitted fields keep their stored values, but concurrent changes can be overwritten on that path.
+/// The legacy request still requires authorization. Other PATCH errors and failed legacy updates
+/// remain errors.
+///
+/// https://github.com/dsx-ai-factory/infra-controller/pull/6359
 #[derive(Parser, Debug, Clone, Serialize, Deserialize)]
+#[clap(verbatim_doc_comment)]
 #[command(after_long_help = "\
 EXAMPLES:
 
-Update an expected power shelf's BMC credentials, selecting it by MAC address:
+Correct a power shelf's BMC password while preserving the username:
     $ nico-admin-cli expected-power-shelf update --bmc-mac-address 00:11:22:33:44:55 \
-    --bmc-username admin --bmc-password mynewpassword
+    --bmc-password mynewpassword
 
 Update an expected power shelf's serial number, selecting it by ID:
     $ nico-admin-cli expected-power-shelf update --id 12345678-1234-5678-90ab-cdef01234567 \
@@ -84,21 +102,21 @@ pub(crate) struct Args {
     #[clap(
         long = "meta-name",
         value_name = "META_NAME",
-        help = "The name that should be used as part of the Metadata for newly created Power Shelves. If empty, the Power Shelf Id will be used"
+        help = "Replace the metadata name. An empty value clears it; PATCH preserves it when omitted"
     )]
     meta_name: Option<String>,
 
     #[clap(
         long = "meta-description",
         value_name = "META_DESCRIPTION",
-        help = "The description that should be used as part of the Metadata for newly created Power Shelves"
+        help = "Replace the metadata description. An empty value clears it; PATCH preserves it when omitted"
     )]
     meta_description: Option<String>,
 
     #[clap(
         long = "label",
         value_name = "LABEL",
-        help = "A label that will be added as metadata for the newly created Machine. The labels key and value must be separated by a : character",
+        help = "Replace all metadata labels with the supplied key or key:value entries. Repeat for each label. Duplicate keys are rejected; label order is not preserved. PATCH preserves omitted labels",
         action = clap::ArgAction::Append
     )]
     labels: Option<Vec<String>>,
@@ -106,7 +124,7 @@ pub(crate) struct Args {
     #[clap(
         long = "host_name",
         value_name = "HOST_NAME",
-        help = "Host name of the power shelf",
+        help = "Unsupported for expected power shelf updates. Omit this option",
         action = clap::ArgAction::Append
     )]
     host_name: Option<String>,
