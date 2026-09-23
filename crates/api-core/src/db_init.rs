@@ -646,6 +646,7 @@ mod tests {
         Domain {
             id: domain_id(id),
             name: name.to_string(),
+            default_ttl: None,
             created: timestamp,
             updated: timestamp,
             deleted: None,
