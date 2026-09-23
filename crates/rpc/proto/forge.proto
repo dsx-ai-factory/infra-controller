@@ -4412,7 +4412,6 @@ message Machine {
   repeated MachineEvent events = 8;
 
   reserved 9; // Was: repeated MachineInterface interfaces = 9;
-
   reserved 10; // Was: optional machine_discovery.DiscoveryInfo discovery_info = 10;
 
   // Machine type (DPU or HOST). Set at ingestion time; not operator-mutable.
@@ -4422,14 +4421,10 @@ message Machine {
   BmcInfo bmc_info = 12;
 
   reserved 14; // Was: google.protobuf.Timestamp last_reboot_time = 14;
-  // This is used by legacy versions of forge-admin-cli as well as by Forge Cloud
   reserved 15; // Was NetworkHealth network_health = 15;
   reserved 16; // Was: google.protobuf.Timestamp last_observation_time = 16;
-
   reserved 17; // Was: optional string maintenance_reference = 17;
-
   reserved 18; // Was: optional google.protobuf.Timestamp maintenance_start_time = 18;
-
   reserved 19; // Was: optional common.MachineId associated_host_machine_id = 19;
   reserved 20; /* previously: optional common.MachineId associated_dpu_machine_id = 20; */
 
@@ -4438,23 +4433,11 @@ message Machine {
   reserved 22; // Was: google.protobuf.Timestamp last_reboot_requested_time = 22;
   reserved 23; // Was: optional string last_reboot_requested_mode = 23;
   reserved 24; // Was: optional string dpu_agent_version = 24;
-
-  // Fields are not ordered numerically, check the whole message for max field number
   reserved 26; // Was: repeated common.MachineId associated_dpu_machine_ids = 26;
-
-  // For Host Machines returns the aggregate health of the host
-  // For DPUs, it returns the individual DPU health
   reserved 27; // Was: health.HealthReport health = 27;
-
   reserved 28; // Was: optional bool firmware_autoupdate = 28;
-
-  // Health report sources (identified by a specific source name and mode) that are applied
-  // to the aggregate health of this machine
   reserved 29; // Was: repeated HealthSourceOrigin health_sources = 29;
-
   reserved 30; // Was: optional string failure_details = 30;
-
-  // Infiniband devices information attached to the machine.
   reserved 32; // Was: optional InfinibandStatusObservation ib_status = 32;
 
   // Metadata associated with the Machine
@@ -4464,23 +4447,15 @@ message Machine {
   // - Metadata
   string version = 34;
 
-  // Restrictions on the network configuration for any instances that can be allocated on this machine.
   reserved 35; // Was: optional InstanceNetworkRestrictions instance_network_restrictions = 35;
-
-  // The instance type with which a machine is associated if any.
   reserved 36; // Was: optional string instance_type_id = 36;
-
-  // The known capabilities of a machine
   reserved 37; // Was: MachineCapabilitiesSet capabilities = 37;
-
   reserved 38; // Was: optional string hw_sku = 38;
   reserved 39; // Was: optional SkuStatus hw_sku_status = 39;
   reserved 40; // Was: optional ManagedHostQuarantineState quarantine_state = 40;
-
   reserved 41; // Was: optional string hw_sku_device_type = 41;
   reserved 42; // Was: bool update_complete = 42;
   reserved 43; // Was: optional MachineNVLinkInfo nvlink_info = 43;
-
   reserved 44; // Was: optional MachineNVLinkStatusObservation nvlink_status_observation = 44;
 
   // The rack this machine is assigned to (from expected machine record).
@@ -4490,10 +4465,7 @@ message Machine {
   optional PlacementInRack placement_in_rack = 46;
 
   reserved 47; // Was: optional MachineSpxStatusObservation spx_status_observation = 47;
-
-  // Build version of forge-scout last observed during machine discovery registration.
   reserved 48; // Was: optional string last_scout_observed_version = 48;
-
   reserved 49; // Was: optional DpfMachineState dpf = 49;
 
   MachineConfig config = 50;

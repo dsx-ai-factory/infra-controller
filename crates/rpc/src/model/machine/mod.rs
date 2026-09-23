@@ -341,7 +341,7 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
 
         // -- Build the new structured config sub-message --
         let config_msg = rpc::forge::MachineConfig {
-            maintenance_reference: maintenance_reference.clone(),
+            maintenance_reference,
             maintenance_start_time: maintenance_start_time.map(rpc::Timestamp::from),
             firmware_autoupdate: machine.config.firmware_autoupdate,
             instance_type_id: machine
@@ -393,7 +393,7 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
                 .clone()
                 .map(|s| s.into()),
             last_scout_observed_version: machine.status.last_scout_observed_version.clone(),
-            instance_network_restrictions: instance_network_restrictions.clone(),
+            instance_network_restrictions,
             lifecycle: Some(rpc::forge::LifecycleStatus {
                 state: rpc_state.clone(),
                 version: rpc_state_version.clone(),
