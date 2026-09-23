@@ -799,8 +799,13 @@ impl ResponseCache {
                 } else if status.is_server_error() {
                     self.record_hold_off(key, HoldOffReason::Error, now).await;
                 } else {
-                    // An encoded body, or a client error about the request:
-                    // the BMC answered, so callers see that answer rather
+                    if status == StatusCode::OK {
+                        // A 200 the store cannot hold, encoded or marked
+                        // unshareable, is the resource's current body; a
+                        // stored one is superseded and must not be served.
+                        self.entries.invalidate(key).await;
+                    }
+                    // The BMC answered, so callers see that answer rather
                     // than a stored one, and nothing is stored.
                     self.record_hold_off(key, HoldOffReason::Unstorable, now)
                         .await;
@@ -1633,6 +1638,40 @@ mod tests {
                             }
                         },
                         prior: false,
+                    },
+                    expect: Yields((false, true)),
+                },
+                Case {
+                    scenario: "an encoded 200 on refresh drops the stale entry",
+                    input: RefreshInput {
+                        reply: || {
+                            let mut headers = HeaderMap::new();
+                            headers
+                                .insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+                            UpstreamReply::Response {
+                                status: StatusCode::OK,
+                                headers,
+                                body: Bytes::from_static(b"zipped"),
+                            }
+                        },
+                        prior: true,
+                    },
+                    expect: Yields((false, true)),
+                },
+                Case {
+                    scenario: "a private 200 on refresh drops the stale entry",
+                    input: RefreshInput {
+                        reply: || {
+                            let mut headers = HeaderMap::new();
+                            headers
+                                .insert(header::CACHE_CONTROL, HeaderValue::from_static("private"));
+                            UpstreamReply::Response {
+                                status: StatusCode::OK,
+                                headers,
+                                body: Bytes::from_static(b"mine"),
+                            }
+                        },
+                        prior: true,
                     },
                     expect: Yields((false, true)),
                 },

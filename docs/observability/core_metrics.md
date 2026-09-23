@@ -43,7 +43,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_bmc_proxy_authorization_errors_total</td><td>counter</td><td>Number of BMC proxy authorization errors caused by missing authentication context, by authorization layer and HTTP method</td></tr>
 <tr><td>carbide_bmc_proxy_cache_invalidations_total</td><td>counter</td><td>Number of times a write to a BMC that the BMC did not reject invalidated the response cache of a request class for that BMC, whether or not entries were stored, by request class</td></tr>
 <tr><td>carbide_bmc_proxy_cache_lookups_total</td><td>counter</td><td>Number of GET requests in cached request classes the proxy answered, by request class and cache outcome (hit, stale, miss, coalesced, bypass, stale_if_error, held, uncacheable)</td></tr>
-<tr><td>carbide_bmc_proxy_cache_refreshes_total</td><td>counter</td><td>Number of upstream fetches the response cache issued for misses and refreshes, by request class and result (stored, revalidated, uncacheable, failed, refused)</td></tr>
+<tr><td>carbide_bmc_proxy_cache_refreshes_total</td><td>counter</td><td>Number of fetches the response cache attempted for misses and refreshes, by request class and result (stored, revalidated, uncacheable, failed, or refused when no upstream request was made)</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_attempted_total</td><td>counter</td><td>Number of inbound TLS connection attempts</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_fail_total</td><td>counter</td><td>Number of failed inbound connections, by failure reason</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_success_total</td><td>counter</td><td>Number of successful TLS connections</td></tr>

@@ -118,7 +118,7 @@ Metrics, all counters labeled by `class`:
 | Metric | Additional label | Counts |
 | ------ | ---------------- | ------ |
 | `carbide_bmc_proxy_cache_lookups_total` | `outcome` | `GET`s in cached classes answered, by how the cache answered. |
-| `carbide_bmc_proxy_cache_refreshes_total` | `result` | Upstream fetches the cache issued, by `stored`, `revalidated`, `uncacheable`, `failed`, or `refused`. |
+| `carbide_bmc_proxy_cache_refreshes_total` | `result` | Fetches the cache attempted for misses and refreshes, by `stored`, `revalidated`, `uncacheable`, `failed`, or `refused`, the last meaning no upstream request was made. |
 | `carbide_bmc_proxy_cache_invalidations_total` | | Writes the BMC did not reject that invalidated a class for a BMC, whether or not entries were stored. |
 
 ## Limits

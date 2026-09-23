@@ -368,9 +368,10 @@ pub(crate) enum RefreshResult {
     Refused,
 }
 
-/// An upstream fetch the response cache issued completed. Metric-only: the
-/// forward itself is already recorded, and a failure's detail reaches the
-/// caller in the response body.
+/// A fetch the response cache attempted for a miss or a refresh ended, with
+/// or without an upstream request having been made. Metric-only: the forward
+/// itself is already recorded, and a failure's detail reaches the caller in
+/// the response body.
 #[derive(Event)]
 #[event(
     event_name = "bmc_proxy_cache_refresh_completed",
@@ -378,7 +379,7 @@ pub(crate) enum RefreshResult {
     component = "nico-bmc-proxy",
     log = off,
     metric = counter,
-    describe = "Number of upstream fetches the response cache issued for misses and refreshes, by request class and result (stored, revalidated, uncacheable, failed, refused)"
+    describe = "Number of fetches the response cache attempted for misses and refreshes, by request class and result (stored, revalidated, uncacheable, failed, or refused when no upstream request was made)"
 )]
 pub(crate) struct CacheRefreshCompleted {
     #[label]
