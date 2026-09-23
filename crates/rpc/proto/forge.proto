@@ -1934,15 +1934,17 @@ message VpcConfig {
   // means that the VPC has no associated resource group; empty values are not
   // persisted.
   optional string power_resource_group = 9;
-  // Selects SLAAC allocation mode for instance IPv6 interfaces in this FNN
-  // VPC. When true, NICo allocates a /64 to each interface that includes IPv6
-  // and retains that prefix without assigning a concrete IPv6 host address.
+  // Selects SLAAC mode for instance IPv6 interfaces in this FNN VPC. When
+  // true, an interface selected from a VPC prefix receives an allocated /64
+  // without a concrete IPv6 host address. An explicit segment-backed interface
+  // retains the segment prefix. The DPU agent configures tenant router
+  // advertisement (RA) only when the resulting prefix is an exact /64 and the
+  // FNN interface is routed. Stretched L2 or SVI tenant interfaces and retained
+  // prefixes with another length remain outside that support boundary.
   // This policy is fixed when the VPC is created and cannot be changed through
-  // `VpcUpdateRequest`. NICo does not yet configure router advertisements;
-  // that support is tracked by
-  // https://github.com/NVIDIA/infra-controller/issues/2398. Core reports this
-  // field explicitly; an absent value indicates a response from a Core version
-  // that predates SLAAC support.
+  // `VpcUpdateRequest`. Other virtualization types remain outside that support
+  // boundary. Core reports this field explicitly. An absent value indicates a
+  // response from a Core version that predates SLAAC support.
   optional bool slaac_enabled = 10;
 }
 
@@ -2045,13 +2047,16 @@ message VpcCreationRequest {
   // Resource group managed by the external power provisioning service. During
   // creation, omission or an empty value creates no association.
   optional string power_resource_group = 19;
-  // Selects SLAAC allocation mode for instance IPv6 interfaces in this VPC.
-  // When true, this is supported only for FNN VPCs and Core allocates a /64 to
-  // each interface that includes IPv6 without assigning a concrete IPv6 host
-  // address. False or omission disables SLAAC. Core evaluates this value only
-  // during VPC creation; `VpcUpdateRequest` cannot change the resulting policy.
-  // NICo does not yet configure router advertisements; that support is tracked by
-  // https://github.com/NVIDIA/infra-controller/issues/2398.
+  // Selects SLAAC mode for instance IPv6 interfaces in this VPC. When true,
+  // this is supported only for FNN VPCs. An interface selected from a VPC prefix
+  // receives an allocated /64 without a concrete IPv6 host address. An explicit
+  // segment-backed interface retains the segment prefix. The DPU agent
+  // configures tenant router advertisement (RA) only when the resulting prefix
+  // is an exact /64 and the FNN interface is routed. Stretched L2 or SVI tenant
+  // interfaces, retained prefixes with another length, and other virtualization
+  // types remain outside that support boundary. False or omission disables
+  // SLAAC. Core evaluates this value only during VPC creation.
+  // `VpcUpdateRequest` cannot change the resulting policy.
   optional bool slaac_enabled = 20;
 }
 
@@ -5205,6 +5210,12 @@ message ManagedHostNetworkConfigResponse {
   // route. Unused roots and roots in Deleting still require coverage in that mode.
   optional common.StringList site_fabric_null_routes = 24;
 
+  // DHCPv6 Preference sent by the DPU server in ADVERTISE messages. The valid
+  // range is 0 through 255, and agents reject larger values. Core omits the
+  // field by default, preserving the DHCPv6 protocol preference of zero. An
+  // explicitly configured zero remains present.
+  optional uint32 dhcpv6_server_preference = 25;
+
   // Enable forge DHCP on HBN.
   // Deprecated: It is always enabled now.
   bool enable_dhcp = 100;
@@ -5506,11 +5517,11 @@ message FlatInterfaceRoutingProfile {
 message FlatInterfaceIpv6Config {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   // Host IPv6 address (e.g. "2001:db8::1"). Empty only when the owning VPC
-  // has SLAAC enabled; in that case interface_prefix still identifies the
-  // prefix configured on the DPU interface.
+  // has SLAAC enabled.
   string ip = 1;
-  // Interface-specific prefix allocation. Stateful FNN uses a /127; SLAAC
-  // uses the /64 allocated to this interface.
+  // Interface-specific tenant allocation. Like IPv4's concrete /32 host
+  // binding, stateful FNN uses a /128. SLAAC uses the /64 allocated to this
+  // interface.
   string interface_prefix = 2;
   // SVI IP for L2 FNN segments — the DPU's IPv6 gateway address on the VLAN.
   // Only set for L2 segments (can_stretch = true).
@@ -11020,8 +11031,11 @@ message InterfaceAddressConfig {
 
   // Family shared by every address and prefix in this entry. Must be V4 or V6.
   AddressFamily address_family = 1;
-  // IPv4 gateway CIDR. IPv6 entries omit this value; their DPU-side link
-  // prefix remains in interface_prefix, which the agent renders as gateway_cidr.
+  // IPv4 gateway CIDR. IPv6 entries omit this value. For routed tenant FNN,
+  // the agent derives the DPU address as the first address of prefix and uses
+  // that prefix as the RA PIO for supported /127 and /64 modes. As with IPv4's
+  // /32 host binding, stateful interface_prefix retains the tenant /128.
+  // SLAAC uses the matching /64 in prefix and interface_prefix.
   optional string gateway = 2;
   // Host address, without a prefix length. This may be empty for SLAAC or an
   // entry that contains only a loopback.

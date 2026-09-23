@@ -24,7 +24,7 @@
         ip:
           address:
             10.0.1.1/24: {} 
-          vrf: vpc_100 
+          vrf: vpc_100
     nve:
       vxlan:
         arp-nd-suppress: on
@@ -430,5 +430,4 @@
             match:
               ip:
                 dest-ip: 2001:db8:bad::/48
-
 

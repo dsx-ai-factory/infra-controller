@@ -3513,6 +3513,8 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
     assert_eq!(address.address_family(), rpc::forge::AddressFamily::V6);
     assert!(address.ip.is_empty());
     assert_eq!(address.interface_prefix, network_prefix.prefix.to_string());
+    assert_eq!(address.prefix, network_prefix.prefix.to_string());
+    assert!(address.gateway.is_none());
 
     // A retry sees the retained interface prefix as the durable allocation
     // result and does not consume another linknet.
@@ -4641,8 +4643,9 @@ async fn assert_ipv6_only_resolution(
     .await
     .unwrap();
     assert_eq!(ipv6_only_segment[0].prefixes.len(), 1);
+    let ipv6_segment_prefix = ipv6_only_segment[0].prefixes[0].prefix;
     assert_eq!(
-        ipv6_only_segment[0].prefixes[0].prefix,
+        ipv6_segment_prefix,
         "fd42:218::/127".parse::<IpNetwork>().unwrap(),
     );
 
@@ -4653,10 +4656,13 @@ async fn assert_ipv6_only_resolution(
 
     // Persistence contains one odd IPv6 host address from the selected /127.
     assert_eq!(ipv6_only_addresses.len(), 1);
+    let tenant_address = ipv6_only_addresses[0].address;
     assert!(matches!(
-        ipv6_only_addresses[0].address,
+        tenant_address,
         IpAddr::V6(address) if address.to_bits() & 1 == 1
     ));
+    let tenant_interface_prefix = IpNetwork::new(tenant_address, 128).unwrap();
+    assert_eq!(ipv6_only_addresses[0].prefix, tenant_interface_prefix);
     txn.commit().await.unwrap();
 
     // Core publishes only the real V6 family and leaves deprecated V4 fields
@@ -4687,14 +4693,19 @@ async fn assert_ipv6_only_resolution(
         rpc::forge::AddressFamily::try_from(address.address_family).unwrap(),
         rpc::forge::AddressFamily::V6,
     );
-    assert!(address.ip.parse::<IpAddr>().unwrap().is_ipv6());
+    assert_eq!(address.ip, tenant_address.to_string());
     assert_eq!(
-        tenant_interface
-            .ipv6_interface_config
-            .as_ref()
-            .map(|config| config.ip.as_str()),
-        Some(address.ip.as_str()),
+        address.interface_prefix,
+        tenant_interface_prefix.to_string()
     );
+    assert_eq!(address.prefix, ipv6_segment_prefix.to_string());
+    assert!(address.gateway.is_none());
+    let legacy_ipv6 = tenant_interface
+        .ipv6_interface_config
+        .as_ref()
+        .expect("IPv6-only config has a compatibility sidecar");
+    assert_eq!(legacy_ipv6.ip, address.ip);
+    assert_eq!(legacy_ipv6.interface_prefix, address.interface_prefix);
 }
 
 /// Exercises dual-stack resolution and per-family address assignment through

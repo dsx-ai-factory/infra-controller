@@ -72,6 +72,7 @@ pub(super) fn build_server_config(
     nameservers: Vec<Ipv4Addr>,
     nameservers_v6: Vec<Ipv6Addr>,
     loopback_ip: Ipv4Addr,
+    dhcpv6_server_preference: Option<u8>,
 ) -> Result<String, eyre::Report> {
     let mut dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig::from_forge_dhcp_config(
         pxe_ip,
@@ -86,6 +87,7 @@ pub(super) fn build_server_config(
     dhcp_config.carbide_ntpservers_v6 = ntpservers_v6;
     dhcp_config.dhcpv6_preferred_lifetime_secs = DHCPV6_PREFERRED_LIFETIME_SECS;
     dhcp_config.dhcpv6_valid_lifetime_secs = DHCPV6_VALID_LIFETIME_SECS;
+    dhcp_config.dhcpv6_server_preference = dhcpv6_server_preference;
 
     Ok(serde_yaml::to_string(&dhcp_config)?)
 }

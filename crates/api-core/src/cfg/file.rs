@@ -220,6 +220,12 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub dhcp_servers: Vec<Ipv4Addr>,
 
+    /// DHCPv6 Preference option sent in ADVERTISE messages. Omission leaves the
+    /// option absent and uses the protocol preference of zero; `Some(0)` emits
+    /// an explicit zero.
+    #[serde(default)]
+    pub dhcpv6_server_preference: Option<u8>,
+
     /// NTP server IP addresses for the site.
     #[serde(default)]
     pub ntp_servers: Vec<Ipv4Addr>,
@@ -6132,6 +6138,7 @@ path = "credentials.yaml"
             }
         );
         assert!(config.dhcp_servers.is_empty());
+        assert_eq!(config.dhcpv6_server_preference, None);
         assert!(!config.allow_insecure_discovery);
         assert!(!config.scout_boot_interface_correction_enabled);
         assert!(config.route_servers.is_empty());
@@ -6231,6 +6238,47 @@ path = "credentials.yaml"
                 config.allow_insecure_discovery
             },
         );
+    }
+
+    /// Verifies omission, explicit zero, and the one-octet protocol bounds.
+    #[test]
+    fn dhcpv6_server_preference_enforces_config_contract() {
+        check_values(
+            [
+                Check {
+                    scenario: "omitted",
+                    input: "",
+                    expect: None,
+                },
+                // Explicit zero must not be mistaken for an omitted setting.
+                Check {
+                    scenario: "explicit protocol minimum",
+                    input: "dhcpv6_server_preference = 0",
+                    expect: Some(0),
+                },
+                // The protocol maximum is a valid explicit setting.
+                Check {
+                    scenario: "explicit protocol maximum",
+                    input: "dhcpv6_server_preference = 255",
+                    expect: Some(255),
+                },
+            ],
+            |patch| {
+                let config: CarbideConfig = Figment::new()
+                    .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                    .merge(Toml::string(patch))
+                    .extract()
+                    .unwrap();
+                config.dhcpv6_server_preference
+            },
+        );
+
+        // Serde must reject a value that the DHCPv6 packet cannot encode.
+        let result = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .merge(Toml::string("dhcpv6_server_preference = 256"))
+            .extract::<CarbideConfig>();
+        assert!(result.is_err());
     }
 
     // The address contract: host-only gets the BMC proxy's default port, a

@@ -10784,15 +10784,17 @@ type VpcConfig struct {
 	// means that the VPC has no associated resource group; empty values are not
 	// persisted.
 	PowerResourceGroup *string `protobuf:"bytes,9,opt,name=power_resource_group,json=powerResourceGroup,proto3,oneof" json:"power_resource_group,omitempty"`
-	// Selects SLAAC allocation mode for instance IPv6 interfaces in this FNN
-	// VPC. When true, NICo allocates a /64 to each interface that includes IPv6
-	// and retains that prefix without assigning a concrete IPv6 host address.
+	// Selects SLAAC mode for instance IPv6 interfaces in this FNN VPC. When
+	// true, an interface selected from a VPC prefix receives an allocated /64
+	// without a concrete IPv6 host address. An explicit segment-backed interface
+	// retains the segment prefix. The DPU agent configures tenant router
+	// advertisement (RA) only when the resulting prefix is an exact /64 and the
+	// FNN interface is routed. Stretched L2 or SVI tenant interfaces and retained
+	// prefixes with another length remain outside that support boundary.
 	// This policy is fixed when the VPC is created and cannot be changed through
-	// `VpcUpdateRequest`. NICo does not yet configure router advertisements;
-	// that support is tracked by
-	// https://github.com/NVIDIA/infra-controller/issues/2398. Core reports this
-	// field explicitly; an absent value indicates a response from a Core version
-	// that predates SLAAC support.
+	// `VpcUpdateRequest`. Other virtualization types remain outside that support
+	// boundary. Core reports this field explicitly. An absent value indicates a
+	// response from a Core version that predates SLAAC support.
 	SlaacEnabled  *bool `protobuf:"varint,10,opt,name=slaac_enabled,json=slaacEnabled,proto3,oneof" json:"slaac_enabled,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -11099,13 +11101,16 @@ type VpcCreationRequest struct {
 	// Resource group managed by the external power provisioning service. During
 	// creation, omission or an empty value creates no association.
 	PowerResourceGroup *string `protobuf:"bytes,19,opt,name=power_resource_group,json=powerResourceGroup,proto3,oneof" json:"power_resource_group,omitempty"`
-	// Selects SLAAC allocation mode for instance IPv6 interfaces in this VPC.
-	// When true, this is supported only for FNN VPCs and Core allocates a /64 to
-	// each interface that includes IPv6 without assigning a concrete IPv6 host
-	// address. False or omission disables SLAAC. Core evaluates this value only
-	// during VPC creation; `VpcUpdateRequest` cannot change the resulting policy.
-	// NICo does not yet configure router advertisements; that support is tracked by
-	// https://github.com/NVIDIA/infra-controller/issues/2398.
+	// Selects SLAAC mode for instance IPv6 interfaces in this VPC. When true,
+	// this is supported only for FNN VPCs. An interface selected from a VPC prefix
+	// receives an allocated /64 without a concrete IPv6 host address. An explicit
+	// segment-backed interface retains the segment prefix. The DPU agent
+	// configures tenant router advertisement (RA) only when the resulting prefix
+	// is an exact /64 and the FNN interface is routed. Stretched L2 or SVI tenant
+	// interfaces, retained prefixes with another length, and other virtualization
+	// types remain outside that support boundary. False or omission disables
+	// SLAAC. Core evaluates this value only during VPC creation.
+	// `VpcUpdateRequest` cannot change the resulting policy.
 	SlaacEnabled  *bool `protobuf:"varint,20,opt,name=slaac_enabled,json=slaacEnabled,proto3,oneof" json:"slaac_enabled,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -27262,6 +27267,11 @@ type ManagedHostNetworkConfigResponse struct {
 	// responses, if that override leaves a retained tenant root without a covering
 	// route. Unused roots and roots in Deleting still require coverage in that mode.
 	SiteFabricNullRoutes *StringList `protobuf:"bytes,24,opt,name=site_fabric_null_routes,json=siteFabricNullRoutes,proto3,oneof" json:"site_fabric_null_routes,omitempty"`
+	// DHCPv6 Preference sent by the DPU server in ADVERTISE messages. The valid
+	// range is 0 through 255, and agents reject larger values. Core omits the
+	// field by default, preserving the DHCPv6 protocol preference of zero. An
+	// explicitly configured zero remains present.
+	Dhcpv6ServerPreference *uint32 `protobuf:"varint,25,opt,name=dhcpv6_server_preference,json=dhcpv6ServerPreference,proto3,oneof" json:"dhcpv6_server_preference,omitempty"`
 	// Enable nico DHCP on HBN.
 	// Deprecated: It is always enabled now.
 	EnableDhcp bool `protobuf:"varint,100,opt,name=enable_dhcp,json=enableDhcp,proto3" json:"enable_dhcp,omitempty"`
@@ -27525,6 +27535,13 @@ func (x *ManagedHostNetworkConfigResponse) GetSiteFabricNullRoutes() *StringList
 		return x.SiteFabricNullRoutes
 	}
 	return nil
+}
+
+func (x *ManagedHostNetworkConfigResponse) GetDhcpv6ServerPreference() uint32 {
+	if x != nil && x.Dhcpv6ServerPreference != nil {
+		return *x.Dhcpv6ServerPreference
+	}
+	return 0
 }
 
 func (x *ManagedHostNetworkConfigResponse) GetEnableDhcp() bool {
@@ -28526,11 +28543,11 @@ func (x *FlatInterfaceRoutingProfile) GetAllowedAnycastPrefixes() []*PrefixFilte
 type FlatInterfaceIpv6Config struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Host IPv6 address (e.g. "2001:db8::1"). Empty only when the owning VPC
-	// has SLAAC enabled; in that case interface_prefix still identifies the
-	// prefix configured on the DPU interface.
+	// has SLAAC enabled.
 	Ip string `protobuf:"bytes,1,opt,name=ip,proto3" json:"ip,omitempty"`
-	// Interface-specific prefix allocation. Stateful FNN uses a /127; SLAAC
-	// uses the /64 allocated to this interface.
+	// Interface-specific tenant allocation. Like IPv4's concrete /32 host
+	// binding, stateful FNN uses a /128. SLAAC uses the /64 allocated to this
+	// interface.
 	InterfacePrefix string `protobuf:"bytes,2,opt,name=interface_prefix,json=interfacePrefix,proto3" json:"interface_prefix,omitempty"`
 	// SVI IP for L2 FNN segments — the DPU's IPv6 gateway address on the VLAN.
 	// Only set for L2 segments (can_stretch = true).
@@ -64843,8 +64860,11 @@ type InterfaceAddressConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Family shared by every address and prefix in this entry. Must be V4 or V6.
 	AddressFamily AddressFamily `protobuf:"varint,1,opt,name=address_family,json=addressFamily,proto3,enum=forge.AddressFamily" json:"address_family,omitempty"`
-	// IPv4 gateway CIDR. IPv6 entries omit this value; their DPU-side link
-	// prefix remains in interface_prefix, which the agent renders as gateway_cidr.
+	// IPv4 gateway CIDR. IPv6 entries omit this value. For routed tenant FNN,
+	// the agent derives the DPU address as the first address of prefix and uses
+	// that prefix as the RA PIO for supported /127 and /64 modes. As with IPv4's
+	// /32 host binding, stateful interface_prefix retains the tenant /128.
+	// SLAAC uses the matching /64 in prefix and interface_prefix.
 	Gateway *string `protobuf:"bytes,2,opt,name=gateway,proto3,oneof" json:"gateway,omitempty"`
 	// Host address, without a prefix length. This may be empty for SLAAC or an
 	// entry that contains only a loopback.
@@ -69944,7 +69964,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x13MachineHardwareInfo\x12*\n" +
 	"\x04gpus\x18\x01 \x03(\v2\x16.machine_discovery.GpuR\x04gpus\"Z\n" +
 	"\x1fManagedHostNetworkConfigRequest\x127\n" +
-	"\x0edpu_machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\fdpuMachineId\"\x91\x16\n" +
+	"\x0edpu_machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\fdpuMachineId\"\xed\x16\n" +
 	" ManagedHostNetworkConfigResponse\x12\x10\n" +
 	"\x03asn\x18\x02 \x01(\rR\x03asn\x12!\n" +
 	"\fdhcp_servers\x18\x03 \x03(\tR\vdhcpServers\x12\x1d\n" +
@@ -69972,33 +69992,35 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\vntp_servers\x18\x16 \x03(\tR\n" +
 	"ntpServers\x12=\n" +
 	"\x1bvpc_peer_vnis_authoritative\x18\x17 \x01(\bR\x18vpcPeerVnisAuthoritative\x12N\n" +
-	"\x17site_fabric_null_routes\x18\x18 \x01(\v2\x12.common.StringListH\x04R\x14siteFabricNullRoutes\x88\x01\x01\x12\x1f\n" +
+	"\x17site_fabric_null_routes\x18\x18 \x01(\v2\x12.common.StringListH\x04R\x14siteFabricNullRoutes\x88\x01\x01\x12=\n" +
+	"\x18dhcpv6_server_preference\x18\x19 \x01(\rH\x05R\x16dhcpv6ServerPreference\x88\x01\x01\x12\x1f\n" +
 	"\venable_dhcp\x18d \x01(\bR\n" +
 	"enableDhcp\x12/\n" +
-	"\x11host_interface_id\x18f \x01(\tH\x05R\x0fhostInterfaceId\x88\x01\x01\x12>\n" +
-	"\x19min_dpu_functioning_links\x18g \x01(\rH\x06R\x16minDpuFunctioningLinks\x88\x01\x01\x12$\n" +
+	"\x11host_interface_id\x18f \x01(\tH\x06R\x0fhostInterfaceId\x88\x01\x01\x12>\n" +
+	"\x19min_dpu_functioning_links\x18g \x01(\rH\aR\x16minDpuFunctioningLinks\x88\x01\x01\x12$\n" +
 	"\x0eis_primary_dpu\x18h \x01(\bR\fisPrimaryDpu\x12+\n" +
-	"\x0finternet_l3_vni\x18j \x01(\rH\aR\rinternetL3Vni\x88\x01\x01\x120\n" +
-	"\binstance\x18k \x01(\v2\x0f.forge.InstanceH\bR\binstance\x88\x01\x01\x12%\n" +
+	"\x0finternet_l3_vni\x18j \x01(\rH\bR\rinternetL3Vni\x88\x01\x01\x120\n" +
+	"\binstance\x18k \x01(\v2\x0f.forge.InstanceH\tR\binstance\x88\x01\x01\x12%\n" +
 	"\x0edatacenter_asn\x18l \x01(\rR\rdatacenterAsn\x12Y\n" +
-	"\x1ccommon_internal_route_target\x18m \x01(\v2\x13.common.RouteTargetH\tR\x19commonInternalRouteTarget\x88\x01\x01\x12Z\n" +
+	"\x1ccommon_internal_route_target\x18m \x01(\v2\x13.common.RouteTargetH\n" +
+	"R\x19commonInternalRouteTarget\x88\x01\x01\x12Z\n" +
 	"\x1fadditional_route_target_imports\x18n \x03(\v2\x13.common.RouteTargetR\x1cadditionalRouteTargetImports\x12r\n" +
 	"!network_security_policy_overrides\x18o \x03(\v2'.forge.ResolvedNetworkSecurityGroupRuleR\x1enetworkSecurityPolicyOverrides\x12a\n" +
 	"\x16dpu_extension_services\x18p \x03(\v2+.forge.ManagedHostDpuExtensionServiceConfigR\x14dpuExtensionServices\x12C\n" +
-	"\x0frouting_profile\x18r \x01(\v2\x15.forge.RoutingProfileH\n" +
-	"R\x0eroutingProfile\x88\x01\x01\x122\n" +
+	"\x0frouting_profile\x18r \x01(\v2\x15.forge.RoutingProfileH\vR\x0eroutingProfile\x88\x01\x01\x122\n" +
 	"\x15anycast_site_prefixes\x18s \x03(\tR\x13anycastSitePrefixes\x12+\n" +
-	"\x0ftenant_host_asn\x18t \x01(\rH\vR\rtenantHostAsn\x88\x01\x01\x122\n" +
-	"\x13site_global_vpc_vni\x18u \x01(\rH\fR\x10siteGlobalVpcVni\x88\x01\x01\x12>\n" +
-	"\x19bgp_leaf_session_password\x18v \x01(\tH\rR\x16bgpLeafSessionPassword\x88\x01\x01\x12:\n" +
-	"\fastra_config\x18w \x01(\v2\x12.forge.AstraConfigH\x0eR\vastraConfig\x88\x01\x01\x12>\n" +
-	"\x19use_admin_network_changed\x18x \x01(\bH\x0fR\x16useAdminNetworkChanged\x88\x01\x01B\x0e\n" +
+	"\x0ftenant_host_asn\x18t \x01(\rH\fR\rtenantHostAsn\x88\x01\x01\x122\n" +
+	"\x13site_global_vpc_vni\x18u \x01(\rH\rR\x10siteGlobalVpcVni\x88\x01\x01\x12>\n" +
+	"\x19bgp_leaf_session_password\x18v \x01(\tH\x0eR\x16bgpLeafSessionPassword\x88\x01\x01\x12:\n" +
+	"\fastra_config\x18w \x01(\v2\x12.forge.AstraConfigH\x0fR\vastraConfig\x88\x01\x01\x12>\n" +
+	"\x19use_admin_network_changed\x18x \x01(\bH\x10R\x16useAdminNetworkChanged\x88\x01\x01B\x0e\n" +
 	"\f_instance_idB\x1e\n" +
 	"\x1c_network_virtualization_typeB\n" +
 	"\n" +
 	"\b_vpc_vniB\x1a\n" +
 	"\x18_dpu_network_pinger_typeB\x1a\n" +
-	"\x18_site_fabric_null_routesB\x14\n" +
+	"\x18_site_fabric_null_routesB\x1b\n" +
+	"\x19_dhcpv6_server_preferenceB\x14\n" +
 	"\x12_host_interface_idB\x1c\n" +
 	"\x1a_min_dpu_functioning_linksB\x12\n" +
 	"\x10_internet_l3_vniB\v\n" +

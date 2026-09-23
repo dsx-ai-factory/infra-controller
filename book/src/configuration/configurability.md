@@ -185,8 +185,10 @@ FNN installs the routes with administrative distance 250 in each VPC VRF. An aut
 
 ### DHCP, route servers, and BGP
 
-`dhcp_servers`, `route_servers`, `enable_route_servers`,
+`dhcp_servers`, `dhcpv6_server_preference`, `route_servers`, `enable_route_servers`,
 `bgp_leaf_session_password`, `common_tenant_host_asn`.
+
+`dhcpv6_server_preference` accepts `0` through `255`. It is omitted by default, which leaves the option absent and uses the protocol preference of zero. The canonical option-emission and rolling-upgrade contract is in the [Core configuration reference](../../../crates/api-core/src/cfg/README.md).
 
 ### Optional capability toggles
 

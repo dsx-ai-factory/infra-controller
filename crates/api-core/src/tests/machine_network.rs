@@ -208,11 +208,16 @@ async fn test_clear_use_admin_network_changed_requires_pending_version(pool: sql
 }
 
 #[crate::sqlx_test]
-// This test verifies parity between `addresses` and the compatibility fields.
+// This test verifies parity between `addresses` and the compatibility fields,
+// plus presence-bearing site policy carried in the same response.
 #[allow(deprecated)]
 async fn test_managed_host_network_config(pool: sqlx::PgPool) {
     // The default fixture omits `lo-ip-v6`, which must preserve the existing IPv4-only response.
-    let env = api_fixtures::create_test_env(pool).await;
+    let mut config = api_fixtures::get_config();
+    config.dhcpv6_server_preference = Some(0);
+    let env =
+        api_fixtures::create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config))
+            .await;
     let host_config = env.managed_host_config();
     let mh = dpu::create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
     let dpu_machine_id = mh.dpu().id;
@@ -236,6 +241,7 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
             .is_none(),
         "sites without lo-ip-v6 must remain IPv4-only"
     );
+    assert_eq!(response.dhcpv6_server_preference, Some(0));
 
     let admin_interface = response.admin_interface.expect("admin interface");
     assert_eq!(

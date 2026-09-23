@@ -613,6 +613,13 @@ fn base_reply(request: &DecodedPacketV6, message_type: MessageType, config: &Con
     reply
         .opts_mut()
         .insert(DhcpOption::ServerId(server_identifier(config)));
+    // Preference participates in server selection and therefore belongs only
+    // in ADVERTISE, not the eventual REPLY.
+    if message_type == MessageType::Advertise
+        && let Some(preference) = config.dhcp_config.dhcpv6_server_preference
+    {
+        reply.opts_mut().insert(DhcpOption::Preference(preference));
+    }
     reply
 }
 
@@ -912,6 +919,50 @@ mod tests {
                 Row { message_type: MessageType::Request, server_ids: ServerIds::DuplicateSame } => false,
                 // Conflicting duplicate identifiers must not depend on option ordering.
                 Row { message_type: MessageType::Request, server_ids: ServerIds::DuplicateMixed } => false,
+            }
+        );
+    }
+
+    /// Verifies Preference is presence-bearing and ADVERTISE-only because a
+    /// REPLY must not repeat the server-selection signal.
+    #[test]
+    fn preference_is_emitted_only_in_advertise() {
+        value_scenarios!(run = |(message_type, preference): (MessageType, Option<u8>)| {
+                let request = DecodedPacketV6 {
+                    message: Message::new_with_id(MessageType::Solicit, [0, 0, 0]),
+                    relay: None,
+                    duid: vec![0, 3, 0, 1, 2, 3, 4, 5, 6, 7],
+                    duid_mac: DuidMac::NoLinkLayerMac,
+                };
+                let config = Config::new(
+                    DhcpConfig {
+                        dhcpv6_server_preference: preference,
+                        ..Default::default()
+                    },
+                    None,
+                    67,
+                    ForgeClientConfig::new(String::new(), None),
+                );
+
+                match base_reply(&request, message_type, &config)
+                    .opts()
+                    .get(OptionCode::Preference)
+                {
+                    Some(DhcpOption::Preference(value)) => Some(*value),
+                    _ => None,
+                }
+            };
+            "ADVERTISE configuration" {
+                // Legacy omission leaves the protocol fallback implicit.
+                (MessageType::Advertise, None) => None,
+                // Explicit zero must remain present despite matching the fallback value.
+                (MessageType::Advertise, Some(0)) => Some(0),
+                // The protocol maximum remains a valid explicit preference.
+                (MessageType::Advertise, Some(255)) => Some(255),
+            }
+            "REPLY configuration" {
+                // Preference selects among ADVERTISE messages and never belongs in REPLY.
+                (MessageType::Reply, Some(255)) => None,
             }
         );
     }

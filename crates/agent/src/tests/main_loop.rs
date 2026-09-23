@@ -121,7 +121,7 @@ fn comparison_interface(id: &str, vlan_id: u32, vni: u32) -> rpc::FlatInterfaceC
         mtu: Some(9_000),
         ipv6_interface_config: Some(rpc::FlatInterfaceIpv6Config {
             ip: "2001:db8::1".to_string(),
-            interface_prefix: "2001:db8::/127".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
             svi_ip: Some("2001:db8::".to_string()),
         }),
         vpc_routing_profile: Some(comparison_routing_profile()),
@@ -135,7 +135,15 @@ fn comparison_interface(id: &str, vlan_id: u32, vni: u32) -> rpc::FlatInterfaceC
                 },
             ],
         }),
-        addresses: vec![],
+        addresses: vec![rpc::InterfaceAddressConfig {
+            address_family: rpc::AddressFamily::V6.into(),
+            ip: "2001:db8::1".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
+            prefix: "2001:db8::/127".to_string(),
+            gateway: None,
+            svi_ip: Some("2001:db8::".to_string()),
+            tenant_vrf_loopback_ip: None,
+        }],
         network_security_group: Some(rpc::FlatInterfaceNetworkSecurityGroupConfig {
             id: format!("nsg-{id}"),
             version: "nsg-v1".to_string(),
@@ -235,8 +243,7 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
 }
 
 /// Selects the unchanged baseline or one response mutation used to verify the
-/// HBN skip decision. The address-list case intentionally remains a match
-/// because HBN does not consume the list and the fingerprint excludes it.
+/// HBN skip decision.
 #[derive(Clone, Copy, Debug)]
 enum RenderedInputChange {
     Unchanged,
@@ -249,7 +256,9 @@ enum RenderedInputChange {
     AdminInterfaceVni,
     TenantInterfaceVni,
     TenantInterfaceIp,
-    TenantInterfaceAddresses,
+    TenantIpv6Prefix,
+    TenantIpv6Mode,
+    TenantIpv6Removal,
     TenantVpcPrefix,
     TenantPeerPrefix,
     TenantPeerVni,
@@ -299,28 +308,19 @@ impl RenderedInputChange {
             Self::TenantInterfaceIp => {
                 config.tenant_interfaces[1].ip = Some("10.0.0.99".to_string());
             }
-            Self::TenantInterfaceAddresses => {
-                config.tenant_interfaces[1].addresses = vec![
-                    rpc::InterfaceAddressConfig {
-                        address_family: rpc::AddressFamily::V4.into(),
-                        ip: "10.0.0.2".to_string(),
-                        interface_prefix: "10.0.0.0/31".to_string(),
-                        prefix: "10.0.0.0/24".to_string(),
-                        gateway: Some("10.0.0.1/24".to_string()),
-                        svi_ip: Some("10.0.0.1".to_string()),
-                        tenant_vrf_loopback_ip: Some("10.0.0.3".to_string()),
-                    },
-                    rpc::InterfaceAddressConfig {
-                        address_family: rpc::AddressFamily::V6.into(),
-                        ip: "2001:db8::1".to_string(),
-                        interface_prefix: "2001:db8::/127".to_string(),
-                        prefix: "2001:db8::/64".to_string(),
-                        gateway: None,
-                        svi_ip: Some("2001:db8::".to_string()),
-                        tenant_vrf_loopback_ip: None,
-                    },
-                ];
+            Self::TenantIpv6Prefix => {
+                let address = &mut config.tenant_interfaces[1].addresses[0];
+                address.ip = "2001:db8:1::1".to_string();
+                address.interface_prefix = "2001:db8:1::1/128".to_string();
+                address.prefix = "2001:db8:1::/127".to_string();
             }
+            Self::TenantIpv6Mode => {
+                let address = &mut config.tenant_interfaces[1].addresses[0];
+                address.ip.clear();
+                address.interface_prefix = "2001:db8::/64".to_string();
+                address.prefix = "2001:db8::/64".to_string();
+            }
+            Self::TenantIpv6Removal => config.tenant_interfaces[1].addresses.clear(),
             Self::TenantVpcPrefix => {
                 config.tenant_interfaces[1]
                     .vpc_prefixes
@@ -438,6 +438,12 @@ fn current_network_version_detects_rendered_input_changes() {
             RenderedInputChange::AdminInterfaceVni => false,
             RenderedInputChange::TenantInterfaceVni => false,
             RenderedInputChange::TenantInterfaceIp => false,
+            // Prefix replacement must replace the advertised desired state.
+            RenderedInputChange::TenantIpv6Prefix => false,
+            // Stateful-to-SLAAC replacement changes the rendered M/A flags.
+            RenderedInputChange::TenantIpv6Mode => false,
+            // IPv6 removal must withdraw the complete RA/RDNSS stanza.
+            RenderedInputChange::TenantIpv6Removal => false,
             RenderedInputChange::TenantVpcPrefix => false,
             RenderedInputChange::TenantPeerPrefix => false,
             RenderedInputChange::TenantPeerVni => false,
@@ -446,10 +452,23 @@ fn current_network_version_detects_rendered_input_changes() {
             RenderedInputChange::NetworkSecurityGroup => false,
             RenderedInputChange::NetworkSecurityPolicyOverride => false,
         }
-        "family-neutral address list is not an HBN rendering input" {
-            RenderedInputChange::TenantInterfaceAddresses => true,
-        }
     );
+}
+
+/// FNN L2 rendering derives the SVI's IPv6 VRR address from the authoritative
+/// V6 prefix, so a Core-side dual-write must invalidate an otherwise-current
+/// agent fingerprint during a rolling upgrade.
+#[test]
+fn current_network_version_tracks_l2_ipv6_gateway_prefix() {
+    let mut config = comparison_network_config();
+    config.tenant_interfaces[1].is_l2_segment = true;
+
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&config, None);
+
+    config.tenant_interfaces[1].addresses[0].prefix = "2001:db8:1::/127".to_string();
+
+    assert!(!current.matches_versions_from(&config, None));
 }
 
 /// `SetLikeInputReordering` lists the response collections this test
@@ -678,6 +697,7 @@ enum NonHbnInputChange {
     DeprecatedDhcpFlag,
     DeprecatedDenyPrefixes,
     NtpServers,
+    Dhcpv6ServerPreference,
     HostInterfaceId,
     ExtensionServices,
     AstraConfig,
@@ -699,6 +719,7 @@ impl NonHbnInputChange {
                 .deprecated_deny_prefixes
                 .push("192.0.2.0/24".to_string()),
             Self::NtpServers => config.ntp_servers.push("10.40.0.3".to_string()),
+            Self::Dhcpv6ServerPreference => config.dhcpv6_server_preference = Some(0),
             Self::HostInterfaceId => {
                 config.host_interface_id = Some("7340b4f5-1721-4dd3-8fc3-9f91a4c29f61".to_string());
             }
@@ -741,6 +762,8 @@ fn current_network_version_ignores_non_hbn_inputs() {
             NonHbnInputChange::InstancePayload => true,
             NonHbnInputChange::HostInterfaceId => true,
             NonHbnInputChange::NtpServers => true,
+            // DHCP is reconciled independently before the HBN skip decision.
+            NonHbnInputChange::Dhcpv6ServerPreference => true,
             NonHbnInputChange::DeprecatedDenyPrefixes => true,
             NonHbnInputChange::DeprecatedDhcpFlag => true,
         }

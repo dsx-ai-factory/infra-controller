@@ -43,6 +43,7 @@ behavior.
 | `ib_config` | `Option<IBFabricConfig>` | — | `hardware` | InfiniBand fabric configuration (see [IBFabricConfig](#ibfabricconfig)). |
 | `asn` | `u32` | **required** | `networking` | Autonomous System Number, fixed per environment. Used by nico-dpu-agent for `frr.conf` BGP routing. |
 | `dhcp_servers` | `Vec<Ipv4Addr>` | `[]` | `networking` | DHCP server addresses announced to DPUs during network provisioning. |
+| `dhcpv6_server_preference` | `Option<u8>` | — | `networking` | Optional DHCPv6 Preference value emitted by DPU servers only in ADVERTISE messages. Accepts `0` through `255`; omission leaves the option absent and uses the protocol preference of zero. An explicit `0` remains present. Clients prefer larger values. Receiving an ADVERTISE with `255` causes immediate selection of that server without waiting for additional ADVERTISE messages. Core reads this setting only at startup; restart Core after changing it. During rolling upgrades, a DPU emits an explicitly configured value only when Core, its DPU agent, and its DHCP server support the field. An older component omits or ignores the field, preserving the default absence. |
 | `ntp_servers` | `Vec<Ipv4Addr>` | `[]` | `networking` | Site-level NTP server IPs used for BMC time configuration and DHCP NTP Server configuration. |
 | `route_servers` | `Vec<String>` | `[]` | `networking` | Route server IPs for L2VPN Ethernet Virtual network support. |
 | `enable_route_servers` | `bool` | `false` | `networking` | Enables route server injection into DPU FRR configs for L2VPN. |

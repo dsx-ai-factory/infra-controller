@@ -124,6 +124,10 @@ async fn stateful_solicit_returns_advertise_with_binding_identity() {
         response.opts().get(OptionCode::ServerId),
         Some(&DhcpOption::ServerId(SERVER_IDENTIFIER.to_vec()))
     );
+    assert_eq!(
+        response.opts().get(OptionCode::Preference),
+        Some(&DhcpOption::Preference(255))
+    );
     let association = response_ia_na(&response);
     assert_eq!(association.id, IAID);
     match association.opts.get(OptionCode::IAAddr) {
@@ -306,6 +310,7 @@ async fn slaac_only_interface_separates_stateful_and_information_requests() {
     .expect("SLAAC-only information request is served");
     let response = decode_response(&response);
     assert_eq!(response.msg_type(), MessageType::Reply);
+    assert!(response.opts().get(OptionCode::Preference).is_none());
     assert!(response.opts().get(OptionCode::IANA).is_none());
     assert_eq!(
         response.opts().get(OptionCode::DomainNameServers),

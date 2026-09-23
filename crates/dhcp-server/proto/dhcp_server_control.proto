@@ -53,6 +53,8 @@ message DhcpConfig {
     optional string carbide_dhcp_server_v6 = 11;
     uint32 dhcpv6_preferred_lifetime_secs = 12;
     uint32 dhcpv6_valid_lifetime_secs = 13;
+    // Absent preserves legacy omission; zero is a distinct explicit value.
+    optional uint32 dhcpv6_server_preference = 14;
 }
 
 // Mirrors utils::models::dhcp::InterfaceInfo.
