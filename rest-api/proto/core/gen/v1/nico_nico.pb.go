@@ -16841,7 +16841,8 @@ type ExpectedRack struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The rack identifier. Same rack_id referenced by expected machines, switches, and power shelves.
 	RackId *RackId `protobuf:"bytes,1,opt,name=rack_id,json=rackId,proto3,oneof" json:"rack_id,omitempty"`
-	// The rack profile ID. Determines expected counts of compute trays, switches, and power shelves.
+	// Output: configured profile derived on creation from the matching group's topology and this rack's manufacturers.
+	// Ignored on writes. Metadata updates preserve the stored profile; replacement derives it again.
 	RackProfileId *RackProfileId `protobuf:"bytes,2,opt,name=rack_profile_id,json=rackProfileId,proto3" json:"rack_profile_id,omitempty"`
 	// Metadata that will be associated with the rack.
 	// This includes things like chassis and location attributes,

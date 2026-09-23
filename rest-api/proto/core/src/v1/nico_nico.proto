@@ -2850,7 +2850,8 @@ message ExpectedRackGroupsByIdsRequest {
 message ExpectedRack {
   // The rack identifier. Same rack_id referenced by expected machines, switches, and power shelves.
   optional common.RackId rack_id = 1;
-  // The rack profile ID. Determines expected counts of compute trays, switches, and power shelves.
+  // Output: configured profile derived on creation from the matching group's topology and this rack's manufacturers.
+  // Ignored on writes. Metadata updates preserve the stored profile; replacement derives it again.
   common.RackProfileId rack_profile_id = 2;
   // Metadata that will be associated with the rack.
   // This includes things like chassis and location attributes,

@@ -22,14 +22,15 @@ import (
 // checks if the ExpectedRackCreateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &ExpectedRackCreateRequest{}
 
-// ExpectedRackCreateRequest Request data to create a new Expected Rack.  The `rackId` is an operator-supplied string identifier (not a UUID) that must be unique within the Site. Chassis identity and physical location information are conveyed via well-known label keys in `labels`: - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model` - `location.region`, `location.datacenter`, `location.room`, `location.position`
+// ExpectedRackCreateRequest Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId and derives the profile as UPPERCASE_TOPOLOGY_ComputeManufacturer_SwitchManufacturer_PowerShelfManufacturer. Manufacturer case is preserved; absent power shelves use NO_POWERSHELF. Compute and switch members are required, each type must have one manufacturer, and the generated ID must exist in Core rack profile configuration.  The `rackId` is an operator-supplied string identifier (not a UUID) that must be unique within the Site. Chassis identity and physical location information are conveyed via well-known label keys in `labels`: - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model` - `location.region`, `location.datacenter`, `location.room`, `location.position`
 type ExpectedRackCreateRequest struct {
 	// ID of the Site the Expected Rack belongs to
 	SiteId string `json:"siteId"`
 	// Operator-supplied identifier for the rack (string, not UUID). Must be non-empty and unique within the Site.
 	RackId string `json:"rackId"`
-	// Identifier of the Rack Profile this rack conforms to. Must be non-empty.
-	RackProfileId string `json:"rackProfileId"`
+	// Ignored compatibility field. Core derives the profile from the matching ExpectedRackGroup; omit this field.
+	// Deprecated
+	RackProfileId *string `json:"rackProfileId,omitempty"`
 	// Human-readable name of the Expected Rack
 	Name NullableString `json:"name,omitempty"`
 	// Human-readable description of the Expected Rack
@@ -44,11 +45,10 @@ type _ExpectedRackCreateRequest ExpectedRackCreateRequest
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExpectedRackCreateRequest(siteId string, rackId string, rackProfileId string) *ExpectedRackCreateRequest {
+func NewExpectedRackCreateRequest(siteId string, rackId string) *ExpectedRackCreateRequest {
 	this := ExpectedRackCreateRequest{}
 	this.SiteId = siteId
 	this.RackId = rackId
-	this.RackProfileId = rackProfileId
 	return &this
 }
 
@@ -108,28 +108,39 @@ func (o *ExpectedRackCreateRequest) SetRackId(v string) {
 	o.RackId = v
 }
 
-// GetRackProfileId returns the RackProfileId field value
+// GetRackProfileId returns the RackProfileId field value if set, zero value otherwise.
+// Deprecated
 func (o *ExpectedRackCreateRequest) GetRackProfileId() string {
-	if o == nil {
+	if o == nil || IsNil(o.RackProfileId) {
 		var ret string
 		return ret
 	}
-
-	return o.RackProfileId
+	return *o.RackProfileId
 }
 
-// GetRackProfileIdOk returns a tuple with the RackProfileId field value
+// GetRackProfileIdOk returns a tuple with the RackProfileId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// Deprecated
 func (o *ExpectedRackCreateRequest) GetRackProfileIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.RackProfileId) {
 		return nil, false
 	}
-	return &o.RackProfileId, true
+	return o.RackProfileId, true
 }
 
-// SetRackProfileId sets field value
+// HasRackProfileId returns a boolean if a field has been set.
+func (o *ExpectedRackCreateRequest) HasRackProfileId() bool {
+	if o != nil && !IsNil(o.RackProfileId) {
+		return true
+	}
+
+	return false
+}
+
+// SetRackProfileId gets a reference to the given string and assigns it to the RackProfileId field.
+// Deprecated
 func (o *ExpectedRackCreateRequest) SetRackProfileId(v string) {
-	o.RackProfileId = v
+	o.RackProfileId = &v
 }
 
 // GetName returns the Name field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -262,7 +273,9 @@ func (o ExpectedRackCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["rackId"] = o.RackId
-	toSerialize["rackProfileId"] = o.RackProfileId
+	if !IsNil(o.RackProfileId) {
+		toSerialize["rackProfileId"] = o.RackProfileId
+	}
 	if o.Name.IsSet() {
 		toSerialize["name"] = o.Name.Get()
 	}
@@ -282,7 +295,6 @@ func (o *ExpectedRackCreateRequest) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"siteId",
 		"rackId",
-		"rackProfileId",
 	}
 
 	allProperties := make(map[string]interface{})

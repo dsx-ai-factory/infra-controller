@@ -1448,9 +1448,6 @@ func (mcgsc *MockCoreGrpcServiceClient) AddExpectedRack(ctx context.Context, in 
 	if in.RackId == nil || in.RackId.Id == "" {
 		return nil, status.Error(codes.Internal, "ID not provided for AddExpectedRack")
 	}
-	if in.RackProfileId == nil || in.RackProfileId.Id == "" {
-		return nil, status.Error(codes.Internal, "Rack Profile ID not provided for AddExpectedRack")
-	}
 	out := new(emptypb.Empty)
 	return out, nil
 }
@@ -1458,9 +1455,6 @@ func (mcgsc *MockCoreGrpcServiceClient) AddExpectedRack(ctx context.Context, in 
 func (mcgsc *MockCoreGrpcServiceClient) UpdateExpectedRack(ctx context.Context, in *corev1.ExpectedRack, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	if in.RackId == nil || in.RackId.Id == "" {
 		return nil, status.Error(codes.Internal, "ID not provided for UpdateExpectedRack")
-	}
-	if in.RackProfileId == nil || in.RackProfileId.Id == "" {
-		return nil, status.Error(codes.Internal, "Rack Profile ID not provided for UpdateExpectedRack")
 	}
 	out := new(emptypb.Empty)
 	return out, nil
@@ -1521,9 +1515,6 @@ func (mcgsc *MockCoreGrpcServiceClient) ReplaceAllExpectedRacks(ctx context.Cont
 	for _, er := range in.ExpectedRacks {
 		if er == nil || er.RackId == nil || er.RackId.Id == "" {
 			return nil, status.Error(codes.Internal, "ID not provided for ReplaceAllExpectedRacks")
-		}
-		if er.RackProfileId == nil || er.RackProfileId.Id == "" {
-			return nil, status.Error(codes.Internal, "Rack Profile ID not provided for ReplaceAllExpectedRacks")
 		}
 	}
 	out := new(emptypb.Empty)

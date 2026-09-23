@@ -244,32 +244,32 @@ pub async fn start(
 
         [host_models]
 
-        [rack_profiles.NVL72]
+        [rack_profiles.GB200_NVL72_WiWynn_NVIDIA_LiteOn]
         product_family = "gb200"
 
-        [rack_profiles.NVL72.rack_capabilities.compute]
+        [rack_profiles.GB200_NVL72_WiWynn_NVIDIA_LiteOn.rack_capabilities.compute]
         name = "GB200"
         count = 18
         vendor = "NVIDIA"
 
-        [rack_profiles.NVL72.rack_capabilities.switch]
+        [rack_profiles.GB200_NVL72_WiWynn_NVIDIA_LiteOn.rack_capabilities.switch]
         count = 0
 
-        [rack_profiles.NVL72.rack_capabilities.power_shelf]
+        [rack_profiles.GB200_NVL72_WiWynn_NVIDIA_LiteOn.rack_capabilities.power_shelf]
         count = 0
 
-        [rack_profiles.NVL72_GB300]
+        [rack_profiles.GB300_NVL72_Lenovo_NVIDIA_LiteOn]
         product_family = "gb300"
 
-        [rack_profiles.NVL72_GB300.rack_capabilities.compute]
+        [rack_profiles.GB300_NVL72_Lenovo_NVIDIA_LiteOn.rack_capabilities.compute]
         name = "GB300"
         count = 18
         vendor = "Lenovo"
 
-        [rack_profiles.NVL72_GB300.rack_capabilities.switch]
+        [rack_profiles.GB300_NVL72_Lenovo_NVIDIA_LiteOn.rack_capabilities.switch]
         count = 0
 
-        [rack_profiles.NVL72_GB300.rack_capabilities.power_shelf]
+        [rack_profiles.GB300_NVL72_Lenovo_NVIDIA_LiteOn.rack_capabilities.power_shelf]
         count = 0
 
         [firmware_global]

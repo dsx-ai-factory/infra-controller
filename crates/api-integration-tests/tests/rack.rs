@@ -25,7 +25,7 @@ use api_test_helper::{IntegrationTestEnvironment, utils};
 use bmc_mock::ListenerOrAddress;
 use bmc_mock::test_support::TEST_MAC_POOL;
 use carbide_utils::HostPortPair;
-use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use eyre::ContextCompat;
 use futures::future::join_all;
 use machine_a_tron::lifecycle_timings::{LifecycleTimingOverrides, PartialLifecycleTimings};
@@ -33,9 +33,15 @@ use machine_a_tron::{
     BmcMockRegistry, DhcpType, LenovoGb300RackConfig, LogFormat, MachineATronConfig, RackConfig,
     RackModelConfig, WiwynnGb200RackConfig,
 };
+use model::expected_rack_group::{
+    ExpectedRackGroup, ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupTopology,
+};
+use model::rack_type::RackCapabilityType;
 use tokio_util::sync::CancellationToken;
 
 const UNDERLAY_DHCP_RELAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(172, 20, 1, 1);
+const GB200_PROFILE_ID: &str = "GB200_NVL72_WiWynn_NVIDIA_LiteOn";
+const GB300_PROFILE_ID: &str = "GB300_NVL72_Lenovo_NVIDIA_LiteOn";
 
 #[ctor::ctor(unsafe)]
 fn setup() {
@@ -104,6 +110,40 @@ async fn run_machine_a_tron_racks_test(
 ) -> eyre::Result<()> {
     let gb200_rack_id = RackId::new("machine-a-tron-gb200-nvl72");
     let gb300_rack_id = RackId::new("machine-a-tron-gb300-nvl72");
+    let mut txn = test_env.db_pool.begin().await?;
+    for (rack_id, topology, compute_manufacturer, power_shelf_count) in [
+        (&gb200_rack_id, "gb200_nvl72", "WiWynn", 8),
+        (&gb300_rack_id, "gb300_nvl72", "Lenovo", 6),
+    ] {
+        let members = [
+            (RackCapabilityType::Compute, compute_manufacturer, 18),
+            (RackCapabilityType::Switch, "NVIDIA", 9),
+            (RackCapabilityType::PowerShelf, "LiteOn", power_shelf_count),
+        ]
+        .into_iter()
+        .flat_map(|(device_type, manufacturer, count)| {
+            (0..count).map(move |index| ExpectedRackGroupMember {
+                id: format!("{rack_id}-{device_type}-{index}"),
+                device_type: device_type.clone(),
+                manufacturer: manufacturer.into(),
+            })
+        })
+        .collect();
+        db::expected_rack_group::create(
+            &mut txn,
+            &ExpectedRackGroup {
+                rack_group_id: RackGroupId::new(format!("group-{rack_id}")),
+                topology: RackGroupTopology::new(topology),
+                racks: vec![ExpectedRackGroupRack {
+                    rack_id: rack_id.clone(),
+                    members,
+                }],
+                metadata: Default::default(),
+            },
+        )
+        .await?;
+    }
+    txn.commit().await?;
     let api_addr = test_env
         .carbide_api_addrs
         .first()
@@ -118,7 +158,7 @@ async fn run_machine_a_tron_racks_test(
             (
                 "gb200".to_string(),
                 RackConfig {
-                    rack_profile_id: RackProfileId::new("NVL72"),
+                    rack_profile_id: RackProfileId::new(GB200_PROFILE_ID),
                     ids: vec![gb200_rack_id.clone()],
                     model: RackModelConfig::WiwynnGb200Nvl72 {
                         simulation: WiwynnGb200RackConfig {
@@ -159,7 +199,7 @@ async fn run_machine_a_tron_racks_test(
             (
                 "gb300".to_string(),
                 RackConfig {
-                    rack_profile_id: RackProfileId::new("NVL72_GB300"),
+                    rack_profile_id: RackProfileId::new(GB300_PROFILE_ID),
                     ids: vec![gb300_rack_id.clone()],
                     model: RackModelConfig::LenovoGb300Nvl72 {
                         simulation: LenovoGb300RackConfig {
@@ -253,8 +293,8 @@ async fn run_machine_a_tron_racks_test(
         assert_eq!(machine_ids.len(), 36);
 
         for (rack_id, expected_profile_id, expected_power_shelf_count) in [
-            (&gb200_rack_id, "NVL72", 8),
-            (&gb300_rack_id, "NVL72_GB300", 6),
+            (&gb200_rack_id, GB200_PROFILE_ID, 8),
+            (&gb300_rack_id, GB300_PROFILE_ID, 6),
         ] {
             let managed_machine_count: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM machines WHERE rack_id = $1")
@@ -338,6 +378,12 @@ async fn run_machine_a_tron_racks_test(
                     .fetch_one(&test_env.db_pool)
                     .await?;
             assert_eq!(rack_profile_id, expected_profile_id, "rack {rack_id}");
+            let managed_profile_id: String =
+                sqlx::query_scalar("SELECT rack_profile_id FROM racks WHERE id = $1")
+                    .bind(rack_id.as_str())
+                    .fetch_one(&test_env.db_pool)
+                    .await?;
+            assert_eq!(managed_profile_id, expected_profile_id, "rack {rack_id}");
         }
 
         Ok::<(), eyre::Report>(())

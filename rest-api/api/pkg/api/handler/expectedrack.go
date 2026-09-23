@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"go.opentelemetry.io/otel/attribute"
 	tclient "go.temporal.io/sdk/client"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // ~~~~~ Create Handler ~~~~~ //
@@ -146,7 +148,6 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 		ExpectedRackID: uuid.New(),
 		SiteID:         site.ID,
 		RackID:         apiRequest.RackID,
-		RackProfileID:  apiRequest.RackProfileID,
 		Labels:         apiRequest.Labels,
 		CreatedBy:      dbUser.ID,
 	}
@@ -159,6 +160,8 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 
 	erDAO := cdbm.NewExpectedRackDAO(cerh.dbSession)
 	expectedRack, err := cdb.WithTxResult(ctx, cerh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedRack, error) {
+		rpcCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+		defer cancel()
 		// Create the ExpectedRack in DB
 		er, err := erDAO.Create(ctx, tx, createInput)
 		if err != nil {
@@ -186,10 +189,21 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 		}
 
 		// Run workflow
-		if apiErr := common.ExecuteSyncWorkflow(ctx, logger, stc, "CreateExpectedRack", workflowOptions, createExpectedRackRequest); apiErr != nil {
+		if apiErr := common.ExecuteSyncWorkflow(rpcCtx, logger, stc, "CreateExpectedRack", workflowOptions, createExpectedRackRequest); apiErr != nil {
 			return nil, apiErr
 		}
-		return er, nil
+		var stored corev1.ExpectedRack
+		if rpcCtx.Err() != nil {
+			return nil, cutil.NewAPIError(http.StatusGatewayTimeout, "Expected Rack creation timed out before readback", nil)
+		}
+		apiErr := common.ExecuteCoreGRPC(rpcCtx, stc, corev1.Forge_GetExpectedRack_FullMethodName, &corev1.ExpectedRackRequest{RackId: er.RackID}, &stored, "")
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		if stored.GetRackId().GetId() != er.RackID || stored.GetRackProfileId().GetId() == "" {
+			return nil, cutil.NewAPIError(http.StatusBadGateway, "Core returned an invalid Expected Rack profile", nil)
+		}
+		return erDAO.Update(ctx, tx, cdbm.ExpectedRackUpdateInput{ExpectedRackID: er.ID, RackProfileID: cutil.GetPtr(stored.RackProfileId.Id)})
 	})
 	if err != nil {
 		return common.HandleTxError(c, logger, err, "Failed to create Expected Rack due to DB transaction error")
@@ -603,7 +617,6 @@ func (uerh UpdateExpectedRackHandler) Handle(c echo.Context) error {
 	// update path is structurally incapable of renaming an Expected Rack.
 	updateInput := cdbm.ExpectedRackUpdateInput{
 		ExpectedRackID: expectedRack.ID,
-		RackProfileID:  apiRequest.RackProfileID,
 		Name:           apiRequest.Name,
 		Description:    apiRequest.Description,
 	}
@@ -883,7 +896,6 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 			ExpectedRackID: uuid.New(),
 			SiteID:         site.ID,
 			RackID:         er.RackID,
-			RackProfileID:  er.RackProfileID,
 			Labels:         er.Labels,
 			CreatedBy:      dbUser.ID,
 		}
@@ -898,6 +910,8 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 
 	erDAO := cdbm.NewExpectedRackDAO(raerh.dbSession)
 	replacedRacks, err := cdb.WithTxResult(ctx, raerh.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedRack, error) {
+		rpcCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+		defer cancel()
 		// Replace the set scoped to this Site
 		racks, err := erDAO.ReplaceAll(ctx, tx,
 			cdbm.ExpectedRackFilterInput{SiteIDs: []uuid.UUID{site.ID}},
@@ -931,10 +945,36 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		if apiErr := common.ExecuteSyncWorkflow(ctx, logger, stc, "ReplaceAllExpectedRacks", workflowOptions, replaceRequest); apiErr != nil {
+		if apiErr := common.ExecuteSyncWorkflow(rpcCtx, logger, stc, "ReplaceAllExpectedRacks", workflowOptions, replaceRequest); apiErr != nil {
 			return nil, apiErr
 		}
-		return racks, nil
+		if len(racks) == 0 {
+			return racks, nil
+		}
+		var stored corev1.ExpectedRackList
+		if rpcCtx.Err() != nil {
+			return nil, cutil.NewAPIError(http.StatusGatewayTimeout, "Expected Rack replacement timed out before readback", nil)
+		}
+		apiErr := common.ExecuteCoreGRPC(rpcCtx, stc, corev1.Forge_GetAllExpectedRacks_FullMethodName, &emptypb.Empty{}, &stored, "")
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		profiles := make(map[string]string, len(stored.ExpectedRacks))
+		for _, rack := range stored.ExpectedRacks {
+			profiles[rack.GetRackId().GetId()] = rack.GetRackProfileId().GetId()
+		}
+		updates := make([]cdbm.ExpectedRackUpdateInput, 0, len(racks))
+		for i := range racks {
+			profile := profiles[racks[i].RackID]
+			if profile == "" {
+				return nil, cutil.NewAPIError(http.StatusBadGateway, "Core did not return a profile for every Expected Rack", nil)
+			}
+			updates = append(updates, cdbm.ExpectedRackUpdateInput{
+				ExpectedRackID: racks[i].ID,
+				RackProfileID:  cutil.GetPtr(profile),
+			})
+		}
+		return erDAO.UpdateMultiple(ctx, tx, updates)
 	})
 	if err != nil {
 		return common.HandleTxError(c, logger, err, "Failed to replace Expected Racks due to DB transaction error")

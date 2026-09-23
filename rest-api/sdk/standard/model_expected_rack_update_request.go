@@ -27,7 +27,8 @@ type ExpectedRackUpdateRequest struct {
 	// Operator-supplied rack identifier. Immutable on update: omit this field, send `null`, or provide the existing value as a compatibility no-op. A changed value is rejected because Core and Flow use rackId as the identity key for expected racks.
 	// Deprecated
 	RackId NullableString `json:"rackId,omitempty"`
-	// Optional new Rack Profile identifier. If provided, must be non-empty.
+	// Ignored compatibility field. Metadata updates preserve the stored profile; this field alone is not a valid update.
+	// Deprecated
 	RackProfileId NullableString `json:"rackProfileId,omitempty"`
 	// Human-readable name of the Expected Rack
 	Name NullableString `json:"name,omitempty"`
@@ -144,6 +145,7 @@ func (o *ExpectedRackUpdateRequest) UnsetRackId() {
 }
 
 // GetRackProfileId returns the RackProfileId field value if set, zero value otherwise (both if not set or set to explicit null).
+// Deprecated
 func (o *ExpectedRackUpdateRequest) GetRackProfileId() string {
 	if o == nil || IsNil(o.RackProfileId.Get()) {
 		var ret string
@@ -155,6 +157,7 @@ func (o *ExpectedRackUpdateRequest) GetRackProfileId() string {
 // GetRackProfileIdOk returns a tuple with the RackProfileId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
+// Deprecated
 func (o *ExpectedRackUpdateRequest) GetRackProfileIdOk() (*string, bool) {
 	if o == nil {
 		return nil, false
@@ -172,6 +175,7 @@ func (o *ExpectedRackUpdateRequest) HasRackProfileId() bool {
 }
 
 // SetRackProfileId gets a reference to the given NullableString and assigns it to the RackProfileId field.
+// Deprecated
 func (o *ExpectedRackUpdateRequest) SetRackProfileId(v string) {
 	o.RackProfileId.Set(&v)
 }
