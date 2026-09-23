@@ -771,7 +771,7 @@ func TestAPIMachineUpdateRequest_Validate(t *testing.T) {
 					},
 				},
 				HealthIssue: &APIMachineHealthIssue{
-					Category: HealthIssueStorage,
+					Category: HealthIssueHardware,
 					Summary:  cutil.GetPtr("Disk issue"),
 					Details:  cutil.GetPtr("logs and ticket refs"),
 				},
@@ -825,7 +825,7 @@ func TestAPIMachineUpdateRequest_Validate(t *testing.T) {
 			name: "test invalid HealthIssue without onlineRepair",
 			fields: fields{
 				HealthIssue: &APIMachineHealthIssue{
-					Category: HealthIssueStorage,
+					Category: HealthIssueHardware,
 					Summary:  cutil.GetPtr("x"),
 					Details:  cutil.GetPtr("y"),
 				},
@@ -861,13 +861,13 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 		wantErr   bool
 	}{
 		{
-			name:      "maps Storage health issue to proto payload with STORAGE issue_category",
+			name:      "maps Performance health issue to proto payload with PERFORMANCE issue_category",
 			machineID: "161c4de4-afb3-4839-a5bd-305f9dea8744",
 			fields: fields{
 				HealthIssue: &APIMachineHealthIssue{
-					Category: HealthIssueStorage,
-					Summary:  cutil.GetPtr("storage subsystem degraded"),
-					Details:  cutil.GetPtr("disk SMART errors in slot 2"),
+					Category: HealthIssuePerformance,
+					Summary:  cutil.GetPtr("sustained GPU throttling"),
+					Details:  cutil.GetPtr("dcgmi diag logs attached"),
 				},
 			},
 			wantErr: false,

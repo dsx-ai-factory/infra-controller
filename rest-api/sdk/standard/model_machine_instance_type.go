@@ -23,9 +23,6 @@ var _ MappedNullable = &MachineInstanceType{}
 
 // MachineInstanceType Associates a machine with an Instance Type
 type MachineInstanceType struct {
-	// Deprecated: Use `machineId` when identifying a Machine/Instance Type association. This field will be removed on July 9th, 2026 0:00 UTC.
-	// Deprecated
-	Id *string `json:"id,omitempty"`
 	// ID of the associated Machine
 	MachineId *string `json:"machineId,omitempty"`
 	// ID of the associated Instance Type
@@ -53,41 +50,6 @@ func NewMachineInstanceType() *MachineInstanceType {
 func NewMachineInstanceTypeWithDefaults() *MachineInstanceType {
 	this := MachineInstanceType{}
 	return &this
-}
-
-// GetId returns the Id field value if set, zero value otherwise.
-// Deprecated
-func (o *MachineInstanceType) GetId() string {
-	if o == nil || IsNil(o.Id) {
-		var ret string
-		return ret
-	}
-	return *o.Id
-}
-
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-// Deprecated
-func (o *MachineInstanceType) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
-		return nil, false
-	}
-	return o.Id, true
-}
-
-// HasId returns a boolean if a field has been set.
-func (o *MachineInstanceType) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
-// Deprecated
-func (o *MachineInstanceType) SetId(v string) {
-	o.Id = &v
 }
 
 // GetMachineId returns the MachineId field value if set, zero value otherwise.
@@ -260,9 +222,6 @@ func (o MachineInstanceType) MarshalJSON() ([]byte, error) {
 
 func (o MachineInstanceType) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
 	if !IsNil(o.MachineId) {
 		toSerialize["machineId"] = o.MachineId
 	}

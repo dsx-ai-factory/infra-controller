@@ -46,11 +46,15 @@ func (mhm MachineHealthReportMode) FromProto(mode corev1.HealthReportApplyMode) 
 	return MachineHealthReportModeMerge
 }
 
+// Time when the deprecated observed_at attribute stops being returned.
+// Same date as the other snake_case alias removals.
+var machineHealthObservedAtDeprecationTime = time.Date(2026, time.September, 10, 0, 0, 0, 0, time.UTC)
+
 // APIMachineHealth is the data structure to capture API representation of a Machine's health Info
 type APIMachineHealth struct {
 	Source               string                         `json:"source"`
 	ObservedAt           *string                        `json:"observedAt"`
-	ObservedAtDeprecated *string                        `json:"observed_at"`
+	ObservedAtDeprecated *string                        `json:"observed_at,omitempty"`
 	Successes            []APIMachineHealthProbeSuccess `json:"successes"`
 	Alerts               []APIMachineHealthProbeAlert   `json:"alerts"`
 }
@@ -65,7 +69,9 @@ func (mh *APIMachineHealth) FromProto(protoHealth *corev1.HealthReport) {
 	if protoHealth.ObservedAt != nil {
 		observed := protoHealth.ObservedAt.AsTime().Format(time.RFC3339)
 		mh.ObservedAt = cutil.GetPtr(observed)
-		mh.ObservedAtDeprecated = cutil.GetPtr(observed)
+		if time.Now().Before(machineHealthObservedAtDeprecationTime) {
+			mh.ObservedAtDeprecated = cutil.GetPtr(observed)
+		}
 	}
 
 	mh.Alerts = []APIMachineHealthProbeAlert{}
@@ -97,7 +103,9 @@ func (mh *APIMachineHealth) FromDBModel(machineHealth *cdbm.MachineHealth) {
 
 	mh.Source = machineHealth.Source
 	mh.ObservedAt = machineHealth.ObservedAt
-	mh.ObservedAtDeprecated = machineHealth.ObservedAt
+	if time.Now().Before(machineHealthObservedAtDeprecationTime) {
+		mh.ObservedAtDeprecated = machineHealth.ObservedAt
+	}
 
 	if len(machineHealth.Alerts) > 0 {
 		mh.Alerts = []APIMachineHealthProbeAlert{}

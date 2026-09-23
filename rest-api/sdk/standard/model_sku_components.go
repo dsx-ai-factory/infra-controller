@@ -36,8 +36,8 @@ type SkuComponents struct {
 	EthernetDevices []SkuEthernetDevice `json:"ethernetDevices,omitempty"`
 	// Infiniband device components
 	InfinibandDevices []SkuInfinibandDevice `json:"infinibandDevices,omitempty"`
-	// TPM components
-	Tpm []SkuTpm `json:"tpm,omitempty"`
+	// TPM component
+	Tpm *SkuTpm `json:"tpm,omitempty"`
 }
 
 // NewSkuComponents instantiates a new SkuComponents object
@@ -282,17 +282,17 @@ func (o *SkuComponents) SetInfinibandDevices(v []SkuInfinibandDevice) {
 }
 
 // GetTpm returns the Tpm field value if set, zero value otherwise.
-func (o *SkuComponents) GetTpm() []SkuTpm {
+func (o *SkuComponents) GetTpm() SkuTpm {
 	if o == nil || IsNil(o.Tpm) {
-		var ret []SkuTpm
+		var ret SkuTpm
 		return ret
 	}
-	return o.Tpm
+	return *o.Tpm
 }
 
 // GetTpmOk returns a tuple with the Tpm field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *SkuComponents) GetTpmOk() ([]SkuTpm, bool) {
+func (o *SkuComponents) GetTpmOk() (*SkuTpm, bool) {
 	if o == nil || IsNil(o.Tpm) {
 		return nil, false
 	}
@@ -308,9 +308,9 @@ func (o *SkuComponents) HasTpm() bool {
 	return false
 }
 
-// SetTpm gets a reference to the given []SkuTpm and assigns it to the Tpm field.
-func (o *SkuComponents) SetTpm(v []SkuTpm) {
-	o.Tpm = v
+// SetTpm gets a reference to the given SkuTpm and assigns it to the Tpm field.
+func (o *SkuComponents) SetTpm(v SkuTpm) {
+	o.Tpm = &v
 }
 
 func (o SkuComponents) MarshalJSON() ([]byte, error) {

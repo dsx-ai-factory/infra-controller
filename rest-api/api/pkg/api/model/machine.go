@@ -38,7 +38,8 @@ const (
 	// TenantReportedIssueAlertID is the ID of the tenant-reported issue health alert.
 	MachineTenantReportedIssueAlertID = "tenant-reported"
 	// MachineHealthIssueSummaryMaxLength is the maximum length of the summary of the MachineHealthIssue.
-	MachineHealthIssueSummaryMaxLength = 512
+	// Shared with the Instance delete health issue; Core proto does not constrain either field.
+	MachineHealthIssueSummaryMaxLength = 1024
 	// MachineHealthIssueDetailsMaxLength is the maximum length of the details of the MachineHealthIssue.
 	MachineHealthIssueDetailsMaxLength = 8192
 )
@@ -53,18 +54,16 @@ const (
 	HealthIssueHardware    = "Hardware"
 	HealthIssueNetwork     = "Network"
 	HealthIssuePerformance = "Performance"
-	HealthIssueStorage     = "Storage"
-	HealthIssueSoftware    = "Software"
 	HealthIssueOther       = "Other"
 )
 
 // ValidHealthIssueCategories lists accepted HealthIssue.category values for online repair.
+// Keep in sync with the Core `IssueCategory` proto enum; categories Core does not define
+// are not accepted at the REST layer.
 var ValidHealthIssueCategoriesMap = map[string]string{
 	HealthIssueHardware:    "HARDWARE",
 	HealthIssueNetwork:     "NETWORK",
 	HealthIssuePerformance: "PERFORMANCE",
-	HealthIssueStorage:     "STORAGE",
-	HealthIssueSoftware:    "SOFTWARE",
 	HealthIssueOther:       "OTHER",
 }
 

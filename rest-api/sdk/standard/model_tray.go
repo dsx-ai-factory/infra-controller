@@ -26,7 +26,7 @@ var _ MappedNullable = &Tray{}
 type Tray struct {
 	// Component ID
 	Id *string `json:"id,omitempty"`
-	// Type of the tray
+	// Type of the tray. `Unknown` is reported when the component type is not recognized.
 	Type *string `json:"type,omitempty"`
 	// Name of the tray
 	Name *string `json:"name,omitempty"`
