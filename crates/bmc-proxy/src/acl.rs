@@ -127,7 +127,9 @@ impl AclEntry {
     ///
     /// Verb matching is exact unless this entry omits verbs, in which case any
     /// HTTP method matches. Path matching uses the wildcard semantics described
-    /// by [`WildcardPathComponent`].
+    /// by [`WildcardPathComponent`]. An allow entry must spell every percent
+    /// escape literally; its wildcards cannot consume escapes. Deny-entry
+    /// wildcards remain broad so an escaped spelling cannot evade a denial.
     fn matches(&self, method: &http::Method, path: &str) -> bool {
         if !self.verbs.is_empty() && !self.verbs.iter().any(|verb| verb.0.eq(method)) {
             return false;
@@ -154,6 +156,7 @@ impl AclEntry {
         }
 
         let acl_components = &self.path.components;
+        let wildcards_match_percent = matches!(self.action, AclAction::Deny);
         let double_wildcard_index = acl_components
             .iter()
             .position(|component| matches!(component, WildcardPathComponent::DoubleWildcard));
@@ -162,7 +165,9 @@ impl AclEntry {
             None => {
                 acl_components.len() == path_components.len()
                     && acl_components.iter().zip(path_components.iter()).all(
-                        |(acl_component, path_component)| acl_component.matches(path_component),
+                        |(acl_component, path_component)| {
+                            acl_component.matches(path_component, wildcards_match_percent)
+                        },
                     )
             }
             Some(double_wildcard_index) => {
@@ -173,12 +178,26 @@ impl AclEntry {
                     return false;
                 }
 
+                let wildcard_end = path_components.len() - suffix.len();
+                let wildcard_components = &path_components[prefix.len()..wildcard_end];
+                if !wildcards_match_percent
+                    && wildcard_components
+                        .iter()
+                        .any(|component| component.contains('%'))
+                {
+                    return false;
+                }
+
                 prefix
                     .iter()
                     .zip(path_components.iter())
-                    .all(|(acl_component, path_component)| acl_component.matches(path_component))
+                    .all(|(acl_component, path_component)| {
+                        acl_component.matches(path_component, wildcards_match_percent)
+                    })
                     && suffix.iter().rev().zip(path_components.iter().rev()).all(
-                        |(acl_component, path_component)| acl_component.matches(path_component),
+                        |(acl_component, path_component)| {
+                            acl_component.matches(path_component, wildcards_match_percent)
+                        },
                     )
             }
         }
@@ -312,6 +331,7 @@ impl FromStr for WildcardPathComponent {
                 err: "Empty path component".to_string(),
             });
         }
+        validate_percent_escape_spelling(s)?;
         if s.eq("*") {
             return Ok(WildcardPathComponent::SingleWildcard);
         } else if s.eq("**") {
@@ -346,6 +366,26 @@ impl FromStr for WildcardPathComponent {
 
         Ok(WildcardPathComponent::Exact(s.to_string()))
     }
+}
+
+/// Ensures every percent sign in an ACL component begins a complete `%HH` escape.
+///
+/// Hexadecimal letter case is preserved because ACLs match the request's wire
+/// spelling rather than normalizing equivalent encodings.
+fn validate_percent_escape_spelling(component: &str) -> Result<(), AclPathParseError> {
+    let valid = component.split('%').skip(1).all(|suffix| {
+        suffix
+            .as_bytes()
+            .get(..2)
+            .is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit))
+    });
+    if !valid {
+        return Err(AclPathParseError {
+            orig: component.to_string(),
+            err: "Percent escapes must use the literal `%HH` spelling".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_path_component(orig: &str, as_whole_path: &str) -> Result<(), AclPathParseError> {
@@ -383,11 +423,19 @@ impl Display for WildcardPathComponent {
 }
 
 impl WildcardPathComponent {
-    fn matches(&self, s: &str) -> bool {
+    /// Matches one request component, optionally allowing the wildcard portion
+    /// to consume percent escapes. Literal portions always match verbatim.
+    fn matches(&self, s: &str, wildcards_match_percent: bool) -> bool {
         match self {
-            WildcardPathComponent::SingleWildcard | WildcardPathComponent::DoubleWildcard => true,
-            WildcardPathComponent::PrefixWildcard(prefix) => s.starts_with(prefix),
-            WildcardPathComponent::SuffixWildcard(suffix) => s.ends_with(suffix),
+            WildcardPathComponent::SingleWildcard | WildcardPathComponent::DoubleWildcard => {
+                wildcards_match_percent || !s.contains('%')
+            }
+            WildcardPathComponent::PrefixWildcard(prefix) => s
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| wildcards_match_percent || !suffix.contains('%')),
+            WildcardPathComponent::SuffixWildcard(suffix) => s
+                .strip_suffix(suffix)
+                .is_some_and(|prefix| wildcards_match_percent || !prefix.contains('%')),
             WildcardPathComponent::Exact(expected) => expected == s,
         }
     }
@@ -474,6 +522,9 @@ mod tests {
                 "GET /redfish/v1/Systems/*Boot/SecureBoot" => Yields(
                     "GET /redfish/v1/Systems/*Boot/SecureBoot".to_string()
                 ),
+                "GET /redfish/v1/Registries/%23*" => Yields(
+                    "GET /redfish/v1/Registries/%23*".to_string()
+                ),
             }
 
             "canonical spacing" {
@@ -503,6 +554,11 @@ mod tests {
                 "GET /foo/ba r*" => Fails,
                 "GET /foo/*ba r" => Fails,
                 "GET /foo#fragment" => Fails,
+                "GET /foo/%" => Fails,
+                "GET /foo/%2" => Fails,
+                "GET /foo/%GG" => Fails,
+                "GET /foo/%+1" => Fails,
+                "GET /foo/%2*" => Fails,
             }
         );
     }
@@ -697,6 +753,57 @@ mod tests {
                 } => false,
             }
 
+            "allow entries require literal percent escapes" {
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/**",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%23*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%23*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23Smart%20StorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/**/%23SmartStorageMessages",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/**/SmartStorageMessages",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/%23Registries/SmartStorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%4A*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%4aResource",
+                } => false,
+            }
+
+            "deny entries remain broad for percent escapes" {
+                EntryMatchInput {
+                    entry: "!GET /redfish/v1/**",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+                EntryMatchInput {
+                    entry: "!GET /redfish/v1/Registries/*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+            }
+
             "verbless entries" {
                 EntryMatchInput {
                     entry: "/redfish/v1/**",
@@ -778,6 +885,32 @@ mod tests {
                     method: http::Method::GET,
                     path: "/redfish/v1/Systems/System1",
                 } => true,
+            }
+        );
+    }
+
+    #[test]
+    fn acl_config_requires_an_explicit_allow_for_percent_escapes() {
+        let acls = parse_acl_config(
+            r#"
+        [acls]
+        explicit_after_broad_allow = ["/**", "GET /redfish/v1/Registries/%23*"]
+        broad_deny_first = ["!GET /redfish/v1/**", "GET /redfish/v1/Registries/%23*"]
+        explicit_allow_first = ["GET /redfish/v1/Registries/%23*", "!GET /redfish/v1/**"]
+        "#,
+        );
+        let path = "/redfish/v1/Registries/%23SmartStorageMessages";
+
+        value_scenarios!(
+            run = |principal: &str| acls.allows(principal, &http::Method::GET, path);
+            "a broad allow is skipped but a later literal allow matches" {
+                "explicit_after_broad_allow" => true,
+            }
+            "a broad denial still wins" {
+                "broad_deny_first" => false,
+            }
+            "a literal allow can precede a broad denial" {
+                "explicit_allow_first" => true,
             }
         );
     }

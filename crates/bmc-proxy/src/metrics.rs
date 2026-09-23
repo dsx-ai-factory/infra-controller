@@ -141,6 +141,8 @@ pub(crate) struct RequestPathRejected {
 }
 
 impl RequestPathRejected {
+    /// Records a request rejected before ACL evaluation because its path has
+    /// ambiguous or structurally unsafe semantics.
     pub(crate) fn new(method: &Method, path: String, reason: String) -> Self {
         Self {
             authorization_layer: AuthorizationLayer::RequestPath,
@@ -177,6 +179,8 @@ pub(crate) struct RedirectSuppressed {
 }
 
 impl RedirectSuppressed {
+    /// Records an upstream `Location` that the proxy cannot relay without
+    /// bypassing or changing its authorization boundary.
     pub(crate) fn new(method: &Method, status: StatusCode, redirect_target: String) -> Self {
         Self {
             authorization_layer: AuthorizationLayer::Redirect,

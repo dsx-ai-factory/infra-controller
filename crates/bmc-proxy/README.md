@@ -56,7 +56,10 @@ spiffe_machine_base_path = "/nico-system/machine/"
 additional_issuer_cns = []
 
 [auth.acls]
-"spiffe-service-id/dpf" = ["/redfish/v1/**"]
+"spiffe-service-id/dpf" = [
+  "GET /redfish/v1/Registries/%23*",
+  "/redfish/v1/**",
+]
 ```
 
 ### `auth.acls`
@@ -65,7 +68,10 @@ additional_issuer_cns = []
 
 ```toml
 [auth.acls]
-"spiffe-service-id/nico-api" = ["/**"]
+"spiffe-service-id/nico-api" = [
+  "GET /redfish/v1/Registries/%23*",
+  "/**",
+]
 "spiffe-service-id/nv-dps" = [
   "GET /redfish/v1",
   "GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains",
@@ -103,10 +109,24 @@ Path matching syntax:
   Valid: `/redfish/v1/Systems/*Boot/SecureBoot`
   Invalid: `/redfish/v1/Systems/sys*tem/SecureBoot`
 - At most one `**` is allowed in an ACL path.
+- Percent escapes are matched by their exact wire spelling. An allow rule must spell every
+  `%HH` sequence literally; `*` and `**` never consume a percent escape in an allow rule.
+  For example, `%23Resource` matches `%23*`, but neither `*` nor `%23*` matches
+  `%23Resource%20Name`. Hexadecimal spelling is not normalized, so `%4A` and `%4a` differ.
+- Deny-rule wildcards do match percent escapes. A broad denial therefore cannot be bypassed by
+  changing a resource identifier to an escaped spelling.
 
-The matcher resolves neither dot segments (`.` and `..`, in any spelling) nor percent-escapes
-in path segments, so a request path that carries either is refused with `400` before the ACLs
-are evaluated: the BMC would read it as a path other than the one the ACLs matched.
+Paths that would be structurally ambiguous remain refused with `400` before ACL evaluation:
+dot segments (`.` and `..`, including encoded spellings), malformed escapes, encoded `/` or `\`,
+encoded control characters, and `%25` nested encoding. Other percent-encoded paths reach the ACLs
+without decoding or normalization and receive `403` unless a matching allow rule contains their
+literal escapes.
+
+This is a **breaking authorization change**: wildcard allow rules that previously covered every
+path do not cover percent-encoded paths. Add narrowly scoped literal rules for vendor resources
+that require them. The shipped configuration includes `GET /redfish/v1/Registries/%23*` for a
+nonconforming HPE iLO registry identifier; Redfish DSP0266 otherwise forbids percent-encoding in
+resource paths.
 
 Redirects are **not followed** by the proxy; the `3xx` is returned instead. `Location` is resolved
 against the original request, so `https://<bmc>/x`, `//<bmc>/x` and `/x` are the same target.
@@ -124,6 +144,8 @@ Examples:
   Allow a principal to access any path with any method.
 - `"GET /redfish/v1/**"`
   Allow only `GET` requests anywhere under `/redfish/v1`.
+- `"GET /redfish/v1/Registries/%23*"`
+  Allow HPE iLO registry identifiers beginning with the literal `%23` spelling.
 - `"!POST,PATCH /redfish/v1/Systems/*/SecureBoot/**"`
   Deny writes below any system's `SecureBoot` subtree.
 - `"GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains"`

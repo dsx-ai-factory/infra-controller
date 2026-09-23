@@ -681,8 +681,14 @@ fn refuse_rewritten_path<B>(request: &Request<B>) -> Option<Response<Body>> {
 /// (unresolvable FQDN per RFC 2606, never used for actual request forwarding)
 const PATH_PROBE_BASE: &str = "https://bmc-proxy.invalid";
 
-/// Dots and escapes are not interpreted by the ACL matcher, so a BMC may receive a different
-/// path if we are not careful. If the decoded path differs from the original, flag it for denial.
+/// Reject path transformations that cannot safely reach ACL evaluation.
+///
+/// Redfish DSP0266 forbids percent-encoding in resource paths. Some supported HPE iLO firmware
+/// nevertheless advertises registry resources whose identifiers begin with `%23`. This is a
+/// compatibility accommodation for a nonconforming implementation, not a standards exception:
+/// non-structural escapes retain their exact wire spelling and an allow ACL must spell each one
+/// literally. Encoded separators, nested encoding, and paths this URL parser rewrites remain
+/// unconditional errors.
 fn path_the_acls_cannot_speak_for(path: &str) -> Option<String> {
     // Fail closed: a path the probe cannot parse is refused, not handed to ACLs
     // matching a spelling the BMC may read differently. No path `http::Uri`
@@ -701,9 +707,31 @@ fn path_the_acls_cannot_speak_for(path: &str) -> Option<String> {
             parsed.path()
         ));
     }
-    // %-escapes are dangerous - can decode to unintended destinations
-    path.contains('%')
-        .then(|| format!("ACL enforcement: request path {path} contains escapes"))
+    percent_escape_rejection(path)
+        .map(|reason| format!("ACL enforcement: request path {path} {reason}"))
+}
+
+/// Returns why a percent escape is unsafe to delegate to literal ACL matching.
+///
+/// Well-formed, non-structural escapes return `None`; an allow ACL must then
+/// contain each escape in the same wire spelling.
+fn percent_escape_rejection(path: &str) -> Option<&'static str> {
+    path.split('%').skip(1).find_map(|suffix| {
+        let Some(digits) = suffix.get(..2) else {
+            return Some("contains a malformed percent escape");
+        };
+        if !digits.bytes().all(|digit| digit.is_ascii_hexdigit()) {
+            return Some("contains a malformed percent escape");
+        }
+        let octet = u8::from_str_radix(digits, 16)
+            .expect("two ASCII hexadecimal digits always fit in a u8");
+        match octet {
+            b'/' | b'\\' => Some("contains an encoded path separator"),
+            b'%' => Some("contains nested percent encoding"),
+            0..=0x1f | 0x7f => Some("contains an encoded control character"),
+            _ => None,
+        }
+    })
 }
 
 fn bmc_proxy_request_span<B>(request: &Request<B>) -> tracing::Span {
@@ -1269,6 +1297,8 @@ struct BmcOrigins {
 }
 
 impl BmcOrigins {
+    /// Builds the two origins that can legitimately identify the destination
+    /// BMC when the request may have traversed another proxy.
     fn new(upstream: Url, target_ip: IpAddr) -> Self {
         let authority = build_authority(Cow::Owned(target_ip.to_string()), None);
         let bmc = Url::parse(&format!("https://{authority}"))
@@ -1276,6 +1306,7 @@ impl BmcOrigins {
         Self { upstream, bmc }
     }
 
+    /// Returns every origin that a same-BMC `Location` may use.
     fn candidates(&self) -> [&Url; 2] {
         [&self.upstream, &self.bmc]
     }
@@ -1748,7 +1779,10 @@ mod tests {
         [auth]
 
         [auth.acls]
-        "spiffe-service-id/forge-system/carbide-api" = ["GET /redfish/v1/**"]
+        "spiffe-service-id/forge-system/carbide-api" = [
+            "GET /redfish/v1/Registries/%23*",
+            "GET /redfish/v1/**",
+        ]
     "#;
 
     const AUTHORIZATION_DENIED_METRIC: &str = "carbide_bmc_proxy_authorization_denied_total";
@@ -2150,11 +2184,26 @@ mod tests {
                 "/redfish/v1/.%2e/x" => true,
             }
 
-            "an escape the BMC decodes and the matcher does not" {
-                "/redfish/v1/%53ystems/1" => true,
+            "a non-structural escape is left to exact ACL matching" {
+                "/redfish/v1/%53ystems/1" => false,
+                "/redfish/v1/a%20b" => false,
+                "/redfish/v1/Registries/%23SmartStorageMessages" => false,
+                "/redfish/v1/Sessions/%5bnone%5d" => false,
+            }
+
+            "an encoded separator or nested escape is refused" {
                 "/redfish/v1/Systems%2Ffoo" => true,
-                "/redfish/v1/a%20b" => true,
+                "/redfish/v1/Systems%5cfoo" => true,
                 "/redfish/v1/%252e%252e/x" => true,
+            }
+
+            "malformed escapes and encoded controls are refused" {
+                "/redfish/v1/%" => true,
+                "/redfish/v1/%2" => true,
+                "/redfish/v1/%GG" => true,
+                "/redfish/v1/%+1" => true,
+                "/redfish/v1/%00" => true,
+                "/redfish/v1/%7f" => true,
             }
 
             // IPv6: brackets are not in the path encode set, so these must survive.
@@ -2163,8 +2212,8 @@ mod tests {
                 "/redfish/v1/Managers/BMC/Hosts/2001:db8::1" => false,
             }
 
-            // corner case for ipv6 but doesn't apply to us, percent escapes enforcement stays.
-            "a zone id is an escape like any other" {
+            // A zone id encodes `%`, so accepting it would enable another decoding pass.
+            "an encoded IPv6 zone delimiter remains nested encoding" {
                 "/redfish/v1/Sessions/fe80::1%25eth0" => true,
             }
 
@@ -2180,7 +2229,7 @@ mod tests {
     /// them is exactly the regression `is_some()` above cannot see.
     #[test]
     fn refusal_reason_names_the_path() {
-        for path in ["/redfish/v1/../x", "/redfish/v1/a%20b"] {
+        for path in ["/redfish/v1/../x", "/redfish/v1/a%2fb"] {
             let reason = path_the_acls_cannot_speak_for(path).expect("refused");
             assert!(reason.contains(path), "{reason:?} does not name {path:?}");
         }
@@ -2405,9 +2454,9 @@ mod tests {
                     => RedirectLocation::Suppressed,
             }
 
-            // Escapes survive the rewrite; the client's next request then meets
-            // `path_the_acls_cannot_speak_for`, which refuses them with 400.
-            "an escaped path is rewritten and left to the request check" {
+            // Structural escapes survive the rewrite; the client's next request
+            // then meets `path_the_acls_cannot_speak_for`, which refuses them.
+            "an encoded separator is rewritten and left to the request check" {
                 ("https://192.0.2.5/redfish", "https://192.0.2.5/%2F%2F169.254.169.254/x")
                     => RedirectLocation::Relative(HeaderValue::from_static("/%2F%2F169.254.169.254/x")),
             }
@@ -3037,6 +3086,34 @@ mod tests {
                         denial_delta: 0.0,
                         error_delta: 0.0,
                         event_names: vec![],
+                    },
+                },
+                Check {
+                    scenario: "a literally authorized percent escape is allowed",
+                    input: AuthorizationRequestCase {
+                        method: Method::GET,
+                        path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                        principals: Some(vec![service_principal()]),
+                    },
+                    expect: AuthorizationObservation {
+                        result: true,
+                        denial_delta: 0.0,
+                        error_delta: 0.0,
+                        event_names: vec![],
+                    },
+                },
+                Check {
+                    scenario: "a broad allow does not authorize an unlisted percent escape",
+                    input: AuthorizationRequestCase {
+                        method: Method::GET,
+                        path: "/redfish/v1/Registries/Smart%20StorageMessages",
+                        principals: Some(vec![service_principal()]),
+                    },
+                    expect: AuthorizationObservation {
+                        result: false,
+                        denial_delta: 1.0,
+                        error_delta: 0.0,
+                        event_names: vec!["bmc_proxy_request_acl_denied".to_string()],
                     },
                 },
                 Check {

@@ -32,7 +32,12 @@ additional_issuer_cns = []
 # `prefix*` and `*suffix` match one component by prefix or suffix. `**` matches
 # zero or more path components. Replace templated components like `{id}` with
 # `*` when deriving ACLs from endpoint documentation.
-"spiffe-service-id/{{ .Values.auth.apiPrincipal }}" = ["/**"]
+# Allow-rule wildcards do not match percent escapes. Such an allow must spell
+# every escape literally; deny-rule wildcards remain broad.
+"spiffe-service-id/{{ .Values.auth.apiPrincipal }}" = [
+  "GET /redfish/v1/Registries/%23*",
+  "/**",
+]
 "spiffe-service-id/nv-dps" = [
   "GET /redfish/v1",
   "POST /redfish/v1/SessionService/Sessions",

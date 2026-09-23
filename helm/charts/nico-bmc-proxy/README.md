@@ -34,7 +34,10 @@ configFiles:
     additional_issuer_cns = []
 
     [auth.acls]
-    "spiffe-service-id/nico-api" = ["/**"]
+    "spiffe-service-id/nico-api" = [
+      "GET /redfish/v1/Registries/%23*",
+      "/**",
+    ]
     "spiffe-service-id/nv-dps" = [
       "GET /redfish/v1",
       "GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains",
@@ -63,6 +66,16 @@ Semantics:
 - If the verb list is omitted, the rule matches any method.
 - Rules are evaluated in order and the first match wins.
 - If no rule matches, access is denied.
+- An allow-rule wildcard does not consume percent escapes. Every `%HH` sequence must appear
+  literally in the matching allow rule, without decoding or hexadecimal case normalization.
+- Deny-rule wildcards continue to match escaped paths so an encoded spelling cannot evade a deny.
+- Malformed escapes, encoded separators, traversal, control characters, and nested `%25`
+  encoding are rejected before ACL evaluation.
+
+This percent-escape behavior is a breaking authorization change: broad wildcard allows no longer
+authorize escaped paths. The chart's nico-api policy explicitly permits the nonconforming HPE iLO
+registry spelling `/redfish/v1/Registries/%23*`; add similarly narrow rules only when required by a
+supported BMC.
 
 Path wildcards:
 

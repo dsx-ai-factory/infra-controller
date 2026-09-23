@@ -166,7 +166,10 @@ nico-bmc-proxy:
       additional_issuer_cns = []
 
       [auth.acls]
-      "trusted-certificate" = ["/**"]
+      "trusted-certificate" = [
+        "GET /redfish/v1/Registries/%23*",
+        "/**",
+      ]
 
       [carbide_api]
       api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
