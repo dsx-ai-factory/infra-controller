@@ -517,10 +517,10 @@ fn parse_reserved_address_filter(address: Option<String>) -> Result<Option<IpAdd
         .transpose()
 }
 
-pub(crate) async fn admin_find_reserved_addresses(
+pub(crate) async fn admin_find_reserved_address_ids(
     api: &Api,
     request: Request<rpc::AdminFindReservedAddressesRequest>,
-) -> Result<Response<rpc::AdminFindReservedAddressesResponse>, Status> {
+) -> Result<Response<rpc::AdminReservedAddressIdList>, Status> {
     log_request_data(&request);
     let rpc::AdminFindReservedAddressesRequest {
         reserved_by_mac,
@@ -530,9 +530,50 @@ pub(crate) async fn admin_find_reserved_addresses(
     let address_filter = parse_reserved_address_filter(ip_address)?;
 
     let mut txn = api.txn_begin().await?;
+    let ids = db::machine_interface_address::find_reserved_ids(
+        txn.as_pgconn(),
+        mac_filter,
+        address_filter,
+    )
+    .await?;
+    txn.commit().await?;
+
+    Ok(Response::new(rpc::AdminReservedAddressIdList {
+        ip_addresses: ids.into_iter().map(|a| a.to_string()).collect(),
+    }))
+}
+
+pub(crate) async fn admin_find_reserved_addresses_by_ids(
+    api: &Api,
+    request: Request<rpc::AdminReservedAddressesByIdsRequest>,
+) -> Result<Response<rpc::AdminFindReservedAddressesResponse>, Status> {
+    log_request_data(&request);
+    let addresses: Vec<IpAddr> = request
+        .into_inner()
+        .ip_addresses
+        .iter()
+        .map(|address| {
+            address.parse::<IpAddr>().map_err(|e| {
+                CarbideError::InvalidArgument(format!("invalid IP address {address}: {e}"))
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
+    let max_find_by_ids = api.runtime_config.max_find_by_ids as usize;
+    if addresses.len() > max_find_by_ids {
+        return Err(CarbideError::InvalidArgument(format!(
+            "no more than {max_find_by_ids} IDs can be accepted"
+        ))
+        .into());
+    } else if addresses.is_empty() {
+        return Err(
+            CarbideError::InvalidArgument("at least one ID must be provided".to_string()).into(),
+        );
+    }
+
+    let mut txn = api.txn_begin().await?;
     let reserved =
-        db::machine_interface_address::find_reserved(txn.as_pgconn(), mac_filter, address_filter)
-            .await?;
+        db::machine_interface_address::find_reserved_by_ids(txn.as_pgconn(), &addresses).await?;
     txn.commit().await?;
 
     let reserved_addresses = reserved
@@ -926,12 +967,22 @@ mod tests {
         .await?;
         txn.commit().await?;
 
-        // Listing with no filter reports the parked reservation.
-        let listed = admin_find_reserved_addresses(
+        // Listing with no filter reports the parked reservation's id, then
+        // fetching by that id returns its full row.
+        let ids = admin_find_reserved_address_ids(
             &env.api,
             Request::new(rpc::AdminFindReservedAddressesRequest {
                 reserved_by_mac: None,
                 ip_address: None,
+            }),
+        )
+        .await?
+        .into_inner();
+        assert_eq!(ids.ip_addresses, vec![parked.to_string()]);
+        let listed = admin_find_reserved_addresses_by_ids(
+            &env.api,
+            Request::new(rpc::AdminReservedAddressesByIdsRequest {
+                ip_addresses: ids.ip_addresses.clone(),
             }),
         )
         .await?
@@ -965,7 +1016,7 @@ mod tests {
         .into_inner();
         assert_eq!(released.released_ip_addresses, vec![parked.to_string()]);
 
-        let after = admin_find_reserved_addresses(
+        let after = admin_find_reserved_address_ids(
             &env.api,
             Request::new(rpc::AdminFindReservedAddressesRequest {
                 reserved_by_mac: None,
@@ -974,7 +1025,7 @@ mod tests {
         )
         .await?
         .into_inner();
-        assert!(after.reserved_addresses.is_empty());
+        assert!(after.ip_addresses.is_empty());
 
         Ok(())
     }

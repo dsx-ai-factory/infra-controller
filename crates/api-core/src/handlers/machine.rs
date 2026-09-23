@@ -694,6 +694,20 @@ pub(crate) async fn admin_force_delete_machine(
     let (_metadata, extensions, request) = request.into_parts();
     let query = &request.host_query;
 
+    // Releasing preserved addresses only takes effect while deleting an
+    // interface, so reject the flag on its own. The admin CLI's ArgGroup already
+    // enforces this, but a direct RPC caller bypasses that check.
+    if request.release_preserved_addresses
+        && !request.delete_interfaces
+        && !request.delete_bmc_interfaces
+    {
+        return Err(CarbideError::InvalidArgument(
+            "force delete with release_preserved_addresses requires either delete_interfaces or delete_bmc_interfaces to be specified"
+                .to_string(),
+        )
+        .into());
+    }
+
     let mut response = rpc::AdminForceDeleteMachineResponse {
         all_done: true,
         ..Default::default()

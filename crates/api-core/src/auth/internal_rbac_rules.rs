@@ -310,7 +310,8 @@ impl InternalRBACRules {
         x.perm("FindExploredMlxDeviceHostIds", vec![ForgeAdminCLI]);
         x.perm("FindExploredMlxDevicesByIds", vec![ForgeAdminCLI]);
         x.perm("AdminForceDeleteMachine", vec![ForgeAdminCLI, Machineatron]);
-        x.perm("AdminFindReservedAddresses", vec![ForgeAdminCLI]);
+        x.perm("AdminFindReservedAddressIds", vec![ForgeAdminCLI]);
+        x.perm("AdminFindReservedAddressesByIds", vec![ForgeAdminCLI]);
         x.perm("AdminReleaseReservedAddresses", vec![ForgeAdminCLI]);
         x.perm(
             "DecommissionManagedHost",

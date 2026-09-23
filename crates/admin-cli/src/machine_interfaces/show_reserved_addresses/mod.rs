@@ -26,6 +26,13 @@ use crate::errors::CarbideCliResult;
 
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmd::handle_show_reserved_addresses(self, ctx.config.format, &ctx.api_client).await
+        cmd::handle_show_reserved_addresses(
+            &mut ctx.output_file,
+            ctx.config.format,
+            &ctx.api_client,
+            self,
+            ctx.config.page_size,
+        )
+        .await
     }
 }

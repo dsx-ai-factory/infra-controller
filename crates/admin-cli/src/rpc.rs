@@ -1046,6 +1046,39 @@ impl ApiClient {
         Ok(all.devices)
     }
 
+    /// List every parked address reservation matching the filter, listing the
+    /// address ids first and then fetching their full rows in bounded,
+    /// concurrently-buffered chunks -- the same paged pattern as the other
+    /// `get_all_*` listings. An empty id list short-circuits before any
+    /// `*ByIds` call.
+    pub(crate) async fn get_all_reserved_addresses(
+        &self,
+        page_size: usize,
+        reserved_by_mac: Option<String>,
+        ip_address: Option<String>,
+    ) -> CarbideCliResult<Vec<::rpc::forge::ReservedAddress>> {
+        let ids = self
+            .0
+            .admin_find_reserved_address_ids(::rpc::forge::AdminFindReservedAddressesRequest {
+                reserved_by_mac,
+                ip_address,
+            })
+            .await?
+            .ip_addresses;
+
+        let mut all = Vec::with_capacity(ids.len());
+        stream::iter(ids.chunks(self.effective_chunk_size(page_size).await?))
+            .map(|chunk| self.0.admin_find_reserved_addresses_by_ids(chunk.to_vec()))
+            .buffered(PAGED_LIST_FETCH_CONCURRENCY)
+            .try_for_each(|resp| {
+                all.extend(resp.reserved_addresses);
+                futures::future::ok(())
+            })
+            .await?;
+
+        Ok(all)
+    }
+
     pub(crate) async fn get_machines_by_ids(
         &self,
         machine_ids: &[impl MachineIdSubtypeTrait],
