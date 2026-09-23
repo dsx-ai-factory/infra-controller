@@ -67,7 +67,6 @@ pub(crate) struct Args {
         short = 'u',
         long,
         group = "group",
-        requires("bmc_password"),
         help = "BMC username of the expected switch"
     )]
     bmc_username: Option<String>,
@@ -75,7 +74,6 @@ pub(crate) struct Args {
         short = 'p',
         long,
         group = "group",
-        requires("bmc_username"),
         help = "BMC password of the expected switch"
     )]
     bmc_password: Option<String>,
@@ -242,6 +240,8 @@ mod tests {
 
         scenarios!(parse_update:
             "standalone update fields" {
+                ["--bmc-username", "replacement"].as_slice() => Yields(vec![Field::BmcUsername]),
+                ["--bmc-password", "replacement"].as_slice() => Yields(vec![Field::BmcPassword]),
                 ["--bmc-ip-address", "192.0.2.10"].as_slice() => Yields(vec![Field::BmcIpAddress]),
                 ["--nvos-ip-address", "192.0.2.20"].as_slice() => Yields(vec![Field::NvosIpAddress]),
                 ["--rack_id", "12345678-1234-5678-90ab-cdef01234567"].as_slice() => Yields(vec![Field::RackId]),

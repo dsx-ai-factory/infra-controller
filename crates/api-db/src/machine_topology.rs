@@ -304,18 +304,25 @@ where
     Ok(machine_id.map(ID::try_from).transpose()?)
 }
 
+/// `find_machine_bmc_pairs` matches BMC addresses by IP value and returns
+/// PostgreSQL's formatted address text. Invalid or unknown inputs do not match.
 pub async fn find_machine_bmc_pairs(
     txn: impl DbReader<'_>,
-    bmc_ips: Vec<String>,
+    bmc_ips: &[String],
 ) -> Result<Vec<(MachineId, String)>, DatabaseError> {
+    // `machine_interface_addresses_host_address_check` requires /32 or /128,
+    // so `inet` equality compares complete host addresses. Keep `host()` in
+    // the result: saved Redfish actions use that text to look up their chassis
+    // serials when they are applied.
     let query = r#"
         SELECT mi.machine_id, host(mia.address)
         FROM machine_interfaces mi
         JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
         WHERE mi.interface_type = 'Bmc'
             AND mi.machine_id IS NOT NULL
-            AND host(mia.address) = ANY($1)
+            AND mia.address = ANY($1)
     "#;
+    let bmc_ips: Vec<IpAddr> = bmc_ips.iter().filter_map(|ip| ip.parse().ok()).collect();
     sqlx::query_as(query)
         .bind(bmc_ips)
         .fetch_all(txn)

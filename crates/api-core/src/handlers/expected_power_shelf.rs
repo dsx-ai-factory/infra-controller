@@ -169,6 +169,8 @@ pub(crate) async fn patch_expected_power_shelf(
     }
     if fields.contains(UpdateField::BmcUsername) {
         power_shelf.bmc_username = patch.bmc_username;
+    }
+    if fields.contains(UpdateField::BmcPassword) {
         power_shelf.bmc_password = patch.bmc_password;
     }
     if fields.contains(UpdateField::ShelfSerialNumber) {

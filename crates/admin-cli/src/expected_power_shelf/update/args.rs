@@ -24,7 +24,7 @@ use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Parser, Debug, Serialize, Deserialize)]
+#[derive(Parser, Debug, Clone, Serialize, Deserialize)]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -63,7 +63,6 @@ pub(crate) struct Args {
         short = 'u',
         long,
         group = "group",
-        requires("bmc_password"),
         help = "BMC username of the expected power shelf"
     )]
     bmc_username: Option<String>,
@@ -71,7 +70,6 @@ pub(crate) struct Args {
         short = 'p',
         long,
         group = "group",
-        requires("bmc_username"),
         help = "BMC password of the expected power shelf"
     )]
     bmc_password: Option<String>,
@@ -188,39 +186,65 @@ impl Args {
         .map(|(_, path)| path.to_string())
         .collect()
     }
+
+    pub(super) fn apply_to(
+        self,
+        shelf: rpc::forge::ExpectedPowerShelf,
+    ) -> rpc::forge::ExpectedPowerShelf {
+        let metadata =
+            if self.meta_name.is_some() || self.meta_description.is_some() || self.labels.is_some()
+            {
+                let metadata = shelf.metadata.unwrap_or_default();
+                Some(rpc::forge::Metadata {
+                    name: self.meta_name.unwrap_or(metadata.name),
+                    description: self.meta_description.unwrap_or(metadata.description),
+                    labels: self
+                        .labels
+                        .map(crate::metadata::parse_rpc_labels)
+                        .unwrap_or(metadata.labels),
+                })
+            } else {
+                shelf.metadata
+            };
+        rpc::forge::ExpectedPowerShelf {
+            expected_power_shelf_id: self
+                .id
+                .map(|id| ::rpc::common::Uuid {
+                    value: id.to_string(),
+                })
+                .or(shelf.expected_power_shelf_id),
+            bmc_mac_address: self
+                .bmc_mac_address
+                .map(|m| m.to_string())
+                .unwrap_or(shelf.bmc_mac_address),
+            bmc_username: self.bmc_username.unwrap_or(shelf.bmc_username),
+            bmc_password: self.bmc_password.unwrap_or(shelf.bmc_password),
+            shelf_serial_number: self
+                .shelf_serial_number
+                .unwrap_or(shelf.shelf_serial_number),
+            bmc_ip_address: self
+                .bmc_ip_address
+                .map(|ip| ip.to_string())
+                .unwrap_or(shelf.bmc_ip_address),
+            metadata,
+            rack_id: self.rack_id.or(shelf.rack_id),
+            bmc_retain_credentials: self.bmc_retain_credentials.or(shelf.bmc_retain_credentials),
+        }
+    }
 }
 
 impl From<Args> for rpc::forge::ExpectedPowerShelf {
     fn from(args: Args) -> Self {
-        rpc::forge::ExpectedPowerShelf {
-            expected_power_shelf_id: args.id.map(|id| ::rpc::common::Uuid {
-                value: id.to_string(),
-            }),
-            bmc_mac_address: args
-                .bmc_mac_address
-                .map(|m| m.to_string())
-                .unwrap_or_default(),
-            bmc_username: args.bmc_username.unwrap_or_default(),
-            bmc_password: args.bmc_password.unwrap_or_default(),
-            shelf_serial_number: args.shelf_serial_number.unwrap_or_default(),
-            bmc_ip_address: args
-                .bmc_ip_address
-                .map(|ip| ip.to_string())
-                .unwrap_or_default(),
-            metadata: Some(rpc::forge::Metadata {
-                name: args.meta_name.unwrap_or_default(),
-                description: args.meta_description.unwrap_or_default(),
-                labels: crate::metadata::parse_rpc_labels(args.labels.unwrap_or_default()),
-            }),
-            rack_id: args.rack_id,
-            bmc_retain_credentials: args.bmc_retain_credentials,
-        }
+        args.apply_to(Self {
+            metadata: Some(rpc::forge::Metadata::default()),
+            ..Default::default()
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, check_cases};
     use rpc::forge::{ExpectedPowerShelf, Label, Metadata};
 
@@ -239,6 +263,28 @@ mod tests {
         };
         check_cases(
             [
+                Case {
+                    scenario: "standalone BMC username",
+                    input: ["--bmc-username", "new-bmc-user"],
+                    expect: Yields((
+                        vec!["bmc_username".to_string()],
+                        ExpectedPowerShelf {
+                            bmc_username: "new-bmc-user".to_string(),
+                            ..base.clone()
+                        },
+                    )),
+                },
+                Case {
+                    scenario: "standalone BMC password",
+                    input: ["--bmc-password", "new-bmc-password"],
+                    expect: Yields((
+                        vec!["bmc_password".to_string()],
+                        ExpectedPowerShelf {
+                            bmc_password: "new-bmc-password".to_string(),
+                            ..base.clone()
+                        },
+                    )),
+                },
                 Case {
                     scenario: "standalone BMC IP address",
                     input: ["--bmc-ip-address", "192.0.2.10"],
@@ -312,25 +358,12 @@ mod tests {
     }
 
     #[test]
-    fn updates_require_a_field_and_complete_credentials() {
-        check_cases(
-            [
-                Case {
-                    scenario: "selector alone is not an update",
-                    input: vec![],
-                    expect: FailsWith(ErrorKind::MissingRequiredArgument),
-                },
-                Case {
-                    scenario: "metadata does not bypass credential pairing",
-                    input: vec!["--meta-name", "shelf", "--bmc-username", "admin"],
-                    expect: FailsWith(ErrorKind::MissingRequiredArgument),
-                },
-            ],
-            |flags| {
-                Args::try_parse_from(["update", "--id", ID].into_iter().chain(flags))
-                    .map(|_| ())
-                    .map_err(|error| error.kind())
-            },
+    fn updates_require_a_field() {
+        assert_eq!(
+            Args::try_parse_from(["update", "--id", ID])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::MissingRequiredArgument,
         );
     }
 }

@@ -83,10 +83,10 @@
                 <td class="mono" style="font-size: 12px;">{{.Switch.Uuid}}</td>
                 <td>{{if .Switch.RackId}}{{.Switch.RackId}}{{else}}<span style="color: #6e7681;">-</span>{{end}}</td>
                 <td class="mono">
-                    {{if .Switch.Bmc}}{{.Switch.Bmc.IpAddress}}{{if ne .Switch.Bmc.Port 0}}:{{.Switch.Bmc.Port}}{{end}}{{else}}-{{end}}
+                    {{if .Switch.Bmc}}{{formatEndpoint .Switch.Bmc.IpAddress .Switch.Bmc.Port}}{{else}}-{{end}}
                 </td>
                 <td class="mono">
-                    {{if .Switch.Nvos}}{{.Switch.Nvos.IpAddress}}{{if ne .Switch.Nvos.Port 0}}:{{.Switch.Nvos.Port}}{{end}}{{else}}-{{end}}
+                    {{if .Switch.Nvos}}{{formatEndpoint .Switch.Nvos.IpAddress .Switch.Nvos.Port}}{{else}}-{{end}}
                 </td>
                 <td>
                     <a href="/updates?switch={{.Switch.Uuid}}&all=true" style="text-decoration: none;">
