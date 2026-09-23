@@ -330,18 +330,64 @@ async fn schedule(
     })
 }
 
-/// The attesters a profile's patterns may select: those the BMC reports as
-/// enabled and as speaking SPDM.
+/// The lowest SPDM version this build attests, below which the responder is
+/// not required to carry the measurement blocks scheduling asks for.
+const MINIMUM_SPDM_VERSION: [u32; 3] = [1, 1, 0];
+
+/// Reads a dotted numeric version, treating absent components as zero so
+/// `1.1` compares equal to `1.1.0`.
 ///
-/// `ComponentIntegrityTypeVersion` is not filtered on, so a BMC reporting a
-/// newer version than this build knew about still attests. The version is not
-/// persisted.
+/// `None` for anything else, which is not an error: BMCs report `unknown` and
+/// `N/A` here, and a version nobody can read is no evidence that the responder
+/// is too old.
+fn parse_spdm_version(version: &str) -> Option<[u32; 3]> {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() > 3 {
+        return None;
+    }
+    let mut parsed = [0_u32; 3];
+    for (slot, part) in parsed.iter_mut().zip(parts) {
+        *slot = part.parse().ok()?;
+    }
+    Some(parsed)
+}
+
+/// The attesters a profile's patterns may select: those the BMC reports as
+/// enabled, as speaking SPDM, and as speaking a version this build attests.
+///
+/// The version is compared rather than matched exactly, so a BMC reporting a
+/// newer version than this build knew about still attests while one reporting
+/// an older version does not. A version that does not parse is admitted, since
+/// real BMCs report `unknown` here and dropping those would stop attesting
+/// hardware that works. The version is not persisted.
 fn eligible_attesters(integrities: &ComponentIntegrities) -> Vec<&ComponentIntegrity> {
     integrities
         .members
         .iter()
         .filter(|component| {
             component.component_integrity_enabled && component.component_integrity_type == "SPDM"
+        })
+        .filter(|component| {
+            let version = &component.component_integrity_type_version;
+            match parse_spdm_version(version) {
+                Some(reported) if reported < MINIMUM_SPDM_VERSION => {
+                    tracing::warn!(
+                        attester = %component.id,
+                        %version,
+                        "attester reports an SPDM version below the minimum; not attesting it"
+                    );
+                    false
+                }
+                Some(_) => true,
+                None => {
+                    tracing::warn!(
+                        attester = %component.id,
+                        %version,
+                        "attester reports an unreadable SPDM version; attesting it anyway"
+                    );
+                    true
+                }
+            }
         })
         .collect()
 }
@@ -518,5 +564,71 @@ pub(crate) async fn handle_spdm_poll_state(
             .with_txn(txn))
         }
         SpdmAttestationStatus::InProgress => Ok(StateHandlerOutcome::do_nothing()),
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use carbide_test_support::value_scenarios;
+    use libredfish::model::component_integrity::{ComponentIntegrities, ComponentIntegrity};
+
+    use super::*;
+
+    fn attester(id: &str, version: &str) -> ComponentIntegrity {
+        ComponentIntegrity {
+            component_integrity_enabled: true,
+            component_integrity_type: "SPDM".to_string(),
+            component_integrity_type_version: version.to_string(),
+            id: id.to_string(),
+            name: id.to_string(),
+            target_component_uri: None,
+            spdm: None,
+            actions: None,
+            links: None,
+        }
+    }
+
+    /// The version gate decides whether a root of trust is attested at all, so
+    /// it has to reject responders this build cannot measure without rejecting
+    /// the ones whose BMC simply does not report a number. Real BMCs answer
+    /// `unknown` and `N/A` here, and dropping those would stop attesting
+    /// working hardware.
+    #[test]
+    fn the_version_gate_rejects_older_spdm_but_admits_an_unreadable_version() {
+        value_scenarios!(
+            run = |version: &str| {
+                let integrities = ComponentIntegrities {
+                    members: vec![attester("HGX_ERoT_GPU_0", version)],
+                    name: "ComponentIntegrityCollection".to_string(),
+                    count: 1,
+                };
+                !eligible_attesters(&integrities).is_empty()
+            };
+
+            "the minimum this build attests is admitted" {
+                "1.1.0" => true,
+            }
+
+            "a version above the minimum is admitted, so a newer BMC still attests" {
+                "1.2.0" => true,
+            }
+
+            // The pre-existing exact match on "1.1.0" admitted neither of
+            // these, and removing it outright admitted both.
+            "a shorter form of the minimum is admitted, since the absent patch reads as zero" {
+                "1.1" => true,
+            }
+
+            "an older version is rejected, whether or not it carries a patch component" {
+                "1.0.0" => false,
+                "1.0" => false,
+            }
+
+            "a version no one can read is admitted rather than silently dropped" {
+                "unknown" => true,
+                "N/A" => true,
+                "" => true,
+            }
+        );
     }
 }
