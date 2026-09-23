@@ -253,9 +253,18 @@ the persistent backend, and changing the Secret rotates no device, so keep the
 values unchanged after ingestion starts. Leave `NICO_DPF_BMC_ROOT_PASSWORD`
 unset: it makes setup point `existingSecret` at its own
 `nico-bmc-v0-credentials` Secret, and setup fails when the Core values already
-name this one. Pass the passwords through a values file, not `--set`, which
-coerces numeric-looking values. The render fails when a password is missing or
-not a quoted string.
+name this one. Pass the passwords through a values file or `--set-string`, not
+`--set`: it coerces a value that looks numeric and has no leading zero, so
+`123` becomes a number and the render fails, while `0123` stays a string. The
+render fails when a password is missing or not a string.
+
+With `siteCredentials` the passwords sit in clear text in the operator's values
+file and in the Helm release history (`helm get values`), and base64-encoded in
+the rendered Secret. That fits machine-a-tron and development sites, which the
+defaults target. For a production site, create the Secret out of band (External
+Secrets Operator, Sealed Secrets, or a Vault sync) and point
+`nico-api.credentials.file.existingSecret` at it, as the manual recipe above
+does without this block.
 
 On a machine-a-tron site, `setup-machine-a-tron.sh` Phase 4 still seeds the
 same three credentials in Vault and the file shadows them. Keep the chart
