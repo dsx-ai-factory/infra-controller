@@ -189,7 +189,7 @@ Set them to the same values used at initial install (they are not persisted by `
 
 ### Prepare Virtualized-to-Flat Routing for a 2.2-to-2.3 Upgrade
 
-Before upgrading an agent that serves an active Virtualized-to-Flat peering, inspect every affected Flat prefix contained by an effective `site_fabric_null_routes` prefix. Ensure the tenant  VRF learns an imported or explicitly admitted underlay route that is at least as specific as the containing blackhole, and verify forward and return reachability before starting the agent rollout. A leaked default does not qualify when the blackhole is more specific than `/0`; combining a `/0` null route with same-family default-route leakage is unsupported. Follow the [FNN-to-Flat routing prerequisite](vpc/vpc_peering_management.md#virtualized-to-flat-routing-prerequisite) for the supported route-provisioning methods.
+Before upgrading an agent that serves an active Virtualized-to-Flat peering, inspect every affected Flat prefix contained by an effective `site_fabric_null_routes` prefix. Ensure the tenant VRF learns an imported or explicitly admitted underlay route that is at least as specific as the containing blackhole, and verify forward and return reachability before starting the agent rollout. A leaked default does not qualify when the blackhole is more specific than `/0`; combining a `/0` null route with same-family default-route leakage is unsupported. Follow the [FNN-to-Flat routing prerequisite](vpc/vpc_peering_management.md#virtualized-to-flat-routing-prerequisite) for the supported route-provisioning methods.
 
 ### Run the pre-flight check
 

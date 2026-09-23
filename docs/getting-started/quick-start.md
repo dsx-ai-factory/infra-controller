@@ -185,7 +185,7 @@ gateway. Do not use empty strings for address fields. The `[pools.lo-ip]`,
 `[pools.vlan-id]`, and `[pools.vni]` ranges must be non-empty.
 
 <Tip>
-The following fields are safe to leave as empty arrays: `dhcp_servers`, `ntp_servers`. Keep required fields in the TOML block; optional network fields follow the initial network configuration requirements above.
+The following fields are safe to leave as empty arrays: `dhcp_servers` and `ntp_servers`. Keep required fields in the TOML block; optional network fields follow the initial network configuration requirements above.
 </Tip>
 
 ### 3d. NICo REST source tree

@@ -75,7 +75,7 @@ for every VPC hosted on its managed host. Routes flow between VRFs and the fabri
 | Additional RT imports | `fnn.additional_route_target_imports` | Extra route-targets imported into every VPC VRF site-wide |
 | Deny-prefix ACL | `deny_prefixes` in the API server config | Prefixes tenant instances are not permitted to reach |
 | Site fabric prefixes | `site_fabric_prefixes` in the API server config | IP prefixes assigned for tenant use within this site. |
-| Site fabric null routes | `site_fabric_null_routes` in the API server config | List of IP prefixes that should receive additional L3 network isolation. Omission inherits `site_fabric_prefixes`. An empty list installs none. Do not combine an effective `/0` null route with `leak_default_route_from_underlay = true` for the same address family because the imported default overrides the equal-prefix blackhole. Open isolation does not install the routes |
+| Site fabric null routes | `site_fabric_null_routes` in the API server config | List of IP prefixes that should receive additional L3 network isolation. Omission inherits `site_fabric_prefixes`. An empty list installs none. Do not combine an effective `/0` null route with `leak_default_route_from_underlay = true` for the same address family because the imported default overrides the equal-prefix blackhole. Open isolation does not install the routes. |
 
 Pool definitions (ranges, prefix sizes) are configured in the API server `pools` section; see
 [VNI Resource Pools](vni_resource_pools.md) and

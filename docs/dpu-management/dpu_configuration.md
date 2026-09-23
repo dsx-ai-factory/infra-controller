@@ -46,7 +46,6 @@ sequenceDiagram
         Agent->>NICo: RecordDpuNetworkStatus()<br>Report applied config versions<br>Report DPU health
     end
 ```
-
 ## DPU LLDP Collection
 
 NICo uses LLDP-MED data from each DPU to associate its physical uplinks with
@@ -404,4 +403,3 @@ The isolated configuration is only applied when the site controller is unaware o
   "internet_l3_vni": null
 }
 ```
-
