@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -3501,6 +3503,26 @@ func TestTenantHasLegacyTargetedInstanceCreation(t *testing.T) {
 			got, err := TenantHasLegacyTargetedInstanceCreation(ctx, nil, dbSession, tc.tenant)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+func TestHandleTxError(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+		body string
+	}{
+		{"wrapped classification", fmt.Errorf("rollback: %w", cutil.NewAPIError(400, "unavailable", nil).WithRetryable(true)), `{"source":"nico","message":"unavailable","data":null,"retryable":true}`},
+		{"unclassified error unchanged", cutil.NewAPIError(400, "invalid", nil), `{"source":"nico","message":"invalid","data":null}`},
+		{"unknown outcome", cutil.NewAPIError(500, "unknown", nil).WithReconciliation(), `{"source":"nico","message":"unknown","data":null,"retryable":false,"recoveryAction":"Reconcile"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+			c.Set(cutil.APINameContextKey, "nico")
+			require.NoError(t, HandleTxError(c, zerolog.Nop(), tt.err, "fallback"))
+			assert.JSONEq(t, tt.body, rec.Body.String())
 		})
 	}
 }

@@ -28,6 +28,12 @@ type NICoAPIError struct {
 	Message *string `json:"message,omitempty"`
 	// Additional data about the error
 	Data map[string]interface{} `json:"data,omitempty"`
+	// Optional classification of a rejected request. True permits a bounded, delayed retry; it does not guarantee availability or eventual success. False means do not automatically repeat the request. Omission means unclassified, not false. Instance create reports true only for a unique current instance owned by the requesting tenant with status Terminating; conflicting live operations report false. Missing or ambiguous machine associations remain unclassified.
+	Retryable *bool `json:"retryable,omitempty"`
+	// Optional minimum delay in seconds before a permitted retry, present only with retryable true. Omission means no server delay estimate is available; use bounded client backoff. Instance release-pending errors omit this field.
+	RetryAfterSeconds *int32 `json:"retryAfterSeconds,omitempty"`
+	// Reconcile means an instance create outcome is uncertain, including a workflow start acknowledgement failure, timeout, lost workflow-result read, site transport/server failure, or REST commit failure after allocation. retryable is false. Check the original operation and ownership before another create; an empty REST result alone does not rule out allocation on the site. Omitted on errors without a recovery action. A lost HTTP response has no metadata: reconcile that outcome rather than blindly retrying.
+	RecoveryAction *string `json:"recoveryAction,omitempty"`
 }
 
 // NewNICoAPIError instantiates a new NICoAPIError object
@@ -144,6 +150,102 @@ func (o *NICoAPIError) SetData(v map[string]interface{}) {
 	o.Data = v
 }
 
+// GetRetryable returns the Retryable field value if set, zero value otherwise.
+func (o *NICoAPIError) GetRetryable() bool {
+	if o == nil || IsNil(o.Retryable) {
+		var ret bool
+		return ret
+	}
+	return *o.Retryable
+}
+
+// GetRetryableOk returns a tuple with the Retryable field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *NICoAPIError) GetRetryableOk() (*bool, bool) {
+	if o == nil || IsNil(o.Retryable) {
+		return nil, false
+	}
+	return o.Retryable, true
+}
+
+// HasRetryable returns a boolean if a field has been set.
+func (o *NICoAPIError) HasRetryable() bool {
+	if o != nil && !IsNil(o.Retryable) {
+		return true
+	}
+
+	return false
+}
+
+// SetRetryable gets a reference to the given bool and assigns it to the Retryable field.
+func (o *NICoAPIError) SetRetryable(v bool) {
+	o.Retryable = &v
+}
+
+// GetRetryAfterSeconds returns the RetryAfterSeconds field value if set, zero value otherwise.
+func (o *NICoAPIError) GetRetryAfterSeconds() int32 {
+	if o == nil || IsNil(o.RetryAfterSeconds) {
+		var ret int32
+		return ret
+	}
+	return *o.RetryAfterSeconds
+}
+
+// GetRetryAfterSecondsOk returns a tuple with the RetryAfterSeconds field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *NICoAPIError) GetRetryAfterSecondsOk() (*int32, bool) {
+	if o == nil || IsNil(o.RetryAfterSeconds) {
+		return nil, false
+	}
+	return o.RetryAfterSeconds, true
+}
+
+// HasRetryAfterSeconds returns a boolean if a field has been set.
+func (o *NICoAPIError) HasRetryAfterSeconds() bool {
+	if o != nil && !IsNil(o.RetryAfterSeconds) {
+		return true
+	}
+
+	return false
+}
+
+// SetRetryAfterSeconds gets a reference to the given int32 and assigns it to the RetryAfterSeconds field.
+func (o *NICoAPIError) SetRetryAfterSeconds(v int32) {
+	o.RetryAfterSeconds = &v
+}
+
+// GetRecoveryAction returns the RecoveryAction field value if set, zero value otherwise.
+func (o *NICoAPIError) GetRecoveryAction() string {
+	if o == nil || IsNil(o.RecoveryAction) {
+		var ret string
+		return ret
+	}
+	return *o.RecoveryAction
+}
+
+// GetRecoveryActionOk returns a tuple with the RecoveryAction field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *NICoAPIError) GetRecoveryActionOk() (*string, bool) {
+	if o == nil || IsNil(o.RecoveryAction) {
+		return nil, false
+	}
+	return o.RecoveryAction, true
+}
+
+// HasRecoveryAction returns a boolean if a field has been set.
+func (o *NICoAPIError) HasRecoveryAction() bool {
+	if o != nil && !IsNil(o.RecoveryAction) {
+		return true
+	}
+
+	return false
+}
+
+// SetRecoveryAction gets a reference to the given string and assigns it to the RecoveryAction field.
+func (o *NICoAPIError) SetRecoveryAction(v string) {
+	o.RecoveryAction = &v
+}
+
 func (o NICoAPIError) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -162,6 +264,15 @@ func (o NICoAPIError) ToMap() (map[string]interface{}, error) {
 	}
 	if o.Data != nil {
 		toSerialize["data"] = o.Data
+	}
+	if !IsNil(o.Retryable) {
+		toSerialize["retryable"] = o.Retryable
+	}
+	if !IsNil(o.RetryAfterSeconds) {
+		toSerialize["retryAfterSeconds"] = o.RetryAfterSeconds
+	}
+	if !IsNil(o.RecoveryAction) {
+		toSerialize["recoveryAction"] = o.RecoveryAction
 	}
 	return toSerialize, nil
 }

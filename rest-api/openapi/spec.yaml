@@ -31767,6 +31767,42 @@ components:
             - object
             - 'null'
           description: Additional data about the error
+        retryable:
+          type: boolean
+          description: |-
+            Optional classification of a rejected request. True permits a bounded,
+            delayed retry; it does not guarantee availability or eventual success.
+            False means do not automatically repeat the request. Omission means
+            unclassified, not false. Instance create reports true only for a unique
+            current instance owned by the requesting tenant with status Terminating;
+            conflicting live operations report false. Missing or ambiguous machine
+            associations remain unclassified.
+        retryAfterSeconds:
+          type: integer
+          format: int32
+          minimum: 1
+          description: |-
+            Optional minimum delay in seconds before a permitted retry, present only
+            with retryable true. Omission means no server delay estimate is available;
+            use bounded client backoff. Instance release-pending errors omit this field.
+        recoveryAction:
+          type: string
+          enum:
+            - Reconcile
+          description: |-
+            Reconcile means an instance create outcome is uncertain, including a
+            workflow start acknowledgement failure, timeout, lost workflow-result
+            read, site transport/server failure, or REST commit failure after
+            allocation. retryable is false.
+            Check the original operation and ownership before another create;
+            an empty REST result alone does not rule out allocation on the site.
+            Omitted on errors without a recovery action. A lost HTTP response has
+            no metadata: reconcile that outcome rather than blindly retrying.
+      example:
+        source: nico
+        message: Machine is assigned to an Instance, cannot be used for new Instance
+        data: null
+        retryable: true
     ServiceAccount:
       title: ServiceAccount
       type: object
