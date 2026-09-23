@@ -16,6 +16,7 @@ import (
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/proto"
 
+	mapset "github.com/deckarep/golang-set/v2"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -252,20 +253,14 @@ func getTenantSiteIDs(ctx context.Context, dbSession *cdb.Session, tenant *cdbm.
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[uuid.UUID]struct{}, len(tss)+len(privilegedIDs))
-	ids := make([]uuid.UUID, 0, len(tss)+len(privilegedIDs))
+	siteIDs := mapset.NewSet[uuid.UUID]()
 	for _, ts := range tss {
-		seen[ts.SiteID] = struct{}{}
-		ids = append(ids, ts.SiteID)
+		siteIDs.Add(ts.SiteID)
 	}
 	for _, id := range privilegedIDs {
-		_, exists := seen[id]
-		if !exists {
-			seen[id] = struct{}{}
-			ids = append(ids, id)
-		}
+		siteIDs.Add(id)
 	}
-	return ids, nil
+	return siteIDs.ToSlice(), nil
 }
 
 // ~~~~~ Create Handler ~~~~~ //
