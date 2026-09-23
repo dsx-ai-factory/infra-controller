@@ -1184,6 +1184,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	// the DB tx unwinds before we make the second remote call. nil means
 	// no timeout occurred and the normal flow continues.
 	var timeoutResp func() error
+	var allocationCompleted bool
 	var dpsRollback func() error
 
 	err = cdb.WithTx(ctx, cih.dbSession, func(tx *cdb.Tx) error {
@@ -1265,7 +1266,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			// Always check if Machine is already assigned
 			if machine.IsAssigned {
 				logger.Warn().Str("MachineID", machine.ID).Bool("AllowUnhealthyMachine", allowUnhealthyMachine).Msg("Machine is already assigned to an Instance, cannot be used for new Instance")
-				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s is assigned to an Instance, cannot be used for new Instance", machine.ID), nil)
+				return cih.machineUnavailableError(ctx, tx, logger, machine, tenant.ID, fmt.Sprintf("Machine: %s is assigned to an Instance, cannot be used for new Instance", machine.ID))
 			}
 
 			// Check if it's possible to provision the Machine
@@ -1291,6 +1292,9 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 							return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s has controller state: %s that does not allow Instance creation even with `allowUnhealthyMachine` set to true", machine.ID, controllerState), nil)
 						} else {
 							mlogger.Warn().Msg("Machine has status that does not allow Instance creation")
+							if machine.Status == cdbm.MachineStatusInUse {
+								return cih.machineUnavailableError(ctx, tx, logger, machine, tenant.ID, fmt.Sprintf("Machine: %s has status: %s that does not allow Instance creation even with `allowUnhealthyMachine` set to true", machine.ID, machine.Status))
+							}
 							return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s has status: %s that does not allow Instance creation even with `allowUnhealthyMachine` set to true", machine.ID, machine.Status), nil)
 						}
 					}
@@ -1300,6 +1304,9 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s is not in Ready state, but it can be provisioned by setting `allowUnhealthyMachine` to true in request", machine.ID), nil)
 					} else {
 						mlogger.Warn().Msg("Machine has status that does not allow Instance creation")
+						if machine.Status == cdbm.MachineStatusInUse {
+							return cih.machineUnavailableError(ctx, tx, logger, machine, tenant.ID, fmt.Sprintf("Machine: %s has status: %s that does not allow Instance creation", machine.ID, machine.Status))
+						}
 						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s has status: %s that does not allow Instance creation", machine.ID, machine.Status), nil)
 					}
 				}
@@ -2061,7 +2068,8 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		we, err := stc.ExecuteWorkflow(ctx, workflowOptions, "CreateInstanceV2", createInstanceRequest)
 		if err != nil {
 			logger.Error().Err(err).Msg("failed to synchronously start Temporal workflow to create Instance")
-			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to create Instance on Site: %s", err), nil)
+			// A failed start acknowledgement does not prove the workflow never started.
+			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to create Instance on Site: %s", err), nil).WithReconciliation()
 		}
 
 		wid := we.GetID()
@@ -2075,17 +2083,26 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				logger.Error().Err(err).Msg("failed to create Instance, timeout occurred executing workflow on Site.")
 				timeoutCause := err
 				timeoutResp = func() error {
-					return common.TerminateWorkflowOnTimeOut(c, logger, stc, wid, timeoutCause, "Instance", "CreateInstanceV2")
+					return common.TerminateWorkflowOnTimeOutError(logger, stc, wid, timeoutCause, "Instance", "CreateInstanceV2").WithReconciliation().Send(c)
 				}
 				return cutil.NewAPIError(http.StatusInternalServerError, "Instance create workflow timed out", nil)
 			}
 
+			var workflowErr *tp.WorkflowExecutionError
+			outcomeUnknown := !errors.As(err, &workflowErr)
 			code, err := common.UnwrapWorkflowError(err)
+			// A completed workflow failure may still contain a lost Core reply.
+			outcomeUnknown = outcomeUnknown || code == http.StatusInternalServerError || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
 			logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to create Instance")
-			return cutil.NewAPIError(code, fmt.Sprintf("Failed to execute sync workflow to create Instance on Site: %s", err), nil)
+			apiErr := cutil.NewAPIError(code, fmt.Sprintf("Failed to execute sync workflow to create Instance on Site: %s", err), nil)
+			if outcomeUnknown {
+				return apiErr.WithReconciliation()
+			}
+			return apiErr
 		}
 
 		logger.Info().Str("Workflow ID", wid).Msg("completed synchronous create Instance workflow")
+		allocationCompleted = true
 
 		return nil
 	})
@@ -2101,6 +2118,10 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				if rollbackErr != nil {
 					logger.Error().Err(rollbackErr).Str("machineID", machine.ID).Str("powerResourceGroup", *vpc.PowerResourceGroup).Msg("failed to compensate DPS after Instance creation failure")
 				}
+			}
+			if allocationCompleted {
+				logger.Error().Err(err).Msg("Instance allocation completed but REST transaction failed")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Instance allocation completed but REST transaction failed; reconcile before creating again", nil).WithReconciliation().Send(c)
 			}
 			return common.HandleTxError(c, logger, err, "Failed to create Instance, DB transaction error")
 		}
@@ -2123,6 +2144,26 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusCreated, apiInstance)
+}
+
+// machineUnavailableError classifies only an unambiguous current association.
+// The caller holds the machine row/advisory locks in tx. Do not filter by tenant:
+// that would hide a conflicting occupant. GetAll excludes soft-deleted instances.
+func (cih CreateInstanceHandler) machineUnavailableError(ctx context.Context, tx *cdb.Tx, logger zerolog.Logger, machine *cdbm.Machine, tenantID uuid.UUID, message string) *cutil.APIError {
+	apiErr := cutil.NewAPIError(http.StatusBadRequest, message, nil)
+	instances, total, err := cdbm.NewInstanceDAO(cih.dbSession).GetAll(ctx, tx,
+		cdbm.InstanceFilterInput{MachineIDs: []string{machine.ID}, SiteIDs: []uuid.UUID{machine.SiteID}},
+		cdbp.PageInput{Limit: cutil.GetPtr(2)}, nil)
+	if err != nil {
+		logger.Error().Err(err).Str("MachineID", machine.ID).Msg("Failed to retrieve Instance association for rejected create")
+		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Machine Instance association", nil)
+	}
+	// Missing or ambiguous associations cannot establish ownership or release.
+	if total != 1 || len(instances) != 1 {
+		return apiErr
+	}
+	occupant := instances[0]
+	return apiErr.WithRetryable(occupant.TenantID == tenantID && occupant.Status == cdbm.InstanceStatusTerminating)
 }
 
 // ~~~~~ Update Handler ~~~~~ //

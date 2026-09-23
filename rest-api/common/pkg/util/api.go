@@ -31,12 +31,20 @@ var (
 	ErrInternal = echo.ErrInternalServerError
 )
 
+// APIErrorRecoveryActionReconcile requires checking the outcome of an earlier
+// mutation before issuing another one.
+const APIErrorRecoveryActionReconcile = "Reconcile"
+
 // APIError represents a structured API error
 type APIError struct {
 	Code    int    `json:"-"`
 	Source  string `json:"source"`
 	Message string `json:"message"`
 	Data    error  `json:"data"`
+	// Omit unclassified recovery metadata to preserve existing error bodies.
+	Retryable         *bool  `json:"retryable,omitempty"`
+	RetryAfterSeconds *int32 `json:"retryAfterSeconds,omitempty"`
+	RecoveryAction    string `json:"recoveryAction,omitempty"`
 }
 
 // Error implements the error interface so *APIError can flow through error
@@ -70,18 +78,34 @@ func NewAPIError(code int, message string, data error) *APIError {
 	}
 }
 
-// NewAPIErrorResponse SENDS an API error response given appropriate params
-// An error is returned to the caller if the send fails.
-func NewAPIErrorResponse(c echo.Context, code int, message string, data error) error {
-	apiNameIfc := c.Get(APINameContextKey)
-	apiName, _ := apiNameIfc.(string)
+// WithRetryable classifies a definite rejection. True permits a bounded retry;
+// it does not promise availability or eventual success.
+func (a *APIError) WithRetryable(retryable bool) *APIError {
+	a.Retryable = &retryable
+	if !retryable {
+		a.RetryAfterSeconds = nil
+	}
+	a.RecoveryAction = ""
+	return a
+}
 
-	return c.JSON(code, APIError{
-		Code:    code,
-		Source:  apiName,
-		Message: message,
-		Data:    data,
-	})
+// WithReconciliation marks an uncertain mutation outcome, not permission to retry.
+func (a *APIError) WithReconciliation() *APIError {
+	a = a.WithRetryable(false)
+	a.RecoveryAction = APIErrorRecoveryActionReconcile
+	return a
+}
+
+// Send preserves the error metadata and sets the response's API source.
+func (a *APIError) Send(c echo.Context) error {
+	response := *a
+	response.Source, _ = c.Get(APINameContextKey).(string)
+	return c.JSON(response.Code, response)
+}
+
+// NewAPIErrorResponse sends an unclassified API error response.
+func NewAPIErrorResponse(c echo.Context, code int, message string, data error) error {
+	return NewAPIError(code, message, data).Send(c)
 }
 
 // DefaultHTTPErrorHandler is the default HTTP error handler. It sends a structured error response

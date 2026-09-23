@@ -732,7 +732,7 @@ func RollbackTx(ctx context.Context, tx *cdb.Tx, committed *bool) {
 func HandleTxError(c echo.Context, logger zerolog.Logger, err error, fallback string) error {
 	var apiErr *cutil.APIError
 	if errors.As(err, &apiErr) {
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+		return apiErr.Send(c)
 	}
 	if errors.Is(err, cdb.ErrTransactionInitiation) {
 		logger.Error().Err(err).Msg("DB transaction initiation failed")
@@ -1218,6 +1218,12 @@ func GetAllocationResourceTypeMaps(ctx context.Context, logger zerolog.Logger, d
 }
 
 func TerminateWorkflowOnTimeOut(echoCtx echo.Context, logger zerolog.Logger, temporalClient tclient.Client, workflowID string, originalError error, objectType string, workflowName string) error {
+	return TerminateWorkflowOnTimeOutError(logger, temporalClient, workflowID, originalError, objectType, workflowName).Send(echoCtx)
+}
+
+// TerminateWorkflowOnTimeOutError performs the existing timeout cleanup without
+// sending a response, so callers can classify recovery after the DB tx unwinds.
+func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclient.Client, workflowID string, originalError error, objectType string, workflowName string) *cutil.APIError {
 	logger.Error().Err(originalError).Msg(fmt.Sprintf("failed to perform %s for %s - timeout occurred executing workflow on Site.", workflowName, objectType))
 
 	// Create a new context deadline
@@ -1228,12 +1234,12 @@ func TerminateWorkflowOnTimeOut(echoCtx echo.Context, logger zerolog.Logger, tem
 	serr := temporalClient.TerminateWorkflow(newctx, workflowID, "", fmt.Sprintf("timeout occurred executing %s workflow for %s", workflowName, objectType))
 	if serr != nil {
 		logger.Error().Err(serr).Msg(fmt.Sprintf("failed to execute terminate Temporal workflow for %s %s workflow", objectType, workflowName))
-		return cutil.NewAPIErrorResponse(echoCtx, http.StatusInternalServerError, fmt.Sprintf("Failed to terminate synchronous %s %s workflow after timeout, Cloud and Site data may be de-synced: %s", objectType, workflowName, serr), nil)
+		return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to terminate synchronous %s %s workflow after timeout, Cloud and Site data may be de-synced: %s", objectType, workflowName, serr), nil)
 	}
 
 	logger.Info().Str("Workflow ID", workflowID).Msg(fmt.Sprintf("initiated terminate synchronous %s workflow for %s successfully", workflowName, objectType))
 
-	return cutil.NewAPIErrorResponse(echoCtx, http.StatusInternalServerError, fmt.Sprintf("Failed to perform %s %s - timeout occurred executing workflow on Site: %s", objectType, workflowName, originalError), nil)
+	return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to perform %s %s - timeout occurred executing workflow on Site: %s", objectType, workflowName, originalError), nil)
 }
 
 // UnwrapWorkflowError removes Temporal wrappers and maps backend errors to HTTP status codes.
