@@ -11,7 +11,7 @@ data:
     # mat-protocol-gateway configuration rendered by Helm. Keys are documented
     # in crates/mat-protocol-gateway/README.md. The controller source list URL
     # is the binary default, which matches the controller's default listener.
-    listen_address = "0.0.0.0:{{ .Values.gateway.port }}"
+    listen_address = "{{ if contains ":" .Values.gateway.listenIpAddress }}[{{ .Values.gateway.listenIpAddress }}]{{ else }}{{ .Values.gateway.listenIpAddress }}{{ end }}:{{ .Values.gateway.port }}"
 
     [tls]
     cert_path = "/var/run/secrets/spiffe.io/tls.crt"

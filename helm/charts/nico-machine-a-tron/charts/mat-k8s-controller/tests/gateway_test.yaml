@@ -195,6 +195,19 @@ tests:
           path: data["gateway.toml"]
           pattern: '\[sources\]\nca_cert_path = "/var/run/secrets/spiffe.io/ca.crt"\ninsecure_skip_verify = false\n'
 
+  - it: should render an IPv6 listener with the configured gateway port
+    set:
+      enabled: true
+      gateway:
+        enabled: true
+        listenIpAddress: "::"
+        port: 9443
+    template: templates/gateway-configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["gateway.toml"]
+          pattern: '(^|\n)listen_address = "\[::\]:9443"\n'
+
   - it: should skip inventory verification with the controller when configured
     set:
       enabled: true

@@ -75,6 +75,10 @@ rbac:
 gateway:
   enabled: false
 
+  ## Bare IP address to bind. Set to "::" for IPv6; keep the IPv4 default
+  ## on hosts where IPv6 sockets are disabled.
+  listenIpAddress: "0.0.0.0"
+
   ## HTTPS port of the UFM API and the probes; also the Service port
   port: 8443
 

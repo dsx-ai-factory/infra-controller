@@ -136,9 +136,14 @@ certificate verification for those requests only; the listener is unaffected.
 | Value | Default | Description |
 |-------|---------|-------------|
 | `mat-k8s-controller.gateway.enabled` | `false` | Add the gateway container, Service, ConfigMap and Certificate |
+| `mat-k8s-controller.gateway.listenIpAddress` | `"0.0.0.0"` | Bare IP address to bind. Set to `"::"` for IPv6; keep the IPv4 default on hosts where IPv6 sockets are disabled. Changing this setting requires restarting the controller Deployment |
 | `mat-k8s-controller.gateway.port` | `8443` | HTTPS port of the UFM API, the probes and the Service |
 | `mat-k8s-controller.gateway.existingAuthSecret` | `""` | Secret with a `token` key for UFM HTTP Basic auth. Empty means the `nico-machine-a-tron-ufm-mock-auth` Secret this chart generates; the gateway does not inherit `ufmMock.existingAuthSecret`. Required whenever that default Secret is absent or renamed: set it to the Secret holding the token when `ufmMock.existingAuthSecret` is set, `ufmMock.enabled` is `false`, or the parent chart uses `nameOverride`, or the gateway fails to start |
 | `mat-k8s-controller.gateway.resources` | 100m/256Mi requests, 1 CPU/1Gi limits | Gateway container resources |
+
+The gateway reads its listener address only at startup. Restarting the controller
+Deployment applies a changed address and resets the gateway's process-local
+partition state, as described above.
 
 ## Logging
 
