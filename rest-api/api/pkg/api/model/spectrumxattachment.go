@@ -5,6 +5,7 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"time"
 
@@ -63,6 +64,32 @@ func (sacr APISpectrumXAttachmentCreateOrUpdateRequest) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+// ValidateSpectrumXAttachmentsForMachine checks selectors against a machine's persisted
+// capabilities. A same-name generic NIC or DPU must not satisfy a SpectrumX
+// request, and every attachment must fit its own device-description group.
+func ValidateSpectrumXAttachmentsForMachine(capabilities []cdbm.MachineCapability, attachments []APISpectrumXAttachmentCreateOrUpdateRequest) error {
+	for i, attachment := range attachments {
+		matched := false
+		for _, capability := range capabilities {
+			if capability.Type == cdbm.MachineCapabilityTypeNetwork &&
+				capability.DeviceType != nil && *capability.DeviceType == cdbm.MachineCapabilityDeviceTypeSpectrumX &&
+				capability.Name == attachment.Device && capability.Count != nil &&
+				attachment.DeviceInstance != nil && *attachment.DeviceInstance >= 0 && *attachment.DeviceInstance < *capability.Count {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return validation.Errors{
+				"spectrumXAttachments": validation.Errors{
+					fmt.Sprint(i): errors.New("device and deviceInstance must select a SpectrumX interface in the Machine's capabilities"),
+				},
+			}
+		}
+	}
 	return nil
 }
 

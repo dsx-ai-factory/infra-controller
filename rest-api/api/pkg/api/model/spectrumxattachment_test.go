@@ -5,14 +5,57 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestValidateSpectrumXAttachmentsForMachine(t *testing.T) {
+	capabilities := []cdbm.MachineCapability{
+		{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", Count: cutil.GetPtr(2), DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX)},
+		{Type: cdbm.MachineCapabilityTypeNetwork, Name: "BlueField-3", Count: cutil.GetPtr(1), DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX)},
+		{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", Count: cutil.GetPtr(8), DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeDPU)},
+		{Type: cdbm.MachineCapabilityTypeNetwork, Name: "generic NIC", Count: cutil.GetPtr(4)},
+		{Type: cdbm.MachineCapabilityTypeInfiniBand, Name: "wrong category", Count: cutil.GetPtr(4), DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX)},
+		{Type: cdbm.MachineCapabilityTypeNetwork, Name: "unknown count", DeviceType: cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX)},
+	}
+	attachment := func(device string, ordinal int) APISpectrumXAttachmentCreateOrUpdateRequest {
+		return APISpectrumXAttachmentCreateOrUpdateRequest{Device: device, DeviceInstance: &ordinal}
+	}
+	for _, test := range []struct {
+		name        string
+		attachments []APISpectrumXAttachmentCreateOrUpdateRequest
+		invalidAt   *int
+	}{
+		{name: "empty attachments impose no constraint"},
+		{name: "all requested device groups match", attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{attachment("ConnectX-8", 1), attachment("BlueField-3", 0)}},
+		{name: "every attachment must fit", attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{attachment("ConnectX-8", 1), attachment("BlueField-3", 1)}, invalidAt: cutil.GetPtr(1)},
+		{name: "same-name DPU count cannot satisfy SpectrumX ordinal", attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{attachment("ConnectX-8", 2)}, invalidAt: cutil.GetPtr(0)},
+		{name: "device name is case sensitive", attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{attachment("connectx-8", 0)}, invalidAt: cutil.GetPtr(0)},
+		{name: "generic network capability is insufficient", attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{attachment("generic NIC", 0)}, invalidAt: cutil.GetPtr(0)},
+		{name: "network category is required", attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{attachment("wrong category", 0)}, invalidAt: cutil.GetPtr(0)},
+		{name: "missing count supplies no capacity", attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{attachment("unknown count", 0)}, invalidAt: cutil.GetPtr(0)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateSpectrumXAttachmentsForMachine(capabilities, test.attachments)
+			if test.invalidAt == nil {
+				require.NoError(t, err)
+				return
+			}
+			var fields validation.Errors
+			require.ErrorAs(t, err, &fields)
+			var selectors validation.Errors
+			require.ErrorAs(t, fields["spectrumXAttachments"], &selectors)
+			assert.Contains(t, selectors, fmt.Sprint(*test.invalidAt))
+		})
+	}
+}
 
 func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 	type fields struct {

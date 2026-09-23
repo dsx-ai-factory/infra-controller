@@ -44,8 +44,6 @@ import (
 func Test_ProxyTimeoutsFitWriteTimeout(t *testing.T) {
 	assert.Less(t, cutil.WorkflowContextTimeout, WriteTimeout)
 	assert.Less(t, grpcproxy.WorkflowExecutionTimeout, cutil.WorkflowContextTimeout)
-	assert.Less(t, common.SpectrumXPreparationTimeout+cutil.WorkflowContextTimeout+cutil.WorkflowContextNewAfterTimeout, WriteTimeout,
-		"SpectrumX preparation, mutation and timeout cleanup must leave time to write the response")
 }
 
 func Test_InitAPIServer(t *testing.T) {

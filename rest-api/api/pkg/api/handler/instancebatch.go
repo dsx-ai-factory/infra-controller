@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
-	"time"
 
 	goset "github.com/deckarep/golang-set/v2"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -231,7 +230,6 @@ func (bcih BatchCreateInstanceHandler) buildBatchInstanceCreateRequestOsConfig(c
 // @Success 201 {object} []model.APIInstance
 // @Router /v2/org/{org}/nico/instance/batch [post]
 func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
-	requestStarted := time.Now()
 	// Execution Steps:
 	// 1. Authentication & Authorization
 	//    - Extract user from context
@@ -1305,26 +1303,6 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 
 	// ==================== Step 3: Database Transaction ====================
 
-	var spectrumXPreparationCtx context.Context
-	var spectrumXEligibleIDs map[string]struct{}
-	if len(apiRequest.SpectrumXAttachments) > 0 {
-		var cancel context.CancelFunc
-		spectrumXPreparationCtx, cancel = common.NewSpectrumXPreparationContext(ctx, requestStarted)
-		defer cancel()
-		spectrumXErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
-		if spectrumXErr != nil {
-			return c.JSON(spectrumXErr.Code, spectrumXErr)
-		}
-		spectrumXEligibleIDs, spectrumXErr = common.GetSpectrumXEligibleMachineIDs(spectrumXPreparationCtx, bcih.dbSession, bcih.scp, site.ID, instancetype.ID, apiRequest.MachineLabelSelector, apiRequest.SpectrumXAttachments)
-		preparationErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
-		if preparationErr != nil {
-			return c.JSON(preparationErr.Code, preparationErr)
-		}
-		if spectrumXErr != nil {
-			logger.Warn().Err(spectrumXErr.Diagnosis()).Msg("SpectrumX preflight failed")
-			return c.JSON(spectrumXErr.Code, spectrumXErr)
-		}
-	}
 	// instanceData holds all the per-instance rows + workflow configs that
 	// get assembled inside the closure and reused for the HTTP response after
 	// the closure returns.
@@ -1443,7 +1421,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		// Allocate machines with topology optimization
-		machines, apiErr := allocateMachinesForBatch(ctx, tx, bcih.dbSession, instancetype, apiRequest.Count, topologyOptimized, apiRequest.MachineLabelSelector, spectrumXEligibleIDs, logger)
+		machines, apiErr := allocateMachinesForBatch(ctx, tx, bcih.dbSession, instancetype, apiRequest.Count, topologyOptimized, apiRequest.MachineLabelSelector, apiRequest.SpectrumXAttachments, logger)
 		if apiErr != nil {
 			return apiErr
 		}
@@ -1943,10 +1921,6 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			Msg("triggering batch create Instances workflow")
 
 		// Trigger batch workflow (use batchSuffix for consistency with instance names)
-		preparationErr := common.ValidateSpectrumXPreparation(spectrumXPreparationCtx)
-		if preparationErr != nil {
-			return preparationErr
-		}
 		workflowID := "instance-batch-create-" + batchSuffix
 		workflowOptions := temporalClient.StartWorkflowOptions{
 			ID: workflowID,
@@ -2055,7 +2029,7 @@ func allocateMachinesForBatch(
 	count int,
 	topologyOptimized bool,
 	machineLabelSelector map[string]string,
-	spectrumXEligibleIDs map[string]struct{},
+	spectrumXAttachments []model.APISpectrumXAttachmentCreateOrUpdateRequest,
 	logger zerolog.Logger,
 ) ([]cdbm.Machine, *cutil.APIError) {
 	if instancetype == nil || count <= 0 {
@@ -2083,11 +2057,19 @@ func allocateMachinesForBatch(
 
 	// Filter before counting capacity or choosing the NVLink domain. Choosing
 	// the largest unfiltered domain could hide compatible capacity elsewhere.
-	if spectrumXEligibleIDs != nil {
+	if len(spectrumXAttachments) > 0 {
+		machineIDs := make([]string, len(machines))
+		for i, machine := range machines {
+			machineIDs[i] = machine.ID
+		}
+		capabilities, capErr := common.GetSpectrumXCapabilitiesForMachines(ctx, tx, dbSession, machineIDs)
+		if capErr != nil {
+			logger.Error().Err(capErr).Msg("failed to retrieve Machine SpectrumX Capabilities from DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SpectrumX Capabilities for Machines", nil)
+		}
 		compatible := make([]cdbm.Machine, 0, len(machines))
 		for _, machine := range machines {
-			_, eligible := spectrumXEligibleIDs[machine.ID]
-			if eligible {
+			if model.ValidateSpectrumXAttachmentsForMachine(capabilities[machine.ID], spectrumXAttachments) == nil {
 				compatible = append(compatible, machine)
 			}
 		}

@@ -301,7 +301,7 @@ func AcquireInstanceTypeQuotaLock(ctx context.Context, tx *cdb.Tx, tenantID uuid
 }
 
 // GetUnallocatedMachineForInstanceType provides unallocatd machine based on instancetype
-func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Logger, tx *cdb.Tx, dbSession *cdb.Session, instanceType *cdbm.InstanceType, apiRequest *cam.APIInstanceCreateRequest, spectrumXEligibleIDs map[string]struct{}) (*cdbm.Machine, error) {
+func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Logger, tx *cdb.Tx, dbSession *cdb.Session, instanceType *cdbm.InstanceType, apiRequest *cam.APIInstanceCreateRequest) (*cdbm.Machine, error) {
 	if instanceType == nil {
 		return nil, ErrInvalidFunctionParams
 	}
@@ -346,8 +346,10 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 	)
 
 	var infiniBandInterfaces []cam.APIInfiniBandInterfaceCreateOrUpdateRequest
+	var spectrumXAttachments []cam.APISpectrumXAttachmentCreateOrUpdateRequest
 	if apiRequest != nil {
 		infiniBandInterfaces = apiRequest.InfiniBandInterfaces
+		spectrumXAttachments = apiRequest.SpectrumXAttachments
 	}
 	requireInfiniBandMatch := len(infiniBandInterfaces) > 0
 	var suggestedByDevice map[string][]int
@@ -373,15 +375,26 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 		}
 	}
 
+	// Read SpectrumX capability rows in the allocation transaction, following
+	// the InfiniBand eligibility pattern above. Do not perform an inline Site
+	// lookup or use an Instance Type summary as evidence for a specific machine.
+	var machineSpectrumXCaps map[string][]cdbm.MachineCapability
+	if len(spectrumXAttachments) > 0 {
+		machineIDs := make([]string, len(machines))
+		for i, machine := range machines {
+			machineIDs[i] = machine.ID
+		}
+		machineSpectrumXCaps, err = GetSpectrumXCapabilitiesForMachines(ctx, tx, dbSession, machineIDs)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to retrieve Machine SpectrumX Capabilities from DB")
+			return nil, err
+		}
+	}
+
 	if len(machines) > 0 {
 		for _, mc := range machines {
-			// nil leaves non-SpectrumX placement unchanged. A non-nil empty
-			// set must not fall back to unvalidated machines.
-			if spectrumXEligibleIDs != nil {
-				_, eligible := spectrumXEligibleIDs[mc.ID]
-				if !eligible {
-					continue
-				}
+			if cam.ValidateSpectrumXAttachmentsForMachine(machineSpectrumXCaps[mc.ID], spectrumXAttachments) != nil {
+				continue
 			}
 			// Acquire an advisory lock on the MachineID, other provider will be look for other is this is being locked
 			// this lock is released when the transaction commits or rollback

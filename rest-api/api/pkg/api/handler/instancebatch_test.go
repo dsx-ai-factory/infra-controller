@@ -1450,7 +1450,6 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 					testInstanceSiteBuildAllocationContraints(t, dbSession, al1, cdbm.AllocationResourceTypeInstanceType, it.ID, cdbm.AllocationConstraintTypeReserved, 2, ipu)
 					common.TestBuildMachineCapability(t, dbSession, nil, &it.ID, cdbm.MachineCapabilityTypeNetwork, "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller", nil, nil, cutil.GetPtr("Mellanox Technologies"), cutil.GetPtr(2), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeDPU), nil)
 					partition = testBuildSpectrumXPartition(t, dbSession, uuid.NewString(), tnOrg, st1, tn1, nil, cdbm.SpectrumXPartitionStatusReady)
-					inventory := map[string]*corev1.Machine{}
 					compatibleIDs = map[string]bool{}
 					for i := range 5 {
 						domain := "larger-incompatible-domain"
@@ -1460,12 +1459,12 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 						machine := testBatchBuildMachineWithNVLinkDomain(t, dbSession, ip.ID, st1.ID, domain)
 						testInstanceBuildMachineInstanceType(t, dbSession, machine, it)
 						candidates = append(candidates, machine)
-						count := uint32(0)
+						count := 0
 						if i >= 3 && scenario.compatible {
 							count = 1
 							compatibleIDs[machine.ID] = true
 						}
-						inventory[machine.ID] = testSpectrumXMachine(machine.ID, "ConnectX-8", count)
+						common.TestBuildMachineCapability(t, dbSession, &machine.ID, nil, cdbm.MachineCapabilityTypeNetwork, "ConnectX-8", nil, nil, nil, &count, cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX), nil)
 					}
 					*req = model.APIBatchInstanceCreateRequest{
 						NamePrefix: "spectrumx-batch", Count: 2, TenantID: tn1.ID.String(), InstanceTypeID: it.ID.String(), VpcID: vpc1.ID.String(),
@@ -1476,16 +1475,12 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 					previous := scp.IDClientMap[st1.ID.String()]
 					scp.IDClientMap[st1.ID.String()] = siteClient
 					t.Cleanup(func() { scp.IDClientMap[st1.ID.String()] = previous })
-					testSpectrumXDiscovery(t, siteClient, inventory, nil).Once()
 					if scenario.compatible {
 						siteClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateInstances", mock.Anything).Return(wrun, nil).Once()
 					}
 				},
 				afterHandle: func(t *testing.T, rec *httptest.ResponseRecorder) {
 					siteClient.AssertExpectations(t)
-					if scenario.compatible {
-						testSpectrumXWorkflowBudget(t, siteClient.Calls)
-					}
 					for _, candidate := range candidates {
 						machine, readErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, candidate.ID, nil, false)
 						require.NoError(t, readErr)

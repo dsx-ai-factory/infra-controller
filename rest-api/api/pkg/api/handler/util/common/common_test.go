@@ -1063,17 +1063,18 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                 string
-		instancetype         *cdbm.InstanceType
-		request              *cam.APIInstanceCreateRequest
-		spectrumXEligibleIDs map[string]struct{}
-		expectErr            bool
+		name         string
+		instancetype *cdbm.InstanceType
+		request      *cam.APIInstanceCreateRequest
+		expectErr    bool
 	}{
 		{
-			name:                 "empty SpectrumX eligibility must not fall back to unvalidated machines",
-			instancetype:         inst1,
-			spectrumXEligibleIDs: map[string]struct{}{},
-			expectErr:            true,
+			name:         "missing SpectrumX capabilities must not fall back to incompatible machines",
+			instancetype: inst1,
+			request: &cam.APIInstanceCreateRequest{
+				SpectrumXAttachments: []cam.APISpectrumXAttachmentCreateOrUpdateRequest{{Device: "ConnectX-8", DeviceInstance: cutil.GetPtr(0)}},
+			},
+			expectErr: true,
 		},
 		{
 			name:         "error when no Machine matches label selector",
@@ -1104,7 +1105,7 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := GetUnallocatedMachineForInstanceType(ctx, zerolog.Nop(), tx, dbSession, tc.instancetype, tc.request, tc.spectrumXEligibleIDs)
+			s, err := GetUnallocatedMachineForInstanceType(ctx, zerolog.Nop(), tx, dbSession, tc.instancetype, tc.request)
 			assert.Equal(t, tc.expectErr, err != nil)
 			if err == nil {
 				assert.NotNil(t, s)
@@ -1159,7 +1160,6 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 				dbSession,
 				concurrentInstanceType,
 				&cam.APIInstanceCreateRequest{MachineLabelSelector: map[string]string{"failure-domain": "fd-a"}},
-				nil,
 			)
 			resultCh <- allocationResult{machine: selected, err: selectionErr}
 		}()
