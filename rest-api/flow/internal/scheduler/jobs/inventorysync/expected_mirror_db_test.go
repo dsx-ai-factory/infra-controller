@@ -686,6 +686,116 @@ func TestMirrorComponents_UpdatePreservesRuntimeColumns(t *testing.T) {
 	assert.Equal(t, "9.9.9", got.FirmwareVersion, "firmware_version is runtime-owned, must survive")
 }
 
+func TestMirrorComponents_PositionPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		labels      map[string]string
+		preexisting bool
+		wantSlot    int
+		wantTray    int
+		wantHostID  int
+	}{
+		{
+			name:        "missing labels clear stale position to unknown",
+			labels:      map[string]string{},
+			preexisting: true,
+			wantSlot:    unknownPositionValue,
+			wantTray:    unknownPositionValue,
+			wantHostID:  unknownPositionValue,
+		},
+		{
+			name: "explicit zero remains valid",
+			labels: map[string]string{
+				labelComponentSlotID:  "0",
+				labelComponentTrayIdx: "0",
+				labelComponentHostID:  "0",
+			},
+			preexisting: true,
+			wantSlot:    0,
+			wantTray:    0,
+			wantHostID:  0,
+		},
+		{
+			name:       "fresh missing labels insert unknown",
+			labels:     map[string]string{},
+			wantSlot:   unknownPositionValue,
+			wantTray:   unknownPositionValue,
+			wantHostID: unknownPositionValue,
+		},
+		{
+			name: "fresh malformed labels insert unknown",
+			labels: map[string]string{
+				labelComponentSlotID:  "not-a-slot",
+				labelComponentTrayIdx: "not-a-tray",
+				labelComponentHostID:  "not-a-host",
+			},
+			wantSlot:   unknownPositionValue,
+			wantTray:   unknownPositionValue,
+			wantHostID: unknownPositionValue,
+		},
+		{
+			name: "negative labels preserve existing position",
+			labels: map[string]string{
+				labelComponentSlotID:  "-2",
+				labelComponentTrayIdx: "-3",
+				labelComponentHostID:  "-4",
+			},
+			preexisting: true,
+			wantSlot:    7,
+			wantTray:    8,
+			wantHostID:  9,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			const mac = "aa:bb:cc:dd:ee:11"
+			var componentID uuid.UUID
+			if tc.preexisting {
+				component := model.Component{
+					Type:         compType(),
+					Manufacturer: "Mfg",
+					SerialNumber: "POSITION-1",
+					SlotID:       7,
+					TrayIndex:    8,
+					HostID:       9,
+				}
+				require.NoError(t, component.Create(ctx, pool.DB))
+				componentID = component.ID
+				_, err := pool.DB.NewInsert().Model(&model.BMC{
+					MacAddress:  mac,
+					Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
+					ComponentID: component.ID,
+				}).Exec(ctx)
+				require.NoError(t, err)
+			}
+
+			detail := nicoapi.ExpectedMachineDetail{
+				BMCMACAddress:       mac,
+				ChassisSerialNumber: "POSITION-1",
+				Labels:              tc.labels,
+			}
+			mirrorExpectedComponents(
+				ctx,
+				pool,
+				compType(),
+				[]expectedComponentSpec{machineDetailToSpec(detail)},
+				map[string]uuid.UUID{},
+			)
+
+			if componentID == uuid.Nil {
+				var bmc model.BMC
+				require.NoError(t, pool.DB.NewSelect().Model(&bmc).Where("mac_address = ?", mac).Scan(ctx))
+				componentID = bmc.ComponentID
+			}
+			got, err := (&model.Component{ID: componentID}).GetIncludingDeleted(ctx, pool.DB)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantSlot, got.SlotID)
+			assert.Equal(t, tc.wantTray, got.TrayIndex)
+			assert.Equal(t, tc.wantHostID, got.HostID)
+		})
+	}
+}
+
 // #6: a host BMC insert whose MAC collides with an existing non-host (DPU) BMC
 // must be refused — the DPU row must not be evicted.
 func TestMirrorComponents_EvictRefusesNonHostBMC(t *testing.T) {

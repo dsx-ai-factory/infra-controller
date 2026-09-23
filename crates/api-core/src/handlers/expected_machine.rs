@@ -555,10 +555,10 @@ async fn apply_machine_patch(
             .normalize_host_bmc_patch(&previous, bmc_overrides)
             .map_err(|message| CarbideError::InvalidArgument(format!("host BMC: {message}")))?;
     }
-    // Pair validation requires both credential paths, so selecting the username
-    // also selects the password.
     if fields.contains(UpdateField::BmcUsername) {
         machine.data.bmc_username = patch.bmc_username;
+    }
+    if fields.contains(UpdateField::BmcPassword) {
         machine.data.bmc_password = patch.bmc_password;
     }
     if fields.contains(UpdateField::ChassisSerialNumber) {

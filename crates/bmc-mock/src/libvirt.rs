@@ -43,6 +43,9 @@ const VIRSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Additional grace period for reaping after a kill request, independent of the command deadline.
 const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Delay after each periodic observation; the actor retains at most one polling alarm.
+const POWER_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub virsh_path: PathBuf,
@@ -54,9 +57,11 @@ pub struct Config {
 /// Backend handle that sends operations to one sequential libvirt actor.
 ///
 /// Commands use an unbounded mailbox. Refresh notifications coalesce into one pending signal.
-/// Power reads return the last observation, initially Off, updated at actor startup
-/// and after power commands, binding, and refresh notifications. Power commands
-/// return once enqueued; execution failures are logged by the actor.
+/// Power reads return the last completed observation, initially Unknown, updated at actor startup,
+/// after power commands, binding, and refresh notifications, and by polling with a five-second
+/// delay after each attempt. Actor work can delay polling; each virsh attempt has a 30-second
+/// deadline and up to five seconds of cleanup. Failed or unrecognized observations return Unknown.
+/// Power commands return once enqueued; execution failures are logged by the actor.
 /// Dropping the handle cancels the actor. Once binding starts, it finishes even if
 /// its caller stops awaiting the reply, to avoid interrupting XML updates.
 #[derive(Debug)]
@@ -101,7 +106,7 @@ impl LibvirtCallbacks {
     /// The owner must observe task failures and shut down the set when stopping the BMC.
     pub fn new(config: Config, tasks: &mut JoinSet<()>) -> Self {
         let refresh_pending = Arc::new(AtomicBool::new(false));
-        let power_state = Arc::new(RwLock::new(MockPowerState::Off));
+        let power_state = Arc::new(RwLock::new(MockPowerState::Unknown));
         let (actor, mailbox) = Actor::new(
             LibvirtBackend {
                 config,
@@ -174,6 +179,7 @@ impl LibvirtBackend {
     async fn virsh_output(&self, arguments: &[&str]) -> eyre::Result<Output> {
         let command = self.config.virsh_path.display().to_string();
         let mut child = Command::new(&self.config.virsh_path)
+            .env("LC_ALL", "C")
             .arg("--connect")
             .arg(&self.config.uri)
             .args(arguments)
@@ -517,7 +523,11 @@ impl LibvirtBackend {
                 "running" | "idle" | "blocked" | "paused" | "in shutdown" | "pmsuspended" => {
                     MockPowerState::On
                 }
-                _ => MockPowerState::Off,
+                "shut off" | "crashed" => MockPowerState::Off,
+                state => {
+                    tracing::warn!(domain = %self.config.domain, state, "unrecognized libvirt domain power state");
+                    MockPowerState::Unknown
+                }
             },
             Err(error) => {
                 tracing::warn!(
@@ -525,7 +535,7 @@ impl LibvirtBackend {
                     error = ?error,
                     "could not read libvirt domain power state",
                 );
-                MockPowerState::Off
+                MockPowerState::Unknown
             }
         }
     }
@@ -620,11 +630,19 @@ impl LibvirtBackend {
 impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
     async fn message(
         &mut self,
-        _mailbox: &ActorMailbox<LibvirtMessage>,
+        mailbox: &ActorMailbox<LibvirtMessage>,
         message: LibvirtMessage,
     ) -> ActorResult {
         match message {
-            LibvirtMessage::Run => self.refresh_power_state().await,
+            LibvirtMessage::Run => {
+                self.refresh_power_state().await;
+                mailbox
+                    .send_at(
+                        (Instant::now() + POWER_POLL_INTERVAL).into(),
+                        LibvirtMessage::Run,
+                    )
+                    .expect("running actor mailbox must be open");
+            }
             LibvirtMessage::Bind { state, reply } => {
                 if !reply.is_closed() {
                     let result = self.bind_state(state).await;
@@ -841,10 +859,115 @@ fn virtual_media_xml(
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
     use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, check_cases};
+    use tower::ServiceExt;
 
     use super::*;
+    use crate::test_support::host_info;
+    use crate::{HardwareType, MachineRouterOptions, machine_router};
+
+    #[tokio::test]
+    async fn observes_external_power_changes_and_recovers_from_unavailable_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let virsh = directory.path().join("virsh");
+        std::fs::write(
+            &virsh,
+            r#"#!/bin/sh
+[ "$3" = domstate ] || exit 2
+state=$(cat "$0.state")
+[ "$state" != error ] || exit 1
+printf '%s\n' "$state"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&virsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let state_file = directory.path().join("virsh.state");
+        std::fs::write(&state_file, "running").unwrap();
+        let mut tasks = JoinSet::new();
+        let callbacks = Arc::new(LibvirtCallbacks::new(
+            Config {
+                virsh_path: virsh,
+                uri: "test:///default".to_string(),
+                domain: "test-domain".to_string(),
+                virtual_media_targets: BTreeMap::new(),
+            },
+            &mut tasks,
+        ));
+        assert!(matches!(
+            callbacks.get_power_state(),
+            MockPowerState::Unknown
+        ));
+        let (router, state) = machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            callbacks.clone(),
+            "test-host".to_string(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        // These changes happen outside the BMC: no reset or refresh is sent.
+        for (observation, expected) in [
+            ("running", serde_json::json!("On")),
+            ("shut off", serde_json::json!("Off")),
+            ("error", serde_json::Value::Null),
+            ("running", serde_json::json!("On")),
+            ("unrecognized", serde_json::Value::Null),
+        ] {
+            let replacement = directory.path().join("next-state");
+            std::fs::write(&replacement, observation).unwrap();
+            std::fs::rename(replacement, &state_file).unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let response = router
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .uri("/redfish/v1/Systems/System.Embedded.1")
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    if body.get("PowerState") == Some(&expected) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("observation {observation:?} did not become {expected}"));
+            if expected.is_null() {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset")
+                            .header("content-type", "application/json")
+                            .body(Body::from(r#"{"ResetType":"ForceOff"}"#))
+                            .unwrap(),
+                    )
+                    .await;
+                assert_eq!(
+                    response.unwrap().status(),
+                    StatusCode::INTERNAL_SERVER_ERROR
+                );
+            }
+        }
+        drop(router);
+        drop(state);
+        drop(callbacks);
+        tokio::time::timeout(Duration::from_secs(1), tasks.join_all())
+            .await
+            .expect("dropping the backend must stop polling");
+    }
 
     #[test]
     fn replaces_domain_boot_order() {
