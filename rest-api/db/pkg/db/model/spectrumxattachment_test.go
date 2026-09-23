@@ -37,7 +37,7 @@ func TestSpectrumXAttachment_ToProto(t *testing.T) {
 		assert.Equal(t, device, got.Device)
 		assert.Equal(t, uint32(2), got.DeviceInstance)
 		assert.Equal(t, corev1.SpxAttachmentType_Physical, got.AttachmentType)
-		assert.Nil(t, got.VirtualFunctionId, "an unset virtual function must stay unset on the wire")
+		assert.Nil(t, got.AttachmentVf, "an unset virtual function must stay unset on the wire")
 	})
 
 	// OVS maps onto Core's `Ovn`, which is the same attachment under its older name.
@@ -50,9 +50,9 @@ func TestSpectrumXAttachment_ToProto(t *testing.T) {
 		}
 
 		got := sxa.ToProto()
-		assert.Equal(t, corev1.SpxAttachmentType_Ovn, got.AttachmentType)
-		require.NotNil(t, got.VirtualFunctionId)
-		assert.Equal(t, uint32(3), *got.VirtualFunctionId)
+		assert.Equal(t, corev1.SpxAttachmentType_OVS, got.AttachmentType)
+		require.NotNil(t, got.AttachmentVf)
+		assert.Equal(t, uint32(3), got.AttachmentVf.GetVfIndex())
 	})
 
 	// API-side validation rejects an unknown type long before a row is written, so the
