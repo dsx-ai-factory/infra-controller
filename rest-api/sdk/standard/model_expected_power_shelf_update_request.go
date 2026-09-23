@@ -22,7 +22,7 @@ var _ MappedNullable = &ExpectedPowerShelfUpdateRequest{}
 
 // ExpectedPowerShelfUpdateRequest Request data to update an existing Expected Power Shelf.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Credentials are never returned in responses.
 type ExpectedPowerShelfUpdateRequest struct {
-	// ID of the Expected Power Shelf to update (ignored for single update, used for identification in batch operations).
+	// ID of the Expected Power Shelf to update.  For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
 	Id NullableString `json:"id,omitempty"`
 	// Immutable MAC address of the Expected Power Shelf's BMC (Baseboard Management Controller). Omit this field when updating. A formatting-equivalent value is accepted for compatibility and preserves the originally stored spelling, but changing the physical MAC address is rejected with HTTP 400.
 	// Deprecated
