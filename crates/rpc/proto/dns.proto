@@ -112,6 +112,11 @@ message Domain {
   google.protobuf.Timestamp deleted = 5;
   Metadata metadata = 6;
   optional string soa = 7;
+  // Default TTL in seconds for the zone's records, 30 to 86400 inclusive.
+  // Absent means the site default of 300. On UpdateDomain,
+  // absent preserves the stored value and a present value replaces it; the
+  // field cannot be cleared once set.
+  optional uint32 default_ttl = 8;
 }
 
 message CreateDomainRequest {
@@ -119,11 +124,17 @@ message CreateDomainRequest {
   // in-addr.arpa or ip6.arpa are rejected with INVALID_ARGUMENT, ignoring case,
   // surrounding whitespace, and trailing dots.
   string name = 1;
+  // Default record TTL in seconds, 30 to 86400 inclusive; values outside that
+  // range are rejected with INVALID_ARGUMENT. Absent means the site default
+  // of 300.
+  optional uint32 default_ttl = 2;
 }
 
 message UpdateDomainRequest {
-  // The replacement name must not be at or below in-addr.arpa or ip6.arpa;
-  // the same reverse-name validation as CreateDomainRequest applies.
+  // Only `id` is required. An empty `name` preserves the stored name; a
+  // replacement name must not be at or below in-addr.arpa or ip6.arpa, with
+  // the same reverse-name validation as CreateDomainRequest. See
+  // Domain.default_ttl for how an absent TTL is treated.
   Domain domain = 1;
 }
 

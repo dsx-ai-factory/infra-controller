@@ -832,6 +832,16 @@ impl ApiClient {
         Ok(self.0.find_domain(request).await?)
     }
 
+    pub(crate) async fn update_domain(
+        &self,
+        domain: ::rpc::protos::dns::Domain,
+    ) -> CarbideCliResult<::rpc::protos::dns::Domain> {
+        let request = ::rpc::protos::dns::UpdateDomainRequest {
+            domain: Some(domain),
+        };
+        Ok(self.0.update_domain(request).await?)
+    }
+
     pub(crate) async fn machine_insert_health_report_override(
         &self,
         id: &MachineId,

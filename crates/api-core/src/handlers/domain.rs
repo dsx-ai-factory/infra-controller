@@ -26,6 +26,13 @@ use tonic::{Request, Response, Status};
 use crate::CarbideError;
 use crate::api::Api;
 
+/// Validates a caller-supplied default TTL into the zone's range.
+fn zone_ttl_argument(secs: Option<u32>) -> Result<Option<model::dns::ZoneTtl>, CarbideError> {
+    secs.map(model::dns::ZoneTtl::try_from)
+        .transpose()
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))
+}
+
 /// Rejects a proposed domain name at or below either reverse-DNS tree root.
 ///
 /// Reverse lookups derive PTRs from inventory, not stored zones. Accepting
@@ -55,7 +62,10 @@ pub(crate) async fn create(
 
     let req = request.into_inner();
     ensure_not_reverse_zone_name(&req.name)?;
-    let new_domain = NewDomain::new(req.name);
+    let new_domain = NewDomain {
+        default_ttl: zone_ttl_argument(req.default_ttl)?,
+        ..NewDomain::new(req.name)
+    };
 
     let domain = domain::persist(new_domain, &mut txn).await?;
 
@@ -89,8 +99,16 @@ pub(crate) async fn update(
                 id: uuid.to_string(),
             })?;
 
-    domain.name = domain_proto.name;
-    ensure_not_reverse_zone_name(&domain.name)?;
+    // An empty name preserves the stored one, so a caller changing only the
+    // TTL does not have to read the name first and race a concurrent rename.
+    if !domain_proto.name.is_empty() {
+        domain.name = domain_proto.name;
+        ensure_not_reverse_zone_name(&domain.name)?;
+    }
+    // Omission preserves the stored default; the wire cannot clear it.
+    if let Some(default_ttl) = zone_ttl_argument(domain_proto.default_ttl)? {
+        domain.default_ttl = Some(default_ttl);
+    }
 
     domain.increment_serial();
 
@@ -194,6 +212,7 @@ pub(crate) async fn create_legacy_compat(
     // Convert legacy Domain to CreateDomainRequest
     let create_request = CreateDomainRequest {
         name: domain_legacy.name,
+        default_ttl: None,
     };
 
     // Call the new handler
@@ -231,6 +250,7 @@ pub(crate) async fn update_legacy_compat(
             deleted: domain_legacy.deleted,
             metadata: None, // Legacy doesn't have metadata
             soa: None,      // Legacy doesn't have SOA
+            default_ttl: None,
         }),
     };
 

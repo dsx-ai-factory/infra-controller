@@ -784,14 +784,19 @@ func (x *DomainInfo) GetNotifiedSerial() int32 {
 }
 
 type Domain struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            *DomainId              `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Created       *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=created,proto3" json:"created,omitempty"`
-	Updated       *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=updated,proto3" json:"updated,omitempty"`
-	Deleted       *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=deleted,proto3" json:"deleted,omitempty"`
-	Metadata      *DomainMetadata        `protobuf:"bytes,6,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	Soa           *string                `protobuf:"bytes,7,opt,name=soa,proto3,oneof" json:"soa,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Id       *DomainId              `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name     string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Created  *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=created,proto3" json:"created,omitempty"`
+	Updated  *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=updated,proto3" json:"updated,omitempty"`
+	Deleted  *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=deleted,proto3" json:"deleted,omitempty"`
+	Metadata *DomainMetadata        `protobuf:"bytes,6,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	Soa      *string                `protobuf:"bytes,7,opt,name=soa,proto3,oneof" json:"soa,omitempty"`
+	// Default TTL in seconds for the zone's records, 30 to 86400 inclusive.
+	// Absent means the site default of 300. On UpdateDomain,
+	// absent preserves the stored value and a present value replaces it; the
+	// field cannot be cleared once set.
+	DefaultTtl    *uint32 `protobuf:"varint,8,opt,name=default_ttl,json=defaultTtl,proto3,oneof" json:"default_ttl,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -875,12 +880,23 @@ func (x *Domain) GetSoa() string {
 	return ""
 }
 
+func (x *Domain) GetDefaultTtl() uint32 {
+	if x != nil && x.DefaultTtl != nil {
+		return *x.DefaultTtl
+	}
+	return 0
+}
+
 type CreateDomainRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Reverse DNS serves inventory-derived PTRs, not managed zones. Names at or below
 	// in-addr.arpa or ip6.arpa are rejected with INVALID_ARGUMENT, ignoring case,
 	// surrounding whitespace, and trailing dots.
-	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Default record TTL in seconds, 30 to 86400 inclusive; values outside that
+	// range are rejected with INVALID_ARGUMENT. Absent means the site default
+	// of 300.
+	DefaultTtl    *uint32 `protobuf:"varint,2,opt,name=default_ttl,json=defaultTtl,proto3,oneof" json:"default_ttl,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -922,10 +938,19 @@ func (x *CreateDomainRequest) GetName() string {
 	return ""
 }
 
+func (x *CreateDomainRequest) GetDefaultTtl() uint32 {
+	if x != nil && x.DefaultTtl != nil {
+		return *x.DefaultTtl
+	}
+	return 0
+}
+
 type UpdateDomainRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The replacement name must not be at or below in-addr.arpa or ip6.arpa;
-	// the same reverse-name validation as CreateDomainRequest applies.
+	// Only `id` is required. An empty `name` preserves the stored name; a
+	// replacement name must not be at or below in-addr.arpa or ip6.arpa, with
+	// the same reverse-name validation as CreateDomainRequest. See
+	// Domain.default_ttl for how an absent TTL is treated.
 	Domain        *Domain `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1160,7 +1185,7 @@ const file_dns_nico_proto_rawDesc = "" +
 	"\flast_checked\x18\x05 \x01(\x05H\x00R\vlastChecked\x88\x01\x01\x12,\n" +
 	"\x0fnotified_serial\x18\x06 \x01(\x05H\x01R\x0enotifiedSerial\x88\x01\x01B\x0f\n" +
 	"\r_last_checkedB\x12\n" +
-	"\x10_notified_serial\"\xb0\x02\n" +
+	"\x10_notified_serial\"\xe6\x02\n" +
 	"\x06Domain\x12 \n" +
 	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x124\n" +
@@ -1168,10 +1193,16 @@ const file_dns_nico_proto_rawDesc = "" +
 	"\aupdated\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\aupdated\x124\n" +
 	"\adeleted\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\adeleted\x12/\n" +
 	"\bmetadata\x18\x06 \x01(\v2\x13.dns.DomainMetadataR\bmetadata\x12\x15\n" +
-	"\x03soa\x18\a \x01(\tH\x00R\x03soa\x88\x01\x01B\x06\n" +
-	"\x04_soa\")\n" +
+	"\x03soa\x18\a \x01(\tH\x00R\x03soa\x88\x01\x01\x12$\n" +
+	"\vdefault_ttl\x18\b \x01(\rH\x01R\n" +
+	"defaultTtl\x88\x01\x01B\x06\n" +
+	"\x04_soaB\x0e\n" +
+	"\f_default_ttl\"_\n" +
 	"\x13CreateDomainRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\":\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12$\n" +
+	"\vdefault_ttl\x18\x02 \x01(\rH\x00R\n" +
+	"defaultTtl\x88\x01\x01B\x0e\n" +
+	"\f_default_ttl\":\n" +
 	"\x13UpdateDomainRequest\x12#\n" +
 	"\x06domain\x18\x01 \x01(\v2\v.dns.DomainR\x06domain\"c\n" +
 	"\x11DomainSearchQuery\x12%\n" +
@@ -1263,6 +1294,7 @@ func file_dns_nico_proto_init() {
 	file_dns_nico_proto_msgTypes[2].OneofWrappers = []any{}
 	file_dns_nico_proto_msgTypes[11].OneofWrappers = []any{}
 	file_dns_nico_proto_msgTypes[12].OneofWrappers = []any{}
+	file_dns_nico_proto_msgTypes[13].OneofWrappers = []any{}
 	file_dns_nico_proto_msgTypes[15].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

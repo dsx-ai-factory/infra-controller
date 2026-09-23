@@ -18,7 +18,7 @@
 use chrono::{DateTime, Utc};
 use dns_record::SoaRecord;
 use model::dns::domain_info::DomainInfo;
-use model::dns::{Answer, Domain, DomainMetadata, NewDomain, ResourceRecord, SoaSnapshot};
+use model::dns::{Answer, Domain, DomainMetadata, NewDomain, ResourceRecord, SoaSnapshot, ZoneTtl};
 
 use crate as rpc;
 use crate::errors::RpcDataConversionError;
@@ -51,9 +51,18 @@ impl TryFrom<rpc::protos::dns::Domain> for NewDomain {
 
         Ok(NewDomain {
             name: proto.name,
+            default_ttl: zone_ttl_from_proto(proto.default_ttl)?,
             soa,
         })
     }
+}
+
+/// Validates an optional wire TTL into the zone's range, reporting the bounds
+/// on failure.
+fn zone_ttl_from_proto(secs: Option<u32>) -> Result<Option<ZoneTtl>, RpcDataConversionError> {
+    secs.map(ZoneTtl::try_from)
+        .transpose()
+        .map_err(|error| RpcDataConversionError::InvalidArgument(error.to_string()))
 }
 
 impl From<Domain> for rpc::protos::dns::Domain {
@@ -61,6 +70,7 @@ impl From<Domain> for rpc::protos::dns::Domain {
         rpc::protos::dns::Domain {
             id: Some(domain.id),
             name: domain.name,
+            default_ttl: domain.default_ttl.map(u32::from),
             created: Some(domain.created.into()),
             updated: Some(domain.updated.into()),
             deleted: domain.deleted.map(|d| d.into()),
@@ -120,6 +130,7 @@ impl TryFrom<rpc::protos::dns::Domain> for Domain {
         Ok(Domain {
             id: domain_id,
             name: domain.name,
+            default_ttl: zone_ttl_from_proto(domain.default_ttl)?,
             created,
             updated,
             deleted,

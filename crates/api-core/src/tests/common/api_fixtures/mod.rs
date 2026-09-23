@@ -1792,6 +1792,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
     let domain: carbide_uuid::domain::DomainId = api
         .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
             name: "dwrt1.com".to_string(),
+            default_ttl: None,
         }))
         .await
         .unwrap()

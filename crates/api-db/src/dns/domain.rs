@@ -49,6 +49,8 @@ fn validate_domain_name(name: &str) -> Result<(), DatabaseError> {
 pub struct DbDomain {
     pub id: DomainId,
     pub name: String,
+    /// Default record TTL; absence means the site default.
+    pub default_ttl: Option<model::dns::ZoneTtl>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
@@ -61,6 +63,7 @@ impl From<DbDomain> for Domain {
         Domain {
             id: db.id,
             name: db.name,
+            default_ttl: db.default_ttl,
             created: db.created,
             updated: db.updated,
             deleted: db.deleted,
@@ -98,8 +101,8 @@ pub async fn persist(value: NewDomain, txn: &mut PgConnection) -> DatabaseResult
     // Create default metadata entry
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
 
-    let query =
-        "INSERT INTO domains (name, soa, domain_metadata_id) VALUES ($1, $2, $3) returning *";
+    let query = "INSERT INTO domains (name, soa, domain_metadata_id, default_ttl)
+                 VALUES ($1, $2, $3, $4) RETURNING *";
     match persist_inner_with_metadata(&value, metadata_id, txn, query).await {
         Ok(Some(domain)) => Ok(domain),
         Ok(None) => Err(DatabaseError::NotFoundError {
@@ -120,7 +123,8 @@ pub async fn persist_first(
     let metadata_id = super::domain_metadata::DbMetadata::create_default(txn).await?;
 
     let query = "
-            INSERT INTO domains (name, soa, domain_metadata_id) SELECT $1, $2, $3
+            INSERT INTO domains (name, soa, domain_metadata_id, default_ttl)
+            SELECT $1, $2, $3, $4
             WHERE NOT EXISTS (SELECT name FROM domains)
             RETURNING *";
     persist_inner_with_metadata(value, metadata_id, txn, query).await
@@ -136,6 +140,7 @@ async fn persist_inner_with_metadata(
         .bind(&value.name)
         .bind(sqlx::types::Json(&value.soa))
         .bind(metadata_id)
+        .bind(value.default_ttl)
         .fetch_optional(txn)
         .await
         .map(|opt| opt.map(Domain::from))
@@ -304,7 +309,8 @@ pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, Da
     let query = "UPDATE domains
                  SET name = $1,
                      updated = GREATEST(statement_timestamp(), updated + interval '1 microsecond'),
-                     soa = $2
+                     soa = $2,
+                     default_ttl = $5
                  WHERE id = $3
                    AND updated = $4
                  RETURNING *";
@@ -314,6 +320,7 @@ pub async fn update(value: &Domain, txn: &mut PgConnection) -> Result<Domain, Da
         .bind(sqlx::types::Json(&value.soa))
         .bind(value.id)
         .bind(value.updated)
+        .bind(value.default_ttl)
         .fetch_one(txn)
         .await
         .map(Domain::from)

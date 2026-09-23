@@ -18855,7 +18855,7 @@ type TenantConfig struct {
 	// Identifies the tenant that uses this instance
 	TenantOrganizationId string  `protobuf:"bytes,1,opt,name=tenant_organization_id,json=tenantOrganizationId,proto3" json:"tenant_organization_id,omitempty"`
 	Hostname             *string `protobuf:"bytes,15,opt,name=hostname,proto3,oneof" json:"hostname,omitempty"`
-	// TODO: make an API that allows these to be updated.  For now, they're set only at instance allocation.
+	//TODO: make an API that allows these to be updated.  For now, they're set only at instance allocation.
 	// protolint:disable:next FIELD_NAMES_LOWER_SNAKE_CASE
 	TenantKeysetIds []string `protobuf:"bytes,8,rep,name=tenantKeysetIds,proto3" json:"tenantKeysetIds,omitempty"` // this may be empty
 	unknownFields   protoimpl.UnknownFields
@@ -20075,12 +20075,12 @@ type InstanceNetworkStatus struct {
 	Interfaces []*InstanceInterfaceStatus `protobuf:"bytes,1,rep,name=interfaces,proto3" json:"interfaces,omitempty"`
 	// Whether all desired network changes that the user has applied have taken effect
 	// This includes:
-	//   - Whether `InstanceNetworkConfig` is of exactly the same version as the
-	//     version the user desires.
-	//   - Whether the version of each security policy that is either directly referenced
-	//     as part of an `InstanceInterfaceConfig` or indirectly referenced via the
-	//     the security policies that are applied to the VPC or NetworkSegment
-	//     is exactly the same version as the version the user desires.
+	// - Whether `InstanceNetworkConfig` is of exactly the same version as the
+	//   version the user desires.
+	// - Whether the version of each security policy that is either directly referenced
+	//   as part of an `InstanceInterfaceConfig` or indirectly referenced via the
+	//   the security policies that are applied to the VPC or NetworkSegment
+	//   is exactly the same version as the version the user desires.
 	//
 	// Note for the implementation: We need to monitor all these config versions
 	// on the feedback path from DPU to nico in order to know whether the
@@ -20149,8 +20149,8 @@ type InstanceInfinibandStatus struct {
 	IbInterfaces []*InstanceIBInterfaceStatus `protobuf:"bytes,1,rep,name=ib_interfaces,json=ibInterfaces,proto3" json:"ib_interfaces,omitempty"`
 	// Whether all desired infiniband changes that the user has applied have taken effect
 	// This includes:
-	//   - Whether `InstanceInfinibandConfig` is of exactly the same version as the
-	//     version the user desires.
+	// - Whether `InstanceInfinibandConfig` is of exactly the same version as the
+	//   version the user desires.
 	//
 	// TODO: Do we also want to show all applied versions here, or just track them
 	// internally? Probably not help for for tenants at all - but it could be helpful
@@ -21400,9 +21400,9 @@ func (x *InstanceIBInterfaceStatus) GetLid() uint32 {
 // The actual status of a single gpu of an instance
 type InstanceNVLinkGpuStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// / fabric guid of this GPU
+	/// fabric guid of this GPU
 	GpuGuid *string `protobuf:"bytes,1,opt,name=gpu_guid,json=gpuGuid,proto3,oneof" json:"gpu_guid,omitempty"`
-	// / The NVLink domain this GPU is physically a part of
+	/// The NVLink domain this GPU is physically a part of
 	DomainId *NVLinkDomainId `protobuf:"bytes,2,opt,name=domain_id,json=domainId,proto3" json:"domain_id,omitempty"`
 	// Logical partition this GPU is in
 	LogicalPartitionId *NVLinkLogicalPartitionId `protobuf:"bytes,3,opt,name=logical_partition_id,json=logicalPartitionId,proto3" json:"logical_partition_id,omitempty"`
@@ -27318,11 +27318,10 @@ type ManagedHostNetworkConfigResponse struct {
 	// used by FNN configs.
 	// Deprecated: use FlatInterfaceConfig.vpc_routing_profile for per-VPC routing.
 	// NOTE: This will replace internet_l3_vni and common_internal_route_target but could allow
-	//
-	//	common_internal_route_target to be renamed/repurposed as a site-level RT.
-	//	to become a site-level common route target.
-	//	This does _not_ replace additional_route_target_imports, which are global
-	//	imports
+	//       common_internal_route_target to be renamed/repurposed as a site-level RT.
+	//       to become a site-level common route target.
+	//       This does _not_ replace additional_route_target_imports, which are global
+	//       imports
 	RoutingProfile *RoutingProfile `protobuf:"bytes,114,opt,name=routing_profile,json=routingProfile,proto3,oneof" json:"routing_profile,omitempty"`
 	// List of aggregate IP prefixes (in CIDR notation) that contain prefixes assigned
 	// to tenants so that they themselves can announce to the DPU.  E.g., BYOIP

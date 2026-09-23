@@ -82,6 +82,7 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
     let original = api
         .create_domain(Request::new(CreateDomainRequest {
             name: DOMAIN_NAME.to_string(),
+            default_ttl: None,
         }))
         .await
         .expect("valid DNS test fixture")
@@ -97,6 +98,7 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
         let error = api
             .create_domain(Request::new(CreateDomainRequest {
                 name: name.to_string(),
+                default_ttl: None,
             }))
             .await
             .expect_err("reverse domain writes are rejected");
@@ -133,6 +135,61 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
         vec![original],
         "rejected writes must leave no changes"
     );
+}
+
+// UpdateDomain treats an empty name and an absent default_ttl as "keep the
+// stored value", and both Create and Update reject a TTL outside 30..=86400
+// with INVALID_ARGUMENT before anything is written.
+#[sqlx_test]
+async fn test_domain_default_ttl_omission_and_range_rules(pool: PgPool) {
+    use rpc::protos::dns::{CreateDomainRequest, UpdateDomainRequest};
+
+    let env = TestHarness::builder(pool).build().await;
+    let api = env.api();
+    let created = api
+        .create_domain(Request::new(CreateDomainRequest {
+            name: DOMAIN_NAME.to_string(),
+            default_ttl: Some(600),
+        }))
+        .await
+        .expect("create domain with a default TTL")
+        .into_inner();
+    assert_eq!(created.default_ttl, Some(600));
+
+    // An update carrying only the id leaves both the name and the TTL as stored.
+    let unchanged = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::protos::dns::Domain {
+                id: created.id,
+                ..Default::default()
+            }),
+        }))
+        .await
+        .expect("update without touching the name or TTL")
+        .into_inner();
+    assert_eq!(unchanged.name, created.name);
+    assert_eq!(unchanged.default_ttl, Some(600));
+
+    let error = api
+        .create_domain(Request::new(CreateDomainRequest {
+            name: "short-ttl.example".to_string(),
+            default_ttl: Some(5),
+        }))
+        .await
+        .expect_err("TTL below the floor on create");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+    let error = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::protos::dns::Domain {
+                id: created.id,
+                default_ttl: Some(5),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .expect_err("TTL below the floor on update");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
 }
 
 #[sqlx_test]
