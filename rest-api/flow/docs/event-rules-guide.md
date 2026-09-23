@@ -182,7 +182,7 @@ event-rule implementation, and `flowConfig.leakDetectionInterval` controls how
 often that implementation runs. A Helm upgrade that changes these values rolls
 the Flow pod so the file and environment changes take effect.
 
-See the [`nico-flow` chart documentation](../../../helm/charts/nico-flow/README.md)
+See the [`nico-flow` chart documentation](../../../helm/nico-flow/README.md)
 for the complete chart configuration contract.
 
 ## gRPC API

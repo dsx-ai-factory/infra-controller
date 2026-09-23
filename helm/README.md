@@ -4,7 +4,7 @@ NCX Infra Controller (NICo) -- Kubernetes Deployment
 
 ## Overview
 
-NICo (also known as NCX Infra Controller) is a platform for provisioning, managing, and monitoring bare metal GPU servers, including DGX and HGX systems. This Helm chart deploys NICo services into a Kubernetes cluster as a single umbrella chart with independently toggleable subcharts.
+NICo (also known as NCX Infra Controller) is a platform for provisioning, managing, and monitoring bare metal GPU servers, including DGX and HGX systems. This Helm chart deploys NICo services into a Kubernetes cluster as a single umbrella chart. Core components are mandatory and always installed (a leftover core `<chart>.enabled` key is ignored); the remaining, optional services are independently toggleable subcharts.
 
 The chart is designed for production environments where NICo manages the full lifecycle of bare metal infrastructure: DHCP/PXE-based OS provisioning, DNS resolution, hardware health monitoring, SSH console access, and a unified REST/gRPC API.
 
@@ -16,8 +16,8 @@ The chart is designed for production environments where NICo manages the full li
 | 2  | **nico-bmc-proxy** | Authenticating proxy for connecting to BMCs over HTTPS (Redfish). Required for DPS-based power provisioning. |
 | 3  | **nico-dhcp** | Kea DHCP server for bare-metal PXE boot and IP assignment. |
 | 4  | **nico-dns** | Authoritative DNS server (StatefulSet) for managed machines and VPCs. |
-| 5  | **nico-dsx-exchange-consumer** | Consumes DSX exchange messages for machine telemetry and state updates. Disabled by default. |
-| 6  | **nico-flow** | Task, policy, and automation service. Installed separately by `setup.sh` unless `--skip-flow` is used; not rendered by the umbrella chart. |
+| 5  | **nico-dsx-exchange-consumer** | Consumes DSX exchange messages for machine telemetry and state updates. Optional; enabled by default - disable when the site has no MQTT broker. |
+| 6  | **nico-flow** | Task, policy, and automation service. Not rendered by the umbrella chart; `setup.sh` phase 7h installs it as a separate release from `helm/nico-flow` whenever NICo REST is installed (no skip flag of its own; skipped only with all of REST by `--skip-rest`). |
 | 7  | **nico-hardware-health** | Collects and reports hardware health metrics from managed machines. |
 | 8  | **nico-ntp** | chrony NTP servers (3-replica StatefulSet, per-pod LoadBalancer VIPs). DPUs and bare-metal hosts sync against these per the kea DHCP `ntpServer` advertisement. |
 | 9  | **nico-pxe** | PXE boot server (HTTP-based) for OS provisioning workflows. |
@@ -183,33 +183,26 @@ another configured value) when using the `alt_metric_prefix` site setting.
 
 ### Subchart Enable/Disable Flags
 
-Each subchart can be independently enabled or disabled. All core NICo services are enabled by default. Infrastructure services (`unbound`) that may already be provided by the environment are disabled by default.
+Core components (`nico-api`, `nico-bmc-proxy`, `nico-dhcp`, `nico-dns`,
+`nico-hardware-health`, `nico-pxe`, `nico-ssh-console-rs`) are mandatory:
+they have no `enabled` flag, are unconditional dependencies in
+`helm/Chart.yaml`, and always install. Setting `<chart>.enabled: false` for
+a core component in site values has no effect. (`nico-flow` is likewise
+mandatory but is a standalone release installed by `setup.sh` from
+`helm/nico-flow`, not by this umbrella.)
+
+Only the optional services are toggleable:
 
 ```yaml
-nico-api:
-  enabled: true        # Core API -- usually always enabled
-nico-bmc-proxy:
-  enabled: true        # BMC proxy — required for DPS-based power provisioning;
-                       # disable only when an external BMC proxy is deployed
-                       # and wired separately
-nico-dhcp:
-  enabled: true        # DHCP for PXE boot
-nico-dns:
-  enabled: true        # Authoritative DNS
 nico-dsx-exchange-consumer:
-  enabled: false       # DSX exchange telemetry consumer (off by default)
-nico-flow:
-  enabled: false       # Off in the umbrella; setup.sh installs a separate release by default
-nico-hardware-health:
-  enabled: true        # Hardware health monitoring
+  enabled: true        # DSX exchange telemetry consumer (on by default;
+                       # disable when the site has no MQTT broker)
 nico-ntp:
   enabled: true        # chrony NTP servers (required for DPU pre-ingestion)
-nico-pxe:
-  enabled: true        # PXE boot server
-nico-ssh-console-rs:
-  enabled: true        # SSH console proxy
 unbound:
   enabled: false       # Recursive DNS resolver (disabled by default)
+nico-machine-a-tron:
+  enabled: false       # Mock machine simulator for dev/test (disabled by default)
 ```
 
 ### Image Configuration
@@ -489,10 +482,12 @@ helm plugin install https://github.com/helm-unittest/helm-unittest.git
 helm unittest helm --with-subchart
 
 # Disabled-by-default subcharts must be tested separately
-helm unittest helm/charts/nico-flow
 helm unittest helm/charts/nico-machine-a-tron
 helm unittest helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
 helm unittest helm/charts/unbound
+
+# nico-flow is a standalone chart (not an umbrella dependency) - test it separately too
+helm unittest helm/nico-flow
 ```
 
 Test files live in `tests/` directories within each chart. CI runs these tests automatically on every PR.

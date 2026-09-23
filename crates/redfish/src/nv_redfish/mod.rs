@@ -25,22 +25,278 @@ use std::time::{Duration, Instant};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use carbide_secrets::credentials::Credentials;
 use carbide_utils::HostPortPair;
-use carbide_utils::redfish::format_forwarded_host_parameter;
+use carbide_utils::redfish::{
+    format_forwarded_host_parameter, log_redfish_http_error, redact_redfish_response_body,
+    redfish_basic_authorization_context,
+};
 pub use nv_redfish::bmc_http::reqwest::BmcError;
 use nv_redfish::bmc_http::reqwest::{
     Client as RedfishReqwestClient, ClientParams as RedfishReqwestClientParams,
 };
 use nv_redfish::bmc_http::{BmcCredentials, CacheSettings, HttpBmc};
+use nv_redfish::core::query::{ExpandQuery, FilterQuery};
+use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
+use nv_redfish::core::{
+    Action, Bmc, BoxTryStream, EntityTypeRef, Expandable, ModificationResponse, ODataETag, ODataId,
+    SessionCreateResponse,
+};
 use nv_redfish::oem::hpe::ilo_service_ext::ManagerType as HpeManagerType;
 use nv_redfish::{Error as NvError, ServiceRoot as NvServiceRoot};
 use reqwest::header::HeaderMap;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 mod span_isolated_http_client;
 
 use span_isolated_http_client::SpanIsolatedHttpClient;
 
-pub type RedfishBmc = HttpBmc<SpanIsolatedHttpClient>;
+const NV_REDFISH_BACKEND: &str = "nv-redfish";
+
+type InnerRedfishBmc = HttpBmc<SpanIsolatedHttpClient>;
+
+/// An `nv-redfish` BMC that emits one structured warning for each failed HTTP
+/// operation and removes request credentials from response-bearing errors
+/// before either logging or returning them to callers.
+///
+/// The decorator retains the credential representations used to authenticate
+/// the client, plus session-creation values for that operation, solely so it
+/// can sanitize untrusted BMC response text. Unsafe error bodies fail closed
+/// through the shared Redfish sanitizer. Successful responses, cache behavior,
+/// and transport errors that contain no BMC response body remain unchanged.
+///
+/// This decorator sits outside `HttpBmc`, after its ETag cache handling, so an
+/// internal `304 Not Modified` cache signal is not misreported as a failure.
+pub struct RedfishBmc {
+    inner: InnerRedfishBmc,
+    sensitive_values: Arc<[String]>,
+}
+
+impl RedfishBmc {
+    fn new(inner: InnerRedfishBmc, sensitive_values: Arc<[String]>) -> Self {
+        Self {
+            inner,
+            sensitive_values,
+        }
+    }
+
+    fn finish<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, BmcError>,
+    ) -> Result<T, BmcError> {
+        self.finish_with_sensitive_values(operation, result, &self.sensitive_values)
+    }
+
+    fn finish_with_sensitive_values<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, BmcError>,
+        sensitive_values: &[String],
+    ) -> Result<T, BmcError> {
+        let result = redact_bmc_error(result, sensitive_values);
+        if let Err(error) = &result {
+            log_bmc_error(operation, error, sensitive_values);
+        }
+        result
+    }
+
+    /// Session creation can submit credentials that differ from the client's
+    /// authentication credential. Include every non-empty string in that small
+    /// request document when sanitizing the returned and logged HTTP error.
+    fn finish_session<T, V: Serialize>(
+        &self,
+        operation: &'static str,
+        query: &V,
+        result: Result<T, BmcError>,
+    ) -> Result<T, BmcError> {
+        let mut sensitive_values = self.sensitive_values.to_vec();
+        if let Ok(query) = serde_json::to_value(query) {
+            collect_nonempty_json_strings(&query, &mut sensitive_values);
+        }
+        sensitive_values.sort_unstable();
+        sensitive_values.dedup();
+
+        self.finish_with_sensitive_values(operation, result, &sensitive_values)
+    }
+}
+
+fn redact_bmc_error<T>(
+    result: Result<T, BmcError>,
+    sensitive_values: &[String],
+) -> Result<T, BmcError> {
+    if sensitive_values.is_empty() {
+        return result;
+    }
+
+    result.map_err(|error| match error {
+        BmcError::InvalidResponse { url, status, text } => BmcError::InvalidResponse {
+            url,
+            status,
+            text: redact_redfish_response_body(&text, sensitive_values.iter().map(String::as_str)),
+        },
+        error => error,
+    })
+}
+
+fn log_bmc_error(operation: &str, error: &BmcError, sensitive_values: &[String]) {
+    if let BmcError::InvalidResponse { url, status, text } = error {
+        log_redfish_http_error(
+            NV_REDFISH_BACKEND,
+            operation,
+            url.as_str(),
+            status.as_u16(),
+            text,
+            sensitive_values.iter().map(String::as_str),
+        );
+    }
+}
+
+/// Collects each reusable credential representation that nv-redfish puts on
+/// the wire so an untrusted BMC error cannot echo a derived value unchanged.
+fn sensitive_values(credentials: &BmcCredentials) -> Arc<[String]> {
+    let sensitive_values = match credentials {
+        BmcCredentials::UsernamePassword { username, password } => {
+            // Use the shared context so all Redfish clients protect plaintext,
+            // bare payload, and complete-header forms consistently.
+            let (_, sensitive_values) =
+                redfish_basic_authorization_context(username, password.as_deref());
+            sensitive_values
+        }
+        BmcCredentials::Token { token } if !token.is_empty() => {
+            // Session tokens are already sent verbatim in X-Auth-Token.
+            vec![token.clone()]
+        }
+        BmcCredentials::Token { .. } => Vec::new(),
+    };
+    Arc::from(sensitive_values)
+}
+
+fn collect_nonempty_json_strings(value: &serde_json::Value, strings: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(value) if !value.is_empty() => strings.push(value.clone()),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_nonempty_json_strings(value, strings);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_nonempty_json_strings(value, strings);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+impl Bmc for RedfishBmc {
+    type Error = BmcError;
+
+    async fn expand<T: Expandable>(
+        &self,
+        id: &ODataId,
+        query: ExpandQuery,
+    ) -> Result<Arc<T>, Self::Error> {
+        let result = self.inner.expand(id, query).await;
+        self.finish("expand", result)
+    }
+
+    async fn get<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
+        &self,
+        id: &ODataId,
+    ) -> Result<Arc<T>, Self::Error> {
+        let result = self.inner.get(id).await;
+        self.finish("get", result)
+    }
+
+    async fn filter<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
+        &self,
+        id: &ODataId,
+        query: FilterQuery,
+    ) -> Result<Arc<T>, Self::Error> {
+        let result = self.inner.filter(id, query).await;
+        self.finish("filter", result)
+    }
+
+    async fn create<V: Send + Sync + Serialize, R: Send + Sync + for<'de> Deserialize<'de>>(
+        &self,
+        id: &ODataId,
+        query: &V,
+    ) -> Result<ModificationResponse<R>, Self::Error> {
+        let result = self.inner.create(id, query).await;
+        self.finish("create", result)
+    }
+
+    async fn create_session<
+        V: Send + Sync + Serialize,
+        R: Send + Sync + for<'de> Deserialize<'de>,
+    >(
+        &self,
+        id: &ODataId,
+        query: &V,
+    ) -> Result<SessionCreateResponse<R>, Self::Error> {
+        let result = self.inner.create_session(id, query).await;
+        self.finish_session("create_session", query, result)
+    }
+
+    async fn update<
+        V: Sync + Send + Serialize,
+        R: Send + Sync + Sized + for<'de> Deserialize<'de>,
+    >(
+        &self,
+        id: &ODataId,
+        etag: Option<&ODataETag>,
+        update: &V,
+    ) -> Result<ModificationResponse<R>, Self::Error> {
+        let result = self.inner.update(id, etag, update).await;
+        self.finish("update", result)
+    }
+
+    async fn delete<R: EntityTypeRef + for<'de> Deserialize<'de>>(
+        &self,
+        id: &ODataId,
+    ) -> Result<ModificationResponse<R>, Self::Error> {
+        let result = self.inner.delete(id).await;
+        self.finish("delete", result)
+    }
+
+    async fn action<
+        T: Send + Sync + Serialize,
+        R: Send + Sync + Sized + for<'de> Deserialize<'de>,
+    >(
+        &self,
+        action: &Action<T, R>,
+        params: &T,
+    ) -> Result<ModificationResponse<R>, Self::Error> {
+        let result = self.inner.action(action, params).await;
+        self.finish("action", result)
+    }
+
+    async fn multipart_update<U, V, R>(
+        &self,
+        uri: &str,
+        request: MultipartUpdateRequest<'_, U, V>,
+    ) -> Result<ModificationResponse<R>, Self::Error>
+    where
+        U: UploadReader,
+        R: Send + Sync + for<'de> Deserialize<'de>,
+        V: Send + Sync + Serialize,
+    {
+        let result = self.inner.multipart_update(uri, request).await;
+        self.finish("multipart_update", result)
+    }
+
+    async fn stream<T: Sized + for<'de> Deserialize<'de> + Send + 'static>(
+        &self,
+        uri: &str,
+    ) -> Result<BoxTryStream<T, Self::Error>, Self::Error> {
+        let result = self.inner.stream(uri).await;
+        self.finish("stream", result)
+    }
+}
+
 pub type ServiceRoot = NvServiceRoot<RedfishBmc>;
 pub type Error = NvError<RedfishBmc>;
 
@@ -527,13 +783,15 @@ impl NvRedfishClientPool {
                 RedfishReqwestClient::with_client(client)
             }
         };
-        Ok(Arc::new(RedfishBmc::with_custom_headers(
+        let sensitive_values = sensitive_values(&credentials);
+        let bmc = InnerRedfishBmc::with_custom_headers(
             SpanIsolatedHttpClient::new(client),
             bmc_url,
             credentials,
             CacheSettings::with_capacity(10),
             headers,
-        )))
+        );
+        Ok(Arc::new(RedfishBmc::new(bmc, sensitive_values)))
     }
 }
 
@@ -568,7 +826,138 @@ fn build_bmc_url(
 
 #[cfg(test)]
 mod tests {
+    use carbide_instrument::testing::{CapturedFieldKind, capture_logs};
+
     use super::*;
+
+    fn test_bmc(credentials: BmcCredentials) -> RedfishBmc {
+        let sensitive_values = sensitive_values(&credentials);
+        RedfishBmc::new(
+            InnerRedfishBmc::with_custom_headers(
+                SpanIsolatedHttpClient::new(
+                    RedfishReqwestClient::with_params(
+                        RedfishReqwestClientParams::new().accept_invalid_certs(true),
+                    )
+                    .expect("test HTTP client"),
+                ),
+                Url::parse("https://bmc.example").expect("valid test BMC URL"),
+                credentials,
+                CacheSettings::with_capacity(1),
+                HeaderMap::new(),
+            ),
+            sensitive_values,
+        )
+    }
+
+    /// Verifies nv-redfish removes plaintext, full Basic header, and bare
+    /// payload forms from its returned error and structured diagnostic.
+    #[test]
+    fn http_failure_logs_structured_context_and_masks_credentials() {
+        // Build the client with Basic credentials and derive each reusable
+        // representation that a hostile or broken BMC may echo.
+        let (basic_authorization, sensitive_values) =
+            redfish_basic_authorization_context("root", Some("secret"));
+        let basic_payload = &sensitive_values[1];
+        let credentials = BmcCredentials::new("root".to_string(), "secret".to_string());
+        let bmc = test_bmc(credentials);
+        let error = BmcError::InvalidResponse {
+            url: Url::parse("https://bmc.example/redfish/v1/Systems/1").expect("valid test URL"),
+            status: http::StatusCode::INTERNAL_SERVER_ERROR,
+            text: format!(
+                r#"{{
+                "error": {{
+                    "@Message.ExtendedInfo": [{{
+                        "Message": "credential s\u0065cret or {basic_authorization} or BASIC {basic_payload} rejected"
+                    }}]
+                }}
+            }}"#,
+            ),
+        };
+
+        // Finish the operation through the same decorator used in production.
+        let (error, logs) = {
+            let mut result = None;
+            let logs = capture_logs(|| {
+                result = Some(bmc.finish::<()>("get", Err(error)));
+            });
+            (
+                result
+                    .expect("captured result")
+                    .expect_err("HTTP failure remains an error"),
+                logs,
+            )
+        };
+
+        // Neither returned nor logged text may retain either credential form.
+        let log = logs.first().expect("one nv-redfish failure log");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(log.field("backend"), Some(NV_REDFISH_BACKEND));
+        assert_eq!(log.field("operation"), Some("get"));
+        assert_eq!(
+            log.field("url"),
+            Some("https://bmc.example/redfish/v1/Systems/1")
+        );
+        assert_eq!(log.field("http_status"), Some("500"));
+        assert_eq!(log.field_kind("http_status"), Some(CapturedFieldKind::U64));
+        assert_eq!(
+            log.field("error"),
+            Some("credential REDACTED or REDACTED or BASIC REDACTED rejected")
+        );
+
+        let BmcError::InvalidResponse { text, .. } = error else {
+            panic!("HTTP error remains an HTTP error after redaction");
+        };
+        let response: serde_json::Value =
+            serde_json::from_str(&text).expect("redacted body remains valid JSON");
+        assert_eq!(
+            response["error"]["@Message.ExtendedInfo"][0]["Message"],
+            "credential REDACTED or REDACTED or BASIC REDACTED rejected"
+        );
+    }
+
+    #[test]
+    fn session_failure_redacts_client_and_payload_credentials_before_logging_and_returning() {
+        let bmc = test_bmc(BmcCredentials::Token {
+            token: "client-token".to_string(),
+        });
+        let query = serde_json::json!({
+            "UserName": "session-user",
+            "Password": "session-secret",
+        });
+        let error = BmcError::InvalidResponse {
+            url: Url::parse("https://bmc.example/redfish/v1/SessionService/Sessions")
+                .expect("valid test URL"),
+            status: http::StatusCode::UNAUTHORIZED,
+            text: r#"{"error":{"message":"client-token rejected s\u0065ssion-secret for session-user"}}"#
+                .to_string(),
+        };
+
+        let mut result: Option<Result<(), BmcError>> = None;
+        let logs = capture_logs(|| {
+            result = Some(bmc.finish_session("create_session", &query, Err(error)));
+        });
+        let error = result
+            .expect("captured result")
+            .expect_err("HTTP failure remains an error");
+
+        let log = logs.first().expect("one nv-redfish failure log");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(log.field("operation"), Some("create_session"));
+        assert_eq!(
+            log.field("error"),
+            Some("REDACTED rejected REDACTED for REDACTED")
+        );
+
+        let BmcError::InvalidResponse { text, .. } = error else {
+            panic!("HTTP error remains an HTTP error after redaction");
+        };
+        let response: serde_json::Value =
+            serde_json::from_str(&text).expect("redacted body remains valid JSON");
+        assert_eq!(
+            response["error"]["message"],
+            "REDACTED rejected REDACTED for REDACTED"
+        );
+    }
 
     #[test]
     fn generation_overflow_clears_expirations_and_restarts_from_zero() {

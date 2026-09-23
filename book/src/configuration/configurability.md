@@ -55,25 +55,28 @@ requires touching a CRD or a sibling system, it is layer 4.
 - `global.imagePullSecrets` — list of Secret names mounted into pods that pull from authenticated registries.
 - `global.certificate.duration`, `.renewBefore`, `.privateKey.algorithm`, `.privateKey.size`, `.issuerRef.{kind,name,group}` — cert-manager Certificate spec applied to every SPIFFE cert the chart issues. Default `ClusterIssuer` is `vault-nico-issuer`.
 - `global.spiffe.trustDomain` — SPIFFE trust domain stamped into every cert's SAN. Default `nico.local`.
-- One `<subchart>.enabled` flag per subchart.
+- One `<subchart>.enabled` flag per *optional* subchart - core components have
+  no such flag; they're unconditional dependencies in `helm/Chart.yaml` and
+  cannot be disabled. A leftover `<core-chart>.enabled` key is ignored.
 
 See [`helm/README.md`](../../../helm/README.md#configuration) for the full list.
 
-### Enabled-by-default vs opt-in subcharts
+### Mandatory vs opt-in subcharts
 
-| Subchart | Default | Reason for default |
-|----------|---------|--------------------|
-| `nico-api` | on | Core API; required. |
-| `nico-bmc-proxy` | on | Authenticating Redfish proxy. |
-| `nico-dhcp` | on | DHCP for PXE boot — DPUs need it to come up. |
-| `nico-dns` | on | Authoritative DNS for managed machines and VPCs. |
-| `nico-dsx-exchange-consumer` | off | Optional MQTT event consumer; requires a broker. |
-| `nico-flow` | off | Umbrella dependency only; `setup.sh` installs Flow as a separate release by default. |
-| `nico-hardware-health` | on | Hardware health collector. |
-| `nico-ntp` | on | chrony NTP servers; DPU pre-ingestion needs synced clocks. |
-| `nico-pxe` | on | HTTP PXE boot server. |
-| `nico-ssh-console-rs` | on | SSH console proxy to BMCs. |
-| `unbound` | off | Recursive DNS for the DPU `.forge` compatibility zone; only needed when external DNS does not serve those records. |
+| Subchart | Mandatory? | Reason |
+|----------|------------|--------|
+| `nico-api` | Yes | Core API. |
+| `nico-bmc-proxy` | Yes | Authenticating Redfish proxy. |
+| `nico-dhcp` | Yes | DHCP for PXE boot - DPUs need it to come up. |
+| `nico-dns` | Yes | Authoritative DNS for managed machines and VPCs. |
+| `nico-hardware-health` | Yes | Hardware health collector. |
+| `nico-pxe` | Yes | HTTP PXE boot server. |
+| `nico-ssh-console-rs` | Yes | SSH console proxy to BMCs. |
+| `nico-flow` | Yes, within the REST install | Not an umbrella dependency; `setup.sh` phase 7h installs it as a separate release from `helm/nico-flow` whenever REST is installed. It has no skip flag of its own and is skipped only with all of REST by `--skip-rest`. |
+| `nico-dsx-exchange-consumer` | No (`enabled`, default on) | Optional MQTT event consumer; requires a broker. |
+| `nico-ntp` | No (`enabled`, default on) | chrony NTP servers; DPU pre-ingestion needs synced clocks. |
+| `unbound` | No (`enabled`, default off) | Recursive DNS for the DPU `.forge` compatibility zone; only needed when external DNS does not serve those records. |
+| `nico-machine-a-tron` | No (`enabled`, default off) | Mock machine simulator for dev and test environments; never enable in production. |
 
 ### Per-service tuning knobs (common pattern)
 
@@ -170,7 +173,13 @@ for `prefix_v6`, `dhcpv6_link_address`, examples, and compatibility requirements
 
 `site_fabric_prefixes` defines the tenant address space within the site. With mutual isolation, ETV enforces its IPv4 entries with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL.
 
-`site_fabric_null_routes` controls the FNN isolation routes. When omitted, it inherits `site_fabric_prefixes` and retains removed operator-managed roots while they contain a VpcPrefix or VPC-attached direct NetworkPrefix. Soft-deleted children retain coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative. An empty list disables the routes. Inherited roots are reduced to their minimal exact union. Explicit CIDRs are canonicalized and exact duplicates are removed, but parent, child, and adjacent entries remain distinct so a child blackhole can remain beneath an importable parent route. FNN installs the routes with administrative distance 250 in each VPC VRF, so an authorized route wins only when it is at least as specific as the applicable blackhole. Do not combine an effective `/0` null route with `leak_default_route_from_underlay = true` for the same address family; the imported default has a better administrative distance than the equal-prefix blackhole.
+`site_fabric_null_routes` controls the FNN isolation routes. Omission combines `site_fabric_prefixes` with every retained tenant-managed SitePrefix, including those awaiting removal. Removed operator-managed roots also remain covered while they contain a VpcPrefix or VPC-attached direct NetworkPrefix. Soft-deleted children retain operator coverage until their VpcPrefix or segment is hard-deleted. Inherited roots are reduced to their minimal exact union.
+
+An explicit list is authoritative. Under mutual isolation, it must cover every retained tenant root with an equal or broader route. Creation rejects a new tenant root without coverage. Startup and every FNN DPU configuration response, including Admin-only responses, check every retained tenant root. Unused roots and roots in `Deleting` still count, even with tenant overlap disabled. An empty list disables the routes and cannot support tenant roots under mutual isolation. Open isolation does not require coverage or enforce `max_site_prefix_isolation_rules`, because it installs no isolation rules. Explicit CIDRs use their network address and exact duplicates are removed. Parent, child, and adjacent entries remain distinct so a child blackhole can remain beneath an importable parent route.
+
+The anonymous `Version` RPC does not add tenant-managed roots or check their coverage; it keeps its existing operator-route output. Its `RuntimeConfig.site_fabric_null_routes` field is not a complete DPU route inventory. Use `GetManagedHostNetworkConfig` to inspect the tenant-inclusive FNN response, with RBAC enforced. If an override blocks startup or FNN configuration serving, restore a covering override or omit `site_fabric_null_routes`, then restart the affected Core replicas. Requesting deletion does not bypass the check, and recovery does not require manual database edits.
+
+FNN installs the routes with administrative distance 250 in each VPC VRF. An authorized route wins only when it is at least as specific as the applicable blackhole. Do not combine an effective `/0` null route with `leak_default_route_from_underlay = true` for the same address family. The imported default has a better administrative distance than the equal-prefix blackhole.
 
 `deny_prefixes` identifies CIDRs tenant instances must not reach—typically OOB, management, or control-plane networks—and generates iptables DROP rules and NVUE ACL policies on DPUs. Open isolation installs neither the FNN blackhole routes nor the ETV isolation ACLs.
 
@@ -1160,7 +1169,7 @@ Flow reads `/etc/flow/flowconfig.yaml`, which the `nico-flow` chart renders
 from its `flowConfig` values (inventory sync interval, leak detection
 interval, and the two job toggles). Defaults equal Flow's built-in
 defaults, and changing a value rolls the Flow pod. See the
-[chart README](https://github.com/dsx-ai-factory/infra-controller/tree/main/helm/charts/nico-flow)
+[chart README](https://github.com/dsx-ai-factory/infra-controller/tree/main/helm/nico-flow)
 for the value table and an override example.
 
 ### REST-side PostgreSQL
@@ -1204,7 +1213,6 @@ Orchestrates the full install in phases. Skip flags:
 | `-y` | Non-interactive — accept all prompts. |
 | `--skip-core` | Skip the NICo Core install (prereqs + REST only). |
 | `--skip-rest` | Skip the entire NICo REST stack (Core only). |
-| `--skip-flow` | Skip the NICo Flow phase inside REST. |
 | `--core-values <file>` | Use a site-specific values file instead of `helm-prereqs/values/nico-core.yaml`. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after NICo Core deploys (for per-site resources not managed by the chart). |
@@ -1484,9 +1492,9 @@ on or off.
 | Component | Layer | Knob | Default | When to enable |
 |-----------|-------|------|---------|----------------|
 | `nico-ntp` | Helm | `nico-ntp.enabled` | on | Leave on unless upstream NTP is reachable from the provisioning network. |
-| `nico-dsx-exchange-consumer` | Helm | `nico-dsx-exchange-consumer.enabled` | off | Enable when the site has an MQTT broker and you want BMS metadata + managed-host events. |
-| `nico-flow` | Helm | `nico-flow.enabled` | off | Leave off in the umbrella; `setup.sh` installs Flow as a separate release by default. |
+| `nico-dsx-exchange-consumer` | Helm | `nico-dsx-exchange-consumer.enabled` | on | Disable when the site has no MQTT broker; provides BMS metadata + managed-host events. |
 | `unbound` | Helm | `unbound.enabled` | off | Enable when DPUs need the `.forge` compatibility zone and no external DNS serves it. |
+| `nico-machine-a-tron` | Helm | `nico-machine-a-tron.enabled` | off | Dev and test only; simulates machines against the API. Never enable in production. |
 | SSH-console Loki sidecar | Helm | `nico-ssh-console-rs.lokiLogCollector.enabled` | off | Enable when shipping SSH session logs to Loki. |
 | ServiceMonitor (per chart) | Helm | `<chart>.serviceMonitor.enabled` | off | Enable when the Prometheus Operator is installed. |
 | Hardware-health telemetry | Helm | `nico-hardware-health.telemetryServiceMonitor.enabled` | off | Enable for per-machine sensor metrics (temperature, power, fans). |

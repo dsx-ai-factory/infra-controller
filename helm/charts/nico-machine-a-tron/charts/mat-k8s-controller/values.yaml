@@ -28,7 +28,7 @@ image:
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 
-## Resource limits
+## Resource limits for the controller container
 resources:
   limits:
     cpu: 500m
@@ -69,6 +69,28 @@ serviceAccount:
 
 rbac:
   create: true
+
+## Protocol gateway: optional second container in the controller pod, run from
+## the controller image (dev/k8s/machine-a-tron-controller/Dockerfile)
+gateway:
+  enabled: false
+
+  ## HTTPS port of the UFM API and the probes; also the Service port
+  port: 8443
+
+  ## Secret with a `token` key holding the UFM HTTP Basic credential. Empty
+  ## uses the parent chart's UFM mock Secret, nico-machine-a-tron-ufm-mock-auth;
+  ## set it when the parent uses nameOverride or ufmMock.existingAuthSecret.
+  existingAuthSecret: ""
+
+  ## Resource limits for the gateway container
+  resources:
+    limits:
+      cpu: "1"
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 256Mi
 
 ## Override names (useful when release name differs from chart name)
 nameOverride: ""

@@ -426,51 +426,38 @@ func compareMachineFieldsForDrift(
 	position *nicoapi.MachinePosition,
 ) []model.FieldDiff {
 	var diffs []model.FieldDiff
-
+	var actualSlot, actualTray, actualHost *int32
 	if position != nil {
-		if position.PhysicalSlotNum != nil && expected.SlotID != int(*position.PhysicalSlotNum) {
-			diffs = append(diffs, model.FieldDiff{
-				FieldName:     "slot_id",
-				ExpectedValue: fmt.Sprintf("%d", expected.SlotID),
-				ActualValue:   fmt.Sprintf("%d", *position.PhysicalSlotNum),
-			})
+		actualSlot = position.PhysicalSlotNum
+		actualTray = position.ComputeTrayIndex
+		actualHost = position.TopologyID
+	}
+
+	for _, field := range []struct {
+		name     string
+		expected int
+		actual   *int32
+	}{
+		{name: "slot_id", expected: expected.SlotID, actual: actualSlot},
+		{name: "tray_index", expected: expected.TrayIndex, actual: actualTray},
+		{name: "host_id", expected: expected.HostID, actual: actualHost},
+	} {
+		if field.expected < 0 {
+			continue
 		}
-		if position.ComputeTrayIndex != nil && expected.TrayIndex != int(*position.ComputeTrayIndex) {
-			diffs = append(diffs, model.FieldDiff{
-				FieldName:     "tray_index",
-				ExpectedValue: fmt.Sprintf("%d", expected.TrayIndex),
-				ActualValue:   fmt.Sprintf("%d", *position.ComputeTrayIndex),
-			})
+
+		actualValue := "<missing>"
+		if field.actual != nil {
+			if field.expected == int(*field.actual) {
+				continue
+			}
+			actualValue = fmt.Sprintf("%d", *field.actual)
 		}
-		if position.TopologyID != nil && expected.HostID != int(*position.TopologyID) {
-			diffs = append(diffs, model.FieldDiff{
-				FieldName:     "host_id",
-				ExpectedValue: fmt.Sprintf("%d", expected.HostID),
-				ActualValue:   fmt.Sprintf("%d", *position.TopologyID),
-			})
-		}
-	} else {
-		if expected.SlotID != 0 {
-			diffs = append(diffs, model.FieldDiff{
-				FieldName:     "slot_id",
-				ExpectedValue: fmt.Sprintf("%d", expected.SlotID),
-				ActualValue:   "<missing>",
-			})
-		}
-		if expected.TrayIndex != 0 {
-			diffs = append(diffs, model.FieldDiff{
-				FieldName:     "tray_index",
-				ExpectedValue: fmt.Sprintf("%d", expected.TrayIndex),
-				ActualValue:   "<missing>",
-			})
-		}
-		if expected.HostID != 0 {
-			diffs = append(diffs, model.FieldDiff{
-				FieldName:     "host_id",
-				ExpectedValue: fmt.Sprintf("%d", expected.HostID),
-				ActualValue:   "<missing>",
-			})
-		}
+		diffs = append(diffs, model.FieldDiff{
+			FieldName:     field.name,
+			ExpectedValue: fmt.Sprintf("%d", field.expected),
+			ActualValue:   actualValue,
+		})
 	}
 
 	return diffs

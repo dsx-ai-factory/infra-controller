@@ -60,6 +60,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
 tonic = { workspace = true }
 tryhard = { workspace = true }
 tss-esapi = { workspace = true }

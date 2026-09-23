@@ -93,19 +93,13 @@ pub(super) async fn show(args: Args, ctx: &mut RuntimeContext) -> CarbideCliResu
     table.set_titles(row![
         "Rack Group ID",
         "Topology",
-        "Rack IDs",
-        "Members",
+        "Racks",
         "Name",
         "Description",
         "Labels"
     ]);
     for group in groups.expected_rack_groups {
-        let members = group
-            .members
-            .iter()
-            .map(|m| format!("{} / {} / {}", m.r#type, m.manufacturer, m.id))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let racks = serde_json::to_string(&group.racks).wrap_err("serializing rack membership")?;
         table.add_row(row![
             group
                 .rack_group_id
@@ -113,13 +107,7 @@ pub(super) async fn show(args: Args, ctx: &mut RuntimeContext) -> CarbideCliResu
                 .map(|id| id.as_str())
                 .unwrap_or_default(),
             group.topology,
-            group
-                .rack_ids
-                .iter()
-                .map(|id| id.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-            members,
+            racks,
             group
                 .metadata
                 .as_ref()

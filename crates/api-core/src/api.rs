@@ -35,6 +35,7 @@ use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_secrets::SecretsError;
 use carbide_secrets::certificates::CertificateProvider;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, CredentialType, Credentials,
@@ -656,6 +657,13 @@ impl Forge for Api {
         request: Request<rpc::DpuAgentInventoryReport>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::dpu::update_agent_reported_inventory(self, request).await
+    }
+
+    async fn report_lldp_neighbors(
+        &self,
+        request: Request<rpc::LldpNeighborReport>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::lldp::report_lldp_neighbors(self, request).await
     }
 
     async fn record_dpu_network_status(
@@ -3954,6 +3962,8 @@ impl Api {
     /// credential counts as configured only when a non-empty password is stored.
     /// Secrets-backend errors are logged and treated as configured, so a
     /// transient Vault outage does not surface a misleading "not set" warning.
+    /// An authoritative local BMC root that is absent is a known missing
+    /// credential rather than a backend error, so it remains in the result.
     ///
     /// This performs up to three credential-store lookups and is invoked per
     /// admin-UI page render; that cost is acceptable for the low-traffic admin
@@ -3972,6 +3982,12 @@ impl Api {
                     _display_name: default_credential_display_name(&key),
                     _key: key.to_key_str().into_owned(),
                 }),
+                Err(SecretsError::BmcSiteWideRootV0CredentialReadBlocked) => {
+                    missing.push(DefaultCredential {
+                        _display_name: default_credential_display_name(&key),
+                        _key: key.to_key_str().into_owned(),
+                    });
+                }
                 Err(err) => {
                     // A backend error is distinct from a genuinely-unset credential;
                     // don't raise the "not set" warning on a transient secrets failure.

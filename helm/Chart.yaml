@@ -11,36 +11,28 @@ keywords:
   - umbrella
 
 dependencies:
+  # Core components - mandatory, no condition. See helm/values.yaml.
   - name: nico-api
     version: "0.1.1"
-    condition: nico-api.enabled
   - name: nico-bmc-proxy
     version: "0.1.0"
-    condition: nico-bmc-proxy.enabled
   - name: nico-dhcp
     version: "0.1.0"
-    condition: nico-dhcp.enabled
   - name: nico-dns
     version: "0.1.0"
-    condition: nico-dns.enabled
+  - name: nico-hardware-health
+    version: "0.1.0"
+  - name: nico-pxe
+    version: "0.1.0"
+  - name: nico-ssh-console-rs
+    version: "0.1.0"
+  # Optional services - configurable via <chart-name>.enabled.
   - name: nico-dsx-exchange-consumer
     version: "0.1.0"
     condition: nico-dsx-exchange-consumer.enabled
-  - name: nico-flow
-    version: "0.3.0"
-    condition: nico-flow.enabled
-  - name: nico-hardware-health
-    version: "0.1.0"
-    condition: nico-hardware-health.enabled
   - name: nico-ntp
     version: "0.1.0"
     condition: nico-ntp.enabled
-  - name: nico-pxe
-    version: "0.1.0"
-    condition: nico-pxe.enabled
-  - name: nico-ssh-console-rs
-    version: "0.1.0"
-    condition: nico-ssh-console-rs.enabled
   - name: unbound
     version: "0.1.0"
     condition: unbound.enabled

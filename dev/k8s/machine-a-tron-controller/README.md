@@ -21,7 +21,7 @@ Services for mock BMC endpoints.
 ## Build
 
 ```bash
-docker build -t mat-k8s-controller:latest .
+docker build -f dev/k8s/machine-a-tron-controller/Dockerfile -t mat-k8s-controller:latest .
 kind load docker-image mat-k8s-controller:latest --name <cluster>
 ```
 

@@ -402,9 +402,15 @@ pub(crate) async fn start_runtime(
 
         // Idempotently seed the dedicated site-wide lockdown IKM (v0) from the
         // site-wide BMC root, so existing sites converge onto the decoupled
-        // lockdown key without operator action. No-op once seeded or if the BMC
-        // root is not yet configured.
-        crate::dpa::lockdown::ensure_lockdown_ikm_seeded(&*credential_manager).await?;
+        // lockdown key without operator action. No-op once seeded; if the BMC
+        // root is not yet configured, retry in the background until it appears.
+        if !crate::dpa::lockdown::ensure_lockdown_ikm_seeded(&*credential_manager).await? {
+            crate::dpa::lockdown::start_lockdown_ikm_seed_retry(
+                join_set,
+                credential_manager.clone(),
+                cancel_token.clone(),
+            )?;
+        }
 
         // Initial credential-rotation bookkeeping is backfilled by the
         // `*_credential_rotation_backfill` data migration (see its header for the
@@ -989,8 +995,14 @@ async fn initialize_dpf_sdk(
     }
 
     // Build every validated configuration before SDK construction writes the shared BMC Secret.
-    let provider = CarbideBmcPasswordProvider::new(credential_manager, db_pool.clone());
-    let sdk = carbide_dpf::DpfSdkBuilder::new(repo, carbide_dpf::NAMESPACE, provider)
+    let provider = CarbideBmcPasswordProvider::new(
+        credential_manager,
+        db_pool.clone(),
+        carbide_config
+            .credentials
+            .uses_authoritative_local_bmc_site_wide_root(),
+    );
+    let sdk = carbide_dpf::DpfSdkBuilder::new(repo.clone(), carbide_dpf::NAMESPACE, provider)
         .with_labeler(
             CarbideDPFLabeler::new(carbide_config.dpf.deployments.bf3.node_label_key.clone())
                 .with_deployment_type_labels(deployment_type_labels),

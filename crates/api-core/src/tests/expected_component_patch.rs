@@ -150,6 +150,47 @@ async fn addressless_interface(env: &TestEnv, mac: &str, address: &str) -> Machi
 }
 
 #[crate::sqlx_test]
+async fn patch_expected_machine_persists_serial_up_to_32_characters(pool: PgPool) {
+    let env = create_test_env(pool).await;
+    let id = Uuid::new_v4();
+    env.api
+        .add_expected_machine(Request::new(machine(id, 1)))
+        .await
+        .unwrap();
+    let mut expected = machine_row(&env.pool, id).await;
+    let serial = "A".repeat(32);
+    let patch = |chassis_serial_number| forge::PatchExpectedMachineRequest {
+        expected_machine: Some(forge::ExpectedMachine {
+            id: rpc_id(id),
+            chassis_serial_number,
+            ..Default::default()
+        }),
+        update_mask: mask(&["chassis_serial_number"]),
+    };
+
+    env.api
+        .patch_expected_machine(Request::new(patch(serial.clone())))
+        .await
+        .unwrap();
+    expected["serial_number"] = json!(serial);
+    assert_eq!(machine_row(&env.pool, id).await, expected);
+
+    let error = env
+        .api
+        .patch_expected_machine(Request::new(patch("A".repeat(33))))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
+    assert!(
+        error.message().contains(
+            "chassis serial must contain 4-32 ASCII letters, digits, hyphens, or underscores"
+        ),
+        "{error}"
+    );
+    assert_eq!(machine_row(&env.pool, id).await, expected);
+}
+
+#[crate::sqlx_test]
 async fn patch_expected_machine_preserves_unselected_fields(pool: PgPool) {
     let env = create_test_env(pool).await;
     let id = Uuid::new_v4();

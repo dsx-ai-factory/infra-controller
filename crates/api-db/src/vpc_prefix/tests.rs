@@ -93,6 +93,7 @@ async fn exercise_prefix_queries(
         NewVpcPrefix {
             id: vpc_prefix_id,
             site_prefix_id: None,
+            overlap_vpc_id: None,
             vpc_id,
             config: VpcPrefixConfig {
                 prefix: parent_prefix,

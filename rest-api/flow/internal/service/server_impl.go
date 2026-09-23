@@ -158,7 +158,7 @@ func (rs *FlowServerImpl) GetRackInfoByID(
 	}
 
 	result := protobuf.RackTo(r)
-	if err := rs.populateTaskStats(ctx, []*pb.Rack{result}, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, []*pb.Rack{result}, nil); err != nil {
 		return nil, err
 	}
 	return &pb.GetRackInfoResponse{Rack: result}, nil
@@ -194,7 +194,7 @@ func (rs *FlowServerImpl) GetRackInfoBySerial(
 	}
 
 	result := protobuf.RackTo(r)
-	if err := rs.populateTaskStats(ctx, []*pb.Rack{result}, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, []*pb.Rack{result}, nil); err != nil {
 		return nil, err
 	}
 	return &pb.GetRackInfoResponse{Rack: result}, nil
@@ -366,6 +366,10 @@ func (rs *FlowServerImpl) PatchComponent(
 	if compID == uuid.Nil {
 		return nil, errors.New("component id is required")
 	}
+	positionPaths, err := patchComponentPositionPaths(req)
+	if err != nil {
+		return nil, err
+	}
 
 	rackID, err := protobuf.OptionalUUIDFrom(req.RackId)
 	if err != nil {
@@ -384,9 +388,15 @@ func (rs *FlowServerImpl) PatchComponent(
 	}
 
 	if req.Position != nil {
-		existing.Position.SlotID = int(req.Position.SlotId)
-		existing.Position.TrayIndex = int(req.Position.TrayIdx)
-		existing.Position.HostID = int(req.Position.HostId)
+		if positionPaths == nil || positionPaths["position.slot_id"] {
+			existing.Position.SlotID = int(req.Position.SlotId)
+		}
+		if positionPaths == nil || positionPaths["position.tray_idx"] {
+			existing.Position.TrayIndex = int(req.Position.TrayIdx)
+		}
+		if positionPaths == nil || positionPaths["position.host_id"] {
+			existing.Position.HostID = int(req.Position.HostId)
+		}
 	}
 
 	if req.Description != nil {
@@ -419,6 +429,29 @@ func (rs *FlowServerImpl) PatchComponent(
 	return &pb.PatchComponentResponse{
 		Component: protobuf.ComponentTo(updated),
 	}, nil
+}
+
+func patchComponentPositionPaths(req *pb.PatchComponentRequest) (map[string]bool, error) {
+	if req.UpdateMask == nil {
+		return nil, nil
+	}
+	if req.Position == nil {
+		return nil, status.Error(codes.InvalidArgument, "position is required when update_mask contains position fields")
+	}
+
+	paths := make(map[string]bool, len(req.UpdateMask.Paths))
+	for _, path := range req.UpdateMask.Paths {
+		switch path {
+		case "position.slot_id", "position.tray_idx", "position.host_id":
+			paths[path] = true
+		default:
+			return nil, status.Errorf(codes.InvalidArgument, "unsupported PatchComponent update_mask path %q", path)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "update_mask paths are required")
+	}
+	return paths, nil
 }
 
 // GetComponentInfoByID retrieves component information by external component ID
@@ -458,7 +491,7 @@ func (rs *FlowServerImpl) GetComponentInfoByID(
 	}
 
 	result := protobuf.ComponentTo(c)
-	if err := rs.populateTaskStats(ctx, nil, []*pb.Component{result}); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, []*pb.Component{result}); err != nil {
 		return nil, err
 	}
 	return &pb.GetComponentInfoResponse{
@@ -520,7 +553,7 @@ func (rs *FlowServerImpl) GetComponentInfoBySerial(
 	}
 
 	result := protobuf.ComponentTo(c)
-	if err := rs.populateTaskStats(ctx, nil, []*pb.Component{result}); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, []*pb.Component{result}); err != nil {
 		return nil, err
 	}
 	return &pb.GetComponentInfoResponse{
@@ -599,7 +632,7 @@ func (rs *FlowServerImpl) GetListOfRacks(
 	for _, r := range racks {
 		results = append(results, protobuf.RackTo(r))
 	}
-	if err := rs.populateTaskStats(ctx, results, nil); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, results, nil); err != nil {
 		return nil, err
 	}
 
@@ -1658,7 +1691,7 @@ func (rs *FlowServerImpl) GetComponents(
 	for _, c := range components {
 		results = append(results, protobuf.ComponentTo(c))
 	}
-	if err := rs.populateTaskStats(ctx, nil, results); err != nil {
+	if err := rs.populateTaskDerivedFields(ctx, nil, results); err != nil {
 		return nil, err
 	}
 

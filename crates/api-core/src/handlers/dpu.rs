@@ -572,36 +572,28 @@ async fn get_managed_host_network_config_inner(
     let deny_prefixes =
         deny_prefixes_for_agent(&api.eth_data.deny_prefixes, network_virtualization_type);
 
-    // Keep the legacy fields on their original site-prefix contract so older
-    // agents retain their existing behavior throughout a rolling upgrade.
-    let site_fabric_networks = &api.runtime_config.site_fabric_prefixes;
-    let site_fabric_prefixes = site_fabric_networks
+    let tenant_roots = db::site_prefix::find_tenant_prefixes(&mut txn).await?;
+    let site_fabric_networks =
+        super::site_prefix::protected_prefixes(&api.runtime_config, &tenant_roots);
+    let site_fabric_prefixes: Vec<String> = site_fabric_networks
         .iter()
         .map(ToString::to_string)
         .collect();
 
-    let retained_operator_roots = if network_virtualization_type == VpcVirtualizationType::Fnn
-        && api.runtime_config.site_fabric_null_routes.is_none()
-    {
-        db::site_prefix::find_operator_managed_prefixes_with_retained_vpc_prefixes(txn.as_pgconn())
+    let site_fabric_null_routes = if network_virtualization_type == VpcVirtualizationType::Fnn {
+        let items = super::site_prefix::retained_null_routes(api, &mut txn, &tenant_roots)
             .await?
+            .into_iter()
+            .map(|prefix| prefix.to_string())
+            .collect();
+        Some(rpc_common::StringList { items })
     } else {
-        vec![]
+        None
     };
-    let site_fabric_null_routes =
-        (network_virtualization_type == VpcVirtualizationType::Fnn).then(|| {
-            let items = api
-                .runtime_config
-                .resolved_site_fabric_null_routes(&retained_operator_roots)
-                .into_iter()
-                .map(|prefix| prefix.to_string())
-                .collect();
-            rpc_common::StringList { items }
-        });
 
     let deprecated_deny_prefixes = deprecated_deny_prefixes_for_agent(
         &deny_prefixes,
-        site_fabric_networks,
+        &site_fabric_networks,
         api.runtime_config.vpc_isolation_behavior,
         network_virtualization_type,
     );
@@ -1205,6 +1197,8 @@ pub(crate) async fn record_dpu_network_status(
     if let Some(astra_config_status) = request.astra_config_status.as_ref() {
         process_astra_config_status(api, &dpu_machine_id, astra_config_status).await?;
     }
+
+    // TODO Handle the LLDP report in the next PR.
 
     // If this all worked and the DPU is healthy, we shouldn't emit a log line
     // If there is any error the report, the logging of the follow-up report is
