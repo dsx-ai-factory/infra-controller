@@ -164,7 +164,7 @@ async fn decommission_request_enters_rms_workflow(
     assert!(matches!(
         switch.controller_state.value,
         SwitchControllerState::Decommissioning {
-            decommissioning_state: SwitchDecommissioningState::SuppressingNvosDhcp,
+            decommissioning_state: SwitchDecommissioningState::FactoryResetNvos,
         }
     ));
 

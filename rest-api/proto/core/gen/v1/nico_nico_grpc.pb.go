@@ -228,6 +228,7 @@ const (
 	Forge_RemoveRouteServers_FullMethodName                                 = "/forge.Forge/RemoveRouteServers"
 	Forge_ReplaceRouteServers_FullMethodName                                = "/forge.Forge/ReplaceRouteServers"
 	Forge_UpdateAgentReportedInventory_FullMethodName                       = "/forge.Forge/UpdateAgentReportedInventory"
+	Forge_ReportLldpNeighbors_FullMethodName                                = "/forge.Forge/ReportLldpNeighbors"
 	Forge_UpdateInstancePhoneHomeLastContact_FullMethodName                 = "/forge.Forge/UpdateInstancePhoneHomeLastContact"
 	Forge_SetHostUefiPassword_FullMethodName                                = "/forge.Forge/SetHostUefiPassword"
 	Forge_ClearHostUefiPassword_FullMethodName                              = "/forge.Forge/ClearHostUefiPassword"
@@ -925,6 +926,8 @@ type ForgeClient interface {
 	ReplaceRouteServers(ctx context.Context, in *RouteServers, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(ctx context.Context, in *DpuAgentInventoryReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	ReportLldpNeighbors(ctx context.Context, in *LldpNeighborReport, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(ctx context.Context, in *InstancePhoneHomeLastContactRequest, opts ...grpc.CallOption) (*InstancePhoneHomeLastContactResponse, error)
 	// Set Host UEFI password
@@ -3537,6 +3540,16 @@ func (c *forgeClient) UpdateAgentReportedInventory(ctx context.Context, in *DpuA
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_UpdateAgentReportedInventory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ReportLldpNeighbors(ctx context.Context, in *LldpNeighborReport, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_ReportLldpNeighbors_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6959,6 +6972,8 @@ type ForgeServer interface {
 	ReplaceRouteServers(context.Context, *RouteServers) (*emptypb.Empty, error)
 	// MachineInventory
 	UpdateAgentReportedInventory(context.Context, *DpuAgentInventoryReport) (*emptypb.Empty, error)
+	// Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+	ReportLldpNeighbors(context.Context, *LldpNeighborReport) (*emptypb.Empty, error)
 	// Phone Home
 	UpdateInstancePhoneHomeLastContact(context.Context, *InstancePhoneHomeLastContactRequest) (*InstancePhoneHomeLastContactResponse, error)
 	// Set Host UEFI password
@@ -8133,6 +8148,9 @@ func (UnimplementedForgeServer) ReplaceRouteServers(context.Context, *RouteServe
 }
 func (UnimplementedForgeServer) UpdateAgentReportedInventory(context.Context, *DpuAgentInventoryReport) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateAgentReportedInventory not implemented")
+}
+func (UnimplementedForgeServer) ReportLldpNeighbors(context.Context, *LldpNeighborReport) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportLldpNeighbors not implemented")
 }
 func (UnimplementedForgeServer) UpdateInstancePhoneHomeLastContact(context.Context, *InstancePhoneHomeLastContactRequest) (*InstancePhoneHomeLastContactResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateInstancePhoneHomeLastContact not implemented")
@@ -12746,6 +12764,24 @@ func _Forge_UpdateAgentReportedInventory_Handler(srv interface{}, ctx context.Co
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).UpdateAgentReportedInventory(ctx, req.(*DpuAgentInventoryReport))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ReportLldpNeighbors_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LldpNeighborReport)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReportLldpNeighbors(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReportLldpNeighbors_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReportLldpNeighbors(ctx, req.(*LldpNeighborReport))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -19001,6 +19037,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateAgentReportedInventory",
 			Handler:    _Forge_UpdateAgentReportedInventory_Handler,
+		},
+		{
+			MethodName: "ReportLldpNeighbors",
+			Handler:    _Forge_ReportLldpNeighbors_Handler,
 		},
 		{
 			MethodName: "UpdateInstancePhoneHomeLastContact",

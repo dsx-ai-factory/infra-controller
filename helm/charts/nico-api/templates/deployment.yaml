@@ -20,6 +20,7 @@ spec:
         {{- include "nico-api.labels" . | nindent 8 }}
       annotations:
         kubectl.kubernetes.io/default-container: {{ include "nico-api.name" . }}
+        checksum/config: {{ include "nico-api.configChecksum" . }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}

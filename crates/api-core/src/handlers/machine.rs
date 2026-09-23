@@ -26,6 +26,8 @@ use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials
 use carbide_uuid::machine::{
     DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
 };
+use db::ConditionalWrite;
+use db::resource_pool::ResourcePoolAllocationNotOwned;
 use libredfish::SystemPowerControl;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::hardware_info::MachineNvLinkInfo;
@@ -472,7 +474,9 @@ async fn force_delete_cleanup_txn(
     }
 
     for dpu_machine in dpu_machines {
-        // Free up all loopback IPs allocated for this DPU.
+        let owner_id = dpu_machine.id.to_string();
+        // Free the DPU's loopbacks. Free or reassigned values leave this DPU
+        // no reservation to release.
         db::vpc_dpu_loopback::delete_and_deallocate(
             &api.common_pools,
             &dpu_machine.id,
@@ -482,12 +486,18 @@ async fn force_delete_cleanup_txn(
         .await?;
 
         if let Some(loopback_ip) = dpu_machine.network_config.loopback_ip {
-            db::resource_pool::release(
+            match db::resource_pool::release(
                 &api.common_pools.ethernet.pool_loopback_ip,
                 &mut txn,
                 loopback_ip,
+                model::resource_pool::OwnerType::Machine,
+                &owner_id,
             )
             .await?
+            {
+                ConditionalWrite::Applied(())
+                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+            }
         }
 
         // The machine snapshot predates `ForceDeletion`, so a concurrent
@@ -497,17 +507,30 @@ async fn force_delete_cleanup_txn(
             &api.common_pools.ethernet.pool_loopback_ip_v6,
             &mut txn,
             model::resource_pool::OwnerType::Machine,
-            &dpu_machine.id.to_string(),
+            &owner_id,
         )
         .await
         .map_err(CarbideError::from)?
         {
-            db::resource_pool::release(
+            // The lookup locks this DPU's reservation, so a rejected release
+            // is an invariant failure.
+            match db::resource_pool::release(
                 &api.common_pools.ethernet.pool_loopback_ip_v6,
                 &mut txn,
                 loopback_ip_v6,
+                model::resource_pool::OwnerType::Machine,
+                &owner_id,
             )
             .await?
+            {
+                ConditionalWrite::Applied(()) => {}
+                ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "DPU `{}` no longer owns loopback IP `{loopback_ip_v6}`",
+                        dpu_machine.id,
+                    )));
+                }
+            }
         }
 
         db::network_devices::dpu_to_network_device_map::delete(&mut txn, &dpu_machine.id).await?;
@@ -524,8 +547,18 @@ async fn force_delete_cleanup_txn(
             }
         }
         if let Some(asn) = dpu_machine.asn {
-            db::resource_pool::release(&api.common_pools.ethernet.pool_fnn_asn, &mut txn, asn)
-                .await?;
+            match db::resource_pool::release(
+                &api.common_pools.ethernet.pool_fnn_asn,
+                &mut txn,
+                asn,
+                model::resource_pool::OwnerType::Machine,
+                &owner_id,
+            )
+            .await?
+            {
+                ConditionalWrite::Applied(())
+                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+            }
         }
         db::machine::force_cleanup(&mut txn, &dpu_machine.id).await?;
 

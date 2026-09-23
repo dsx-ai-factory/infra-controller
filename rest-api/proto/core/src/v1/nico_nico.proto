@@ -484,6 +484,9 @@ service Forge {
   // MachineInventory
   rpc UpdateAgentReportedInventory(DpuAgentInventoryReport) returns (google.protobuf.Empty);
 
+  // Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+  rpc ReportLldpNeighbors(LldpNeighborReport) returns (google.protobuf.Empty);
+
   // Phone Home
   rpc UpdateInstancePhoneHomeLastContact(InstancePhoneHomeLastContactRequest) returns (InstancePhoneHomeLastContactResponse);
 
@@ -1720,11 +1723,14 @@ message RuntimeConfig {
   bool astra_enabled = 56;
   bool ewethers_enabled = 57;
 
-  // Effective FNN null-route set. When site_fabric_null_routes is omitted from
-  // site configuration, this includes site_fabric_prefixes and removed
-  // operator-managed roots while they contain a VpcPrefix or VPC-attached
-  // direct NetworkPrefix. Older Core versions omit this field; an empty items
-  // list is authoritative.
+  // Operator FNN null routes reported by the anonymous Version RPC. When
+  // site_fabric_null_routes is omitted from site configuration, this includes
+  // site_fabric_prefixes and removed operator-managed roots while they contain
+  // a VpcPrefix or VPC-attached direct NetworkPrefix. Tenant-managed roots are
+  // not added here; this is not a complete audit of DPU isolation routes. Use
+  // GetManagedHostNetworkConfig for the tenant-inclusive FNN response, with RBAC
+  // enforced. An explicit list is returned without checking tenant coverage.
+  // Older Core versions omit this field; an empty items list is authoritative.
   optional common.StringList site_fabric_null_routes = 58;
 }
 
@@ -2782,12 +2788,20 @@ message ExpectedRackGroup {
   optional common.RackGroupId rack_group_id = 1;
   // External group-level NVLink topology identifier, non-blank and at most 128 characters.
   string topology = 2;
-  // Non-blank, unique rack IDs, independent of device membership. Input order is preserved; may be empty.
-  repeated common.RackId rack_ids = 3;
+  reserved 3, 5;
+  reserved "rack_ids", "members";
   // Descriptive attributes such as name, manufacturer, and location labels.
   Metadata metadata = 4;
-  // Ordered device identities; (type, manufacturer, id) tuples must be unique. May be empty.
-  repeated ExpectedRackGroupMember members = 5;
+  // Ordered racks and their devices. Rack IDs and device identities are unique across the group.
+  // May be empty; updates replace the complete list.
+  repeated ExpectedRackGroupRack racks = 6;
+}
+
+message ExpectedRackGroupRack {
+  // Required non-blank external rack identifier.
+  optional common.RackId rack_id = 1;
+  // Ordered devices belonging to this rack; may be empty.
+  repeated ExpectedRackGroupMember members = 2;
 }
 
 message ExpectedRackGroupMember {
@@ -2850,13 +2864,6 @@ message IBFabricIdList {
   repeated string ib_fabric_ids = 1;
 }
 
-// Deprecated: use FindNetworkSegmentStateHistories RPC instead
-message NetworkSegmentStateHistory {
-  string state = 1;
-  string version = 2;
-  google.protobuf.Timestamp time = 3;
-}
-
 enum NetworkSegmentType {
   TENANT = 0;
   ADMIN = 1;
@@ -2910,41 +2917,41 @@ message NetworkSegmentStatus {
 message NetworkSegment {
   common.NetworkSegmentId id = 1;
 
-  // Deprecated: use config.vpc_id
-  common.VpcId vpc_id = 2 [deprecated = true];
-  // Deprecated: use metadata.name
-  string name = 3 [deprecated = true];
-  // Deprecated: use config.subdomain_id
-  optional common.DomainId subdomain_id = 4 [deprecated = true];
-  // Deprecated: use config.mtu
-  optional int32 mtu = 5 [deprecated = true];
-  // Deprecated: use config.prefixes
-  repeated NetworkPrefix prefixes = 6 [deprecated = true];
+  reserved 2;  // was: common.VpcId vpc_id, replaced with config.vpc_id
+  reserved "vpc_id";
+  reserved 3;  // was: string name, replaced with metadata.name
+  reserved "name";
+  reserved 4;  // was: optional common.DomainId subdomain_id, replaced with config.subdomain_id
+  reserved "subdomain_id";
+  reserved 5;  // was: optional int32 mtu, replaced with config.mtu
+  reserved "mtu";
+  reserved 6;  // was: repeated NetworkPrefix prefixes, replaced with config.prefixes
+  reserved "prefixes";
 
   // Not sure if we actually still need those
   google.protobuf.Timestamp created = 11;
   google.protobuf.Timestamp updated = 12;
   google.protobuf.Timestamp deleted = 13;
 
-  // Deprecated: use config.segment_type
-  NetworkSegmentType segment_type = 14 [deprecated = true];
-  // Deprecated: use status.flags
-  repeated NetworkSegmentFlag flags = 15 [deprecated = true];
+  reserved 14;  // was: NetworkSegmentType segment_type, replaced with config.segment_type
+  reserved "segment_type";
+  reserved 15;  // was: repeated NetworkSegmentFlag flags, replaced with status.flags
+  reserved "flags";
 
   NetworkSegmentConfig config = 16;
   NetworkSegmentStatus status = 17;
   Metadata metadata = 18;
 
-  // Deprecated: use status.lifecycle.version
-  string version = 99 [deprecated = true];
-  // Deprecated: use status.tenant_state (coarse) or status.lifecycle.state (full controller state)
-  TenantState state = 100 [deprecated = true];
-  // Deprecated: use FindNetworkSegmentStateHistories RPC
-  repeated NetworkSegmentStateHistory history = 101 [deprecated = true];
-  // Deprecated: use status.lifecycle.state_reason
-  optional ControllerStateReason state_reason = 102 [deprecated = true];
-  // Deprecated: use status.lifecycle.sla
-  StateSla state_sla = 103 [deprecated = true];
+  reserved 99;  // was: string version, replaced with status.lifecycle.version
+  reserved "version";
+  reserved 100;  // was: TenantState state, replaced with status.tenant_state and status.lifecycle.state
+  reserved "state";
+  reserved 101;  // was: repeated NetworkSegmentStateHistory history, replaced with FindNetworkSegmentStateHistories
+  reserved "history";
+  reserved 102;  // was: optional ControllerStateReason state_reason, replaced with status.lifecycle.state_reason
+  reserved "state_reason";
+  reserved 103;  // was: StateSla state_sla, replaced with status.lifecycle.sla
+  reserved "state_sla";
 }
 
 message NetworkSegmentCreationRequest {
@@ -4417,6 +4424,51 @@ message MachineInventorySoftwareComponent {
   string url = 3;
 }
 
+// Why a machine's LLDP snapshot is being reported. Lets nico-api tell a fresh
+// snapshot from an unchanged one and from a machine that could not read its
+// neighbors at all.
+enum LldpReportResult {
+  // Explicit zero value so an omitted result cannot read as a fresh snapshot.
+  LLDP_REPORT_RESULT_UNSPECIFIED = 0;
+  // `interfaces` holds a snapshot that differs from the last one nico-api
+  // acknowledged. An empty `interfaces` here means the machine genuinely sees
+  // no neighbors.
+  LLDP_REPORT_RESULT_UPDATED = 1;
+  // The snapshot matches the last one nico-api acknowledged; `interfaces` is
+  // empty and nothing needs reconciling.
+  LLDP_REPORT_RESULT_UNCHANGED = 2;
+  // The reporter could not read its LLDP neighbors; `interfaces` is empty. It
+  // repeats on every poll for as long as collection keeps failing.
+  LLDP_REPORT_RESULT_COLLECTION_FAILED = 3;
+}
+
+// One LLDP collection attempt on a machine.
+message LldpReport {
+  // Required. LLDP_REPORT_RESULT_UNSPECIFIED will be rejected, so a
+  // default-constructed report cannot be mistaken for a fresh snapshot.
+  LldpReportResult result = 1;
+  // Populated only for LLDP_REPORT_RESULT_UPDATED, where an empty list is
+  // meaningful: the machine genuinely sees no neighbors.
+  repeated InterfaceLldp interfaces = 2;
+}
+
+// Full snapshot of a machine's current LLDP neighbors, keyed by local NIC MAC.
+// Sent by a scout; a DPU agent reports through DpuNetworkStatus.lldp instead.
+message LldpNeighborReport {
+  // Required. A report that names no machine is rejected.
+  common.MachineId machine_id = 1;
+  // Required. An absent report is rejected; use
+  // LLDP_REPORT_RESULT_COLLECTION_FAILED to say the neighbors could not be
+  // read.
+  LldpReport report = 2;
+}
+
+message InterfaceLldp {
+  // Local NIC MAC address (the machine's own port).
+  string mac_address = 1;
+  machine_discovery.LldpSwitchData lldp = 2;
+}
+
 // Summary of a health report source: its mode and source identifier.
 message HealthSourceOrigin {
   HealthReportApplyMode mode = 1;
@@ -4866,10 +4918,10 @@ message ManagedHostNetworkConfigResponse {
   // IP prefixes to be denied in the DPU ACL rules.
   repeated string deny_prefixes = 18;
 
-  // Legacy site-prefix field. Core continues to send the configured
-  // site_fabric_prefixes here unchanged so older agents retain their existing
-  // behavior during a rolling upgrade. New FNN agents prefer the
-  // presence-bearing site_fabric_null_routes field below. When that field is
+  // Minimal exact union of configured site_fabric_prefixes and every retained
+  // tenant-managed SitePrefix. Retiring operator roots and explicit null-route
+  // overrides do not change this legacy input. New FNN agents prefer the
+  // optional site_fabric_null_routes field below. When that field is
   // absent in a response from an older Core, a new FNN agent reduces this list
   // to its minimal exact union before rendering fallback blackhole routes.
   // Other virtualizers consume this field directly. With mutual isolation,
@@ -4900,6 +4952,11 @@ message ManagedHostNetworkConfigResponse {
   // including a present empty list, and each distinct prefix boundary must be
   // rendered. New agents fall back to site_fabric_prefixes only when this is
   // absent in a response from an older Core. Non-FNN responses omit it.
+  // Unlike RuntimeConfig, inherited routes include all retained tenant-managed
+  // SitePrefixes. An explicit override keeps its distinct boundaries. Under
+  // mutual isolation, Core rejects every FNN response, including Admin-only
+  // responses, if that override leaves a retained tenant root without a covering
+  // route. Unused roots and roots in Deleting still require coverage in that mode.
   optional common.StringList site_fabric_null_routes = 24;
 
   // Enable nico DHCP on HBN.
@@ -5810,6 +5867,9 @@ message DpuNetworkStatus {
   optional string dpu_extension_service_version = 15;
   repeated DpuExtensionServiceStatusObservation dpu_extension_services = 16;
   optional AstraConfigStatus astra_config_status = 17;
+  // LLDP neighbors this DPU sees, attached to the status push rather than sent
+  // on its own RPC. Absent when the agent did not attempt a collection.
+  optional LldpReport lldp = 18;
 }
 
 message LastDhcpRequest {
@@ -10717,7 +10777,7 @@ message PatchExpectedMachineRequest {
   // nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
   // only the mask selects interface replacement.
   //
-  // A selected `chassis_serial_number` must contain 4-64 ASCII letters,
+  // A selected `chassis_serial_number` must contain 4-32 ASCII letters,
   // digits, hyphens, or underscores. Selected `fallback_dpu_serial_numbers`
   // must not contain duplicate strings.
   //

@@ -106,6 +106,39 @@ fn site_prefix_is_eligible(site_prefix: &SitePrefix, vpc: &Vpc, prefix: IpNetwor
         )
 }
 
+/// Selects database scope for a new eligible tenant-managed IPv4 prefix.
+/// Tenant-managed SitePrefix creation is IPv4-only; other families stay global.
+/// This does not authorize overlap: pair, VNI, receiver, and Instance checks
+/// still apply, as do the original global database exclusions.
+pub(super) fn vpc_prefix_overlap_scope(
+    runtime_config: &CarbideConfig,
+    site_prefix: &SitePrefix,
+    vpc: &Vpc,
+    prefix: IpNetwork,
+) -> Option<VpcId> {
+    if !runtime_config.tenant_prefix_overlap_enabled
+        || !prefix.is_ipv4()
+        || vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn
+        || site_prefix.status.lifecycle_state != SitePrefixLifecycleState::Ready
+        || !site_prefix_is_eligible(site_prefix, vpc, prefix)
+        || !site_policy_is_isolated(runtime_config)
+        || runtime_config
+            .site_fabric_null_routes
+            .as_deref()
+            .is_some_and(|routes| !prefix_has_isolation_route(routes, prefix))
+    {
+        return None;
+    }
+
+    runtime_config
+        .fnn
+        .as_ref()?
+        .resolve_vpc_routing_profile(&vpc.config)
+        .ok()?
+        .is_eligible_for_tenant_prefix_overlap()
+        .then_some(vpc.id)
+}
+
 /// `pair_is_eligible` returns whether two `VpcPrefix` records may reuse one
 /// exact CIDR.
 ///
@@ -119,7 +152,15 @@ pub(super) fn pair_is_eligible(
     candidate: VpcPrefixParticipant<'_>,
     existing: VpcPrefixParticipant<'_>,
 ) -> bool {
-    let isolation_routes = runtime_config.resolved_site_fabric_null_routes(&[]);
+    // Valid tenant parents supply inherited coverage even outside configured
+    // operator ranges. Retiring operator roots do not authorize new reuse.
+    let isolation_routes = runtime_config.resolved_site_fabric_null_routes(
+        &[],
+        &[
+            candidate.site_prefix.config.prefix,
+            existing.site_prefix.config.prefix,
+        ],
+    );
     runtime_config.tenant_prefix_overlap_enabled
         && !candidate.is_deleted
         && !existing.is_deleted
@@ -153,7 +194,10 @@ fn site_policy_is_isolated(runtime_config: &CarbideConfig) -> bool {
 
 /// A broader or equal blackhole protects the reused prefix while allowing an authorized
 /// equal-length or more-specific imported route to win by distance or longest-prefix match.
-fn prefix_has_isolation_route(isolation_routes: &[IpNetwork], prefix: IpNetwork) -> bool {
+pub(super) fn prefix_has_isolation_route(
+    isolation_routes: &[IpNetwork],
+    prefix: IpNetwork,
+) -> bool {
     let to_ip_net = |prefix: IpNetwork| {
         IpNet::new(prefix.ip(), prefix.prefix())
             .expect("IpNetwork guarantees a valid address-family prefix length")
@@ -837,6 +881,65 @@ mod tests {
     }
 
     #[test]
+    fn database_scope_requires_an_eligible_tenant_prefix() {
+        #[derive(Debug)]
+        enum Ineligible {
+            SiteGateDisabled,
+            OperatorRoot,
+            ProfileNotEligible,
+            MissingIsolationRoute,
+            Ipv6,
+        }
+        let prefix = "10.123.1.0/24".parse().unwrap();
+        let vpc = vpc("scope-test", Some(10200));
+        let root = site_prefix("scope-test", "10.123.0.0/16".parse().unwrap());
+        let mut config = eligible_config();
+        config.site_fabric_prefixes.clear();
+        for routes in [None, Some(vec!["10.1.2.3/8".parse().unwrap()])] {
+            config.site_fabric_null_routes = routes;
+            assert_eq!(
+                vpc_prefix_overlap_scope(&config, &root, &vpc, prefix),
+                Some(vpc.id),
+                "override: {:?}",
+                config.site_fabric_null_routes
+            );
+        }
+
+        for scenario in [
+            Ineligible::SiteGateDisabled,
+            Ineligible::OperatorRoot,
+            Ineligible::ProfileNotEligible,
+            Ineligible::MissingIsolationRoute,
+            Ineligible::Ipv6,
+        ] {
+            let mut config = config.clone();
+            let mut root = root.clone();
+            let mut vpc = vpc.clone();
+            let mut prefix = prefix;
+            match scenario {
+                Ineligible::SiteGateDisabled => config.tenant_prefix_overlap_enabled = false,
+                Ineligible::OperatorRoot => {
+                    root.status.authority = SitePrefixAuthority::OperatorManaged
+                }
+                Ineligible::ProfileNotEligible => {
+                    vpc.config.routing_profile_type = Some("UNSAFE".into())
+                }
+                Ineligible::MissingIsolationRoute => config.site_fabric_null_routes = Some(vec![]),
+                Ineligible::Ipv6 => {
+                    root.config.prefix = "fd00:3891::/64".parse().unwrap();
+                    prefix = "fd00:3891::/80".parse().unwrap();
+                    config.site_fabric_null_routes = Some(vec![root.config.prefix]);
+                }
+            }
+            assert_eq!(
+                vpc_prefix_overlap_scope(&config, &root, &vpc, prefix),
+                None,
+                "{scenario:?}"
+            );
+        }
+    }
+
+    #[test]
     fn retained_pairs_preserve_isolation_when_admission_stops() {
         enum StopAdmission {
             SiteGate,
@@ -893,7 +996,7 @@ mod tests {
             };
             let (a, b) = participants();
             assert!(!pair_is_eligible(&config, a, b));
-            let isolation_routes = config.resolved_site_fabric_null_routes(&[]);
+            let isolation_routes = config.resolved_site_fabric_null_routes(&[], &[]);
             let (a, b) = participants();
             assert_eq!(
                 retained_pair_is_isolated(&config, &isolation_routes, a, b),
@@ -932,56 +1035,55 @@ mod tests {
                 let mut config = eligible_config();
                 config.site_fabric_prefixes = adjacent_roots();
                 config.site_fabric_null_routes = null_routes;
-                let isolation_routes = config.resolved_site_fabric_null_routes(&[]);
+                let isolation_routes = config.resolved_site_fabric_null_routes(&[], &[]);
                 prefix_has_isolation_route(&isolation_routes, "10.0.0.0/8".parse().unwrap())
             },
         );
     }
 
-    /// Proves a retiring operator root preserves already-admitted overlap
-    /// without authorizing new overlap after it leaves current configuration.
+    /// Ready tenant parents supply inherited isolation outside the configured
+    /// operator ranges; an explicit override must provide its own coverage.
     #[test]
-    fn retained_isolation_routes_do_not_expand_admission() {
-        // Remove current inventory while keeping a retiring root around duplicate tenant space.
-        let mut config = eligible_config();
-        config.site_fabric_prefixes.clear();
-        config.site_fabric_null_routes = None;
-        let retained_root = "10.0.0.0/8".parse().unwrap();
+    fn tenant_roots_supply_inherited_isolation_for_admission() {
         let prefix = "10.1.0.0/24".parse().unwrap();
         let first = vpc("first", Some(100));
         let second = vpc("second", Some(200));
         let first_root = site_prefix("first", prefix);
         let second_root = site_prefix("second", prefix);
-        let participants = || {
-            (
-                VpcPrefixParticipant {
-                    prefix,
-                    is_deleted: false,
-                    vpc: &first,
-                    site_prefix: &first_root,
+        check_values(
+            [
+                Check {
+                    scenario: "tenant parents supply inherited coverage",
+                    input: None,
+                    expect: true,
                 },
-                VpcPrefixParticipant {
-                    prefix,
-                    is_deleted: false,
-                    vpc: &second,
-                    site_prefix: &second_root,
+                Check {
+                    scenario: "tenant parents cannot augment an explicit override",
+                    input: Some(vec![]),
+                    expect: false,
                 },
-            )
-        };
-
-        // Current configuration no longer authorizes an additional duplicate.
-        let (candidate, existing) = participants();
-        assert!(!pair_is_eligible(&config, candidate, existing));
-
-        // Retained validation follows the route still rendered to FNN.
-        let isolation_routes = config.resolved_site_fabric_null_routes(&[retained_root]);
-        let (candidate, existing) = participants();
-        assert!(retained_pair_is_isolated(
-            &config,
-            &isolation_routes,
-            candidate,
-            existing,
-        ));
+            ],
+            |override_routes| {
+                let mut config = eligible_config();
+                config.site_fabric_prefixes.clear();
+                config.site_fabric_null_routes = override_routes;
+                pair_is_eligible(
+                    &config,
+                    VpcPrefixParticipant {
+                        prefix,
+                        is_deleted: false,
+                        vpc: &first,
+                        site_prefix: &first_root,
+                    },
+                    VpcPrefixParticipant {
+                        prefix,
+                        is_deleted: false,
+                        vpc: &second,
+                        site_prefix: &second_root,
+                    },
+                )
+            },
+        );
     }
 
     #[test]

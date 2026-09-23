@@ -22,7 +22,8 @@ use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::{
-    ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
+    ColumnInfo, ConditionalWrite, DatabaseError, DatabaseResult, FilterableQueryBuilder,
+    ObjectColumnFilter,
 };
 
 #[derive(Copy, Clone)]
@@ -147,20 +148,53 @@ where
         .map_err(|e| DatabaseError::new(query.sql(), e))
 }
 
+/// `SpxPartitionAlreadyDeleted` means the partition already has a deletion timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpxPartitionAlreadyDeleted {
+    /// The partition's VNI, if any, so callers can finish an incomplete release.
+    pub vni: Option<i32>,
+}
+
+/// `mark_as_deleted` records the first deletion and returns the updated partition.
+/// An existing deleted partition returns `NotApplied` without changing its timestamps.
+/// If neither the update nor the tombstone lookup finds the partition, the error
+/// wraps `sqlx::Error::RowNotFound`. Callers must release any VNI returned by
+/// either result through owner-checked release in the same transaction. A release
+/// error must discard any new deletion so callers can retry both writes together.
 pub async fn mark_as_deleted(
     pid: SpxPartitionId,
     txn: &mut PgConnection,
-) -> DatabaseResult<SpxPartition> {
-    let query = "UPDATE spx_partitions SET updated=NOW(), deleted=NOW() WHERE id=$1 RETURNING row_to_json(spx_partitions.*)";
-    let partition: SpxPartitionSnapshotPgJson = sqlx::query_as(query)
+) -> DatabaseResult<ConditionalWrite<SpxPartition, SpxPartitionAlreadyDeleted>> {
+    let query = "UPDATE spx_partitions SET updated=NOW(), deleted=NOW() WHERE id=$1 AND deleted IS NULL RETURNING row_to_json(spx_partitions.*)";
+    let partition: Option<SpxPartitionSnapshotPgJson> = sqlx::query_as(query)
         .bind(pid)
-        .fetch_one(txn)
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::new(query, e))?;
 
-    partition
-        .try_into()
-        .map_err(|e| DatabaseError::new(query, e))
+    if let Some(partition) = partition {
+        return partition
+            .try_into()
+            .map(ConditionalWrite::Applied)
+            .map_err(|e| DatabaseError::new(query, e));
+    }
+
+    // A caller-supplied UUID may be created after the UPDATE. Only a deleted
+    // row proves that the deletion was already recorded.
+    let already_deleted_query =
+        "SELECT vni FROM spx_partitions WHERE id=$1 AND deleted IS NOT NULL";
+    let already_deleted: Option<(Option<i32>,)> = sqlx::query_as(already_deleted_query)
+        .bind(pid)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::new(already_deleted_query, e))?;
+    if let Some((vni,)) = already_deleted {
+        return Ok(ConditionalWrite::NotApplied(SpxPartitionAlreadyDeleted {
+            vni,
+        }));
+    }
+
+    Err(DatabaseError::new(query, sqlx::Error::RowNotFound))
 }
 
 pub async fn final_delete(
@@ -175,4 +209,23 @@ pub async fn final_delete(
         .map_err(|e| DatabaseError::new(query, e))?;
 
     Ok(partition)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[crate::sqlx_test]
+    async fn missing_partition_delete_preserves_row_not_found(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin deletion");
+        let id = uuid::Uuid::new_v4().into();
+        let error = mark_as_deleted(id, &mut txn)
+            .await
+            .expect_err("missing partition remains an error");
+        let DatabaseError::Sqlx(error) = error else {
+            panic!("expected wrapped SQLx error, got {error:?}");
+        };
+        assert!(matches!(error.source, sqlx::Error::RowNotFound));
+        txn.commit().await.expect("finish missing deletion");
+    }
 }

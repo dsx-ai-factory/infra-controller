@@ -31,7 +31,13 @@ use crate::crds::dpus_generated::{
 
 /// Async provider for BMC passwords used to create and refresh the K8s BMC
 /// secret. Implement this trait to supply credentials dynamically (e.g. from
-/// a vault or credential manager).
+/// a vault or credential manager). Return
+/// [`crate::DpfError::BmcPasswordSourceUnavailable`] when the configured source
+/// cannot supply the credential. Return
+/// [`crate::DpfError::LocalBmcPasswordSourceUnavailable`] for an authoritative
+/// local version 0 miss so the SDK can reject source-policy activation before
+/// startup. After a value has been published, source-unavailable and ordinary
+/// transient lookup failures retain the last published value and are retried.
 #[async_trait::async_trait]
 pub trait BmcPasswordProvider: Send + Sync {
     async fn get_bmc_password(&self) -> Result<String, crate::DpfError>;

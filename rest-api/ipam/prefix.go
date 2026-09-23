@@ -459,12 +459,18 @@ func (i *ipamer) releaseIPFromPrefixInternal(ctx context.Context, prefixCidr, ip
 	if prefix == nil {
 		return fmt.Errorf("%w: unable to find prefix for cidr:%s", ErrNotFound, prefixCidr)
 	}
-	_, ok := prefix.ips[ip]
+	// Acquisition keys allocations by the canonical address string.
+	address, err := netip.ParseAddr(ip)
+	key := ip
+	if err == nil {
+		key = address.String()
+	}
+	_, ok := prefix.ips[key]
 	if !ok {
 		return fmt.Errorf("%w: unable to release ip:%s because it is not allocated in prefix:%s", ErrNotFound, ip, prefixCidr)
 	}
-	delete(prefix.ips, ip)
-	_, err := i.storage.UpdatePrefix(ctx, *prefix, i.namespace)
+	delete(prefix.ips, key)
+	_, err = i.storage.UpdatePrefix(ctx, *prefix, i.namespace)
 	if err != nil {
 		return fmt.Errorf("unable to release ip %v:%w", ip, err)
 	}

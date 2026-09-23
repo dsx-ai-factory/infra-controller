@@ -80,6 +80,7 @@ fabric_monitor_run_interval = "101s"
 
 [credentials]
 ufm_source = "backend"
+bmc_site_wide_root_source = "local"
 
 [credentials.file]
 path = "/var/run/secrets/nico/ufm/credentials.yaml"

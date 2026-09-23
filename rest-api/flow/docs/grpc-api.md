@@ -210,6 +210,7 @@
     - [EventRuleSeverity](#v1-EventRuleSeverity)
     - [EventRuleTargetStrategy](#v1-EventRuleTargetStrategy)
     - [FirmwareControlOperation](#v1-FirmwareControlOperation)
+    - [LeakHandlingStatus](#v1-LeakHandlingStatus)
     - [LeakStatus](#v1-LeakStatus)
     - [OperationRunPhysicalLocationOrdering.Strategy](#v1-OperationRunPhysicalLocationOrdering-Strategy)
     - [OperationRunSafetyGateScope](#v1-OperationRunSafetyGateScope)
@@ -525,6 +526,7 @@ An empty list means no conflicts were detected.
 | nvl_domain_id | [UUID](#v1-UUID) |  | NVLink Domain containing this component&#39;s rack; omitted when unassigned |
 | task_stats | [TaskStats](#v1-TaskStats) |  | Active Tasks that explicitly target this component. |
 | rack_external_id | [string](#string) |  |  |
+| leak_handling_status | [LeakHandlingStatus](#v1-LeakHandlingStatus) |  | Flow&#39;s leakage-handling status for this component. |
 
 
 
@@ -3695,6 +3697,23 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 
 
 
+<a name="v1-LeakHandlingStatus"></a>
+
+### LeakHandlingStatus
+LeakHandlingStatus describes Flow&#39;s handling of a leakage event for a
+component. It describes handling progress, not the component&#39;s current leak
+or power state.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| LEAK_HANDLING_STATUS_UNKNOWN | 0 | Flow could not determine the status. |
+| LEAK_HANDLING_STATUS_NONE | 1 | No supported leakage-handling Task targets this component. |
+| LEAK_HANDLING_STATUS_SHUTTING_DOWN | 2 | A forced-shutdown Task is waiting, pending, or running. |
+| LEAK_HANDLING_STATUS_DOWN | 3 | A forced-shutdown Task completed. This is not current power state. |
+| LEAK_HANDLING_STATUS_FAILED | 4 | The latest supported leakage-handling Task failed or was terminated. |
+
+
+
 <a name="v1-LeakStatus"></a>
 
 ### LeakStatus
@@ -3834,7 +3853,9 @@ execution for the same scope is still active.
 <a name="v1-Phase"></a>
 
 ### Phase
-Phase is Flow&#39;s coarse operability bucket.
+Phase is Flow&#39;s coarse operability bucket. Component phases are derived from
+Core&#39;s type-specific state machines; Rack.operation_status aggregates those
+component phases.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |

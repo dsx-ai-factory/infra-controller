@@ -46,6 +46,17 @@ pub struct ExpectedRackGroupMember {
     pub id: String,
 }
 
+/// An expected rack and the devices assigned to it.
+/// Deserialization requires both fields and rejects unknown fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedRackGroupRack {
+    /// External rack identity; unique within the group.
+    pub rack_id: RackId,
+    /// Devices in this rack; device identities are unique across the group.
+    pub members: Vec<ExpectedRackGroupMember>,
+}
+
 /// A logical group of expected racks and devices in one NVLink domain.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ExpectedRackGroup {
@@ -53,10 +64,10 @@ pub struct ExpectedRackGroup {
     pub rack_group_id: RackGroupId,
     /// NVLink topology declared for the group.
     pub topology: RackGroupTopology,
-    /// Expected racks spanned by the group.
-    pub rack_ids: Vec<RackId>,
-    /// Devices expected to participate in the NVLink domain.
-    pub members: Vec<ExpectedRackGroupMember>,
+    /// Ordered racks; may be empty. RPC conversion requires non-blank, unique rack IDs,
+    /// non-blank member manufacturer/ID values, and group-wide unique (type, manufacturer, id)
+    /// tuples. Member types use the case-sensitive [`RackCapabilityType`] names.
+    pub racks: Vec<ExpectedRackGroupRack>,
     /// Descriptive attributes such as name, manufacturer, and location labels.
     /// Omission during deserialization supplies `Metadata::default()`.
     #[serde(default = "default_metadata_for_deserializer")]
