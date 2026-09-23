@@ -11,6 +11,7 @@ import (
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
@@ -213,6 +214,212 @@ func TestManageSpectrumXPartition_UpdateSpectrumXPartitionsInDB(t *testing.T) {
 		assert.Equal(t, cdbm.SpectrumXPartitionStatusPending, persisted.Status)
 
 		require.NoError(t, sxpDAO.Delete(ctx, nil, sxp.ID))
+	})
+
+	// The cases below cover Partitions the Site reports that REST has no active row for. The
+	// Site is the source of truth, so such a Partition is created under the Site-reported ID,
+	// or undeleted if a soft-deleted row already carries that ID. They share one Partition and
+	// run in order, so a failure early on stops the chain rather than cascading.
+	sdDAO := cdbm.NewStatusDetailDAO(dbSession)
+
+	siteCreatedID := uuid.New()
+	siteCreated := &corev1.SpxPartition{
+		Id:                   &corev1.SpxPartitionId{Value: siteCreatedID.String()},
+		Vni:                  10500,
+		TenantOrganizationId: fx.tenant.Org,
+		Metadata: &corev1.Metadata{
+			Name:        "site-created-partition",
+			Description: "created directly on Site",
+			Labels:      []*corev1.Label{{Key: "origin", Value: cutil.GetPtr("site")}},
+		},
+	}
+	inventory := &corev1.SpectrumXPartitionInventory{
+		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		Timestamp:       timestamppb.Now(),
+		SpxPartitions:   []*corev1.SpxPartition{siteCreated},
+		InventoryPage:   &corev1.InventoryPage{TotalPages: 1, CurrentPage: 1, PageSize: 1, TotalItems: 1, ItemIds: []string{siteCreatedID.String()}},
+	}
+
+	if !t.Run("auto creates Partition from inventory", func(t *testing.T) {
+		require.NoError(t, manager.UpdateSpectrumXPartitionsInDB(ctx, fx.site.ID, inventory))
+
+		created, err := sxpDAO.Get(ctx, nil, siteCreatedID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, siteCreatedID, created.ID)
+		assert.Equal(t, "site-created-partition", created.Name)
+		require.NotNil(t, created.Description)
+		assert.Equal(t, "created directly on Site", *created.Description)
+		assert.Equal(t, fx.tenant.Org, created.Org)
+		assert.Equal(t, fx.tenant.ID, created.TenantID)
+		assert.Equal(t, fx.site.ID, created.SiteID)
+		assert.Equal(t, fx.tenant.CreatedBy, created.CreatedBy)
+		assert.Equal(t, cdbm.SpectrumXPartitionStatusReady, created.Status)
+		assert.False(t, created.IsMissingOnSite)
+		assert.Equal(t, cdbm.Labels{"origin": "site"}, created.Labels)
+		require.NotNil(t, created.VNI)
+		assert.Equal(t, 10500, *created.VNI)
+
+		details, err := sdDAO.GetRecentByEntityIDs(ctx, nil, []string{siteCreatedID.String()}, 10)
+		require.NoError(t, err)
+		require.Len(t, details, 1)
+		require.NotNil(t, details[0].Message)
+		assert.Equal(t, "SpectrumX Partition was found on Site, Ready for use", *details[0].Message)
+	}) {
+		t.FailNow()
+	}
+
+	if !t.Run("inventory replay is idempotent", func(t *testing.T) {
+		require.NoError(t, manager.UpdateSpectrumXPartitionsInDB(ctx, fx.site.ID, inventory))
+
+		rows, count, err := sxpDAO.GetAll(ctx, nil, cdbm.SpectrumXPartitionFilterInput{SpectrumXPartitionIDs: []uuid.UUID{siteCreatedID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		assert.Equal(t, 1, count)
+
+		details, err := sdDAO.GetRecentByEntityIDs(ctx, nil, []string{siteCreatedID.String()}, 10)
+		require.NoError(t, err)
+		assert.Len(t, details, 1, "a replay must not append another status detail")
+	}) {
+		t.FailNow()
+	}
+
+	// A row only reaches soft-deletion from Deleting, so that is the state a Site-reported
+	// Partition is undeleted from. The undelete must bring it back to Ready itself, because
+	// the main loop deliberately leaves Deleting rows alone.
+	t.Run("inventory restores soft-deleted Partition", func(t *testing.T) {
+		deletingStatus := cdbm.SpectrumXPartitionStatusDeleting
+		_, err := sxpDAO.Update(ctx, nil, cdbm.SpectrumXPartitionUpdateInput{
+			SpectrumXPartitionID: siteCreatedID,
+			Status:               &deletingStatus,
+			IsMissingOnSite:      cutil.GetPtr(true),
+		})
+		require.NoError(t, err)
+		require.NoError(t, sxpDAO.Delete(ctx, nil, siteCreatedID))
+
+		deleted, _, err := sxpDAO.GetAll(ctx, nil, cdbm.SpectrumXPartitionFilterInput{SpectrumXPartitionIDs: []uuid.UUID{siteCreatedID}, IncludeDeleted: true}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		require.NoError(t, err)
+		require.Len(t, deleted, 1)
+		require.NotNil(t, deleted[0].Deleted)
+
+		// A delete newer than the staleness threshold may postdate this inventory, so the
+		// undelete is deferred until the delete has aged past it.
+		require.NoError(t, manager.UpdateSpectrumXPartitionsInDB(ctx, fx.site.ID, inventory))
+		_, err = sxpDAO.Get(ctx, nil, siteCreatedID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist, "a recent delete must not be undone yet")
+
+		util.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.SpectrumXPartition)(nil), siteCreatedID)
+		require.NoError(t, manager.UpdateSpectrumXPartitionsInDB(ctx, fx.site.ID, inventory))
+
+		restored, err := sxpDAO.Get(ctx, nil, siteCreatedID, nil)
+		require.NoError(t, err)
+		assert.Nil(t, restored.Deleted)
+		assert.False(t, restored.IsMissingOnSite)
+		assert.Equal(t, cdbm.SpectrumXPartitionStatusReady, restored.Status)
+		require.NotNil(t, restored.VNI)
+		assert.Equal(t, 10500, *restored.VNI)
+
+		// The most recent status detail is the undelete's, so the history shows why the
+		// Partition left Deleting.
+		details, err := sdDAO.GetRecentByEntityIDs(ctx, nil, []string{siteCreatedID.String()}, 1)
+		require.NoError(t, err)
+		require.Len(t, details, 1)
+		assert.Equal(t, string(cdbm.SpectrumXPartitionStatusReady), details[0].Status)
+		require.NotNil(t, details[0].Message)
+		assert.Equal(t, "SpectrumX Partition was found on Site, Ready for use", *details[0].Message)
+	})
+
+	t.Run("inventory skips restore when tenant organization differs", func(t *testing.T) {
+		require.NoError(t, sxpDAO.Delete(ctx, nil, siteCreatedID))
+		util.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.SpectrumXPartition)(nil), siteCreatedID)
+
+		mismatched := &corev1.SpectrumXPartitionInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			Timestamp:       timestamppb.Now(),
+			SpxPartitions: []*corev1.SpxPartition{{
+				Id:                   &corev1.SpxPartitionId{Value: siteCreatedID.String()},
+				TenantOrganizationId: "other-tenant-org",
+				Metadata:             &corev1.Metadata{Name: "site-created-partition"},
+			}},
+			InventoryPage: &corev1.InventoryPage{TotalPages: 1, CurrentPage: 1, PageSize: 1, TotalItems: 1, ItemIds: []string{siteCreatedID.String()}},
+		}
+		require.NoError(t, manager.UpdateSpectrumXPartitionsInDB(ctx, fx.site.ID, mismatched))
+
+		_, err := sxpDAO.Get(ctx, nil, siteCreatedID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	})
+
+	t.Run("name conflict gets a recovered suffix", func(t *testing.T) {
+		existing := util.TestBuildSpectrumXPartition(t, dbSession, "shared-name", fx.site, fx.tenant, nil, cdbm.SpectrumXPartitionStatusReady, false)
+		newID := uuid.New()
+
+		require.NoError(t, manager.UpdateSpectrumXPartitionsInDB(ctx, fx.site.ID, &corev1.SpectrumXPartitionInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			Timestamp:       timestamppb.Now(),
+			SpxPartitions: []*corev1.SpxPartition{
+				reportedPartition(existing.ID, 0),
+				{
+					Id:                   &corev1.SpxPartitionId{Value: newID.String()},
+					TenantOrganizationId: fx.tenant.Org,
+					Metadata:             &corev1.Metadata{Name: "shared-name"},
+				},
+			},
+			InventoryPage: &corev1.InventoryPage{TotalPages: 1, CurrentPage: 1, PageSize: 2, TotalItems: 2, ItemIds: []string{existing.ID.String(), newID.String()}},
+		}))
+
+		created, err := sxpDAO.Get(ctx, nil, newID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, fmt.Sprintf("shared-name-recovered-%s", newID.String()[:8]), created.Name)
+
+		require.NoError(t, sxpDAO.Delete(ctx, nil, existing.ID))
+		require.NoError(t, sxpDAO.Delete(ctx, nil, newID))
+	})
+
+	t.Run("missing name falls back to a recovered name", func(t *testing.T) {
+		newID := uuid.New()
+
+		require.NoError(t, manager.UpdateSpectrumXPartitionsInDB(ctx, fx.site.ID, &corev1.SpectrumXPartitionInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			Timestamp:       timestamppb.Now(),
+			SpxPartitions: []*corev1.SpxPartition{{
+				Id:                   &corev1.SpxPartitionId{Value: newID.String()},
+				TenantOrganizationId: fx.tenant.Org,
+			}},
+			InventoryPage: &corev1.InventoryPage{TotalPages: 1, CurrentPage: 1, PageSize: 1, TotalItems: 1, ItemIds: []string{newID.String()}},
+		}))
+
+		created, err := sxpDAO.Get(ctx, nil, newID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, fmt.Sprintf("recovered-%s", newID.String()[:8]), created.Name)
+		assert.Nil(t, created.Description)
+		assert.Nil(t, created.VNI)
+
+		require.NoError(t, sxpDAO.Delete(ctx, nil, newID))
+	})
+
+	// Partitions whose ownership cannot be established are skipped rather than guessed at.
+	t.Run("skips Partitions without a resolvable Tenant or a valid ID", func(t *testing.T) {
+		unknownTenantID := uuid.New()
+		emptyOrgID := uuid.New()
+
+		require.NoError(t, manager.UpdateSpectrumXPartitionsInDB(ctx, fx.site.ID, &corev1.SpectrumXPartitionInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			Timestamp:       timestamppb.Now(),
+			SpxPartitions: []*corev1.SpxPartition{
+				{Id: &corev1.SpxPartitionId{Value: unknownTenantID.String()}, TenantOrganizationId: "unknown-tenant-org", Metadata: &corev1.Metadata{Name: "unknown-tenant"}},
+				{Id: &corev1.SpxPartitionId{Value: emptyOrgID.String()}, Metadata: &corev1.Metadata{Name: "empty-org"}},
+				{Id: &corev1.SpxPartitionId{Value: "not-a-uuid"}, TenantOrganizationId: fx.tenant.Org, Metadata: &corev1.Metadata{Name: "bad-id"}},
+			},
+			InventoryPage: &corev1.InventoryPage{TotalPages: 1, CurrentPage: 1, PageSize: 3, TotalItems: 3},
+		}))
+
+		_, err := sxpDAO.Get(ctx, nil, unknownTenantID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+		_, err = sxpDAO.Get(ctx, nil, emptyOrgID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+
+		rows, _, err := sxpDAO.GetAll(ctx, nil, cdbm.SpectrumXPartitionFilterInput{SiteIDs: []uuid.UUID{fx.site.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		require.NoError(t, err)
+		assert.Empty(t, rows)
 	})
 }
 
