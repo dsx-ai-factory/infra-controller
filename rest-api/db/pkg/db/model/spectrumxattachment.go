@@ -51,7 +51,7 @@ func (t *SpectrumXAttachmentType) FromProto(attachmentType corev1.SpxAttachmentT
 		*t = SpectrumXAttachmentTypePhysical
 	case corev1.SpxAttachmentType_Virtual:
 		*t = SpectrumXAttachmentTypeVirtual
-	case corev1.SpxAttachmentType_Ovn:
+	case corev1.SpxAttachmentType_OVS:
 		*t = SpectrumXAttachmentTypeOVS
 	default:
 		log.Warn().Str("SpxAttachmentType", attachmentType.String()).Msg("unsupported SpectrumXAttachmentType reported")
@@ -66,7 +66,7 @@ func (t SpectrumXAttachmentType) ToProto() corev1.SpxAttachmentType {
 	case SpectrumXAttachmentTypeVirtual:
 		return corev1.SpxAttachmentType_Virtual
 	case SpectrumXAttachmentTypeOVS:
-		return corev1.SpxAttachmentType_Ovn
+		return corev1.SpxAttachmentType_OVS
 	default:
 		return corev1.SpxAttachmentType_Physical
 	}
@@ -165,8 +165,8 @@ func (sxa *SpectrumXAttachment) FromProto(attachment *corev1.InstanceSpxAttachme
 	sxa.DeviceInstance = int(attachment.GetDeviceInstance())
 	sxa.AttachmentType.FromProto(attachment.GetAttachmentType())
 
-	if attachment.VirtualFunctionId != nil {
-		virtualFunctionID := int(attachment.GetVirtualFunctionId())
+	if attachment.GetAttachmentVf() != nil {
+		virtualFunctionID := int(attachment.GetAttachmentVf().GetVfIndex())
 		sxa.VirtualFunctionID = &virtualFunctionID
 	}
 }
@@ -179,8 +179,7 @@ func (sxa *SpectrumXAttachment) ToProto() *corev1.InstanceSpxAttachment {
 		AttachmentType: sxa.AttachmentType.ToProto(),
 	}
 	if sxa.VirtualFunctionID != nil {
-		vfID := uint32(*sxa.VirtualFunctionID)
-		attachment.VirtualFunctionId = &vfID
+		attachment.AttachmentVf = &corev1.SpxAttachmentVf{VfIndex: uint32(*sxa.VirtualFunctionID)}
 	}
 	return attachment
 }
