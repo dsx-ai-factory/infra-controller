@@ -134,6 +134,9 @@ func TestSyncMachines(t *testing.T) {
 					Type:         devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),
 					Manufacturer: "TestMfg",
 					SerialNumber: "expected-host",
+					SlotID:       unknownPositionValue,
+					TrayIndex:    unknownPositionValue,
+					HostID:       unknownPositionValue,
 				}
 				require.NoError(t, expectedComponent.Create(ctx, pool.DB))
 				createTestBMC(ctx, t, pool, expectedComponent.ID, tc.expectedHostBmcMac)
@@ -189,6 +192,9 @@ func TestRunInventoryOne(t *testing.T) {
 			Type:         devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),
 			Manufacturer: "TestMfg",
 			SerialNumber: "expected-host-to-delete",
+			SlotID:       unknownPositionValue,
+			TrayIndex:    unknownPositionValue,
+			HostID:       unknownPositionValue,
 		}
 		require.NoError(t, component.Create(ctx, pool.DB))
 		createTestBMC(ctx, t, pool, component.ID, hostBmcMac)
@@ -291,7 +297,7 @@ func TestCompareMachineFieldsForDrift_AllPositionalFieldsMismatch(t *testing.T) 
 	assert.NotContains(t, diffByField, "firmware_version")
 }
 
-func TestCompareMachineFieldsForDrift_NilPositionFieldsSkipped(t *testing.T) {
+func TestCompareMachineFieldsForDrift_NilPositionFieldsReportedMissing(t *testing.T) {
 	expected := &model.Component{
 		SerialNumber:    "SN001",
 		FirmwareVersion: "1.0.0",
@@ -299,11 +305,14 @@ func TestCompareMachineFieldsForDrift_NilPositionFieldsSkipped(t *testing.T) {
 		TrayIndex:       1,
 		HostID:          5,
 	}
-	// Position found but all fields nil — should not produce diffs
+	// The position row exists, but each expected coordinate is still missing.
 	position := nicoapi.MachinePosition{}
 
 	diffs := compareMachineFieldsForDrift(expected, &position)
-	assert.Empty(t, diffs)
+	require.Len(t, diffs, 3)
+	for _, diff := range diffs {
+		assert.Equal(t, "<missing>", diff.ActualValue)
+	}
 }
 
 func TestCompareMachineFieldsForDrift_SerialNeverCompared(t *testing.T) {
@@ -311,6 +320,9 @@ func TestCompareMachineFieldsForDrift_SerialNeverCompared(t *testing.T) {
 	// correlation/drift signal anymore.
 	expected := &model.Component{
 		SerialNumber: "SN001",
+		SlotID:       unknownPositionValue,
+		TrayIndex:    unknownPositionValue,
+		HostID:       unknownPositionValue,
 	}
 	position := nicoapi.MachinePosition{}
 
@@ -375,7 +387,7 @@ func TestCompareMachineFieldsForDrift_MissingPositionReportsDrift(t *testing.T) 
 	assert.Equal(t, "<missing>", diffByField["host_id"].ActualValue)
 }
 
-func TestCompareMachineFieldsForDrift_MissingPositionZeroExpectedNoDrift(t *testing.T) {
+func TestCompareMachineFieldsForDrift_MissingPositionExplicitZeroReportsDrift(t *testing.T) {
 	expected := &model.Component{
 		SerialNumber: "SN001",
 		SlotID:       0,
@@ -383,7 +395,26 @@ func TestCompareMachineFieldsForDrift_MissingPositionZeroExpectedNoDrift(t *test
 		HostID:       0,
 	}
 
-	// nil position with zero-value expected fields — no position drift
+	// Zero is an explicitly configured position, not an unknown sentinel.
 	diffs := compareMachineFieldsForDrift(expected, nil)
-	assert.Empty(t, diffs)
+	require.Len(t, diffs, 3)
+	for _, diff := range diffs {
+		assert.Equal(t, "0", diff.ExpectedValue)
+		assert.Equal(t, "<missing>", diff.ActualValue)
+	}
+}
+
+func TestCompareMachineFieldsForDrift_UnknownExpectedPositionSkipped(t *testing.T) {
+	expected := &model.Component{
+		SlotID:    unknownPositionValue,
+		TrayIndex: unknownPositionValue,
+		HostID:    unknownPositionValue,
+	}
+
+	assert.Empty(t, compareMachineFieldsForDrift(expected, nil))
+	assert.Empty(t, compareMachineFieldsForDrift(expected, &nicoapi.MachinePosition{
+		PhysicalSlotNum:  ptr(int32(0)),
+		ComputeTrayIndex: ptr(int32(0)),
+		TopologyID:       ptr(int32(0)),
+	}))
 }

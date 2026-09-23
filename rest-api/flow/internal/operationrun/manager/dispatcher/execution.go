@@ -250,6 +250,10 @@ func operationRequestForTarget(
 	if err != nil {
 		return nil, fmt.Errorf("marshal operation payload: %w", err)
 	}
+	ruleID, err := operations.ExtractRuleID(info)
+	if err != nil {
+		return nil, fmt.Errorf("extract operation rule ID: %w", err)
+	}
 
 	componentIDs := target.ComponentsByType.AllComponentUUIDs()
 	components := make([]operation.ComponentTarget, 0, len(componentIDs))
@@ -273,7 +277,7 @@ func operationRequestForTarget(
 		},
 		Description:      description,
 		ConflictStrategy: operation.ConflictStrategyReject,
-		RuleID:           operations.ExtractRuleID(info),
+		RuleID:           ruleID,
 		RequiredRackID:   target.RackID,
 		IdempotencyKey:   targetIdempotencyKey(target.ID),
 	}, nil

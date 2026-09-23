@@ -121,7 +121,11 @@ func (rs *FlowServerImpl) CreateExpectedRack(
 	ctx context.Context,
 	req *pb.CreateExpectedRackRequest,
 ) (*pb.CreateExpectedRackResponse, error) {
-	id, err := rs.inventoryManager.CreateExpectedRack(ctx, protobuf.RackFrom(req.GetRack()))
+	r, err := protobuf.RackFrom(req.GetRack())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid rack: %v", err)
+	}
+	id, err := rs.inventoryManager.CreateExpectedRack(ctx, r)
 
 	return &pb.CreateExpectedRackResponse{Id: protobuf.UUIDTo(id)}, err
 }
@@ -204,7 +208,10 @@ func (rs *FlowServerImpl) PatchRack(
 	ctx context.Context,
 	req *pb.PatchRackRequest,
 ) (*pb.PatchRackResponse, error) {
-	r := protobuf.RackFrom(req.GetRack())
+	r, err := protobuf.RackFrom(req.GetRack())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid rack: %v", err)
+	}
 
 	report, err := rs.inventoryManager.PatchRack(ctx, r)
 
@@ -228,12 +235,22 @@ func (rs *FlowServerImpl) AddComponent(
 
 	// Convert proto component to internal; rack_id comes from the component
 	// itself and is optional.
-	comp := protobuf.ComponentFrom(pbComp)
-	comp.RackID = protobuf.UUIDFrom(pbComp.GetRackId())
+	comp, err := protobuf.ComponentFrom(pbComp)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid component: %v", err)
+	}
+	rackID, err := protobuf.OptionalUUIDFrom(pbComp.GetRackId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "component.rack_id %v", err)
+	}
+	if rackID != nil {
+		comp.RackID = *rackID
+	}
 
 	// Verify the rack exists only when one has been specified.
 	if comp.RackID != uuid.Nil {
-		if _, err := rs.inventoryManager.GetRackByID(ctx, comp.RackID, false); err != nil {
+		_, err = rs.inventoryManager.GetRackByID(ctx, comp.RackID, false)
+		if err != nil {
 			return nil, fmt.Errorf("rack not found: %w", err)
 		}
 	}
@@ -341,6 +358,15 @@ func (rs *FlowServerImpl) PatchComponent(
 	if compID == uuid.Nil {
 		return nil, errors.New("component id is required")
 	}
+	positionPaths, err := patchComponentPositionPaths(req)
+	if err != nil {
+		return nil, err
+	}
+
+	rackID, err := protobuf.OptionalUUIDFrom(req.RackId)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rack_id %v", err)
+	}
 
 	// Get the existing component
 	existing, err := rs.inventoryManager.GetComponentByID(ctx, compID)
@@ -354,23 +380,27 @@ func (rs *FlowServerImpl) PatchComponent(
 	}
 
 	if req.Position != nil {
-		existing.Position.SlotID = int(req.Position.SlotId)
-		existing.Position.TrayIndex = int(req.Position.TrayIdx)
-		existing.Position.HostID = int(req.Position.HostId)
+		if positionPaths == nil || positionPaths["position.slot_id"] {
+			existing.Position.SlotID = int(req.Position.SlotId)
+		}
+		if positionPaths == nil || positionPaths["position.tray_idx"] {
+			existing.Position.TrayIndex = int(req.Position.TrayIdx)
+		}
+		if positionPaths == nil || positionPaths["position.host_id"] {
+			existing.Position.HostID = int(req.Position.HostId)
+		}
 	}
 
 	if req.Description != nil {
 		existing.Info.Description = *req.Description
 	}
 
-	if req.RackId != nil {
-		rackID := protobuf.UUIDFrom(req.RackId)
-		if rackID != uuid.Nil {
-			if _, err := rs.inventoryManager.GetRackByID(ctx, rackID, false); err != nil {
-				return nil, fmt.Errorf("rack not found: %w", err)
-			}
-			existing.RackID = rackID
+	if rackID != nil {
+		_, err = rs.inventoryManager.GetRackByID(ctx, *rackID, false)
+		if err != nil {
+			return nil, fmt.Errorf("rack not found: %w", err)
 		}
+		existing.RackID = *rackID
 	}
 
 	if len(req.GetBmcs()) > 0 {
@@ -391,6 +421,29 @@ func (rs *FlowServerImpl) PatchComponent(
 	return &pb.PatchComponentResponse{
 		Component: protobuf.ComponentTo(updated),
 	}, nil
+}
+
+func patchComponentPositionPaths(req *pb.PatchComponentRequest) (map[string]bool, error) {
+	if req.UpdateMask == nil {
+		return nil, nil
+	}
+	if req.Position == nil {
+		return nil, status.Error(codes.InvalidArgument, "position is required when update_mask contains position fields")
+	}
+
+	paths := make(map[string]bool, len(req.UpdateMask.Paths))
+	for _, path := range req.UpdateMask.Paths {
+		switch path {
+		case "position.slot_id", "position.tray_idx", "position.host_id":
+			paths[path] = true
+		default:
+			return nil, status.Errorf(codes.InvalidArgument, "unsupported PatchComponent update_mask path %q", path)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "update_mask paths are required")
+	}
+	return paths, nil
 }
 
 // GetComponentInfoByID retrieves component information by its unique identifier.
@@ -756,10 +809,16 @@ func (rs *FlowServerImpl) BringUpRack(
 			"target_spec is required",
 		)
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
 	info := &operations.BringUpTaskInfo{
-		RuleID:                 protobuf.UUIDStringFrom(req.GetRuleId()),
 		OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+	}
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
 	}
 	opReq, err := rs.convertTargetSpecToOperationRequest(
 		targetSpec, req.GetDescription(), info,
@@ -768,7 +827,7 @@ func (rs *FlowServerImpl) BringUpRack(
 		return nil, err
 	}
 
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -802,9 +861,14 @@ func (rs *FlowServerImpl) IngestRack(
 	if targetSpec == nil {
 		return nil, errors.New("target_spec is required")
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
-	info := &operations.BringUpTaskInfo{
-		RuleID: protobuf.UUIDStringFrom(req.GetRuleId()),
+	info := &operations.BringUpTaskInfo{}
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
 	}
 
 	opReq, err := rs.convertTargetSpecToOperationRequest(
@@ -817,7 +881,7 @@ func (rs *FlowServerImpl) IngestRack(
 	// Override the operation code so the rule resolver picks the
 	// ingestion-only rule instead of the full bring-up rule.
 	opReq.Operation.Code = taskcommon.OpCodeIngest
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -874,9 +938,14 @@ func (rs *FlowServerImpl) decommissionRackImpl(
 			"decommission requires rack targets; component targets are not supported",
 		)
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
-	info := &operations.DecommissionTaskInfo{
-		RuleID: protobuf.UUIDStringFrom(req.GetRuleId()),
+	info := &operations.DecommissionTaskInfo{}
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
 	}
 	opReq, err := rs.convertTargetSpecToOperationRequest(
 		targetSpec, req.GetDescription(), info,
@@ -886,7 +955,7 @@ func (rs *FlowServerImpl) decommissionRackImpl(
 	}
 
 	opReq.ConflictStrategy, opReq.QueueTimeout = protobuf.QueueOptionsFrom(req.GetQueueOptions())
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -919,8 +988,14 @@ func (rs *FlowServerImpl) handlePowerControlTask(
 	if targetSpec == nil {
 		return nil, errors.New("target_spec is required")
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(pbRuleID)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
-	info.RuleID = protobuf.UUIDStringFrom(pbRuleID)
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
+	}
 
 	// Convert pb.OperationTargetSpec to internal operation.Request
 	req, err := rs.convertTargetSpecToOperationRequest(targetSpec, description, info)
@@ -929,7 +1004,7 @@ func (rs *FlowServerImpl) handlePowerControlTask(
 	}
 
 	req.ConflictStrategy, req.QueueTimeout = protobuf.QueueOptionsFrom(queueOptions)
-	req.RuleID = protobuf.OptionalUUIDFrom(pbRuleID)
+	req.RuleID = ruleID
 
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, req)
@@ -1022,9 +1097,9 @@ func (rs *FlowServerImpl) GetTasksByIDs(
 	ctx context.Context,
 	req *pb.GetTasksByIDsRequest,
 ) (*pb.GetTasksByIDsResponse, error) {
-	taskIDs := make([]uuid.UUID, 0, len(req.GetTaskIds()))
-	for _, tid := range req.GetTaskIds() {
-		taskIDs = append(taskIDs, protobuf.UUIDFrom(tid))
+	taskIDs, err := protobuf.RequiredUUIDsFrom(req.GetTaskIds())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "task_ids %v", err)
 	}
 
 	tasks, err := rs.taskStore.GetTasks(ctx, taskIDs)
@@ -1054,6 +1129,9 @@ func (rs *FlowServerImpl) CancelTask(
 	}
 
 	if err := rs.taskManager.CancelTask(ctx, taskID); err != nil {
+		if errors.Is(err, taskmanager.ErrTaskNotCancellable) {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
 		return nil, err
 	}
 
@@ -1362,16 +1440,22 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 	if targetSpec == nil {
 		return nil, errors.New("target_spec is required")
 	}
+	ruleID, err := protobuf.OptionalUUIDFrom(req.GetRuleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
 
 	// Build FirmwareControlTaskInfo
 	info := &operations.FirmwareControlTaskInfo{
 		Operation:              operations.FirmwareOperationUpgrade,
 		TargetVersion:          req.GetTargetVersion(),
-		RuleID:                 protobuf.UUIDStringFrom(req.GetRuleId()),
 		SubTargets:             req.GetSubTargets(),
 		OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
 	}
-	err := rs.encryptFirmwareAuthenticationData(info, req.GetAuthenticationData())
+	if ruleID != nil {
+		info.RuleID = ruleID.String()
+	}
+	err = rs.encryptFirmwareAuthenticationData(info, req.GetAuthenticationData())
 	if err != nil {
 		return nil, firmwareAuthenticationStatusError(err)
 	}
@@ -1393,7 +1477,7 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 	opReq.ConflictStrategy, opReq.QueueTimeout = protobuf.QueueOptionsFrom(
 		req.GetQueueOptions(),
 	)
-	opReq.RuleID = protobuf.OptionalUUIDFrom(req.GetRuleId())
+	opReq.RuleID = ruleID
 
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
