@@ -278,7 +278,6 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | ---- | ----------- |
 | `--skip-core` | Skip Phase 6 only. Prerequisites and the REST stack still upgrade; NICo Core is left on its current image. Useful when the Core image did not change. |
 | `--skip-rest` | Skip Phase 7 only. Prerequisites and NICo Core still upgrade; the REST stack is left untouched. |
-| `--skip-flow` | Skip the Flow upgrade (Phase 7h). It does not bypass the initial guard for bundled PSM/NSM containers or an incomplete Flow-only rollout. Follow the [preserve-or-overwrite guidance](../../helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm). |
 | `--skip-rms` | Skip the Rack Management Service upgrade (Phase 5c). RMS installs **by default** (like DPF); `NICO_RMS_IMAGE_TAG` is required unless this flag is passed. Skipping leaves an existing RMS release untouched. |
 | `--skip-dpf` | Use **only** if DPF is not enabled at this site. This is not a pure skip: it clears `INSTALL_DPF`, which drops phase 5b and redeploys NICo Core with the `[dpf]` block disabled — on a DPF-enabled site that is a config change, not a skip. |
 | `--core-values <file>` | Use a per-site NICo Core values file (same as initial install). |
@@ -363,6 +362,12 @@ Once the writer is Postgres, the KEK backup above belongs in every pre-upgrade c
 
 ## Version-specific upgrade notes
 
+### 2.2 → 2.3: Core components are mandatory
+
+**Impact:** The core NICo subcharts (`nico-api`, `nico-bmc-proxy`, `nico-dhcp`, `nico-dns`, `nico-hardware-health`, `nico-pxe`, `nico-ssh-console-rs`) no longer have `<chart>.enabled` toggles - they are unconditional dependencies in `helm/Chart.yaml` and always install. A site values file (including one passed via `setup.sh --core-values`) that still sets a core `<chart>.enabled` key, whether `true` or `false`, keeps working: the key is ignored and the component installs. No values changes are required for the upgrade. If a site previously disabled a core component (for example, a DHCP or BMC proxy provided externally), plan for the in-cluster component to appear after the upgrade. Optional services (`nico-dsx-exchange-consumer`, `nico-ntp`, `unbound`) keep their toggles.
+
+NICo Flow is also mandatory within the REST install: `--skip-flow` and the helm-prereqs `flow.enabled` value were removed, phase 7h has no skip flag of its own and runs whenever REST is installed (only `--skip-rest` skips it, together with all of REST), and the Flow chart moved from `helm/charts/nico-flow` to `helm/nico-flow`. A leftover `nico-flow.enabled` key in umbrella values is ignored, because the umbrella no longer deploys Flow; `setup.sh` installs it. Sites running an external PostgreSQL (`postgresql.enabled: false` in helm-prereqs values) must provision the flow database and the `flow.nico.nico-pg-cluster.credentials` Secret in the `flow` namespace before running `setup.sh`, or phase 7h fails after its 120s credential wait.
+
 ### 2.0 → 2.1: MetalLB CRD ownership migration
 
 **Impact:** This upgrade path requires special handling that `setup.sh` performs automatically. If you skip MetalLB's phase in your upgrade (for example, by removing it from the helmfile run), your site config objects (`IPAddressPool`, `BGPPeer`, `BGPAdvertisement`) will be deleted.
@@ -404,6 +409,18 @@ NICo 2.1 requires `startupProbe` to be explicitly configured in the machine-a-tr
 
 NICo 2.3 raises the default `startupProbe.failureThreshold` from 20 to 120 (60 minutes), sized for a 250-rack site spread over ten pods ([issue 5968](https://github.com/dsx-ai-factory/infra-controller/issues/5968)). The threshold applies to each pod on its own, so size it for the pod that registers the most records. For larger sites, raise `startupProbe.failureThreshold` following the sizing rule in the chart's `values.yaml`, as `helm-prereqs/values/machine-a-tron-scale.yaml` does.
 
+### 2.2 → 2.3: Kustomize deployment deprecated
+
+The Kustomize deployment under `deploy/` (`deploy/kustomization.yaml`,
+`deploy/nico-base`, `deploy/nico-system`, `deploy/nico-unbound-base`) is
+deprecated in 2.3 and will be removed in 2.4. Every service it deploys has a
+Helm chart under `helm/`, and `setup.sh` installs NICo Core from those charts
+only. Kustomize deployments keep working in 2.3 but receive no new
+configuration. Before upgrading to 2.4, install with the Helm charts as
+described in the [quick start](../getting-started/quick-start.md) and retire the
+Kustomize overlays. The `rest-api/deploy/kustomize` bases that `setup.sh` uses
+for cert-manager, PostgreSQL, and Temporal are not affected.
+
 ## Rollback
 
 <Warning>
@@ -425,7 +442,7 @@ For DPF, rolling back to a prior DPF version is not supported by NVIDIA. If DPF 
 
 ## Using setup.sh for individual component upgrades
 
-You can narrow an upgrade to particular components with the `--skip-*` flags. `--skip-core`, `--skip-rest`, and `--skip-flow` skip exactly the phase they name — **none of them skip the prerequisite stack**, and there is no `--skip-prereqs`. (`--skip-dpf` is the exception: refer to its caveat in the flag table above. `--skip-core` also suppresses the `imagepullsecret` upsert that the Core migration Job uses.)
+You can narrow an upgrade to particular components with the `--skip-*` flags. `--skip-core` and `--skip-rest` skip exactly the phase they name - **none of them skip the prerequisite stack**, and there is no `--skip-prereqs`. NICo Flow (Phase 7h) has no skip flag of its own; it upgrades together with REST and is skipped only by `--skip-rest`. (`--skip-dpf` is the exception: refer to its caveat in the flag table above. `--skip-core` also suppresses the `imagepullsecret` upsert that the Core migration Job uses.)
 
 ```bash
 # Prerequisites + NICo Core; leave the REST stack untouched (skips Phase 7)

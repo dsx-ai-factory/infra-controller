@@ -75,7 +75,7 @@ changes, because objects created outside Helm (the `flow` Namespace, and
 Certificates pre-applied by `setup.sh`) otherwise reject the new chart label:
 
 ```bash
-helm upgrade flow ./helm/charts/nico-flow \
+helm upgrade flow ./helm/nico-flow \
   --namespace flow \
   --reset-then-reuse-values \
   --set flowConfig.leakDetectionInterval=5m \
@@ -118,6 +118,6 @@ flowConfig:
 ## Testing
 
 ```bash
-helm lint helm/charts/nico-flow
-helm unittest helm/charts/nico-flow
+helm lint helm/nico-flow
+helm unittest helm/nico-flow
 ```

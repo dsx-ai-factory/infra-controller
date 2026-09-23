@@ -104,7 +104,6 @@ pub(crate) struct Args {
         short = 'u',
         long,
         group = "group",
-        requires("bmc_password"),
         help = "BMC username of the expected machine"
     )]
     pub(super) bmc_username: Option<String>,
@@ -112,7 +111,6 @@ pub(crate) struct Args {
         short = 'p',
         long,
         group = "group",
-        requires("bmc_username"),
         help = "BMC password of the expected machine"
     )]
     pub(super) bmc_password: Option<String>,

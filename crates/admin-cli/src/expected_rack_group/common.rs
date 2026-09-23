@@ -15,21 +15,20 @@
  * limitations under the License.
  */
 
-use carbide_uuid::rack::{RackGroupId, RackId};
+use carbide_uuid::rack::RackGroupId;
 use clap::Args;
-use model::expected_rack_group::ExpectedRackGroupMember;
+use model::expected_rack_group::ExpectedRackGroupRack;
 use rpc::forge;
 use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub(super) struct Attributes {
-    /// Rack ID; repeat for each rack. Omission supplies an empty list.
-    #[arg(long = "rack-id")]
-    rack_ids: Vec<RackId>,
-    /// Device JSON with type, manufacturer and id; repeat for each device. Omission supplies an empty list.
-    /// Type must be Compute, Switch, or PowerShelf.
-    #[arg(long = "member", value_parser = parse_member)]
-    members: Vec<ExpectedRackGroupMember>,
+    /// Rack JSON; repeat for each rack. Example:
+    /// {"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}
+    /// Both fields are required; use "members": [] for a rack without devices.
+    /// Member type must be Compute, Switch, or PowerShelf. Omitting --rack supplies no racks.
+    #[arg(long = "rack", value_parser = parse_rack)]
+    racks: Vec<ExpectedRackGroupRack>,
     /// Metadata name (ASCII, at most 256 characters). Defaults to empty.
     #[arg(long)]
     meta_name: Option<String>,
@@ -41,9 +40,8 @@ pub(super) struct Attributes {
     labels: Vec<String>,
 }
 
-fn parse_member(value: &str) -> Result<ExpectedRackGroupMember, String> {
-    serde_json::from_str(value)
-        .map_err(|e| format!("expected device JSON {{type, manufacturer, id}}: {e}"))
+fn parse_rack(value: &str) -> Result<ExpectedRackGroupRack, String> {
+    serde_json::from_str(value).map_err(|e| format!("expected rack JSON {{rack_id, members}}: {e}"))
 }
 
 impl Attributes {
@@ -55,8 +53,7 @@ impl Attributes {
         ExpectedRackGroupJson {
             rack_group_id,
             topology,
-            rack_ids: self.rack_ids,
-            members: self.members,
+            racks: self.racks,
             metadata: Some(forge::Metadata {
                 name: self.meta_name.unwrap_or_default(),
                 description: self.meta_description.unwrap_or_default(),
@@ -74,9 +71,7 @@ pub(super) struct ExpectedRackGroupJson {
     rack_group_id: RackGroupId,
     topology: String,
     #[serde(default)]
-    rack_ids: Vec<RackId>,
-    #[serde(default)]
-    members: Vec<ExpectedRackGroupMember>,
+    racks: Vec<ExpectedRackGroupRack>,
     #[serde(default)]
     metadata: Option<forge::Metadata>,
 }
@@ -86,14 +81,20 @@ impl From<ExpectedRackGroupJson> for forge::ExpectedRackGroup {
         Self {
             rack_group_id: Some(value.rack_group_id),
             topology: value.topology,
-            rack_ids: value.rack_ids,
-            members: value
-                .members
+            racks: value
+                .racks
                 .into_iter()
-                .map(|m| forge::ExpectedRackGroupMember {
-                    r#type: m.device_type.to_string(),
-                    manufacturer: m.manufacturer,
-                    id: m.id,
+                .map(|rack| forge::ExpectedRackGroupRack {
+                    rack_id: Some(rack.rack_id),
+                    members: rack
+                        .members
+                        .into_iter()
+                        .map(|member| forge::ExpectedRackGroupMember {
+                            r#type: member.device_type.to_string(),
+                            manufacturer: member.manufacturer,
+                            id: member.id,
+                        })
+                        .collect(),
                 })
                 .collect(),
             metadata: value.metadata,

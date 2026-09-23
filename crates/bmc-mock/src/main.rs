@@ -21,7 +21,7 @@ mod tar_router;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::Router;
@@ -111,7 +111,7 @@ async fn start_tar_gz_app(
     let mut handle = bmc_mock::CombinedServer::run(
         "bmc-mock",
         Arc::new(RwLock::new(routers_by_ip)),
-        listener.listener_address(),
+        Some(listener.bind().await?),
         bmc_mock::tls::server_config(listener.cert_path)?,
     );
     handle.wait().await?;
@@ -160,7 +160,7 @@ async fn start_libvirt_app(
     let mut handle = bmc_mock::CombinedServer::run_router(
         "bmc-mock",
         router,
-        listener.listener_address(),
+        Some(listener.bind().await?),
         bmc_mock::tls::server_config(listener.cert_path)?,
     );
     tokio::select! {
@@ -208,7 +208,7 @@ async fn start_mock_app(
     let mut handle = bmc_mock::CombinedServer::run_router(
         "bmc-mock",
         router,
-        listener.listener_address(),
+        Some(listener.bind().await?),
         bmc_mock::tls::server_config(listener.cert_path)?,
     );
     handle.wait().await?;
@@ -286,10 +286,14 @@ impl MachineArgs {
 }
 
 impl ListenerArgs {
-    fn listener_address(&self) -> Option<ListenerOrAddress> {
-        self.port
-            .map(|p| SocketAddr::from(([0, 0, 0, 0], p)))
-            .map(ListenerOrAddress::Address)
+    fn listener_address(&self) -> SocketAddr {
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, self.port.unwrap_or(1266)))
+    }
+
+    async fn bind(&self) -> std::io::Result<ListenerOrAddress> {
+        // Use explicit dual-stack setup, with an IPv4 fallback when IPv6 is unavailable.
+        let listener = metrics_endpoint::bind_tcp_listener(self.listener_address()).await?;
+        Ok(ListenerOrAddress::Listener(listener.into_std()?))
     }
 }
 
@@ -321,5 +325,80 @@ fn ipmi_sim_config() -> bmc_mock::ipmi_sim::IpmiSimConfig {
     bmc_mock::ipmi_sim::IpmiSimConfig {
         stable_id: "standalone-bmc-mock".to_string(),
         console_prompt: "root@bmc-mock # ".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+    use std::time::Duration;
+
+    use axum::routing::get;
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn listener_uses_ipv6_wildcard_and_preserves_ports() {
+        value_scenarios!(run = |port| ListenerArgs {
+            port,
+            ..Default::default()
+        }.listener_address();
+            "configured port" {
+                None => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 1266)),
+                Some(0) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_listener_serves_https_on_both_families() {
+        let ipv6_available = match std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)) {
+            Ok(_) => true,
+            Err(error) => {
+                let _listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                    .expect("IPv4 loopback must be available before skipping IPv6 assertions");
+                eprintln!("IPv6 loopback unavailable; checking IPv4 only: {error}");
+                false
+            }
+        };
+        let listener = ListenerArgs {
+            port: Some(0),
+            ..Default::default()
+        }
+        .bind()
+        .await
+        .expect("bind standalone listener");
+        let mut server = bmc_mock::CombinedServer::run_router(
+            "bmc-mock-listener-test",
+            Router::new().route("/redfish/v1", get(|| async { "redfish" })),
+            Some(listener),
+            bmc_mock::tls::server_config(None::<&str>).expect("mock TLS config"),
+        );
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("HTTPS client");
+        for address in [
+            Some(SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                server.address.port(),
+            ))),
+            ipv6_available.then(|| SocketAddr::from((Ipv6Addr::LOCALHOST, server.address.port()))),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let response = client
+                .get(format!("https://{address}/redfish/v1"))
+                .send()
+                .await
+                .expect("HTTPS request");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.text().await.expect("response body"), "redfish");
+        }
+        server.stop().await.expect("stop mock server");
     }
 }

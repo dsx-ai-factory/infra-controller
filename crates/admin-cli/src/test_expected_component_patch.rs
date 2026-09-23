@@ -90,6 +90,42 @@ async fn machine_flags_select_only_supplied_fields() {
     }
     for case in [
         Case {
+            scenario: "username flag selects only bmc_username",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--bmc-username",
+                "new-bmc-user",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["bmc_username"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                bmc_username: "new-bmc-user".to_string(),
+                ..Default::default()
+            },
+        },
+        Case {
+            scenario: "password flag selects only bmc_password",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--bmc-password",
+                "new-bmc-password",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["bmc_password"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                bmc_password: "new-bmc-password".to_string(),
+                ..Default::default()
+            },
+        },
+        Case {
             scenario: "labels alone select only the supplied collection",
             args: vec![
                 "expected-machine",
@@ -492,6 +528,8 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
                 ID,
                 "--sku-id",
                 "DGX-H100-640GB",
+                "--bmc-username",
+                "new-bmc-user",
                 "--meta-name",
                 "",
                 "--interfaces",
@@ -509,6 +547,7 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
                 ..Default::default()
             },
             expected: forge::ExpectedMachine {
+                bmc_username: "new-bmc-user".to_string(),
                 sku_id: Some("DGX-H100-640GB".to_string()),
                 metadata: Some(forge::Metadata {
                     name: String::new(),
@@ -565,6 +604,8 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
                 MAC,
                 "--sku-id",
                 "DGX-H100-640GB",
+                "--bmc-password",
+                "new-bmc-password",
             ],
             patch_reply: PatchReply::Grpc(Code::Ok),
             lookup_id: None,
@@ -579,6 +620,7 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
             },
             expected: forge::ExpectedMachine {
                 id: None,
+                bmc_password: "new-bmc-password".to_string(),
                 sku_id: Some("DGX-H100-640GB".to_string()),
                 #[allow(deprecated)]
                 dpf_enabled: true,
@@ -607,6 +649,8 @@ async fn unsupported_shelf_patch_preserves_the_legacy_request_and_result() {
                 "update",
                 "--bmc-mac-address",
                 MAC,
+                "--bmc-username",
+                "new-bmc-user",
                 "--shelf-serial-number",
                 "SHELF-002",
                 "--bmc-retain-credentials",
@@ -636,17 +680,60 @@ async fn unsupported_shelf_patch_preserves_the_legacy_request_and_result() {
         assert_eq!(
             update,
             forge::ExpectedPowerShelf {
-                bmc_mac_address: MAC.to_string(),
+                bmc_username: "new-bmc-user".to_string(),
                 shelf_serial_number: "SHELF-002".to_string(),
                 bmc_retain_credentials: Some(false),
                 metadata: Some(forge::Metadata {
                     name: "replacement-name".to_string(),
-                    ..Default::default()
+                    ..stored_metadata()
                 }),
-                ..Default::default()
+                ..stored_shelf()
             }
         );
     }
+}
+
+#[tokio::test]
+async fn unsupported_shelf_patch_by_id_merges_credentials_and_stored_mac() {
+    let (result, requests) = dispatch_with_replies(
+        &[
+            "expected-power-shelf",
+            "update",
+            "--id",
+            ID,
+            "--bmc-password",
+            "new-bmc-password",
+        ],
+        PatchReply::HttpForbidden,
+        Code::Ok,
+        Some(ID),
+    )
+    .await;
+    result.unwrap();
+    assert_methods(
+        &requests,
+        &[
+            "PatchExpectedPowerShelf",
+            "GetExpectedPowerShelf",
+            "UpdateExpectedPowerShelf",
+        ],
+    );
+    let lookup: forge::ExpectedPowerShelfRequest = requests[1].decode();
+    assert_eq!(
+        lookup,
+        forge::ExpectedPowerShelfRequest {
+            expected_power_shelf_id: Some(rpc_id()),
+            ..Default::default()
+        }
+    );
+    let update: forge::ExpectedPowerShelf = requests[2].decode();
+    assert_eq!(
+        update,
+        forge::ExpectedPowerShelf {
+            bmc_password: "new-bmc-password".to_string(),
+            ..stored_shelf()
+        }
+    );
 }
 
 #[tokio::test]
@@ -681,7 +768,7 @@ async fn unsupported_switch_patch_keeps_the_legacy_typed_mask_header() {
     );
     assert_eq!(
         requests[1].headers[EXPECTED_SWITCH_UPDATE_MASK_HEADER],
-        "nvos_username,nvos_password"
+        "nvos_username"
     );
 }
 
@@ -723,8 +810,8 @@ async fn shelf_lookup_without_an_id_uses_the_original_mac_update() {
             bmc_mac_address: MAC.to_string(),
             shelf_serial_number: "SHELF-002".to_string(),
             bmc_retain_credentials: Some(false),
-            metadata: Some(forge::Metadata::default()),
-            ..Default::default()
+            expected_power_shelf_id: None,
+            ..stored_shelf()
         }
     );
 }
@@ -737,6 +824,8 @@ async fn switch_lookup_without_an_id_uses_the_original_mac_update_and_mask() {
             "update",
             "--bmc-mac-address",
             MAC,
+            "--bmc-password",
+            "new-bmc-password",
             "--nvos-username",
             "new-nvos-user",
             "--nvos-password",
@@ -754,6 +843,7 @@ async fn switch_lookup_without_an_id_uses_the_original_mac_update_and_mask() {
         update,
         forge::ExpectedSwitch {
             bmc_mac_address: MAC.to_string(),
+            bmc_password: "new-bmc-password".to_string(),
             nvos_username: Some("new-nvos-user".to_string()),
             nvos_password: Some("new-nvos-password".to_string()),
             metadata: Some(forge::Metadata::default()),
@@ -762,7 +852,7 @@ async fn switch_lookup_without_an_id_uses_the_original_mac_update_and_mask() {
     );
     assert_eq!(
         requests[1].headers[EXPECTED_SWITCH_UPDATE_MASK_HEADER],
-        "nvos_username,nvos_password"
+        "bmc_password,nvos_username,nvos_password"
     );
 }
 
@@ -1165,7 +1255,7 @@ async fn mock_request(
         payload: body.slice(5..),
     };
     // Lookup responses contain fields a read-modify-write client would replay.
-    // PATCH must copy only the ID; the legacy machine update must merge them.
+    // PATCH must copy only the ID; legacy machine and shelf updates must merge them.
     let response = match recorded.method.as_str() {
         "GetExpectedMachine" => {
             let request: forge::ExpectedMachineRequest = recorded.decode();
@@ -1226,12 +1316,7 @@ async fn mock_request(
                     expected_power_shelf_id: lookup_id.map(|id| rpc::common::Uuid {
                         value: id.to_string(),
                     }),
-                    bmc_mac_address: MAC.to_string(),
-                    bmc_username: "stored-bmc-user".to_string(),
-                    bmc_password: "stored-bmc-password".to_string(),
-                    shelf_serial_number: "STORED-002".to_string(),
-                    metadata: Some(stored_metadata()),
-                    ..Default::default()
+                    ..stored_shelf()
                 }
                 .encode_to_vec(),
                 Code::Ok,
@@ -1303,6 +1388,20 @@ fn stored_machine() -> forge::ExpectedMachine {
             ..Default::default()
         }],
         ..Default::default()
+    }
+}
+
+fn stored_shelf() -> forge::ExpectedPowerShelf {
+    forge::ExpectedPowerShelf {
+        expected_power_shelf_id: Some(rpc_id()),
+        bmc_mac_address: MAC.to_string(),
+        bmc_username: "stored-bmc-user".to_string(),
+        bmc_password: "stored-bmc-password".to_string(),
+        shelf_serial_number: "STORED-002".to_string(),
+        metadata: Some(stored_metadata()),
+        rack_id: Some(ID.parse().unwrap()),
+        bmc_ip_address: "192.0.2.10".to_string(),
+        bmc_retain_credentials: Some(true),
     }
 }
 

@@ -26,7 +26,7 @@ EXAMPLES:
 
 Replace topology, rack membership, devices, and metadata:
     $ nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --topology gb200_nvl72r1_c2g4 \
-    --rack-id rack-01 --member '{\"type\":\"Switch\",\"manufacturer\":\"NVIDIA\",\"id\":\"switch-01\"}' \
+    --rack '{\"rack_id\":\"rack-01\",\"members\":[{\"type\":\"Switch\",\"manufacturer\":\"NVIDIA\",\"id\":\"switch-01\"}]}' \
     --meta-name nvl5-gp1-jhb01 --label location.datacenter:JHB01
 
 Clear rack/device lists and metadata while retaining the supplied topology:

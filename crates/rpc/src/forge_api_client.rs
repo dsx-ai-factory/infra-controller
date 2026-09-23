@@ -123,11 +123,12 @@ pub fn expected_switch_update_mask(
 ) -> Vec<ExpectedSwitchUpdateField> {
     let mut fields = Vec::new();
 
-    if !switch.bmc_username.is_empty() || !switch.bmc_password.is_empty() {
-        fields.extend([
-            ExpectedSwitchUpdateField::BmcUsername,
-            ExpectedSwitchUpdateField::BmcPassword,
-        ]);
+    if !switch.bmc_username.is_empty() {
+        fields.push(ExpectedSwitchUpdateField::BmcUsername);
+    }
+
+    if !switch.bmc_password.is_empty() {
+        fields.push(ExpectedSwitchUpdateField::BmcPassword);
     }
 
     if !switch.switch_serial_number.is_empty() {
@@ -138,11 +139,12 @@ pub fn expected_switch_update_mask(
         fields.push(ExpectedSwitchUpdateField::NvosMacAddresses);
     }
 
-    if switch.nvos_username.is_some() || switch.nvos_password.is_some() {
-        fields.extend([
-            ExpectedSwitchUpdateField::NvosUsername,
-            ExpectedSwitchUpdateField::NvosPassword,
-        ]);
+    if switch.nvos_username.is_some() {
+        fields.push(ExpectedSwitchUpdateField::NvosUsername);
+    }
+
+    if switch.nvos_password.is_some() {
+        fields.push(ExpectedSwitchUpdateField::NvosPassword);
     }
 
     if let Some(metadata) = &switch.metadata {
@@ -393,6 +395,38 @@ mod tests {
                     scenario: "empty patch",
                     input: ExpectedSwitch::default(),
                     expect: Vec::new(),
+                },
+                Check {
+                    scenario: "bmc_username does not select its partner",
+                    input: ExpectedSwitch {
+                        bmc_username: "replacement".to_string(),
+                        ..Default::default()
+                    },
+                    expect: vec![Field::BmcUsername],
+                },
+                Check {
+                    scenario: "bmc_password does not select its partner",
+                    input: ExpectedSwitch {
+                        bmc_password: "replacement".to_string(),
+                        ..Default::default()
+                    },
+                    expect: vec![Field::BmcPassword],
+                },
+                Check {
+                    scenario: "nvos_username does not select its partner",
+                    input: ExpectedSwitch {
+                        nvos_username: Some("replacement".to_string()),
+                        ..Default::default()
+                    },
+                    expect: vec![Field::NvosUsername],
+                },
+                Check {
+                    scenario: "nvos_password does not select its partner",
+                    input: ExpectedSwitch {
+                        nvos_password: Some("replacement".to_string()),
+                        ..Default::default()
+                    },
+                    expect: vec![Field::NvosPassword],
                 },
                 Check {
                     scenario: "paired credentials",

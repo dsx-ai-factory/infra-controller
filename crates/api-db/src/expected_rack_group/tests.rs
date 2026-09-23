@@ -3,14 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use carbide_uuid::rack::RackId;
+use model::expected_rack_group::ExpectedRackGroupMember;
+
 use super::*;
 
 #[crate::sqlx_test]
-async fn expected_rack_group_migration_defaults(
+async fn expected_rack_group_migration_requires_empty_table(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use sqlx::Acquire;
+
     let mut txn = pool.begin().await?;
-    // Reapply the new table migration to the predecessor shape (no group table).
     sqlx::query("DROP TABLE expected_rack_groups")
         .execute(&mut *txn)
         .await?;
@@ -19,20 +23,81 @@ async fn expected_rack_group_migration_defaults(
     ))
     .execute(&mut *txn)
     .await?;
-    sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, rack_ids, members) VALUES ('defaults', 'topology', '[]', '[]')")
-        .execute(&mut *txn).await?;
-    let loaded = find_by_rack_group_id(&mut txn, &RackGroupId::new("defaults"))
-        .await?
-        .unwrap();
-    assert_eq!(loaded.metadata, Metadata::default());
-    let mut boundary = group("boundary");
-    boundary.metadata.name = "n".repeat(256);
-    boundary.metadata.description = "d".repeat(1024);
-    create(&mut txn, &boundary).await?;
+    let migration = include_str!("../../migrations/20260922172535_expected_rack_group_racks.sql");
+
+    for (rack_ids, members) in [
+        (serde_json::json!([]), serde_json::json!([])),
+        (
+            serde_json::json!(["rack-01"]),
+            serde_json::json!([
+                {"type": "Switch", "manufacturer": "NVIDIA", "id": "switch-01"}
+            ]),
+        ),
+    ] {
+        sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, rack_ids, members) VALUES ('legacy', 'topology', $1, $2)")
+            .bind(&rack_ids).bind(&members).execute(&mut *txn).await?;
+        // Match the migration runner's transaction boundary.
+        let mut attempt = txn.begin().await?;
+        let error = sqlx::raw_sql(migration)
+            .execute(&mut *attempt)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("23502")
+        );
+        attempt.rollback().await?;
+        let retained: (serde_json::Value, serde_json::Value) = sqlx::query_as(
+            "SELECT rack_ids, members FROM expected_rack_groups WHERE rack_group_id='legacy'",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
+        assert_eq!(retained, (rack_ids, members));
+        let schema: Vec<(String, String)> = sqlx::query_as(
+            "SELECT column_name::text, is_nullable::text FROM information_schema.columns WHERE table_schema='public' AND table_name='expected_rack_groups' AND column_name IN ('racks', 'rack_ids', 'members') ORDER BY column_name"
+        ).fetch_all(&mut *txn).await?;
+        assert_eq!(
+            schema,
+            vec![
+                ("members".into(), "NO".into()),
+                ("rack_ids".into(), "NO".into())
+            ]
+        );
+        sqlx::query("DELETE FROM expected_rack_groups WHERE rack_group_id='legacy'")
+            .execute(&mut *txn)
+            .await?;
+    }
+
+    sqlx::raw_sql(migration).execute(&mut *txn).await?;
+    let mut old_writer = txn.begin().await?;
+    let error = sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, rack_ids, members) VALUES ('old-writer', 'topology', '[]', '[]')")
+        .execute(&mut *old_writer).await.unwrap_err();
+    let error = error.as_database_error().unwrap();
+    assert_eq!(error.code().as_deref(), Some("23502"));
     assert_eq!(
-        find_by_rack_group_id(&mut txn, &boundary.rack_group_id).await?,
-        Some(boundary)
+        error
+            .downcast_ref::<sqlx::postgres::PgDatabaseError>()
+            .column(),
+        Some("racks")
     );
+    old_writer.rollback().await?;
+
+    for empty in [false, true] {
+        let mut boundary = group(if empty { "empty" } else { "populated" });
+        boundary.metadata.name = "n".repeat(256);
+        boundary.metadata.description = "d".repeat(1024);
+        if empty {
+            boundary.racks.clear();
+        }
+        create(&mut txn, &boundary).await?;
+        let untouched: bool = sqlx::query_scalar("SELECT rack_ids IS NULL AND members IS NULL AND racks IS NOT NULL FROM expected_rack_groups WHERE rack_group_id=$1")
+            .bind(&boundary.rack_group_id).fetch_one(&mut *txn).await?;
+        assert!(untouched);
+        assert_eq!(
+            find_by_rack_group_id(&mut txn, &boundary.rack_group_id).await?,
+            Some(boundary)
+        );
+    }
     txn.rollback().await?;
     Ok(())
 }
@@ -101,12 +166,20 @@ fn group(id: &str) -> ExpectedRackGroup {
     ExpectedRackGroup {
         rack_group_id: RackGroupId::new(id),
         topology: RackGroupTopology::new("gb200_nvl72r1_c2g4"),
-        rack_ids: vec![RackId::new("rack-02"), RackId::new("rack-01")],
-        members: vec![ExpectedRackGroupMember {
-            device_type: model::rack_type::RackCapabilityType::Compute,
-            manufacturer: "NVIDIA".to_string(),
-            id: "device-01".to_string(),
-        }],
+        racks: vec![
+            ExpectedRackGroupRack {
+                rack_id: RackId::new("rack-02"),
+                members: vec![ExpectedRackGroupMember {
+                    device_type: model::rack_type::RackCapabilityType::Compute,
+                    manufacturer: "NVIDIA".to_string(),
+                    id: "device-01".to_string(),
+                }],
+            },
+            ExpectedRackGroupRack {
+                rack_id: RackId::new("rack-01"),
+                members: vec![],
+            },
+        ],
         metadata: Metadata {
             name: "nvl5-gp1-jhb01".to_string(),
             description: String::new(),
@@ -154,8 +227,7 @@ async fn expected_rack_group_persistence(
             .collect::<Vec<_>>(),
         ["group-a", "group-b"]
     );
-    expected.members.clear();
-    expected.rack_ids.clear();
+    expected.racks.clear();
     expected.topology = RackGroupTopology::new("future-topology");
     update(&mut txn, &expected).await?;
     assert_eq!(

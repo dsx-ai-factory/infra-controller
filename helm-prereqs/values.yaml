@@ -161,21 +161,6 @@ rest:
   namespace: nico-rest
 
 ## ---------------------------------------------------------------------------
-## flow — NICo Flow task, policy, and automation service.
-##
-## This toggle controls only the helm-prereqs side of Flow:
-##   - the Flow database on nico-pg-cluster
-##   - the ClusterExternalSecret that syncs its credentials into the flow
-##     namespace (eso-external-secrets.yaml)
-##
-## The flow Deployment itself ships as a separate helm release from
-## helm/charts/nico-flow, installed by setup.sh phase 7h. That phase is NOT
-## driven by this value — it is unconditionally invoked unless setup.sh is
-## passed --skip-flow. If you set flow.enabled=false here you should also
-## pass --skip-flow on the setup.sh command line, otherwise phase 7h will
-## try to install a chart whose database credentials are missing and fail.
-## ---------------------------------------------------------------------------
-## ---------------------------------------------------------------------------
 ## rms — NVIDIA Rack Manager Service (rack-manager chart) prerequisites.
 ##
 ## This toggle controls only the helm-prereqs side of RMS:
@@ -186,15 +171,25 @@ rest:
 ## The rack-manager chart itself is installed by setup.sh phase 5c, by
 ## DEFAULT (opt out with --skip-rms). Deliberately NOT driven by that flag:
 ## --skip-rms skips only the chart install and never deprovisions these
-## prerequisites — removing them would strand a running rack-manager release
-## (same contract as --skip-flow). To skip the prerequisites too, set
-## enabled: false here, paired with --skip-rms.
+## prerequisites - removing them would strand a running rack-manager release.
+## To skip the prerequisites too, set enabled: false here, paired with
+## --skip-rms.
 ## ---------------------------------------------------------------------------
 rms:
   enabled: true
 
+## ---------------------------------------------------------------------------
+## flow - NICo Flow task, policy, and automation service. Mandatory: the Flow
+## database and its ClusterExternalSecret are always provisioned, and the Flow
+## Deployment (a separate helm release from helm/nico-flow) is installed by
+## setup.sh phase 7h whenever NICo REST is installed. There is no Flow-specific
+## toggle; only --skip-rest skips it, together with all of REST.
+## The database and ClusterExternalSecret are only rendered when
+## postgresql.enabled is true. Sites running an external PostgreSQL must
+## provision the flow database and the flow.nico.nico-pg-cluster.credentials
+## Secret in the flow namespace themselves before running setup.sh.
+## ---------------------------------------------------------------------------
 flow:
-  enabled: true
   ## Namespace flow runs in — must match the helm install -n flag for the
   ## flow release. ESO targets this namespace.
   namespace: flow

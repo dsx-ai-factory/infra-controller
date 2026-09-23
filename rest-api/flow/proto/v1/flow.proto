@@ -705,6 +705,10 @@ message PatchComponentRequest {
     optional string description = 4;      // Update description (JSON string)
     optional UUID rack_id = 5;            // Re-assign to a different rack
     repeated BMCInfo bmcs = 6;            // Update BMCs (matched by MAC address; create if new)
+    // Optional for backward compatibility. When omitted, position replaces all
+    // three coordinates. When set, supported paths are position.slot_id,
+    // position.tray_idx, and position.host_id; only those coordinates change.
+    google.protobuf.FieldMask update_mask = 7;
 }
 
 message PatchComponentResponse {

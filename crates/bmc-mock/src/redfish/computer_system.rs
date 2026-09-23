@@ -1434,6 +1434,7 @@ impl SystemBuilder {
 
     fn power_state(self, state: MockPowerState) -> Self {
         let power_state = match state {
+            MockPowerState::Unknown => return self.apply_patch(json!({"PowerState": null})),
             MockPowerState::On => "On",
             MockPowerState::Off => "Off",
             MockPowerState::PoweringOn => "PoweringOn",

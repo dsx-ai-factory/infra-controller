@@ -8,7 +8,7 @@ switch password rotation, and switch factory reset. This page covers what the
 mock serves, how to point NICo at it, and what it does not do. Refer to the
 [crate README](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rms-mock/README.md)
 for the job model, and to
-[Component Manager RMS Backends](../configuration/component-manager-rms.md)
+[RMS Configuration](../configuration/rms.md)
 for the settings that make NICo call RMS in the first place.
 
 ## What It Serves

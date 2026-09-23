@@ -6,29 +6,20 @@ Namespace : {{ .Release.Namespace }}
 Release   : {{ .Release.Name }}
 
 Deployed sub-charts:
-{{- if index .Values "nico-api" "enabled" | default true }}
   ✓ nico-api
-{{- end }}
-{{- if index .Values "nico-bmc-proxy" "enabled" | default false }}
   ✓ nico-bmc-proxy
-{{- end }}
-{{- if index .Values "nico-dhcp" "enabled" | default true }}
   ✓ nico-dhcp
-{{- end }}
-{{- if index .Values "nico-dns" "enabled" | default true }}
   ✓ nico-dns
-{{- end }}
-{{- if index .Values "nico-dsx-exchange-consumer" "enabled" | default true }}
+  ✓ nico-hardware-health
+  ✓ nico-pxe
+  ✓ nico-ssh-console-rs
+{{- /* Core components above are mandatory (no enabled toggle, see Chart.yaml).
+       Optional services below keep their gates. */}}
+{{- if ne (toString (index .Values "nico-dsx-exchange-consumer" "enabled")) "false" }}
   ✓ nico-dsx-exchange-consumer
 {{- end }}
-{{- if index .Values "nico-hardware-health" "enabled" | default true }}
-  ✓ nico-hardware-health
-{{- end }}
-{{- if index .Values "nico-pxe" "enabled" | default true }}
-  ✓ nico-pxe
-{{- end }}
-{{- if index .Values "nico-ssh-console-rs" "enabled" | default true }}
-  ✓ nico-ssh-console-rs
+{{- if ne (toString (index .Values "nico-ntp" "enabled")) "false" }}
+  ✓ nico-ntp
 {{- end }}
 {{- if index .Values "nico-machine-a-tron" "enabled" | default false }}
   ✓ nico-machine-a-tron (mock machines for dev/test)

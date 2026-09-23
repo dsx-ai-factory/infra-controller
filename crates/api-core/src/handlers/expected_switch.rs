@@ -335,10 +335,14 @@ pub(crate) async fn patch_expected_switch(
     }
     if fields.contains(UpdateField::BmcUsername) {
         switch.bmc_username = patch.bmc_username;
+    }
+    if fields.contains(UpdateField::BmcPassword) {
         switch.bmc_password = patch.bmc_password;
     }
     if fields.contains(UpdateField::NvosUsername) {
         switch.nvos_username = patch.nvos_username;
+    }
+    if fields.contains(UpdateField::NvosPassword) {
         switch.nvos_password = patch.nvos_password;
     }
     if fields.contains(UpdateField::SwitchSerialNumber) {
