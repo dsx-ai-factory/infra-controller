@@ -584,6 +584,7 @@ script = '''
     cp otel/site-controller/otel-agent/Dockerfile "otel-dpu_${vers}_arm64/usr/share/otelcol-contrib/docker/otel-agent/"
     cp otel/site-controller/otel-agent/otel-agent.sh "otel-dpu_${vers}_arm64/usr/share/otelcol-contrib/docker/otel-agent/" && chmod u+x "otel-dpu_${vers}_arm64/usr/share/otelcol-contrib/docker/otel-agent/otel-agent.sh"
     cp otel/site-controller/otel-agent/otel-agent.yaml.template "otel-dpu_${vers}_arm64/usr/share/otelcol-contrib/docker/otel-agent/"
+    cp otel/site-controller/otel-agent/render_pod.py "otel-dpu_${vers}_arm64/usr/share/otelcol-contrib/docker/otel-agent/"
     cp otel/site-controller/scripts/map_endpoints.sh "otel-dpu_${vers}_arm64/usr/local/sbin/" && chmod u+x "otel-dpu_${vers}_arm64/usr/local/sbin/map_endpoints.sh"
     cp otel/site-controller/scripts/localhost_alias.sh "otel-dpu_${vers}_arm64/usr/local/sbin/" && chmod u+x "otel-dpu_${vers}_arm64/usr/local/sbin/localhost_alias.sh"
     cp otel/site-controller/scripts/otel_post_install.sh "otel-dpu_${vers}_arm64/usr/local/sbin/" && chmod u+x "otel-dpu_${vers}_arm64/usr/local/sbin/otel_post_install.sh"
