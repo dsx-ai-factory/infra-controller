@@ -10750,9 +10750,9 @@ message PatchExpectedPowerShelfRequest {
   // including empty labels, an absent `rack_id` (clear), and an empty BMC IP
   // (clear). Nonempty IPs must parse as IPv4 or IPv6. A selected
   // `bmc_retain_credentials` must be present; false is an update.
-  // BMC username and password must be selected together and both be nonempty;
-  // clearing credentials is unsupported. Only the listed paths are accepted;
-  // duplicate paths have no additional effect.
+  // BMC username and password can be selected independently; unselected values
+  // stay unchanged. Selected credentials must be nonempty and cannot be cleared.
+  // Only the listed paths are accepted; duplicate paths have no additional effect.
   // Selected metadata leaves use empty values when metadata is absent.
   // Selected labels replace the collection; keys must be unique, and absent
   // label values become empty strings. Label order is not preserved.
@@ -10773,9 +10773,11 @@ message PatchExpectedSwitchRequest {
   // including empty collections, an absent `rack_id` (clear), and an empty BMC
   // IP (clear). A selected `nvos_ip_address` clears with an absent or empty value.
   // Nonempty IPs must parse as IPv4 or IPv6. A selected `bmc_retain_credentials`
-  // must be present; false is an update. Each username/password pair must be
-  // selected together with both values present and nonempty; clearing
-  // credentials is unsupported. BMC and NVOS pairs can change independently.
+  // must be present; false is an update. BMC and NVOS usernames and passwords
+  // can each be selected independently; unselected values stay unchanged.
+  // Selected credentials must be present and nonempty and cannot be cleared.
+  // If either NVOS credential is set after merging, both must be present and
+  // nonempty. Configuring them for the first time requires both values.
   // The merged NVOS IP, when set, requires exactly one NVOS MAC; both fields
   // can change in the same patch. Only the listed paths are accepted;
   // duplicate paths have no additional effect.
@@ -10831,9 +10833,9 @@ message PatchExpectedMachineRequest {
   // UTF-8 bytes. At most 16 labels are allowed. Label keys must contain
   // 1-255 ASCII bytes, and label values may contain up to 255 UTF-8 bytes.
   //
-  // BMC username and password must be selected together and both be nonempty;
-  // clearing credentials is unsupported. Only the listed paths are accepted;
-  // duplicate paths have no additional effect.
+  // BMC username and password can be selected independently; unselected values
+  // stay unchanged. Selected credentials must be nonempty and cannot be cleared.
+  // Only the listed paths are accepted; duplicate paths have no additional effect.
   google.protobuf.FieldMask update_mask = 2;
 }
 
