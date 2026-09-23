@@ -235,7 +235,9 @@ func TestGetAllDomainHandler_Handle(t *testing.T) {
 				ownedSiteTwo := fixture.createDomain(t, "two.example.com", &fixture.tenant.ID, &otherSite.ID)
 				// A projection can survive Site-access revocation; the list must not leak it.
 				unauthorizedSite := common.TestBuildSite(t, fixture.dbSession, fixture.provider, "Revoked Site", fixture.user)
+				tenantSite := common.TestBuildTenantSite(t, fixture.dbSession, fixture.tenant, unauthorizedSite, fixture.user)
 				fixture.createDomain(t, "revoked.example.com", &fixture.tenant.ID, &unauthorizedSite.ID)
+				require.NoError(t, cdbm.NewTenantSiteDAO(fixture.dbSession).Delete(context.Background(), nil, tenantSite.ID))
 				fixture.createDomain(t, "other.example.com", cutil.GetPtr(uuid.New()), &fixture.site.ID)
 				fixture.createDomain(t, "legacy.example.com", nil, nil)
 
@@ -378,6 +380,23 @@ func TestGetDomainHandler_Handle(t *testing.T) {
 				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
 				assert.Equal(t, domain.ID.String(), response.ID)
 				assert.Equal(t, fixture.tenant.ID.String(), response.TenantID)
+			},
+		},
+		{
+			name: "Site access revocation hides a known Domain ID",
+			run: func(t *testing.T) {
+				fixture := newDomainHandlerFixture(t, nil)
+				domain := fixture.createDomain(t, "revoked.example.com", &fixture.tenant.ID, &fixture.site.ID)
+				handler := NewGetDomainHandler(fixture.dbSession)
+				recorder := fixture.request(t, handler.Handle, http.MethodGet, "/", domain.ID.String(), nil)
+				require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+
+				tenantSite, err := cdbm.NewTenantSiteDAO(fixture.dbSession).GetByTenantIDAndSiteID(context.Background(), nil, fixture.tenant.ID, fixture.site.ID, nil)
+				require.NoError(t, err)
+				require.NoError(t, cdbm.NewTenantSiteDAO(fixture.dbSession).Delete(context.Background(), nil, tenantSite.ID))
+
+				recorder = fixture.request(t, handler.Handle, http.MethodGet, "/", domain.ID.String(), nil)
+				assert.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
 			},
 		},
 		{

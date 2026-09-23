@@ -262,6 +262,13 @@ func (gdh GetDomainHandler) Handle(c echo.Context) error {
 		logger.Error().Err(err).Msg("failed to retrieve Domain from REST DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Domain, DB error", nil)
 	}
+	if domain.SiteID == nil || *domain.SiteID == uuid.Nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Domain with the specified ID", nil)
+	}
+	_, apiErr = getDomainSiteForTenant(ctx, logger, gdh.dbSession, tenant, domain.SiteID.String(), false)
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+	}
 
 	return c.JSON(http.StatusOK, model.NewAPIDomain(domain))
 }
