@@ -27,6 +27,7 @@ use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
+use model::allocation_type::AllocationType;
 use model::test_support::ManagedHostConfig;
 use rpc::forge::{RedfishAction, RedfishActionResult};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -229,6 +230,88 @@ async fn test_create_and_approve_action(_: PgPoolOptions, options: PgConnectOpti
         db::ConditionalWrite::NotApplied(db::redfish_actions::ActionNotClaimed)
     );
     txn.commit().await.unwrap();
+}
+
+#[sqlx_test]
+async fn test_action_with_equivalent_ipv6_addresses(_: PgPoolOptions, options: PgConnectOptions) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+    let machine = mh.host.rpc_machine().await;
+    let bmc_ip = machine.bmc_info.as_ref().unwrap().ip();
+    let mut txn = env.harness.db_txn().await;
+    let bmc_interface =
+        db::machine_interface_address::find_by_address(&mut *txn, bmc_ip.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+    db::machine_interface_address::insert(
+        &mut txn,
+        bmc_interface.id,
+        "2001:db8::10".parse().unwrap(),
+        AllocationType::Static,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let request = rpc::forge::RedfishCreateActionRequest {
+        ips: vec!["2001:0DB8:0:0:0:0:0:10".to_string(), "2001:db8::10".to_string()],
+        action: "#ComputerSystem.Reset".to_string(),
+        target: "/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset".to_string(),
+        parameters: serde_json::json!({"ResetType": "ForceOff", "__TEST_BEHAVIOR__": test_behavior::success()}).to_string(),
+    };
+    for missing_ip in ["2001:0DB8:0:0:0:0:0:11", "not-an-ip"] {
+        let mut missing_request = request.clone();
+        missing_request
+            .ips
+            .extend([missing_ip.to_string(), missing_ip.to_string()]);
+        let error = env
+            .api
+            .redfish_create_action(request_with_username("user1", missing_request))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert_eq!(error.message().matches(missing_ip).count(), 1, "{error}");
+        assert!(
+            !error.message().contains("2001:0DB8:0:0:0:0:0:10"),
+            "{error}"
+        );
+    }
+    assert!(list_actions(&env, None).await.is_empty());
+
+    let request_id = env
+        .api
+        .redfish_create_action(request_with_username("user1", request))
+        .await
+        .unwrap()
+        .into_inner()
+        .request_id;
+    let actions = list_actions(&env, Some("2001:db8::10".to_string())).await;
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].request_id, request_id);
+    assert_eq!(actions[0].machine_ips, vec!["2001:db8::10"]);
+    assert_eq!(actions[0].board_serials.len(), 1);
+    assert_eq!(actions[0].results.len(), 1);
+
+    env.api
+        .redfish_approve_action(request_with_username(
+            "user2",
+            rpc::forge::RedfishActionId { request_id },
+        ))
+        .await
+        .unwrap();
+    env.api
+        .redfish_apply_action(request_with_username(
+            "user1",
+            rpc::forge::RedfishActionId { request_id },
+        ))
+        .await
+        .unwrap();
+    let results = wait_for_action_results(&env, "2001:db8::10").await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, "OK");
+    assert_eq!(results[0].body, "Mock success");
 }
 
 #[sqlx_test]

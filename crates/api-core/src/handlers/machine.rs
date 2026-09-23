@@ -100,7 +100,7 @@ pub(crate) async fn find_machine_ids_by_bmc_ips(
 
     let pairs = db::machine_topology::find_machine_bmc_pairs(
         &api.database_connection,
-        request.into_inner().bmc_ips,
+        &request.into_inner().bmc_ips,
     )
     .await?;
     let rpc_pairs = rpc::MachineIdBmcIpPairs {
