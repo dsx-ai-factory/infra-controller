@@ -405,6 +405,101 @@ async fn test_preingestion_time_sync_reset_flow(
     Ok(())
 }
 
+/// A BlueField-3 reports its stable StandbyOffline state as Paused after
+/// powering off. The time-sync reset must accept that state and continue.
+#[sqlx_test]
+async fn test_preingestion_time_sync_reset_accepts_paused_power_state(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let mut config = default_config::get();
+    config.ntp_servers.clear();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    redfish_sim.set_bmc_time_offset_seconds(600);
+    redfish_sim.set_paused_when_off(true);
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers,
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    let addr = response.address.as_str();
+    let ip_addr = IpAddr::from_str(addr).unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
+    db::explored_endpoints::set_preingestion_set_ntp_servers(ip_addr, None, 0, &mut txn).await?;
+    txn.commit().await?;
+
+    // Empty NTP configuration runs initial checks and detects the seeded skew.
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await.unwrap();
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist");
+    assert!(matches!(
+        endpoint.preingestion_state,
+        PreingestionState::TimeSyncReset {
+            phase: TimeSyncResetPhase::BMCWasReset,
+            ..
+        }
+    ));
+    txn.commit().await?;
+
+    // Power-on still reports On, so the existing power-state check remains valid.
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await.unwrap();
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist");
+    assert!(matches!(
+        endpoint.preingestion_state,
+        PreingestionState::TimeSyncReset {
+            phase: TimeSyncResetPhase::WaitHostBoot,
+            ..
+        }
+    ));
+    db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+    txn.commit().await?;
+
+    // Model the reset correcting the clock before the final convergence check.
+    redfish_sim.set_bmc_time_offset_seconds(0);
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await.unwrap();
+    assert_eq!(
+        db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+            .await?
+            .first()
+            .expect("endpoint should exist")
+            .preingestion_state,
+        PreingestionState::Complete
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
 /// An ingested/paired host whose BMC clock is skewed must NOT be power-cycled or
 /// have its BMC timezone changed by the time-sync remediation. When the initial
 /// checks detect a skew, the gate sees that the BMC IP maps to a fleet machine

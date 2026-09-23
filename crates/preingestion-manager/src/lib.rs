@@ -1891,7 +1891,8 @@ impl PreingestionManagerStatic {
                 return false;
             }
         };
-        if status != PowerState::Off {
+        // BlueField-3 reports stable StandbyOffline as Paused after the Arm OS shuts down.
+        if !matches!(status, PowerState::Off | PowerState::Paused) {
             tracing::warn!(
                 bmc_ip_address = %endpoint.address,
                 power_state = %status,
