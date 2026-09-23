@@ -233,6 +233,9 @@ func TestGetAllDomainHandler_Handle(t *testing.T) {
 				common.TestBuildTenantSite(t, fixture.dbSession, fixture.tenant, otherSite, fixture.user)
 				ownedSiteOne := fixture.createDomain(t, "one.example.com", &fixture.tenant.ID, &fixture.site.ID)
 				ownedSiteTwo := fixture.createDomain(t, "two.example.com", &fixture.tenant.ID, &otherSite.ID)
+				// A projection can survive Site-access revocation; the list must not leak it.
+				unauthorizedSite := common.TestBuildSite(t, fixture.dbSession, fixture.provider, "Revoked Site", fixture.user)
+				fixture.createDomain(t, "revoked.example.com", &fixture.tenant.ID, &unauthorizedSite.ID)
 				fixture.createDomain(t, "other.example.com", cutil.GetPtr(uuid.New()), &fixture.site.ID)
 				fixture.createDomain(t, "legacy.example.com", nil, nil)
 
@@ -252,6 +255,27 @@ func TestGetAllDomainHandler_Handle(t *testing.T) {
 				assert.Equal(t, cdbp.DefaultLimit, pageResponse.PageSize)
 				assert.Equal(t, 2, pageResponse.Total)
 				assert.Nil(t, pageResponse.OrderBy)
+			},
+		},
+		{
+			name: "no accessible Sites returns an empty paginated list",
+			run: func(t *testing.T) {
+				fixture := newDomainHandlerFixture(t, nil)
+				fixture.createDomain(t, "old.example.com", &fixture.tenant.ID, &fixture.site.ID)
+				tenantSites, _, err := cdbm.NewTenantSiteDAO(fixture.dbSession).GetAll(context.Background(), nil,
+					cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{fixture.tenant.ID}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+				require.NoError(t, err)
+				for _, tenantSite := range tenantSites {
+					require.NoError(t, cdbm.NewTenantSiteDAO(fixture.dbSession).Delete(context.Background(), nil, tenantSite.ID))
+				}
+
+				recorder := fixture.request(t, NewGetAllDomainHandler(fixture.dbSession).Handle, http.MethodGet, "/", "", nil)
+				require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+				assert.JSONEq(t, `[]`, recorder.Body.String())
+				var pageResponse pagination.PageResponse
+				require.NoError(t, json.Unmarshal([]byte(recorder.Header().Get(pagination.ResponseHeaderName)), &pageResponse))
+				assert.Zero(t, pageResponse.Total)
 			},
 		},
 		{

@@ -179,12 +179,30 @@ func (gadh GetAllDomainHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, siteAPIError.Code, siteAPIError.Message, siteAPIError.Data)
 		}
 		filter.SiteIDs = []uuid.UUID{site.ID}
+	} else {
+		// A tenant may retain Domain projections after losing access to a Site.
+		// Do not reveal those Domains through the unfiltered list endpoint.
+		tenantSites, _, err := cdbm.NewTenantSiteDAO(gadh.dbSession).GetAll(ctx, nil,
+			cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to retrieve Tenant Site associations for Domain list")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve accessible Sites, DB error", nil)
+		}
+		for _, tenantSite := range tenantSites {
+			filter.SiteIDs = append(filter.SiteIDs, tenantSite.SiteID)
+		}
 	}
 
-	domains, total, err := cdbm.NewDomainDAO(gadh.dbSession).GetAll(ctx, nil, filter, pageRequest.ConvertToDB(), nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to retrieve Domains from REST DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Domains, DB error", nil)
+	// An empty Site filter means no Sites are accessible, not all Sites.
+	domains := []cdbm.Domain{}
+	total := 0
+	if len(filter.SiteIDs) > 0 {
+		domains, total, err = cdbm.NewDomainDAO(gadh.dbSession).GetAll(ctx, nil, filter, pageRequest.ConvertToDB(), nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to retrieve Domains from REST DB")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Domains, DB error", nil)
+		}
 	}
 
 	response := make([]*model.APIDomain, 0, len(domains))
