@@ -3651,9 +3651,10 @@ type GetListOfRacksRequest struct {
 	Filters        []*Filter              `protobuf:"bytes,1,rep,name=filters,proto3" json:"filters,omitempty"` // Filter conditions for rack queries
 	WithComponents bool                   `protobuf:"varint,2,opt,name=with_components,json=withComponents,proto3" json:"with_components,omitempty"`
 	Pagination     *Pagination            `protobuf:"bytes,3,opt,name=pagination,proto3,oneof" json:"pagination,omitempty"`
-	OrderBy        *OrderBy               `protobuf:"bytes,4,opt,name=order_by,json=orderBy,proto3,oneof" json:"order_by,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Defaults to name ascending. Rack UUID ascending breaks equal-field ties.
+	OrderBy       *OrderBy `protobuf:"bytes,4,opt,name=order_by,json=orderBy,proto3,oneof" json:"order_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetListOfRacksRequest) Reset() {
@@ -3951,9 +3952,10 @@ func (x *DetachRacksFromNVLDomainRequest) GetRackIdentifiers() []*Identifier {
 }
 
 type GetListOfNVLDomainsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Info          *StringQueryInfo       `protobuf:"bytes,1,opt,name=info,proto3" json:"info,omitempty"`
-	Pagination    *Pagination            `protobuf:"bytes,2,opt,name=pagination,proto3,oneof" json:"pagination,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Info  *StringQueryInfo       `protobuf:"bytes,1,opt,name=info,proto3" json:"info,omitempty"`
+	// Results are ordered by name ascending, then UUID ascending.
+	Pagination    *Pagination `protobuf:"bytes,2,opt,name=pagination,proto3,oneof" json:"pagination,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4426,11 +4428,12 @@ func (x *PerComponentFirmwareAuthenticationData) GetPowershelf() string {
 
 // GetComponents - retrieves components from local database
 type GetComponentsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TargetSpec    *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3,oneof" json:"target_spec,omitempty"` // Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, queries all components.
-	Filters       []*Filter              `protobuf:"bytes,2,rep,name=filters,proto3" json:"filters,omitempty"`                               // Filter conditions for component queries
-	Pagination    *Pagination            `protobuf:"bytes,3,opt,name=pagination,proto3,oneof" json:"pagination,omitempty"`
-	OrderBy       *OrderBy               `protobuf:"bytes,4,opt,name=order_by,json=orderBy,proto3,oneof" json:"order_by,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	TargetSpec *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3,oneof" json:"target_spec,omitempty"` // Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, queries all components.
+	Filters    []*Filter              `protobuf:"bytes,2,rep,name=filters,proto3" json:"filters,omitempty"`                               // Filter conditions for component queries
+	Pagination *Pagination            `protobuf:"bytes,3,opt,name=pagination,proto3,oneof" json:"pagination,omitempty"`
+	// Defaults to name ascending. Component UUID ascending breaks equal-field ties.
+	OrderBy       *OrderBy `protobuf:"bytes,4,opt,name=order_by,json=orderBy,proto3,oneof" json:"order_by,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4546,11 +4549,13 @@ func (x *GetComponentsResponse) GetTotal() int32 {
 }
 
 type ValidateComponentsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TargetSpec    *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3,oneof" json:"target_spec,omitempty"` // Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, returns all diffs.
-	Filters       []*Filter              `protobuf:"bytes,2,rep,name=filters,proto3" json:"filters,omitempty"`                               // Filter conditions for component queries
-	Pagination    *Pagination            `protobuf:"bytes,3,opt,name=pagination,proto3,oneof" json:"pagination,omitempty"`
-	OrderBy       *OrderBy               `protobuf:"bytes,4,opt,name=order_by,json=orderBy,proto3,oneof" json:"order_by,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	TargetSpec *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3,oneof" json:"target_spec,omitempty"` // Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, returns all diffs.
+	Filters    []*Filter              `protobuf:"bytes,2,rep,name=filters,proto3" json:"filters,omitempty"`                               // Filter conditions for component queries
+	Pagination *Pagination            `protobuf:"bytes,3,opt,name=pagination,proto3,oneof" json:"pagination,omitempty"`
+	// Defaults to name ascending for targeted components. Stable component and
+	// drift identities break equal-field ties before drift pagination.
+	OrderBy       *OrderBy `protobuf:"bytes,4,opt,name=order_by,json=orderBy,proto3,oneof" json:"order_by,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5981,7 +5986,8 @@ type ListTasksRequest struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	RackId     *UUID                  `protobuf:"bytes,1,opt,name=rack_id,json=rackId,proto3,oneof" json:"rack_id,omitempty"`        // Restrict to Tasks created against this rack.
 	ActiveOnly bool                   `protobuf:"varint,2,opt,name=active_only,json=activeOnly,proto3" json:"active_only,omitempty"` // Restrict to non-terminal Tasks (Waiting, Pending, Running).
-	Pagination *Pagination            `protobuf:"bytes,3,opt,name=pagination,proto3,oneof" json:"pagination,omitempty"`
+	// Results are ordered by creation time descending, then UUID descending.
+	Pagination *Pagination `protobuf:"bytes,3,opt,name=pagination,proto3,oneof" json:"pagination,omitempty"`
 	// Restrict to Tasks that target this component UUID, regardless of
 	// component type. A rack_id + component_id combination that references
 	// a component not on the given rack is not an error; it yields an
@@ -6824,6 +6830,7 @@ func (x *GetOperationRuleRequest) GetRuleId() *UUID {
 	return nil
 }
 
+// Results are ordered by creation time descending, then UUID descending.
 type ListOperationRulesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	OperationType *OperationType         `protobuf:"varint,1,opt,name=operation_type,json=operationType,proto3,enum=v1.OperationType,oneof" json:"operation_type,omitempty"`
@@ -7844,7 +7851,7 @@ func (x *GetTaskScheduleRequest) GetId() *UUID {
 }
 
 // ListTaskSchedulesRequest lists TaskSchedules with optional filters.
-// Results are ordered by creation time ascending.
+// Results are ordered by creation time ascending, then UUID ascending.
 type ListTaskSchedulesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RackId        *UUID                  `protobuf:"bytes,1,opt,name=rack_id,json=rackId,proto3,oneof" json:"rack_id,omitempty"` // if set, return only schedules with a scope on this rack
@@ -9100,7 +9107,8 @@ func (x *GetOperationRunResponse) GetOperationRun() *OperationRun {
 	return nil
 }
 
-// ListOperationRunsRequest lists operation runs, newest first by default.
+// ListOperationRunsRequest lists operation runs by creation time descending,
+// then UUID descending.
 type ListOperationRunsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Filter        *OperationRunFilter    `protobuf:"bytes,1,opt,name=filter,proto3" json:"filter,omitempty"`
@@ -9325,6 +9333,7 @@ func (x *OperationRunStateFilter) GetReason() OperationRunStatusReason {
 // ListOperationRunTargetsRequest lists materialized rack execution targets for
 // one operation run. status UNKNOWN means no target-status filter is applied.
 // phase_scope UNKNOWN defaults to CURRENT_PHASE.
+// Results are ordered by phase index, then the unique sequence index.
 type ListOperationRunTargetsRequest struct {
 	state          protoimpl.MessageState       `protogen:"open.v1"`
 	OperationRunId *UUID                        `protobuf:"bytes,1,opt,name=operation_run_id,json=operationRunId,proto3" json:"operation_run_id,omitempty"`
