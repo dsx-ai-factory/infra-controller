@@ -57,6 +57,31 @@ use crate::HealthError;
 pub trait DataSink: Send + Sync {
     fn sink_type(&self) -> &'static str;
 
+    /// Removes retained samples for this endpoint and collector. Label values
+    /// select a subset; optional label names select the complete dynamic label
+    /// set. An absent type or unit matches all. Sinks without retention ignore
+    /// the request.
+    fn prune_metrics(
+        &self,
+        _context: &EventContext,
+        _metric_type: Option<&str>,
+        _labels: &[crate::metrics::MetricLabel],
+        _unit: Option<&str>,
+        _label_names: Option<&[&str]>,
+    ) {
+    }
+
+    /// Removes one retained reading identified by its metric sample key,
+    /// type, and unit. Sinks without retention ignore the request.
+    fn prune_metric_key(
+        &self,
+        _context: &EventContext,
+        _key: &str,
+        _metric_type: &str,
+        _unit: &str,
+    ) {
+    }
+
     /// Handles one event, surfacing failure to the caller.
     ///
     /// Implementations log their own failure detail at the failure site; the

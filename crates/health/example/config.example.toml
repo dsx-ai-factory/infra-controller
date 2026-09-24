@@ -579,8 +579,7 @@ leak_sensors_enabled = false
 #
 # The output can instead use a finite state_set or info domain. Values outside
 # the declared domain, malformed values, and unsupported value encodings do
-# not produce metrics. Delete notifications are ignored; emitted metrics remain
-# until the collector is removed.
+# not produce metrics. Delete notifications remove matching Prometheus series.
 # A state_set output uses the reserved `state` label and emits one series per
 # declared state: 1 for the current state and 0 for the others. An info output
 # emits one constant-1 series with the matched value in its configured label.

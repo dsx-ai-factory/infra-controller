@@ -55,6 +55,25 @@ impl DataSink for CompositeDataSink {
         "composite_sink"
     }
 
+    fn prune_metrics(
+        &self,
+        context: &EventContext,
+        metric_type: Option<&str>,
+        labels: &[crate::metrics::MetricLabel],
+        unit: Option<&str>,
+        label_names: Option<&[&str]>,
+    ) {
+        for sink in &self.sinks {
+            sink.prune_metrics(context, metric_type, labels, unit, label_names);
+        }
+    }
+
+    fn prune_metric_key(&self, context: &EventContext, key: &str, metric_type: &str, unit: &str) {
+        for sink in &self.sinks {
+            sink.prune_metric_key(context, key, metric_type, unit);
+        }
+    }
+
     /// Fans the event out to every sink, recording each sink's duration and
     /// outcome. A failing sink never blocks the others: its error is fully
     /// reported here (the sink logs its own detail, the composite meters the

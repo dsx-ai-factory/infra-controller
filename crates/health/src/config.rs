@@ -4994,7 +4994,10 @@ heartbeat_interval = "1m"
 paths = [["interface"]]
 metrics = [
   { path = ["interface", "state", "health"], metric_type = "interface_health", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "state_set", states = ["healthy", "attention"] } },
+  { path = ["interface", "state", "other-health"], metric_type = "interface_health", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "state_set", states = ["offline"] } },
   { path = ["interface", "state", "counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "gauge", unit = "count" } },
+  { path = ["interface", "state", "other-counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "gauge", unit = "count" } },
+  { path = ["interface", "lane", "state", "counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }, { name = "lane_id", element = "lane", key = "id" }], output = { kind = "gauge", unit = "count" } },
 ]
 "#,
             ))
@@ -5025,7 +5028,7 @@ metrics = [
         assert_eq!(subscription.encoding, NvueGnmiEncoding::JsonIetf);
         assert!(subscription.updates_only);
         assert_eq!(subscription.paths.len(), 1);
-        assert_eq!(subscription.metrics.len(), 2);
+        assert_eq!(subscription.metrics.len(), 5);
 
         assert_eq!(subscription.mode, NvueGnmiSubscriptionMode::Sample);
         assert_eq!(subscription.sample_interval, Some(Duration::from_secs(10)));
