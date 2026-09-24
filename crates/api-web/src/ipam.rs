@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use askama::Template;
@@ -241,6 +241,7 @@ pub(super) async fn dns_html(AxumState(state): AxumState<Arc<Api>>) -> Response 
 #[template(path = "ipam_underlay.html")]
 struct IpamUnderlay {
     segments: Vec<UnderlaySegmentDisplay>,
+    segment_count: usize,
 }
 
 struct UnderlaySegmentDisplay {
@@ -289,7 +290,16 @@ pub(super) async fn underlay_html(AxumState(state): AxumState<Arc<Api>>) -> Resp
         }
     };
 
-    let tmpl = IpamUnderlay { segments };
+    // The overview has one row per prefix, but the summary counts segments.
+    let segment_count = segments
+        .iter()
+        .map(|segment| &segment.id)
+        .collect::<HashSet<_>>()
+        .len();
+    let tmpl = IpamUnderlay {
+        segments,
+        segment_count,
+    };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
 }
 
@@ -336,7 +346,7 @@ struct IpamUnderlaySegment {
     segment_id: String,
     segment_name: String,
     segment_type: String,
-    segment_prefix: String,
+    segment_prefixes: Vec<String>,
     addresses: Vec<UnderlayAddressDisplay>,
 }
 
@@ -388,11 +398,7 @@ pub(super) async fn underlay_segment_html(
         tracing::error!("underlay segment missing config");
         return (StatusCode::INTERNAL_SERVER_ERROR, "Segment data incomplete").into_response();
     };
-    let segment_prefix = config
-        .prefixes
-        .first()
-        .map(|p| p.prefix.clone())
-        .unwrap_or_default();
+    let segment_prefixes = config.prefixes.into_iter().map(|p| p.prefix).collect();
     let segment_type = format!(
         "{:?}",
         forgerpc::NetworkSegmentType::try_from(config.segment_type).unwrap_or_default()
@@ -428,7 +434,7 @@ pub(super) async fn underlay_segment_html(
         segment_id,
         segment_name,
         segment_type,
-        segment_prefix,
+        segment_prefixes,
         addresses,
     };
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()
@@ -870,7 +876,7 @@ impl From<OverlaySegmentRow> for OverlaySegmentDisplay {
 struct IpamOverlaySegment {
     segment_id: String,
     segment_name: String,
-    segment_prefix: String,
+    segment_prefixes: Vec<String>,
     vpc_name: String,
     addresses: Vec<OverlayAddressDisplay>,
 }
@@ -920,11 +926,7 @@ pub(super) async fn overlay_segment_html(
         tracing::error!("overlay segment missing config");
         return (StatusCode::INTERNAL_SERVER_ERROR, "Segment data incomplete").into_response();
     };
-    let segment_prefix = config
-        .prefixes
-        .first()
-        .map(|p| p.prefix.clone())
-        .unwrap_or_default();
+    let segment_prefixes = config.prefixes.into_iter().map(|p| p.prefix).collect();
 
     // Fetch VPC name if available.
     let vpc_name = if let Some(vpc_id) = config.vpc_id {
@@ -969,7 +971,7 @@ pub(super) async fn overlay_segment_html(
     let tmpl = IpamOverlaySegment {
         segment_id,
         segment_name,
-        segment_prefix,
+        segment_prefixes,
         vpc_name,
         addresses,
     };

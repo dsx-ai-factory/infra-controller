@@ -7,7 +7,7 @@
 
 <table class="detailsview">
 	<tr><td>Segment</td><td>{{ segment_name }}</td></tr>
-	<tr><td>Prefix</td><td>{{ segment_prefix }}</td></tr>
+	<tr><td>Prefixes</td><td>{% for prefix in segment_prefixes %}{{ prefix }}{% if !loop.last %}<br>{% endif %}{% endfor %}</td></tr>
 	<tr><td>VPC</td><td>{{ vpc_name }}</td></tr>
 	<tr><td>Segment ID</td><td><a href="/admin/network-segment/{{ segment_id }}">{{ segment_id }}</a></td></tr>
 </table>
