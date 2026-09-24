@@ -383,10 +383,38 @@ func (a *MachineAPIService) DecommissionMachineExecute(r ApiDecommissionMachineR
 }
 
 type ApiDeleteMachineRequest struct {
-	ctx        context.Context
-	ApiService *MachineAPIService
-	org        string
-	machineId  string
+	ctx                         context.Context
+	ApiService                  *MachineAPIService
+	org                         string
+	machineId                   string
+	force                       *bool
+	allowDeleteWithInstanceType *bool
+	allowDeleteWithInstance     *bool
+	allowDeleteWithAllocation   *bool
+}
+
+// Request forced deletion on the Site, including host, DPU, and BMC interfaces. Requires a Registered Site. Machines marked missing on Site can be force deleted without waiting 24 hours, including when their missing-status history is unavailable. This alone does not override attached Instances, assigned Instance Types, or Allocation Constraints. BMC credentials, discovery suppressions, and retained boot-interface pairs are preserved; orphaned DPF resources are not overridden.
+func (r ApiDeleteMachineRequest) Force(force bool) ApiDeleteMachineRequest {
+	r.force = &force
+	return r
+}
+
+// Requires force&#x3D;true when enabled. Authorize removing an assigned Instance Type on the Site. This does not authorize deletion of an attached Instance or violating Allocation Constraints.
+func (r ApiDeleteMachineRequest) AllowDeleteWithInstanceType(allowDeleteWithInstanceType bool) ApiDeleteMachineRequest {
+	r.allowDeleteWithInstanceType = &allowDeleteWithInstanceType
+	return r
+}
+
+// Requires force&#x3D;true when enabled. Authorize deletion of the attached Instance control-plane record on the Site without first requesting a graceful workload shutdown; cleanup may forcibly restart the host. Also authorizes removal of its Instance Type, even if allowDeleteWithInstanceType&#x3D;false. REST Machine, Instance, interfaces, capabilities, and Instance Type associations are retained for deliberate cleanup by their owners. Allocation Constraints require a separate acknowledgment.
+func (r ApiDeleteMachineRequest) AllowDeleteWithInstance(allowDeleteWithInstance bool) ApiDeleteMachineRequest {
+	r.allowDeleteWithInstance = &allowDeleteWithInstance
+	return r
+}
+
+// Requires force&#x3D;true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. Does not imply either Instance or Instance Type deletion permission.
+func (r ApiDeleteMachineRequest) AllowDeleteWithAllocation(allowDeleteWithAllocation bool) ApiDeleteMachineRequest {
+	r.allowDeleteWithAllocation = &allowDeleteWithAllocation
+	return r
 }
 
 func (r ApiDeleteMachineRequest) Execute() (*MessageResponse, *http.Response, error) {
@@ -396,7 +424,8 @@ func (r ApiDeleteMachineRequest) Execute() (*MessageResponse, *http.Response, er
 /*
 DeleteMachine Delete a Machine from a Site
 
-Org must have an Infrastructure Provider entity. Machine must belong to the Provider. User must have authorization role with `PROVIDER_ADMIN` suffix. Machine must meet certain criteria to be eligible for deletion.
+Requires Provider Admin access to the Machine's Infrastructure Provider. Regular deletion requires the Machine to be missing on Site for at least 24 hours, with no attached Instance or assigned Instance Type.
+Forced deletion requires a Registered Site and the applicable overrides below. Machines marked missing on Site can also be force deleted without the 24-hour wait required for regular deletion. REST records are removed only after Site cleanup completes, with no Instance deletion requested and sufficient remaining Allocation capacity. Otherwise, records remain for inventory to mark missing Machines and Instances as `Error`, then their owners can explicitly clean them up. Allocation Constraints remain unchanged. HTTP 202 confirms acceptance, not completion.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -436,6 +465,34 @@ func (a *MachineAPIService) DeleteMachineExecute(r ApiDeleteMachineRequest) (*Me
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
 
+	if r.force != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "force", r.force, "form", "")
+	} else {
+		var defaultValue bool = false
+		parameterAddToHeaderOrQuery(localVarQueryParams, "force", defaultValue, "form", "")
+		r.force = &defaultValue
+	}
+	if r.allowDeleteWithInstanceType != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "allowDeleteWithInstanceType", r.allowDeleteWithInstanceType, "form", "")
+	} else {
+		var defaultValue bool = false
+		parameterAddToHeaderOrQuery(localVarQueryParams, "allowDeleteWithInstanceType", defaultValue, "form", "")
+		r.allowDeleteWithInstanceType = &defaultValue
+	}
+	if r.allowDeleteWithInstance != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "allowDeleteWithInstance", r.allowDeleteWithInstance, "form", "")
+	} else {
+		var defaultValue bool = false
+		parameterAddToHeaderOrQuery(localVarQueryParams, "allowDeleteWithInstance", defaultValue, "form", "")
+		r.allowDeleteWithInstance = &defaultValue
+	}
+	if r.allowDeleteWithAllocation != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "allowDeleteWithAllocation", r.allowDeleteWithAllocation, "form", "")
+	} else {
+		var defaultValue bool = false
+		parameterAddToHeaderOrQuery(localVarQueryParams, "allowDeleteWithAllocation", defaultValue, "form", "")
+		r.allowDeleteWithAllocation = &defaultValue
+	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
 
@@ -508,6 +565,28 @@ func (a *MachineAPIService) DeleteMachineExecute(r ApiDeleteMachineRequest) (*Me
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 429 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 422 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -520,6 +599,28 @@ func (a *MachineAPIService) DeleteMachineExecute(r ApiDeleteMachineRequest) (*Me
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

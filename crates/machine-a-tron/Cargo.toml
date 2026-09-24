@@ -82,6 +82,10 @@ ufm-mock = { package = "carbide-ufm-mock", path = "../ufm-mock" }
 rms-mock = { package = "carbide-rms-mock", path = "../rms-mock" }
 
 [dev-dependencies]
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+prost = { workspace = true }
 carbide-test-support = { path = "../test-support" }
 tokio = { workspace = true, features = ["test-util"] }
 toml = { workspace = true }
