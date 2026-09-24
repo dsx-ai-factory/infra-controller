@@ -27,6 +27,7 @@ on:
     paths:
       - 'fern/**'
       - 'docs/**'
+      - 'RELEASE.md'
       - 'rest-api/flow/docs/**'
       - 'rest-api/openapi/**'
       - '.github/workflows/fern-docs-preview-build.yml'
@@ -36,6 +37,7 @@ on:
     paths:
       - 'fern/**'
       - 'docs/**'
+      - 'RELEASE.md'
       - 'rest-api/flow/docs/**'
       - 'rest-api/openapi/**'
       - '.github/workflows/fern-docs-preview-build.yml'
@@ -81,6 +83,7 @@ jobs:
           path: |
             fern/
             docs/
+            RELEASE.md
             rest-api/flow/docs/
             rest-api/openapi/
             preview-metadata/

@@ -98,3 +98,6 @@ up a development environment and submitting changes, and the
 The software is provided "as is" without warranties of any kind. Features,
 APIs, and configurations may change in future releases. For production
 deployments, please test thoroughly in non-critical environments first.
+
+See [RELEASE.md](RELEASE.md) for NICo's release, support, upgrade, and
+compatibility policy.

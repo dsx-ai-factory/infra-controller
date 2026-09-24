@@ -344,8 +344,11 @@ navigation:
       contents:
         - page: Hardware Compatibility List
           path: hcl.md
-        - page: Release and QA Process
-          path: development/release_and_qa_process.md
+        - page: Release Policy
+          path: ../RELEASE.md
+        - page: QA Process
+          path: development/qa_process.md
+          slug: qa-process
         - page: FAQs
           path: faq.md
         - section: Development
