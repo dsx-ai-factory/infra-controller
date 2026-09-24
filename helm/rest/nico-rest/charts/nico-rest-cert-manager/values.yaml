@@ -12,6 +12,9 @@ image:
 replicaCount: 1
 
 config:
+  # -- Service account allowed to issue certificates. Namespace defaults to this chart's namespace.
+  siteManagerServiceAccount: nico-rest-site-manager
+  siteManagerNamespace: ""
   caCommonName: "NICo Local Dev CA"
   caOrganization: "NVIDIA"
   caCertFile: "/etc/pki/ca/tls.crt"

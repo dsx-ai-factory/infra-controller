@@ -5,12 +5,15 @@ package certs
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
 	"github.com/getsentry/sentry-go"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	authenticationclient "k8s.io/client-go/kubernetes/typed/authentication/v1"
 )
 
 const (
@@ -21,11 +24,13 @@ const (
 
 // Options defines options for the server
 type Options struct {
-	Addr         string
-	InsecureAddr string
-	DNSName      string
-	CABaseDNS    string
-	sentryDSN    string
+	Addr                  string
+	InsecureAddr          string
+	DNSName               string
+	CABaseDNS             string
+	sentryDSN             string
+	AllowedServiceAccount string
+	TokenReviewer         authenticationclient.TokenReviewInterface
 }
 
 // Server defines a server
@@ -40,6 +45,14 @@ type Server struct {
 func NewServerWithIssuer(ctx context.Context, o Options, certIssuer CertificateIssuer) (*Server, error) {
 	if certIssuer == nil {
 		panic("certIssuer is required")
+	}
+
+	subject := strings.Split(o.AllowedServiceAccount, ":")
+	if len(subject) != 4 || subject[0] != "system" || subject[1] != "serviceaccount" || subject[2] == "" || subject[3] == "" {
+		return nil, fmt.Errorf("allowed service account must have the form system:serviceaccount:namespace:name")
+	}
+	if o.TokenReviewer == nil {
+		return nil, fmt.Errorf("token reviewer is required")
 	}
 
 	s := &Server{Options: o}
@@ -66,10 +79,13 @@ func NewServerWithIssuer(ctx context.Context, o Options, certIssuer CertificateI
 	s.insecService = insec
 
 	if o.sentryDSN != "" {
-		sentry.Init(sentry.ClientOptions{
+		err = sentry.Init(sentry.ClientOptions{
 			Dsn:   o.sentryDSN,
 			Debug: true,
 		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -106,7 +122,7 @@ func (s *Server) PKICloudCertificateHandler(_ context.Context) http.Handler {
 		certificateIssuer: s.certificateIssuer,
 	}
 
-	return s.withWraps(h, "ccm-get-cert")
+	return s.withWraps(s.authorizeCertificateRequest(h), "ccm-get-cert")
 }
 
 func (s *Server) tlsSetup(ctx context.Context) error {
