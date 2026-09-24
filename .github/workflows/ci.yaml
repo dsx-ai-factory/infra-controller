@@ -1927,6 +1927,9 @@ jobs:
       - name: Test health check namespaces
         run: bash helm-prereqs/tests/health-check-namespaces_test.sh
 
+      - name: Test health check external VIPs
+        run: bash helm-prereqs/tests/health-check-external-vips_test.sh
+
       - name: Test observability installer DPU output
         run: bash helm-prereqs/tests/install-observability-dpu-output_test.sh
 
