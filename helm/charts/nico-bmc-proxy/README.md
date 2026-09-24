@@ -10,7 +10,7 @@ That section maps a caller principal such as `spiffe-service-id/nv-dps` to an or
 of ACL entries.
 
 By default the chart ships a baseline config at
-[`files/nico-bmc-proxy.toml`](files/nico-bmc-proxy.toml). To replace it from Helm values,
+[`files/carbide-bmc-proxy.toml`](files/carbide-bmc-proxy.toml). To replace it from Helm values,
 set `configFiles.nicoBmcProxyConfig` to the full TOML contents:
 
 ```yaml
@@ -41,6 +41,19 @@ configFiles:
       "GET,PATCH,DELETE /redfish/v1/Managers/BMC/NodeManager/Domains/*",
     ]
 ```
+
+## Request Classes and Response Cache
+
+The shipped configuration also declares `[[class]]` tables. A class groups
+proxied requests that share an upstream timeout and, optionally, a response
+cache policy for `GET` requests. The default configuration caches Redfish
+firmware inventory (`/redfish/v1/UpdateService/FirmwareInventory/**`) for an
+hour, serves it stale for six more while refreshing, keeps serving the last
+inventory for a day if the BMC stops answering, and forwards it uncached for
+half an hour after a firmware update is posted. Override the class table
+through `configFiles.nicoBmcProxyConfig` like any other setting. Field
+reference and cache semantics are in the
+[crate README](../../../crates/bmc-proxy/README.md#request-classes).
 
 ## ACL Entry Format
 

@@ -118,6 +118,156 @@ Examples:
 If you are translating endpoint docs into ACLs, replace templated path components such as
 `{id}`, `{session_id}`, or `{policy_id}` with `*`.
 
+## Request Classes
+
+`[[class]]` tables group proxied requests that share an upstream budget and a
+cache policy. Every request is classified after authorization: classes are
+evaluated in order, and the first whose `match` patterns fit the request wins.
+A request no class matches belongs to the implicit `default` class, which
+keeps the proxy's historical 60 second upstream budget and caches nothing.
+
+```toml
+[[class]]
+name = "inventory"
+match = ["GET /redfish/v1/UpdateService/FirmwareInventory/**"]
+upstream_timeout = "300s"
+
+[class.cache]
+ttl = "1h"
+stale_while_revalidate = "6h"
+stale_if_error = "24h"
+invalidated_by = ["POST /redfish/v1/UpdateService/**"]
+
+[[class]]
+name = "default"
+upstream_timeout = "90s"
+```
+
+| Field | Required | Default | Meaning |
+| ----- | -------- | ------- | ------- |
+| `name` | yes | — | Lowercase `snake_case`, at most 32 characters, unique. Appears as the `class` label on the proxy's cache metrics and as `bmc_proxy.class` on the request span. |
+| `match` | yes, except for `default` | — | Patterns in the `[VERB[,VERB...]] /path/pattern` form ACL entries use, without the leading `!`. Any pattern matching admits the request to the class. |
+| `principals` | no | any | Restricts the class to requests from these principal identifiers, for example `spiffe-service-id/nv-dps`. |
+| `upstream_timeout` | no | `60s` | Total budget for one upstream exchange, as a duration such as `30s` or `5m`, at most `30m`. Streamed firmware uploads scale their own budget from the declared size and ignore it. |
+| `cache` | no | none | Response cache policy for `GET` requests in the class; see below. |
+
+The `default` class may be declared to change its budget, but it takes no
+`match`, `principals`, or `cache`: it exists to catch what nothing else
+matched, and what it catches includes resources whose live state must never
+be served stale.
+
+Classification is per request and internal to the proxy. Callers cannot see
+or choose their class.
+
+## Response Cache
+
+A class with a `cache` table stores the body and headers of every eligible
+`200` the BMC returns to a `GET` in that class: one whose query the cache keys
+and whose body is unencoded and within the size limit, as the rules below
+spell out. Entries are keyed by BMC, class, and request path (with its query,
+and with a single trailing slash ignored). Later `GET`s for the same resource
+are answered from the store according to three windows, all counted from the
+moment the response was stored:
+
+| Field | Required | Default | Meaning |
+| ----- | -------- | ------- | ------- |
+| `ttl` | yes | — | While younger than this, the stored response is served without asking the BMC. Must be greater than zero. |
+| `stale_while_revalidate` | no | `0s` | After `ttl`, for this much longer the stored response is still served while one refresh runs in the background. |
+| `stale_if_error` | no | `0s` | After `ttl`, for this much longer the stored response is served when the BMC fails to answer a fetch, or answers with a 5xx. |
+| `invalidated_by` | no | any write | Write patterns that drop the class's stored responses for the written BMC. Omitted or empty means every write to the BMC does. |
+| `hold_after_write` | no | `0s` | After an invalidating write, for this long `GET`s in the class for the written BMC are forwarded without the cache and nothing is stored. Use it for writes whose effect lands after the response, such as firmware updates that complete as a Task. |
+
+Behavior that follows from the store:
+
+- Concurrent misses for one resource share one upstream fetch, and that fetch
+  runs on its own task: a caller that gives up waiting does not cancel it, so
+  the next caller finds the response stored. This is what lets a resource that
+  takes minutes to assemble, such as `FirmwareInventory` on a DGX H100, be
+  served to callers whose own timeout is shorter.
+- The fetch asks for one canonical representation, `Accept: application/json`
+  with no content encoding, regardless of what the caller sent, so every
+  caller can consume what one fetch stored. A response the BMC encodes anyway
+  is forwarded but not stored.
+- A refresh of a stored response sends its `ETag` as `If-None-Match`; a `304`
+  keeps the stored body, adopts the headers the `304` carries, and restarts
+  the age. A definitive client error on refresh, such as `404`, drops the
+  stored response; `401`, `403`, `429`, and 5xx leave it in place.
+- After a fetch yields nothing the store can hold, the resource is held off
+  for 30 seconds and is not fetched through the cache again. After a failure
+  or a 5xx, a stored response within its `stale_if_error` window is served
+  instead; after an answer the store cannot hold (an oversized or encoded
+  body, or a client error other than `404` or `410`), requests are forwarded
+  directly so callers see what the BMC answers. Either way a BMC that fails
+  fast or serves an unstorable resource is not asked through the cache once
+  per client request.
+- When a stored response within its `stale_if_error` window exists, a caller
+  waits at most 10 seconds for the fetch before that response is served;
+  the fetch continues on its own. A BMC slow to fail does not make callers
+  wait out its budget.
+- The cache runs at most 4 fetches against one BMC at a time and accepts at
+  most 32 running or waiting; further fetches are refused at once with `503`
+  and counted as `refused`, and a waiting fetch that gets no slot within the
+  class `upstream_timeout` fails the same way. A fetch outlives the caller
+  that started it, so this bounds what a caller asking for many resources and
+  leaving can pile onto a BMC.
+- Only requests whose query is empty or made of Redfish's own parameters
+  (`$expand`, `$select`, `$filter`, `$top`, `$skip`, `$skiptoken`, `only`,
+  `excerpt`) are cached. A BMC ignores other parameters and answers the same
+  resource, so caching them would let a caller mint unbounded entries; such
+  requests are forwarded with `X-Nico-Cache: uncacheable`.
+- A caller whose `If-None-Match` names the stored `ETag` receives `304 Not
+  Modified` without the body being sent.
+- `Cache-Control: no-cache` or `max-age=0`, or `Pragma: no-cache`, on the
+  request skips the stored response in every case: the caller gets what the
+  BMC answers, a `304` included, and gets the BMC's failure rather than a
+  stored fallback. The fetched response is still stored, unless the class is
+  held after a write or the resource is held off after an unstorable fetch:
+  the cache is shared and exists to protect the BMC, not to serve one caller's
+  preference. `Cache-Control: no-store` on the request goes further: it is
+  forwarded directly and nothing is stored.
+- A response the BMC marks `Cache-Control: no-store`, `private`, or
+  `no-cache` is never stored and drops any stored entry a `304` would have
+  refreshed; the store is shared, and `no-cache` asks for a validation the
+  store does not perform within `ttl`.
+- A write (`POST`, `PUT`, `PATCH`, or `DELETE`) the BMC did not answer with a
+  4xx drops the stored responses of every class whose `invalidated_by` it
+  matches for that BMC, and starts that class's `hold_after_write` for the
+  BMC. A write whose response was lost after it was sent counts as well; one
+  the proxy could not send, because credentials could not be resolved or the
+  request could not be built, does not.
+- Only a `200` is stored, and only when its body is at most 8 MiB. A larger
+  body is forwarded to its caller unstored, at the cost of a second upstream
+  request for the caller that discovers it; for the hold-off that follows,
+  requests for it are forwarded directly. A cache policy on resources with
+  large payloads therefore adds BMC work instead of saving it.
+- Stored headers never include `Set-Cookie`. The store is shared by every
+  caller the ACL admits to the resource, and a cookie addresses one of them.
+- Non-`GET` requests and classes without a `cache` table are forwarded and
+  streamed back exactly as before.
+
+Every `GET` in a class with a `cache` table carries `X-Nico-Cache` in its
+response: `hit`, `stale`, `miss`, `coalesced`, `bypass`, `stale_if_error`,
+`held`, or `uncacheable`, matching the `outcome` label of
+`carbide_bmc_proxy_cache_lookups_total`. When a stored response is served the
+response also carries `Age`, its age in seconds. The store is per proxy
+replica and in memory, bounded to 256 MiB of response bodies.
+
+Invalidation is per replica too. A write through one replica drops that
+replica's entries; another replica keeps serving its own until their `ttl`
+ends, since nothing tells it about the write. While cache classes are
+configured, run the proxy with one replica, or have callers that need to read
+their own writes send `Cache-Control: no-cache`, which refetches on whichever
+replica they reach. Within one replica, a `GET` that arrives after a write's
+response was delivered observes the BMC's state after that write, except for
+writes the BMC applies after answering, which `hold_after_write` covers.
+
+Do not cache resources that carry live state a caller acts on. `Systems`,
+`Chassis`, and `Managers` roots report `PowerState` and are read before power
+actions; a stale value there is a safety problem, not a staleness one. The
+`default` class cannot carry a cache policy for this reason. Firmware
+inventory, processor, memory, and PCIe device collections are the intended
+targets.
+
 ## Example Request
 
 ```bash

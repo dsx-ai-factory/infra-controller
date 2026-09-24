@@ -26,6 +26,11 @@ image:
 
 namespaceOverride: ""
 
+# The response cache configured under `[[class]]` in the proxy config is per
+# replica, and so is its invalidation: a write through one replica leaves the
+# other replica's entries in place until their ttl. Run one replica while cache
+# classes are configured unless callers that read their own writes send
+# `Cache-Control: no-cache`. See crates/bmc-proxy/README.md.
 replicas: 2
 automountServiceAccountToken: true
 annotations:

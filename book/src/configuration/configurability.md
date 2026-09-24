@@ -488,6 +488,12 @@ ACL set in
 [`helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml`](../../../helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml)
 is the reference.
 
+`[[class]]` tables in the same file define `nico-bmc-proxy` request classes:
+groups of proxied requests that share an upstream timeout and, optionally, a
+response cache policy for `GET`s. The shipped configuration caches Redfish
+firmware inventory. Field reference and cache semantics are in
+[`crates/bmc-proxy/README.md`](../../../crates/bmc-proxy/README.md#request-classes).
+
 ### DPU configuration — `[dpu_config]`
 
 DPU-side firmware, BFB image references, IPMI behavior, and per-vendor

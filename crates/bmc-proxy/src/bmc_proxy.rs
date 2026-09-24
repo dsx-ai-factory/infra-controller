@@ -27,6 +27,7 @@ use axum::extract::State;
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::IntoResponse;
 use axum::routing::{any, get};
+use bytes::Bytes;
 use carbide_authn::SpiffeContext;
 use carbide_authn::middleware::{
     AuthContext, Authorization, CertDescriptionMiddleware, ConnectionAttributes, Principal,
@@ -35,7 +36,12 @@ use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
 use carbide_utils::HostPortPair;
 use carbide_utils::redfish::{redact_redfish_response_body, redfish_basic_authorization_context};
 use forge_tls::client_config::ClientCert;
-use http::{HeaderMap, Method, Request, Response, StatusCode, Uri};
+use futures::future::BoxFuture;
+use http::uri::PathAndQuery;
+use http::{
+    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri, header,
+};
+use http_body_util::LengthLimitError;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
@@ -55,10 +61,15 @@ use tower_http::add_extension::AddExtensionLayer;
 use trace_propagation::{is_propagated_header, set_span_parent_from_headers};
 use tracing::Instrument;
 
+use crate::cache::{
+    CacheKey, CachePolicy, CachedResponse, FetchOutcome, FetchRequest, Freshness, HoldOffReason,
+    ResponseCache, UpstreamReply, is_cacheable_query,
+};
+use crate::class::{DEFAULT_UPSTREAM_TIMEOUT, RequestClass};
 use crate::config::{AuthConfig, TlsConfig};
 use crate::metrics::{
-    AuthContextMissing, MethodLabel, PrincipalAllowListDenied, RequestAclDenied,
-    UpstreamAuthRetried, UpstreamRequestCompleted, UpstreamStatus,
+    AuthContextMissing, CacheLookupCompleted, CacheOutcome, MethodLabel, PrincipalAllowListDenied,
+    RequestAclDenied, UpstreamAuthRetried, UpstreamRequestCompleted, UpstreamStatus,
 };
 use crate::span_isolation::SpanIsolationMiddleware;
 
@@ -71,14 +82,17 @@ const REDFISH_AUTH_TOKEN_HEADER: &str = "X-Auth-Token";
 /// pushes, mainly -- is streamed through instead of being rejected, which the
 /// old 8 MiB hard cap did. (8 MiB matches nginx ingress controller defaults.)
 const MAX_BUFFERED_BODY_SIZE: usize = 8 * 1024 * 1024;
+/// How long a request whose stored response can stand in waits for a fetch
+/// before that response is served instead. The fetch continues on its own
+/// task; the wait only decides what this caller sees. Callers' own timeouts
+/// are longer than this, and a BMC that is slow to fail should not make them
+/// wait for the failure when a usable response is at hand.
+const SLOW_FETCH_FALLBACK_WAIT: Duration = Duration::from_secs(10);
 /// Reuse the established request-body bound when inspecting error responses;
 /// anything larger is omitted rather than risking an unbounded allocation or
 /// forwarding a credential that could not be searched safely.
 const MAX_REDACTABLE_ERROR_BODY_SIZE: usize = MAX_BUFFERED_BODY_SIZE;
 const OMITTED_BMC_ERROR_RESPONSE: &str = r#"{"error":{"message":"BMC error response omitted because it could not be safely sanitized"}}"#;
-/// Total-request budget for ordinary exchanges; the shared client's default
-/// and the base that streamed-upload timeouts build on.
-const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Floor transfer rate used to scale a streamed upload's timeout from its
 /// declared size, mirroring libredfish's firmware-upload heuristic. The
 /// shared client's 60-second default would abort any large image mid-push.
@@ -88,6 +102,13 @@ const MIN_UPLOAD_BANDWIDTH_BYTES_PER_SEC: u64 = 10_000;
 /// stalled request pin a proxy task and a BMC connection indefinitely. Four
 /// hours covers any real firmware image at the floor rate.
 const MAX_UPLOAD_TIMEOUT: Duration = Duration::from_secs(4 * 60 * 60);
+/// Response header naming how the response cache answered a `GET` in a cached
+/// class. Its values are the `outcome` label of the cache lookup metric.
+const CACHE_STATUS_HEADER: HeaderName = HeaderName::from_static("x-nico-cache");
+/// Upper bound on stored response bodies per replica. Bodies are at most
+/// [`MAX_BUFFERED_BODY_SIZE`] each, and the fleet's cacheable resources are
+/// small JSON documents, so this leaves the pod's memory limit untouched.
+const RESPONSE_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum BmcProxyError {
@@ -118,6 +139,8 @@ struct BmcProxyState {
     /// internally, so per-BMC clients bought nothing and grew without bound.
     http_client: reqwest_middleware::ClientWithMiddleware,
     ip_cache: LookupToIpCache,
+    /// Stored `GET` responses for request classes with a cache policy.
+    response_cache: Arc<ResponseCache>,
 }
 
 /// Cached BMC credentials by IP. Correctness comes from the 401/403 eviction
@@ -179,12 +202,14 @@ enum ForwardedHeaderParseError {
 }
 
 impl BmcProxyState {
-    fn allows(&self, request: &Request<Body>) -> bool {
+    /// The request's principal identifiers when its ACLs allow the request,
+    /// or `None` after recording the denial.
+    fn authorized_principals(&self, request: &Request<Body>) -> Option<Vec<String>> {
         let Some(auth_context) = request.extensions().get::<AuthContext<()>>() else {
             emit(AuthContextMissing::RequestAcl {
                 method_label: request.method().into(),
             });
-            return false;
+            return None;
         };
 
         let principal_ids = request_principal_ids(auth_context);
@@ -201,9 +226,10 @@ impl BmcProxyState {
                 format!("{principal_ids:?}"),
                 request.uri().path().to_string(),
             ));
+            return None;
         }
 
-        allowed
+        Some(principal_ids)
     }
 }
 
@@ -243,6 +269,7 @@ pub(crate) async fn start(
         credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
         http_client: build_http_client()?,
         ip_cache: bounded_cache(IP_CACHE_TTL),
+        response_cache: Arc::new(ResponseCache::new(RESPONSE_CACHE_MAX_BYTES)),
     };
 
     let app = Router::new()
@@ -665,6 +692,7 @@ fn bmc_proxy_request_span<B>(request: &Request<B>) -> tracing::Span {
         http.response.status_code = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,
         bmc.ip_address = tracing::field::Empty,
+        bmc_proxy.class = tracing::field::Empty,
         logfmt.suppress = true,
     );
     set_span_parent_from_headers(&request_span, request.headers());
@@ -687,9 +715,9 @@ async fn proxy_request_inner(
     state: BmcProxyState,
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
-    if !state.allows(&request) {
+    let Some(principals) = state.authorized_principals(&request) else {
         return Ok(error_response((StatusCode::FORBIDDEN, "Forbidden").into()));
-    }
+    };
     let (parts, body) = request.into_parts();
     let forwarded_target = forwarded_header_value(&parts.headers)
         .map_err(|e| error_response((StatusCode::BAD_REQUEST, e.to_string()).into()))?
@@ -727,12 +755,24 @@ async fn proxy_request_inner(
 
     tracing::Span::current().record("bmc.ip_address", target_ip.to_string());
 
+    let class = state
+        .config
+        .classes
+        .classify(&parts.method, parts.uri.path(), &principals);
+    tracing::Span::current().record("bmc_proxy.class", class.name.as_str());
+
     let path_and_query = parts
         .uri
         .clone()
         .into_parts()
         .path_and_query
         .ok_or_else(|| error_response((StatusCode::BAD_REQUEST, "missing path").into()))?;
+
+    if parts.method == Method::GET
+        && let Some(policy) = &class.cache
+    {
+        return serve_cached_get(state, target_ip, &parts, &class, policy, path_and_query).await;
+    }
 
     // Buffer a replayable body once so a stale-credential rejection can be
     // retried; streamed (large) bodies are sent as-is and never replayed.
@@ -744,57 +784,650 @@ async fn proxy_request_inner(
         UpstreamBody::None
     };
 
-    let mut upstream_response = send_upstream(
+    let forwarded = forward_with_auth_retry(
         &state,
         target_ip,
-        &parts,
-        path_and_query.clone(),
+        &parts.method,
+        &parts.headers,
+        path_and_query,
         &mut upstream_body,
+        class.upstream_timeout,
+    )
+    .await;
+
+    // A write may have changed what the cache holds for the BMC unless the
+    // BMC definitely rejected it or the request never reached it. A response
+    // lost after sending proves nothing either way, so it invalidates too.
+    let may_have_changed_bmc = match &forwarded {
+        Ok(upstream) => !upstream.response.status().is_client_error(),
+        Err(failure) => failure.reached_bmc,
+    };
+    if is_write(&parts.method) && may_have_changed_bmc {
+        state.response_cache.invalidate_for_write(
+            target_ip,
+            &parts.method,
+            parts.uri.path(),
+            &state.config.classes,
+            tokio::time::Instant::now(),
+        );
+    }
+
+    Ok(respond_from_upstream(forwarded).await)
+}
+
+/// The caller's response for one forward: the upstream response with its
+/// body streamed back, scrubbed of the credential the proxy applied if it is
+/// an error that might echo it, or the error the forward produced.
+async fn respond_from_upstream(
+    forwarded: Result<UpstreamResponse, ForwardError>,
+) -> Response<Body> {
+    match forwarded {
+        Ok(UpstreamResponse {
+            response,
+            sensitive_values,
+        }) => {
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body = prepare_response_body(
+                status,
+                &headers,
+                Body::from_stream(response.bytes_stream()),
+                &sensitive_values,
+            )
+            .await;
+            build_response(status, &headers, body)
+        }
+        Err(failure) => error_response(failure.error),
+    }
+}
+
+/// Forwards once, and once more with freshly resolved credentials when the
+/// BMC rejected the cached ones and the body can be replayed, so callers
+/// never see a stale-session 401. A second rejection is returned as-is.
+async fn forward_with_auth_retry(
+    state: &BmcProxyState,
+    target_ip: IpAddr,
+    method: &Method,
+    headers: &HeaderMap,
+    path_and_query: PathAndQuery,
+    upstream_body: &mut UpstreamBody,
+    timeout: Duration,
+) -> Result<UpstreamResponse, ForwardError> {
+    let mut upstream_response = send_upstream(
+        state,
+        target_ip,
+        method,
+        headers,
+        path_and_query.clone(),
+        upstream_body,
+        timeout,
     )
     .await?;
 
-    // A BMC that rejects the credential the proxy cached (an expired Redfish
-    // session, a rotated password) gets one replay with freshly resolved
-    // credentials, so callers never see a stale-session 401. Only replayable
-    // bodies qualify; a streamed body was consumed by the first attempt.
     let rejected = |status: reqwest::StatusCode| {
         status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
     };
     if rejected(upstream_response.response.status()) && upstream_body.is_replayable() {
         evict_cached_credentials(target_ip, &state.credential_cache).await;
         emit(UpstreamAuthRetried {
-            method: MethodLabel::from(&parts.method),
+            method: MethodLabel::from(method),
             bmc_ip_address: target_ip.to_string(),
         });
         upstream_response = send_upstream(
-            &state,
+            state,
             target_ip,
-            &parts,
+            method,
+            headers,
             path_and_query,
-            &mut upstream_body,
+            upstream_body,
+            timeout,
         )
         .await?;
     }
 
-    let UpstreamResponse {
-        response,
-        sensitive_values,
-    } = upstream_response;
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = prepare_response_body(
-        status,
-        &headers,
-        Body::from_stream(response.bytes_stream()),
-        &sensitive_values,
-    )
-    .await;
-
-    if rejected(status) {
+    if rejected(upstream_response.response.status()) {
         evict_cached_credentials(target_ip, &state.credential_cache).await;
     }
 
-    Ok(build_response(status, &headers, body))
+    Ok(upstream_response)
+}
+
+/// Answers a `GET` in a cached class, going to the BMC only when nothing
+/// stored can be served.
+///
+/// While a recent write holds the class for the BMC, the request is
+/// forwarded without the store. Otherwise a fresh entry is served as-is and
+/// a stale one is served while one refresh runs behind it. Failing those,
+/// this request fetches, or joins the fetch already in flight for the same
+/// resource; if that fetch fails and an entry within its `stale_if_error`
+/// window exists, the entry stands in. After a fetch that yields nothing
+/// storable the key is held off for a short while, during which an entry
+/// that can stand in is served and a request without one is forwarded
+/// directly. `Cache-Control: no-cache`, `no-store`, or `max-age=0`, or
+/// `Pragma: no-cache`, skips the stored entry but the fetched response is
+/// still stored, because the cache is shared and protects the BMC rather
+/// than the caller. Every response leaves through here with the outcome
+/// named on it.
+async fn serve_cached_get(
+    state: BmcProxyState,
+    target_ip: IpAddr,
+    parts: &http::request::Parts,
+    class: &Arc<RequestClass>,
+    policy: &CachePolicy,
+    path_and_query: PathAndQuery,
+) -> Result<Response<Body>, Response<Body>> {
+    let now = tokio::time::Instant::now();
+    if state.response_cache.is_held(target_ip, &class.name, now) {
+        // A recent write may still be taking effect on the BMC, so nothing
+        // read now may be stored or served later.
+        return forward_uncached(
+            &state,
+            target_ip,
+            parts,
+            class,
+            path_and_query,
+            CacheOutcome::Held,
+        )
+        .await;
+    }
+
+    if !is_cacheable_query(&path_and_query) {
+        // A query the cache does not key names the same resource to the BMC
+        // but would be a distinct entry here, so it is not stored.
+        return forward_uncached(
+            &state,
+            target_ip,
+            parts,
+            class,
+            path_and_query,
+            CacheOutcome::Uncacheable,
+        )
+        .await;
+    }
+
+    let directive = cache_directive(&parts.headers);
+    if directive == CacheDirective::NoStore {
+        // Neither served from the store nor stored: forwarded directly.
+        return forward_uncached(
+            &state,
+            target_ip,
+            parts,
+            class,
+            path_and_query,
+            CacheOutcome::Bypass,
+        )
+        .await;
+    }
+
+    let key = CacheKey::new(target_ip, class.name.clone(), &path_and_query);
+    let bypass = directive == CacheDirective::Revalidate;
+    let existing = state.response_cache.lookup(&key).await;
+    // Built once, run only by the request that starts a fetch; a joiner drops
+    // it unused.
+    let make_fetch = || {
+        upstream_fetch(
+            state.clone(),
+            target_ip,
+            &parts.headers,
+            path_and_query.clone(),
+            class.upstream_timeout,
+        )
+    };
+
+    if !bypass && let Some(entry) = &existing {
+        match entry.freshness(policy, now) {
+            Freshness::Fresh => {
+                return Ok(answer_from_cache(
+                    class,
+                    CacheOutcome::Hit,
+                    entry,
+                    &parts.headers,
+                    now,
+                ));
+            }
+            Freshness::Stale => {
+                if state
+                    .response_cache
+                    .hold_off_reason(&key, now)
+                    .await
+                    .is_none()
+                {
+                    state
+                        .response_cache
+                        .spawn_refresh(key, class, Arc::clone(entry), make_fetch);
+                }
+                return Ok(answer_from_cache(
+                    class,
+                    CacheOutcome::Stale,
+                    entry,
+                    &parts.headers,
+                    now,
+                ));
+            }
+            Freshness::Expired => {}
+        }
+    }
+
+    // The stored entry that may stand in for a fetch the BMC fails, unless
+    // the caller asked for a live answer.
+    let fallback = if bypass {
+        None
+    } else {
+        existing
+            .as_ref()
+            .filter(|entry| entry.usable_on_error(policy, now))
+    };
+
+    // A fetch for this resource yielded nothing storable moments ago: after
+    // an error the fallback is served without asking the BMC again, and
+    // otherwise the request goes straight to the BMC instead of through
+    // another doomed fetch, so callers see what the BMC answers.
+    if let Some(reason) = state.response_cache.hold_off_reason(&key, now).await {
+        if reason == HoldOffReason::Error
+            && let Some(entry) = fallback
+        {
+            return Ok(answer_from_cache(
+                class,
+                CacheOutcome::StaleIfError,
+                entry,
+                &parts.headers,
+                now,
+            ));
+        }
+        let outcome = if bypass {
+            CacheOutcome::Bypass
+        } else {
+            CacheOutcome::Miss
+        };
+        return forward_uncached(&state, target_ip, parts, class, path_and_query, outcome).await;
+    }
+
+    let fetch = state
+        .response_cache
+        .fetch(key, class, existing.clone(), make_fetch);
+    let (outcome, joined) = match fallback {
+        // A BMC slow to answer, or slow to fail, must not make a caller wait
+        // out the whole budget when a usable response is at hand; the fetch
+        // goes on without this caller.
+        Some(entry) => match tokio::time::timeout(SLOW_FETCH_FALLBACK_WAIT, fetch).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                return Ok(answer_from_cache(
+                    class,
+                    CacheOutcome::StaleIfError,
+                    entry,
+                    &parts.headers,
+                    tokio::time::Instant::now(),
+                ));
+            }
+        },
+        None => fetch.await,
+    };
+    let fetched = if bypass {
+        CacheOutcome::Bypass
+    } else if joined {
+        CacheOutcome::Coalesced
+    } else {
+        CacheOutcome::Miss
+    };
+    let now = tokio::time::Instant::now();
+
+    match outcome {
+        FetchOutcome::Fetched(entry) | FetchOutcome::Revalidated(entry) => Ok(answer_from_cache(
+            class,
+            fetched,
+            &entry,
+            &parts.headers,
+            now,
+        )),
+        FetchOutcome::Passthrough {
+            status,
+            headers,
+            body,
+        } => {
+            // A caller who asked for a live answer gets the BMC's failure,
+            // never a stored body; `fallback` is `None` for them.
+            if status.is_server_error()
+                && let Some(entry) = fallback
+            {
+                return Ok(answer_from_cache(
+                    class,
+                    CacheOutcome::StaleIfError,
+                    entry,
+                    &parts.headers,
+                    now,
+                ));
+            }
+            emit(CacheLookupCompleted {
+                class: class.name.clone(),
+                outcome: fetched,
+            });
+            let mut response = response_with_headers(status, &headers, Body::from(body));
+            set_cache_status(&mut response, fetched);
+            Ok(response)
+        }
+        FetchOutcome::TooLarge => {
+            // The resource does not fit the store, so this caller forwards
+            // for itself and streams the body, as an uncached class would.
+            forward_uncached(&state, target_ip, parts, class, path_and_query, fetched).await
+        }
+        FetchOutcome::Failed { status, message } => {
+            if let Some(entry) = fallback {
+                return Ok(answer_from_cache(
+                    class,
+                    CacheOutcome::StaleIfError,
+                    entry,
+                    &parts.headers,
+                    now,
+                ));
+            }
+            emit(CacheLookupCompleted {
+                class: class.name.clone(),
+                outcome: fetched,
+            });
+            let mut response = error_response((status, message).into());
+            set_cache_status(&mut response, fetched);
+            Err(response)
+        }
+    }
+}
+
+/// Forwards a `GET` in a cached class for one caller without the store,
+/// streaming the body back, and names `outcome` on the response whether the
+/// forward succeeded or not.
+async fn forward_uncached(
+    state: &BmcProxyState,
+    target_ip: IpAddr,
+    parts: &http::request::Parts,
+    class: &RequestClass,
+    path_and_query: PathAndQuery,
+    outcome: CacheOutcome,
+) -> Result<Response<Body>, Response<Body>> {
+    emit(CacheLookupCompleted {
+        class: class.name.clone(),
+        outcome,
+    });
+    let mut body = UpstreamBody::None;
+    let forwarded = forward_with_auth_retry(
+        state,
+        target_ip,
+        &parts.method,
+        &parts.headers,
+        path_and_query,
+        &mut body,
+        class.upstream_timeout,
+    )
+    .await;
+    let mut response = respond_from_upstream(forwarded).await;
+    set_cache_status(&mut response, outcome);
+    Ok(response)
+}
+
+/// The fetch the response cache runs for one resource: a `GET` carrying the
+/// initiating caller's headers, made conditional on the stored `ETag` when
+/// refreshing, with the body read in full so it can be stored and shared.
+fn upstream_fetch(
+    state: BmcProxyState,
+    target_ip: IpAddr,
+    request_headers: &HeaderMap,
+    path_and_query: PathAndQuery,
+    timeout: Duration,
+) -> impl FnOnce(FetchRequest) -> BoxFuture<'static, UpstreamReply> + Send + 'static {
+    let headers = fetch_request_headers(request_headers);
+    move |request: FetchRequest| {
+        Box::pin(async move {
+            let mut headers = headers;
+            if let Some(etag) = request.if_none_match {
+                headers.insert(header::IF_NONE_MATCH, etag);
+            }
+            let mut body = UpstreamBody::None;
+            let response = match forward_with_auth_retry(
+                &state,
+                target_ip,
+                &Method::GET,
+                &headers,
+                path_and_query,
+                &mut body,
+                timeout,
+            )
+            .await
+            {
+                Ok(upstream) => upstream,
+                Err(failure) => {
+                    return UpstreamReply::Failed {
+                        status: failure.error.status,
+                        message: failure.error.message,
+                    };
+                }
+            };
+            let UpstreamResponse {
+                response,
+                sensitive_values,
+            } = response;
+            let status = response.status();
+            let upstream_headers = response.headers().clone();
+            match read_bounded_body(response, MAX_BUFFERED_BODY_SIZE).await {
+                BodyRead::Complete(body) => {
+                    // An error body may echo the credential the proxy applied;
+                    // scrub it as the streaming path does before it is shared
+                    // with waiters or stored.
+                    let prepared = prepare_response_body(
+                        status,
+                        &upstream_headers,
+                        Body::from(body),
+                        &sensitive_values,
+                    )
+                    .await;
+                    let headers = prepared_headers(&upstream_headers, &prepared);
+                    match axum::body::to_bytes(prepared.into_body(), MAX_BUFFERED_BODY_SIZE).await {
+                        Ok(body) => UpstreamReply::Response {
+                            status,
+                            headers,
+                            body,
+                        },
+                        Err(error) => UpstreamReply::Failed {
+                            status: StatusCode::BAD_GATEWAY,
+                            message: format!("error preparing upstream response: {error}"),
+                        },
+                    }
+                }
+                BodyRead::TooLarge => UpstreamReply::TooLarge,
+                BodyRead::Failed(message) => UpstreamReply::Failed {
+                    status: StatusCode::BAD_GATEWAY,
+                    message,
+                },
+            }
+        })
+    }
+}
+
+/// The caller's headers as the cache's own fetch sends them: without the
+/// conditional and cache directives the cache answers itself, and without
+/// content negotiation, which one canonical representation replaces so that
+/// every caller can consume what one fetch stored.
+fn fetch_request_headers(request_headers: &HeaderMap) -> HeaderMap {
+    let mut headers = request_headers.clone();
+    for name in [
+        header::IF_NONE_MATCH,
+        header::IF_MODIFIED_SINCE,
+        header::IF_MATCH,
+        header::IF_UNMODIFIED_SINCE,
+        header::IF_RANGE,
+        header::RANGE,
+        header::CACHE_CONTROL,
+        header::PRAGMA,
+        header::ACCEPT,
+        header::ACCEPT_ENCODING,
+        header::ACCEPT_LANGUAGE,
+        header::ACCEPT_CHARSET,
+        header::COOKIE,
+    ] {
+        headers.remove(name);
+    }
+    headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static("identity"),
+    );
+    headers
+}
+
+/// What the caller's cache directives ask of the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheDirective {
+    /// No directive: served from the store when it can be.
+    Serve,
+    /// `Cache-Control: no-cache` or `max-age=0`, or the HTTP/1.0
+    /// `Pragma: no-cache`: the stored response is skipped; the fetched one is
+    /// still stored.
+    Revalidate,
+    /// `Cache-Control: no-store`: neither served nor stored.
+    NoStore,
+}
+
+fn cache_directive(headers: &HeaderMap) -> CacheDirective {
+    let directive_present = |name: HeaderName, directives: &[&str]| {
+        headers
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .map(|directive| directive.trim().to_ascii_lowercase())
+            .any(|directive| directives.contains(&directive.as_str()))
+    };
+    if directive_present(header::CACHE_CONTROL, &["no-store"]) {
+        CacheDirective::NoStore
+    } else if directive_present(header::CACHE_CONTROL, &["no-cache", "max-age=0"])
+        || directive_present(header::PRAGMA, &["no-cache"])
+    {
+        CacheDirective::Revalidate
+    } else {
+        CacheDirective::Serve
+    }
+}
+
+/// Names how the cache answered on a response leaving the cache path.
+fn set_cache_status(response: &mut Response<Body>, outcome: CacheOutcome) {
+    response.headers_mut().insert(
+        CACHE_STATUS_HEADER,
+        HeaderValue::from_str(outcome.label_value().as_str())
+            .expect("cache outcome labels are lowercase ASCII"),
+    );
+}
+
+/// Builds the caller's response from a stored entry: `304` when the caller's
+/// `If-None-Match` names the stored `ETag`, else the stored `200`. Both carry
+/// the entry's age and how the cache answered.
+fn answer_from_cache(
+    class: &RequestClass,
+    outcome: CacheOutcome,
+    entry: &CachedResponse,
+    request_headers: &HeaderMap,
+    now: tokio::time::Instant,
+) -> Response<Body> {
+    emit(CacheLookupCompleted {
+        class: class.name.clone(),
+        outcome,
+    });
+
+    let mut response = if if_none_match_names(request_headers, entry.etag()) {
+        let mut response = Response::builder().status(StatusCode::NOT_MODIFIED);
+        if let Some(etag) = entry.etag() {
+            response = response.header(header::ETAG, etag);
+        }
+        response.body(Body::empty())
+    } else {
+        let mut response = Response::builder().status(StatusCode::OK);
+        for (name, value) in &entry.headers {
+            response = response.header(name, value);
+        }
+        response.body(Body::from(entry.body.clone()))
+    }
+    // The headers were received from a BMC as valid header values, and the
+    // status is a constant, so the builder cannot fail.
+    .expect("a stored response rebuilds from its validated headers");
+
+    response
+        .headers_mut()
+        .insert(header::AGE, HeaderValue::from(entry.age(now).as_secs()));
+    set_cache_status(&mut response, outcome);
+    response
+}
+
+/// Whether the caller's `If-None-Match` names `etag`, comparing weakly as
+/// RFC 9110 requires for `GET`: `W/"x"` and `"x"` match, and `*` matches any.
+fn if_none_match_names(request_headers: &HeaderMap, etag: Option<&HeaderValue>) -> bool {
+    let Some(etag) = etag.and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    let weak = |tag: &str| tag.strip_prefix("W/").unwrap_or(tag).to_string();
+    request_headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(entity_tags)
+        .any(|candidate| candidate == "*" || weak(candidate) == weak(etag))
+}
+
+/// The entity-tags of one `If-None-Match` value. A tag may contain a comma
+/// inside its quotes, so the list is split only on commas outside them.
+fn entity_tags(value: &str) -> Vec<&str> {
+    let mut tags = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    for (index, character) in value.char_indices() {
+        match character {
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                tags.push(&value[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    tags.push(&value[start..]);
+    tags.into_iter()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .collect()
+}
+
+/// How reading an upstream body for the store ended.
+enum BodyRead {
+    Complete(Bytes),
+    /// The body exceeds the store's limit; it was not read in full.
+    TooLarge,
+    Failed(String),
+}
+
+/// Reads an upstream body in full, stopping at `limit` bytes so a
+/// misbehaving BMC cannot grow the cache without bound.
+async fn read_bounded_body(response: reqwest::Response, limit: usize) -> BodyRead {
+    if let Some(length) = response.content_length()
+        && length > limit as u64
+    {
+        return BodyRead::TooLarge;
+    }
+    match axum::body::to_bytes(Body::from_stream(response.bytes_stream()), limit).await {
+        Ok(body) => BodyRead::Complete(body),
+        Err(error) => {
+            let error = error.into_inner();
+            if error.downcast_ref::<LengthLimitError>().is_some() {
+                BodyRead::TooLarge
+            } else {
+                BodyRead::Failed(format!("error reading upstream response: {error}"))
+            }
+        }
+    }
+}
+
+/// Whether `method` writes to the BMC, as far as the cache is concerned.
+/// Other methods, such as `OPTIONS`, cannot change a resource.
+fn is_write(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    )
 }
 
 /// The caller's request body, in a form the proxy can attach to an upstream
@@ -874,15 +1507,18 @@ impl UpstreamBody {
 }
 
 /// One forwarding attempt: resolve credentials for `target_ip` (cached or
-/// freshly minted), build the upstream request from the caller's `parts`,
-/// attach the body, and send. Records the per-attempt upstream metric.
+/// freshly minted), build the upstream request from the caller's `method`
+/// and `headers`, attach the body, and send within `timeout`. Records the
+/// per-attempt upstream metric.
 async fn send_upstream(
     state: &BmcProxyState,
     target_ip: IpAddr,
-    parts: &http::request::Parts,
-    path_and_query: http::uri::PathAndQuery,
+    method: &Method,
+    headers: &HeaderMap,
+    path_and_query: PathAndQuery,
     upstream_body: &mut UpstreamBody,
-) -> Result<UpstreamResponse, Response<Body>> {
+    timeout: Duration,
+) -> Result<UpstreamResponse, ForwardError> {
     let mut bmc_client_info = create_client(
         target_ip,
         &state.api_client,
@@ -891,35 +1527,41 @@ async fn send_upstream(
         &state.config.bmc_proxy,
     )
     .await
-    .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
+    .map_err(|e| ForwardError::before_send((StatusCode::BAD_GATEWAY, e.to_string())))?;
 
-    copy_request_headers(&parts.headers, &mut bmc_client_info.header_map);
+    copy_request_headers(headers, &mut bmc_client_info.header_map);
 
     let mut upstream_uri_parts = bmc_client_info.base_upstream_uri.into_parts();
     upstream_uri_parts.path_and_query = Some(path_and_query);
     let upstream_uri = Uri::from_parts(upstream_uri_parts)
-        .map_err(|e| error_response((StatusCode::BAD_REQUEST, e.to_string()).into()))?;
+        .map_err(|e| ForwardError::before_send((StatusCode::BAD_REQUEST, e.to_string())))?;
 
     let upstream_request = bmc_client_info
         .http_client
-        .request(parts.method.clone(), upstream_uri.to_string())
-        .headers(bmc_client_info.header_map);
+        .request(method.clone(), upstream_uri.to_string())
+        .headers(bmc_client_info.header_map)
+        // The class budget. A streamed upload replaces it with one scaled to
+        // its declared size when the body attaches.
+        .timeout(timeout);
     // Apply the credential and retain every secret representation placed on
     // the wire. The downstream client cannot reconstruct this context safely.
     let (upstream_request, sensitive_values) = bmc_client_info
         .credentials
         .apply_to_request(upstream_request)
         .map_err(|e| {
-            error_response((StatusCode::BAD_GATEWAY, format!("invalid credentials: {e}")).into())
+            ForwardError::before_send((
+                StatusCode::BAD_GATEWAY,
+                format!("invalid credentials: {e}"),
+            ))
         })?;
     let upstream_request = upstream_body
         .attach(upstream_request)
-        .map_err(error_response)?;
+        .map_err(ForwardError::before_send)?;
 
     let started = Instant::now();
     let upstream_result = upstream_request.send().await;
     emit(UpstreamRequestCompleted {
-        method: MethodLabel::from(&parts.method),
+        method: MethodLabel::from(method),
         status: UpstreamStatus::from_result(&upstream_result),
         took: started.elapsed(),
     });
@@ -928,7 +1570,36 @@ async fn send_upstream(
             response,
             sensitive_values,
         })
-        .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))
+        .map_err(|e| ForwardError {
+            reached_bmc: request_may_have_reached_bmc(&e),
+            error: ProxyError::from((StatusCode::BAD_GATEWAY, e.to_string())),
+        })
+}
+
+/// A forward that produced no response, and whether the request may have
+/// reached the BMC before it failed. A write that never left the proxy
+/// cannot have changed anything the cache holds.
+struct ForwardError {
+    error: ProxyError,
+    reached_bmc: bool,
+}
+
+impl ForwardError {
+    fn before_send(error: impl Into<ProxyError>) -> Self {
+        Self {
+            error: error.into(),
+            reached_bmc: false,
+        }
+    }
+}
+
+/// Whether a failed send may have delivered the request: a connection that
+/// never opened or a request that never built did not, anything later may.
+fn request_may_have_reached_bmc(error: &reqwest_middleware::Error) -> bool {
+    match error {
+        reqwest_middleware::Error::Reqwest(error) => !error.is_connect() && !error.is_builder(),
+        reqwest_middleware::Error::Middleware(_) => true,
+    }
 }
 
 /// Buffers only final HTTP error responses that have a known authentication
@@ -1116,37 +1787,92 @@ enum PreparedResponseBody {
     Replaced(Body),
 }
 
+impl PreparedResponseBody {
+    fn was_rewritten(&self) -> bool {
+        !matches!(self, Self::Unchanged(_))
+    }
+
+    fn was_replaced(&self) -> bool {
+        matches!(self, Self::Replaced(_))
+    }
+
+    fn into_body(self) -> Body {
+        match self {
+            Self::Unchanged(body) | Self::Redacted(body) | Self::Replaced(body) => body,
+        }
+    }
+}
+
 fn build_response(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
     body: PreparedResponseBody,
 ) -> Response<Body> {
-    let body_was_rewritten = !matches!(&body, PreparedResponseBody::Unchanged(_));
-    let body_was_replaced = matches!(&body, PreparedResponseBody::Replaced(_));
-    let body = match body {
-        PreparedResponseBody::Unchanged(body)
-        | PreparedResponseBody::Redacted(body)
-        | PreparedResponseBody::Replaced(body) => body,
-    };
+    let body_was_rewritten = body.was_rewritten();
+    let body_was_replaced = body.was_replaced();
     let mut response = Response::builder().status(status);
-    for (name, value) in headers {
-        if is_hop_by_hop_header(name.as_str())
-            || name == reqwest::header::CONTENT_LENGTH
-            || (body_was_rewritten
-                && (name == reqwest::header::CONTENT_ENCODING
-                    || name == reqwest::header::ETAG
-                    || name.as_str().eq_ignore_ascii_case("content-md5")
-                    || name.as_str().eq_ignore_ascii_case("digest")))
-            || (body_was_replaced && name == reqwest::header::CONTENT_TYPE)
-        {
-            continue;
-        }
+    for (name, value) in prepared_header_pairs(headers, body_was_rewritten, body_was_replaced) {
         response = response.header(name, value);
     }
     if body_was_replaced {
         response = response.header(reqwest::header::CONTENT_TYPE, "application/json");
     }
+    response.body(body.into_body()).unwrap()
+}
+
+/// The upstream headers a caller receives with a prepared body: the
+/// forwardable ones, minus the validators of a body that was rewritten and
+/// the content type of one that was replaced, which no longer describe it.
+fn prepared_header_pairs(
+    headers: &HeaderMap,
+    body_was_rewritten: bool,
+    body_was_replaced: bool,
+) -> impl Iterator<Item = (&HeaderName, &HeaderValue)> {
+    forwardable_response_header_pairs(headers).filter(move |(name, _)| {
+        !(body_was_rewritten
+            && (**name == header::CONTENT_ENCODING
+                || **name == header::ETAG
+                || name.as_str().eq_ignore_ascii_case("content-md5")
+                || name.as_str().eq_ignore_ascii_case("digest")))
+            && !(body_was_replaced && **name == header::CONTENT_TYPE)
+    })
+}
+
+/// [`prepared_header_pairs`] as an owned map, with the content type a
+/// replaced body carries; for the cache, which stores and shares headers.
+fn prepared_headers(headers: &HeaderMap, body: &PreparedResponseBody) -> HeaderMap {
+    let mut prepared = HeaderMap::new();
+    for (name, value) in prepared_header_pairs(headers, body.was_rewritten(), body.was_replaced()) {
+        prepared.append(name.clone(), value.clone());
+    }
+    if body.was_replaced() {
+        prepared.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+    }
+    prepared
+}
+
+/// A response carrying `headers` verbatim; for headers already filtered by
+/// [`prepared_headers`].
+fn response_with_headers(status: StatusCode, headers: &HeaderMap, body: Body) -> Response<Body> {
+    let mut response = Response::builder().status(status);
+    for (name, value) in headers {
+        response = response.header(name, value);
+    }
     response.body(body).unwrap()
+}
+
+/// The upstream response headers a caller receives: everything but
+/// hop-by-hop headers and `Content-Length`, which the proxy's own framing of
+/// the body replaces.
+fn forwardable_response_header_pairs(
+    headers: &HeaderMap,
+) -> impl Iterator<Item = (&HeaderName, &HeaderValue)> {
+    headers.iter().filter(|(name, _)| {
+        !is_hop_by_hop_header(name.as_str()) && **name != header::CONTENT_LENGTH
+    })
 }
 
 fn copy_request_headers(source: &HeaderMap, dest: &mut HeaderMap) {
@@ -1177,7 +1903,7 @@ fn method_supports_body(method: &Method) -> bool {
 /// request budget plus the transfer itself at worst-case OOB bandwidth,
 /// bounded by [`MAX_UPLOAD_TIMEOUT`] because `length` is caller-supplied.
 fn sized_upload_timeout(length: u64) -> Duration {
-    (UPSTREAM_REQUEST_TIMEOUT + Duration::from_secs(length / MIN_UPLOAD_BANDWIDTH_BYTES_PER_SEC))
+    (DEFAULT_UPSTREAM_TIMEOUT + Duration::from_secs(length / MIN_UPLOAD_BANDWIDTH_BYTES_PER_SEC))
         .min(MAX_UPLOAD_TIMEOUT)
 }
 
@@ -1462,7 +2188,7 @@ fn build_http_client() -> Result<reqwest_middleware::ClientWithMiddleware, BmcPr
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::limited(5))
         .connect_timeout(std::time::Duration::from_secs(5)) // Limit connections to 5 seconds
-        .timeout(UPSTREAM_REQUEST_TIMEOUT) // Limit the overall request; uploads override per request
+        .timeout(DEFAULT_UPSTREAM_TIMEOUT) // Limit the overall request; classes and uploads override per request
         .pool_max_idle_per_host(4)
         .build()
         .map_err(|err| {
@@ -1488,11 +2214,17 @@ mod tests {
     use std::convert::Infallible;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::str::FromStr;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use axum::Router;
     use axum::body::Body;
-    use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
+    use axum::extract::State;
+    use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header};
+    use axum::response::IntoResponse;
+    use axum::routing::any;
+    use axum_server::tls_rustls::RustlsConfig;
     use bytes::Bytes;
     use carbide_authn::middleware::{AuthContext, ExternalUserInfo, Principal};
     use carbide_instrument::LabelValue;
@@ -1509,18 +2241,21 @@ mod tests {
     use rpc::forge::find_bmc_ips_request::LookupBy;
     use rpc::forge_api_client::ForgeApiClient;
     use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use tokio_stream::iter;
 
     use super::{
         BmcCredentials, BmcProxyState, CREDENTIAL_CACHE_IDLE_TTL, ConnectionFailReason,
         CredentialCache, ForwardedTarget, IP_CACHE_TTL, MAX_BUFFERED_BODY_SIZE,
         MAX_REDACTABLE_ERROR_BODY_SIZE, MethodLabel, OMITTED_BMC_ERROR_RESPONSE,
-        PreparedResponseBody, TcpAcceptFailed, TlsCertificateReloadFailed, TlsConnectionFailed,
-        UpstreamBody, authorize_principal_allow_list, bmc_proxy_request_span, bounded_cache,
-        build_authority, build_http_client, build_response, copy_request_headers, create_client,
-        evict_cached_credentials, forwarded_header_value, idle_bounded_cache,
+        PreparedResponseBody, RESPONSE_CACHE_MAX_BYTES, ResponseCache, TcpAcceptFailed,
+        TlsCertificateReloadFailed, TlsConnectionFailed, UpstreamBody,
+        authorize_principal_allow_list, bmc_proxy_request_span, bounded_cache, build_authority,
+        build_http_client, build_response, copy_request_headers, create_client,
+        evict_cached_credentials, forwarded_header_value, idle_bounded_cache, if_none_match_names,
         ip_for_forwarded_target, is_hop_by_hop_header, method_supports_body,
-        parse_forwarded_host_value, prepare_response_body, request_principal_ids, span_status,
+        parse_forwarded_host_value, prepare_response_body, proxy_request_inner,
+        request_may_have_reached_bmc, request_principal_ids, span_status,
     };
 
     const TEST_CONFIG: &str = r#"
@@ -1620,6 +2355,7 @@ mod tests {
             credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
             http_client: build_http_client().expect("test HTTP client builds"),
             ip_cache: bounded_cache(IP_CACHE_TTL),
+            response_cache: Arc::new(ResponseCache::new(RESPONSE_CACHE_MAX_BYTES)),
         }
     }
 
@@ -1678,7 +2414,7 @@ mod tests {
         ];
         let metrics = MetricsCapture::start();
         let mut result = false;
-        let logs = capture_logs(|| result = state.allows(&request));
+        let logs = capture_logs(|| result = state.authorized_principals(&request).is_some());
 
         AuthorizationObservation {
             result,
@@ -2028,6 +2764,93 @@ mod tests {
 
             "invalid MAC" {
                 ForwardedHeaderCase::InvalidMac => ForwardedTargetSummary::Error("mac"),
+            }
+        );
+    }
+
+    /// A request that never built or never connected did not reach the BMC.
+    #[tokio::test]
+    async fn send_failures_classify_whether_the_bmc_was_reached() {
+        let builder_error = reqwest_middleware::Error::from(
+            reqwest::Client::new()
+                .get("http://")
+                .build()
+                .expect_err("an empty host cannot build a request"),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let closed = listener.local_addr().expect("address");
+        drop(listener);
+        let connect_error = reqwest_middleware::Error::from(
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .build()
+                .expect("client builds")
+                .get(format!("http://{closed}/"))
+                .send()
+                .await
+                .expect_err("a closed port refuses the connection"),
+        );
+
+        // A server that accepts the connection and never answers: the
+        // request left the proxy, so its effect on the BMC is unknown.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let silent_addr = silent.local_addr().expect("address");
+        let hold_connections = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (socket, _) = silent.accept().await.expect("accept");
+                held.push(socket);
+            }
+        });
+        let timeout_error = reqwest_middleware::Error::from(
+            reqwest::Client::builder()
+                .timeout(Duration::from_millis(200))
+                .build()
+                .expect("client builds")
+                .post(format!("http://{silent_addr}/redfish/v1/UpdateService"))
+                .send()
+                .await
+                .expect_err("a silent server times the request out"),
+        );
+        hold_connections.abort();
+
+        assert!(!request_may_have_reached_bmc(&builder_error));
+        assert!(!request_may_have_reached_bmc(&connect_error));
+        assert!(request_may_have_reached_bmc(&timeout_error));
+    }
+
+    struct IfNoneMatchInput {
+        header: &'static str,
+        etag: &'static str,
+    }
+
+    /// `If-None-Match` is a comma-separated list, but a tag may carry a comma
+    /// inside its quotes, and comparison is weak for `GET`.
+    #[test]
+    fn if_none_match_lists_are_split_only_between_tags() {
+        value_scenarios!(
+            run = |IfNoneMatchInput { header, etag }| {
+                let mut headers = HeaderMap::new();
+                headers.insert(header::IF_NONE_MATCH, HeaderValue::from_static(header));
+                if_none_match_names(&headers, Some(&HeaderValue::from_static(etag)))
+            };
+            "plain lists" {
+                IfNoneMatchInput { header: "\"a\"", etag: "\"a\"" } => true,
+                IfNoneMatchInput { header: "\"x\", \"a\"", etag: "\"a\"" } => true,
+                IfNoneMatchInput { header: "\"x\"", etag: "\"a\"" } => false,
+                IfNoneMatchInput { header: "*", etag: "\"a\"" } => true,
+            }
+
+            "a comma inside the quotes stays in the tag" {
+                IfNoneMatchInput { header: "\"a,b\"", etag: "\"a,b\"" } => true,
+                IfNoneMatchInput { header: "\"x\", \"a,b\"", etag: "\"a,b\"" } => true,
+                IfNoneMatchInput { header: "\"a\", \"b\"", etag: "\"a,b\"" } => false,
+            }
+
+            "weak tags match strong ones" {
+                IfNoneMatchInput { header: "W/\"a,b\"", etag: "\"a,b\"" } => true,
             }
         );
     }
@@ -3259,5 +4082,497 @@ mod tests {
             panic!("a consumed stream cannot be attached again");
         };
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // --- end to end through a TLS upstream ---------------------------------
+
+    const INVENTORY_PATH: &str = "/redfish/v1/UpdateService/FirmwareInventory";
+    const INVENTORY_BODY: &str =
+        r#"{"Members":[{"@odata.id":"/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0"}]}"#;
+    const INVENTORY_ETAG: &str = "\"inv-1\"";
+    const SYSTEM_PATH: &str = "/redfish/v1/Systems/System_0";
+    const CHASSIS_PATH: &str = "/redfish/v1/Chassis/C0";
+    const CHASSIS_BODY: &str = r#"{"Id":"C0"}"#;
+    const MEMBER_PATH: &str = "/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0";
+    const MEMBER_BODY: &str = r#"{"Id":"FW_BMC_0","Version":"1.0"}"#;
+    const HUGE_PATH: &str = "/redfish/v1/UpdateService/FirmwareInventory/Huge";
+    /// One byte past what the store accepts.
+    const HUGE_LEN: usize = MAX_BUFFERED_BODY_SIZE + 1;
+    const FAKE_BMC_IP: &str = "10.0.0.8";
+    /// A class name only this test emits, so parallel cache tests emitting
+    /// for their own classes cannot move the counters asserted here.
+    const E2E_CLASS: &str = "e2e_inventory";
+
+    /// A TLS listener standing in for one BMC. It counts every request by
+    /// method and path, serves the firmware inventory with an `ETag`,
+    /// accepts writes, and can be switched to answer everything with a 503.
+    #[derive(Clone)]
+    struct FakeBmc {
+        hits: Arc<Mutex<HashMap<String, usize>>>,
+        failing: Arc<AtomicBool>,
+    }
+
+    impl FakeBmc {
+        fn hits(&self, method: Method, path: &str) -> usize {
+            self.hits
+                .lock()
+                .unwrap()
+                .get(&format!("{method} {path}"))
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    async fn fake_bmc_handler(
+        State(bmc): State<FakeBmc>,
+        request: Request<Body>,
+    ) -> axum::response::Response {
+        let key = format!("{} {}", request.method(), request.uri().path());
+        *bmc.hits.lock().unwrap().entry(key).or_insert(0) += 1;
+        if bmc.failing.load(Ordering::SeqCst) {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        match (request.method().clone(), request.uri().path()) {
+            (Method::GET, INVENTORY_PATH) => (
+                [
+                    (header::CONTENT_TYPE, "application/json"),
+                    (header::ETAG, INVENTORY_ETAG),
+                ],
+                INVENTORY_BODY,
+            )
+                .into_response(),
+            (Method::GET, SYSTEM_PATH) => (
+                [(header::CONTENT_TYPE, "application/json")],
+                r#"{"PowerState":"On"}"#,
+            )
+                .into_response(),
+            (Method::GET, CHASSIS_PATH) => {
+                ([(header::CONTENT_TYPE, "application/json")], CHASSIS_BODY).into_response()
+            }
+            (Method::GET, MEMBER_PATH) => {
+                ([(header::CONTENT_TYPE, "application/json")], MEMBER_BODY).into_response()
+            }
+            (Method::GET, HUGE_PATH) => (
+                [(header::CONTENT_TYPE, "application/json")],
+                vec![b'x'; HUGE_LEN],
+            )
+                .into_response(),
+            (Method::OPTIONS, _) => StatusCode::NO_CONTENT.into_response(),
+            (Method::PATCH, _) => StatusCode::NO_CONTENT.into_response(),
+            (Method::POST, _) => StatusCode::ACCEPTED.into_response(),
+            _ => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+
+    fn spawn_fake_bmc() -> (SocketAddr, FakeBmc) {
+        // The test binary links two rustls crypto providers (rcgen brings its
+        // own), so pick the one the proxy itself uses before any TLS config
+        // is built. A second call reports it is already installed.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let params =
+            rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()]).expect("cert params");
+        let key = rcgen::KeyPair::generate().expect("server key");
+        let cert = params.self_signed(&key).expect("self-signed server cert");
+        let server_cert: CertificateDer<'static> = cert.der().clone();
+        let server_key = PrivateKeyDer::Pkcs8(key.serialize_der().into());
+        // The proxy's upstream client accepts any certificate, as it does for
+        // real BMCs, so a self-signed one suffices and no client auth is asked.
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![server_cert], server_key)
+            .expect("server TLS config");
+
+        let bmc = FakeBmc {
+            hits: Arc::new(Mutex::new(HashMap::new())),
+            failing: Arc::new(AtomicBool::new(false)),
+        };
+        let app = Router::new()
+            .route("/{*path}", any(fake_bmc_handler))
+            .with_state(bmc.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake BMC");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let addr = listener.local_addr().expect("fake BMC address");
+        tokio::spawn(async move {
+            axum_server::from_tcp_rustls(listener, RustlsConfig::from_config(Arc::new(config)))
+                .expect("fake BMC listener")
+                .serve(app.into_make_service())
+                .await
+                .expect("fake BMC serves");
+        });
+        (addr, bmc)
+    }
+
+    /// A proxy whose upstream override points at `upstream` and whose
+    /// credential cache is seeded for [`FAKE_BMC_IP`], so no nico-api call is
+    /// needed. Every request is anonymous and the ACL allows anonymous
+    /// everything; `classes` supplies the `[[class]]` tables.
+    async fn proxy_with_classes(upstream: SocketAddr, classes: &str) -> BmcProxyState {
+        let state = test_state_with_config(&format!(
+            r#"
+            allowed_principals = ["anonymous"]
+            bmc_proxy = "{upstream}"
+
+            [tls]
+            identity_pemfile_path = ""
+            identity_keyfile_path = ""
+            root_cafile_path = ""
+            admin_root_cafile_path = ""
+
+            [auth]
+
+            [auth.acls]
+            anonymous = ["/**"]
+
+            {classes}
+            "#
+        ));
+        state
+            .credential_cache
+            .insert(
+                FAKE_BMC_IP.parse().unwrap(),
+                BmcCredentials::UsernamePassword {
+                    username: "root".to_string(),
+                    password: "secret".to_string(),
+                },
+            )
+            .await;
+        state
+    }
+
+    /// The fake BMC's proxy: one cached class covers the firmware inventory
+    /// and is held off the cache for an hour after a firmware update post; a
+    /// second, whose entries expire at once, covers chassis so the fallback
+    /// for a failing BMC can be reached without a bypass.
+    async fn proxy_in_front_of(upstream: SocketAddr) -> BmcProxyState {
+        proxy_with_classes(
+            upstream,
+            &format!(
+                r#"
+            [[class]]
+            name = "{E2E_CLASS}"
+            match = ["GET /redfish/v1/UpdateService/FirmwareInventory/**"]
+            upstream_timeout = "30s"
+            cache = {{ ttl = "1h", stale_if_error = "1h", invalidated_by = ["POST /redfish/v1/UpdateService/**"], hold_after_write = "1h" }}
+
+            [[class]]
+            name = "e2e_volatile"
+            match = ["GET /redfish/v1/Chassis/**"]
+            upstream_timeout = "30s"
+            cache = {{ ttl = "1ms", stale_if_error = "1h" }}
+            "#
+            ),
+        )
+        .await
+    }
+
+    fn proxied_request(method: Method, path: &str, extra: &[(HeaderName, &str)]) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("forwarded", format!("host={FAKE_BMC_IP}"));
+        for (name, value) in extra {
+            builder = builder.header(name.clone(), *value);
+        }
+        let mut request = builder.body(Body::empty()).expect("request builds");
+        request.extensions_mut().insert(AuthContext::<()> {
+            principals: vec![],
+            authorization: None,
+        });
+        request
+    }
+
+    /// What a caller observes from one proxied request.
+    #[derive(Debug, PartialEq)]
+    struct Observed {
+        status: u16,
+        cache: Option<String>,
+        has_age: bool,
+        body: String,
+    }
+
+    async fn send(state: &BmcProxyState, request: Request<Body>) -> Observed {
+        let response = match proxy_request_inner(state.clone(), request).await {
+            Ok(response) | Err(response) => response,
+        };
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let status = response.status().as_u16();
+        let cache = header("x-nico-cache");
+        let has_age = header("age").is_some();
+        // Oversized bodies are part of what this test observes, so the read
+        // limit here is not the store's.
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body reads");
+        Observed {
+            status,
+            cache,
+            has_age,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        }
+    }
+
+    fn cache_of_observed(observed: &Observed) -> Option<&str> {
+        observed.cache.as_deref()
+    }
+
+    fn observed(status: u16, cache: Option<&str>, has_age: bool, body: &str) -> Observed {
+        Observed {
+            status,
+            cache: cache.map(str::to_owned),
+            has_age,
+            body: body.to_string(),
+        }
+    }
+
+    /// The cache as a caller and the BMC see it: a miss goes upstream once,
+    /// hits and conditional hits do not, a bypass does but still refreshes
+    /// the store, an unrelated write leaves the entry alone, a stored entry
+    /// stands in for a failing BMC, a matching write drops the entry and
+    /// holds the class off the cache, and an uncached class is forwarded
+    /// every time.
+    #[tokio::test]
+    async fn cached_get_round_trip_through_a_tls_upstream() {
+        let (upstream, bmc) = spawn_fake_bmc();
+        let state = proxy_in_front_of(upstream).await;
+        let metrics = MetricsCapture::start();
+        let lookups = |outcome: &str| {
+            metrics.counter_delta(
+                "carbide_bmc_proxy_cache_lookups_total",
+                &[("class", E2E_CLASS), ("outcome", outcome)],
+            )
+        };
+
+        // A miss fetches once and stores.
+        assert_eq!(
+            send(&state, proxied_request(Method::GET, INVENTORY_PATH, &[])).await,
+            observed(200, Some("miss"), true, INVENTORY_BODY),
+        );
+        assert_eq!(bmc.hits(Method::GET, INVENTORY_PATH), 1);
+
+        // A hit and a conditional hit never reach the BMC.
+        assert_eq!(
+            send(&state, proxied_request(Method::GET, INVENTORY_PATH, &[])).await,
+            observed(200, Some("hit"), true, INVENTORY_BODY),
+        );
+        assert_eq!(
+            send(
+                &state,
+                proxied_request(
+                    Method::GET,
+                    INVENTORY_PATH,
+                    &[(header::IF_NONE_MATCH, INVENTORY_ETAG)],
+                ),
+            )
+            .await,
+            observed(304, Some("hit"), true, ""),
+        );
+        assert_eq!(bmc.hits(Method::GET, INVENTORY_PATH), 1);
+
+        // A `no-store` request is forwarded and stores nothing: the next plain
+        // read of the same resource is a miss.
+        assert_eq!(
+            send(
+                &state,
+                proxied_request(
+                    Method::GET,
+                    MEMBER_PATH,
+                    &[(header::CACHE_CONTROL, "no-store")],
+                ),
+            )
+            .await,
+            observed(200, Some("bypass"), false, MEMBER_BODY),
+        );
+        assert_eq!(
+            send(&state, proxied_request(Method::GET, MEMBER_PATH, &[])).await,
+            observed(200, Some("miss"), true, MEMBER_BODY),
+        );
+        assert_eq!(bmc.hits(Method::GET, MEMBER_PATH), 2);
+        assert_eq!(
+            cache_of_observed(&send(&state, proxied_request(Method::GET, MEMBER_PATH, &[])).await),
+            Some("hit")
+        );
+
+        // A bypass goes upstream and is not a hit.
+        assert_eq!(
+            send(
+                &state,
+                proxied_request(
+                    Method::GET,
+                    INVENTORY_PATH,
+                    &[(header::CACHE_CONTROL, "no-cache")],
+                ),
+            )
+            .await,
+            observed(200, Some("bypass"), true, INVENTORY_BODY),
+        );
+        assert_eq!(bmc.hits(Method::GET, INVENTORY_PATH), 2);
+
+        // A write the policy does not name keeps the entry.
+        assert_eq!(
+            send(
+                &state,
+                proxied_request(
+                    Method::PATCH,
+                    "/redfish/v1/Managers/BMC/NodeManager/Domains/D0",
+                    &[],
+                ),
+            )
+            .await
+            .status,
+            204,
+        );
+        assert_eq!(
+            send(&state, proxied_request(Method::GET, INVENTORY_PATH, &[]))
+                .await
+                .cache
+                .as_deref(),
+            Some("hit"),
+        );
+        assert_eq!(bmc.hits(Method::GET, INVENTORY_PATH), 2);
+
+        // A method that is not a write leaves the entry alone.
+        assert_eq!(
+            send(
+                &state,
+                proxied_request(Method::OPTIONS, INVENTORY_PATH, &[])
+            )
+            .await
+            .status,
+            204,
+        );
+        assert_eq!(
+            send(&state, proxied_request(Method::GET, INVENTORY_PATH, &[]))
+                .await
+                .cache
+                .as_deref(),
+            Some("hit"),
+        );
+
+        // A query the cache does not key is forwarded and never stored.
+        assert_eq!(
+            send(
+                &state,
+                proxied_request(Method::GET, &format!("{INVENTORY_PATH}?vendor=1"), &[]),
+            )
+            .await,
+            observed(200, Some("uncacheable"), false, INVENTORY_BODY),
+        );
+
+        // A miss the BMC answers with 404 passes through, named but unaged.
+        let missing = format!("{INVENTORY_PATH}/Missing");
+        assert_eq!(
+            send(&state, proxied_request(Method::GET, &missing, &[])).await,
+            observed(404, Some("miss"), false, ""),
+        );
+
+        // A body too large to store is forwarded unstored, at the cost of a
+        // second upstream request for this caller.
+        let huge = send(&state, proxied_request(Method::GET, HUGE_PATH, &[])).await;
+        assert_eq!(
+            (
+                huge.status,
+                huge.cache.as_deref(),
+                huge.has_age,
+                huge.body.len()
+            ),
+            (200, Some("miss"), false, HUGE_LEN),
+        );
+        assert_eq!(bmc.hits(Method::GET, HUGE_PATH), 2);
+
+        // A chassis entry whose ttl has passed by the time it is read again;
+        // on loopback the next read can land within the same millisecond, so
+        // let the ttl pass explicitly.
+        assert_eq!(
+            send(&state, proxied_request(Method::GET, CHASSIS_PATH, &[])).await,
+            observed(200, Some("miss"), true, CHASSIS_BODY),
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // With the BMC failing, a caller who insisted on a live answer gets
+        // the failure and never a stored body, while a caller who did not,
+        // and whose entry is past its ttl, gets the stored body as a fallback.
+        bmc.failing.store(true, Ordering::SeqCst);
+        assert_eq!(
+            send(
+                &state,
+                proxied_request(
+                    Method::GET,
+                    INVENTORY_PATH,
+                    &[(header::CACHE_CONTROL, "no-cache")],
+                ),
+            )
+            .await,
+            observed(503, Some("bypass"), false, ""),
+        );
+        assert_eq!(bmc.hits(Method::GET, INVENTORY_PATH), 4);
+        assert_eq!(
+            send(&state, proxied_request(Method::GET, CHASSIS_PATH, &[])).await,
+            observed(200, Some("stale_if_error"), true, CHASSIS_BODY),
+        );
+        assert_eq!(bmc.hits(Method::GET, CHASSIS_PATH), 2);
+        bmc.failing.store(false, Ordering::SeqCst);
+
+        // A write the policy names drops the entry and holds the class off
+        // the cache: the next reads are forwarded, named `held`, and store
+        // nothing.
+        assert_eq!(
+            send(
+                &state,
+                proxied_request(
+                    Method::POST,
+                    "/redfish/v1/UpdateService/update-multipart",
+                    &[]
+                ),
+            )
+            .await
+            .status,
+            202,
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                send(&state, proxied_request(Method::GET, INVENTORY_PATH, &[])).await,
+                observed(200, Some("held"), false, INVENTORY_BODY),
+            );
+        }
+        assert_eq!(bmc.hits(Method::GET, INVENTORY_PATH), 6);
+
+        // An uncached class is forwarded every time and carries no cache header.
+        for _ in 0..2 {
+            assert_eq!(
+                send(&state, proxied_request(Method::GET, SYSTEM_PATH, &[])).await,
+                observed(200, None, false, r#"{"PowerState":"On"}"#),
+            );
+        }
+        assert_eq!(bmc.hits(Method::GET, SYSTEM_PATH), 2);
+
+        assert_eq!(lookups("miss"), 4.0);
+        assert_eq!(lookups("hit"), 5.0);
+        assert_eq!(lookups("bypass"), 3.0);
+        assert_eq!(lookups("stale_if_error"), 0.0);
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_bmc_proxy_cache_lookups_total",
+                &[("class", "e2e_volatile"), ("outcome", "stale_if_error")],
+            ),
+            1.0,
+        );
+        assert_eq!(lookups("held"), 2.0);
+        assert_eq!(lookups("uncacheable"), 1.0);
+        assert_eq!(lookups("coalesced"), 0.0);
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_bmc_proxy_cache_invalidations_total",
+                &[("class", E2E_CLASS)],
+            ),
+            1.0,
+        );
     }
 }
