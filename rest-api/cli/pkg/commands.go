@@ -1134,7 +1134,7 @@ func fetchAllPages(client *Client, method, path string, pathParams, queryParams 
 	}
 	queryParams["pageSize"] = strconv.Itoa(maxPageSize)
 
-	var allItems []json.RawMessage
+	allItems := make([]json.RawMessage, 0)
 	totalFromHeader := 0
 
 	for {
