@@ -23,8 +23,7 @@ use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Utc};
 use config_version::Versioned;
-use db::machine::ExtensionServiceObservationNotCurrent;
-use db::{ConditionalWrite, extension_service as db_extension_service};
+use db::extension_service as db_extension_service;
 use eyre::eyre;
 use itertools::Itertools;
 use model::extension_service::{
@@ -342,7 +341,8 @@ enum PlacementEvidence<'a> {
 ///
 /// The write is intentionally per DPU rather than batched at the end of the
 /// pass, so a failure on a later DPU cannot discard the verified results of
-/// DPUs this pass already reconciled.
+/// DPUs this pass already reconciled. A rejected observation invalidates the
+/// pass before the caller can use it for readiness.
 async fn persist_dpf_helm_chart_placement_observation(
     dpu_id: DpuMachineId,
     config_version: config_version::ConfigVersion,
@@ -371,23 +371,15 @@ async fn persist_dpf_helm_chart_placement_observation(
     };
 
     let mut txn = db_pool.begin().await?;
-    let observation_write = db::machine::update_extension_service_status_observation(
+    db::machine::update_extension_service_status_observation(
         txn.as_mut(),
         &dpu_id,
         ExtensionServiceType::DpfHelmChart,
         &observation,
     )
-    .await?;
+    .await?
+    .check_applied()?;
     txn.commit().await?;
-
-    // A concurrent reconciliation may have already stored a newer observation.
-    if let ConditionalWrite::NotApplied(ExtensionServiceObservationNotCurrent) = observation_write {
-        tracing::warn!(
-            dpu_machine_id = %dpu_id,
-            %observed_at,
-            "a newer DPF Helm chart placement observation already exists; discarding this one"
-        );
-    }
 
     Ok(observation)
 }

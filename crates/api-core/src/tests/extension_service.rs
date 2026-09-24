@@ -3851,6 +3851,173 @@ async fn test_find_instances_by_extension_service_multiple_services_per_instance
 }
 
 #[crate::sqlx_test]
+async fn test_rejected_helm_placement_observation_does_not_advance_readiness(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    use std::collections::BTreeMap;
+
+    use chrono::{Duration, Utc};
+    use model::extension_service::{DPF_HELM_CHART_PLACEMENT_LABEL_VALUE, DpfHelmChartIdentity};
+    use model::instance::status::extension_service::{
+        ExtensionServiceDeploymentStatus, ExtensionServiceStatusObservation,
+        InstanceExtensionServiceStatusObservation,
+    };
+    use model::machine::{InstanceState, ManagedHostState};
+
+    use crate::tests::common::api_fixtures::create_managed_host_with_dpf;
+    use crate::tests::common::api_fixtures::instance::{
+        default_os_config, single_interface_network_config,
+    };
+
+    let service_id = ExtensionServiceId::new();
+    let placement_labels = BTreeMap::from([(
+        DpfHelmChartIdentity::from_service_id(service_id).placement_label_key,
+        DPF_HELM_CHART_PLACEMENT_LABEL_VALUE.to_string(),
+    )]);
+    let label_reads = Arc::new(AtomicUsize::new(0));
+    let mut mock = MockDpfOperations::new();
+    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_node().returning(|_| Ok(()));
+    mock.expect_release_maintenance_hold().returning(|_| Ok(()));
+    mock.expect_is_reboot_required().returning(|_| Ok(false));
+    mock.expect_get_dpu_phase()
+        .returning(|_, _| Ok(carbide_dpf::DpuPhase::Ready));
+    mock.expect_deployment_type_for_dpu()
+        .returning(|_, _| Ok(carbide_dpf::DpuDeploymentType::Bf3));
+    mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    mock.expect_get_service_versions_for_dpu()
+        .returning(|_| Ok(vec![]));
+    mock.expect_create_dpu_service()
+        .returning(|service| Ok(dpu_service_observation(service)));
+    mock.expect_merge_dpu_device_node_labels()
+        .returning(|_, _| Ok(()));
+    let reads = label_reads.clone();
+    mock.expect_get_dpu_device_node_labels()
+        .returning(move |_| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Ok(placement_labels.clone())
+        });
+
+    let mut site_config = get_config();
+    site_config.dpf.enabled = true;
+    site_config.dpf.deployments.bf3.bfb_url = Some("http://example.com/test.bfb".into());
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(site_config).with_dpf_sdk(Arc::new(mock)),
+    )
+    .await;
+    create_test_tenants(&env).await?;
+    let mh = create_managed_host_with_dpf(&env).await;
+    let segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            rpc::VpcCreationRequest::builder("best_org")
+                .metadata(rpc::Metadata {
+                    name: "rejected-placement".into(),
+                    ..Default::default()
+                })
+                .rpc(),
+        )
+        .await;
+    let service = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_id: Some(service_id.to_string()),
+            service_name: "rejected-placement".into(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart as i32,
+            dpu_target: Some(rpc::DpuExtensionServiceDpuTarget::Primary as i32),
+            tenant_organization_id: "best_org".into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.into(),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner();
+    env.run_extension_service_controller_iteration().await;
+    env.api
+        .allocate_instance(Request::new(rpc::InstanceAllocationRequest {
+            machine_id: Some(mh.host().id),
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(rpc::TenantConfig {
+                    tenant_organization_id: "best_org".into(),
+                    ..Default::default()
+                }),
+                os: Some(default_os_config()),
+                network: Some(single_interface_network_config(segment_id)),
+                dpu_extension_services: Some(rpc::InstanceDpuExtensionServicesConfig {
+                    service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
+                        service_id: service_id.to_string(),
+                        version: service.latest_version_info.unwrap().version,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await?;
+
+    let waiting_state = ManagedHostState::Assigned {
+        instance_state: InstanceState::WaitingForExtensionServicesConfig,
+    };
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(txn.as_mut(), &mh.id.into(), &waiting_state).await?;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let instance = snapshot.instance.as_ref().unwrap();
+    let config = &instance.config.extension_services.service_configs[0];
+    // A future timestamp forces rejection of this pass's `Running` candidate.
+    // This tests the rejection branch, not overlapping controller passes.
+    let accepted_observation = InstanceExtensionServiceStatusObservation {
+        config_version: instance.extension_services_config_version,
+        instance_config_version: None,
+        observed_at: Utc::now() + Duration::days(1),
+        extension_service_statuses: vec![ExtensionServiceStatusObservation {
+            service_id,
+            service_type: ExtensionServiceType::DpfHelmChart,
+            service_name: String::new(),
+            version: config.version,
+            dpu_target: config.dpu_target,
+            removed: None,
+            overall_state: ExtensionServiceDeploymentStatus::Error,
+            components: vec![],
+            message: "placement could not be verified".into(),
+        }],
+    };
+    assert_eq!(
+        db::machine::update_extension_service_status_observation(
+            txn.as_mut(),
+            &mh.dpu().id,
+            ExtensionServiceType::DpfHelmChart,
+            &accepted_observation,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    env.run_machine_state_controller_iteration().await;
+
+    assert_eq!(label_reads.load(Ordering::SeqCst), 1);
+    let mut txn = env.db_txn().await;
+    let persisted = mh.snapshot(&mut txn).await;
+    assert_eq!(persisted.host_snapshot.current_state(), &waiting_state);
+    assert_eq!(
+        persisted.host_snapshot.current_version(),
+        snapshot.host_snapshot.current_version()
+    );
+    assert_eq!(
+        persisted.host_snapshot.controller_state_outcome,
+        snapshot.host_snapshot.controller_state_outcome
+    );
+    assert_eq!(
+        persisted.dpu_snapshots[0]
+            .status
+            .extension_service_status_observations
+            .for_service_type(ExtensionServiceType::DpfHelmChart),
+        Some(&accepted_observation)
+    );
+    txn.commit().await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_helm_target_placement_status_and_detach(
     pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
