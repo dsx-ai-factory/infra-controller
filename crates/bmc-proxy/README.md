@@ -112,15 +112,18 @@ Path matching syntax:
 - Percent escapes are matched by their exact wire spelling. An allow rule must spell every
   `%HH` sequence literally; `*` and `**` never consume a percent escape in an allow rule.
   For example, `%23Resource` matches `%23*`, but neither `*` nor `%23*` matches
-  `%23Resource%20Name`. Hexadecimal spelling is not normalized, so `%4A` and `%4a` differ.
+  `%23Resource%20Name`. This verbatim treatment is the general security policy for exceptional
+  paths: an allow rule authorizes only the spelling its operator entered, without inferring an
+  equivalent encoded, decoded, or hexadecimal-case variant. Consequently `%4A`, `%4a`, and `J`
+  are three separate ACL spellings.
 - Deny-rule wildcards do match percent escapes. A broad denial therefore cannot be bypassed by
   changing a resource identifier to an escaped spelling.
 
 Paths that would be structurally ambiguous remain refused with `400` before ACL evaluation:
 dot segments (`.` and `..`, including encoded spellings), malformed escapes, encoded `/` or `\`,
-encoded control characters, and `%25` nested encoding. Other percent-encoded paths reach the ACLs
-without decoding or normalization and receive `403` unless a matching allow rule contains their
-literal escapes.
+encoded control characters, `%25` nested encoding, and characters the URL parser would rewrite
+(including `{` and `}`). Other percent-encoded paths reach the ACLs without decoding or
+normalization and receive `403` unless a matching allow rule contains their literal escapes.
 
 This is a **breaking authorization change**: wildcard allow rules that previously covered every
 path do not cover percent-encoded paths. Add narrowly scoped literal rules for vendor resources
@@ -137,8 +140,11 @@ the client to re-enter the proxy. This includes `/`: the banner is served only w
 same-BMC `Location` the proxy cannot rewrite safely — a
 resolved path beginning with `//`, another port or scheme, or a value it cannot parse — is
 withheld: a redirect is rejected with a `502` error, and any other response (a `201 Created`,
-say) passes without the header. A redirect to a different host is passed through untouched and
-is **not** re-authorized by this proxy. Suppression logs contain only a bounded reason, never the
+say) passes without the header. A redirect to a different host is passed through untouched. The
+proxy makes no authorization decision about that future hop because the client's HTTP routing is
+outside its view: a client might proxy every destination, select a proxy only for known BMCs, or
+connect directly. If the follow-up reaches this proxy with a `Forwarded` target, the normal ACL
+evaluation applies to that request. Suppression logs contain only a bounded reason, never the
 `Location` value. Only a rejected redirect increments
 `carbide_bmc_proxy_authorization_denied_total`; withholding the header from another response is
 log-only because the request itself succeeded.

@@ -10,7 +10,7 @@ That section maps a caller principal such as `spiffe-service-id/nv-dps` to an or
 of ACL entries.
 
 By default the chart ships a baseline config at
-[`files/nico-bmc-proxy.toml`](files/nico-bmc-proxy.toml). To replace it from Helm values,
+[`files/carbide-bmc-proxy.toml`](files/carbide-bmc-proxy.toml). To replace it from Helm values,
 set `configFiles.nicoBmcProxyConfig` to the full TOML contents:
 
 ```yaml
@@ -67,7 +67,9 @@ Semantics:
 - Rules are evaluated in order and the first match wins.
 - If no rule matches, access is denied.
 - An allow-rule wildcard does not consume percent escapes. Every `%HH` sequence must appear
-  literally in the matching allow rule, without decoding or hexadecimal case normalization.
+  literally in the matching allow rule. This verbatim treatment is the general security policy
+  for exceptional paths: the matcher does not infer encoded, decoded, or hexadecimal-case
+  equivalents, so `%4A`, `%4a`, and `J` are three separate ACL spellings.
 - Deny-rule wildcards continue to match escaped paths so an encoded spelling cannot evade a deny.
 - Malformed escapes, encoded separators, traversal, control characters, and nested `%25`
   encoding are rejected before ACL evaluation.
@@ -87,15 +89,19 @@ Path wildcards:
 - `foo*bar` is not valid.
 - Only one `**` is allowed per path pattern.
 
-A *request* path the BMC would read differently is refused with a `400` response before
-the ACLs run: `.`/`..` in any spelling, percent-escapes of any kind, and any characters
-the path encoding would rewrite, braces included. Redirects are not followed — the
-`3xx` is returned instead. A redirect back to the proxied BMC is rewritten to a relative
-reference so the next hop is authorized like any other request. If the proxy cannot rewrite
-the `Location` safely (a resolved path beginning with `//`, another port or scheme, an
-unresolvable value), it is withheld rather than forwarded: a redirect is refused with a `502`
-response, any other response passes without the header. A redirect to a different host is
-passed through unchanged and is not re-authorized by the proxy.
+A *request* path the BMC would read differently is refused with a `400` response before the ACLs
+run: `.`/`..` in any spelling; malformed escapes; encoded `/`, `\`, control characters, or `%`;
+and characters the URL parser would rewrite, including braces. Other percent escapes retain their
+exact wire spelling and reach the ACLs, where an explicit allow rule must contain each literal escape.
+Redirects are not followed, the `3xx` is returned to the client instead. A redirect back to the
+proxied BMC is rewritten to a relative reference so the next hop is authorized like any other request.
+If the proxy cannot rewrite the `Location` safely (a resolved path beginning with `//`, another port or
+scheme, or an unresolvable value), it is withheld rather than forwarded: a redirect is refused
+with a `502` response, while any other response passes without the Location header. A redirect to a
+different host is passed through unchanged. The proxy makes no authorization decision about that
+future hop because the client's HTTP routing is outside its view: a client might proxy every
+destination, select a proxy only for known BMCs, or connect directly. If the follow-up reaches this
+proxy with a `Forwarded` target, the normal ACL evaluation applies to that request.
 
 When converting Redfish-style documented endpoints to ACLs, replace templated path components
 like `{id}` or `{session_id}` with `*`.
