@@ -1,8 +1,10 @@
 suite: readiness probe
 templates:
   - daemonset.yaml
+  - configmap.yaml
 tests:
   - it: should expose the metrics port on the main container
+    template: daemonset.yaml
     set:
       image:
         repository: test
@@ -16,6 +18,7 @@ tests:
             protocol: TCP
 
   - it: should probe /ready on the metrics port for readiness
+    template: daemonset.yaml
     set:
       image:
         repository: test
@@ -29,6 +32,7 @@ tests:
           value: metrics
 
   - it: should follow a custom metricsPort in both the container port and the probe
+    template: daemonset.yaml
     set:
       image:
         repository: test
@@ -42,7 +46,59 @@ tests:
           path: spec.template.spec.containers[0].readinessProbe.httpGet.port
           value: metrics
 
+  - it: should not mount an agent config by default, so the agent keeps its built-in 0.0.0.0:8888 listener
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: agent-config
+          any: true
+
+  - it: should mount an agent config with a matching telemetry address when metricsPort is overridden
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      metricsPort: 9999
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: agent-config
+            mountPath: /etc/forge/config.toml
+            subPath: config.toml
+            readOnly: true
+
+  - it: should render a matching telemetry address in the config map when metricsPort is overridden
+    template: configmap.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      metricsPort: 9999
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'metrics-address = "0\.0\.0\.0:9999"'
+
+  - it: should not render a config map by default
+    template: configmap.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - hasDocuments:
+          count: 0
+
   - it: should not add a readinessProbe to the LLDP sidecar
+    template: daemonset.yaml
     set:
       image:
         repository: test

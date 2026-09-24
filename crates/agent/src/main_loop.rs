@@ -1140,41 +1140,21 @@ impl MainLoop {
                         .await
                     };
 
+                    // Astra (Weave EW VPC) reconciliation is independent of HBN/DHCP: it is
+                    // reported on network status below, but a failure here must not block
+                    // the HBN/DHCP bookkeeping (or the readiness gate) that follows.
                     let astra_config_status = astra_weave::build_notify_weave_ew_vpc_astra_config(
                         conf.astra_config.as_ref(),
                     )
                     .await;
 
-                    let joined_result = match (update_result, dhcp_result, astra_config_status) {
-                        (Ok(hbn_changed), Ok(dhcp_changed), Ok(spx_net_status)) => {
-                            Ok((hbn_changed, dhcp_changed, spx_net_status))
-                        }
-                        (update_result, dhcp_result, astra_config_status) => {
-                            let mut errors = Vec::new();
-
-                            if let Err(err) = update_result {
-                                errors.push(format!("update={err:#}"));
-                            }
-                            if let Err(err) = dhcp_result {
-                                errors.push(format!("dhcp={err:#}"));
-                            }
-                            if let Err(err) = astra_config_status {
-                                errors.push(format!("spx={err:#}"));
-                            }
-
-                            Err(eyre::eyre!("network update failed: {}", errors.join(", ")))
-                        }
-                    };
-                    match joined_result {
-                        Ok((hbn_changed, dhcp_changed, astra_config_status)) => {
+                    match (update_result, dhcp_result) {
+                        (Ok(hbn_changed), Ok(dhcp_changed)) => {
                             self.current_network_version
                                 .update_from(&conf, supplemental_config.as_deref());
                             has_changed_hbn_config = hbn_changed;
                             has_changed_configs = hbn_changed || dhcp_changed;
                             hbn_dhcp_applied_ok = true;
-                            if conf.astra_config.is_some() {
-                                status_out.astra_config_status = Some(astra_config_status);
-                            }
                             if self.options.agent_platform_type.is_dpu_os()
                                 && let Err(err) = mtu::ensure().await
                             {
@@ -1210,12 +1190,38 @@ impl MainLoop {
                                 Err(err) => status_out.network_config_error = Some(err.to_string()),
                             }
                         }
-                        Err(err) => {
+                        (update_result, dhcp_result) => {
+                            let mut errors = Vec::new();
+                            if let Err(err) = update_result {
+                                errors.push(format!("update={err:#}"));
+                            }
+                            if let Err(err) = dhcp_result {
+                                errors.push(format!("dhcp={err:#}"));
+                            }
+                            let err = eyre::eyre!("network update failed: {}", errors.join(", "));
                             tracing::error!(
                                 error = format!("{err:#}"),
                                 "Writing network configuration"
                             );
                             status_out.network_config_error = Some(err.to_string());
+                        }
+                    }
+
+                    match astra_config_status {
+                        Ok(status) => {
+                            if conf.astra_config.is_some() {
+                                status_out.astra_config_status = Some(status);
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                error = format!("{err:#}"),
+                                "Notifying Weave EW VPC Astra config"
+                            );
+                            // Don't clobber a real HBN/DHCP failure already reported above.
+                            if status_out.network_config_error.is_none() {
+                                status_out.network_config_error = Some(err.to_string());
+                            }
                         }
                     }
 
