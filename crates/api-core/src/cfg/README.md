@@ -492,6 +492,7 @@ shipped configuration selects a plaintext mode.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `permissive_mode` | `bool` | — | Enable permissive authorization (dev mode). |
+| `allow_machineatron_scout_stream` | `bool` | `false` | Allow the authenticated `machine-a-tron` service identity to call `ScoutStream`. Enable only in isolated simulation environments; the simulator can claim any machine ID. |
 | `casbin_policy_file` | `Option<PathBuf>` | — | Path to Casbin CSV policy file. |
 | `cli_certs` | `Option<AllowedCertCriteria>` | — | Additional allowed cert criteria for nico-admin-cli. |
 | `trust` | `Option<TrustConfig>` | — | SPIFFE trust domain and allowed paths for client certs. |

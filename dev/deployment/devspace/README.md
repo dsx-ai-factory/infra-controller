@@ -12,6 +12,8 @@ The intent is that the app deploy path stays the same whether the prerequisites 
 - installed by the provided bootstrap script, or
 - brought by the developer from elsewhere.
 
+On Apple Silicon, see [Running DevSpace on macOS with vfkit](#running-devspace-on-macos-with-vfkit) for a single Ubuntu VM that hosts Docker, kind, and MAT.
+
 ## Prerequisites Bootstrap
 
 The bootstrap script operates on the current Kubernetes context and does not require a particular Kubernetes distribution. The provided full-stack deploy path uses kind-specific hooks to load locally built images into contexts named `kind-<cluster>`.
@@ -35,7 +37,7 @@ By default this script assumes an empty cluster and will idempotently:
 - deploy the local Keycloak realm
 - share the Core CA with REST so the site agent can use mTLS with Core
 - create the Secrets and ConfigMaps that the Helm chart expects
-- write [`values.generated.yaml`](values.generated.yaml) for the app deploy step
+- write `values.generated.yaml` for the app deploy step
 
 It is safe to re-run. It uses `helm upgrade --install`, `kubectl apply`, and Vault checks before writing mounts/roles/secrets.
 
@@ -120,6 +122,7 @@ DevSpace will:
 - deploy the REST umbrella, site-agent, and MCP charts in [`helm/rest`](../../../helm/rest)
 - inject the built image names and DevSpace-generated tags into both deployments at runtime
 - register a local REST site, configure its Temporal namespace, and confirm that the site agent establishes a Core gRPC connection
+- wait for a fresh, completed machine inventory cycle, confirm that REST reports every MAT host as tenant-usable at the registered, online site, and verify Core readiness and Scout responses
 
 The image builds are configured in [`devspace.yaml`](../../../devspace.yaml). DevSpace always invokes the native [`dev/docker/Dockerfile.build-container-x86_64`](../../../dev/docker/Dockerfile.build-container-x86_64) or [`dev/docker/Dockerfile.build-container-aarch64`](../../../dev/docker/Dockerfile.build-container-aarch64) build so Docker notices architecture and Dockerfile changes while reusing unchanged layers from its cache. In the first build stage, a single shared builder compiles the API, admin CLI, BMC proxy, and machine-a-tron binaries while the REST images build in parallel. The builder exports those binaries to the local `nico-devspace-core-artifacts` image. In the second stage, the three Core runtime Dockerfiles copy their binaries from that image in parallel and add only their distinct runtime packages and assets. DevSpace always invokes these lightweight second-stage builds because its custom-build change cache can outlive the corresponding local Docker images; Docker still reuses unchanged layers. BuildKit cache mounts are used for Cargo registry, Cargo git checkouts, and Cargo target output so rebuilds stay fast without copying host build artifacts into the image.
 
@@ -145,6 +148,17 @@ The local REST Dockerfiles inherit BuildKit's target operating system and archit
 DevSpace watches the Rust workspace, toolchain metadata, and the runtime Dockerfiles to decide when the shared Core artifacts need rebuilding. It always runs the three second-stage Core runtime builds to guarantee their generated tags exist locally. On kind clusters, the pre-deploy hooks then load all Core and REST images into the cluster selected by the current kube context.
 
 The `nico-machine-a-tron` Helm subchart configuration is in [`values.base.yaml`](values.base.yaml). The post-deploy setup resolves the `nico-machine-a-tron-mat-0-bmc-mock` Service ClusterIP and sets Core's runtime BMC proxy to that literal address. After allowing earlier requests to drain, it clears cached lockout-protection errors and refreshes existing host and DPU BMC endpoint records reported by machine-a-tron; endpoints not yet recorded on a clean install are left for normal discovery. This avoids hostname connection failures on affected ARM64 hosts and works unchanged on AMD64.
+
+DevSpace's Core configuration explicitly sets `auth.allow_machineatron_scout_stream = true` so MAT can open simulated Scout streams. This optional boolean defaults to `false` when omitted, including when the entire `[auth]` section is absent. It permits only the authenticated `machine-a-tron` service identity to call `ScoutStream`; it does not change other RPC permissions or enable an RBAC bypass. It is independent of `auth.permissive_mode`, which applies to Casbin. Configuration changes require restarting Core. Keep this setting disabled outside isolated simulation environments: when enabled, MAT can claim any machine ID, including a real host's ID. Do not use it in mixed real/simulated deployments.
+
+The readiness check allows 180 attempts with five-second pauses between attempts, reports progress every twelve attempts, and exits nonzero on failure. It matches REST's controller machine IDs against Core hosts in `Ready` or `Assigned/Ready`; REST's `isUsableByTenant` flag alone does not prove initialization has finished. Unassigned `Ready` hosts must also have a connected Scout stream and respond to a ping. Already assigned hosts do not require Scout while running a tenant OS, so success does not mean every host is free for a new allocation. Temporary port forwards are stopped and joined on normal exit, interrupt, or termination.
+
+Core recovery calls use [`core-admin.sh`](core-admin.sh), which selects a ready, non-terminating Core pod and obtains a one-hour admin certificate from that pod's configured Vault PKI role. It requires the root-token development setup (or a compatible Vault token with issuance permission), the trusted Vault admin CA, and `kubectl`/`jq` on the caller. The private key is passed over stdin, stored temporarily with owner-only permissions inside the pod, and removed on exit; server certificate verification is enabled. `LOCAL_DEV_NAMESPACE` selects the Core namespace (default `nico-system`); remaining arguments are passed to the bundled CLI:
+
+```bash
+bash dev/deployment/devspace/core-admin.sh -f json machine show
+bash dev/deployment/devspace/core-admin.sh scout-stream show
+```
 
 Common usage:
 
@@ -248,6 +262,91 @@ DevSpace then deploys the Helm chart with:
 
 The REST images are built from the existing `rest-api/docker/local` Dockerfiles and are passed to the three existing REST Helm charts with the same generated tag.
 
+## Running DevSpace on macOS with vfkit
+
+[`setup-devspace-mac-vfkit.sh`](setup-devspace-mac-vfkit.sh) manages one Ubuntu 24.04 ARM64 VM using [vfkit and Apple's Virtualization.framework](https://github.com/crc-org/vfkit/blob/main/doc/usage.md). Docker Engine runs inside Ubuntu; the entire DevSpace stack, including machine-a-tron, runs in kind inside that Docker Engine. Native Rust builds and tests run directly in Ubuntu. MAT retains its existing Helm configuration, service discovery, and certificates.
+
+The host requires Apple Silicon, macOS 13 or newer, Python 3, vfkit 0.6.2 or newer, Git, curl, OpenSSH, and macOS tar. [vfkit 0.6.2](https://github.com/crc-org/vfkit/releases/tag/v0.6.2) added the cloud-init `network-config` support used by this launcher. `up` and `start` reject older or unrecognized vfkit versions before accessing VM state. Install vfkit, Python, and the image conversion tool with Homebrew:
+
+```bash
+brew install vfkit python qemu
+```
+
+### First run and native tests
+
+```bash
+bash dev/deployment/devspace/setup-devspace-mac-vfkit.sh up
+bash dev/deployment/devspace/setup-devspace-mac-vfkit.sh exec -- cargo test --profile ci-tests
+
+# Optional: deploy the containerized DevSpace stack.
+bash dev/deployment/devspace/setup-devspace-mac-vfkit.sh deploy
+```
+
+`up` downloads Canonical's Ubuntu 24.04 ARM64 cloud image, verifies it against the HTTPS-published SHA256 manifest, converts it to raw format, boots Ubuntu, copies this checkout, and invokes [`setup-devspace-on-host.sh`](setup-devspace-on-host.sh) with `--skip-deploy --ip-family dual`. A mismatch aborts before creating the root disk. The image URL and checksum are recorded in `image.json`; an existing disk is reused without downloading again. A predownloaded, raw EFI-bootable Ubuntu 24.04 ARM64 cloud image can be supplied with `--image PATH --image-sha256 HEX`, avoiding the qemu-img dependency. Both options are required together and only used when creating a disk.
+
+`up` also invokes [`prepare-ubuntu-host-for-dev.sh`](prepare-ubuntu-host-for-dev.sh) to install native test prerequisites. This includes the repository's Rust toolchain, C/C++ build tools, protobuf, TPM/OpenIPMI/SSH libraries, Kea DHCPv4/DHCPv6, Vault, and a separate loopback-only PostgreSQL test container. PostgreSQL permits at least 1,000 connections, matching CI's parallel test budget. Kea's AppArmor rules allow the checkout's `target/debug` and `target/ci-tests` hooks. Native tests do not require a DevSpace deployment; both `cargo test` and `cargo test --profile ci-tests` run directly in Ubuntu.
+
+On ARM64, native preparation selects the same `clang -fuse-ld=mold` linker driver used by CI through `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER`. It applies to Cargo commands in a fresh login shell, including `exec`, without replacing the system linker used by other builds.
+
+`deploy` copies the checkout again and runs the full Linux setup, including prerequisite bootstrap, DevSpace deployment, and its stack health checks. Tool and image versions are selected by the existing Linux setup scripts; the vfkit launcher does not select separate versions. `prepare-dev` refreshes native prerequisites for an existing VM without deploying the stack. It may restart the test PostgreSQL container to increase an older connection limit, preserving its data; do not run it during tests. The preparation step is not proof that every workspace test passes; run the desired tests in the VM.
+
+Repeated setup leaves Docker and kind's container runtime running when their TLS-compatibility configuration is unchanged. A changed runtime configuration can still require a restart. Core uses a 30-second termination grace period in this single-node development stack to keep draining revisions from exhausting scheduling capacity during consecutive rollouts. The local Vault is an in-memory development server, not a durable secrets store: VM/runtime restarts can lose its state, so preserving the VM disk alone does not guarantee application-state recovery. Use a persistent external Vault for tests that require secrets to survive restarts.
+
+The guest account is `nico`, with password authentication disabled and passwordless sudo. The launcher generates a dedicated SSH key in the VM directory. SSH uses a private Unix socket and virtio-vsock, so management does not depend on discovering the guest's IP address. `ssh` opens a login shell in `/home/nico/infra-controller`; `exec -- COMMAND ARG...` runs an argument-preserving command there. Shell expressions require an explicit `bash -lc` command.
+
+### Resources and external storage
+
+| Option | Default | Contract |
+| --- | --- | --- |
+| `--vm-dir PATH` | `$HOME/.nico-devspace/vfkit` | State, SSH identity, logs, and raw disk; `VFKIT_VM_DIR` changes the default. CLI takes precedence. |
+| `--cpus N` | 6 | Positive integer, bounded by Virtualization.framework on this Mac. |
+| `--memory-gib N` | 16 | Positive integer GiB, bounded by Virtualization.framework. |
+| `--disk-gib N` | 200; 40 with `--data-dir` | Positive integer GiB for the root disk, at least the downloaded image's virtual size. |
+| `--data-dir PATH` | None | Optional separate directory containing an ext4 data disk for `/home`, `/var/lib/docker`, and `/var/lib/containerd`. |
+| `--data-disk-gib N` | 200 | Positive integer GiB; requires `--data-dir`. |
+| `--network MODE` | `nat` | `nat`, `bridged`, or `socket`; see networking below. |
+
+Resource and network settings are saved in `config.json` on the first `up`. Later runs reuse them; supplying different settings to `up` fails. Use a separate VM directory for a different configuration. VM state directories must initially be empty; paths may contain spaces but not commas or newlines. Supply options before the action. `--help` lists all actions and options.
+
+To keep the OS disk on the internal drive while placing `/home` and Docker/containerd data on an external drive, select an empty directory on an already mounted volume when creating the VM:
+
+```bash
+bash dev/deployment/devspace/setup-devspace-mac-vfkit.sh \
+  --data-dir "/Volumes/External 4TB/nico-vfkit-data" --data-disk-gib 300 up
+bash dev/deployment/devspace/setup-devspace-mac-vfkit.sh deploy
+```
+
+The data-disk location is saved with the VM; subsequent calls do not need `--data-dir`. First boot formats the VM's newly created data disk as ext4, copies the initial home directory, and adds persistent bind mounts at the standard Linux paths. Docker's daemon data-root and containerd's root are not rewritten. Missing external volumes or a missing initialized data disk cause startup to fail rather than silently place Docker data on the internal disk. This option applies to new VMs; it does not migrate an existing populated VM.
+
+Alternatively, set `VFKIT_VM_DIR="/Volumes/External 4TB/nico-vfkit"` before the first `up` to place the entire VM on the external drive. Use the same `VFKIT_VM_DIR` or `--vm-dir` on subsequent calls. A missing `/Volumes/<volume>` mount fails before creation. The source tree and Cargo caches use the guest's ext4 filesystem. APFS supports sparse files and copy-on-write image copies. Keep the drive mounted while the VM runs. No macOS source directory is mounted into the guest.
+
+`sync`, `up`, `deploy`, and `prepare-dev` copy tracked files and nonignored untracked files, including local edits. Host Git metadata is excluded to avoid dangling linked-worktree paths. The guest gets an independent Git workspace with an initial empty commit for DevSpace image tags, rather than host history. Sync also records the host's `git describe --tags --first-parent --always --long` and abbreviated HEAD in `~/.config/nico/vfkit-source-version.sh`. Fresh guest login shells export these as `VERSION` and `CI_COMMIT_SHORT_SHA`, the build-script inputs used by CI; native upgrade tests therefore see the source checkout's version, not the synthetic guest commit. The host checkout must have a reachable version tag beginning with `v` and a digit; sync fails if it does not.
+
+Transfer overwrites corresponding guest files but preserves guest-only files and build caches; it does not propagate source deletions. Run `sync` explicitly after host edits, and copy guest-only work back before replacing a VM. Open a new guest login shell after syncing to refresh its version environment.
+
+### IPv4, IPv6, and gateway attachment
+
+The guest enables IPv6 forwarding and accepts router advertisements on `eth0`. Docker's default bridge has a private IPv6 subnet, and kind is created with `networking.ipFamily: dual`. DevSpace purge preserves the cluster's IP family. This configures Linux/container networking; it does not convert every application Service or MAT listener into an IPv6 endpoint.
+
+`nat` uses Apple's built-in NAT. New NAT VMs use a 1280-byte guest MTU, with DHCP and router-advertisement MTU overrides disabled: larger HTTPS requests stalled with repeated TCP retransmissions at MTU 1500 on the tested macOS NAT path. This retains IPv6's minimum MTU. The setting is installed by first-boot cloud-init, so existing VMs must be recreated to receive it; `verify` checks it. Gateway modes retain their network-provided MTU. Upstream IPv6 capability depends on the host network; NAT must not be treated as proof of routed IPv6 access. For gateway-provided IPv4/IPv6, use a VMNet bridge or an existing gateway socket:
+
+- `--network bridged --interface en0` runs vfkit through `vmnet-run --operation-mode bridged --shared-interface en0`. Install [vmnet-helper](https://github.com/nirs/vmnet-helper#installation) using the instructions for your macOS version. `vmnet-run` must be on `PATH` or in its supported Homebrew or `/opt/vmnet-helper/bin` location. Choose the actual interface connected to your dual-stack network.
+- `--network socket --network-socket /absolute/path/to/gateway.sock` attaches vfkit's Ethernet device to an existing compatible Unix datagram socket. The gateway must already be running and supply DHCPv4, IPv6 router advertisements or DHCPv6, DNS, and upstream routes. The launcher does not create or stop that gateway.
+
+`--interface` is required only for `bridged`; `--network-socket` is required only for `socket`. They cannot be combined. Both modes use the same DHCPv4/DHCPv6/RA guest configuration. Bridging onto a LAN also exposes guest listeners to that LAN; use a dedicated development network when appropriate.
+
+`verify` checks Ubuntu ARM64, Linux-backed storage, Docker's data root/buildx, and the dual-stack kind node. For gateway modes it also requires a non-link-local IPv6 address and default route. Validate actual IPv6 traffic to your intended peer separately: an address and route alone do not prove gateway forwarding, DNS, or application reachability.
+
+### Services and lifecycle
+
+```bash
+bash dev/deployment/devspace/setup-devspace-mac-vfkit.sh forward
+```
+
+`forward` keeps an SSH tunnel open until Ctrl-C, binding REST to `127.0.0.1:18388` and Keycloak to `127.0.0.1:18082`. Keycloak's local port matches the configured token issuer. An occupied local port makes the tunnel fail. Kubernetes access stays inside the guest, for example through `exec -- kubectl get pods -A`.
+
+`status` prints saved configuration and the matching vfkit PID. `stop` requests a graceful shutdown and preserves all state; it reports a timeout rather than force-stopping the VM. `start` boots an existing VM and waits for cloud-init/SSH. The VM survives the invoking terminal but must be started after a Mac reboot. `vfkit.log` and `serial.log` are in the selected VM directory. There is no automatic disk deletion or build-cache pruning.
+
 ## Resetting the local environment
 
 Once deployed, the `nico-api` container will run and initialize its database, and the `machine-a-tron` container will run a set of mock machines, which will be discovered and ingested into the database, and run through the state machine until they reach a Ready state.
@@ -258,7 +357,7 @@ Reset the complete local environment by running:
 devspace purge -n nico-system
 ```
 
-When the current context is `kind-<cluster>`, the purge pipeline deletes and recreates that kind cluster with the same node image, then bootstraps clean prerequisites. This removes all Kubernetes state, including the Core and REST databases, Temporal namespaces and history, Vault data, Keycloak data, certificates, site registration, Helm releases (including machine-a-tron), CRDs, and persistent volumes.
+When the current context is `kind-<cluster>`, the purge pipeline deletes and recreates that kind cluster with the same node image and IP family, then bootstraps clean prerequisites. This removes all Kubernetes state, including the Core and REST databases, Temporal namespaces and history, Vault data, Keycloak data, certificates, site registration, Helm releases (including machine-a-tron), CRDs, and persistent volumes.
 
 The local REST migration hook uses the same PostgreSQL `14.5-alpine` image as the bootstrapped database, so the freshly pulled image is reused after cluster recreation.
 
@@ -288,11 +387,12 @@ devspace deploy -n nico-system
 
 - [`prepare-ubuntu-host-for-dev.sh`](prepare-ubuntu-host-for-dev.sh)
 - [`setup-devspace-on-host.sh`](setup-devspace-on-host.sh)
+- [`setup-devspace-mac-vfkit.sh`](setup-devspace-mac-vfkit.sh)
 - [`reset-devspace-on-host.sh`](reset-devspace-on-host.sh)
 - [`bootstrap-prereqs.sh`](bootstrap-prereqs.sh)
 - [`reset-kind-cluster.sh`](reset-kind-cluster.sh)
 - [`setup-rest-integration.sh`](setup-rest-integration.sh)
 - [`devspace.yaml`](../../../devspace.yaml)
 - [`values.base.yaml`](values.base.yaml)
-- [`values.generated.yaml`](values.generated.yaml)
+- `values.generated.yaml`, written by `bootstrap-prereqs.sh` and not tracked
 - [`nuke-postgres.sh`](nuke-postgres.sh)
