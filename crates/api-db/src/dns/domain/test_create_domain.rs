@@ -256,3 +256,33 @@ async fn stale_domain_snapshot_cannot_delete_a_newer_row(pool: sqlx::PgPool) {
         Err(DatabaseError::ConcurrentModificationError("domain", _))
     ));
 }
+
+// `ZoneTtl` rejects out-of-range values on decode, so a row holding one would
+// be unreadable and its zone unservable. The column's CHECK stops such a value
+// being written by anything other than nico-api, while NULL stays allowed.
+#[crate::sqlx_test]
+async fn default_ttl_column_rejects_out_of_range_values(pool: sqlx::PgPool) {
+    let mut txn = pool.begin().await.unwrap();
+    let domain = db::dns::domain::persist(NewDomain::new("ttl-check.example"), txn.as_mut())
+        .await
+        .unwrap();
+
+    for out_of_range in [29, 86_401] {
+        // A failed statement aborts its transaction, so run each attempt in
+        // a savepoint that is rolled back before the next one.
+        let mut attempt = sqlx::Acquire::begin(&mut txn).await.unwrap();
+        let error = sqlx::query("UPDATE domains SET default_ttl = $1 WHERE id = $2")
+            .bind(out_of_range)
+            .bind(domain.id)
+            .execute(attempt.as_mut())
+            .await
+            .expect_err("the CHECK constraint rejects out-of-range values");
+        attempt.rollback().await.unwrap();
+        assert!(
+            error
+                .as_database_error()
+                .is_some_and(|db_error| db_error.is_check_violation()),
+            "{out_of_range} fails the CHECK constraint, got {error}"
+        );
+    }
+}

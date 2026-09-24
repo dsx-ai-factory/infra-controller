@@ -321,7 +321,7 @@ type EndpointExplorationReport struct {
 	// If the endpoint is a BMC that belongs to a Machine and enough data is
 	// available to calculate the `MachineId`, this field contains the `MachineId`
 	MachineId *string `protobuf:"bytes,3,opt,name=machine_id,json=machineId,proto3,oneof" json:"machine_id,omitempty"`
-	// / The time it took to explore the endpoint in the last site explorer run
+	/// The time it took to explore the endpoint in the last site explorer run
 	LastExplorationLatency *durationpb.Duration `protobuf:"bytes,4,opt,name=last_exploration_latency,json=lastExplorationLatency,proto3,oneof" json:"last_exploration_latency,omitempty"`
 	// Vendor as reported by Redfish
 	Vendor *string `protobuf:"bytes,11,opt,name=vendor,proto3,oneof" json:"vendor,omitempty"`
@@ -484,7 +484,7 @@ type ExploredEndpoint struct {
 	// The version of `report`.
 	// Will increase every time the report gets updated.
 	ReportVersion string `protobuf:"bytes,3,opt,name=report_version,json=reportVersion,proto3" json:"report_version,omitempty"`
-	// / Whether the endpoint will be explored in the next site-explorer run
+	/// Whether the endpoint will be explored in the next site-explorer run
 	ExplorationRequested bool `protobuf:"varint,4,opt,name=exploration_requested,json=explorationRequested,proto3" json:"exploration_requested,omitempty"`
 	// The current preingestion state
 	PreingestionState string `protobuf:"bytes,5,opt,name=preingestion_state,json=preingestionState,proto3" json:"preingestion_state,omitempty"`

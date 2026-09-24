@@ -15,20 +15,26 @@
  * limitations under the License.
  */
 
-mod show;
-mod update;
-
-// Cross-module re-exports for jump module
+use carbide_uuid::domain::DomainId;
 use clap::Parser;
-pub(crate) use show::args::Args as ShowDomain;
-pub(crate) use show::cmd::handle_show;
 
-use crate::cfg::dispatch::Dispatch;
+#[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
 
-#[derive(Parser, Debug, Dispatch)]
-pub(crate) enum Cmd {
-    #[clap(about = "Display Domain information")]
-    Show(show::Args),
-    #[clap(about = "Update domain default TTL")]
-    Update(update::Args),
+Change a domain's default record TTL to ten minutes:
+    $ nico-admin-cli domain update 12345678-1234-5678-90ab-cdef01234567 --default-ttl 600
+
+")]
+pub(crate) struct Args {
+    #[clap(value_name = "DomainId", help = "ID of the domain to update")]
+    pub(super) domain: DomainId,
+
+    #[clap(
+        long,
+        value_name = "SECONDS",
+        help = "Default TTL for the zone's records, 30 to 86400 seconds. Once set it cannot be \
+                cleared back to the site default"
+    )]
+    pub(super) default_ttl: u32,
 }
