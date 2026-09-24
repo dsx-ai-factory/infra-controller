@@ -119,7 +119,8 @@ spec:
         # Production-validated: IP availability <15% for 60m
         - alert: NicoLowIPCapacity
           expr: |
-            (carbide_available_ips_count / carbide_total_ips_count) < 0.15
+            (carbide_available_ips_count{name!="static-assignments"}
+            / carbide_total_ips_count{name!="static-assignments"}) < 0.15
           for: 60m
           labels:
             severity: warning
