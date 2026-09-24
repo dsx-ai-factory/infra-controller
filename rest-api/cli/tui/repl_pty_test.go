@@ -199,19 +199,28 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "ethernet-instance\r")
-		terminal.waitFor(t, "Subnet for interface:")
+		terminal.waitFor(t, "Subnet for Ethernet interface:")
 		terminal.send(t, "\r")
-		terminal.waitFor(t, "Add another interface (have 1)?")
+		terminal.waitFor(t, "Add another Ethernet interface (have 1)?")
 		terminal.send(t, "y\r")
 		terminal.waitFor(t, "Virtual function ID (0-15)")
 		terminal.send(t, "7\r")
-		terminal.waitFor(t, "Add another interface (have 2)?")
+		terminal.waitFor(t, "Add another Ethernet interface (have 2)?")
 		terminal.send(t, "n\r")
+		terminal.waitFor(t, "Configure an InfiniBand interface?")
+		terminal.send(t, "y\r")
+		terminal.waitFor(t, "InfiniBand partition for interface ConnectX-7 0:")
+		terminal.send(t, "training-partition\r")
+		terminal.waitFor(t, "Configure another InfiniBand interface?")
+		terminal.send(t, "y\r")
+		terminal.waitFor(t, "InfiniBand partition for interface ConnectX-7 2:")
+		terminal.send(t, "storage-partition\r")
 		terminal.waitFor(t, "Instance created: ethernet-instance")
 		ethernetTranscript := terminal.transcript()[ethernetCommandStart:]
 		assert.NotContains(t, ethernetTranscript, "pending-subnet")
 		assert.Contains(t, ethernetTranscript, "--data")
 		assert.Contains(t, ethernetTranscript, `"interfaces":[{"isPhysical":true,"subnetId":"subnet-1"},{"isPhysical":false,"subnetId":"subnet-2","virtualFunctionId":7}]`)
+		assert.Contains(t, ethernetTranscript, `"infinibandInterfaces":[{"device":"ConnectX-7","deviceInstance":0,"isPhysical":true,"partitionId":"ib-partition-1"},{"device":"ConnectX-7","deviceInstance":2,"isPhysical":true,"partitionId":"ib-partition-2"}]`)
 
 		// An FNN VPC on a dual-DPU machine requires one physical interface
 		// per DPU. Additional interfaces on a DPU are virtual and carry the
@@ -265,15 +274,15 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Instance name")
 		terminal.send(t, "fnn-fallback-instance\r")
-		terminal.waitFor(t, "VPC prefix for interface:")
+		terminal.waitFor(t, "VPC prefix for Ethernet interface:")
 		terminal.send(t, "\r")
-		terminal.waitFor(t, "Add another interface (have 1)?")
+		terminal.waitFor(t, "Add another Ethernet interface (have 1)?")
 		terminal.send(t, "y\r")
-		terminal.waitFor(t, "VPC prefix for interface:")
+		terminal.waitFor(t, "VPC prefix for Ethernet interface:")
 		terminal.send(t, "\r")
 		terminal.waitFor(t, "Virtual function ID (0-15)")
 		terminal.send(t, "5\r")
-		terminal.waitFor(t, "Add another interface (have 2)?")
+		terminal.waitFor(t, "Add another Ethernet interface (have 2)?")
 		terminal.send(t, "n\r")
 		terminal.waitFor(t, "Instance created: fnn-fallback-instance")
 		fnnFallbackTranscript := terminal.transcript()[fnnFallbackCommandStart:]
@@ -293,8 +302,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "flat-instance\r")
 		terminal.waitFor(t, "Instance created: flat-instance")
 		flatTranscript := terminal.transcript()[flatCommandStart:]
-		assert.NotContains(t, flatTranscript, "Subnet for interface:")
-		assert.NotContains(t, flatTranscript, "VPC prefix for interface:")
+		assert.NotContains(t, flatTranscript, "Subnet for Ethernet interface:")
+		assert.NotContains(t, flatTranscript, "VPC prefix for Ethernet interface:")
 
 		// A Tenant without effective TargetedInstanceCreation at the selected
 		// Site must fail locally before the TUI offers the Machine picker.
@@ -505,7 +514,19 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		require.Len(t, instanceRequests, 4) // no request sent for instance create without a VPC prefix (otherwise would be 5)
 		assert.JSONEq(
 			t,
-			`{"name":"ethernet-instance","machineId":"machine-1","vpcId":"vpc-1","interfaces":[{"subnetId":"subnet-1","isPhysical":true},{"subnetId":"subnet-2","isPhysical":false,"virtualFunctionId":7}]}`,
+			`{
+				"name":"ethernet-instance",
+				"machineId":"machine-1",
+				"vpcId":"vpc-1",
+				"interfaces":[
+					{"subnetId":"subnet-1","isPhysical":true},
+					{"subnetId":"subnet-2","isPhysical":false,"virtualFunctionId":7}
+				],
+				"infinibandInterfaces":[
+					{"partitionId":"ib-partition-1","device":"ConnectX-7","deviceInstance":0,"isPhysical":true},
+					{"partitionId":"ib-partition-2","device":"ConnectX-7","deviceInstance":2,"isPhysical":true}
+				]
+			}`,
 			instanceRequests[0].Body,
 		)
 		assert.NotContains(t, instanceRequests[0].Body, "vpcPrefixId")
@@ -547,7 +568,15 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 			http.MethodGet,
 			"/v2/org/acme/nico/machine/machine-1",
 		)
-		require.Len(t, machineDetailRequests, 3)
+		require.Len(t, machineDetailRequests, 5)
+		infiniBandPartitionRequests := recorder.matching(
+			http.MethodGet,
+			"/v2/org/acme/nico/infiniband-partition",
+		)
+		require.Len(t, infiniBandPartitionRequests, 1)
+		assert.Contains(t, infiniBandPartitionRequests[0].Query, "orderBy=NAME_ASC")
+		assert.Contains(t, infiniBandPartitionRequests[0].Query, "siteId=site-1")
+		assert.Contains(t, infiniBandPartitionRequests[0].Query, "status=Ready")
 		subnetRequests := recorder.matching(
 			http.MethodGet,
 			"/v2/org/acme/nico/subnet",
@@ -927,12 +956,25 @@ func newInteractiveRegressionHandler(recorder *cliRegressionRecorder) http.Handl
 				http.MethodGet,
 				"/v2/org/acme/nico/machine/machine-1",
 			))
-			if machineDetailRequestCount != 2 {
+			if machineDetailRequestCount == 2 {
 				_, _ = io.WriteString(w, `{
 					"id":"machine-1",
 					"siteId":"site-1",
 					"status":"Ready",
-					"machineCapabilities":[]
+					"machineCapabilities":[
+						{"type":"InfiniBand","name":"ConnectX-7","count":3,"inactiveDevices":[1]}
+					]
+				}`)
+				return
+			}
+			if machineDetailRequestCount == 3 {
+				_, _ = io.WriteString(w, `{
+					"id":"machine-1",
+					"siteId":"site-1",
+					"status":"Ready",
+					"machineCapabilities":[
+						{"type":"Network","name":"dual-dpu-network","deviceType":"DPU","count":2}
+					]
 				}`)
 				return
 			}
@@ -940,10 +982,14 @@ func newInteractiveRegressionHandler(recorder *cliRegressionRecorder) http.Handl
 				"id":"machine-1",
 				"siteId":"site-1",
 				"status":"Ready",
-				"machineCapabilities":[
-					{"type":"Network","name":"dual-dpu-network","deviceType":"DPU","count":2}
-				]
+				"machineCapabilities":[]
 			}`)
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/v2/org/acme/nico/infiniband-partition":
+			_, _ = io.WriteString(w, `[
+				{"id":"ib-partition-1","name":"training-partition","siteId":"site-1","status":"Ready"},
+				{"id":"ib-partition-2","name":"storage-partition","siteId":"site-1","status":"Ready"}
+			]`)
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/machine/machine-1/status-history":
 			w.WriteHeader(http.StatusUnprocessableEntity)
