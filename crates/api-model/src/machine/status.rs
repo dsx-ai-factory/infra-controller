@@ -14,7 +14,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::bmc_info::BmcInfo;
 use crate::hardware_info::{HardwareInfo, MachineInventory, MachineNvLinkInfo};
@@ -52,9 +54,22 @@ pub struct MachineStatus {
     pub infiniband_status_observation: Option<MachineInfinibandStatusObservation>,
     pub nvlink_status_observation: Option<MachineNvLinkStatusObservation>,
     pub spx_status_observation: Option<MachineSpxStatusObservation>,
+    /// Latest successful unfiltered Scout MLX report, or `None` before one is stored.
+    pub mlx_device_observation: Option<MlxDeviceObservation>,
     pub extension_service_status_observations: InstanceExtensionServiceStatusObservationByType,
     pub slot_number: Option<i32>,
     pub tray_index: Option<i32>,
     /// Power management state for this machine (hosts only; absent for DPUs).
     pub power_options: Option<PowerOptions>,
+}
+
+/// `MlxDeviceObservation` retains the devices from an unfiltered Scout MLX report.
+/// Device facts can be incomplete; presence alone does not make a device eligible
+/// for firmware updates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MlxDeviceObservation {
+    /// Time Scout generated the report, not the time Core received it.
+    pub observed_at: DateTime<Utc>,
+    /// All reported devices, including entries with unavailable optional facts.
+    pub devices: Vec<MlxDeviceInfo>,
 }

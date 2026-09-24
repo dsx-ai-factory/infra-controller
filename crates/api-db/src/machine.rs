@@ -51,6 +51,7 @@ use model::machine::network::{
 };
 use model::machine::nvlink::MachineNvLinkStatusObservation;
 use model::machine::spx::MachineSpxStatusObservation;
+use model::machine::status::MlxDeviceObservation;
 use model::machine::upgrade_policy::AgentUpgradePolicy;
 use model::machine::{
     AnyMachine, CURRENT_STATE_MODEL_VERSION, Dpf, DpuInfo, DpuInfoStatusObservation, DpuMachine,
@@ -1272,6 +1273,32 @@ pub async fn update_spx_status_observation(
                         <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
     let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(match updated {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(MachineObservationNotCurrent),
+    })
+}
+
+/// Stores an unfiltered MLX observation when none is stored or its timestamp is
+/// at least as recent, comparing both JSON timestamps at PostgreSQL's
+/// microsecond precision. A missing machine or an unmet timestamp condition
+/// returns `NotApplied`; callers must validate report ownership and completeness.
+pub async fn update_mlx_device_observation(
+    txn: &mut PgConnection,
+    machine_id: &HostMachineId,
+    observation: &MlxDeviceObservation,
+) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
+    let query = "UPDATE machines SET mlx_device_observation = $1::json WHERE id = $2 AND
+                (mlx_device_observation IS NULL
+                    OR (mlx_device_observation->>'observed_at')::timestamptz
+                        <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
+    let updated: Option<(MachineId,)> = sqlx::query_as(query)
+        .bind(sqlx::types::Json(observation))
         .bind(machine_id)
         .fetch_optional(txn)
         .await
@@ -3807,10 +3834,12 @@ mod test {
         use model::machine::infiniband::MachineInfinibandStatusObservation;
         use model::machine::nvlink::MachineNvLinkStatusObservation;
         use model::machine::spx::MachineSpxStatusObservation;
+        use model::machine::status::MlxDeviceObservation;
 
         use super::{
             MachineObservationNotCurrent, update_infiniband_status_observation,
-            update_nvlink_status_observation, update_spx_status_observation,
+            update_mlx_device_observation, update_nvlink_status_observation,
+            update_spx_status_observation,
         };
         use crate::ConditionalWrite::{Applied, NotApplied};
 
@@ -3841,6 +3870,7 @@ mod test {
             "infiniband_status_observation",
             "nvlink_status_observation",
             "spx_status_observation",
+            "mlx_device_observation",
         ] {
             for Case {
                 scenario,
@@ -3925,6 +3955,17 @@ mod test {
                             serde_json::to_value(observation)?,
                         )
                     }
+                    "mlx_device_observation" => {
+                        let observation = MlxDeviceObservation {
+                            observed_at,
+                            devices: Vec::new(),
+                        };
+                        (
+                            update_mlx_device_observation(txn.as_mut(), &machine_id, &observation)
+                                .await?,
+                            serde_json::to_value(observation)?,
+                        )
+                    }
                     _ => unreachable!("the table contains only observation columns"),
                 };
                 assert_eq!(
@@ -3949,6 +3990,126 @@ mod test {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn mlx_observation_round_trips_through_machine_snapshot(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine::status::MlxDeviceObservation;
+
+        use super::{MachineObservationNotCurrent, update_mlx_device_observation};
+        use crate::ConditionalWrite::{Applied, NotApplied};
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let observation: MlxDeviceObservation = serde_json::from_value(serde_json::json!({
+            "observed_at": "2026-09-16T16:00:00.123456789Z",
+            "devices": [
+                {
+                    "pci_name": "0000:01:00.0",
+                    "device_type": "ConnectX8",
+                    "psid": "MT_0000001111",
+                    "part_number": "MCX813106AS-VEA",
+                    "fw_version_current": "40.45.1000"
+                },
+                {
+                    "pci_name": "0000:b4:00.0",
+                    "device_type": "BlueField3",
+                    "status": "Failed to open device"
+                }
+            ]
+        }))?;
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
+            NotApplied(MachineObservationNotCurrent),
+            "a missing machine cannot accept an observation"
+        );
+        let machine = super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        assert_eq!(machine.status.mlx_device_observation, None);
+        assert_eq!(
+            update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
+            Applied(())
+        );
+        txn.commit().await?;
+
+        let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("fixture host");
+        assert_eq!(machine.status.mlx_device_observation, Some(observation));
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn concurrent_mlx_observations_preserve_newer_report(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine::status::MlxDeviceObservation;
+
+        use super::{MachineObservationNotCurrent, update_mlx_device_observation};
+        use crate::ConditionalWrite::{Applied, NotApplied};
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let newer = MlxDeviceObservation {
+            observed_at: "2026-09-16T16:00:01Z".parse()?,
+            devices: Vec::new(),
+        };
+        let older = MlxDeviceObservation {
+            observed_at: "2026-09-16T16:00:00Z".parse()?,
+            devices: Vec::new(),
+        };
+        let mut newer_txn = pool.begin().await?;
+        assert_eq!(
+            update_mlx_device_observation(newer_txn.as_mut(), &machine_id, &newer).await?,
+            Applied(())
+        );
+        let mut older_txn = pool.begin().await?;
+        let release_newer = async {
+            // The older write must reach the locked row before the newer
+            // report commits, so its predicate must be rechecked after waiting.
+            wait_until_blocked_on(&pool, "UPDATE machines SET mlx_device_observation", 1).await;
+            newer_txn.commit().await
+        };
+        let (older_result, released) =
+            tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                tokio::join!(
+                    update_mlx_device_observation(older_txn.as_mut(), &machine_id, &older),
+                    release_newer,
+                )
+            })
+            .await
+            .expect("the older observation must finish after the newer transaction commits");
+        released?;
+        assert_eq!(older_result?, NotApplied(MachineObservationNotCurrent));
+        older_txn.commit().await?;
+
+        let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("fixture host");
+        assert_eq!(machine.status.mlx_device_observation, Some(newer));
         Ok(())
     }
 

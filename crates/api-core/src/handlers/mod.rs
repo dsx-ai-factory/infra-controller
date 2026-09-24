@@ -67,6 +67,7 @@ pub(super) mod managed_host;
 pub(super) mod managed_host_reset;
 pub(super) mod measured_boot;
 pub(super) mod mlx_admin;
+mod mlx_device_report;
 pub(super) mod network_devices;
 pub(super) mod network_security_group;
 pub(super) mod network_segment;
