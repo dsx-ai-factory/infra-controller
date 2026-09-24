@@ -155,12 +155,12 @@ async fn test_delete_outdated_iterations(pool: sqlx::PgPool) -> eyre::Result<()>
 }
 
 #[derive(Debug, Default)]
-struct TestStateControllerIO {
+pub(crate) struct TestStateControllerIO {
     history_writes: AtomicUsize,
 }
 
 #[derive(Debug, Clone)]
-struct TestObject {
+pub(crate) struct TestObject {
     id: String,
     controller_state: Versioned<TestObjectControllerState>,
 }
@@ -182,13 +182,13 @@ impl<'r> FromRow<'r, PgRow> for TestObject {
 /// State of a IB subnet as tracked by the controller
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
-enum TestObjectControllerState {
+pub(crate) enum TestObjectControllerState {
     A,
     B,
     C,
 }
 
-struct TestStateControllerContextObjects {}
+pub(crate) struct TestStateControllerContextObjects {}
 
 impl StateHandlerContextObjects for TestStateControllerContextObjects {
     type Services = ();
@@ -198,7 +198,7 @@ impl StateHandlerContextObjects for TestStateControllerContextObjects {
 #[derive(Debug, Default)]
 struct PanicInListObjectsStateControllerIO;
 
-async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
+pub(crate) async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
     let mut txn = pool.begin().await.unwrap();
 
     sqlx::query(
@@ -246,7 +246,7 @@ async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
     txn.commit().await.unwrap();
 }
 
-async fn create_test_object(id: String, txn: &mut PgConnection) -> TestObject {
+pub(crate) async fn create_test_object(id: String, txn: &mut PgConnection) -> TestObject {
     let version: ConfigVersion = ConfigVersion::initial();
     let state = TestObjectControllerState::A;
 

@@ -567,7 +567,7 @@ service, IB partition, DPA interface, rack, power shelf, switch, SPDM).
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `iteration_time` | `Duration` | `30s` | Target duration for one state controller iteration. |
-| `max_object_handling_time` | `Duration` | `3m` | Timeout for evaluating/advancing a single object's state. |
+| `max_object_handling_time` | `Duration` | `3m` | Shared budget for claiming queued objects and evaluating/advancing each object's state, starting before claim connection acquisition and including commit and dispatch. A late claim starts no tasks; a late handler returns `StateHandlerError::Timeout`. Abandoned reservations become eligible again after three times this duration. |
 | `max_concurrency` | `usize` | `10` | Max objects advanced in parallel. |
 | `processor_dispatch_interval` | `Duration` | `2s` | Max wait time when checking for and dispatching new tasks. |
 | `processor_log_interval` | `Duration` | `60s` | How often the processor emits log messages. |
