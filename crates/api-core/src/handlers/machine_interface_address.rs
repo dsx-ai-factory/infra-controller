@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::net::IpAddr;
+
 use carbide_instrument::emit;
 use carbide_network::ip::IdentifyAddressFamily;
 use mac_address::MacAddress;
@@ -26,7 +28,7 @@ use model::network_segment::NetworkSegmentType;
 use rpc::forge as rpc;
 use tonic::{Request, Response, Status};
 
-use crate::api::Api;
+use crate::api::{Api, log_request_data};
 use crate::errors::CarbideError;
 use crate::handlers::static_address_metrics::{
     PreallocationSuccess, StaticAddressAssignmentCompleted, StaticAddressPreallocationCompleted,
@@ -495,6 +497,142 @@ pub(crate) async fn find_interface_addresses(
     }))
 }
 
+/// Parse an optional MAC-address filter from an operator request.
+fn parse_reserved_mac_filter(mac: Option<String>) -> Result<Option<MacAddress>, CarbideError> {
+    mac.map(|mac| {
+        mac.parse::<MacAddress>()
+            .map_err(|e| CarbideError::InvalidArgument(format!("invalid MAC address {mac}: {e}")))
+    })
+    .transpose()
+}
+
+/// Parse an optional address filter from an operator request.
+fn parse_reserved_address_filter(address: Option<String>) -> Result<Option<IpAddr>, CarbideError> {
+    address
+        .map(|address| {
+            address.parse::<IpAddr>().map_err(|e| {
+                CarbideError::InvalidArgument(format!("invalid IP address {address}: {e}"))
+            })
+        })
+        .transpose()
+}
+
+pub(crate) async fn admin_find_reserved_address_ids(
+    api: &Api,
+    request: Request<rpc::AdminFindReservedAddressesRequest>,
+) -> Result<Response<rpc::AdminReservedAddressIdList>, Status> {
+    log_request_data(&request);
+    let rpc::AdminFindReservedAddressesRequest {
+        reserved_by_mac,
+        ip_address,
+    } = request.into_inner();
+    let mac_filter = parse_reserved_mac_filter(reserved_by_mac)?;
+    let address_filter = parse_reserved_address_filter(ip_address)?;
+
+    let mut txn = api.txn_begin().await?;
+    let ids = db::machine_interface_address::find_reserved_ids(
+        txn.as_pgconn(),
+        mac_filter,
+        address_filter,
+    )
+    .await?;
+    txn.commit().await?;
+
+    Ok(Response::new(rpc::AdminReservedAddressIdList {
+        ip_addresses: ids.into_iter().map(|a| a.to_string()).collect(),
+    }))
+}
+
+pub(crate) async fn admin_find_reserved_addresses_by_ids(
+    api: &Api,
+    request: Request<rpc::AdminReservedAddressesByIdsRequest>,
+) -> Result<Response<rpc::AdminFindReservedAddressesResponse>, Status> {
+    log_request_data(&request);
+    let addresses: Vec<IpAddr> = request
+        .into_inner()
+        .ip_addresses
+        .iter()
+        .map(|address| {
+            address.parse::<IpAddr>().map_err(|e| {
+                CarbideError::InvalidArgument(format!("invalid IP address {address}: {e}"))
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
+    let max_find_by_ids = api.runtime_config.max_find_by_ids as usize;
+    if addresses.len() > max_find_by_ids {
+        return Err(CarbideError::InvalidArgument(format!(
+            "no more than {max_find_by_ids} IDs can be accepted"
+        ))
+        .into());
+    } else if addresses.is_empty() {
+        return Err(
+            CarbideError::InvalidArgument("at least one ID must be provided".to_string()).into(),
+        );
+    }
+
+    let mut txn = api.txn_begin().await?;
+    let reserved =
+        db::machine_interface_address::find_reserved_by_ids(txn.as_pgconn(), &addresses).await?;
+    txn.commit().await?;
+
+    let reserved_addresses = reserved
+        .into_iter()
+        .map(|r| rpc::ReservedAddress {
+            ip_address: r.address.to_string(),
+            reserved_by_mac: r.reserved_by_mac.to_string(),
+            allocation_type: allocation_type_label(r.allocation_type),
+        })
+        .collect();
+
+    Ok(Response::new(rpc::AdminFindReservedAddressesResponse {
+        reserved_addresses,
+    }))
+}
+
+pub(crate) async fn admin_release_reserved_addresses(
+    api: &Api,
+    request: Request<rpc::AdminReleaseReservedAddressesRequest>,
+) -> Result<Response<rpc::AdminReleaseReservedAddressesResponse>, Status> {
+    log_request_data(&request);
+    let rpc::AdminReleaseReservedAddressesRequest {
+        reserved_by_mac,
+        ip_address,
+    } = request.into_inner();
+    let mac_filter = parse_reserved_mac_filter(reserved_by_mac)?;
+    let address_filter = parse_reserved_address_filter(ip_address)?;
+
+    // Require a scope so an operator cannot release every reservation at once.
+    if mac_filter.is_none() && address_filter.is_none() {
+        return Err(CarbideError::InvalidArgument(
+            "a MAC address or an address is required to release a reservation".into(),
+        )
+        .into());
+    }
+
+    let mut txn = api.txn_begin().await?;
+    let released = db::machine_interface_address::release_reserved(
+        txn.as_pgconn(),
+        mac_filter,
+        address_filter,
+    )
+    .await?;
+    txn.commit().await?;
+
+    Ok(Response::new(rpc::AdminReleaseReservedAddressesResponse {
+        released_ip_addresses: released.into_iter().map(|a| a.to_string()).collect(),
+    }))
+}
+
+/// The wire label for an [`AllocationType`], matching the interface-address API.
+fn allocation_type_label(allocation_type: AllocationType) -> String {
+    match allocation_type {
+        AllocationType::Dhcp => "dhcp".to_string(),
+        AllocationType::Static => "static".to_string(),
+        AllocationType::Slaac => "slaac".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -806,6 +944,89 @@ mod tests {
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].address, inferred_address);
         assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);
+        Ok(())
+    }
+
+    /// The operator RPCs list a parked reservation and release it by MAC, and
+    /// an unscoped release is rejected so a mistake cannot clear everything.
+    #[crate::sqlx_test]
+    async fn admin_reserved_address_rpcs_list_and_release(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let env = crate::tests::create_test_env(pool).await;
+        let mac: mac_address::MacAddress = "02:00:00:00:44:10".parse()?;
+        let parked: std::net::IpAddr = "192.0.2.70".parse()?;
+
+        let mut txn = env.api.database_connection.begin().await?;
+        db::machine_interface_address::insert_reserved(
+            &mut txn,
+            mac,
+            parked,
+            AllocationType::Static,
+        )
+        .await?;
+        txn.commit().await?;
+
+        // Listing with no filter reports the parked reservation's id, then
+        // fetching by that id returns its full row.
+        let ids = admin_find_reserved_address_ids(
+            &env.api,
+            Request::new(rpc::AdminFindReservedAddressesRequest {
+                reserved_by_mac: None,
+                ip_address: None,
+            }),
+        )
+        .await?
+        .into_inner();
+        assert_eq!(ids.ip_addresses, vec![parked.to_string()]);
+        let listed = admin_find_reserved_addresses_by_ids(
+            &env.api,
+            Request::new(rpc::AdminReservedAddressesByIdsRequest {
+                ip_addresses: ids.ip_addresses.clone(),
+            }),
+        )
+        .await?
+        .into_inner();
+        assert_eq!(listed.reserved_addresses.len(), 1);
+        let reserved = &listed.reserved_addresses[0];
+        assert_eq!(reserved.ip_address, parked.to_string());
+        assert_eq!(reserved.reserved_by_mac, mac.to_string());
+        assert_eq!(reserved.allocation_type, "static");
+
+        // An unscoped release is rejected.
+        let unscoped = admin_release_reserved_addresses(
+            &env.api,
+            Request::new(rpc::AdminReleaseReservedAddressesRequest {
+                reserved_by_mac: None,
+                ip_address: None,
+            }),
+        )
+        .await;
+        assert_eq!(unscoped.unwrap_err().code(), tonic::Code::InvalidArgument);
+
+        // Releasing by MAC frees the address and empties the listing.
+        let released = admin_release_reserved_addresses(
+            &env.api,
+            Request::new(rpc::AdminReleaseReservedAddressesRequest {
+                reserved_by_mac: Some(mac.to_string()),
+                ip_address: None,
+            }),
+        )
+        .await?
+        .into_inner();
+        assert_eq!(released.released_ip_addresses, vec![parked.to_string()]);
+
+        let after = admin_find_reserved_address_ids(
+            &env.api,
+            Request::new(rpc::AdminFindReservedAddressesRequest {
+                reserved_by_mac: None,
+                ip_address: None,
+            }),
+        )
+        .await?
+        .into_inner();
+        assert!(after.ip_addresses.is_empty());
+
         Ok(())
     }
 }

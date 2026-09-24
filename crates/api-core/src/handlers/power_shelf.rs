@@ -283,7 +283,7 @@ pub(crate) async fn admin_force_delete_power_shelf(
                 .await
                 .map_err(CarbideError::from)?;
         for interface_id in &interface_ids {
-            db::machine_interface::delete(interface_id, &mut txn)
+            db::machine_interface::delete(interface_id, &mut txn, false)
                 .await
                 .map_err(CarbideError::from)?;
         }

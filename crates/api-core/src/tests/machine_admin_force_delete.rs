@@ -480,6 +480,7 @@ async fn test_admin_force_delete_orders_locks_against_exploration(pool: sqlx::Pg
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
     });
@@ -502,6 +503,122 @@ async fn test_admin_force_delete_orders_locks_against_exploration(pool: sqlx::Pg
         .into_inner();
     assert!(response.all_done);
     validate_machine_deletion(&env, &host.dpu_ids[0], None).await;
+}
+
+/// The persisted fate of a marked host-interface address after a force-delete.
+struct MarkedAddressFate {
+    mac: mac_address::MacAddress,
+    address: IpAddr,
+    allocation_type: model::allocation_type::AllocationType,
+    /// Reservations owning the address after teardown (parked rows).
+    parked: Vec<db::machine_interface_address::ReservedAddress>,
+    /// Rows referencing the address at all, parked or active.
+    rows_remaining: i64,
+}
+
+/// Marks a host-interface address for preservation, force-deletes the host with
+/// `release_preserved_addresses`, and reports what the RPC's teardown left
+/// persisted for that address.
+async fn force_delete_marked_host_address(
+    env: &TestEnv,
+    release_preserved_addresses: bool,
+) -> MarkedAddressFate {
+    let host = create_managed_host(env).await;
+
+    let mut txn = env.pool.begin().await.unwrap();
+    let machine = db::machine::find_one(txn.as_mut(), &host.id, MachineSearchConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let interface = &machine.status.interfaces[0];
+    let interface_id = interface.id;
+    let mac = interface.mac_address;
+    // Mark the interface's existing IPv4 address (an interface holds at most one
+    // address per family) for preservation.
+    let existing = db::machine_interface_address::find_for_interface(txn.as_mut(), interface_id)
+        .await
+        .unwrap();
+    let existing = existing
+        .into_iter()
+        .find(|a| a.address.is_ipv4())
+        .expect("host interface fixture has an IPv4 address");
+    let address = existing.address;
+    let allocation_type = existing.allocation_type;
+    assert!(
+        db::machine_interface_address::mark_reserved(
+            txn.as_mut(),
+            interface_id,
+            carbide_network::ip::IpAddressFamily::Ipv4,
+        )
+        .await
+        .unwrap(),
+        "the interface's IPv4 address should be marked for preservation"
+    );
+    txn.commit().await.unwrap();
+
+    let response = host
+        .api
+        .admin_force_delete_machine(Request::new(AdminForceDeleteMachineRequest {
+            host_query: host.id.to_string(),
+            delete_interfaces: true,
+            delete_bmc_interfaces: true,
+            delete_bmc_credentials: false,
+            allow_delete_with_orphaned_dpf_crds: false,
+            delete_bmc_suppressions: false,
+            delete_retained_boot_interfaces: false,
+            release_preserved_addresses,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.all_done);
+
+    let mut txn = env.pool.begin().await.unwrap();
+    let parked = db::machine_interface_address::find_reserved(txn.as_mut(), Some(mac), Some(address))
+        .await
+        .unwrap();
+    let rows_remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM machine_interface_addresses WHERE address = $1")
+            .bind(address)
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap();
+    txn.commit().await.unwrap();
+
+    MarkedAddressFate {
+        mac,
+        address,
+        allocation_type,
+        parked,
+        rows_remaining,
+    }
+}
+
+/// Default force-delete parks a marked interface address as a MAC-owned
+/// reservation; the RPC's `release_preserved_addresses` flag instead removes it
+/// outright. Proves the flag reaches interface teardown, which the DB-helper
+/// test cannot show.
+#[crate::sqlx_test]
+async fn force_delete_parks_marked_address_unless_release_requested(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+
+    // Default: the marked address survives as a parked reservation owned by the
+    // interface's MAC.
+    let parked_fate = force_delete_marked_host_address(&env, false).await;
+    assert_eq!(
+        parked_fate.parked,
+        vec![db::machine_interface_address::ReservedAddress {
+            address: parked_fate.address,
+            reserved_by_mac: parked_fate.mac,
+            allocation_type: parked_fate.allocation_type,
+        }]
+    );
+    assert_eq!(parked_fate.rows_remaining, 1);
+
+    // Explicit release: the marked address is deleted, leaving no reservation.
+    let released_fate = force_delete_marked_host_address(&env, true).await;
+    assert!(released_fate.parked.is_empty());
+    assert_eq!(released_fate.rows_remaining, 0);
 }
 
 /// Multi-endpoint exploration persistence and force-delete must acquire
@@ -563,6 +680,7 @@ async fn test_admin_force_delete_orders_endpoint_locks_by_address(pool: sqlx::Pg
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
     });
@@ -640,6 +758,7 @@ async fn test_admin_force_delete_orders_topology_before_endpoint(pool: sqlx::PgP
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
     });
@@ -764,6 +883,7 @@ async fn test_admin_force_delete_preserves_reassigned_resources(pool: sqlx::PgPo
                 .machine_interface_id
                 .unwrap(),
             &mut replacement_txn,
+            false,
         )
         .await
         .unwrap();
@@ -983,6 +1103,7 @@ fn force_delete_request(machine_id: &impl std::fmt::Display) -> AdminForceDelete
         allow_delete_with_orphaned_dpf_crds: false,
         delete_bmc_suppressions: false,
         delete_retained_boot_interfaces: false,
+        release_preserved_addresses: false,
     }
 }
 
@@ -1168,6 +1289,7 @@ async fn test_admin_force_delete_reads_instance_after_machine_lock(pool: sqlx::P
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
     });
@@ -1835,6 +1957,7 @@ async fn test_admin_force_delete_with_instance_type(pool: sqlx::PgPool) {
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
         .unwrap_err();
@@ -2006,6 +2129,7 @@ async fn test_admin_force_delete_retains_boot_interface_ids(pool: sqlx::PgPool) 
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
+            release_preserved_addresses: false,
         }))
         .await
         .unwrap()
@@ -2093,6 +2217,7 @@ async fn test_admin_force_delete_clears_suppressions_and_retained_boot(pool: sql
             allow_delete_with_orphaned_dpf_crds: false,
             delete_bmc_suppressions: true,
             delete_retained_boot_interfaces: true,
+            release_preserved_addresses: false,
         }))
         .await
         .unwrap()

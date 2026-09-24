@@ -369,6 +369,20 @@ service Forge {
   // appropriate customer-facing workflow available or where those workflows fail.
   rpc AdminForceDeleteMachine(AdminForceDeleteMachineRequest) returns (AdminForceDeleteMachineResponse);
 
+  // List the IP addresses of parked reservations that outlived their interface,
+  // optionally filtered by owning MAC or by address. The IP addresses are ids for
+  // AdminFindReservedAddressesByIds.
+  rpc AdminFindReservedAddressIds(AdminFindReservedAddressesRequest) returns (AdminReservedAddressIdList);
+
+  // Fetch parked address reservations by their IP-address ids, in bounded pages.
+  // A request may carry no more IDs than the server's max_find_by_ids limit.
+  rpc AdminFindReservedAddressesByIds(AdminReservedAddressesByIdsRequest) returns (AdminFindReservedAddressesResponse);
+
+  // Release parked address reservations, making their addresses available to
+  // allocators again. Only parked reservations are affected; active interface
+  // addresses are never released.
+  rpc AdminReleaseReservedAddresses(AdminReleaseReservedAddressesRequest) returns (AdminReleaseReservedAddressesResponse);
+
   // Starts the managed host decommissioning workflow. The host must be Ready.
   rpc DecommissionManagedHost(DecommissionManagedHostRequest) returns (DecommissionManagedHostResponse);
 
@@ -5396,6 +5410,60 @@ message AdminForceDeleteMachineRequest {
   // machine can recover its boot target; set this when a clean rediscovery
   // without prior boot-target memory is intended.
   bool delete_retained_boot_interfaces = 7;
+
+  // Release preserved address reservations for the deleted interfaces instead
+  // of parking them. By default, deleting an interface parks any address it
+  // marked for preservation so the same MAC can reclaim it on re-ingestion; set
+  // this when a permanent wipe should free those addresses immediately.
+  bool release_preserved_addresses = 8;
+}
+
+// A parked address reservation owned by its MAC with no active interface row.
+message ReservedAddress {
+  // The reserved IP address.
+  string ip_address = 1;
+  // The MAC address that owns the reservation.
+  string reserved_by_mac = 2;
+  // The runtime allocation type of the reserved address (e.g. "static").
+  string allocation_type = 3;
+}
+
+// Filter for listing or releasing parked address reservations. An empty filter
+// matches every parked reservation; setting both narrows to a single row.
+message AdminFindReservedAddressesRequest {
+  // Restrict to reservations owned by this MAC address.
+  optional string reserved_by_mac = 1;
+  // Restrict to the reservation for this exact IP address.
+  optional string ip_address = 2;
+}
+
+// The IP addresses of parked reservations matching a find filter. Each address
+// is an id for AdminFindReservedAddressesByIds.
+message AdminReservedAddressIdList {
+  repeated string ip_addresses = 1;
+}
+
+// Fetch parked reservations by their IP-address ids, bounded by max_find_by_ids.
+message AdminReservedAddressesByIdsRequest {
+  repeated string ip_addresses = 1;
+}
+
+message AdminFindReservedAddressesResponse {
+  repeated ReservedAddress reserved_addresses = 1;
+}
+
+// Release parked reservations matching the filter. At least one of the filter
+// fields must be set so a release cannot clear every reservation by accident.
+message AdminReleaseReservedAddressesRequest {
+  // Release reservations owned by this MAC address.
+  optional string reserved_by_mac = 1;
+  // Release the reservation for this exact IP address.
+  optional string ip_address = 2;
+}
+
+message AdminReleaseReservedAddressesResponse {
+  // The IP addresses that were released.
+  repeated string released_ip_addresses = 1;
 }
 
 message DecommissionManagedHostRequest {
