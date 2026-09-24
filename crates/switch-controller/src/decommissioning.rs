@@ -80,20 +80,6 @@ async fn suppress_dhcp(
     Ok(txn)
 }
 
-async fn dhcp_suppression_acknowledged(
-    mac_address: MacAddress,
-    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
-) -> Result<bool, StateHandlerError> {
-    Ok(db::bmc_suppression::find(
-        &ctx.services.db_pool,
-        mac_address,
-        BmcSuppressionSubsystem::Dhcp,
-        BmcSuppressionSource::Decommissioning,
-    )
-    .await?
-    .is_some_and(|suppression| suppression.acknowledged_at.is_some()))
-}
-
 pub(super) async fn handle_decommissioning(
     switch_id: &SwitchId,
     switch: &Switch,
@@ -121,17 +107,11 @@ pub(super) async fn handle_decommissioning(
         SwitchDecommissioningState::RebootingSwitch => {
             handle_rebooting_switch(switch_id, switch, ctx).await
         }
-        SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => {
-            handle_waiting_for_nvos_dhcp_acknowledgement(switch_id, ctx).await
-        }
         SwitchDecommissioningState::SuppressingBmcDhcp => {
             handle_suppressing_bmc_dhcp(switch_id, switch, ctx).await
         }
         SwitchDecommissioningState::FactoryResetBmc => {
             handle_factory_reset_bmc(switch_id, switch, ctx).await
-        }
-        SwitchDecommissioningState::WaitingForBmcDhcpAcknowledgement => {
-            handle_waiting_for_bmc_dhcp_acknowledgement(switch_id, switch, ctx).await
         }
         SwitchDecommissioningState::DeletingManagedCredentials => {
             handle_deleting_managed_credentials(switch_id, switch, ctx).await
@@ -285,31 +265,6 @@ async fn handle_rebooting_switch(
         .await
         .map_err(|error| external_error("failed to reboot switch", error))?;
     Ok(StateHandlerOutcome::transition(decommissioning(
-        SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement,
-    )))
-}
-
-async fn handle_waiting_for_nvos_dhcp_acknowledgement(
-    switch_id: &SwitchId,
-    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
-) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    let rows = db::switch::find_switch_endpoints_by_ids(
-        &ctx.services.db_pool,
-        std::slice::from_ref(switch_id),
-    )
-    .await?;
-    let nvos_mac = rows
-        .into_iter()
-        .next()
-        .and_then(|row| row.nvos_mac)
-        .ok_or_else(|| missing_data(switch_id, "nvos_mac"))?;
-    if !dhcp_suppression_acknowledged(nvos_mac, ctx).await? {
-        return Ok(StateHandlerOutcome::wait(
-            "waiting for NVOS DHCP suppression acknowledgement".to_string(),
-        ));
-    }
-
-    Ok(StateHandlerOutcome::transition(decommissioning(
         SwitchDecommissioningState::SuppressingBmcDhcp,
     )))
 }
@@ -363,28 +318,6 @@ async fn handle_factory_reset_bmc(
         .bmc_reset_to_defaults()
         .await
         .map_err(|error| external_error("failed to factory reset switch BMC", error))?;
-
-    Ok(StateHandlerOutcome::transition(decommissioning(
-        SwitchDecommissioningState::WaitingForBmcDhcpAcknowledgement,
-    )))
-}
-
-async fn handle_waiting_for_bmc_dhcp_acknowledgement(
-    switch_id: &SwitchId,
-    switch: &Switch,
-    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
-) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    let bmc_mac_address = switch
-        .bmc_info
-        .as_ref()
-        .and_then(|bmc_info| bmc_info.mac)
-        .or(switch.bmc_mac_address)
-        .ok_or_else(|| missing_data(switch_id, "bmc_mac"))?;
-    if !dhcp_suppression_acknowledged(bmc_mac_address, ctx).await? {
-        return Ok(StateHandlerOutcome::wait(
-            "waiting for BMC DHCP suppression acknowledgement".to_string(),
-        ));
-    }
 
     Ok(StateHandlerOutcome::transition(decommissioning(
         SwitchDecommissioningState::DeletingManagedCredentials,

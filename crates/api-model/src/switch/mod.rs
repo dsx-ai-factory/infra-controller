@@ -389,20 +389,14 @@ pub enum SwitchDecommissioningState {
     /// to [`Self::RebootingSwitch`] without waiting for suppression acknowledgement.
     SuppressingNvosDhcp,
     /// Requests a forced restart through the BMC and advances to
-    /// [`Self::WaitingForNvosDhcpAcknowledgement`] when the request succeeds.
+    /// [`Self::SuppressingBmcDhcp`] when the request succeeds.
     RebootingSwitch,
-    /// Waits for NVOS DHCP suppression acknowledgement after requesting the reboot,
-    /// then advances to [`Self::SuppressingBmcDhcp`].
-    WaitingForNvosDhcpAcknowledgement,
     /// Records BMC DHCP suppression and advances to [`Self::FactoryResetBmc`]
     /// without waiting for suppression acknowledgement.
     SuppressingBmcDhcp,
     /// Issues the BMC factory reset and advances to
-    /// [`Self::WaitingForBmcDhcpAcknowledgement`] when the request succeeds.
+    /// [`Self::DeletingManagedCredentials`] when the request succeeds.
     FactoryResetBmc,
-    /// Waits for BMC DHCP suppression acknowledgement, then advances to
-    /// [`Self::DeletingManagedCredentials`].
-    WaitingForBmcDhcpAcknowledgement,
     /// Deletes managed BMC and NVOS credentials and their credential-rotation records,
     /// then advances to [`Self::Decommissioned`] once cleanup succeeds.
     DeletingManagedCredentials,
@@ -548,24 +542,12 @@ pub fn state_sla(state: &SwitchControllerState, state_version: &ConfigVersion) -
                 std::time::Duration::from_secs(slas::DECOMMISSIONING_REBOOTING_SWITCH),
                 time_in_state,
             ),
-            SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => StateSla::with_sla(
-                std::time::Duration::from_secs(
-                    slas::DECOMMISSIONING_WAITING_FOR_NVOS_DHCP_ACKNOWLEDGEMENT,
-                ),
-                time_in_state,
-            ),
             SwitchDecommissioningState::SuppressingBmcDhcp => StateSla::with_sla(
                 std::time::Duration::from_secs(slas::DECOMMISSIONING_SUPPRESSING_BMC_DHCP),
                 time_in_state,
             ),
             SwitchDecommissioningState::FactoryResetBmc => StateSla::with_sla(
                 std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_BMC),
-                time_in_state,
-            ),
-            SwitchDecommissioningState::WaitingForBmcDhcpAcknowledgement => StateSla::with_sla(
-                std::time::Duration::from_secs(
-                    slas::DECOMMISSIONING_WAITING_FOR_BMC_DHCP_ACKNOWLEDGEMENT,
-                ),
                 time_in_state,
             ),
             SwitchDecommissioningState::DeletingManagedCredentials => StateSla::with_sla(
@@ -708,31 +690,11 @@ mod tests {
                 ),
             }
 
-            "decommissioning: waiting for NVOS DHCP acknowledgement" {
-                SwitchControllerState::Decommissioning {
-                    decommissioning_state:
-                        SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement,
-                } => Yields(
-                    r#"{"state":"decommissioning","decommissioning_state":{"state":"waitingfornvosdhcpacknowledgement"}}"#
-                        .to_string(),
-                ),
-            }
-
             "decommissioning: suppressing BMC DHCP" {
                 SwitchControllerState::Decommissioning {
                     decommissioning_state: SwitchDecommissioningState::SuppressingBmcDhcp,
                 } => Yields(
                     r#"{"state":"decommissioning","decommissioning_state":{"state":"suppressingbmcdhcp"}}"#
-                        .to_string(),
-                ),
-            }
-
-            "decommissioning: waiting for BMC DHCP acknowledgement" {
-                SwitchControllerState::Decommissioning {
-                    decommissioning_state:
-                        SwitchDecommissioningState::WaitingForBmcDhcpAcknowledgement,
-                } => Yields(
-                    r#"{"state":"decommissioning","decommissioning_state":{"state":"waitingforbmcdhcpacknowledgement"}}"#
                         .to_string(),
                 ),
             }

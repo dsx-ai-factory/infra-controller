@@ -172,14 +172,8 @@ impl StateControllerIO for SwitchStateControllerIO {
                         "nvos_factory_reset_outcome_unknown"
                     }
                     SwitchDecommissioningState::RebootingSwitch => "rebooting_switch",
-                    SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => {
-                        "waiting_for_nvos_dhcp_acknowledgement"
-                    }
                     SwitchDecommissioningState::SuppressingBmcDhcp => "suppressing_bmc_dhcp",
                     SwitchDecommissioningState::FactoryResetBmc => "factory_reset_bmc",
-                    SwitchDecommissioningState::WaitingForBmcDhcpAcknowledgement => {
-                        "waiting_for_bmc_dhcp_acknowledgement"
-                    }
                     SwitchDecommissioningState::DeletingManagedCredentials => {
                         "deleting_managed_credentials"
                     }

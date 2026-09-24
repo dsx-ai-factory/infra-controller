@@ -579,8 +579,6 @@ pub(crate) async fn discover_dhcp(
     let parsed_mac: MacAddress = mac_address.parse()?;
 
     // If DHCP is suppressed for this BMC MAC, acknowledge and refuse.
-    // The decommission workflow polls acknowledged_at to confirm the BMC
-    // DHCP client has returned to the INIT state.
     if db::bmc_suppression::acknowledge(
         &mut txn,
         parsed_mac,
