@@ -1631,6 +1631,132 @@ func TestManageMachine_UpdateMachinesInDB_AddresslessInterface(t *testing.T) {
 	assert.Empty(t, machineInterfaces[0].IPAddresses)
 }
 
+// TestManageMachine_UpdateMachinesInDB_ReconcilesAfterOwnWrite proves that
+// reconciliation no longer skips a Machine solely because a previous reconcile
+// bumped its generic `updated` column. The staleness guard must defer to a
+// reported inventory only when a change is newer than that inventory's own
+// reported collection time, not merely newer than "one interval ago".
+func TestManageMachine_UpdateMachinesInDB_ReconcilesAfterOwnWrite(t *testing.T) {
+	dbSession := testMachineInitDB(t)
+	defer dbSession.Close()
+	testMachineSetupSchema(t, dbSession)
+
+	tSiteClientPool := testTemporalSiteClientPool(t)
+	require.NotNil(t, tSiteClientPool)
+
+	ctx := context.Background()
+
+	ip := testMachineBuildInfrastructureProvider(t, dbSession, "reconcile-after-own-write-org", "reconcileAfterOwnWriteProvider")
+	site := testMachineBuildSite(t, dbSession, ip, "reconcile-after-own-write-site", cdbm.SiteStatusRegistered)
+	machine := testMachineBuildMachine(t, dbSession, ip.ID, site.ID, nil, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusReady))
+
+	machineDAO := cdbm.NewMachineDAO(dbSession)
+
+	// Simulate the previous cycle's reconcile write: it marked the Machine present
+	// (bumping `updated`) about one collection interval ago. This is the write that
+	// used to trip the interval-based guard on the very next snapshot.
+	_, err := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{
+		MachineID:       machine.ID,
+		IsMissingOnSite: cutil.GetPtr(true),
+	})
+	require.NoError(t, err)
+	priorWrite := time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval))
+	_, err = dbSession.DB.Exec("UPDATE machine SET updated = ? WHERE id = ?", priorWrite, machine.ID)
+	require.NoError(t, err)
+
+	// A fresh snapshot collected now — after that prior write. Because the write
+	// predates this collection, it is self, not a competing edit, so the snapshot
+	// must be applied.
+	inventory := &corev1.MachineInventory{
+		Machines: []*corev1.MachineInfo{
+			{
+				Machine: &corev1.Machine{
+					Id:     &corev1.MachineId{Id: machine.ControllerMachineID},
+					State:  controllerMachineStatePrefixReady,
+					Status: &corev1.MachineStatus{},
+				},
+			},
+		},
+		Timestamp:       timestamppb.Now(),
+		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+	}
+
+	manager := ManageMachine{
+		dbSession:      dbSession,
+		siteClientPool: tSiteClientPool,
+	}
+	require.NoError(t, manager.UpdateMachinesInDB(ctx, site.ID.String(), inventory))
+
+	// The prior write predates this snapshot's collection, so reconciliation must
+	// apply it rather than treat its own earlier write as a competing external
+	// change. IsMissingOnSite flips to false only when the update path runs; it
+	// stays true if the guard wrongly skipped the Machine.
+	reconciled, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+	require.NoError(t, err)
+	assert.False(t, reconciled.IsMissingOnSite, "a machine last written by a prior reconcile must be reconciled, not skipped as its own recent write")
+}
+
+// TestManageMachine_UpdateMachinesInDB_PreservesEditAfterCollection proves the
+// freshness guard defers a snapshot when a user/API edit landed after the
+// snapshot was collected. The clock-skew buffer must be applied conservatively
+// (subtracted), so an edit shortly after collection is preserved rather than
+// overwritten by the older inventory.
+func TestManageMachine_UpdateMachinesInDB_PreservesEditAfterCollection(t *testing.T) {
+	dbSession := testMachineInitDB(t)
+	defer dbSession.Close()
+	testMachineSetupSchema(t, dbSession)
+
+	tSiteClientPool := testTemporalSiteClientPool(t)
+	require.NotNil(t, tSiteClientPool)
+
+	ctx := context.Background()
+
+	ip := testMachineBuildInfrastructureProvider(t, dbSession, "preserve-edit-org", "preserveEditProvider")
+	site := testMachineBuildSite(t, dbSession, ip, "preserve-edit-site", cdbm.SiteStatusRegistered)
+	machine := testMachineBuildMachine(t, dbSession, ip.ID, site.ID, nil, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusReady))
+
+	machineDAO := cdbm.NewMachineDAO(dbSession)
+
+	// The snapshot is collected at collectedAt; an API edit lands two seconds later,
+	// after collection, so it is newer than the reported data and must be preserved.
+	// IsMissingOnSite stands in for any reconcile-owned field an edit might touch
+	// (e.g. maintenance, health, status): the update path always sets it to false,
+	// so its surviving `true` proves the snapshot was deferred.
+	collectedAt := time.Now()
+	_, err := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{
+		MachineID:       machine.ID,
+		IsMissingOnSite: cutil.GetPtr(true),
+	})
+	require.NoError(t, err)
+	editAt := collectedAt.Add(2 * time.Second)
+	_, err = dbSession.DB.Exec("UPDATE machine SET updated = ? WHERE id = ?", editAt, machine.ID)
+	require.NoError(t, err)
+
+	inventory := &corev1.MachineInventory{
+		Machines: []*corev1.MachineInfo{
+			{
+				Machine: &corev1.Machine{
+					Id:     &corev1.MachineId{Id: machine.ControllerMachineID},
+					State:  controllerMachineStatePrefixReady,
+					Status: &corev1.MachineStatus{},
+				},
+			},
+		},
+		Timestamp:       timestamppb.New(collectedAt),
+		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+	}
+
+	manager := ManageMachine{
+		dbSession:      dbSession,
+		siteClientPool: tSiteClientPool,
+	}
+	require.NoError(t, manager.UpdateMachinesInDB(ctx, site.ID.String(), inventory))
+
+	reconciled, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+	require.NoError(t, err)
+	assert.True(t, reconciled.IsMissingOnSite, "an edit made after the snapshot was collected must be preserved, not overwritten by stale inventory")
+}
+
 func TestNewManageMachine(t *testing.T) {
 	type args struct {
 		dbSession     *cdb.Session

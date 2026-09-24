@@ -234,12 +234,21 @@ type ManageMachineInventory struct {
 func (mmi *ManageMachineInventory) CollectAndPublishMachineInventory(ctx context.Context) error {
 	logger := log.With().Str("Activity", "CollectAndPublishMachineInventory").Logger()
 	logger.Info().Msg("Starting activity")
+
+	// Capture the collection boundary before any Core fetch and stamp every
+	// published page with it. Cloud's freshness guard compares each Machine's
+	// Updated timestamp against this value, so it must be a lower bound on when
+	// the data was read — not the per-page publish time, which trails the fetch
+	// during pagination and would let a concurrent API edit be overwritten.
+	collectedAt := timestamppb.Now()
 	inventoryImpl := manageInventoryImpl[*corev1.MachineId, *corev1.Machine, *corev1.MachineInventory]{
-		itemType:               "Machine",
-		config:                 mmi.config,
-		internalFindIDs:        machineFindIDs,
-		internalFindByIDs:      machineFindByIDs,
-		internalPagedInventory: machinePagedInventory,
+		itemType:          "Machine",
+		config:            mmi.config,
+		internalFindIDs:   machineFindIDs,
+		internalFindByIDs: machineFindByIDs,
+		internalPagedInventory: func(allItemIDs []*corev1.MachineId, pagedItems []*corev1.Machine, input *pagedInventoryInput) *corev1.MachineInventory {
+			return machinePagedInventory(allItemIDs, pagedItems, input, collectedAt)
+		},
 	}
 	return inventoryImpl.CollectAndPublishInventory(ctx, &logger)
 }
@@ -364,7 +373,7 @@ func recentMachineEvents(events []*corev1.MachineEvent, stateVersion string) []*
 	return recent
 }
 
-func machinePagedInventory(allItemIDs []*corev1.MachineId, pagedItems []*corev1.Machine, input *pagedInventoryInput) *corev1.MachineInventory {
+func machinePagedInventory(allItemIDs []*corev1.MachineId, pagedItems []*corev1.Machine, input *pagedInventoryInput, collectedAt *timestamppb.Timestamp) *corev1.MachineInventory {
 	itemIDs := []string{}
 	for _, id := range allItemIDs {
 		itemIDs = append(itemIDs, id.GetId())
@@ -378,10 +387,8 @@ func machinePagedInventory(allItemIDs []*corev1.MachineId, pagedItems []*corev1.
 	}
 
 	machineInventory := &corev1.MachineInventory{
-		Machines: pagedMachineInfo,
-		Timestamp: &timestamppb.Timestamp{
-			Seconds: time.Now().Unix(),
-		},
+		Machines:        pagedMachineInfo,
+		Timestamp:       collectedAt,
 		InventoryStatus: input.status,
 		StatusMsg:       input.statusMessage,
 		InventoryPage:   input.buildPage(),

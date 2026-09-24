@@ -480,11 +480,28 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				}
 			}
 
-			// If the machine was updated at all since this inventory was received, we
-			// should consider the inventory details stale for this machine.
-			// We'll add a 5 second buffer to account for a little clock skew/drift.
-			if !wasDeleted && site.IsTimeWithinStaleInventoryThreshold(existingCloudMachine.Updated) {
-				slogger.Warn().Msg("machine updated more recently than inventory received time, skipping processing")
+			// Skip the machine only when it changed after this inventory snapshot was
+			// collected, which means a user or API change is newer than the reported
+			// data and must not be clobbered. Comparing against the snapshot's own
+			// reported collection time, rather than "updated within one interval of
+			// now", is what keeps reconciliation's own write from tripping this guard
+			// on the very next snapshot: that write predates the next collection, so
+			// it is correctly treated as self, not as a competing external change.
+			//
+			// The buffer is applied conservatively — subtracted, so the cutoff moves
+			// earlier — so that under clock skew we err toward preserving a genuine
+			// edit rather than overwriting it. The Site Agent stamps the collection
+			// time before fetching, so an edit at or after that instant is genuinely
+			// newer than the reported data. Older Site Agents may not report a
+			// collection timestamp; fall back to the interval-based window.
+			var machineChangedAfterInventory bool
+			if ts := machineInventory.GetTimestamp(); ts != nil && ts.GetSeconds() > 0 {
+				machineChangedAfterInventory = existingCloudMachine.Updated.After(ts.AsTime().Add(-cwutil.StaleInventoryBuffer))
+			} else {
+				machineChangedAfterInventory = site.IsTimeWithinStaleInventoryThreshold(existingCloudMachine.Updated)
+			}
+			if !wasDeleted && machineChangedAfterInventory {
+				slogger.Warn().Msg("machine changed after inventory was collected, skipping processing")
 				txn.Rollback()
 				continue
 			}
