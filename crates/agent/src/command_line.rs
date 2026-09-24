@@ -407,6 +407,7 @@ impl AgentPlatformType {
         matches!(self, AgentPlatformType::DpuOs)
     }
 
+    /// Returns `true` only for `AgentPlatformType::Containerized`.
     pub fn is_containerized(&self) -> bool {
         matches!(self, AgentPlatformType::Containerized)
     }
