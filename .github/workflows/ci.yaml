@@ -77,6 +77,9 @@ jobs:
       - name: Test development bootstrap addresses
         run: python3 -B dev/bin/test_bootstrap_addresses.py
 
+      - name: Test HBN management startup patches
+        run: python3 -B pxe/tests/test_hbn_management.py
+
       - name: Check Core CI final-gate inventory
         run: python3 -B .github/ci/check_ci_gate.py inventory --policy core .github/workflows/ci.yaml
 
