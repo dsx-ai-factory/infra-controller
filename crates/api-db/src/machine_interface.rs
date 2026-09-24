@@ -233,13 +233,23 @@ pub async fn set_primary_interface(
     primary: bool,
     txn: &mut PgConnection,
 ) -> Result<MachineInterfaceId, DatabaseError> {
-    let query = "UPDATE machine_interfaces SET primary_interface=$1 where id=$2::uuid RETURNING id";
-    sqlx::query_as(query)
+    // Only primary and BMC interfaces publish DNS names, so a real change here
+    // changes what the zone serves. The sub-select sees the pre-update row, so
+    // `changed` compares the old flag with the new one.
+    let query = "UPDATE machine_interfaces SET primary_interface=$1 WHERE id=$2::uuid
+                 RETURNING id,
+                     (SELECT primary_interface FROM machine_interfaces WHERE id=$2::uuid)
+                         IS DISTINCT FROM primary_interface AS changed";
+    let (id, changed): (MachineInterfaceId, bool) = sqlx::query_as(query)
         .bind(primary)
         .bind(*interface_id)
-        .fetch_one(txn)
+        .fetch_one(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if changed {
+        crate::dns::domain::bump_serial_for_interface(txn, *interface_id).await?;
+    }
+    Ok(id)
 }
 
 /// Clears `primary_interface` on every interface a machine currently owns.
@@ -253,12 +263,16 @@ pub async fn demote_primary_interfaces_for_machine(
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let query = "UPDATE machine_interfaces SET primary_interface=false WHERE machine_id=$1 AND primary_interface=true";
-    sqlx::query(query)
+    let demoted = sqlx::query(query)
         .bind(machine_id)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
-        .map(|_| ())
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if demoted.rows_affected() > 0 {
+        // A demoted primary stops publishing its names.
+        crate::dns::domain::bump_serial_for_machine_interfaces(txn, machine_id).await?;
+    }
+    Ok(())
 }
 
 /// Whether a machine owns any interface flagged `primary_interface`, in any segment.
@@ -372,13 +386,23 @@ pub async fn set_interface_type(
     interface_type: InterfaceType,
     txn: &mut PgConnection,
 ) -> DatabaseResult<MachineInterfaceId> {
-    let query = "UPDATE machine_interfaces SET interface_type=$1 WHERE id=$2::uuid RETURNING id";
-    sqlx::query_as(query)
+    // Only primary and BMC interfaces publish DNS names, so a real change here
+    // changes what the zone serves. The sub-select sees the pre-update row, so
+    // `changed` compares the old type with the new one.
+    let query = "UPDATE machine_interfaces SET interface_type=$1 WHERE id=$2::uuid
+                 RETURNING id,
+                     (SELECT interface_type FROM machine_interfaces WHERE id=$2::uuid)
+                         IS DISTINCT FROM interface_type AS changed";
+    let (id, changed): (MachineInterfaceId, bool) = sqlx::query_as(query)
         .bind(interface_type)
         .bind(*interface_id)
-        .fetch_one(txn)
+        .fetch_one(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if changed {
+        crate::dns::domain::bump_serial_for_interface(txn, *interface_id).await?;
+    }
+    Ok(id)
 }
 
 pub async fn associate_interface_with_machine(
@@ -945,14 +969,20 @@ WHERE id = $3::uuid
       OR ($2::boolean IS NOT NULL AND primary_interface IS DISTINCT FROM $2::boolean)
   )
 "#;
-    sqlx::query(query)
+    let changed = sqlx::query(query)
         .bind(interface_type)
         .bind(primary_interface)
         .bind(interface_id)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
         .map(|result| result.rows_affected() == 1)
-        .map_err(|error| DatabaseError::query(query, error))
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if changed {
+        // Only primary and BMC interfaces publish DNS names, so this changes
+        // what the zone serves.
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
+    }
+    Ok(changed)
 }
 
 /// Reconcile role-derived ExpectedInterface settings on an unassociated row.
@@ -3459,6 +3489,13 @@ RETURNING mia.address"#;
 
     match moved {
         Some(_) => {
+            // The address now answers under the destination's name; both
+            // interfaces are on one segment but may publish into different zones.
+            crate::dns::domain::bump_serial_for_interfaces(
+                txn,
+                &[source_interface_id, destination_interface_id],
+            )
+            .await?;
             record_allocation_removal(txn, source_interface_id, address.address_family()).await
         }
         None => Err(DatabaseError::internal(format!(
@@ -3479,6 +3516,9 @@ async fn delete_dhcp_addresses_from_interface(
         .fetch_all(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
+    if !removed.is_empty() {
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
+    }
     for address in &removed {
         record_allocation_removal(txn, interface_id, address.address_family()).await?;
     }
@@ -3492,21 +3532,34 @@ async fn update_hostname_and_domain(
     hostname: &str,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<bool> {
+    // The old zone loses the name and the new zone gains it, so both serials
+    // advance when the row actually changed. The sub-select in RETURNING runs
+    // under the statement's snapshot, which cannot see the row this same
+    // statement modified, so it yields the domain_id from before the update.
     let query = r#"
 UPDATE machine_interfaces
 SET hostname = $1, domain_id = $2
 WHERE id = $3
   AND (hostname IS DISTINCT FROM $1 OR domain_id IS DISTINCT FROM $2)
-RETURNING id"#;
-    let updated: Option<MachineInterfaceId> = sqlx::query_scalar(query)
+RETURNING (SELECT domain_id FROM machine_interfaces WHERE id = $3)"#;
+    let previous_domain: Option<Option<DomainId>> = sqlx::query_scalar(query)
         .bind(hostname)
         .bind(domain_id)
         .bind(interface_id)
-        .fetch_optional(txn)
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
+    let Some(previous_domain) = previous_domain else {
+        return Ok(false);
+    };
+    let changed_zones: Vec<DomainId> = previous_domain
+        .into_iter()
+        .chain(domain_id)
+        .unique()
+        .collect();
+    crate::dns::domain::bump_serial(txn, &changed_zones).await?;
 
-    Ok(updated.is_some())
+    Ok(true)
 }
 
 /// Syncs a machine interface's hostname to its current address state after an
@@ -3590,15 +3643,30 @@ pub async fn update_segment_id(
     segment_id: NetworkSegmentId,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<()> {
-    let query = "UPDATE machine_interfaces SET segment_id = $1, domain_id = $2 WHERE id = $3";
-    sqlx::query(query)
+    // The interface's names leave the old zone and appear in the new one, so
+    // both serials advance when the row actually changed. The sub-select in
+    // RETURNING sees the pre-update row, so it yields the old domain_id; see
+    // `update_hostname_and_domain`.
+    let query = "UPDATE machine_interfaces SET segment_id = $1, domain_id = $2
+                 WHERE id = $3
+                   AND (segment_id IS DISTINCT FROM $1 OR domain_id IS DISTINCT FROM $2)
+                 RETURNING (SELECT domain_id FROM machine_interfaces WHERE id = $3)";
+    let previous_domain: Option<Option<DomainId>> = sqlx::query_scalar(query)
         .bind(segment_id)
         .bind(domain_id)
         .bind(interface_id)
-        .execute(txn)
+        .fetch_optional(&mut *txn)
         .await
-        .map(|_| ())
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    let Some(previous_domain) = previous_domain else {
+        return Ok(());
+    };
+    let changed_zones: Vec<DomainId> = previous_domain
+        .into_iter()
+        .chain(domain_id)
+        .unique()
+        .collect();
+    crate::dns::domain::bump_serial(txn, &changed_zones).await
 }
 
 /// Reconcile an existing interface's segment with the DHCP relay address.
