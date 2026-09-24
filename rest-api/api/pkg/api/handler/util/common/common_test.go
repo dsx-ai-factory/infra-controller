@@ -1069,6 +1069,14 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		expectErr    bool
 	}{
 		{
+			name:         "missing SpectrumX capabilities must not fall back to incompatible machines",
+			instancetype: inst1,
+			request: &cam.APIInstanceCreateRequest{
+				SpectrumXAttachments: []cam.APISpectrumXAttachmentCreateOrUpdateRequest{{Device: "ConnectX-8", DeviceInstance: cutil.GetPtr(0)}},
+			},
+			expectErr: true,
+		},
+		{
 			name:         "error when no Machine matches label selector",
 			instancetype: inst1,
 			request: &cam.APIInstanceCreateRequest{

@@ -719,10 +719,11 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			machine = existingCloudMachine
 		}
 
-		// Update/create Machine Capabilities
-		// Check if discovery data is available
-		if discoveryInfo == nil {
-			logger.Warn().Msg("received MachineInfo without DiscoveryInfo, skipping Machine Capability processing")
+		// Capabilities are reported independently of DiscoveryInfo: Core can publish
+		// SpectrumX selectors from DPA inventory without hardware discovery data.
+		// An absent set is unavailable; an explicit empty set removes stale rows.
+		if controllerMachineStatus.GetCapabilities() == nil {
+			slogger.Warn().Msg("received MachineInfo without Capabilities, skipping Machine Capability processing")
 			continue
 		}
 

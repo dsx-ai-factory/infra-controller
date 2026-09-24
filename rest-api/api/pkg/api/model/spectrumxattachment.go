@@ -5,6 +5,8 @@ package model
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"time"
 
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -38,7 +40,8 @@ func (sacr APISpectrumXAttachmentCreateOrUpdateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired)),
 		validation.Field(&sacr.DeviceInstance,
 			validation.NotNil.Error(validationErrorValueRequired),
-			validation.Min(0).Error("value must be equal or greater than 0")),
+			validation.Min(0).Error("value must be equal or greater than 0"),
+			validation.Max(int64(math.MaxUint32)).Error("value must not exceed 4294967295")),
 		validation.Field(&sacr.AttachmentType,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.In(cdbm.SpectrumXAttachmentTypePhysical, cdbm.SpectrumXAttachmentTypeVirtual, cdbm.SpectrumXAttachmentTypeOVS).Error("must be one of 'Physical', 'Virtual', or 'OVS'")),
@@ -61,6 +64,32 @@ func (sacr APISpectrumXAttachmentCreateOrUpdateRequest) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+// ValidateSpectrumXAttachmentsForMachine checks selectors against a machine's persisted
+// capabilities. A same-name generic NIC or DPU must not satisfy a SpectrumX
+// request, and every attachment must fit its own device-description group.
+func ValidateSpectrumXAttachmentsForMachine(capabilities []cdbm.MachineCapability, attachments []APISpectrumXAttachmentCreateOrUpdateRequest) error {
+	for i, attachment := range attachments {
+		matched := false
+		for _, capability := range capabilities {
+			if capability.Type == cdbm.MachineCapabilityTypeNetwork &&
+				capability.DeviceType != nil && *capability.DeviceType == cdbm.MachineCapabilityDeviceTypeSpectrumX &&
+				capability.Name == attachment.Device && capability.Count != nil &&
+				attachment.DeviceInstance != nil && *attachment.DeviceInstance >= 0 && *attachment.DeviceInstance < *capability.Count {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return validation.Errors{
+				"spectrumXAttachments": validation.Errors{
+					fmt.Sprint(i): errors.New("device and deviceInstance must select a SpectrumX interface in the Machine's capabilities"),
+				},
+			}
+		}
+	}
 	return nil
 }
 

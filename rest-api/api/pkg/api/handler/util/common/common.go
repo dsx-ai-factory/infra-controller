@@ -346,8 +346,10 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 	)
 
 	var infiniBandInterfaces []cam.APIInfiniBandInterfaceCreateOrUpdateRequest
+	var spectrumXAttachments []cam.APISpectrumXAttachmentCreateOrUpdateRequest
 	if apiRequest != nil {
 		infiniBandInterfaces = apiRequest.InfiniBandInterfaces
+		spectrumXAttachments = apiRequest.SpectrumXAttachments
 	}
 	requireInfiniBandMatch := len(infiniBandInterfaces) > 0
 	var suggestedByDevice map[string][]int
@@ -373,8 +375,27 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 		}
 	}
 
+	// Read SpectrumX capability rows in the allocation transaction, following
+	// the InfiniBand eligibility pattern above. Do not perform an inline Site
+	// lookup or use an Instance Type summary as evidence for a specific machine.
+	var machineSpectrumXCaps map[string][]cdbm.MachineCapability
+	if len(spectrumXAttachments) > 0 {
+		machineIDs := make([]string, len(machines))
+		for i, machine := range machines {
+			machineIDs[i] = machine.ID
+		}
+		machineSpectrumXCaps, err = GetSpectrumXCapabilitiesForMachines(ctx, tx, dbSession, machineIDs)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to retrieve Machine SpectrumX Capabilities from DB")
+			return nil, err
+		}
+	}
+
 	if len(machines) > 0 {
 		for _, mc := range machines {
+			if cam.ValidateSpectrumXAttachmentsForMachine(machineSpectrumXCaps[mc.ID], spectrumXAttachments) != nil {
+				continue
+			}
 			// Acquire an advisory lock on the MachineID, other provider will be look for other is this is being locked
 			// this lock is released when the transaction commits or rollback
 			err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)

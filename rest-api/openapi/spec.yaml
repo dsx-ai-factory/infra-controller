@@ -8430,6 +8430,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: A resource conflict prevents creation.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -8616,6 +8619,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Insufficient compatible Machines are available, or another resource conflict prevents batch creation.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -9021,6 +9027,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: A resource conflict prevents the update.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -24138,7 +24147,7 @@ components:
         spectrumXAttachments:
           type: array
           maxItems: 64
-          description: 'Associate one or more SpectrumX Partitions with this Instance. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'Associate one or more SpectrumX Partitions with this Instance. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. A nonempty list is validated against the Machine capabilities persisted by inventory reconciliation, using the same eligibility source as InfiniBand. The selected Machine must satisfy every attachment; Instance Type placement considers only compatible Machines. Invalid explicit-machine selectors return 400. No inline Site inventory lookup is performed. Final allocation remains authoritative because persisted inventory can lag behind the Site.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
@@ -24314,7 +24323,7 @@ components:
         spectrumXAttachments:
           type: array
           maxItems: 64
-          description: 'SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Every selected Machine must satisfy the entire list using its persisted capabilities. Compatible capacity is checked before selecting an NVLink domain when topology optimization is enabled. Insufficient compatible capacity returns 409 without allocating any Machines. No inline Site inventory lookup is performed; final allocation remains authoritative because persisted inventory can lag behind the Site.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
@@ -24513,9 +24522,11 @@ components:
           items:
             $ref: '#/components/schemas/InfiniBandInterfaceCreateRequest'
         spectrumXAttachments:
-          type: array
+          type:
+            - array
+            - 'null'
           maxItems: 64
-          description: 'Update SpectrumX Partition attachments of the Instance. Omitting this field leaves the Instance''s SpectrumX attachments unchanged; an explicit (possibly empty) list replaces them entirely. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance''s Machine capabilities persisted by inventory reconciliation before any update is persisted. Missing capabilities or invalid selectors return 400. No inline Site inventory lookup is performed. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         nvLinkInterfaces:
@@ -24965,11 +24976,12 @@ components:
           description: ID of the SpectrumX Partition the attachment should associate with
         device:
           type: string
-          description: 'SpectrumX device to attach over, matching the device description reported for the Machine''s SpectrumX interfaces'
+          description: 'Exact, case-sensitive name of a persisted Machine capability with type `Network` and device type `SpectrumX`. Generic network and DPU capabilities do not satisfy this selector.'
         deviceInstance:
           type: integer
           minimum: 0
-          description: 'Index of the device, used to identify which interface card to attach the Partition to'
+          maximum: 4294967295
+          description: 'Zero-based interface index within the matching SpectrumX device-description group. Must be strictly less than the persisted capability count on the Machine.'
         attachmentType:
           type: string
           enum:

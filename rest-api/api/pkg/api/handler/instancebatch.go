@@ -1421,7 +1421,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		// Allocate machines with topology optimization
-		machines, apiErr := allocateMachinesForBatch(ctx, tx, bcih.dbSession, instancetype, apiRequest.Count, topologyOptimized, apiRequest.MachineLabelSelector, logger)
+		machines, apiErr := allocateMachinesForBatch(ctx, tx, bcih.dbSession, instancetype, apiRequest.Count, topologyOptimized, apiRequest.MachineLabelSelector, apiRequest.SpectrumXAttachments, logger)
 		if apiErr != nil {
 			return apiErr
 		}
@@ -2029,6 +2029,7 @@ func allocateMachinesForBatch(
 	count int,
 	topologyOptimized bool,
 	machineLabelSelector map[string]string,
+	spectrumXAttachments []model.APISpectrumXAttachmentCreateOrUpdateRequest,
 	logger zerolog.Logger,
 ) ([]cdbm.Machine, *cutil.APIError) {
 	if instancetype == nil || count <= 0 {
@@ -2054,6 +2055,26 @@ func allocateMachinesForBatch(
 		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve available machines", nil)
 	}
 
+	// Filter before counting capacity or choosing the NVLink domain. Choosing
+	// the largest unfiltered domain could hide compatible capacity elsewhere.
+	if len(spectrumXAttachments) > 0 {
+		machineIDs := make([]string, len(machines))
+		for i, machine := range machines {
+			machineIDs[i] = machine.ID
+		}
+		capabilities, capErr := common.GetSpectrumXCapabilitiesForMachines(ctx, tx, dbSession, machineIDs)
+		if capErr != nil {
+			logger.Error().Err(capErr).Msg("failed to retrieve Machine SpectrumX Capabilities from DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SpectrumX Capabilities for Machines", nil)
+		}
+		compatible := make([]cdbm.Machine, 0, len(machines))
+		for _, machine := range machines {
+			if model.ValidateSpectrumXAttachmentsForMachine(capabilities[machine.ID], spectrumXAttachments) == nil {
+				compatible = append(compatible, machine)
+			}
+		}
+		machines = compatible
+	}
 	if len(machines) < count {
 		logger.Warn().Int("available", len(machines)).Int("requested", count).
 			Msg("insufficient machines available")

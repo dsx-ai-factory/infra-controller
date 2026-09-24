@@ -1576,6 +1576,95 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 		assert.Equal(t, statusDetailCountBefore, statusDetailCountAfter)
 		assert.NotContains(t, logOutput.String(), "failed to update missing on Site flag in DB")
 	})
+
+	t.Run("capability inventory", func(t *testing.T) {
+		const device = "NVIDIA ConnectX-8 SuperNIC"
+		genericNetwork := &corev1.MachineCapabilityAttributesNetwork{Name: device, Count: 2}
+		cases := []struct {
+			name          string
+			capabilities  *corev1.MachineCapabilitiesSet
+			discoveryInfo *corev1.DiscoveryInfo
+			wantCounts    map[cdbm.MachineCapabilityDeviceType]int
+		}{
+			{
+				name: "reduces SpectrumX count without discovery info",
+				capabilities: &corev1.MachineCapabilitiesSet{Network: []*corev1.MachineCapabilityAttributesNetwork{
+					genericNetwork,
+					{Name: device, Count: 1, DeviceType: corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X.Enum()},
+				}},
+				wantCounts: map[cdbm.MachineCapabilityDeviceType]int{"": 2, cdbm.MachineCapabilityDeviceTypeSpectrumX: 1},
+			},
+			{
+				name:         "removes SpectrumX while retaining the same-name generic capability",
+				capabilities: &corev1.MachineCapabilitiesSet{Network: []*corev1.MachineCapabilityAttributesNetwork{genericNetwork}},
+				wantCounts:   map[cdbm.MachineCapabilityDeviceType]int{"": 2},
+			},
+			{
+				name:          "preserves capabilities when the set is absent even with discovery info",
+				discoveryInfo: &corev1.DiscoveryInfo{},
+				wantCounts:    map[cdbm.MachineCapabilityDeviceType]int{"": 2, cdbm.MachineCapabilityDeviceTypeSpectrumX: 4},
+			},
+			{
+				name:         "clears capabilities when Core reports an explicit empty set",
+				capabilities: &corev1.MachineCapabilitiesSet{},
+				wantCounts:   map[cdbm.MachineCapabilityDeviceType]int{},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				capabilitySite := testMachineBuildSite(t, dbSession, ip, uuid.NewString(), cdbm.SiteStatusRegistered)
+				machine := testMachineBuildMachine(t, dbSession, ip.ID, capabilitySite.ID, nil, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusReady))
+				originalIDs := make(map[cdbm.MachineCapabilityDeviceType]uuid.UUID)
+				for deviceType, count := range map[cdbm.MachineCapabilityDeviceType]int{"": 2, cdbm.MachineCapabilityDeviceTypeSpectrumX: 4} {
+					capability, createErr := mcDAO.Create(ctx, nil, cdbm.MachineCapabilityCreateInput{
+						MachineID:  &machine.ID,
+						Type:       cdbm.MachineCapabilityTypeNetwork,
+						Name:       device,
+						Count:      cutil.GetPtr(count),
+						DeviceType: cutil.GetPtr(deviceType),
+					})
+					require.NoError(t, createErr)
+					originalIDs[deviceType] = capability.ID
+				}
+
+				// Age only this fixture so inventory is not skipped as older than a local write.
+				_, updateErr := dbSession.DB.NewUpdate().Model((*cdbm.Machine)(nil)).
+					Set("updated = ?", time.Now().Add(-2*time.Duration(cutil.DefaultInventoryReceiptInterval))).
+					Where("id = ?", machine.ID).Exec(ctx)
+				require.NoError(t, updateErr)
+
+				inventory := &corev1.MachineInventory{
+					Machines: []*corev1.MachineInfo{{Machine: &corev1.Machine{
+						Id:    &corev1.MachineId{Id: machine.ID},
+						State: controllerMachineStatePrefixReady,
+						Status: &corev1.MachineStatus{
+							DiscoveryInfo: tc.discoveryInfo,
+							Capabilities:  tc.capabilities,
+						},
+					}}},
+					Timestamp:       timestamppb.Now(),
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				}
+				manager := NewManageMachine(dbSession, nil)
+				require.NoError(t, manager.UpdateMachinesInDB(ctx, capabilitySite.ID.String(), inventory))
+
+				capabilities, _, readErr := mcDAO.GetAll(ctx, nil, []string{machine.ID}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
+				require.NoError(t, readErr)
+				require.Len(t, capabilities, len(tc.wantCounts))
+				for _, capability := range capabilities {
+					require.NotNil(t, capability.DeviceType)
+					wantCount, found := tc.wantCounts[*capability.DeviceType]
+					require.True(t, found, "unexpected capability type %q", *capability.DeviceType)
+					require.NotNil(t, capability.Count)
+					assert.Equal(t, wantCount, *capability.Count)
+					assert.Equal(t, device, capability.Name)
+					assert.Equal(t, cdbm.MachineCapabilityTypeNetwork, capability.Type)
+					assert.Equal(t, originalIDs[*capability.DeviceType], capability.ID, "retain the row when updating a capability")
+				}
+			})
+		}
+	})
 }
 
 func TestManageMachine_UpdateMachinesInDB_AddresslessInterface(t *testing.T) {

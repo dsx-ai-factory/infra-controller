@@ -62,7 +62,7 @@ type BatchInstanceCreateRequest struct {
 	AutoNetwork *bool `json:"autoNetwork,omitempty"`
 	// InfiniBand interface configuration shared across all instances
 	InfinibandInterfaces []InfiniBandInterfaceCreateRequest `json:"infinibandInterfaces,omitempty"`
-	// SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.
+	// SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Every selected Machine must satisfy the entire list using its persisted capabilities. Compatible capacity is checked before selecting an NVLink domain when topology optimization is enabled. Insufficient compatible capacity returns 409 without allocating any Machines. No inline Site inventory lookup is performed; final allocation remains authoritative because persisted inventory can lag behind the Site.
 	SpectrumXAttachments []InstanceSpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments,omitempty"`
 	// DPU Extension Services to deploy to all instances in the batch
 	DpuExtensionServiceDeployments []DpuExtensionServiceDeploymentRequest `json:"dpuExtensionServiceDeployments,omitempty"`
