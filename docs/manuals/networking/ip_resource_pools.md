@@ -22,7 +22,8 @@ The following IP pools are recognized by the API server.
 
 | Pool name | Allocation unit | Required |
 |---|---|---|
-| `lo-ip` | One IP per managed DPU | Yes |
+| `lo-ip` | One IPv4 per managed DPU | Yes |
+| `lo-ip-v6` | One IPv6 per managed DPU | No (dual-stack underlay only) |
 | `vpc-dpu-lo` | One IP per VPC per DPU that participates in that VPC | Yes |
 
 ### `lo-ip` — DPU Loopback IPs
@@ -86,7 +87,7 @@ ranges = [
 
 ### Pool type values
 
-Both IP pools described on this page use `type = "ipv4"`.
+The `lo-ip` and `vpc-dpu-lo` pools use `type = "ipv4"`. The optional `lo-ip-v6` pool uses `type = "ipv6"`.
 
 ### Full example
 
@@ -162,7 +163,9 @@ Each reserved address is validated when the reservation is created or changed an
 
 A reservation that names an address in the wrong family, an address outside the pool, an auto-assignable address, or an address already in use is rejected. Re-submitting an unchanged reservation is a no-op.
 
-The reserved address is claimed atomically when the DPU's machine record is first created — during site exploration for a matched host, or during direct discovery resolved by the globally unique DPU serial. A family without a reservation keeps automatic allocation. Editing or removing a reservation does not readdress a DPU that already exists; the reservation applies the next time that DPU is ingested.
+A reservation records *intent*: it declares which address a DPU should receive, but it does not itself hold the address. Live ownership lives in the resource pool, where an address is allocated to a specific DPU. The two are reconciled only when the DPU's machine record is created — during site exploration for a matched host, or during direct discovery resolved by the globally unique DPU serial — at which point the reserved address is claimed atomically for that DPU. A family without a reservation keeps automatic allocation.
+
+Editing or removing a reservation never readdresses a DPU that already exists, and re-running discovery against a live DPU does not either: the DPU keeps the loopback it already owns in the pool. A changed reservation takes effect only after the existing DPU is deleted — which releases its current pool allocation — and then recreated, so the new intent can be claimed against a now-free address.
 
 ### Managing reservations
 

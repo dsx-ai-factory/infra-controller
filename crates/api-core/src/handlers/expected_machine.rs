@@ -263,12 +263,25 @@ fn validate_dpu_loopback_reservation_shape(machine: &ExpectedMachine) -> Result<
 
 /// Validate that each new or changed reserved address is usable in its pool.
 ///
+/// The reservation table records the operator's *future intent* for a DPU
+/// serial; the resource pool records *live ownership* keyed by DPU machine id.
+/// The two are reconciled at DPU creation, not here. This check only proves a
+/// replacement set is admissible before it is stored.
+///
 /// A reservation whose per-family address matches the stored value for that DPU
-/// serial is unchanged and skipped, so re-submitting an already-allocated
-/// reservation is a no-op rather than a conflict. Every other reserved address
-/// must exist in the matching pool (`lo-ip` / `lo-ip-v6`), sit in the
-/// non-auto-assign partition, and be free -- an allocated value belongs to
-/// another DPU. Address-family correctness is guaranteed by the typed model.
+/// serial is unchanged and skipped, so re-submitting an existing reservation is
+/// a no-op rather than a conflict. Every other reserved address must exist in
+/// the matching pool (`lo-ip` / `lo-ip-v6`), sit in the non-auto-assign
+/// partition, and be either free or already allocated to the very DPU this
+/// reservation targets -- so restoring an identical declaration after a clear
+/// succeeds while the DPU still holds the address. A value owned by any other
+/// DPU is rejected. Address-family correctness is guaranteed by the typed model.
+///
+/// Before reading pool state the writer locks this host's existing reservation
+/// rows, serializing with a concurrent DPU creation that read one of them under
+/// [`db::expected_dpu_loopback_reservation::find_by_dpu_serial_for_update`]. That
+/// makes a same-host address transfer observe the creation's committed
+/// allocation instead of validating against a soon-to-be-stale free value.
 ///
 /// `None` reservations (an older client's omission) preserve stored values and
 /// need no validation.
@@ -281,6 +294,11 @@ async fn validate_reservation_pool_membership(
     let Some(incoming) = machine.data.dpu_loopback_reservations.as_deref() else {
         return Ok(());
     };
+
+    // Lock this host's current reservation rows for the write transaction before
+    // observing pool state, so a concurrent DPU creation that locked one of them
+    // finishes first and its allocation is visible below.
+    db::expected_dpu_loopback_reservation::lock_for_machine(txn, machine.bmc_mac_address).await?;
 
     let existing_by_serial: HashMap<&str, &DpuLoopbackReservation> = existing
         .and_then(|machine| machine.data.dpu_loopback_reservations.as_deref())
@@ -302,6 +320,7 @@ async fn validate_reservation_pool_membership(
                 common_pools.ethernet.pool_loopback_ip.as_ref(),
                 IpAddr::V4(ipv4),
                 model::resource_pool::common::LOOPBACK_IP,
+                &reservation.dpu_serial_number,
             )
             .await?;
         }
@@ -314,6 +333,7 @@ async fn validate_reservation_pool_membership(
                 common_pools.ethernet.pool_loopback_ip_v6.as_ref(),
                 ipv6,
                 model::resource_pool::common::LOOPBACK_IP_V6,
+                &reservation.dpu_serial_number,
             )
             .await?;
         }
@@ -323,12 +343,15 @@ async fn validate_reservation_pool_membership(
 }
 
 /// Check one reserved address against its pool: it must exist, be
-/// non-auto-assignable, and be free.
+/// non-auto-assignable, and be either free or already allocated to the DPU this
+/// reservation targets (identified by `intended_dpu_serial`). A value owned by
+/// any other DPU is rejected.
 async fn validate_reserved_pool_address<T>(
     txn: &mut sqlx::PgConnection,
     pool: &ResourcePool<T>,
     value: T,
     pool_label: &str,
+    intended_dpu_serial: &str,
 ) -> Result<(), CarbideError>
 where
     T: ToString + FromStr + Send + Sync + 'static,
@@ -346,15 +369,42 @@ where
              reserve it from a non-auto-assign range"
         )));
     }
-    if !matches!(
-        info.state,
-        model::resource_pool::ResourcePoolEntryState::Free
-    ) {
-        return Err(CarbideError::FailedPrecondition(format!(
-            "loopback address {value_text} is already allocated to another DPU"
-        )));
+    match info.state {
+        model::resource_pool::ResourcePoolEntryState::Free => Ok(()),
+        model::resource_pool::ResourcePoolEntryState::Allocated { owner, .. }
+            if pool_owner_is_dpu_serial(txn, &owner, intended_dpu_serial).await? =>
+        {
+            // The address is already this DPU's live allocation: restoring the
+            // same declaration must not fail while the DPU still owns it.
+            Ok(())
+        }
+        model::resource_pool::ResourcePoolEntryState::Allocated { .. } => {
+            Err(CarbideError::FailedPrecondition(format!(
+                "loopback address {value_text} is already allocated to another DPU"
+            )))
+        }
     }
-    Ok(())
+}
+
+/// Whether a pool `owner` string is the DPU machine that pairs to
+/// `intended_dpu_serial`.
+///
+/// The pool records ownership by DPU machine id; the reservation targets a DPU
+/// by its pairing (product) serial. Resolving the owner id back to its serial
+/// through the machine topology ties the allocation to the *specific* DPU, so a
+/// value held by a different DPU -- even one on the same host -- is not mistaken
+/// for the intended owner. A non-machine owner or an owner id that no longer
+/// resolves to a serial is treated as "not this DPU".
+async fn pool_owner_is_dpu_serial(
+    txn: &mut sqlx::PgConnection,
+    owner: &str,
+    intended_dpu_serial: &str,
+) -> Result<bool, CarbideError> {
+    let Ok(owner_id) = owner.parse::<carbide_uuid::machine::MachineId>() else {
+        return Ok(false);
+    };
+    let owner_serial = db::machine_topology::serial_for_machine(&mut *txn, &owner_id).await?;
+    Ok(owner_serial.as_deref() == Some(intended_dpu_serial))
 }
 
 /// Preserve an omitted reservation set on replace-all.

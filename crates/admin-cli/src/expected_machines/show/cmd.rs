@@ -242,6 +242,81 @@ mod tests {
 
     use super::dpu_policy_display;
 
+    /// The public show table renders a `DPU Loopbacks` column: a machine with a
+    /// reservation shows `serial: v4=<addr> v6=<addr>` (a missing family as `-`),
+    /// and a machine without reservations shows an empty cell.
+    #[tokio::test]
+    async fn show_table_renders_dpu_loopbacks_column() {
+        use std::collections::HashMap;
+
+        use ::rpc::forge::{
+            DpuLoopbackReservation, DpuLoopbackReservationList, ExpectedMachine,
+            ExpectedMachineList,
+        };
+
+        use super::convert_and_print_into_nice_table;
+        use crate::async_write::CapturedOutput;
+
+        let with_reservation = ExpectedMachine {
+            chassis_serial_number: "HOST-WITH".to_string(),
+            bmc_mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            dpu_loopback_reservations: Some(DpuLoopbackReservationList {
+                reservations: vec![DpuLoopbackReservation {
+                    dpu_serial_number: "MT2000X00001".to_string(),
+                    loopback_ipv4: Some("192.0.2.10".to_string()),
+                    loopback_ipv6: None,
+                }],
+            }),
+            ..Default::default()
+        };
+        let without_reservation = ExpectedMachine {
+            chassis_serial_number: "HOST-NONE".to_string(),
+            bmc_mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+            dpu_loopback_reservations: None,
+            ..Default::default()
+        };
+        let list = ExpectedMachineList {
+            expected_machines: vec![with_reservation, without_reservation],
+        };
+
+        let mut captured = CapturedOutput::new();
+        convert_and_print_into_nice_table(
+            captured.writer(),
+            &list,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await
+        .expect("table should render");
+        let display = String::from_utf8(captured.into_bytes().await).expect("UTF-8 output");
+
+        assert!(
+            display.contains("DPU Loopbacks"),
+            "table header must include the DPU Loopbacks column",
+        );
+
+        let cells_for = |name: &str| {
+            display
+                .lines()
+                .find(|line| line.contains(name))
+                .unwrap_or_else(|| panic!("missing row for {name}"))
+                .trim_matches('|')
+                .split('|')
+                .map(str::trim)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            cells_for("HOST-WITH").last().copied(),
+            Some("MT2000X00001: v4=192.0.2.10 v6=-"),
+            "a reserved machine renders its per-DPU reservation summary",
+        );
+        assert_eq!(
+            cells_for("HOST-NONE").last().copied(),
+            Some(""),
+            "a machine without reservations renders an empty DPU Loopbacks cell",
+        );
+    }
+
     #[test]
     fn dpu_policy_display_uses_canonical_policy_vocabulary() {
         value_scenarios!(

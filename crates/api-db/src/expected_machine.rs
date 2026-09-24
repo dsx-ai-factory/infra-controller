@@ -44,12 +44,10 @@ const SQL_VIOLATION_DUPLICATE_MAC: &str = "expected_machines_bmc_mac_address_key
 /// many rows), but `ExpectedMachine`'s `FromRow` decodes a single row, so a
 /// correlated `json_agg` subquery collapses the child rows into one JSON column
 /// named `dpu_loopback_reservations` that `FromRow` reads directly. `host(..)`
-/// yields the bare address text so it parses into `Ipv4Addr` / `Ipv6Addr`.
-/// `concat!` keeps the result a compile-time `&'static str`, which `sqlx::query`
-/// requires to prove the SQL is static and not dynamically built -- a helper
-/// returning `String` trips sqlx's dynamic-SQL-injection guard. The
-/// `$expected_machines_filter:literal` bound enforces that the trailing clause is
-/// a string literal, never caller input.
+/// yields the bare address text so it parses into `Ipv4Addr` / `Ipv6Addr`. The
+/// `$expected_machines_filter:literal` bound keeps the trailing `WHERE` /
+/// `ORDER BY` clause a string literal, never caller input, so `concat!` can
+/// assemble the entire statement at compile time.
 macro_rules! select_expected_machine {
     ($expected_machines_filter:literal) => {
         concat!(

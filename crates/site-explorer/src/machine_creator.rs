@@ -512,20 +512,30 @@ impl MachineCreator {
             managed_host.explored_host.dpus.iter().zip(dpu_ids.iter())
         {
             // Resolve the operator's deterministic loopback reservation for this
-            // DPU within the matched expected machine, keyed by the DPU pairing
-            // serial. Matching is per-serial, so multi-DPU hosts resolve
-            // independent reservations regardless of report order. An absent
-            // reservation leaves both families on automatic allocation.
-            let reservation = dpu_report
-                .report
-                .dpu_pairing_serial_number()
-                .and_then(|serial| {
-                    machine_data.and_then(|data| data.dpu_loopback_reservation(serial))
-                });
+            // DPU by its pairing serial, read *inside* this transaction and
+            // locked, rather than from the pre-transaction ExpectedMachine
+            // snapshot. Reading the live intent here and holding the row lock
+            // stops a concurrent reservation edit from moving or clearing the
+            // address between this read and the allocation below. Matching is
+            // per-serial (globally unique), so multi-DPU hosts resolve
+            // independent reservations regardless of report order and this stays
+            // consistent with direct discovery. An absent reservation leaves
+            // both families on automatic allocation.
+            let reservation = match dpu_report.report.dpu_pairing_serial_number() {
+                Some(serial) => {
+                    db::expected_dpu_loopback_reservation::find_by_dpu_serial_for_update(
+                        &mut txn, serial,
+                    )
+                    .await?
+                }
+                None => None,
+            };
             let requested_loopback_v4 = reservation
+                .as_ref()
                 .and_then(|reservation| reservation.loopback_ipv4.map(std::net::IpAddr::V4));
-            let requested_loopback_v6 =
-                reservation.and_then(|reservation| reservation.loopback_ipv6);
+            let requested_loopback_v6 = reservation
+                .as_ref()
+                .and_then(|reservation| reservation.loopback_ipv6);
 
             let dpu_machine = self
                 .create_dpu(&mut txn, dpu_report, requested_loopback_v6)
