@@ -23,6 +23,11 @@ var defaultRackPagination = dbquery.Pagination{
 	Total:  0,
 }
 
+var defaultRackOrderBy = []dbquery.OrderBy{
+	{Column: "name", Direction: dbquery.OrderAscending},
+	{Column: "id", Direction: dbquery.OrderAscending},
+}
+
 type Rack struct {
 	bun.BaseModel `bun:"table:rack,alias:r"`
 
@@ -266,8 +271,12 @@ func GetListOfRacks(
 		conf.Filterables = filterables
 	}
 
+	conf.DefaultOrderBy = defaultRackOrderBy
 	if orderBy != nil {
-		conf.DefaultOrderBy = []dbquery.OrderBy{*orderBy}
+		conf.DefaultOrderBy = []dbquery.OrderBy{
+			*orderBy,
+			{Column: "id", Direction: dbquery.OrderAscending},
+		}
 	}
 
 	if withComponents {

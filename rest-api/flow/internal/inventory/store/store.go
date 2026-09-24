@@ -22,12 +22,13 @@ import (
 
 // ComponentDrift represents a drift detected between expected (local DB) and actual (source system) data.
 type ComponentDrift struct {
-	ID          uuid.UUID
-	ComponentID *uuid.UUID  // NULL for missing_in_expected
-	ExternalID  *string     // Component ID from the component manager service; NULL for missing_in_actual
-	DriftType   string      // "missing_in_expected", "missing_in_actual", "mismatch"
-	Diffs       []FieldDiff // Field-level differences (for mismatch type)
-	CheckedAt   time.Time
+	ID            uuid.UUID
+	ComponentID   *uuid.UUID  // NULL for missing_in_expected
+	ExternalID    *string     // Component ID from the component manager service; NULL for missing_in_actual
+	ComponentType *string     // Stable discriminator when external IDs overlap across component types
+	DriftType     string      // "missing_in_expected", "missing_in_actual", "mismatch"
+	Diffs         []FieldDiff // Field-level differences (for mismatch type)
+	CheckedAt     time.Time
 }
 
 // FieldDiff represents a single field difference between expected and actual values.

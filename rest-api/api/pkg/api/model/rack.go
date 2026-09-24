@@ -56,7 +56,10 @@ var RackFilterFieldMap = map[string]flowv1.RackFilterField{
 	"model":        flowv1.RackFilterField_RACK_FILTER_FIELD_MODEL,
 }
 
-// RackOrderByFieldMap maps API field names to Flow protobuf order by enum
+// RackDefaultOrderBy is the deterministic REST ordering used when orderBy is omitted.
+const RackDefaultOrderBy = "NAME_ASC"
+
+// RackOrderByFieldMap maps API field names to Flow protobuf order by enum.
 var RackOrderByFieldMap = map[string]flowv1.RackOrderByField{
 	"name":         flowv1.RackOrderByField_RACK_ORDER_BY_FIELD_NAME,
 	"manufacturer": flowv1.RackOrderByField_RACK_ORDER_BY_FIELD_MANUFACTURER,

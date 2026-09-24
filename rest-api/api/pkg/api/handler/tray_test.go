@@ -35,6 +35,7 @@ import (
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
+	"google.golang.org/protobuf/proto"
 )
 
 func testTrayInitDB(t *testing.T) *cdb.Session {
@@ -636,7 +637,17 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 				// For error cases, reply with an empty response
 				testFlowProxyReply(t, mockWorkflowRun, &flowv1.GetComponentsResponse{})
 			}
-			testFlowProxyDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetComponents_FullMethodName, nil)
+			testFlowProxyMethodDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetComponents_FullMethodName, func(args mock.Arguments) {
+				var req flowv1.GetComponentsRequest
+				testFlowProxyRequest(t, args, &req)
+				orderBy := tt.queryParams["orderBy"]
+				if orderBy == "" {
+					orderBy = model.TrayDefaultOrderBy
+				}
+				parts := strings.Split(orderBy, "_")
+				expected := model.GetProtoTrayOrderByFromQueryParam(strings.ToLower(strings.Join(parts[:len(parts)-1], "_")), parts[len(parts)-1])
+				assert.True(t, proto.Equal(expected, req.OrderBy))
+			})
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			// Build query string
@@ -687,6 +698,12 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 			if tt.expectedTotal != nil {
 				assert.Equal(t, *tt.expectedTotal, pr.Total)
 			}
+			expectedOrderBy := tt.queryParams["orderBy"]
+			if expectedOrderBy == "" {
+				expectedOrderBy = model.TrayDefaultOrderBy
+			}
+			require.NotNil(t, pr.OrderBy)
+			assert.Equal(t, expectedOrderBy, *pr.OrderBy)
 		})
 	}
 }

@@ -119,7 +119,10 @@ func GetProtoTrayFilter(fieldName string, patterns []string) *flowv1.Filter {
 	}
 }
 
-// TrayOrderByFieldMap maps API field names to Flow protobuf ComponentOrderByField enum
+// TrayDefaultOrderBy is the deterministic REST ordering used when orderBy is omitted.
+const TrayDefaultOrderBy = "NAME_ASC"
+
+// TrayOrderByFieldMap maps API field names to Flow protobuf ComponentOrderByField enum.
 var TrayOrderByFieldMap = map[string]flowv1.ComponentOrderByField{
 	"name":         flowv1.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_NAME,
 	"manufacturer": flowv1.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_MANUFACTURER,

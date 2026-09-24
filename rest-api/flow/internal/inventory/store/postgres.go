@@ -1203,12 +1203,13 @@ func convertDriftsFromModel(drifts []model.ComponentDrift) []ComponentDrift {
 			})
 		}
 		result = append(result, ComponentDrift{
-			ID:          d.ID,
-			ComponentID: d.ComponentID,
-			ExternalID:  d.ExternalID,
-			DriftType:   string(d.DriftType),
-			Diffs:       fieldDiffs,
-			CheckedAt:   d.CheckedAt,
+			ID:            d.ID,
+			ComponentID:   d.ComponentID,
+			ExternalID:    d.ExternalID,
+			ComponentType: d.ComponentType,
+			DriftType:     string(d.DriftType),
+			Diffs:         fieldDiffs,
+			CheckedAt:     d.CheckedAt,
 		})
 	}
 	return result

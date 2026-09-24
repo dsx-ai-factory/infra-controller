@@ -303,6 +303,9 @@ func (garh GetAllRackHandler) Handle(c echo.Context) error {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
 	}
+	if pageRequest.OrderByStr == nil {
+		pageRequest.OrderByStr = cutil.GetPtr(model.RackDefaultOrderBy)
+	}
 
 	// Validate pagination attributes
 	err = pageRequest.Validate(slices.Collect(maps.Keys(model.RackOrderByFieldMap)))

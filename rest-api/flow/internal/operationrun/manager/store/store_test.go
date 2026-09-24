@@ -106,7 +106,7 @@ func TestPostgresStore_List(t *testing.T) {
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	mock.ExpectQuery(`SELECT count\(\*\) FROM "operation_run" AS "orun"`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery(`(?s)SELECT.*"total_phases".*FROM "operation_run" AS "orun"`).
+	mock.ExpectQuery(`(?s)SELECT.*"total_phases".*FROM "operation_run" AS "orun".*ORDER BY orun\.created_at DESC, orun\.id DESC`).
 		WillReturnRows(
 			sqlmock.NewRows([]string{"id", "total_phases"}).
 				AddRow(id, 2),
