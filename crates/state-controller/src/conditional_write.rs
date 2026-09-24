@@ -19,7 +19,10 @@ use std::panic::Location;
 
 use db::dpa_interface::DpaNetworkConfigNotCurrent;
 use db::instance::InstanceExtensionServicesNotCurrent;
-use db::machine::{ExtensionServiceObservationNotCurrent, MachineNetworkConfigNotCurrent};
+use db::machine::{
+    ExtensionServiceObservationNotCurrent, MachineNetworkConfigNotCurrent,
+    RebootVerificationNotCurrent,
+};
 use db::{ConditionalWrite, ControllerStateNotCurrent};
 
 use crate::state_handler::StateHandlerError;
@@ -116,6 +119,22 @@ impl<T> CheckApplied for ConditionalWrite<T, ExtensionServiceObservationNotCurre
         match self {
             Self::Applied(value) => Ok(value),
             Self::NotApplied(ExtensionServiceObservationNotCurrent) => {
+                Err(StateHandlerError::IterationInvalidated {
+                    source_ref: Location::caller(),
+                })
+            }
+        }
+    }
+}
+
+impl<T> CheckApplied for ConditionalWrite<T, RebootVerificationNotCurrent> {
+    type Value = T;
+
+    #[track_caller]
+    fn check_applied(self) -> Result<T, StateHandlerError> {
+        match self {
+            Self::Applied(value) => Ok(value),
+            Self::NotApplied(RebootVerificationNotCurrent) => {
                 Err(StateHandlerError::IterationInvalidated {
                     source_ref: Location::caller(),
                 })
