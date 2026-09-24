@@ -1,5 +1,5 @@
 {{- $supplementalCmName := default "" (get (default (dict) .Values.supplementalNetworkConfig) "name") -}}
-{{- if or .Values.fmds.sign_proxy_url $supplementalCmName }}
+{{- if or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,5 +15,9 @@ data:
     {{- if $supplementalCmName }}
     [network]
     supplemental-config-path = "/etc/forge/supplemental-network-config/supplemental.json"
+    {{- end }}
+    {{- with .Values.metricsPort }}
+    [telemetry]
+    metrics-address = "0.0.0.0:{{ . }}"
     {{- end }}
 {{- end }}

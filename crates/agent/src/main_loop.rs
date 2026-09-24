@@ -135,6 +135,15 @@ pub(super) async fn setup_and_run(
     let agent_meter = get_dpu_agent_meter();
     let metrics = create_metrics(agent_meter);
 
+    // Containerized (DPF) mode starts not-ready: the pod should only become
+    // Ready once the first GetManagedHostNetworkConfig iteration has actually
+    // applied HBN, DHCP, and FMDS config (see `run_single_iteration`). DpuOs
+    // mode has no such probe wired up, so it stays ready by default.
+    let health_controller = metrics_endpoint::HealthController::new();
+    if options.agent_platform_type.is_containerized() {
+        health_controller.set_ready(false);
+    }
+
     match agent_config
         .telemetry
         .metrics_address
@@ -148,7 +157,7 @@ pub(super) async fn setup_and_run(
             let metrics_config = metrics_endpoint::MetricsEndpointConfig {
                 address: metrics_address,
                 registry: get_prometheus_registry(),
-                health_controller: None,
+                health_controller: Some(health_controller.clone()),
                 additional_prefix: None,
             };
             tokio::task::spawn(async move {
@@ -456,6 +465,7 @@ pub(super) async fn setup_and_run(
         extension_service_manager,
         nvue_context,
         dhcp_interface_translation_mode,
+        health_controller,
         current_network_version: CurrentNetworkVersion::default(),
         last_ovs_restart_version: None,
         ovs_restart_retry_backoff: None,
@@ -498,6 +508,10 @@ struct MainLoop {
     extension_service_manager: extension_services::ExtensionServiceManager,
     nvue_context: Option<NvueClientContext>,
     dhcp_interface_translation_mode: Option<InterfaceTranslationMode>,
+    /// Backs the metrics endpoint's `/ready`. Sticky: only ever flips to ready
+    /// (never back to not-ready) once the first HBN+DHCP+FMDS apply succeeds
+    /// in containerized (DPF) mode; unused in DpuOs mode.
+    health_controller: metrics_endpoint::HealthController,
     current_network_version: CurrentNetworkVersion,
     last_ovs_restart_version: Option<String>,
     ovs_restart_retry_backoff: Option<OvsRestartRetryBackoff>,
@@ -938,6 +952,9 @@ impl MainLoop {
         let mut is_healthy = false;
         let mut has_changed_configs = false;
         let mut has_changed_hbn_config = false;
+        // Readiness gate: only set once HBN+DHCP apply and the FMDS push both
+        // succeed in the same iteration. See `self.health_controller`.
+        let mut hbn_dhcp_applied_ok = false;
         let mut current_host_network_config_version = None;
         let mut current_instance_network_config_version = None;
         let mut current_instance_config_version = None;
@@ -1147,40 +1164,21 @@ impl MainLoop {
                         .await
                     };
 
+                    // Astra (Weave EW VPC) reconciliation is independent of HBN/DHCP: it is
+                    // reported on network status below, but a failure here must not block
+                    // the HBN/DHCP bookkeeping (or the readiness gate) that follows.
                     let astra_config_status = astra_weave::build_notify_weave_ew_vpc_astra_config(
                         conf.astra_config.as_ref(),
                     )
                     .await;
 
-                    let joined_result = match (update_result, dhcp_result, astra_config_status) {
-                        (Ok(hbn_changed), Ok(dhcp_changed), Ok(spx_net_status)) => {
-                            Ok((hbn_changed, dhcp_changed, spx_net_status))
-                        }
-                        (update_result, dhcp_result, astra_config_status) => {
-                            let mut errors = Vec::new();
-
-                            if let Err(err) = update_result {
-                                errors.push(format!("update={err:#}"));
-                            }
-                            if let Err(err) = dhcp_result {
-                                errors.push(format!("dhcp={err:#}"));
-                            }
-                            if let Err(err) = astra_config_status {
-                                errors.push(format!("spx={err:#}"));
-                            }
-
-                            Err(eyre::eyre!("network update failed: {}", errors.join(", ")))
-                        }
-                    };
-                    match joined_result {
-                        Ok((hbn_changed, dhcp_changed, astra_config_status)) => {
+                    match (update_result, dhcp_result) {
+                        (Ok(hbn_changed), Ok(dhcp_changed)) => {
                             self.current_network_version
                                 .update_from(&conf, supplemental_config.as_deref());
                             has_changed_hbn_config = hbn_changed;
                             has_changed_configs = hbn_changed || dhcp_changed;
-                            if conf.astra_config.is_some() {
-                                status_out.astra_config_status = Some(astra_config_status);
-                            }
+                            hbn_dhcp_applied_ok = true;
                             if self.options.agent_platform_type.is_dpu_os()
                                 && let Err(err) = mtu::ensure().await
                             {
@@ -1216,12 +1214,38 @@ impl MainLoop {
                                 Err(err) => status_out.network_config_error = Some(err.to_string()),
                             }
                         }
-                        Err(err) => {
+                        (update_result, dhcp_result) => {
+                            let mut errors = Vec::new();
+                            if let Err(err) = update_result {
+                                errors.push(format!("update={err:#}"));
+                            }
+                            if let Err(err) = dhcp_result {
+                                errors.push(format!("dhcp={err:#}"));
+                            }
+                            let err = eyre::eyre!("network update failed: {}", errors.join(", "));
                             tracing::error!(
                                 error = format!("{err:#}"),
                                 "Writing network configuration"
                             );
                             status_out.network_config_error = Some(err.to_string());
+                        }
+                    }
+
+                    match astra_config_status {
+                        Ok(status) => {
+                            if conf.astra_config.is_some() {
+                                status_out.astra_config_status = Some(status);
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                error = format!("{err:#}"),
+                                "Notifying Weave EW VPC Astra config"
+                            );
+                            // Don't clobber a real HBN/DHCP failure already reported above.
+                            if status_out.network_config_error.is_none() {
+                                status_out.network_config_error = Some(err.to_string());
+                            }
                         }
                     }
 
@@ -1242,9 +1266,22 @@ impl MainLoop {
                 // It will guarantee that the Instance Config that is acknowledged to
                 // carbide via the status message is actually visible to the tenant via
                 // FMDS
-                self.fmds_updater
+                let fmds_applied_ok = self
+                    .fmds_updater
                     .update(instance_data.clone(), Some(conf.clone()))
                     .await;
+
+                // Mark the pod Ready once HBN, DHCP, and FMDS have all been
+                // applied successfully in the same iteration. Sticky: never
+                // reset back to not-ready by a later failure. No-op in DpuOs
+                // mode, which has no readiness probe wired up.
+                if self.options.agent_platform_type.is_containerized()
+                    && hbn_dhcp_applied_ok
+                    && fmds_applied_ok
+                {
+                    self.health_controller.set_ready(true);
+                }
+
                 status_out.instance_config_version = instance_data
                     .as_ref()
                     .map(|instance| instance.config_version.version_string());
