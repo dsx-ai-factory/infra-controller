@@ -409,6 +409,124 @@ async fn patch_expected_machine_dpu_loopback_reservations(pool: PgPool) {
     assert_eq!(reservations_of(&env, id).await, Vec::new());
 }
 
+/// Restoring an identical reservation after clearing it must succeed while the
+/// intended DPU still owns the address in the pool, and reserving that same live
+/// allocation for a different DPU must be rejected. This proves the pool check
+/// is owner-aware -- it accepts a free value or an allocation proven to belong
+/// to the intended DPU, rather than rejecting every allocated value outright.
+#[crate::sqlx_test]
+async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgPool) {
+    use std::net::IpAddr;
+
+    use carbide_uuid::machine::MachineType;
+    use model::hardware_info::{DmiData, HardwareInfo};
+    use model::machine::machine_id::from_hardware_info_with_type;
+    use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
+    use model::resource_pool::OwnerType;
+
+    let env = create_test_env(pool.clone()).await;
+
+    // A single reservable (non-auto-assign) address in the loopback pool.
+    let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
+    let reserved: IpAddr = "192.0.2.30".parse().unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![reserved], false)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    let id = Uuid::new_v4();
+    env.api
+        .add_expected_machine(Request::new(machine(id, 0x62)))
+        .await
+        .unwrap();
+
+    let reservation = |serial: &str, v4: &str| forge::DpuLoopbackReservation {
+        dpu_serial_number: serial.to_string(),
+        loopback_ipv4: Some(v4.to_string()),
+        loopback_ipv6: None,
+    };
+    let patch = |reservations: Vec<forge::DpuLoopbackReservation>| {
+        Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                dpu_loopback_reservations: Some(forge::DpuLoopbackReservationList { reservations }),
+                ..Default::default()
+            }),
+            update_mask: mask(&["dpu_loopback_reservations"]),
+        })
+    };
+
+    // The reservation is admissible while the address is free.
+    env.api
+        .patch_expected_machine(patch(vec![reservation("D1", "192.0.2.30")]))
+        .await
+        .unwrap();
+
+    // Simulate DPU "D1" being created: record its topology so the pool owner
+    // resolves back to serial "D1", and allocate the reserved address to it.
+    let dpu_hw = HardwareInfo {
+        dmi_data: Some(DmiData {
+            product_serial: "D1".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let dpu_id = from_hardware_info_with_type(&dpu_hw, MachineType::Dpu).unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    db::machine::create(
+        &mut txn,
+        None,
+        &dpu_id,
+        ManagedHostState::Ready,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+        None,
+    )
+    .await
+    .unwrap();
+    db::machine_topology::create_or_update(&mut txn, &dpu_id, &dpu_hw)
+        .await
+        .unwrap();
+    db::resource_pool::allocate_exact(
+        loopback_pool,
+        &mut txn,
+        OwnerType::Machine,
+        &dpu_id.to_string(),
+        reserved,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // Clearing the declaration does not release D1's live pool allocation.
+    env.api.patch_expected_machine(patch(vec![])).await.unwrap();
+    assert_eq!(reservations_of(&env, id).await, Vec::new());
+
+    // Restoring the identical declaration succeeds because the address is still
+    // D1's own allocation, not another DPU's.
+    env.api
+        .patch_expected_machine(patch(vec![reservation("D1", "192.0.2.30")]))
+        .await
+        .unwrap();
+    assert_eq!(
+        reservations_of(&env, id).await,
+        vec![reservation("D1", "192.0.2.30")]
+    );
+
+    // Reserving that same live allocation for a different DPU is rejected.
+    let error = env
+        .api
+        .patch_expected_machine(patch(vec![reservation("D2", "192.0.2.30")]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        reservations_of(&env, id).await,
+        vec![reservation("D1", "192.0.2.30")]
+    );
+}
+
 #[crate::sqlx_test]
 async fn patch_expected_machine_sets_and_clears_nested_host_bmc_address(pool: PgPool) {
     let env = create_test_env(pool).await;

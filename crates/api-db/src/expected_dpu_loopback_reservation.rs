@@ -112,6 +112,67 @@ pub async fn find_by_dpu_serial(
         .map_err(|err| DatabaseError::query(sql, err))
 }
 
+/// The reservation for one DPU pairing serial, locked for the creating
+/// transaction.
+///
+/// DPU creation reads the operator's intent through this so the row it allocates
+/// from cannot be moved to another DPU or cleared before the creating
+/// transaction commits: `FOR UPDATE` makes a concurrent reservation writer
+/// (`replace_for_machine`, `clear`, or the cascade behind an expected-machine
+/// delete) block until creation finishes, and vice versa. An absent row locks
+/// nothing, which is correct -- a reservation declared after creation only
+/// affects the next ingestion.
+///
+/// Call this at the same point the automatic path would read intent, before the
+/// loopback-pool row locks and any admin-segment locks, so the lock order the
+/// creation transaction already establishes is preserved.
+pub async fn find_by_dpu_serial_for_update(
+    txn: &mut PgConnection,
+    dpu_serial_number: &str,
+) -> DatabaseResult<Option<DpuLoopbackReservation>> {
+    let sql = "SELECT dpu_serial_number, loopback_ipv4, loopback_ipv6 \
+               FROM expected_dpu_loopback_reservations \
+               WHERE dpu_serial_number = $1 \
+               FOR UPDATE";
+    let row = sqlx::query(sql)
+        .bind(dpu_serial_number)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|err| DatabaseError::query(sql, err))?;
+    row.as_ref()
+        .map(reservation_from_row)
+        .transpose()
+        .map_err(|err| DatabaseError::query(sql, err))
+}
+
+/// Lock a host's existing reservation rows for the writing transaction.
+///
+/// A reservation writer (add / update / replace-all / patch) calls this before
+/// it validates a replacement set against the live resource pool, so it
+/// serializes with any DPU creation that has locked one of those rows through
+/// [`find_by_dpu_serial_for_update`]. Without it, a same-host "transfer address
+/// X from DPU A to DPU B" could validate X as free while a creating transaction
+/// is mid-flight allocating X to A, then persist B -> X after that creation
+/// commits. Holding the row lock forces the writer to wait and re-observe the
+/// committed allocation, where the owner-aware pool check rejects the move.
+///
+/// A host with no reservations locks nothing, which is correct: there is no
+/// prior intent for a creation to have read.
+pub async fn lock_for_machine(
+    txn: &mut PgConnection,
+    host_bmc_mac: MacAddress,
+) -> DatabaseResult<()> {
+    let sql = "SELECT 1 FROM expected_dpu_loopback_reservations \
+               WHERE bmc_mac_address = $1 \
+               FOR UPDATE";
+    sqlx::query(sql)
+        .bind(host_bmc_mac)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|err| DatabaseError::query(sql, err))?;
+    Ok(())
+}
+
 /// Replace the reservations for one host expected machine.
 ///
 /// Deletes the host's existing reservations, then inserts `reservations`. The

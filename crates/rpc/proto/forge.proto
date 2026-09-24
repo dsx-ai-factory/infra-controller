@@ -11321,7 +11321,7 @@ message PatchExpectedMachineRequest {
   // fallback_dpu_serial_numbers, sku_id, rack_id, is_dpf_enabled,
   // default_pause_ingestion_and_poweron, bmc_retain_credentials, dpu_mode,
   // bmc_ip_address, bmc_ip_allocation, host_nics,
-  // host_lifecycle_profile.disable_lockdown,
+  // host_lifecycle_profile.disable_lockdown, dpu_loopback_reservations,
   // metadata.name, metadata.description, metadata.labels.
   //
   // Unselected values are ignored. Selected values replace the stored field,
@@ -11344,6 +11344,13 @@ message PatchExpectedMachineRequest {
   // Selected top-level `bmc_ip_address` and `bmc_ip_allocation` override the
   // nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
   // only the mask selects interface replacement.
+  //
+  // Selecting `dpu_loopback_reservations` replaces the entire reservation list,
+  // including an empty list, which clears every stored reservation. A selected
+  // but absent `DpuLoopbackReservationList` wrapper is treated as an empty list
+  // and clears them as well. Each reservation is validated against the `lo-ip` /
+  // `lo-ip-v6` pools when selected; an unselected path leaves the stored
+  // reservations unchanged.
   //
   // A selected `chassis_serial_number` must contain 4-32 ASCII letters,
   // digits, hyphens, or underscores. Selected `fallback_dpu_serial_numbers`
