@@ -126,7 +126,10 @@ fn render_node(
     // (we emit a linked table) and EXTRA (the after_long_help examples, which
     // roff mangles — we re-render them from the clap command instead).
     let man_file = man_dir.join(format!("{}.1", path.join("-")));
-    let body = strip_sections(&man_to_markdown(&man_file)?, &["SUBCOMMANDS", "EXTRA"]);
+    let body = strip_sections(
+        &man_to_markdown(&man_file, path.as_slice())?,
+        &["SUBCOMMANDS", "EXTRA"],
+    );
     let body = clean_pandoc_markdown(&format_markdown_links(&body));
 
     let children: Vec<&Command> = cmd
@@ -452,7 +455,24 @@ fn clean_pandoc_prose(line: &str, in_inline_code: &mut bool) -> String {
 /// Converts a roff man page to GitHub-flavored markdown via pandoc, demoting the
 /// man page's `# NAME`/`# OPTIONS`/… sections to `## ` so each generated page
 /// can own the `# ` title (the full command invocation).
-fn man_to_markdown(man_file: &Path) -> CarbideCliResult<String> {
+fn man_to_markdown(man_file: &Path, command_path: &[String]) -> CarbideCliResult<String> {
+    let mut man = std::fs::read_to_string(man_file)?;
+    if matches!(
+        command_path,
+        [_, top, command]
+            if top == "vpc"
+                && matches!(command.as_str(), "routing-state" | "change-routing-profile")
+    ) {
+        // The global --extended flag is accepted by these commands for CLI
+        // consistency, but their VpcRoutingState response has no measured-boot
+        // instance UUIDs to expose.
+        man = man.replace(
+            "This is used by measured boot, where basic output contains just what you probably care about, and \"extended\" output also dumps out all the internal UUIDs that are used to associate instances.",
+            "",
+        );
+        std::fs::write(man_file, man)?;
+    }
+
     let mut pandoc = pandoc::new();
     pandoc.add_input(man_file);
     pandoc.set_input_format(pandoc::InputFormat::Other("man".to_string()), Vec::new());

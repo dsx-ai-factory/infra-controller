@@ -33,7 +33,7 @@ pub(crate) enum Cmd {
     Create(create::Args),
     #[clap(about = "Display VPC information")]
     Show(show::Args),
-    #[clap(about = "Inspect the VPC's persisted routing profile and VNI allocations")]
+    #[clap(about = "Inspect persisted routing profile and VNI allocations for a VPC")]
     RoutingState(routing::Show),
     #[clap(about = "Change the routing profile while retaining the previous VNI")]
     ChangeRoutingProfile(routing::ChangeProfile),

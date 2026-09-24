@@ -47,31 +47,31 @@ History count. Valid if `machine` argument is passed.
 `--max-width <[COLUMN=]WIDTH>`
 
 Limit displayed column width to WIDTH characters, truncating longer
-values with an ellipsis (...). A column never narrows below its headers
-length, so WIDTH is an upper bound on values, not a guaranteed rendered
-width: a WIDTH shorter than the header still lets values fill the
-headers width for free, and the ellipsis is only added when that
-effective width (WIDTH, or the headers length if longer) exceeds 3
-characters; at 3 or fewer theres no room for one, so the value is
+values with an ellipsis (...). A column never narrows below the length
+of its header, so WIDTH is an upper bound on values, not a guaranteed
+rendered width: a WIDTH shorter than the header still lets values fill
+the header width for free, and the ellipsis is only added when that
+effective width (WIDTH, or the header length if longer) exceeds 3
+characters; at 3 or fewer there is no room for one, so the value is
 truncated without it. WIDTH 0 means no limit (the same as not specifying
 that column at all; useful as COLUMN=0 to exempt one column from a
 blanket --max-width). Repeatable. A bare WIDTH applies to every column;
 COLUMN=WIDTH limits just that column, where COLUMN must exactly match
-the columns displayed header text (case-insensitive), e.g. State=40. For
-a header containing spaces, quote the whole COLUMN=WIDTH argument, e.g.
-"COLUMN NAME=40". An unmatched COLUMN is ignored with a warning listing
-the valid headers for this invocation.
+the displayed header text for the column (case-insensitive), e.g.
+State=40. For a header containing spaces, quote the whole COLUMN=WIDTH
+argument, e.g. "COLUMN NAME=40". An unmatched COLUMN is ignored with a
+warning listing the valid headers for this invocation.
 
 `--columns <COLUMN>`
 
 Only show these columns, in the order given. Comma-separated and/or
-repeatable. COLUMN must exactly match the columns displayed header text
-(case-insensitive), e.g. --columns id,state. For a header containing
-spaces, quote it, e.g. --columns "id,state version". Omit to show every
-column in the tables normal order. The unlabeled health-flag column
-(U/H) is always shown first and cant be filtered out, since it has no
-header text to select by. An unmatched COLUMN is ignored with a warning
-listing the valid headers for this invocation.
+repeatable. COLUMN must exactly match the displayed header text for the
+column (case-insensitive), e.g. --columns id,state. For a header
+containing spaces, quote it, e.g. --columns "id,state version". Omit to
+show every column in the normal table order. The unlabeled health-flag
+column (U/H) is always shown first and cannot be filtered out, since it
+has no header text to select by. An unmatched COLUMN is ignored with a
+warning listing the valid headers for this invocation.
 
 `--extended`
 
