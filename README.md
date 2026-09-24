@@ -11,9 +11,29 @@
 NVIDIA Infra Controller (NICo) delivers zero-touch lifecycle automation for
 bare-metal systems that secures datacenter infrastructure at its foundation.
 
-It is an API-based microservice that provides site-local, zero-trust,
-bare-metal lifecycle management with DPU-enforced isolation. NICo automates the complexity
-of the bare-metal lifecycle to fast-track building next generation AI Cloud offerings.
+NICo is an open-source infrastructure component in DSX OS. It provides
+site-local, zero-trust, bare-metal lifecycle management with DPU-enforced
+isolation. NICo automates the complexity of the bare-metal lifecycle to
+fast-track building next-generation AI cloud offerings.
+
+## Project Resources
+
+- [Documentation](https://docs.nvidia.com/infra-controller/documentation/home)
+  and the [Quick Start Guide](https://docs.nvidia.com/infra-controller/documentation/getting-started/quick-start-guide)
+- [Contribution guidelines](CONTRIBUTING.md) for development setup and pull
+  request requirements
+- [GitHub Discussions](https://github.com/dsx-ai-factory/infra-controller/discussions)
+  for questions and community conversations
+- [Governance](GOVERNANCE.md) and [maintainer roles](MAINTAINERS.md) for project
+  decision-making and ownership
+- [Code of Conduct](CODE_OF_CONDUCT.md) for participation expectations and
+  [conduct reporting](mailto:GitHub_Conduct@nvidia.com)
+- [Security policy](SECURITY.md) for the approved private vulnerability
+  reporting paths
+- [Support policy](SUPPORT.md) for community, security, and commercial support
+  paths and the supported-release lifecycle
+- [Release notes](https://docs.nvidia.com/infra-controller/documentation/release-notes)
+  for current, maintenance, and end-of-life release status
 
 ## Getting Started
 
