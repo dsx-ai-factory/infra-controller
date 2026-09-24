@@ -553,7 +553,17 @@ func TestGetAllRackHandler_Handle(t *testing.T) {
 				// For error cases, reply with an empty response
 				testFlowProxyReply(t, mockWorkflowRun, &flowv1.GetListOfRacksResponse{})
 			}
-			testFlowProxyDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetListOfRacks_FullMethodName, nil)
+			testFlowProxyMethodDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetListOfRacks_FullMethodName, func(args mock.Arguments) {
+				var req flowv1.GetListOfRacksRequest
+				testFlowProxyRequest(t, args, &req)
+				orderBy := tt.queryParams["orderBy"]
+				if orderBy == "" {
+					orderBy = model.RackDefaultOrderBy
+				}
+				parts := strings.Split(orderBy, "_")
+				expected := model.GetProtoRackOrderByFromQueryParam(strings.ToLower(strings.Join(parts[:len(parts)-1], "_")), parts[len(parts)-1])
+				assert.True(t, proto.Equal(expected, req.OrderBy))
+			})
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			// Build query string
@@ -604,6 +614,12 @@ func TestGetAllRackHandler_Handle(t *testing.T) {
 			if tt.expectedTotal != nil {
 				assert.Equal(t, *tt.expectedTotal, pr.Total)
 			}
+			expectedOrderBy := tt.queryParams["orderBy"]
+			if expectedOrderBy == "" {
+				expectedOrderBy = model.RackDefaultOrderBy
+			}
+			require.NotNil(t, pr.OrderBy)
+			assert.Equal(t, expectedOrderBy, *pr.OrderBy)
 		})
 	}
 }

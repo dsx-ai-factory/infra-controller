@@ -758,7 +758,7 @@ func (r ApiGetAllTrayRequest) PageSize(pageSize int32) ApiGetAllTrayRequest {
 	return r
 }
 
-// Ordering for pagination query
+// Ordering for pagination query. Defaults to &#x60;NAME_ASC&#x60;; equal field values are ordered by an immutable unique identifier to keep page boundaries stable.
 func (r ApiGetAllTrayRequest) OrderBy(orderBy string) ApiGetAllTrayRequest {
 	r.orderBy = &orderBy
 	return r

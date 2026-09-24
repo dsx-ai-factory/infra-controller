@@ -379,6 +379,9 @@ func (gath GetAllTrayHandler) Handle(c echo.Context) error {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
 	}
+	if pageRequest.OrderByStr == nil {
+		pageRequest.OrderByStr = cutil.GetPtr(model.TrayDefaultOrderBy)
+	}
 	err = pageRequest.Validate(slices.Collect(maps.Keys(model.TrayOrderByFieldMap)))
 	if err != nil {
 		logger.Warn().Err(err).Msg("error validating pagination request data")

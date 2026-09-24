@@ -1652,11 +1652,9 @@ func (rs *FlowServerImpl) GetComponents(
 			componentTypes,
 		)
 
-		// Apply ordering
-		if orderBy != nil {
-			if err := rs.sortComponents(filteredComponents, orderBy); err != nil {
-				return nil, fmt.Errorf("failed to sort components: %w", err)
-			}
+		// Apply ordering before pagination, using the default when omitted.
+		if err := rs.sortComponents(filteredComponents, orderBy); err != nil {
+			return nil, fmt.Errorf("failed to sort components: %w", err)
 		}
 
 		// Apply pagination
@@ -1780,6 +1778,7 @@ func (rs *FlowServerImpl) ValidateComponents(
 	targetSpec := req.GetTargetSpec()
 
 	var storeDrifts []inventorymanager.ComponentDrift
+	var componentIDs []uuid.UUID
 	var filteredComponentCount int32
 	var err error
 
@@ -1795,16 +1794,14 @@ func (rs *FlowServerImpl) ValidateComponents(
 			components = rs.applyComponentFilters(components, *infoFilter, manufacturerFilter, modelFilter, componentTypes)
 		}
 
-		// Apply ordering
-		if orderBy != nil {
-			if sortErr := rs.sortComponents(components, orderBy); sortErr != nil {
-				return nil, fmt.Errorf("failed to sort components: %w", sortErr)
-			}
+		// Apply ordering, including the default, before deriving drift order.
+		if sortErr := rs.sortComponents(components, orderBy); sortErr != nil {
+			return nil, fmt.Errorf("failed to sort components: %w", sortErr)
 		}
 
 		filteredComponentCount = int32(len(components))
 
-		componentIDs := make([]uuid.UUID, 0, len(components))
+		componentIDs = make([]uuid.UUID, 0, len(components))
 		for _, comp := range components {
 			componentIDs = append(componentIDs, comp.Info.ID)
 		}
@@ -1817,6 +1814,29 @@ func (rs *FlowServerImpl) ValidateComponents(
 	if err != nil {
 		return nil, fmt.Errorf("failed to get drifts: %w", err)
 	}
+
+	componentOrder := make(map[uuid.UUID]int, len(storeDrifts))
+	if targetSpec != nil {
+		for index, componentID := range componentIDs {
+			componentOrder[componentID] = index
+		}
+	}
+	sort.Slice(storeDrifts, func(i, j int) bool {
+		left, right := storeDrifts[i], storeDrifts[j]
+		if left.ComponentID != nil && right.ComponentID != nil && targetSpec != nil {
+			leftIndex, leftFound := componentOrder[*left.ComponentID]
+			rightIndex, rightFound := componentOrder[*right.ComponentID]
+			if leftFound && rightFound && leftIndex != rightIndex {
+				return leftIndex < rightIndex
+			}
+		}
+		leftKey := componentDriftSortKey(left)
+		rightKey := componentDriftSortKey(right)
+		if leftKey != rightKey {
+			return leftKey < rightKey
+		}
+		return left.ID.String() < right.ID.String()
+	})
 
 	// Convert store drifts to proto response
 	var diffs []*pb.ComponentDiff
@@ -1903,6 +1923,21 @@ func (rs *FlowServerImpl) ValidateComponents(
 		MismatchCount:   mismatchCount,
 		MatchCount:      matchCount,
 	}, nil
+}
+
+func componentDriftSortKey(drift inventorymanager.ComponentDrift) string {
+	if drift.ComponentID != nil {
+		return "component/" + drift.ComponentID.String() + "/" + drift.DriftType
+	}
+	componentType := ""
+	if drift.ComponentType != nil {
+		componentType = *drift.ComponentType
+	}
+	externalID := ""
+	if drift.ExternalID != nil {
+		externalID = *drift.ExternalID
+	}
+	return "external/" + componentType + "/" + externalID + "/" + drift.DriftType
 }
 
 func componentBMCMAC(comp *component.Component) string {
@@ -2053,44 +2088,45 @@ func (rs *FlowServerImpl) matchesWildcard(value, pattern string) bool {
 
 // sortComponents sorts components according to the OrderBy specification.
 func (rs *FlowServerImpl) sortComponents(components []*component.Component, orderBy *dbquery.OrderBy) error {
-	if orderBy == nil {
-		return nil
+	effectiveOrderBy := dbquery.OrderBy{
+		Column:    "name",
+		Direction: dbquery.OrderAscending,
+	}
+	if orderBy != nil {
+		effectiveOrderBy = *orderBy
+	}
+	less := func(i, j int, left, right string) bool {
+		if left == right {
+			return components[i].Info.ID.String() < components[j].Info.ID.String()
+		}
+		if effectiveOrderBy.Direction == dbquery.OrderAscending {
+			return left < right
+		}
+		return left > right
 	}
 
 	// Support sorting by common fields
-	switch orderBy.Column {
+	switch effectiveOrderBy.Column {
 	case "name":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Name < components[j].Info.Name
-			}
-			return components[i].Info.Name > components[j].Info.Name
+			return less(i, j, components[i].Info.Name, components[j].Info.Name)
 		})
 	case "manufacturer":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Manufacturer < components[j].Info.Manufacturer
-			}
-			return components[i].Info.Manufacturer > components[j].Info.Manufacturer
+			return less(i, j, components[i].Info.Manufacturer, components[j].Info.Manufacturer)
 		})
 	case "model":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Model < components[j].Info.Model
-			}
-			return components[i].Info.Model > components[j].Info.Model
+			return less(i, j, components[i].Info.Model, components[j].Info.Model)
 		})
 	case "type":
 		sort.Slice(components, func(i, j int) bool {
 			typeI := devicetypes.ComponentTypeToString(components[i].Type)
 			typeJ := devicetypes.ComponentTypeToString(components[j].Type)
-			if orderBy.Direction == dbquery.OrderAscending {
-				return typeI < typeJ
-			}
-			return typeI > typeJ
+			return less(i, j, typeI, typeJ)
 		})
 	default:
-		return fmt.Errorf("unsupported order by column: %s", orderBy.Column)
+		return fmt.Errorf("unsupported order by column: %s", effectiveOrderBy.Column)
 	}
 
 	return nil

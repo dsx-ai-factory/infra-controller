@@ -1020,7 +1020,7 @@ func (r ApiGetAllRackRequest) PageSize(pageSize int32) ApiGetAllRackRequest {
 	return r
 }
 
-// Ordering for pagination query
+// Ordering for pagination query. Defaults to &#x60;NAME_ASC&#x60;; equal field values are ordered by an immutable unique identifier to keep page boundaries stable.
 func (r ApiGetAllRackRequest) OrderBy(orderBy string) ApiGetAllRackRequest {
 	r.orderBy = &orderBy
 	return r
