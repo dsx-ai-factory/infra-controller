@@ -7151,6 +7151,35 @@ message HostLifecycleProfile {
   optional bool disable_lockdown = 1;
 }
 
+// A deterministic DPU underlay loopback reservation, keyed by the DPU pairing
+// serial number (the same identity NICo pairs DPUs by and the operator declares
+// in `fallback_dpu_serial_numbers`), not by a MAC. At least one address must be
+// present. Each address, when set, must be a value drawn from the site's
+// `lo-ip` / `lo-ip-v6` pool that is not auto-assignable and not already reserved
+// for or allocated to another DPU.
+message DpuLoopbackReservation {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
+  // Trimmed, exact DPU pairing serial number this reservation applies to.
+  string dpu_serial_number = 1;
+  // Reserved IPv4 underlay loopback. Omitted or empty means no IPv4 reservation
+  // for this DPU, which preserves automatic IPv4 allocation.
+  optional string loopback_ipv4 = 2;
+  // Reserved IPv6 underlay loopback. Omitted or empty means no IPv6 reservation
+  // for this DPU, which preserves automatic IPv6 allocation.
+  optional string loopback_ipv6 = 3;
+}
+
+// Wrapper that distinguishes an omitted reservation set from an explicitly empty
+// one. On ExpectedMachine, an absent `dpu_loopback_reservations` preserves the
+// stored reservations (older clients), while a present message with an empty
+// `reservations` list clears them.
+message DpuLoopbackReservationList {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
+  repeated DpuLoopbackReservation reservations = 1;
+}
+
 message ExpectedMachine {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   string bmc_mac_address = 1;
@@ -7201,6 +7230,12 @@ message ExpectedMachine {
   // host_nics, including `[]`; older clients leave it false so an unknown
   // nested HostBmc is not removed by a read-modify-write.
   bool replace_host_nics = 19;
+  // Deterministic DPU underlay loopback reservations. The optional wrapper
+  // preserves omitted-versus-empty semantics uniformly across create, update,
+  // batch update, and replace-all: an absent message preserves the stored
+  // reservations (so an older client cannot drop them on a read-modify-write),
+  // while a present message with an empty `reservations` list clears them.
+  optional DpuLoopbackReservationList dpu_loopback_reservations = 20;
 }
 
 message ExpectedMachineRequest {
@@ -11286,7 +11321,7 @@ message PatchExpectedMachineRequest {
   // fallback_dpu_serial_numbers, sku_id, rack_id, is_dpf_enabled,
   // default_pause_ingestion_and_poweron, bmc_retain_credentials, dpu_mode,
   // bmc_ip_address, bmc_ip_allocation, host_nics,
-  // host_lifecycle_profile.disable_lockdown,
+  // host_lifecycle_profile.disable_lockdown, dpu_loopback_reservations,
   // metadata.name, metadata.description, metadata.labels.
   //
   // Unselected values are ignored. Selected values replace the stored field,
@@ -11309,6 +11344,13 @@ message PatchExpectedMachineRequest {
   // Selected top-level `bmc_ip_address` and `bmc_ip_allocation` override the
   // nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
   // only the mask selects interface replacement.
+  //
+  // Selecting `dpu_loopback_reservations` replaces the entire reservation list,
+  // including an empty list, which clears every stored reservation. A selected
+  // but absent `DpuLoopbackReservationList` wrapper is treated as an empty list
+  // and clears them as well. Each reservation is validated against the `lo-ip` /
+  // `lo-ip-v6` pools when selected; an unselected path leaves the stored
+  // reservations unchanged.
   //
   // A selected `chassis_serial_number` must contain 4-32 ASCII letters,
   // digits, hyphens, or underscores. Selected `fallback_dpu_serial_numbers`

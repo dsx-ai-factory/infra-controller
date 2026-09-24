@@ -511,8 +511,34 @@ impl MachineCreator {
         for (dpu_report, dpu_machine_id) in
             managed_host.explored_host.dpus.iter().zip(dpu_ids.iter())
         {
+            // Resolve the operator's deterministic loopback reservation for this
+            // DPU by its pairing serial, read *inside* this transaction and
+            // locked, rather than from the pre-transaction ExpectedMachine
+            // snapshot. Reading the live intent here and holding the row lock
+            // stops a concurrent reservation edit from moving or clearing the
+            // address between this read and the allocation below. Matching is
+            // per-serial (globally unique), so multi-DPU hosts resolve
+            // independent reservations regardless of report order and this stays
+            // consistent with direct discovery. An absent reservation leaves
+            // both families on automatic allocation.
+            let reservation = match dpu_report.report.dpu_pairing_serial_number() {
+                Some(serial) => {
+                    db::expected_dpu_loopback_reservation::find_by_dpu_serial_for_update(
+                        &mut txn, serial,
+                    )
+                    .await?
+                }
+                None => None,
+            };
+            let requested_loopback_v4 = reservation
+                .as_ref()
+                .and_then(|reservation| reservation.loopback_ipv4.map(std::net::IpAddr::V4));
+            let requested_loopback_v6 = reservation
+                .as_ref()
+                .and_then(|reservation| reservation.loopback_ipv6);
+
             let dpu_machine = self
-                .create_dpu(&mut txn, dpu_report)
+                .create_dpu(&mut txn, dpu_report, requested_loopback_v6)
                 .await?
                 .ok_or_else(|| {
                     SiteExplorerError::internal(format!(
@@ -530,7 +556,7 @@ impl MachineCreator {
             // machine group syncing in try_update_network_config keeps this
             // DPU verison bump in sync with the host-level version (and any
             // sibling DPUs already linked) network_config_version.
-            self.update_dpu_network_config(&mut txn, &dpu_machine)
+            self.update_dpu_network_config(&mut txn, &dpu_machine, requested_loopback_v4)
                 .await?;
         }
 
@@ -1157,8 +1183,12 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
+        requested_loopback_v6: Option<std::net::Ipv6Addr>,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
-        if let Some(dpu_machine) = self.create_dpu_machine(txn, explored_dpu).await? {
+        if let Some(dpu_machine) = self
+            .create_dpu_machine(txn, explored_dpu, requested_loopback_v6)
+            .await?
+        {
             self.configure_dpu_interface(txn, explored_dpu).await?;
             let dpu_machine_id: &MachineId = explored_dpu.report.machine_id.as_ref().unwrap();
             let dpu_bmc_info = explored_dpu.bmc_info();
@@ -1186,6 +1216,8 @@ impl MachineCreator {
             ManagedHostState::Created,
             machine_data,
             CURRENT_STATE_MODEL_VERSION,
+            // Hosts never receive a DPU loopback reservation.
+            None,
         )
         .await?;
         let hardware_info = HardwareInfo::default();
@@ -1292,6 +1324,7 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
+        requested_loopback_v6: Option<std::net::Ipv6Addr>,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
         let dpu_machine_id = explored_dpu.report.machine_id.as_ref().unwrap();
         match db::machine::find_one(&mut *txn, dpu_machine_id, MachineSearchConfig::default())
@@ -1306,6 +1339,7 @@ impl MachineCreator {
                 ManagedHostState::Created,
                 None,
                 CURRENT_STATE_MODEL_VERSION,
+                requested_loopback_v6,
             )
             .await
             {
@@ -1406,13 +1440,18 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         dpu_machine: &AnyMachine,
+        requested_loopback_v4: Option<std::net::IpAddr>,
     ) -> SiteExplorerResult<()> {
         let (mut network_config, version) = dpu_machine.network_config.clone().take();
         if network_config.loopback_ip.is_none() {
+            // The IPv4 loopback is allocated here rather than at insert, so the
+            // reservation's requested value is applied on this path. The IPv6
+            // reservation is applied at insert in `db::machine::create`.
             let loopback_ip = db::machine::allocate_loopback_ip(
                 &self.common_pools,
                 txn,
                 &dpu_machine.id.to_string(),
+                requested_loopback_v4,
             )
             .await?;
             network_config.loopback_ip = Some(loopback_ip);
@@ -1423,6 +1462,7 @@ impl MachineCreator {
                 &self.common_pools,
                 txn,
                 &dpu_machine.id.to_string(),
+                None,
             )
             .await?;
         }
@@ -1558,6 +1598,8 @@ impl MachineCreator {
             ManagedHostState::Created,
             machine_data,
             CURRENT_STATE_MODEL_VERSION,
+            // Hosts never receive a DPU loopback reservation.
+            None,
         )
         .await?;
 
